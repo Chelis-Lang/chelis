@@ -22,11 +22,13 @@ fn typed_rate_plan_from_ir(expressions: &[chelis_deep::Expr]) -> Result<Evaluati
         seed: Some(42),
         counter: 0,
     });
-    let product = chelis_ir::host::host_def_evaluation_plan(
-        &chelis_ir::host::HostLoweringSession::new(&checked),
-        "sample",
-        &context,
-    )
+    let product = chelis_ir::lowering_runtime::with_native_lowering_runtime(|runtime| {
+        chelis_ir::host::host_def_evaluation_plan(
+            &chelis_ir::host::HostLoweringSession::new(&checked, runtime),
+            "sample",
+            &context,
+        )
+    })
     .map_err(|error| error.to_string())?
     .ok_or("no tensor kernel")?;
     if product.profile() != chelis_ir::evaluation::EvaluationProfile::FixedControl {
@@ -235,13 +237,16 @@ fn lower(
             precision: Prim::F32,
         },
     );
-    chelis_ir::lower::try_lower_subexpr_evaluation_plan(
-        &expression,
-        inputs,
-        UnordMap::new(),
-        defs,
-        context,
-    )
+    chelis_ir::lowering_runtime::with_native_lowering_runtime(|runtime| {
+        chelis_ir::lower::try_lower_subexpr_evaluation_plan(
+            &expression,
+            inputs,
+            UnordMap::new(),
+            defs,
+            context,
+            runtime,
+        )
+    })
     .unwrap()
 }
 
@@ -277,11 +282,13 @@ fn staged_claim_failure_commits_the_preceding_draw_and_reuse_keeps_live_ordinals
         seed: Some(42),
         counter: 5,
     });
-    let product = chelis_ir::host::host_def_evaluation_plan(
-        &chelis_ir::host::HostLoweringSession::new(&checked),
-        "sample",
-        &context,
-    )
+    let product = chelis_ir::lowering_runtime::with_native_lowering_runtime(|runtime| {
+        chelis_ir::host::host_def_evaluation_plan(
+            &chelis_ir::host::HostLoweringSession::new(&checked, runtime),
+            "sample",
+            &context,
+        )
+    })
     .unwrap()
     .unwrap();
     let staged = product.kernel_for_inspection().staged.as_ref().unwrap();
@@ -417,7 +424,9 @@ fn source_profile_names_exclusions_before_plan_construction() {
             .pop()
             .unwrap();
         assert_eq!(
-            chelis_ir::lower::evaluation_profile(&expression, &UnordMap::new()),
+            chelis_ir::lowering_runtime::with_native_lowering_runtime(|runtime| {
+                chelis_ir::lower::evaluation_profile(&expression, &UnordMap::new(), runtime)
+            }),
             EvaluationProfile::Legacy(reason),
             "{source}"
         );
@@ -425,13 +434,16 @@ fn source_profile_names_exclusions_before_plan_construction() {
             seed: Some(42),
             counter: 9,
         });
-        let error = chelis_ir::lower::try_lower_subexpr_evaluation_plan(
-            &expression,
-            UnordMap::new(),
-            UnordMap::new(),
-            UnordMap::new(),
-            &context,
-        )
+        let error = chelis_ir::lowering_runtime::with_native_lowering_runtime(|runtime| {
+            chelis_ir::lower::try_lower_subexpr_evaluation_plan(
+                &expression,
+                UnordMap::new(),
+                UnordMap::new(),
+                UnordMap::new(),
+                &context,
+                runtime,
+            )
+        })
         .unwrap_err();
         assert!(error.message.contains(&format!("{reason:?}")), "{error:?}");
         assert_eq!(context.state().counter, 9);
@@ -450,7 +462,9 @@ fn source_profile_respects_lexical_and_top_level_dropout_shadowing() {
             .pop()
             .unwrap();
         assert_eq!(
-            chelis_ir::lower::evaluation_profile(&expression, &UnordMap::new()),
+            chelis_ir::lowering_runtime::with_native_lowering_runtime(|runtime| {
+                chelis_ir::lower::evaluation_profile(&expression, &UnordMap::new(), runtime)
+            }),
             EvaluationProfile::Legacy(Reason::NoDropout)
         );
     }
@@ -466,7 +480,9 @@ fn source_profile_respects_lexical_and_top_level_dropout_shadowing() {
     let mut defs = UnordMap::new();
     defs.insert("dropout".into(), body);
     assert_eq!(
-        chelis_ir::lower::evaluation_profile(&expression, &defs),
+        chelis_ir::lowering_runtime::with_native_lowering_runtime(|runtime| {
+            chelis_ir::lower::evaluation_profile(&expression, &defs, runtime)
+        }),
         EvaluationProfile::Legacy(Reason::NoDropout)
     );
 }
@@ -601,11 +617,13 @@ fn local_movement_failure_occurs_after_the_earlier_entered_draw() {
         seed: Some(42),
         counter: 5,
     });
-    let kernel = chelis_ir::host::host_def_evaluation_plan(
-        &chelis_ir::host::HostLoweringSession::new(&checked),
-        "sample",
-        &context,
-    )
+    let kernel = chelis_ir::lowering_runtime::with_native_lowering_runtime(|runtime| {
+        chelis_ir::host::host_def_evaluation_plan(
+            &chelis_ir::host::HostLoweringSession::new(&checked, runtime),
+            "sample",
+            &context,
+        )
+    })
     .unwrap()
     .unwrap();
     let plan = kernel
@@ -636,11 +654,13 @@ fn explicit_drop_in_gradient_retains_draws_and_verified_terminal_ownership() {
         seed: Some(42),
         counter: 0,
     });
-    let kernel = chelis_ir::host::host_def_evaluation_plan(
-        &chelis_ir::host::HostLoweringSession::new(&checked),
-        "sample",
-        &context,
-    )
+    let kernel = chelis_ir::lowering_runtime::with_native_lowering_runtime(|runtime| {
+        chelis_ir::host::host_def_evaluation_plan(
+            &chelis_ir::host::HostLoweringSession::new(&checked, runtime),
+            "sample",
+            &context,
+        )
+    })
     .unwrap()
     .unwrap();
     let plan = kernel.plan().unwrap();

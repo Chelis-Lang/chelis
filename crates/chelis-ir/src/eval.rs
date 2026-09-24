@@ -5051,7 +5051,9 @@ mod tests {
             .unwrap_or_else(|errors| panic!("effect check failed: {errors:?}"));
         let checked = chelis_types::check_linearity(&checked)
             .unwrap_or_else(|errors| panic!("linearity check failed: {errors:?}"));
-        lower_program_to_library(&checked)
+        crate::lowering_runtime::with_native_lowering_runtime(|runtime| {
+            lower_program_to_library(&checked, runtime)
+        })
     }
 
     #[test]

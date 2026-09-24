@@ -2,6 +2,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use chelis_ir::Dag;
 use chelis_ir::lower::{LowerDiagnostic, LoweredLibrary as IrLoweredLibrary};
+use chelis_ir::lowering_runtime::LoweringRuntime;
 
 use crate::artifacts::RootBindingMode;
 use crate::roots::root_metadata;
@@ -43,9 +44,12 @@ impl LoweredLibrary {
 }
 
 /// Lower a checked library carrier without target-specific emission.
-pub fn lower_library(library: &CheckedLibrary) -> Result<LoweredLibrary, CoreLowerError> {
+pub fn lower_library(
+    library: &CheckedLibrary,
+    runtime: &LoweringRuntime,
+) -> Result<LoweredLibrary, CoreLowerError> {
     require_isolated_program(library.program())?;
-    chelis_ir::lower::try_lower_program_to_library(library.program())
+    chelis_ir::lower::try_lower_program_to_library(library.program(), runtime)
         .map(|inner| LoweredLibrary { inner })
         .map_err(CoreLowerError::Lower)
 }
@@ -56,10 +60,11 @@ pub fn lower_library(library: &CheckedLibrary) -> Result<LoweredLibrary, CoreLow
 pub fn lower_checked(
     checked: CheckedCompilation,
     mode: LoweringMode,
+    runtime: &LoweringRuntime,
 ) -> Result<LoweredCompilation, CoreLowerError> {
     require_isolated_program(checked.program())?;
-    let lower_result =
-        chelis_ir::lower::try_lower_program_to_library(checked.program()).map(LoweredProgram::from);
+    let lower_result = chelis_ir::lower::try_lower_program_to_library(checked.program(), runtime)
+        .map(LoweredProgram::from);
     finish_isolated_lowering(checked, mode, lower_result)
 }
 
@@ -74,6 +79,7 @@ pub fn lower_checked_for_c_execution(
     checked: CheckedCompilation,
     manifest: &chelis_types::manifest::RootManifest,
     mode: LoweringMode,
+    runtime: &LoweringRuntime,
 ) -> Result<
     (
         LoweredCompilation,
@@ -83,10 +89,13 @@ pub fn lower_checked_for_c_execution(
     CoreLowerError,
 > {
     require_isolated_program(checked.program())?;
-    let (_, host) =
-        chelis_ir::host::try_lower_execution_program_with_manifest(checked.program(), manifest)
-            .map_err(CoreLowerError::Lower)?;
-    finish_c_execution_lowering(checked, host, mode)
+    let (_, host) = chelis_ir::host::try_lower_execution_program_with_manifest(
+        checked.program(),
+        manifest,
+        runtime,
+    )
+    .map_err(CoreLowerError::Lower)?;
+    finish_c_execution_lowering(checked, host, mode, runtime)
 }
 
 /// Opt-in pass capture follows the same C lane and ordinary root guards.
@@ -96,6 +105,7 @@ pub fn lower_checked_for_c_execution_with_trace(
     checked: CheckedCompilation,
     manifest: &chelis_types::manifest::RootManifest,
     mode: LoweringMode,
+    runtime: &LoweringRuntime,
 ) -> Result<
     (
         LoweredCompilation,
@@ -108,15 +118,17 @@ pub fn lower_checked_for_c_execution_with_trace(
     let (_, host) = chelis_ir::host::try_lower_execution_program_with_manifest_and_trace(
         checked.program(),
         manifest,
+        runtime,
     )
     .map_err(CoreLowerError::Lower)?;
-    finish_c_execution_lowering(checked, host, mode)
+    finish_c_execution_lowering(checked, host, mode, runtime)
 }
 
 fn finish_c_execution_lowering(
     checked: CheckedCompilation,
     host: Option<chelis_ir::host::HostExecutionPlan>,
     mode: LoweringMode,
+    runtime: &LoweringRuntime,
 ) -> Result<
     (
         LoweredCompilation,
@@ -146,7 +158,7 @@ fn finish_c_execution_lowering(
         } else {
             mode
         };
-        let lowered = lower_checked(checked, mode)?;
+        let lowered = lower_checked(checked, mode, runtime)?;
         let ordinary = host
             .map(|plan| {
                 // This lane remains ordinary compilation; helper snapshots
@@ -168,9 +180,10 @@ fn finish_c_execution_lowering(
 /// this non-serialized execution transport.
 pub fn lower_checked_for_evaluation(
     checked: &CheckedCompilation,
+    runtime: &LoweringRuntime,
 ) -> Result<chelis_ir::lower::EvaluationProgram, CoreLowerError> {
     require_isolated_program(checked.program())?;
-    chelis_ir::lower::try_lower_program_to_evaluation_library(checked.program())
+    chelis_ir::lower::try_lower_program_to_evaluation_library(checked.program(), runtime)
         .map(|library| library.program().clone())
         .map_err(CoreLowerError::Lower)
 }
@@ -178,6 +191,7 @@ pub fn lower_checked_for_evaluation(
 pub fn lower_checked_with_evaluation_context(
     checked: &ContextCheckedCompilation<'_>,
     evaluation: &chelis_ir::lower::EvaluationLibrary,
+    runtime: &LoweringRuntime,
 ) -> Result<chelis_ir::lower::EvaluationProgram, CoreLowerError> {
     if evaluation.library_for_inspection().library_proof_id()
         != checked.library().program().library_proof_id()
@@ -194,6 +208,7 @@ pub fn lower_checked_with_evaluation_context(
     chelis_ir::lower::try_lower_program_with_evaluation_context(
         evaluation,
         checked.extension().program(),
+        runtime,
     )
     .map_err(CoreLowerError::Lower)
 }
@@ -273,6 +288,7 @@ pub fn lower_checked_with_context(
     checked: ContextCheckedCompilation<'_>,
     library: &LoweredLibrary,
     mode: LoweringMode,
+    runtime: &LoweringRuntime,
 ) -> Result<LoweredCompilation, CoreLowerError> {
     if library.library_proof_id() != checked.library().program().library_proof_id() {
         return Err(CoreLowerError::Lower(
@@ -289,12 +305,13 @@ pub fn lower_checked_with_context(
         library.raw(),
         checked.program.exprs(),
         checked.program.type_env(),
+        runtime,
     );
-    checked.root_metadata = root_metadata(&checked.program, Some(&lowered_map));
+    checked.root_metadata = root_metadata(&checked.program, Some(&lowered_map), runtime);
     let tensor_names = checked.root_metadata.tensor_names.clone();
 
     let lower_result =
-        chelis_ir::lower::try_lower_program_with_context(library.raw(), &checked.program)
+        chelis_ir::lower::try_lower_program_with_context(library.raw(), &checked.program, runtime)
             .map(LoweredProgram::from);
     finish_contextual_lowering(checked, library.dag(), mode, lower_result, &tensor_names)
 }
@@ -399,8 +416,10 @@ mod tests {
                 panic!("test Deep must type-check: {:?}", fitness.errors)
             }
         };
-        complete_checks(analysis, SemanticContext::Isolated)
-            .expect("test Deep must pass semantic checks")
+        chelis_ir::lowering_runtime::with_native_lowering_runtime(|runtime| {
+            complete_checks(analysis, SemanticContext::Isolated, runtime)
+        })
+        .expect("test Deep must pass semantic checks")
     }
 
     fn lowered(dag: Dag) -> LoweredProgram {
@@ -421,14 +440,25 @@ mod tests {
         );
         let manifest =
             chelis_effects::realizability::compute_root_manifest(checked.program(), &realizability);
-        let ordinary = lower_checked(checked.clone(), LoweringMode::Strict).unwrap();
-        let expected_host =
-            chelis_ir::host::try_lower_compiled_program_with_manifest(checked.program(), &manifest)
-                .unwrap()
-                .host;
+        let ordinary = chelis_ir::lowering_runtime::with_native_lowering_runtime(|runtime| {
+            lower_checked(checked.clone(), LoweringMode::Strict, runtime)
+        })
+        .unwrap();
+        let expected_host = chelis_ir::lowering_runtime::with_native_lowering_runtime(|runtime| {
+            chelis_ir::host::try_lower_compiled_program_with_manifest(
+                checked.program(),
+                &manifest,
+                runtime,
+            )
+        })
+        .unwrap()
+        .host;
         for mode in [LoweringMode::AllowHostOnly, LoweringMode::AllowHostBackend] {
             let (actual, ordinary_host, plan) =
-                lower_checked_for_c_execution(checked.clone(), &manifest, mode).unwrap();
+                chelis_ir::lowering_runtime::with_native_lowering_runtime(|runtime| {
+                    lower_checked_for_c_execution(checked.clone(), &manifest, mode, runtime)
+                })
+                .unwrap();
             assert_eq!(ordinary_host.is_some(), expected_host.is_some());
             assert!(
                 !plan
@@ -454,7 +484,9 @@ mod tests {
                 .0
                 .push(IrName::new("phantom"));
             assert!(matches!(
-                lower_checked_for_c_execution(malformed, &manifest, mode),
+                chelis_ir::lowering_runtime::with_native_lowering_runtime(|runtime| {
+                    lower_checked_for_c_execution(malformed, &manifest, mode, runtime)
+                }),
                 Err(CoreLowerError::RootCount { .. })
             ));
         }

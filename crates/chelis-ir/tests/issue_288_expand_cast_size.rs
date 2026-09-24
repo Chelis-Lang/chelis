@@ -38,7 +38,9 @@ fn lower_deep(src: &str) -> Result<chelis_ir::dag::Dag, String> {
     let checked = chelis_effects::check_program(&checked).map_err(|e| format!("effects: {e:?}"))?;
     let checked =
         chelis_types::check_linearity(&checked).map_err(|e| format!("linearity: {e:?}"))?;
-    Ok(lower_program(&checked))
+    Ok(chelis_ir::lowering_runtime::with_native_lowering_runtime(
+        |runtime| lower_program(&checked, runtime),
+    ))
 }
 
 /// The `expand` node must carry the cast-wrapped size `2`, producing a

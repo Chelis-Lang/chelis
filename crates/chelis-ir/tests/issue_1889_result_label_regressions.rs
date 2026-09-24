@@ -28,16 +28,21 @@ fn checked_deep(source: &str, origin: ProgramOrigin) -> chelis_types::CheckedPro
 }
 
 fn named_entry(source: &str, name: &str) -> chelis_ir::Dag {
-    chelis_ir::host::lower_named_tensor_entry_dag(
-        &checked_deep(source, ProgramOrigin::Unlinked),
-        name,
-    )
+    chelis_ir::lowering_runtime::with_native_lowering_runtime(|runtime| {
+        chelis_ir::host::lower_named_tensor_entry_dag(
+            &checked_deep(source, ProgramOrigin::Unlinked),
+            name,
+            runtime,
+        )
+    })
     .expect("named tensor entry lowers")
 }
 
 fn compiled_dags(source: &str, origin: ProgramOrigin) -> Vec<chelis_ir::Dag> {
-    let compiled = chelis_ir::host::try_lower_compiled_program(&checked_deep(source, origin))
-        .expect("compiled host program lowers");
+    let compiled = chelis_ir::lowering_runtime::with_native_lowering_runtime(|runtime| {
+        chelis_ir::host::try_lower_compiled_program(&checked_deep(source, origin), runtime)
+    })
+    .expect("compiled host program lowers");
     let mut dags = compiled.dag.into_iter().collect::<Vec<_>>();
     if let Some(host) = compiled.host {
         dags.extend(

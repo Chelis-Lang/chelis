@@ -39,6 +39,7 @@ pub mod host;
 pub mod host_type_state;
 pub mod load_store_name;
 pub mod lower;
+pub mod lowering_runtime;
 #[cfg(feature = "lowering-trace")]
 pub mod lowering_trace;
 pub mod optimize;

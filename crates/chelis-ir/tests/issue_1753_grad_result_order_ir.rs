@@ -38,12 +38,15 @@ fn pair_roots(selection: &str, batched: bool) -> Vec<Vec<f64>> {
             ),
         ),
     ]);
-    let dag = try_lower_subexpr_program(
-        &expr,
-        UnordMap::from([("a".into(), ty.clone()), ("b".into(), ty)]),
-        UnordMap::new(),
-        UnordMap::new(),
-    )
+    let dag = chelis_ir::lowering_runtime::with_native_lowering_runtime(|runtime| {
+        try_lower_subexpr_program(
+            &expr,
+            UnordMap::from([("a".into(), ty.clone()), ("b".into(), ty)]),
+            UnordMap::new(),
+            UnordMap::new(),
+            runtime,
+        )
+    })
     .expect("valid direct grad lowers");
     let values =
         eval_tensor_roots_with_strict(&dag, dag.roots(), |name| inputs.get(name).cloned()).unwrap();

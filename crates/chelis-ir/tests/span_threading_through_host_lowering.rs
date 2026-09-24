@@ -35,7 +35,10 @@ use chelis_types::{CheckedProgram, check_ir_program, check_linearity};
 /// Keep that expectation explicit while production callers retain the
 /// fallible boundary.
 fn lower_compiled_program(program: &CheckedProgram) -> CompiledProgram {
-    try_lower_compiled_program(program).expect("span fixture must lower through the host boundary")
+    chelis_ir::lowering_runtime::with_native_lowering_runtime(|runtime| {
+        try_lower_compiled_program(program, runtime)
+    })
+    .expect("span fixture must lower through the host boundary")
 }
 
 // ── Schema lock test ──────────────────────────────────────────────────

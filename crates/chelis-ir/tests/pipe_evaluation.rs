@@ -55,7 +55,15 @@ fn pipe_unary_builtin_stage_lowers_and_evaluates() {
     "#;
     let pipe_expr = parse_one(pipe_src);
     let scoped = UnordMap::from([("x".to_string(), f32_vec(3))]);
-    let dag = lower_subexpr_program(&pipe_expr, scoped, UnordMap::new(), UnordMap::new());
+    let dag = chelis_ir::lowering_runtime::with_native_lowering_runtime(|runtime| {
+        lower_subexpr_program(
+            &pipe_expr,
+            scoped,
+            UnordMap::new(),
+            UnordMap::new(),
+            runtime,
+        )
+    });
 
     let inputs = UnordMap::from([(
         "x".to_string(),
@@ -95,7 +103,15 @@ fn pipe_plain_callable_with_args_lowers_and_evaluates() {
     "#;
     let pipe_expr = parse_one(pipe_src);
     let scoped = UnordMap::from([("x".to_string(), f32_vec(3)), ("a".to_string(), f32_vec(3))]);
-    let dag = lower_subexpr_program(&pipe_expr, scoped, UnordMap::new(), UnordMap::new());
+    let dag = chelis_ir::lowering_runtime::with_native_lowering_runtime(|runtime| {
+        lower_subexpr_program(
+            &pipe_expr,
+            scoped,
+            UnordMap::new(),
+            UnordMap::new(),
+            runtime,
+        )
+    });
 
     let inputs = UnordMap::from([
         (
@@ -157,13 +173,24 @@ fn pipe_grad_stage_matches_non_pipe_application() {
     let input_ty = f32_vec(1);
     let scoped = UnordMap::from([("input".to_string(), input_ty)]);
 
-    let pipe_dag = lower_subexpr_program(
-        &parse_one(pipe_src),
-        scoped.clone(),
-        UnordMap::new(),
-        program_defs.clone(),
-    );
-    let app_dag = lower_subexpr_program(&parse_one(app_src), scoped, UnordMap::new(), program_defs);
+    let pipe_dag = chelis_ir::lowering_runtime::with_native_lowering_runtime(|runtime| {
+        lower_subexpr_program(
+            &parse_one(pipe_src),
+            scoped.clone(),
+            UnordMap::new(),
+            program_defs.clone(),
+            runtime,
+        )
+    });
+    let app_dag = chelis_ir::lowering_runtime::with_native_lowering_runtime(|runtime| {
+        lower_subexpr_program(
+            &parse_one(app_src),
+            scoped,
+            UnordMap::new(),
+            program_defs,
+            runtime,
+        )
+    });
 
     let inputs = UnordMap::from([(
         "input".to_string(),
@@ -244,13 +271,24 @@ fn pipe_vmap_grad_stage_matches_non_pipe_application() {
     let xs_ty = f32_mat(3, 1);
     let scoped = UnordMap::from([("xs".to_string(), xs_ty)]);
 
-    let pipe_dag = lower_subexpr_program(
-        &parse_one(pipe_src),
-        scoped.clone(),
-        UnordMap::new(),
-        program_defs.clone(),
-    );
-    let app_dag = lower_subexpr_program(&parse_one(app_src), scoped, UnordMap::new(), program_defs);
+    let pipe_dag = chelis_ir::lowering_runtime::with_native_lowering_runtime(|runtime| {
+        lower_subexpr_program(
+            &parse_one(pipe_src),
+            scoped.clone(),
+            UnordMap::new(),
+            program_defs.clone(),
+            runtime,
+        )
+    });
+    let app_dag = chelis_ir::lowering_runtime::with_native_lowering_runtime(|runtime| {
+        lower_subexpr_program(
+            &parse_one(app_src),
+            scoped,
+            UnordMap::new(),
+            program_defs,
+            runtime,
+        )
+    });
 
     let inputs = UnordMap::from([(
         "xs".to_string(),
@@ -327,7 +365,15 @@ fn pipe_vmap_def_stage_lowers_and_evaluates() {
     let mut program_defs = UnordMap::new();
     program_defs.insert("relu_row".to_string(), parse_one(relu_row_src));
     let scoped = UnordMap::from([("xs".to_string(), f32_mat(2, 3))]);
-    let dag = lower_subexpr_program(&parse_one(pipe_src), scoped, UnordMap::new(), program_defs);
+    let dag = chelis_ir::lowering_runtime::with_native_lowering_runtime(|runtime| {
+        lower_subexpr_program(
+            &parse_one(pipe_src),
+            scoped,
+            UnordMap::new(),
+            program_defs,
+            runtime,
+        )
+    });
 
     let inputs = UnordMap::from([(
         "xs".to_string(),
@@ -399,12 +445,15 @@ fn pipe_fn_typed_parameter_stage_lowers_standalone_def() {
             (var {} f)
             (var {} f)))
     "#;
-    let result = try_lower_subexpr_program(
-        &parse_one(fn_src),
-        UnordMap::new(),
-        UnordMap::new(),
-        UnordMap::new(),
-    );
+    let result = chelis_ir::lowering_runtime::with_native_lowering_runtime(|runtime| {
+        try_lower_subexpr_program(
+            &parse_one(fn_src),
+            UnordMap::new(),
+            UnordMap::new(),
+            UnordMap::new(),
+            runtime,
+        )
+    });
     assert!(
         result.is_ok(),
         "lowering a fn body whose pipe stage is a fn-typed parameter must \
@@ -476,18 +525,24 @@ fn pipe_fn_typed_parameter_stage_matches_non_pipe_call_site() {
     let seed_ty = f32_vec(3);
     let scoped = UnordMap::from([("seed".to_string(), seed_ty)]);
 
-    let pipe_dag = lower_subexpr_program(
-        &parse_one(pipe_call_src),
-        scoped.clone(),
-        UnordMap::new(),
-        program_defs.clone(),
-    );
-    let app_dag = lower_subexpr_program(
-        &parse_one(app_call_src),
-        scoped,
-        UnordMap::new(),
-        program_defs,
-    );
+    let pipe_dag = chelis_ir::lowering_runtime::with_native_lowering_runtime(|runtime| {
+        lower_subexpr_program(
+            &parse_one(pipe_call_src),
+            scoped.clone(),
+            UnordMap::new(),
+            program_defs.clone(),
+            runtime,
+        )
+    });
+    let app_dag = chelis_ir::lowering_runtime::with_native_lowering_runtime(|runtime| {
+        lower_subexpr_program(
+            &parse_one(app_call_src),
+            scoped,
+            UnordMap::new(),
+            program_defs,
+            runtime,
+        )
+    });
 
     let inputs = UnordMap::from([(
         "seed".to_string(),

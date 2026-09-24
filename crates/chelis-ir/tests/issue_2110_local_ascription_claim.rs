@@ -16,7 +16,10 @@ fn lower(source: &str) -> chelis_ir::Dag {
         check_ir_program(&decls, chelis_types::ProgramOrigin::Unlinked).unwrap_or_else(|report| {
             panic!("type check failed: {:?}", report.errors);
         });
-    chelis_ir::host::lower_named_tensor_entry_dag(&checked, "f").expect("named tensor entry lowers")
+    chelis_ir::lowering_runtime::with_native_lowering_runtime(|runtime| {
+        chelis_ir::host::lower_named_tensor_entry_dag(&checked, "f", runtime)
+    })
+    .expect("named tensor entry lowers")
 }
 
 fn checked(source: &str) -> chelis_types::CheckedProgram {
@@ -382,15 +385,17 @@ fn host_evaluation_kernel_carries_the_same_local_ascription_site() {
     let source =
         include_str!("fixtures/core/tests/issue_2110_local_ascription_claim/direct_claim_0.dp");
     let checked = checked(source);
-    let session = chelis_ir::host::HostLoweringSession::new(&checked);
     let execution =
         chelis_ir::evaluation::RandomExecutionContext::new(chelis_ir::host::RandomLoweringState {
             seed: None,
             counter: 0,
         });
-    let plan = chelis_ir::host::host_def_evaluation_plan(&session, "f", &execution)
-        .expect("kernel decision")
-        .expect("tensor kernel");
+    let plan = chelis_ir::lowering_runtime::with_native_lowering_runtime(|runtime| {
+        let session = chelis_ir::host::HostLoweringSession::new(&checked, runtime);
+        chelis_ir::host::host_def_evaluation_plan(&session, "f", &execution)
+            .expect("kernel decision")
+            .expect("tensor kernel")
+    });
     assert_eq!(
         local_claims(&plan.kernel_for_inspection().dag).len(),
         1,
@@ -405,15 +410,17 @@ fn staged_host_partition_retains_the_local_ascription_site() {
         "fixtures/core/tests/issue_2110_local_ascription_claim/staged_host_partition_retains_the_local_ascription_site_4.dp"
     );
     let checked = checked(source);
-    let session = chelis_ir::host::HostLoweringSession::new(&checked);
     let execution =
         chelis_ir::evaluation::RandomExecutionContext::new(chelis_ir::host::RandomLoweringState {
             seed: None,
             counter: 0,
         });
-    let plan = chelis_ir::host::host_def_evaluation_plan(&session, "f", &execution)
-        .expect("kernel decision")
-        .expect("tensor kernel");
+    let plan = chelis_ir::lowering_runtime::with_native_lowering_runtime(|runtime| {
+        let session = chelis_ir::host::HostLoweringSession::new(&checked, runtime);
+        chelis_ir::host::host_def_evaluation_plan(&session, "f", &execution)
+            .expect("kernel decision")
+            .expect("tensor kernel")
+    });
     assert!(
         plan.kernel_for_inspection().staged.is_some(),
         "numel-fed reshape must exercise the staged host partition"

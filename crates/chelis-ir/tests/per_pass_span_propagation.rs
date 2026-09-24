@@ -1079,7 +1079,9 @@ fn s3_oracle_lowering_then_optimization_passes() {
     let checked = check_linearity(&checked).expect("linearity");
 
     // Stage 1: lowering (which already runs DCE inside lower_program_to_library).
-    let mut dag = lower_program(&checked);
+    let mut dag = chelis_ir::lowering_runtime::with_native_lowering_runtime(|runtime| {
+        lower_program(&checked, runtime)
+    });
 
     // Stage 2: constant fold + CSE + a redundant DCE (all pure on already-DCE'd input).
     optimize::constant_fold(&mut dag);

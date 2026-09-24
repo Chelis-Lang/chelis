@@ -136,7 +136,9 @@ fn span_threading_through_lowering() {
     );
 
     let checked = check(source);
-    let dag = lower_program(&checked);
+    let dag = chelis_ir::lowering_runtime::with_native_lowering_runtime(|runtime| {
+        lower_program(&checked, runtime)
+    });
     let dag_spans = collect_dag_spans(&dag);
     let missing: Vec<&String> = input_spans.difference(&dag_spans).collect();
     assert!(
@@ -190,7 +192,9 @@ fn lowering_without_spans_produces_none_span_ids() {
     );
 
     let checked = check(source);
-    let dag = lower_program(&checked);
+    let dag = chelis_ir::lowering_runtime::with_native_lowering_runtime(|runtime| {
+        lower_program(&checked, runtime)
+    });
 
     assert!(
         !dag.is_empty(),
@@ -223,7 +227,9 @@ fn lowering_an_empty_program_does_not_panic() {
     assert!(exprs.is_empty(), "empty source should yield zero exprs");
 
     let checked = check(source);
-    let dag = lower_program(&checked);
+    let dag = chelis_ir::lowering_runtime::with_native_lowering_runtime(|runtime| {
+        lower_program(&checked, runtime)
+    });
     assert!(
         dag.is_empty(),
         "empty program must lower to an empty DAG (got {} nodes)",
@@ -249,7 +255,9 @@ fn single_span_program_propagates_to_every_ir_node() {
                (lit {type: (t-tensor {} (t-prim {} f32)) span: "span_uniform"} 2.0)))
     "#;
     let checked = check(source);
-    let dag = lower_program(&checked);
+    let dag = chelis_ir::lowering_runtime::with_native_lowering_runtime(|runtime| {
+        lower_program(&checked, runtime)
+    });
 
     assert!(!dag.is_empty(), "uniform-span fixture should lower");
     let mut saw_uniform = false;
@@ -286,7 +294,9 @@ fn s2_lowering_does_not_emit_synthesized_markers() {
                (lit {type: (t-tensor {} (t-prim {} f32)) span: "u_lit"} 7.0)))
     "#;
     let checked = check(source);
-    let dag = lower_program(&checked);
+    let dag = chelis_ir::lowering_runtime::with_native_lowering_runtime(|runtime| {
+        lower_program(&checked, runtime)
+    });
 
     for node in dag.nodes() {
         if let Some(s) = &node.span_id {
@@ -318,7 +328,9 @@ fn atom_const_inherits_parent_span() {
           (lit {type: (t-tensor {} (t-prim {} f32)) span: "atom_lit"} 7.0))
     "#;
     let checked = check(source);
-    let dag = lower_program(&checked);
+    let dag = chelis_ir::lowering_runtime::with_native_lowering_runtime(|runtime| {
+        lower_program(&checked, runtime)
+    });
 
     let mut found_atom_span = false;
     for node in dag.nodes() {
@@ -386,7 +398,9 @@ fn var_ref_to_let_bound_name_records_span_on_cached_node() {
     );
 
     let checked = check(source);
-    let dag = lower_program(&checked);
+    let dag = chelis_ir::lowering_runtime::with_native_lowering_runtime(|runtime| {
+        lower_program(&checked, runtime)
+    });
     let dag_spans = collect_dag_spans(&dag);
 
     assert!(
@@ -445,7 +459,9 @@ fn var_ref_without_span_does_not_fabricate_one() {
     "#;
 
     let checked = check(source);
-    let dag = lower_program(&checked);
+    let dag = chelis_ir::lowering_runtime::with_native_lowering_runtime(|runtime| {
+        lower_program(&checked, runtime)
+    });
 
     let mut saw_lit_a_node = false;
     for node in dag.nodes() {
@@ -489,7 +505,9 @@ fn var_ref_inherits_enclosing_apps_span_via_current_span_id() {
     "#;
 
     let checked = check(source);
-    let dag = lower_program(&checked);
+    let dag = chelis_ir::lowering_runtime::with_native_lowering_runtime(|runtime| {
+        lower_program(&checked, runtime)
+    });
     let dag_spans = collect_dag_spans(&dag);
     assert!(
         dag_spans.contains("outer_app"),
@@ -539,7 +557,9 @@ fn atom_symbol_ref_to_let_bound_name_records_span_on_cached_node() {
     let exprs = chelis_deep::parser::parse_str(source).expect("deep parse");
     let input_spans = collect_input_spans(&exprs);
     let checked = check(source);
-    let dag = lower_program(&checked);
+    let dag = chelis_ir::lowering_runtime::with_native_lowering_runtime(|runtime| {
+        lower_program(&checked, runtime)
+    });
     let dag_spans = collect_dag_spans(&dag);
     let missing: Vec<&String> = input_spans.difference(&dag_spans).collect();
     assert!(

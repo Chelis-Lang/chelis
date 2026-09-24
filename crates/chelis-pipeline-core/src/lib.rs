@@ -71,11 +71,13 @@
 //! ```compile_fail
 //! use chelis_pipeline_core::{CheckedLibrary, ContextCheckedCompilation};
 //!
+//! use chelis_ir::lowering_runtime::LoweringRuntime;
 //! fn replace_library(
 //!     checked: ContextCheckedCompilation<'_>,
 //!     other: &CheckedLibrary,
+//!     runtime: &LoweringRuntime,
 //! ) {
-//!     let _ = checked.compose(other);
+//!     let _ = checked.compose(other, runtime);
 //! }
 //! ```
 //!
@@ -143,8 +145,14 @@ mod tests {
     }
 
     fn checked(source: &str) -> CheckedCompilation {
-        complete_checks(accepted_analysis(source), SemanticContext::Isolated)
-            .expect("the fixture must pass semantic checks")
+        chelis_ir::lowering_runtime::with_native_lowering_runtime(|runtime| {
+            complete_checks(
+                accepted_analysis(source),
+                SemanticContext::Isolated,
+                runtime,
+            )
+        })
+        .expect("the fixture must pass semantic checks")
     }
 
     const CONTEXT_LIBRARY: &str =
@@ -157,9 +165,12 @@ mod tests {
             (lit {type: (t-tensor {} (t-prim {} f32))} 3.0)))";
 
     fn context_checked(library: &CheckedLibrary) -> ContextCheckedCompilation<'_> {
-        complete_context_checks(
-            analyze_prepared_with_library(prepared(CONTEXT_EXTENSION), library).unwrap(),
-        )
+        chelis_ir::lowering_runtime::with_native_lowering_runtime(|runtime| {
+            complete_context_checks(
+                analyze_prepared_with_library(prepared(CONTEXT_EXTENSION), library).unwrap(),
+                runtime,
+            )
+        })
         .unwrap()
     }
 
@@ -198,9 +209,17 @@ mod tests {
 
     #[test]
     fn library_origin_distinguishes_linked_declarations_from_forged_source() {
-        check_prepared_library(prepared_with_origin(LINKED_LIBRARY, ProgramOrigin::Linked))
-            .expect("trusted linked declarations must pass the library semantic entry point");
-        let LibraryRejection::Type { report } = check_prepared_library(prepared(LINKED_LIBRARY))
+        chelis_ir::lowering_runtime::with_native_lowering_runtime(|runtime| {
+            check_prepared_library(
+                prepared_with_origin(LINKED_LIBRARY, ProgramOrigin::Linked),
+                runtime,
+            )
+        })
+        .expect("trusted linked declarations must pass the library semantic entry point");
+        let LibraryRejection::Type { report } =
+            chelis_ir::lowering_runtime::with_native_lowering_runtime(|runtime| {
+                check_prepared_library(prepared(LINKED_LIBRARY), runtime)
+            })
             .expect_err("identical unlinked declarations must be rejected")
         else {
             panic!("forged linker names must be rejected during type analysis");
@@ -215,15 +234,22 @@ mod tests {
 
     #[test]
     fn contextual_origin_is_not_inherited_from_a_linked_library() {
-        let library =
-            check_prepared_library(prepared_with_origin(LINKED_LIBRARY, ProgramOrigin::Linked))
-                .unwrap();
+        let library = chelis_ir::lowering_runtime::with_native_lowering_runtime(|runtime| {
+            check_prepared_library(
+                prepared_with_origin(LINKED_LIBRARY, ProgramOrigin::Linked),
+                runtime,
+            )
+        })
+        .unwrap();
         let linked = analyze_prepared_with_library(
             prepared_with_origin(LINKED_EXTENSION, ProgramOrigin::Linked),
             &library,
         )
         .expect("a separately trusted linked extension must type-check");
-        complete_context_checks(linked).expect("linked extension must pass semantic checks");
+        chelis_ir::lowering_runtime::with_native_lowering_runtime(|runtime| {
+            complete_context_checks(linked, runtime)
+        })
+        .expect("linked extension must pass semantic checks");
 
         let rejection = analyze_prepared_with_library(prepared(LINKED_EXTENSION), &library)
             .expect_err("a linked base must not authorize new unlinked declarations");
@@ -236,21 +262,30 @@ mod tests {
 
         let unlinked = analyze_prepared_with_library(prepared(UNLINKED_EXTENSION), &library)
             .expect("unlinked code may reference already-checked linked declarations");
-        complete_context_checks(unlinked).expect("ordinary unlinked extension must remain valid");
+        chelis_ir::lowering_runtime::with_native_lowering_runtime(|runtime| {
+            complete_context_checks(unlinked, runtime)
+        })
+        .expect("ordinary unlinked extension must remain valid");
     }
 
     #[test]
     fn layered_origin_is_not_inherited_from_a_linked_library() {
-        let library =
-            check_prepared_library(prepared_with_origin(LINKED_LIBRARY, ProgramOrigin::Linked))
-                .unwrap();
+        let library = chelis_ir::lowering_runtime::with_native_lowering_runtime(|runtime| {
+            check_prepared_library(
+                prepared_with_origin(LINKED_LIBRARY, ProgramOrigin::Linked),
+                runtime,
+            )
+        })
+        .unwrap();
         let linked = analyze_prepared_library_with_base(
             prepared_with_origin(LINKED_EXTENSION, ProgramOrigin::Linked),
             &library,
         )
         .expect("a separately trusted linked library layer must type-check");
-        complete_context_library_checks(linked)
-            .expect("linked library layer must compose with its checked base");
+        chelis_ir::lowering_runtime::with_native_lowering_runtime(|runtime| {
+            complete_context_library_checks(linked, runtime)
+        })
+        .expect("linked library layer must compose with its checked base");
 
         let rejection = analyze_prepared_library_with_base(prepared(LINKED_EXTENSION), &library)
             .expect_err("a linked base must not authorize an unlinked library layer");
@@ -263,8 +298,10 @@ mod tests {
 
         let unlinked = analyze_prepared_library_with_base(prepared(UNLINKED_EXTENSION), &library)
             .expect("an unlinked layer may reference already-checked linked declarations");
-        complete_context_library_checks(unlinked)
-            .expect("ordinary unlinked layer must compose with its checked base");
+        chelis_ir::lowering_runtime::with_native_lowering_runtime(|runtime| {
+            complete_context_library_checks(unlinked, runtime)
+        })
+        .expect("ordinary unlinked layer must compose with its checked base");
     }
 
     fn manifest(checked: &CheckedCompilation) -> chelis_types::manifest::RootManifest {
@@ -277,7 +314,9 @@ mod tests {
 
     fn assert_isolated_lowering_rejects(checked: &CheckedCompilation) {
         assert!(matches!(
-            lower_checked_for_evaluation(checked),
+            chelis_ir::lowering_runtime::with_native_lowering_runtime(|runtime| {
+                lower_checked_for_evaluation(checked, runtime)
+            }),
             Err(CoreLowerError::ContextRequired)
         ));
         let manifest = manifest(checked);
@@ -287,16 +326,29 @@ mod tests {
             LoweringMode::AllowHostBackend,
         ] {
             assert!(matches!(
-                lower_checked(checked.clone(), mode),
+                chelis_ir::lowering_runtime::with_native_lowering_runtime(|runtime| lower_checked(
+                    checked.clone(),
+                    mode,
+                    runtime
+                )),
                 Err(CoreLowerError::ContextRequired)
             ));
             assert!(matches!(
-                lower_checked_for_c_execution(checked.clone(), &manifest, mode),
+                chelis_ir::lowering_runtime::with_native_lowering_runtime(|runtime| {
+                    lower_checked_for_c_execution(checked.clone(), &manifest, mode, runtime)
+                }),
                 Err(CoreLowerError::ContextRequired)
             ));
             #[cfg(feature = "lowering-trace")]
             assert!(matches!(
-                lower_checked_for_c_execution_with_trace(checked.clone(), &manifest, mode),
+                chelis_ir::lowering_runtime::with_native_lowering_runtime(|runtime| {
+                    lower_checked_for_c_execution_with_trace(
+                        checked.clone(),
+                        &manifest,
+                        mode,
+                        runtime,
+                    )
+                }),
                 Err(CoreLowerError::ContextRequired)
             ));
         }
@@ -318,7 +370,10 @@ mod tests {
     }
 
     fn assert_sealed_evaluation_result(program: chelis_ir::lower::EvaluationProgram) {
-        let selected = program.select_roots(&["y".to_owned()]).unwrap();
+        let selected = chelis_ir::lowering_runtime::with_native_lowering_runtime(|runtime| {
+            program.select_roots(&["y".to_owned()], runtime)
+        })
+        .unwrap();
         let mut context = chelis_ir::evaluation::RandomExecutionContext::new(
             chelis_ir::host::RandomLoweringState {
                 seed: None,
@@ -339,7 +394,10 @@ mod tests {
 
     #[test]
     fn detached_context_extensions_reject_every_isolated_lowering_entrypoint() {
-        let library = check_prepared_library(prepared(CONTEXT_LIBRARY)).unwrap();
+        let library = chelis_ir::lowering_runtime::with_native_lowering_runtime(|runtime| {
+            check_prepared_library(prepared(CONTEXT_LIBRARY), runtime)
+        })
+        .unwrap();
         let contextual = context_checked(&library);
         assert_isolated_lowering_rejects(contextual.extension());
         let detached = contextual.extension().clone();
@@ -350,13 +408,23 @@ mod tests {
 
     #[test]
     fn contextual_lowered_products_cannot_be_relowered_without_their_library() {
-        let library = check_prepared_library(prepared(CONTEXT_LIBRARY)).unwrap();
-        let lowered_library = lower_library(&library).unwrap();
-        let lowered = lower_checked_with_context(
-            context_checked(&library),
-            &lowered_library,
-            LoweringMode::Strict,
-        )
+        let library = chelis_ir::lowering_runtime::with_native_lowering_runtime(|runtime| {
+            check_prepared_library(prepared(CONTEXT_LIBRARY), runtime)
+        })
+        .unwrap();
+        let lowered_library =
+            chelis_ir::lowering_runtime::with_native_lowering_runtime(|runtime| {
+                lower_library(&library, runtime)
+            })
+            .unwrap();
+        let lowered = chelis_ir::lowering_runtime::with_native_lowering_runtime(|runtime| {
+            lower_checked_with_context(
+                context_checked(&library),
+                &lowered_library,
+                LoweringMode::Strict,
+                runtime,
+            )
+        })
         .unwrap();
         assert_sealed_dag_result(&lowered);
         assert_isolated_lowering_rejects(lowered.checked());
@@ -366,34 +434,70 @@ mod tests {
 
     #[test]
     fn bound_and_composed_programs_keep_library_values_sealed() {
-        let library = check_prepared_library(prepared(CONTEXT_LIBRARY)).unwrap();
+        let library = chelis_ir::lowering_runtime::with_native_lowering_runtime(|runtime| {
+            check_prepared_library(prepared(CONTEXT_LIBRARY), runtime)
+        })
+        .unwrap();
         let evaluation_library =
-            chelis_ir::lower::try_lower_program_to_evaluation_library(library.program()).unwrap();
+            chelis_ir::lowering_runtime::with_native_lowering_runtime(|runtime| {
+                chelis_ir::lower::try_lower_program_to_evaluation_library(
+                    library.program(),
+                    runtime,
+                )
+            })
+            .unwrap();
         assert_sealed_evaluation_result(
-            lower_checked_with_evaluation_context(&context_checked(&library), &evaluation_library)
-                .unwrap(),
+            chelis_ir::lowering_runtime::with_native_lowering_runtime(|runtime| {
+                lower_checked_with_evaluation_context(
+                    &context_checked(&library),
+                    &evaluation_library,
+                    runtime,
+                )
+            })
+            .unwrap(),
         );
 
-        let composed = context_checked(&library).compose();
+        let composed = chelis_ir::lowering_runtime::with_native_lowering_runtime(|runtime| {
+            context_checked(&library).compose(runtime)
+        });
         let isolated = checked(&format!("{CONTEXT_LIBRARY}\n{CONTEXT_EXTENSION}"));
         for checked in [composed, isolated] {
-            assert_sealed_evaluation_result(lower_checked_for_evaluation(&checked).unwrap());
+            assert_sealed_evaluation_result(
+                chelis_ir::lowering_runtime::with_native_lowering_runtime(|runtime| {
+                    lower_checked_for_evaluation(&checked, runtime)
+                })
+                .unwrap(),
+            );
             let manifest = manifest(&checked);
             assert_sealed_dag_result(
-                &lower_checked(checked.clone(), LoweringMode::Strict).unwrap(),
+                &chelis_ir::lowering_runtime::with_native_lowering_runtime(|runtime| {
+                    lower_checked(checked.clone(), LoweringMode::Strict, runtime)
+                })
+                .unwrap(),
             );
             let (lowered, _, _) =
-                lower_checked_for_c_execution(checked.clone(), &manifest, LoweringMode::Strict)
-                    .unwrap();
+                chelis_ir::lowering_runtime::with_native_lowering_runtime(|runtime| {
+                    lower_checked_for_c_execution(
+                        checked.clone(),
+                        &manifest,
+                        LoweringMode::Strict,
+                        runtime,
+                    )
+                })
+                .unwrap();
             assert_sealed_dag_result(&lowered);
             #[cfg(feature = "lowering-trace")]
             {
-                let (lowered, _, _) = lower_checked_for_c_execution_with_trace(
-                    checked.clone(),
-                    &manifest,
-                    LoweringMode::Strict,
-                )
-                .unwrap();
+                let (lowered, _, _) =
+                    chelis_ir::lowering_runtime::with_native_lowering_runtime(|runtime| {
+                        lower_checked_for_c_execution_with_trace(
+                            checked.clone(),
+                            &manifest,
+                            LoweringMode::Strict,
+                            runtime,
+                        )
+                    })
+                    .unwrap();
                 assert_sealed_dag_result(&lowered);
             }
         }
@@ -401,7 +505,10 @@ mod tests {
 
     #[test]
     fn library_extensions_require_composition_before_library_lowering() {
-        let library = check_prepared_library(prepared(CONTEXT_LIBRARY)).unwrap();
+        let library = chelis_ir::lowering_runtime::with_native_lowering_runtime(|runtime| {
+            check_prepared_library(prepared(CONTEXT_LIBRARY), runtime)
+        })
+        .unwrap();
         let extension =
             analyze_prepared_library_with_base(prepared(CONTEXT_EXTENSION), &library).unwrap();
         assert!(matches!(
@@ -412,11 +519,17 @@ mod tests {
             Err(LibraryRejection::ContextMismatch)
         ));
 
-        let composed = complete_context_library_checks(extension).unwrap();
+        let composed = chelis_ir::lowering_runtime::with_native_lowering_runtime(|runtime| {
+            complete_context_library_checks(extension, runtime)
+        })
+        .unwrap();
         let composed =
             validate_cached_library(composed.type_env().clone(), composed.program().clone())
                 .unwrap();
-        let lowered = lower_library(&composed).unwrap();
+        let lowered = chelis_ir::lowering_runtime::with_native_lowering_runtime(|runtime| {
+            lower_library(&composed, runtime)
+        })
+        .unwrap();
         let values = chelis_ir::eval::eval_tensor_roots_with_strict(
             lowered.dag(),
             lowered.dag().roots(),
@@ -429,9 +542,15 @@ mod tests {
 
     #[test]
     fn shadowed_host_declaration_retains_its_new_tensor_root() {
-        let library =
-            check_prepared_library(prepared(r#"(def {} value (lit {} "host"))"#)).unwrap();
-        let lowered_library = lower_library(&library).unwrap();
+        let library = chelis_ir::lowering_runtime::with_native_lowering_runtime(|runtime| {
+            check_prepared_library(prepared(r#"(def {} value (lit {} "host"))"#), runtime)
+        })
+        .unwrap();
+        let lowered_library =
+            chelis_ir::lowering_runtime::with_native_lowering_runtime(|runtime| {
+                lower_library(&library, runtime)
+            })
+            .unwrap();
         let analysis = analyze_prepared_with_library(
             prepared(
                 "(defsig {} value (t-prim {} i32))
@@ -440,11 +559,17 @@ mod tests {
             &library,
         )
         .unwrap();
-        let lowered = lower_checked_with_context(
-            complete_context_checks(analysis).unwrap(),
-            &lowered_library,
-            LoweringMode::Strict,
-        )
+        let lowered = chelis_ir::lowering_runtime::with_native_lowering_runtime(|runtime| {
+            lower_checked_with_context(
+                chelis_ir::lowering_runtime::with_native_lowering_runtime(|runtime| {
+                    complete_context_checks(analysis, runtime)
+                })
+                .unwrap(),
+                &lowered_library,
+                LoweringMode::Strict,
+                runtime,
+            )
+        })
         .unwrap();
         let root = *lowered.named_roots().get(&IrName::new("value")).unwrap();
         assert_eq!(lowered.dag().roots(), &[root]);
@@ -456,16 +581,26 @@ mod tests {
 
     #[test]
     fn contextual_products_reject_a_replacement_library() {
-        let first =
-            check_prepared_library(prepared("(def {} one (lit {type: (t-prim {} i32)} 1))"))
-                .expect("the first library must pass all checks");
-        let replacement =
-            check_prepared_library(prepared("(def {} one (lit {type: (t-prim {} i32)} 2))"))
-                .expect("the replacement library must pass all checks");
+        let first = chelis_ir::lowering_runtime::with_native_lowering_runtime(|runtime| {
+            check_prepared_library(
+                prepared("(def {} one (lit {type: (t-prim {} i32)} 1))"),
+                runtime,
+            )
+        })
+        .expect("the first library must pass all checks");
+        let replacement = chelis_ir::lowering_runtime::with_native_lowering_runtime(|runtime| {
+            check_prepared_library(
+                prepared("(def {} one (lit {type: (t-prim {} i32)} 2))"),
+                runtime,
+            )
+        })
+        .expect("the replacement library must pass all checks");
         let analysis = analyze_prepared_with_library(prepared(""), &first)
             .expect("the empty extension must type-check");
-        let checked = complete_context_checks(analysis)
-            .expect("the empty extension must pass semantic checks");
+        let checked = chelis_ir::lowering_runtime::with_native_lowering_runtime(|runtime| {
+            complete_context_checks(analysis, runtime)
+        })
+        .expect("the empty extension must pass semantic checks");
 
         assert!(
             chelis_types::CheckedProgram::compose(
@@ -476,35 +611,62 @@ mod tests {
             "a context-checked program must reject another library"
         );
         let replacement_dag =
-            lower_library(&replacement).expect("the replacement library must lower");
+            chelis_ir::lowering_runtime::with_native_lowering_runtime(|runtime| {
+                lower_library(&replacement, runtime)
+            })
+            .expect("the replacement library must lower");
         let first_evaluation =
-            chelis_ir::lower::try_lower_program_to_evaluation_library(first.program()).unwrap();
-        lower_checked_with_evaluation_context(&checked, &first_evaluation)
-            .expect("the opaque evaluation library matches the sealed context");
+            chelis_ir::lowering_runtime::with_native_lowering_runtime(|runtime| {
+                chelis_ir::lower::try_lower_program_to_evaluation_library(first.program(), runtime)
+            })
+            .unwrap();
+        chelis_ir::lowering_runtime::with_native_lowering_runtime(|runtime| {
+            lower_checked_with_evaluation_context(&checked, &first_evaluation, runtime)
+        })
+        .expect("the opaque evaluation library matches the sealed context");
         let replacement_evaluation =
-            chelis_ir::lower::try_lower_program_to_evaluation_library(replacement.program())
-                .unwrap();
+            chelis_ir::lowering_runtime::with_native_lowering_runtime(|runtime| {
+                chelis_ir::lower::try_lower_program_to_evaluation_library(
+                    replacement.program(),
+                    runtime,
+                )
+            })
+            .unwrap();
         assert!(matches!(
-            lower_checked_with_evaluation_context(&checked, &replacement_evaluation),
+            chelis_ir::lowering_runtime::with_native_lowering_runtime(|runtime| {
+                lower_checked_with_evaluation_context(&checked, &replacement_evaluation, runtime)
+            }),
             Err(CoreLowerError::Lower(_))
         ));
         assert!(matches!(
-            lower_checked_with_context(checked, &replacement_dag, LoweringMode::Strict),
+            chelis_ir::lowering_runtime::with_native_lowering_runtime(|runtime| {
+                lower_checked_with_context(checked, &replacement_dag, LoweringMode::Strict, runtime)
+            }),
             Err(CoreLowerError::Lower(_))
         ));
     }
 
     #[test]
     fn cached_library_parser_rejects_a_same_shape_foreign_context() {
-        let exported = check_prepared_library(prepared(
-            "(module {} m (export {} value) \
+        let exported = chelis_ir::lowering_runtime::with_native_lowering_runtime(|runtime| {
+            check_prepared_library(
+                prepared(
+                    "(module {} m (export {} value) \
              (def {} value (lit {type: (t-prim {} i32)} 1)))",
-        ))
+                ),
+                runtime,
+            )
+        })
         .expect("the exported library must pass all checks");
-        let private = check_prepared_library(prepared(
-            "(module {} m \
+        let private = chelis_ir::lowering_runtime::with_native_lowering_runtime(|runtime| {
+            check_prepared_library(
+                prepared(
+                    "(module {} m \
              (def {} value (lit {type: (t-prim {} i32)} 1)))",
-        ))
+                ),
+                runtime,
+            )
+        })
         .expect("the private library must pass all checks");
         assert_eq!(private.program().type_env(), exported.program().type_env());
         assert!(
@@ -522,9 +684,13 @@ mod tests {
 
     #[test]
     fn cached_library_parser_rejects_a_mismatched_type_environment() {
-        let library =
-            check_prepared_library(prepared("(def {} one (lit {type: (t-prim {} i32)} 1))"))
-                .expect("the library must pass all checks");
+        let library = chelis_ir::lowering_runtime::with_native_lowering_runtime(|runtime| {
+            check_prepared_library(
+                prepared("(def {} one (lit {type: (t-prim {} i32)} 1))"),
+                runtime,
+            )
+        })
+        .expect("the library must pass all checks");
 
         let rejection =
             validate_cached_library(chelis_types::TypeEnv::empty(), library.program().clone())
@@ -535,10 +701,13 @@ mod tests {
 
     #[test]
     fn lowering_preserves_canonical_tuple_roots() {
-        let lowered = lower_checked(
-            checked(include_str!("../tests/fixtures/pair.dp")),
-            LoweringMode::Strict,
-        )
+        let lowered = chelis_ir::lowering_runtime::with_native_lowering_runtime(|runtime| {
+            lower_checked(
+                checked(include_str!("../tests/fixtures/pair.dp")),
+                LoweringMode::Strict,
+                runtime,
+            )
+        })
         .expect("the tuple must lower");
         assert_eq!(
             lowered
@@ -556,10 +725,13 @@ mod tests {
 
     #[test]
     fn declared_roots_and_forward_load_aliases_have_distinct_lookups() {
-        let lowered = lower_checked(
-            checked(include_str!("../tests/fixtures/lookup.dp")),
-            LoweringMode::Strict,
-        )
+        let lowered = chelis_ir::lowering_runtime::with_native_lowering_runtime(|runtime| {
+            lower_checked(
+                checked(include_str!("../tests/fixtures/lookup.dp")),
+                LoweringMode::Strict,
+                runtime,
+            )
+        })
         .expect("the function must lower");
         let output = IrName::new("out");
         let input = IrName::new("input");
@@ -571,10 +743,13 @@ mod tests {
 
     #[test]
     fn host_only_output_keeps_the_explicit_empty_root_product() {
-        let lowered = lower_checked(
-            checked(include_str!("../tests/fixtures/host.dp")),
-            LoweringMode::AllowHostOnly,
-        )
+        let lowered = chelis_ir::lowering_runtime::with_native_lowering_runtime(|runtime| {
+            lower_checked(
+                checked(include_str!("../tests/fixtures/host.dp")),
+                LoweringMode::AllowHostOnly,
+                runtime,
+            )
+        })
         .expect("the host-only value must lower without tensor roots");
         assert!(lowered.dag().roots().is_empty());
         assert!(lowered.named_roots().is_empty());
@@ -593,10 +768,11 @@ mod tests {
     #[test]
     fn effect_rejection_uses_the_narrow_semantic_error() {
         assert!(matches!(
-            complete_checks(
+            chelis_ir::lowering_runtime::with_native_lowering_runtime(|runtime| complete_checks(
                 accepted_analysis(include_str!("../tests/fixtures/effect_rejection.dp")),
                 SemanticContext::Isolated,
-            ),
+                runtime,
+            )),
             Err(SemanticRejection::Effects { .. })
         ));
     }
@@ -604,10 +780,11 @@ mod tests {
     #[test]
     fn linearity_rejection_uses_the_narrow_semantic_error() {
         assert!(matches!(
-            complete_checks(
+            chelis_ir::lowering_runtime::with_native_lowering_runtime(|runtime| complete_checks(
                 accepted_analysis(include_str!("../tests/fixtures/linearity_rejection.dp")),
                 SemanticContext::Isolated,
-            ),
+                runtime,
+            )),
             Err(SemanticRejection::Linearity { .. })
         ));
     }
@@ -615,10 +792,11 @@ mod tests {
     #[test]
     fn strict_lowering_rejection_retains_the_lower_diagnostic() {
         assert!(matches!(
-            lower_checked(
+            chelis_ir::lowering_runtime::with_native_lowering_runtime(|runtime| lower_checked(
                 checked(include_str!("../tests/fixtures/lower_rejection.dp")),
                 LoweringMode::Strict,
-            ),
+                runtime,
+            )),
             Err(CoreLowerError::Lower(_))
         ));
     }

@@ -44,8 +44,14 @@ fn execution_trace_captures_the_actual_ad_call_without_replaying_seed_controls()
     let program = checked(include_str!(
         "fixtures/core/tests/lowering_trace/execution_trace_captures_the_actual_ad_call_without_replaying_seed_controls_1.dp"
     ));
-    let ordinary = try_lower_program_to_evaluation_library(&program).unwrap();
-    let (observed, trace) = try_lower_program_to_evaluation_library_with_trace(&program).unwrap();
+    let ordinary = chelis_ir::lowering_runtime::with_native_lowering_runtime(|runtime| {
+        try_lower_program_to_evaluation_library(&program, runtime)
+    })
+    .unwrap();
+    let (observed, trace) = chelis_ir::lowering_runtime::with_native_lowering_runtime(|runtime| {
+        try_lower_program_to_evaluation_library_with_trace(&program, runtime)
+    })
+    .unwrap();
     assert_eq!(
         bincode::serialize(ordinary.library_for_inspection()).unwrap(),
         bincode::serialize(observed.library_for_inspection()).unwrap()
@@ -129,8 +135,14 @@ fn selected_source_census_keeps_draw_free_dependencies_and_excludes_siblings() {
     let program = checked(include_str!(
         "fixtures/core/tests/lowering_trace/selected_source_census_keeps_draw_free_dependencies_and_excludes_siblings_2.dp"
     ));
-    let library = chelis_ir::lower::try_lower_program_to_evaluation_library(&program).unwrap();
-    let selected = library.program().select_roots(&["sample".into()]).unwrap();
+    let library = chelis_ir::lowering_runtime::with_native_lowering_runtime(|runtime| {
+        chelis_ir::lower::try_lower_program_to_evaluation_library(&program, runtime)
+    })
+    .unwrap();
+    let selected = chelis_ir::lowering_runtime::with_native_lowering_runtime(|runtime| {
+        library.program().select_roots(&["sample".into()], runtime)
+    })
+    .unwrap();
     let seeds = selected
         .plan()
         .source_for_inspection()
@@ -166,13 +178,19 @@ fn selecting_a_draw_free_region_retains_controls_without_changing_dispatch() {
     let program = checked(include_str!(
         "fixtures/core/tests/lowering_trace/selecting_a_draw_free_region_retains_controls_without_changing_dispatch_3.dp"
     ));
-    let library = chelis_ir::lower::try_lower_program_to_evaluation_library(&program).unwrap();
+    let library = chelis_ir::lowering_runtime::with_native_lowering_runtime(|runtime| {
+        chelis_ir::lower::try_lower_program_to_evaluation_library(&program, runtime)
+    })
+    .unwrap();
     let names = ["selected".into()];
     assert_eq!(
         library.program().profile_for_roots(&names).unwrap(),
         EvaluationProfile::Legacy(LegacyEvaluationReason::NoDropout)
     );
-    let selected = library.program().select_roots(&names).unwrap();
+    let selected = chelis_ir::lowering_runtime::with_native_lowering_runtime(|runtime| {
+        library.program().select_roots(&names, runtime)
+    })
+    .unwrap();
     let source = selected.plan().source_for_inspection();
     assert_eq!(source.len(), 4);
     assert_eq!(
@@ -200,14 +218,27 @@ fn selecting_a_draw_free_region_retains_controls_without_changing_dispatch() {
         [3.0, 5.0]
     );
     assert_eq!((context.state().seed, context.state().counter), (None, 23));
-    assert!(library.program().select_roots(&["missing".into()]).is_err());
+    assert!(
+        chelis_ir::lowering_runtime::with_native_lowering_runtime(|runtime| library
+            .program()
+            .select_roots(&["missing".into()], runtime))
+        .is_err()
+    );
 
     let excluded = checked(include_str!(
         "fixtures/core/tests/lowering_trace/selecting_a_draw_free_region_retains_controls_without_changing_dispatch_4.dp"
     ));
-    let library = chelis_ir::lower::try_lower_program_to_evaluation_library(&excluded).unwrap();
+    let library = chelis_ir::lowering_runtime::with_native_lowering_runtime(|runtime| {
+        chelis_ir::lower::try_lower_program_to_evaluation_library(&excluded, runtime)
+    })
+    .unwrap();
     assert!(!library.library_for_inspection().lowered_names()["choose"]);
-    assert!(library.program().select_roots(&["choose".into()]).is_err());
+    assert!(
+        chelis_ir::lowering_runtime::with_native_lowering_runtime(|runtime| library
+            .program()
+            .select_roots(&["choose".into()], runtime))
+        .is_err()
+    );
 }
 
 #[cfg(feature = "lowering-trace")]
@@ -221,8 +252,10 @@ fn context_composition_retains_declared_controls_without_confusing_local_aliases
     let env =
         chelis_types::build_type_env_from_library(&deep, chelis_types::ProgramOrigin::Unlinked)
             .unwrap();
-    let library =
-        chelis_ir::lower::try_lower_program_to_evaluation_library(&checked(source)).unwrap();
+    let library = chelis_ir::lowering_runtime::with_native_lowering_runtime(|runtime| {
+        chelis_ir::lower::try_lower_program_to_evaluation_library(&checked(source), runtime)
+    })
+    .unwrap();
     let original = bincode::serialize(library.library_for_inspection()).unwrap();
     for (body, expected) in [
         (
@@ -244,10 +277,14 @@ fn context_composition_retains_declared_controls_without_confusing_local_aliases
                 .unwrap();
         let program = chelis_effects::check_program(&program).unwrap();
         let program = chelis_types::check_linearity(&program).unwrap();
-        let composed =
-            chelis_ir::lower::try_lower_program_with_evaluation_context(&library, &program)
-                .unwrap();
-        let selected = composed.select_roots(&["sample".into()]).unwrap();
+        let composed = chelis_ir::lowering_runtime::with_native_lowering_runtime(|runtime| {
+            chelis_ir::lower::try_lower_program_with_evaluation_context(&library, &program, runtime)
+        })
+        .unwrap();
+        let selected = chelis_ir::lowering_runtime::with_native_lowering_runtime(|runtime| {
+            composed.select_roots(&["sample".into()], runtime)
+        })
+        .unwrap();
         let seeds = selected
             .plan()
             .source_for_inspection()
@@ -287,8 +324,14 @@ fn trace_preserves_the_ordinary_library_and_actual_normalization() {
     let program = checked(include_str!(
         "fixtures/core/tests/lowering_trace/trace_preserves_the_ordinary_library_and_actual_normalization.dp"
     ));
-    let ordinary = try_lower_program_to_library(&program).unwrap();
-    let (observed, trace) = try_lower_program_to_library_with_trace(&program).unwrap();
+    let ordinary = chelis_ir::lowering_runtime::with_native_lowering_runtime(|runtime| {
+        try_lower_program_to_library(&program, runtime)
+    })
+    .unwrap();
+    let (observed, trace) = chelis_ir::lowering_runtime::with_native_lowering_runtime(|runtime| {
+        try_lower_program_to_library_with_trace(&program, runtime)
+    })
+    .unwrap();
     assert_eq!(
         bincode::serialize(&ordinary).unwrap(),
         bincode::serialize(&observed).unwrap()
@@ -333,7 +376,10 @@ fn trace_preserves_the_ordinary_library_and_actual_normalization() {
 #[cfg(feature = "lowering-trace")]
 #[test]
 fn trace_captures_actual_ad_ports_roots_and_ordered_wrt() {
-    let (_, trace) = try_lower_program_to_library_with_trace(&checked(SQUARE)).unwrap();
+    let (_, trace) = chelis_ir::lowering_runtime::with_native_lowering_runtime(|runtime| {
+        try_lower_program_to_library_with_trace(&checked(SQUARE), runtime)
+    })
+    .unwrap();
     assert_eq!(trace.gradients.len(), 1);
     let grad = &trace.gradients[0];
     assert_eq!(trace.contexts[grad.context.0].kind, ContextKind::Gradient);
@@ -401,8 +447,15 @@ fn trace_captures_actual_ad_ports_roots_and_ordered_wrt() {
 fn empty_and_repeated_invocations_do_not_leak_capture_state() {
     for source in [SQUARE, "", SQUARE, ""] {
         let program = checked(source);
-        let (library, trace) = try_lower_program_to_library_with_trace(&program).unwrap();
-        let ordinary = try_lower_program_to_library(&program).unwrap();
+        let (library, trace) =
+            chelis_ir::lowering_runtime::with_native_lowering_runtime(|runtime| {
+                try_lower_program_to_library_with_trace(&program, runtime)
+            })
+            .unwrap();
+        let ordinary = chelis_ir::lowering_runtime::with_native_lowering_runtime(|runtime| {
+            try_lower_program_to_library(&program, runtime)
+        })
+        .unwrap();
         same_dag(library.dag(), ordinary.dag());
         assert_eq!(trace.contexts[0].kind, ContextKind::Library);
         assert_eq!(trace.contexts[0].parent, None);
@@ -418,11 +471,20 @@ fn rejected_ad_keeps_its_diagnostic_instead_of_returning_a_trace() {
         "fixtures/core/tests/lowering_trace/rejected_ad_keeps_its_diagnostic_instead_of_returning_a_trace_9.dp"
     );
     let program = checked(source);
-    let ordinary = try_lower_program_to_library(&program).unwrap_err();
-    let observed = try_lower_program_to_library_with_trace(&program).unwrap_err();
+    let ordinary = chelis_ir::lowering_runtime::with_native_lowering_runtime(|runtime| {
+        try_lower_program_to_library(&program, runtime)
+    })
+    .unwrap_err();
+    let observed = chelis_ir::lowering_runtime::with_native_lowering_runtime(|runtime| {
+        try_lower_program_to_library_with_trace(&program, runtime)
+    })
+    .unwrap_err();
     assert_eq!(ordinary, observed);
     assert!(ordinary.to_string().contains("floor"));
-    let (_, next) = try_lower_program_to_library_with_trace(&checked(SQUARE)).unwrap();
+    let (_, next) = chelis_ir::lowering_runtime::with_native_lowering_runtime(|runtime| {
+        try_lower_program_to_library_with_trace(&checked(SQUARE), runtime)
+    })
+    .unwrap();
     assert_eq!(next.gradients.len(), 1);
     assert_eq!(next.contexts.len(), 2);
 }
@@ -433,7 +495,10 @@ fn multiple_wrt_inputs_keep_their_forward_order_and_distinct_results() {
     let source = include_str!(
         "fixtures/core/tests/lowering_trace/multiple_wrt_inputs_keep_their_forward_order_and_distinct_results_10.dp"
     );
-    let (_, trace) = try_lower_program_to_library_with_trace(&checked(source)).unwrap();
+    let (_, trace) = chelis_ir::lowering_runtime::with_native_lowering_runtime(|runtime| {
+        try_lower_program_to_library_with_trace(&checked(source), runtime)
+    })
+    .unwrap();
     let grad = &trace.gradients[0];
     assert_eq!(grad.wrt.len(), 2);
     for (id, expected_name) in grad.wrt.iter().zip(["x", "y"]) {
@@ -468,7 +533,10 @@ fn nested_gradients_have_distinct_contexts_and_actual_parent_links() {
     let source = include_str!(
         "fixtures/core/tests/lowering_trace/nested_gradients_have_distinct_contexts_and_actual_parent_links.dp"
     );
-    let (_, trace) = try_lower_program_to_library_with_trace(&checked(source)).unwrap();
+    let (_, trace) = chelis_ir::lowering_runtime::with_native_lowering_runtime(|runtime| {
+        try_lower_program_to_library_with_trace(&checked(source), runtime)
+    })
+    .unwrap();
     assert_eq!(trace.gradients.len(), 4);
     let nested = trace
         .gradients
@@ -494,7 +562,10 @@ fn shaped_zero_materialization_is_not_fabricated_in_the_raw_ad_result() {
     let source = include_str!(
         "fixtures/core/tests/lowering_trace/shaped_zero_materialization_is_not_fabricated_in_the_raw_ad_result_12.dp"
     );
-    let (library, trace) = try_lower_program_to_library_with_trace(&checked(source)).unwrap();
+    let (library, trace) = chelis_ir::lowering_runtime::with_native_lowering_runtime(|runtime| {
+        try_lower_program_to_library_with_trace(&checked(source), runtime)
+    })
+    .unwrap();
     let grad = &trace.gradients[0];
     assert_eq!(grad.wrt.len(), 1);
     assert!(
@@ -527,7 +598,10 @@ fn host_only_definitions_do_not_fabricate_graph_observations() {
     let source = include_str!(
         "fixtures/core/tests/lowering_trace/host_only_definitions_do_not_fabricate_graph_observations_13.dp"
     );
-    let (library, trace) = try_lower_program_to_library_with_trace(&checked(source)).unwrap();
+    let (library, trace) = chelis_ir::lowering_runtime::with_native_lowering_runtime(|runtime| {
+        try_lower_program_to_library_with_trace(&checked(source), runtime)
+    })
+    .unwrap();
     assert!(library.dag().nodes().is_empty());
     assert!(trace.gradients.is_empty());
     assert_eq!(trace.boundaries.len(), 1);
@@ -542,10 +616,17 @@ fn application_preserves_formal_names_when_caller_names_differ() {
         "fixtures/core/tests/lowering_trace/application_preserves_formal_names_when_caller_names_differ_14.dp"
     );
     let program = checked(source);
-    let (library, trace) = try_lower_program_to_library_with_trace(&program).unwrap();
+    let (library, trace) = chelis_ir::lowering_runtime::with_native_lowering_runtime(|runtime| {
+        try_lower_program_to_library_with_trace(&program, runtime)
+    })
+    .unwrap();
     same_dag(
         library.dag(),
-        try_lower_program_to_library(&program).unwrap().dag(),
+        chelis_ir::lowering_runtime::with_native_lowering_runtime(|runtime| {
+            try_lower_program_to_library(&program, runtime)
+        })
+        .unwrap()
+        .dag(),
     );
     let grad = &trace.gradients[0];
     let application = grad.application.as_ref().unwrap();
@@ -572,10 +653,17 @@ fn host_structured_results_are_not_reported_as_observed_applications() {
         "fixtures/core/tests/lowering_trace/host_structured_results_are_not_reported_as_observed_applications_15.dp"
     );
     let program = checked(source);
-    let (library, trace) = try_lower_program_to_library_with_trace(&program).unwrap();
+    let (library, trace) = chelis_ir::lowering_runtime::with_native_lowering_runtime(|runtime| {
+        try_lower_program_to_library_with_trace(&program, runtime)
+    })
+    .unwrap();
     same_dag(
         library.dag(),
-        try_lower_program_to_library(&program).unwrap().dag(),
+        chelis_ir::lowering_runtime::with_native_lowering_runtime(|runtime| {
+            try_lower_program_to_library(&program, runtime)
+        })
+        .unwrap()
+        .dag(),
     );
     assert!(trace.gradients.is_empty());
     assert!(
@@ -593,7 +681,10 @@ fn specialization_records_both_named_and_actual_dimension_types() {
     let source = include_str!(
         "fixtures/core/tests/lowering_trace/specialization_records_both_named_and_actual_dimension_types_16.dp"
     );
-    let (_, trace) = try_lower_program_to_library_with_trace(&checked(source)).unwrap();
+    let (_, trace) = chelis_ir::lowering_runtime::with_native_lowering_runtime(|runtime| {
+        try_lower_program_to_library_with_trace(&checked(source), runtime)
+    })
+    .unwrap();
     assert_eq!(trace.gradients.len(), 1);
     let application = trace.gradients[0].application.as_ref().unwrap();
     assert_eq!(application.formal_types.len(), 1);
@@ -621,7 +712,10 @@ fn selected_wrt_does_not_drop_the_other_argument_binding() {
     let source = include_str!(
         "fixtures/core/tests/lowering_trace/selected_wrt_does_not_drop_the_other_argument_binding_17.dp"
     );
-    let (_, trace) = try_lower_program_to_library_with_trace(&checked(source)).unwrap();
+    let (_, trace) = chelis_ir::lowering_runtime::with_native_lowering_runtime(|runtime| {
+        try_lower_program_to_library_with_trace(&checked(source), runtime)
+    })
+    .unwrap();
     let grad = &trace.gradients[0];
     let application = grad.application.as_ref().unwrap();
     assert_eq!(grad.wrt.len(), 1);
@@ -641,7 +735,10 @@ fn selected_wrt_does_not_drop_the_other_argument_binding() {
 #[cfg(feature = "lowering-trace")]
 #[test]
 fn completed_application_snapshots_do_not_alias_later_mutations() {
-    let (_, mut trace) = try_lower_program_to_library_with_trace(&checked(SQUARE)).unwrap();
+    let (_, mut trace) = chelis_ir::lowering_runtime::with_native_lowering_runtime(|runtime| {
+        try_lower_program_to_library_with_trace(&checked(SQUARE), runtime)
+    })
+    .unwrap();
     let grad = &mut trace.gradients[0];
     let backward = bincode::serialize(&grad.backward).unwrap();
     let application = grad.application.as_mut().unwrap();
@@ -683,7 +780,10 @@ fn full_integer_constants_keep_bits_beyond_the_f64_exact_range() {
     let source = include_str!(
         "fixtures/core/tests/lowering_trace/full_integer_constants_keep_bits_beyond_the_f64_exact_range_18.dp"
     );
-    let (library, trace) = try_lower_program_to_library_with_trace(&checked(source)).unwrap();
+    let (library, trace) = chelis_ir::lowering_runtime::with_native_lowering_runtime(|runtime| {
+        try_lower_program_to_library_with_trace(&checked(source), runtime)
+    })
+    .unwrap();
     for dag in [
         &trace.normalization.before_dce,
         &trace.normalization.after_dce,
@@ -726,7 +826,10 @@ fn unresolved_and_vectorized_gradients_are_explicit_boundaries() {
     let source = include_str!(
         "fixtures/core/tests/lowering_trace/unresolved_and_vectorized_gradients_are_explicit_boundaries_19.dp"
     );
-    let (library, trace) = try_lower_program_to_library_with_trace(&checked(source)).unwrap();
+    let (library, trace) = chelis_ir::lowering_runtime::with_native_lowering_runtime(|runtime| {
+        try_lower_program_to_library_with_trace(&checked(source), runtime)
+    })
+    .unwrap();
     assert!(library.rootless_defs().contains("unknown"));
     assert!(trace.gradients.is_empty());
     assert_eq!(trace.boundaries.len(), 1);
@@ -788,10 +891,18 @@ fn unresolved_and_vectorized_gradients_are_explicit_boundaries() {
         "#
         );
         let program = checked(&source);
-        let (library, trace) = try_lower_program_to_library_with_trace(&program).unwrap();
+        let (library, trace) =
+            chelis_ir::lowering_runtime::with_native_lowering_runtime(|runtime| {
+                try_lower_program_to_library_with_trace(&program, runtime)
+            })
+            .unwrap();
         same_dag(
             library.dag(),
-            try_lower_program_to_library(&program).unwrap().dag(),
+            chelis_ir::lowering_runtime::with_native_lowering_runtime(|runtime| {
+                try_lower_program_to_library(&program, runtime)
+            })
+            .unwrap()
+            .dag(),
         );
         assert!(trace.gradients.is_empty());
         assert_eq!(trace.boundaries.len(), 1);

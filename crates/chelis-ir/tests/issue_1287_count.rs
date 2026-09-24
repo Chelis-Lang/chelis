@@ -108,7 +108,10 @@ fn lower_deep(source: &str) -> Result<Dag, String> {
     let checked = chelis_effects::check_program(&checked).map_err(|e| format!("effects: {e:?}"))?;
     let checked =
         chelis_types::check_linearity(&checked).map_err(|e| format!("linearity: {e:?}"))?;
-    try_lower_program(&checked).map_err(|diag| format!("lower: {diag:?}"))
+    chelis_ir::lowering_runtime::with_native_lowering_runtime(|runtime| {
+        try_lower_program(&checked, runtime)
+    })
+    .map_err(|diag| format!("lower: {diag:?}"))
 }
 
 #[test]

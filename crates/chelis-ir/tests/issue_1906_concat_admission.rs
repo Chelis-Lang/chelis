@@ -12,9 +12,11 @@ fn checked(src: &str) -> chelis_types::CheckedProgram {
 
 fn decision(source: &str, name: &str, kernel: bool) {
     let program = checked(source);
-    let result = host_def_kernel(&HostLoweringSession::new(&program), name, None)
-        .map(|value| value.is_some())
-        .map_err(|error| error.to_string());
+    let result = chelis_ir::lowering_runtime::with_native_lowering_runtime(|runtime| {
+        host_def_kernel(&HostLoweringSession::new(&program, runtime), name, None)
+    })
+    .map(|value| value.is_some())
+    .map_err(|error| error.to_string());
     assert_eq!(result, Ok(kernel), "{source}");
 }
 
@@ -176,8 +178,10 @@ fn computed_dynamic_extent_is_not_claimed_as_supported_host_partition() {
     let program = checked(include_str!(
         "fixtures/core/tests/issue_1906_concat_admission/computed_dynamic_extent_is_not_claimed_as_supported_host_partition_13.dp"
     ));
-    let error = host_def_kernel(&HostLoweringSession::new(&program), "run", None)
-        .expect_err("computed concat stays outside this admission class");
+    let error = chelis_ir::lowering_runtime::with_native_lowering_runtime(|runtime| {
+        host_def_kernel(&HostLoweringSession::new(&program, runtime), "run", None)
+    })
+    .expect_err("computed concat stays outside this admission class");
     assert!(
         error
             .to_string()
@@ -198,9 +202,16 @@ fn forced_dynamic_concat_rejects_instead_of_fabricating_a_load() {
             precision: Prim::F32,
         },
     )]);
-    let error =
-        chelis_ir::lower::try_lower_subexpr_program(&expr, scope, UnordMap::new(), UnordMap::new())
-            .expect_err("no fabricated input");
+    let error = chelis_ir::lowering_runtime::with_native_lowering_runtime(|runtime| {
+        chelis_ir::lower::try_lower_subexpr_program(
+            &expr,
+            scope,
+            UnordMap::new(),
+            UnordMap::new(),
+            runtime,
+        )
+    })
+    .expect_err("no fabricated input");
     assert!(
         error
             .to_string()

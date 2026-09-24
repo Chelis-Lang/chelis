@@ -109,8 +109,10 @@ fn front(source: &str) -> Front {
     let checked = check_linearity(&checked).unwrap_or_else(|error| panic!("linearity: {error:?}"));
     let realizability = infer_realizability(&checked, C_TENSOR_PRIMS);
     let manifest = compute_root_manifest(&checked, &realizability);
-    let compiled = try_lower_compiled_program_with_manifest(&checked, &manifest)
-        .unwrap_or_else(|diagnostic| panic!("host lowering: {diagnostic:?}"));
+    let compiled = chelis_ir::lowering_runtime::with_native_lowering_runtime(|runtime| {
+        try_lower_compiled_program_with_manifest(&checked, &manifest, runtime)
+    })
+    .unwrap_or_else(|diagnostic| panic!("host lowering: {diagnostic:?}"));
     let host = compiled.host.expect("test source must have a host lane");
     let manifested = ManifestedProgram::new(checked.clone(), manifest.clone(), Target::C);
     Front {

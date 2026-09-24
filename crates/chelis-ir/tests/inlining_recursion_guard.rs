@@ -112,7 +112,15 @@ fn nested_fn_param_call_lowers_via_substituted_callable() {
     program_defs.insert("outer".to_string(), parse_one(outer_src));
 
     let scoped = UnordMap::from([("seed".to_string(), f32_vec(3))]);
-    let dag = lower_subexpr_program(&parse_one(call_src), scoped, UnordMap::new(), program_defs);
+    let dag = chelis_ir::lowering_runtime::with_native_lowering_runtime(|runtime| {
+        lower_subexpr_program(
+            &parse_one(call_src),
+            scoped,
+            UnordMap::new(),
+            program_defs,
+            runtime,
+        )
+    });
 
     let inputs = UnordMap::from([(
         "seed".to_string(),
@@ -170,9 +178,16 @@ fn true_self_recursion_errors_loudly_at_unroll_cap() {
     program_defs.insert("loop_self".to_string(), parse_one(loop_self_src));
 
     let scoped = UnordMap::from([("seed".to_string(), f32_vec(3))]);
-    let diagnostic =
-        try_lower_subexpr_program(&parse_one(call_src), scoped, UnordMap::new(), program_defs)
-            .expect_err("unbounded self-recursion must be rejected, not silently dropped");
+    let diagnostic = chelis_ir::lowering_runtime::with_native_lowering_runtime(|runtime| {
+        try_lower_subexpr_program(
+            &parse_one(call_src),
+            scoped,
+            UnordMap::new(),
+            program_defs,
+            runtime,
+        )
+    })
+    .expect_err("unbounded self-recursion must be rejected, not silently dropped");
     let message = diagnostic.to_string();
     assert!(
         message.contains("static unroll limit"),
@@ -228,7 +243,15 @@ fn static_base_case_recursion_unrolls_within_cap() {
     program_defs.insert("count_up".to_string(), parse_one(count_up_src));
 
     let scoped = UnordMap::from([("seed".to_string(), f32_vec(3))]);
-    let dag = lower_subexpr_program(&parse_one(call_src), scoped, UnordMap::new(), program_defs);
+    let dag = chelis_ir::lowering_runtime::with_native_lowering_runtime(|runtime| {
+        lower_subexpr_program(
+            &parse_one(call_src),
+            scoped,
+            UnordMap::new(),
+            program_defs,
+            runtime,
+        )
+    });
 
     let inputs = UnordMap::from([(
         "seed".to_string(),

@@ -26,6 +26,7 @@ use crate::host_type_state::{
     HostTensorTypeTerm, HostTypeDecodeError, HostTypeTerm, decode_host_type,
 };
 use crate::lower::top_level_lowering_map;
+use crate::lowering_runtime::LoweringRuntime;
 
 thread_local! {
     // chelis#1829: kernel-decision summary probes that missed the memo and ran
@@ -325,8 +326,8 @@ struct DefLaneFacts {
     dynamic_to_tensor_def_summaries: RefCell<Option<Arc<BTreeMap<String, bool>>>>,
 }
 
-/// One host-lowering session: a checked program, its derived facts, and the
-/// explicit state shared by recursive lowering within this invocation.
+/// One host-lowering session: a checked program, its derived facts, invocation
+/// state, and the borrowed runtime shared by recursive lowering.
 ///
 /// This is the representation chelis#1835 puts where a thread-local memo used
 /// to be. That memo was seven caches keyed on
@@ -342,26 +343,34 @@ struct DefLaneFacts {
 ///   be reused by a later one; a borrow cannot.
 /// - The borrow checker binds the facts to the program they describe, so they
 ///   cannot outlive it.
-/// - Nested entries are two sessions that share nothing, so a whole-program
-///   lowering reached from inside an evaluation can neither read nor clear
-///   the evaluation's facts, specializations, or scoped lowering state.
+/// - Nested entries have separate facts, specializations, and scoped invocation
+///   state, so a whole-program lowering reached from inside an evaluation can
+///   neither read nor clear the evaluation's state.
 /// - An entry point that does not establish a session does not compile, which
 ///   is the part no convention could supply.
+///
+/// The runtime is a separate service: native nested entries borrow the same
+/// per-thread panic/suppression state, not a fresh invocation-owned copy. Its
+/// borrow makes the session thread-bound without putting runtime state in the
+/// checked program or any derived fact cache.
 ///
 /// `Deref` is what keeps the change mechanical: every function that took
 /// `&CheckedProgram` takes `&HostLoweringSession` and reads the program
 /// through it unchanged.
 pub struct HostLoweringSession<'program> {
     program: &'program CheckedProgram,
+    runtime: &'program LoweringRuntime,
     facts: DefLaneFacts,
     invocation: HostInvocationState,
 }
 
 impl<'program> HostLoweringSession<'program> {
-    /// Begin an empty invocation over `program`. Derived facts fill on demand.
-    pub fn new(program: &'program CheckedProgram) -> Self {
+    /// Begin an empty invocation over `program` using the caller's runtime.
+    /// Derived facts fill on demand; runtime suppression state is not reset.
+    pub fn new(program: &'program CheckedProgram, runtime: &'program LoweringRuntime) -> Self {
         Self {
             program,
+            runtime,
             facts: DefLaneFacts::default(),
             invocation: HostInvocationState::default(),
         }
@@ -370,6 +379,11 @@ impl<'program> HostLoweringSession<'program> {
     /// The program this session derives its facts from.
     pub fn program(&self) -> &'program CheckedProgram {
         self.program
+    }
+
+    /// The runtime service shared by every lowering operation in this session.
+    pub fn runtime(&self) -> &'program LoweringRuntime {
+        self.runtime
     }
 
     /// The checked subexpression-lowering context for this program.
@@ -395,8 +409,9 @@ impl Deref for HostLoweringSession<'_> {
 /// installed only after its computation finishes. Scoped inlining, preflight,
 /// and type-substitution guards restore their state on unwind. Specializations
 /// are restored by the enclosing whole-invocation or speculative-probe guard.
-/// `RefCell` borrows end before those guards run. Keep this claim on the owner
-/// rather than hiding new fields behind a call-site `AssertUnwindSafe`.
+/// `RefCell` borrows end before those guards run. The borrowed runtime maintains
+/// its own unwind-safe suppression guards. Keep this claim on the owner rather
+/// than hiding new fields behind a call-site `AssertUnwindSafe`.
 impl std::panic::RefUnwindSafe for HostLoweringSession<'_> {}
 
 /// Kernel-decision summary probes on this thread that missed the memo and ran
@@ -2100,8 +2115,9 @@ fn resolve_host_expr(expr: HostExpr) -> Result<ConcreteHostExpr, crate::HostType
 /// surfaces can return a clean structured error rather than a thread panic.
 pub fn try_lower_compiled_program(
     program: &CheckedProgram,
+    runtime: &LoweringRuntime,
 ) -> Result<CompiledProgram, crate::lower::LowerDiagnostic> {
-    try_lower_compiled_program_with_lane_overrides(program, None, false, false)
+    try_lower_compiled_program_with_lane_overrides(program, None, false, false, runtime)
         .map(|(compiled, _)| compiled)
 }
 
@@ -2111,12 +2127,14 @@ pub fn try_lower_compiled_program(
 /// manifest grows an all-def lane table.
 pub fn try_lower_manifested_program(
     program: &chelis_types::manifest::ManifestedProgram,
+    runtime: &LoweringRuntime,
 ) -> Result<CompiledProgram, crate::lower::LowerDiagnostic> {
     try_lower_compiled_program_with_lane_overrides(
         program.checked(),
         Some(program.manifest()),
         false,
         false,
+        runtime,
     )
     .map(|(compiled, _)| compiled)
 }
@@ -2127,8 +2145,9 @@ pub fn try_lower_manifested_program(
 pub fn try_lower_compiled_program_with_manifest(
     program: &CheckedProgram,
     manifest: &chelis_types::manifest::RootManifest,
+    runtime: &LoweringRuntime,
 ) -> Result<CompiledProgram, crate::lower::LowerDiagnostic> {
-    try_lower_compiled_program_with_lane_overrides(program, Some(manifest), false, false)
+    try_lower_compiled_program_with_lane_overrides(program, Some(manifest), false, false, runtime)
         .map(|(compiled, _)| compiled)
 }
 
@@ -2136,40 +2155,50 @@ pub fn try_lower_compiled_program_with_manifest(
 /// fixed-control C tensor helpers. Ordinary host lowering remains unchanged.
 pub fn try_lower_manifested_execution_program(
     program: &chelis_types::manifest::ManifestedProgram,
+    runtime: &LoweringRuntime,
 ) -> Result<(Option<crate::Dag>, Option<HostExecutionPlan>), crate::lower::LowerDiagnostic> {
-    lower_execution_program(program.checked(), Some(program.manifest()), false)
+    lower_execution_program(program.checked(), Some(program.manifest()), false, runtime)
 }
 
 #[cfg(feature = "lowering-trace")]
 pub fn try_lower_manifested_execution_program_with_trace(
     program: &chelis_types::manifest::ManifestedProgram,
+    runtime: &LoweringRuntime,
 ) -> Result<(Option<crate::Dag>, Option<HostExecutionPlan>), crate::lower::LowerDiagnostic> {
-    lower_execution_program(program.checked(), Some(program.manifest()), true)
+    lower_execution_program(program.checked(), Some(program.manifest()), true, runtime)
 }
 
 /// CLI counterpart of [`try_lower_manifested_execution_program`].
 pub fn try_lower_execution_program_with_manifest(
     program: &CheckedProgram,
     manifest: &chelis_types::manifest::RootManifest,
+    runtime: &LoweringRuntime,
 ) -> Result<(Option<crate::Dag>, Option<HostExecutionPlan>), crate::lower::LowerDiagnostic> {
-    lower_execution_program(program, Some(manifest), false)
+    lower_execution_program(program, Some(manifest), false, runtime)
 }
 
 #[cfg(feature = "lowering-trace")]
 pub fn try_lower_execution_program_with_manifest_and_trace(
     program: &CheckedProgram,
     manifest: &chelis_types::manifest::RootManifest,
+    runtime: &LoweringRuntime,
 ) -> Result<(Option<crate::Dag>, Option<HostExecutionPlan>), crate::lower::LowerDiagnostic> {
-    lower_execution_program(program, Some(manifest), true)
+    lower_execution_program(program, Some(manifest), true, runtime)
 }
 
 fn lower_execution_program(
     program: &CheckedProgram,
     manifest: Option<&chelis_types::manifest::RootManifest>,
     collect_trace: bool,
+    runtime: &LoweringRuntime,
 ) -> Result<(Option<crate::Dag>, Option<HostExecutionPlan>), crate::lower::LowerDiagnostic> {
-    let (compiled, execution) =
-        try_lower_compiled_program_with_lane_overrides(program, manifest, true, collect_trace)?;
+    let (compiled, execution) = try_lower_compiled_program_with_lane_overrides(
+        program,
+        manifest,
+        true,
+        collect_trace,
+        runtime,
+    )?;
     Ok((
         compiled.dag,
         compiled.host.map(|host| HostExecutionPlan {
@@ -2191,13 +2220,14 @@ fn try_lower_compiled_program_with_lane_overrides(
     manifest: Option<&chelis_types::manifest::RootManifest>,
     collect_execution: bool,
     collect_trace: bool,
+    runtime: &LoweringRuntime,
 ) -> Result<(CompiledProgram, HostExecutionMetadata), crate::lower::LowerDiagnostic> {
     // The whole-program lowering owns its session. Every function below reads
     // the program through it, so there is no entry to this lowering that can
     // forget to establish one (chelis#1835).
-    let session = HostLoweringSession::new(program);
+    let session = HostLoweringSession::new(program, runtime);
     let program = &session;
-    let mut lowered_names = top_level_lowering_map(program.exprs(), program.type_env());
+    let mut lowered_names = top_level_lowering_map(program.exprs(), program.type_env(), runtime);
     if let Some(manifest) = manifest {
         for entry in &manifest.entries {
             lowered_names.insert(
@@ -2214,12 +2244,12 @@ fn try_lower_compiled_program_with_lane_overrides(
     // and then fails opaquely at gcc-link time. Non-fatal
     // diagnostics (the historical un-representable cases) keep the
     // original fallback semantics so host-only programs still build.
-    let dag = match crate::lower::try_lower_program(program) {
+    let dag = match crate::lower::try_lower_program(program, runtime) {
         Ok(dag) => Some(dag),
         Err(diagnostic) if diagnostic.fatal => return Err(diagnostic),
         Err(_) => None,
     };
-    let (host_terms, execution) = crate::lower::catch_lowering_external(|| {
+    let (host_terms, execution) = runtime.catch_lowering(|| {
         lower_host_program_with_execution(program, &lowered_names, collect_execution, collect_trace)
     })??;
     let host = resolve_host_program(host_terms).map_err(|error| {
@@ -2344,6 +2374,7 @@ fn named_tensor_entry_lowering_inputs(
     program: &HostLoweringSession<'_>,
     name: &str,
 ) -> Option<NamedTensorEntryLoweringInputs> {
+    let runtime = program.runtime();
     let defs = cached_program_defs(program);
     let body = lookup_program_def(&defs, name)?.clone();
     let Expr::List(list, _) = &body else {
@@ -2370,7 +2401,7 @@ fn named_tensor_entry_lowering_inputs(
             .get(index)
             .cloned()
             .or_else(|| {
-                param_host_type(param, &program.invocation.type_subst.borrow())
+                param_host_type(param, &program.invocation.type_subst.borrow(), runtime)
                     .map(|ty| expand_host_type_aliases(program, ty))
             })
             .filter(|ty| !ty.is_unresolved())?;
@@ -2385,14 +2416,18 @@ fn named_tensor_entry_lowering_inputs(
     Some((body_expr, scope, result_claim, defs))
 }
 
-pub fn lower_named_tensor_entry_dag(program: &CheckedProgram, name: &str) -> Option<crate::Dag> {
+pub fn lower_named_tensor_entry_dag(
+    program: &CheckedProgram,
+    name: &str,
+    runtime: &LoweringRuntime,
+) -> Option<crate::Dag> {
     // A whole-program entry owns its session, so nothing outside this crate
     // has to know one exists (chelis#1835).
-    let session = HostLoweringSession::new(program);
+    let session = HostLoweringSession::new(program, runtime);
     let program = &session;
     let (body_expr, scope, result_claim, defs) = named_tensor_entry_lowering_inputs(program, name)?;
     // Issue #197: a fatal lowering diagnostic (AD-rejection) must
-    // propagate as a panic so the outer `catch_lowering_external`
+    // propagate as a panic so the outer runtime catch
     // surfaces it to the user. Silently absorbing it with `.ok()`
     // would let the host fallback emit an undefined-symbol call to
     // the grad function.
@@ -2406,15 +2441,16 @@ pub fn lower_named_tensor_entry_dag(program: &CheckedProgram, name: &str) -> Opt
         scope,
         &context,
         result_claim.as_ref(),
-        None,
-        0,
+        RandomLoweringState {
+            seed: None,
+            counter: 0,
+        },
         // `scope` is this def's own declared parameter list.
         true,
+        runtime,
     ) {
         Ok((dag, _)) => Some(dag),
-        Err(diagnostic) if diagnostic.fatal => {
-            crate::lower::raise_fatal_lowering_diagnostic(diagnostic)
-        }
+        Err(diagnostic) if diagnostic.fatal => runtime.raise_fatal_lowering_diagnostic(diagnostic),
         Err(_) => None,
     }
 }
@@ -2427,10 +2463,11 @@ pub fn lower_named_tensor_entry_dag(program: &CheckedProgram, name: &str) -> Opt
 pub fn lower_named_tensor_entry_execution_plan(
     program: &CheckedProgram,
     name: &str,
+    runtime: &LoweringRuntime,
 ) -> Result<Option<crate::evaluation::EvaluationPlan>, crate::lower::LowerDiagnostic> {
     // A whole-program entry owns its session, so nothing outside this crate
     // has to know one exists (chelis#1835).
-    let session = HostLoweringSession::new(program);
+    let session = HostLoweringSession::new(program, runtime);
     let program = &session;
     lower_named_tensor_entry_execution_with(
         program,
@@ -2443,6 +2480,7 @@ pub fn lower_named_tensor_entry_execution_plan(
 pub fn lower_named_tensor_entry_execution_plan_with_trace(
     program: &CheckedProgram,
     name: &str,
+    runtime: &LoweringRuntime,
 ) -> Result<
     Option<(
         crate::evaluation::EvaluationPlan,
@@ -2450,7 +2488,7 @@ pub fn lower_named_tensor_entry_execution_plan_with_trace(
     )>,
     crate::lower::LowerDiagnostic,
 > {
-    let session = HostLoweringSession::new(program);
+    let session = HostLoweringSession::new(program, runtime);
     lower_named_tensor_entry_execution_with(
         &session,
         name,
@@ -2470,8 +2508,10 @@ fn lower_named_tensor_entry_execution_with<T>(
         Option<&TensorType>,
         bool,
         &crate::evaluation::RandomExecutionContext,
+        &LoweringRuntime,
     ) -> Result<T, crate::lower::LowerDiagnostic>,
 ) -> Result<Option<T>, crate::lower::LowerDiagnostic> {
+    let runtime = program.runtime();
     let Some((body_expr, scope, result_claim, defs)) =
         named_tensor_entry_lowering_inputs(program, name)
     else {
@@ -2482,7 +2522,7 @@ fn lower_named_tensor_entry_execution_with<T>(
         defs,
         Arc::new(crate::lower::collect_top_level_sigs(program.exprs())),
     );
-    let profile = context.c_execution_profile(&body_expr, &scope);
+    let profile = context.c_execution_profile(&body_expr, &scope, runtime);
     match profile {
         crate::evaluation::EvaluationProfile::Legacy(
             crate::evaluation::LegacyEvaluationReason::NoDropout,
@@ -2510,6 +2550,7 @@ fn lower_named_tensor_entry_execution_with<T>(
         result_claim.as_ref(),
         true,
         &planning,
+        runtime,
     )
     .map(Some)
 }
@@ -2546,10 +2587,14 @@ pub fn function_has_tensor_signature(program: &ConcreteHostProgram, name: &str) 
 /// a DAG-lowerable host-runtime builtin such as `concat` lowers cleanly
 /// through `lower_named_tensor_entry_dag` (that IS the #818 fix), so it is
 /// NOT excluded here. Only genuinely host-lane-owned forms are.
-pub fn named_entry_uses_grad_like(program: &CheckedProgram, name: &str) -> bool {
+pub fn named_entry_uses_grad_like(
+    program: &CheckedProgram,
+    name: &str,
+    runtime: &LoweringRuntime,
+) -> bool {
     // A whole-program entry owns its session, so nothing outside this crate
     // has to know one exists (chelis#1835).
-    let session = HostLoweringSession::new(program);
+    let session = HostLoweringSession::new(program, runtime);
     let program = &session;
     let defs = cached_program_defs(program);
     match lookup_program_def(&defs, name) {
@@ -2607,6 +2652,7 @@ fn lower_host_program_with_execution(
     collect_execution: bool,
     collect_trace: bool,
 ) -> Result<(HostProgram, HostExecutionMetadata), crate::lower::LowerDiagnostic> {
+    let runtime = program.runtime();
     // Each invocation rebuilds its specializations, without clearing an outer
     // invocation or retaining a failed run's partial memo.
     let _invocation_guard = HostInvocationGuard::begin(program);
@@ -2854,7 +2900,8 @@ fn lower_host_program_with_execution(
                 .is_some_and(|row| !row.contains(&chelis_types::types::Effect::Random))
             && named_tensor_entry_lowering_inputs(program, name).is_some_and(
                 |(body, scope, _, _)| {
-                    cached_subexpr_lowering_context(program).c_execution_profile(&body, &scope)
+                    cached_subexpr_lowering_context(program)
+                        .c_execution_profile(&body, &scope, runtime)
                         == crate::evaluation::EvaluationProfile::FixedControl
                 },
             );
@@ -2967,7 +3014,7 @@ fn lower_host_program_with_execution(
             // matches the declared dtype.
             let declared_ty = ty_expr
                 .as_ref()
-                .map(|ty| decode_host_type_or_raise(ty, &UnordMap::new()))
+                .map(|ty| decode_host_type_or_raise(ty, &UnordMap::new(), runtime))
                 .map(|ty| expand_host_type_aliases(program, ty))
                 .filter(|ty| !ty.is_unresolved());
             // chelis#1137: movement-helper lowering may prove a different
@@ -3964,8 +4011,10 @@ enum DefBodyDecision {
 /// # use chelis_ir::host::HostLoweringSession;
 /// # use chelis_types::CheckedProgram;
 /// fn decide(program: &CheckedProgram) {
-///     let session = HostLoweringSession::new(program);
-///     let _ = chelis_ir::host::host_def_kernel(&session, "f", None);
+///     chelis_ir::lowering_runtime::with_native_lowering_runtime(|runtime| {
+///         let session = HostLoweringSession::new(program, runtime);
+///         let _ = chelis_ir::host::host_def_kernel(&session, "f", None);
+///     });
 /// }
 /// ```
 pub fn host_def_kernel(
@@ -3997,9 +4046,11 @@ pub fn host_def_kernel(
 /// # use chelis_ir::host::HostLoweringSession;
 /// # use chelis_types::CheckedProgram;
 /// fn plan(program: &CheckedProgram) {
-///     let session = HostLoweringSession::new(program);
-///     let context = RandomExecutionContext::new(RandomLoweringState { seed: None, counter: 0 });
-///     let _ = chelis_ir::host::host_def_evaluation_plan(&session, "f", &context);
+///     chelis_ir::lowering_runtime::with_native_lowering_runtime(|runtime| {
+///         let session = HostLoweringSession::new(program, runtime);
+///         let context = RandomExecutionContext::new(RandomLoweringState { seed: None, counter: 0 });
+///         let _ = chelis_ir::host::host_def_evaluation_plan(&session, "f", &context);
+///     });
 /// }
 /// ```
 pub fn host_def_evaluation_plan(
@@ -4016,6 +4067,7 @@ fn host_def_kernel_product(
     random: Option<RandomLoweringState>,
     execution: Option<&crate::evaluation::RandomExecutionContext>,
 ) -> Result<Option<HostDefEvaluationPlan>, crate::lower::LowerDiagnostic> {
+    let runtime = program.runtime();
     // The declaration's own name is the key for every per-def fact (the
     // effect row, the call graph); a caller may hand in a shorter spelling
     // that `find_top_level_def_named` resolves.
@@ -4053,6 +4105,7 @@ fn host_def_kernel_product(
         Some(_) => cached_subexpr_lowering_context(program).evaluation_profile(
             profile_body,
             &kernel_scope_types(&signature.scope, Some(&signature.params)),
+            runtime,
         ),
         None => crate::evaluation::EvaluationProfile::Legacy(
             crate::evaluation::LegacyEvaluationReason::LegacyApi,
@@ -4098,6 +4151,7 @@ fn host_def_kernel_product(
                 Some(&expected),
                 true,
                 execution,
+                runtime,
             )?
         } else {
             crate::lower::try_lower_subexpr_evaluation_with_ordered_inputs(
@@ -4107,6 +4161,7 @@ fn host_def_kernel_product(
                 Some(&expected),
                 true,
                 execution,
+                runtime,
             )?
         };
         let rebound =
@@ -4324,9 +4379,11 @@ pub(crate) fn body_form_the_dag_cannot_carry(
     params: &[HostParam],
     evaluation_dropout: bool,
 ) -> Option<String> {
+    let runtime = program.runtime();
     let defs = cached_program_defs(program);
     let type_subst = program.invocation.type_subst.borrow();
     let mut walk = UncarriableWalk {
+        runtime,
         defs: &defs,
         type_subst: &type_subst,
         active: UnordSet::new(),
@@ -4405,6 +4462,7 @@ fn contains_computed_callable_application(expr: &Expr) -> bool {
 /// Lexical scopes retain constructor scrutinees (chelis#520 D1) and direct
 /// concat input facts. Neither class evaluates arbitrary tensor expressions.
 struct UncarriableWalk<'a> {
+    runtime: &'a LoweringRuntime,
     defs: &'a BTreeMap<String, Expr>,
     type_subst: &'a UnordMap<String, HostTypeTerm>,
     active: UnordSet<String>,
@@ -4751,6 +4809,7 @@ impl UncarriableWalk<'_> {
         body: &Expr,
         actuals: Option<Vec<ConcatInputFact>>,
     ) -> Option<String> {
+        let runtime = self.runtime;
         let Some((DeepTag::Fn, _, fn_kids)) = stamped_parts(body) else {
             return None;
         };
@@ -4773,7 +4832,7 @@ impl UncarriableWalk<'_> {
                         .first()
                         .and_then(stamped_parts)
                         .and_then(|(_, _, params)| params.get(index))
-                        .and_then(|param| param_host_type(param, self.type_subst))
+                        .and_then(|param| param_host_type(param, self.type_subst, runtime))
                         .map(|ty| ConcatInputFact::from_type(&ty))
                         .unwrap_or(ConcatInputFact::Unknown),
                 };
@@ -5041,9 +5100,11 @@ fn def_body_decision(
     program: &HostLoweringSession<'_>,
     signature: &HostDefSignature,
 ) -> Result<DefBodyDecision, crate::lower::LowerDiagnostic> {
+    let runtime = program.runtime();
     let fixed_dropout = cached_subexpr_lowering_context(program).c_execution_profile(
         &signature.body_expr,
         &kernel_scope_types(&signature.scope, Some(&signature.params)),
+        runtime,
     ) == crate::evaluation::EvaluationProfile::FixedControl;
     def_body_decision_impl(program, signature, fixed_dropout)
 }
@@ -5147,6 +5208,7 @@ fn lower_def_body_kernel(
     signature: &HostDefSignature,
     tensor_helpers: &mut TensorHelperSink,
 ) -> Result<Option<HostExpr>, crate::lower::LowerDiagnostic> {
+    let runtime = program.runtime();
     // A returned/dynamically-computed callable has no C value ABI. Do not
     // let a staged or tensor helper erase its outer application; the host
     // lowering route emits the existing unspellable marker, and the C ABI
@@ -5185,7 +5247,7 @@ fn lower_def_body_kernel(
     if tensor_helpers.collect_execution {
         let context = cached_subexpr_lowering_context(program);
         let scoped = kernel_scope_types(&signature.scope, Some(&signature.params));
-        if context.c_execution_profile(&signature.body_expr, &scoped)
+        if context.c_execution_profile(&signature.body_expr, &scoped, runtime)
             == crate::evaluation::EvaluationProfile::FixedControl
         {
             let planning = crate::evaluation::RandomExecutionContext::new(RandomLoweringState {
@@ -5202,6 +5264,7 @@ fn lower_def_body_kernel(
                         Some(&expected),
                         true,
                         &planning,
+                        runtime,
                     )?;
                 (plan, Some(trace))
             } else if tensor_helpers.collect_trace {
@@ -5213,6 +5276,7 @@ fn lower_def_body_kernel(
                         Some(&expected),
                         true,
                         &planning,
+                        runtime,
                     )?;
                 (plan, Some(trace))
             } else if transfer_literal_result_claims {
@@ -5224,6 +5288,7 @@ fn lower_def_body_kernel(
                         Some(&expected),
                         true,
                         &planning,
+                        runtime,
                     )?,
                     None,
                 )
@@ -5236,6 +5301,7 @@ fn lower_def_body_kernel(
                         Some(&expected),
                         true,
                         &planning,
+                        runtime,
                     )?,
                     None,
                 )
@@ -5249,6 +5315,7 @@ fn lower_def_body_kernel(
                     Some(&expected),
                     true,
                     &planning,
+                    runtime,
                 )?
             } else {
                 crate::lower::try_lower_subexpr_c_execution_with_ordered_inputs(
@@ -5258,6 +5325,7 @@ fn lower_def_body_kernel(
                     Some(&expected),
                     true,
                     &planning,
+                    runtime,
                 )?
             };
             let rebound = remap_tensor_helper_dim_symbols(
@@ -5296,9 +5364,12 @@ fn lower_def_body_kernel(
             scoped,
             &context,
             Some(&expected),
-            None,
-            0,
+            crate::host::RandomLoweringState {
+                seed: None,
+                counter: 0,
+            },
             true,
+            runtime,
         )
         .map(|(dag, _, trace)| ((dag, None), Some(trace)))
     } else if tensor_helpers.collect_trace {
@@ -5309,9 +5380,12 @@ fn lower_def_body_kernel(
             scoped,
             &context,
             Some(&expected),
-            None,
-            0,
+            crate::host::RandomLoweringState {
+                seed: None,
+                counter: 0,
+            },
             true,
+            runtime,
         )
         .map(|(dag, _, trace)| ((dag, None), Some(trace)))
     } else {
@@ -5348,9 +5422,7 @@ fn lower_def_body_kernel(
         }
         #[cfg(not(feature = "lowering-trace"))]
         Ok((dag, _)) => (dag, ()),
-        Err(diagnostic) if diagnostic.fatal => {
-            crate::lower::raise_fatal_lowering_diagnostic(diagnostic)
-        }
+        Err(diagnostic) if diagnostic.fatal => runtime.raise_fatal_lowering_diagnostic(diagnostic),
         Err(_) => {
             record_host_work(|profile| {
                 profile.tensor_helper_dag_rejections += 1;
@@ -5424,6 +5496,7 @@ fn lower_kernel_dag(
     random: Option<RandomLoweringState>,
     transfer_literal_result_claims: bool,
 ) -> Result<(crate::Dag, Option<u64>), crate::lower::LowerDiagnostic> {
+    let runtime = program.runtime();
     let context = cached_subexpr_lowering_context(program);
     let scope_types = kernel_scope_types(scope, declaring_params);
     let (dag, next_random_counter) = match random {
@@ -5434,9 +5507,12 @@ fn lower_kernel_dag(
                     scope_types,
                     &context,
                     declaring_params.is_some().then_some(expected),
-                    None,
-                    0,
+                    crate::host::RandomLoweringState {
+                        seed: None,
+                        counter: 0,
+                    },
                     declaring_params.is_some(),
+                    runtime,
                 )?
             } else {
                 crate::lower::try_lower_subexpr_program_with_ordered_inputs(
@@ -5444,9 +5520,12 @@ fn lower_kernel_dag(
                     scope_types,
                     &context,
                     declaring_params.is_some().then_some(expected),
-                    None,
-                    0,
+                    crate::host::RandomLoweringState {
+                        seed: None,
+                        counter: 0,
+                    },
                     declaring_params.is_some(),
+                    runtime,
                 )?
             };
             (lowered.0, None)
@@ -5458,9 +5537,9 @@ fn lower_kernel_dag(
                     scope_types,
                     &context,
                     declaring_params.is_some().then_some(expected),
-                    state.seed,
-                    state.counter,
+                    state,
                     declaring_params.is_some(),
+                    runtime,
                 )?
             } else {
                 crate::lower::try_lower_subexpr_program_with_ordered_inputs(
@@ -5468,9 +5547,9 @@ fn lower_kernel_dag(
                     scope_types,
                     &context,
                     declaring_params.is_some().then_some(expected),
-                    state.seed,
-                    state.counter,
+                    state,
                     declaring_params.is_some(),
+                    runtime,
                 )?
             };
             (dag, Some(counter))
@@ -5506,6 +5585,7 @@ fn host_def_signature(
     ty_expr: Option<&Expr>,
     program: &HostLoweringSession<'_>,
 ) -> Option<HostDefSignature> {
+    let runtime = program.runtime();
     // Preserve authored dimension identities while expanding only the
     // checker-validated nominal aliases below. Replacing this expression with
     // the canonical checked signature turns `batch` into an anonymous `dN`
@@ -5525,7 +5605,8 @@ fn host_def_signature(
         .as_ref()
         .and_then(|ty| parse_expanded_fn_type_expr(program, ty))
         .or_else(|| {
-            expr_fn_type(body).map(|signature| expand_host_fn_type_aliases(program, signature))
+            expr_fn_type(body, runtime)
+                .map(|signature| expand_host_fn_type_aliases(program, signature))
         })
         .or_else(|| lookup_declared_fn_type(program, name))
         .unwrap_or((Vec::new(), fresh_host_inference()));
@@ -5548,7 +5629,7 @@ fn host_def_signature(
                     .cloned()
                     .filter(|ty| !ty.is_unresolved())
                     .or_else(|| {
-                        param_host_type(param, &program.invocation.type_subst.borrow())
+                        param_host_type(param, &program.invocation.type_subst.borrow(), runtime)
                             .map(|ty| expand_host_type_aliases(program, ty))
                             .filter(|ty| !ty.is_unresolved())
                     })
@@ -6270,6 +6351,7 @@ fn lower_tensor_helper_with<T>(
     program: &HostLoweringSession<'_>,
     lower: impl FnOnce() -> Result<T, crate::lower::LowerDiagnostic>,
 ) -> Option<T> {
+    let runtime = program.runtime();
     // Do not lower a returned/dynamically-computed callable through the DAG:
     // that path beta-reduces the inner application and loses the outer call.
     // The caller falls back to host lowering, which preserves the unsupported
@@ -6302,9 +6384,7 @@ fn lower_tensor_helper_with<T>(
     // the rejected grad function.
     match lower() {
         Ok(product) => Some(product),
-        Err(diagnostic) if diagnostic.fatal => {
-            crate::lower::raise_fatal_lowering_diagnostic(diagnostic)
-        }
+        Err(diagnostic) if diagnostic.fatal => runtime.raise_fatal_lowering_diagnostic(diagnostic),
         Err(_) => {
             record_host_work(|profile| profile.tensor_helper_dag_rejections += 1);
             None
@@ -6319,15 +6399,19 @@ fn lower_tensor_helper_dag(
     expected: &TensorType,
     context: &crate::lower::SubexprLoweringContext,
 ) -> Option<crate::Dag> {
+    let runtime = program.runtime();
     lower_tensor_helper_with(expr, program, || {
         let (dag, _) = crate::lower::try_lower_tensor_helper_program_with_ordered_inputs(
             expr,
             collect_tensor_scope(scope).into_sorted(),
             context,
             None,
-            None,
-            0,
+            crate::host::RandomLoweringState {
+                seed: None,
+                counter: 0,
+            },
             false,
+            runtime,
         )?;
         Ok(remap_tensor_helper_dim_symbols(&dag, scope, expected))
     })
@@ -6349,6 +6433,7 @@ fn lower_tensor_helper_product(
     collect_trace: bool,
     lowering_context: Option<&crate::lower::SubexprLoweringContext>,
 ) -> Option<LoweredTensorHelper> {
+    let runtime = program.runtime();
     #[cfg(not(feature = "lowering-trace"))]
     let _ = collect_trace;
     // The fixed-control execution branch below lowers directly rather than
@@ -6364,7 +6449,7 @@ fn lower_tensor_helper_product(
         .unwrap_or_else(|| cached_subexpr_lowering_context(program));
     if collect_execution {
         let scoped = collect_tensor_scope(scope).into_sorted();
-        if context.c_execution_profile(expr, &scoped)
+        if context.c_execution_profile(expr, &scoped, runtime)
             == crate::evaluation::EvaluationProfile::FixedControl
         {
             let planning = crate::evaluation::RandomExecutionContext::new(RandomLoweringState {
@@ -6380,6 +6465,7 @@ fn lower_tensor_helper_product(
                     Some(expected),
                     false,
                     &planning,
+                    runtime,
                 )
                 .map(|(plan, trace)| (plan, Some(trace)))
             } else {
@@ -6390,6 +6476,7 @@ fn lower_tensor_helper_product(
                     Some(expected),
                     false,
                     &planning,
+                    runtime,
                 )
                 .map(|plan| (plan, None))
             };
@@ -6401,19 +6488,20 @@ fn lower_tensor_helper_product(
                 Some(expected),
                 false,
                 &planning,
+                runtime,
             )
             .map(|plan| (plan, ()));
             let (plan, _trace) = match lowered {
                 Ok(lowered) => lowered,
                 Err(diagnostic) if diagnostic.fatal => {
-                    crate::lower::raise_fatal_lowering_diagnostic(diagnostic)
+                    runtime.raise_fatal_lowering_diagnostic(diagnostic)
                 }
                 Err(_) => return None,
             };
             let rebound =
                 remap_tensor_helper_dim_symbols(plan.dag_for_inspection(), scope, expected);
             let plan = plan.rebind_dimensions(rebound).unwrap_or_else(|message| {
-                crate::lower::raise_fatal_lowering_diagnostic(
+                runtime.raise_fatal_lowering_diagnostic(
                     crate::lower::LowerDiagnostic::new(message, None, None).fatal(),
                 )
             });
@@ -6438,7 +6526,16 @@ fn lower_tensor_helper_product(
             let scoped = collect_tensor_scope(scope).into_sorted();
             let (dag, _, trace) =
                 crate::lower::try_lower_tensor_helper_program_with_ordered_inputs_and_trace(
-                    expr, scoped, &context, None, None, 0, false,
+                    expr,
+                    scoped,
+                    &context,
+                    None,
+                    crate::host::RandomLoweringState {
+                        seed: None,
+                        counter: 0,
+                    },
+                    false,
+                    runtime,
                 )?;
             let dag = remap_tensor_helper_dim_symbols(&dag, scope, expected);
             let mut trace = trace;
@@ -6466,6 +6563,7 @@ fn lower_tensor_helper_dag_with_controls(
     scope: &UnordMap<String, HostTypeTerm>,
     expected: &TensorType,
 ) -> Option<crate::lower::LoweredSubexprWithControls> {
+    let runtime = program.runtime();
     let defs = cached_program_defs(program);
     if expr_reaches_forward_fail(expr, &defs, &mut UnordSet::new()) {
         record_host_work(|profile| profile.tensor_helper_fail_guard_rejections += 1);
@@ -6476,11 +6574,10 @@ fn lower_tensor_helper_dag_with_controls(
         expr,
         collect_tensor_scope(scope),
         &context,
+        runtime,
     ) {
         Ok(lowered) => lowered,
-        Err(diagnostic) if diagnostic.fatal => {
-            crate::lower::raise_fatal_lowering_diagnostic(diagnostic)
-        }
+        Err(diagnostic) if diagnostic.fatal => runtime.raise_fatal_lowering_diagnostic(diagnostic),
         Err(_) => {
             record_host_work(|profile| profile.tensor_helper_dag_rejections += 1);
             return None;
@@ -7865,6 +7962,7 @@ fn lower_host_expr_kind(
     tensor_helpers: &mut TensorHelperSink,
     expected_ty: Option<&HostTypeTerm>,
 ) -> Result<HostExpr, crate::lower::LowerDiagnostic> {
+    let runtime = program.runtime();
     let is_app_expr = matches!(expr, Expr::List(list, _) if tag(list) == Some(DeepTag::App));
     if !is_app_expr
         && let Some(tensor_ty) = expr_tensor_type(expr, program, scope)
@@ -8271,7 +8369,7 @@ fn lower_host_expr_kind(
                          (chelis#744, chelis#730 census row 13)"
                     ),
                 );
-                crate::lower::raise_fatal_lowering_diagnostic(
+                runtime.raise_fatal_lowering_diagnostic(
                     crate::lower::LowerDiagnostic::from_unsupported(
                         unsupported,
                         None,
@@ -9451,6 +9549,7 @@ fn lower_match_host_expr(
     // type. The scrutinee is NOT a result position and keeps plain lowering.
     expected_ty: Option<&HostTypeTerm>,
 ) -> Result<HostExpr, crate::lower::LowerDiagnostic> {
+    let runtime = program.runtime();
     let kids = children(list);
     let match_expr = Expr::List(list.clone(), list_span(list));
     let scrutinee_node = kids
@@ -9575,7 +9674,7 @@ fn lower_match_host_expr(
                         AdtConstructorResolution::Missing => program
                             .type_env()
                             .get(ctor_name)
-                            .and_then(parse_fn_type_expr)
+                            .and_then(|ty| parse_fn_type_expr(ty, runtime))
                             .map(|(args, _)| {
                                 args.into_iter()
                                     .map(|ty| HostAdtField { name: None, ty })
@@ -9598,7 +9697,9 @@ fn lower_match_host_expr(
                             continue;
                         };
                         let ty = field_ty
-                            .or_else(|| expr_type(subpat, &program.invocation.type_subst.borrow()))
+                            .or_else(|| {
+                                expr_type(subpat, &program.invocation.type_subst.borrow(), runtime)
+                            })
                             .unwrap_or_else(fresh_host_inference);
                         scoped.insert(name.to_string(), ty.clone());
                         bindings.push(HostPatternBinding {
@@ -10142,6 +10243,7 @@ fn resolve_scalar_def<'a>(
     program: &'a HostLoweringSession<'a>,
     name: &str,
 ) -> Option<(Vec<String>, Vec<HostTypeTerm>, &'a Expr)> {
+    let runtime = program.runtime();
     let mut found: Option<(&'a List,)> = None;
     for expr in top_level_items(program.exprs()) {
         let Expr::List(list, _) = expr else {
@@ -10176,7 +10278,7 @@ fn resolve_scalar_def<'a>(
     let mut param_tys = Vec::new();
     for param in children(params_list) {
         let pname = param_name(param)?;
-        let pty = param_host_type(param, &program.invocation.type_subst.borrow())
+        let pty = param_host_type(param, &program.invocation.type_subst.borrow(), runtime)
             .or_else(|| {
                 lookup_declared_fn_type(program, name).and_then(|(tys, _)| tys.first().cloned())
             })
@@ -10410,6 +10512,7 @@ fn grad_pack_plan(
     actual: &Expr,
     program: &HostLoweringSession<'_>,
 ) -> Option<GradPackPlan> {
+    let runtime = program.runtime();
     if let HostTypeTerm::Adt(name, arguments) = ty
         && let Some((_, alias)) = program
             .adt_registry()
@@ -10424,7 +10527,7 @@ fn grad_pack_plan(
             .map(|(variable, name)| (format!("t{}", variable.0), name.clone()))
             .collect::<UnordMap<_, _>>();
         let expanded = rename_host_type_variables(
-            decode_host_type_or_raise(&type_to_deep_expr(&alias.body), &UnordMap::new()),
+            decode_host_type_or_raise(&type_to_deep_expr(&alias.body), &UnordMap::new(), runtime),
             &checker_parameter_names,
         );
         let substitutions = alias
@@ -10710,6 +10813,7 @@ fn try_lower_general_list_grad_app(
     tensor_helpers: &mut TensorHelperSink,
     expected_ty: Option<&HostTypeTerm>,
 ) -> Result<Option<HostExpr>, crate::lower::LowerDiagnostic> {
+    let runtime = program.runtime();
     let kids = children(list);
     let Some(callee) = kids.first().and_then(as_list) else {
         return Ok(None);
@@ -10768,7 +10872,9 @@ fn try_lower_general_list_grad_app(
     let mut rewritten_elements = list.elements.clone();
     let mut parameter_plans = UnordMap::new();
     for (param_index, param) in params.iter().enumerate() {
-        let Some(param_ty) = param_host_type(param, &program.invocation.type_subst.borrow()) else {
+        let Some(param_ty) =
+            param_host_type(param, &program.invocation.type_subst.borrow(), runtime)
+        else {
             return Ok(None);
         };
         let actual_index = param_index + 1;
@@ -11389,7 +11495,10 @@ fn lower_app_host_expr(
         .get(&name)
         .and_then(host_fn_signature)
         .or_else(|| lookup_declared_fn_type(program, &name))
-        .or_else(|| kids.first().and_then(expr_fn_type));
+        .or_else(|| {
+            kids.first()
+                .and_then(|expr| expr_fn_type(expr, program.runtime()))
+        });
     // Ordinary lexical lookup precedes builtin callable routes. A
     // function-typed parameter named `round_to` or `map` is a call through
     // that parameter, not a builtin selected by spelling
@@ -12304,6 +12413,7 @@ fn lower_inline_host_invocation(
     tensor_helpers: &mut TensorHelperSink,
     expected: Option<&HostTypeTerm>,
 ) -> Result<Option<HostExpr>, crate::lower::LowerDiagnostic> {
+    let runtime = program.runtime();
     let Some(call) = as_list(expr) else {
         return Ok(None);
     };
@@ -12334,7 +12444,7 @@ fn lower_inline_host_invocation(
             "inline invocation lost its body",
         ));
     };
-    let inferred = expr_fn_type(callee).map(|(params, _)| params);
+    let inferred = expr_fn_type(callee, runtime).map(|(params, _)| params);
     let mut params = Vec::new();
     for (index, declaration) in self::children(declarations).iter().enumerate() {
         let Some(name) = param_name(declaration) else {
@@ -12345,15 +12455,19 @@ fn lower_inline_host_invocation(
         };
         // The authored annotation is the obligation. Actualized expression
         // metadata supplies only parameters whose annotation is absent.
-        let ty = param_host_type(declaration, &program.invocation.type_subst.borrow())
-            .or_else(|| {
-                inferred
-                    .as_ref()
-                    .and_then(|params| params.get(index))
-                    .cloned()
-            })
-            .map(|ty| expand_host_type_aliases(program, ty))
-            .unwrap_or_else(fresh_host_inference);
+        let ty = param_host_type(
+            declaration,
+            &program.invocation.type_subst.borrow(),
+            runtime,
+        )
+        .or_else(|| {
+            inferred
+                .as_ref()
+                .and_then(|params| params.get(index))
+                .cloned()
+        })
+        .map(|ty| expand_host_type_aliases(program, ty))
+        .unwrap_or_else(fresh_host_inference);
         params.push(HostParam { name, ty });
     }
     lower_retained_host_invocation(
@@ -12612,6 +12726,7 @@ fn lower_recursive_generic_call(
     scope: &UnordMap<String, HostTypeTerm>,
     tensor_helpers: &mut TensorHelperSink,
 ) -> Result<HostExpr, crate::lower::LowerDiagnostic> {
+    let runtime = program.runtime();
     // Resolve the callee to its defining declaration first: the interned
     // identity is the definition's own name, never the call site's spelling,
     // so a qualified and a short reference to one def intern one
@@ -12653,7 +12768,7 @@ fn lower_recursive_generic_call(
         // whole application. A stamp that is still unresolved after erasure
         // is genuinely underconstrained and is left to the residue.
         if ty.is_unresolved()
-            && let Some(stamped) = expr_type(arg, &program.invocation.type_subst.borrow())
+            && let Some(stamped) = expr_type(arg, &program.invocation.type_subst.borrow(), runtime)
         {
             let stamped = canonicalize_representation_erased_adt_args(stamped, &definitions);
             if !stamped.is_unresolved() {
@@ -12727,7 +12842,8 @@ fn lower_recursive_generic_call(
                 && let Some(actual) = param_tys.get(slot)
                 && !actual.is_unresolved()
             {
-                let declared_term = decode_host_type_or_raise(declared_expr, &UnordMap::new());
+                let declared_term =
+                    decode_host_type_or_raise(declared_expr, &UnordMap::new(), runtime);
                 solve_host_type_vars(&declared_term, actual, &mut subst);
             }
         }
@@ -12741,7 +12857,8 @@ fn lower_recursive_generic_call(
         if !ret_ty.is_unresolved()
             && let Some(declared_ret) = declared_return_type_expr(program.exprs(), &canonical_name)
         {
-            let declared_ret_term = decode_host_type_or_raise(&declared_ret, &UnordMap::new());
+            let declared_ret_term =
+                decode_host_type_or_raise(&declared_ret, &UnordMap::new(), runtime);
             solve_host_type_vars(&declared_ret_term, &ret_ty, &mut subst);
         }
         if !subst.is_empty() {
@@ -12749,7 +12866,7 @@ fn lower_recursive_generic_call(
                 if param_ty.is_unresolved()
                     && let Some(Some(declared_expr)) = declared.get(slot)
                 {
-                    let completed = decode_host_type_or_raise(declared_expr, &subst);
+                    let completed = decode_host_type_or_raise(declared_expr, &subst, runtime);
                     if !completed.is_unresolved() {
                         *param_ty = completed;
                     }
@@ -12759,7 +12876,7 @@ fn lower_recursive_generic_call(
                 && let Some(declared_ret) =
                     declared_return_type_expr(program.exprs(), &canonical_name)
             {
-                let completed = decode_host_type_or_raise(&declared_ret, &subst);
+                let completed = decode_host_type_or_raise(&declared_ret, &subst, runtime);
                 if !completed.is_unresolved() {
                     ret_ty = completed;
                 }
@@ -13184,6 +13301,7 @@ struct MonoSpecializedFunctionInput<'a> {
 fn lower_mono_specialized_function(
     input: MonoSpecializedFunctionInput<'_>,
 ) -> Result<LoweredHostFunction, crate::lower::LowerDiagnostic> {
+    let runtime = input.program.runtime();
     let MonoSpecializedFunctionInput {
         symbol,
         declaration_name,
@@ -13211,7 +13329,7 @@ fn lower_mono_specialized_function(
     // correctly and then matches nothing, because no body node ever mentions
     // `a`. Only the recorded generic signature shares the body's namespace.
     let mut subst: UnordMap<String, HostTypeTerm> = UnordMap::new();
-    if let Some((generic_params, generic_ret)) = expr_fn_type(fn_expr) {
+    if let Some((generic_params, generic_ret)) = expr_fn_type(fn_expr, runtime) {
         for (generic, actual) in generic_params.iter().zip(params.iter()) {
             solve_host_type_vars(generic, &actual.ty, &mut subst);
         }
@@ -14015,6 +14133,7 @@ fn top_level_fn_helper_summary_rejects(
     program: &HostLoweringSession<'_>,
     name: &str,
 ) -> Result<bool, crate::lower::LowerDiagnostic> {
+    let runtime = program.runtime();
     // chelis#935/#936 bounded generic functions are specialized before
     // helper extraction. Probing their unspecialized body here would discard
     // the checked call-site application and fail before the specialization
@@ -14045,7 +14164,7 @@ fn top_level_fn_helper_summary_rejects(
     // Like a type-polymorphic declaration, an unresolved source-rate
     // template has no standalone helper summary. Its actual call is
     // classified and lowered with the caller's static controls (#1764).
-    if cached_subexpr_lowering_context(program).evaluation_profile(body, &[])
+    if cached_subexpr_lowering_context(program).evaluation_profile(body, &[], runtime)
         == crate::evaluation::EvaluationProfile::Legacy(
             crate::evaluation::LegacyEvaluationReason::RuntimeRate,
         )
@@ -14074,9 +14193,8 @@ fn top_level_fn_helper_summary_rejects(
     // it must leave no trace on specialization state
     // (harden-bounded-monomorphization D1).
     let probe_guard = MonoProbeGuard::begin(program);
-    let lowered = crate::lower::catch_lowering_external(|| {
-        lower_host_function(name, body, None, program, false, false)
-    });
+    let lowered =
+        runtime.catch_lowering(|| lower_host_function(name, body, None, program, false, false));
     drop(probe_guard);
     drop(inlining_guard);
     // A fatal tensor-helper rejection can unwind from lower_host_function
@@ -14560,6 +14678,7 @@ fn lower_host_callback(
     scope: &UnordMap<String, HostTypeTerm>,
     tensor_helpers: &mut TensorHelperSink,
 ) -> Result<Option<HostCallback>, crate::lower::LowerDiagnostic> {
+    let runtime = program.runtime();
     match expr {
         Expr::MetaExpr(meta, _) => lower_host_callback(&meta.expr, program, scope, tensor_helpers),
         Expr::List(list, _) if tag(list) == Some(DeepTag::Fn) => {
@@ -14571,7 +14690,7 @@ fn lower_host_callback(
                 return Ok(None);
             }
             let (param_tys, ret_ty) =
-                expr_fn_type(expr).unwrap_or((Vec::new(), fresh_host_inference()));
+                expr_fn_type(expr, runtime).unwrap_or((Vec::new(), fresh_host_inference()));
             let mut callback_scope = scope.clone();
             let mut params = Vec::new();
             for (index, param) in children(params_list).iter().enumerate() {
@@ -14582,7 +14701,9 @@ fn lower_host_callback(
                     .get(index)
                     .cloned()
                     .filter(|ty| !ty.is_unresolved())
-                    .or_else(|| param_host_type(param, &program.invocation.type_subst.borrow()))
+                    .or_else(|| {
+                        param_host_type(param, &program.invocation.type_subst.borrow(), runtime)
+                    })
                     .unwrap_or_else(fresh_host_inference);
                 callback_scope.insert(name.clone(), ty.clone());
                 params.push(HostParam { name, ty });
@@ -14596,10 +14717,13 @@ fn lower_host_callback(
             let plan =
                 SignatureEntryPlan::new(children(params_list).iter().zip(&params).filter_map(
                     |(declaration, param)| {
-                        let declared =
-                            param_host_type(declaration, &program.invocation.type_subst.borrow())
-                                .filter(|ty| matches!(ty, HostTypeTerm::Tensor(_)))
-                                .unwrap_or_else(|| param.ty.clone());
+                        let declared = param_host_type(
+                            declaration,
+                            &program.invocation.type_subst.borrow(),
+                            runtime,
+                        )
+                        .filter(|ty| matches!(ty, HostTypeTerm::Tensor(_)))
+                        .unwrap_or_else(|| param.ty.clone());
                         let HostTypeTerm::Tensor(ty) = declared else {
                             return None;
                         };
@@ -14671,7 +14795,8 @@ fn lower_host_callback(
                 })
                 .or_else(|| lookup_declared_fn_type(program, name))
                 .or_else(|| {
-                    lookup_program_def(&cached_program_defs(program), name).and_then(expr_fn_type)
+                    lookup_program_def(&cached_program_defs(program), name)
+                        .and_then(|expr| expr_fn_type(expr, program.runtime()))
                 })
             else {
                 return Ok(None);
@@ -16270,6 +16395,7 @@ fn expand_host_type_aliases(program: &HostLoweringSession<'_>, ty: HostTypeTerm)
         ty: HostTypeTerm,
         visiting: &mut UnordSet<String>,
     ) -> HostTypeTerm {
+        let runtime = program.runtime();
         match ty {
             HostTypeTerm::Adt(name, args) => {
                 let args = args
@@ -16300,6 +16426,7 @@ fn expand_host_type_aliases(program: &HostLoweringSession<'_>, ty: HostTypeTerm)
                     decode_host_type_or_raise(
                         &type_to_deep_expr(&program.adt_registry().expand_aliases(&alias.body)),
                         &UnordMap::new(),
+                        runtime,
                     ),
                     &checker_parameter_names,
                 );
@@ -16410,6 +16537,7 @@ fn expr_host_type_raw(
     program: &HostLoweringSession<'_>,
     scope: &UnordMap<String, HostTypeTerm>,
 ) -> HostTypeTerm {
+    let runtime = program.runtime();
     match expr {
         Expr::Atom(Atom::Int(_), _) => HostTypeTerm::Int64,
         Expr::Atom(Atom::Float(_), _) => HostTypeTerm::Float64,
@@ -16420,7 +16548,7 @@ fn expr_host_type_raw(
                 .and_then(|(_, _, kids)| kids.first())
                 .and_then(symbol_name)
                 .and_then(|name| {
-                    expr_type(expr, &program.invocation.type_subst.borrow())
+                    expr_type(expr, &program.invocation.type_subst.borrow(), runtime)
                         .filter(|ty| !ty.is_unresolved())
                         .or_else(|| {
                             scope
@@ -16432,7 +16560,7 @@ fn expr_host_type_raw(
                 .unwrap_or_else(fresh_host_inference)
         }
         Expr::List(_, _) | Expr::Node(_, _) if expr.tag() == Some(DeepTag::App) => {
-            let explicit = expr_type(expr, &program.invocation.type_subst.borrow())
+            let explicit = expr_type(expr, &program.invocation.type_subst.borrow(), runtime)
                 .unwrap_or_else(fresh_host_inference);
             if app_expr_needs_inferred_type(&explicit) {
                 let inferred = infer_app_expr_host_type(expr, program, scope)
@@ -16448,7 +16576,7 @@ fn expr_host_type_raw(
                 explicit
             }
         }
-        _ => expr_type(expr, &program.invocation.type_subst.borrow())
+        _ => expr_type(expr, &program.invocation.type_subst.borrow(), runtime)
             .unwrap_or_else(fresh_host_inference),
     }
 }
@@ -16966,7 +17094,11 @@ fn expr_tensor_type(
     }
 }
 
-fn expr_type(expr: &Expr, subst: &UnordMap<String, HostTypeTerm>) -> Option<HostTypeTerm> {
+fn expr_type(
+    expr: &Expr,
+    subst: &UnordMap<String, HostTypeTerm>,
+    runtime: &LoweringRuntime,
+) -> Option<HostTypeTerm> {
     // Parameter binders are untagged list carriers `(name {type: ...})`,
     // not Deep vocabulary nodes. Preserve their source-authored metadata
     // while reading stamped vocabulary nodes directly; routing all Lists
@@ -16986,10 +17118,13 @@ fn expr_type(expr: &Expr, subst: &UnordMap<String, HostTypeTerm>) -> Option<Host
     };
     meta.ty()
         .map(|ty| ty.expression())
-        .map(|value| decode_host_type_or_raise(value, subst))
+        .map(|value| decode_host_type_or_raise(value, subst, runtime))
 }
 
-fn expr_fn_type(expr: &Expr) -> Option<(Vec<HostTypeTerm>, HostTypeTerm)> {
+fn expr_fn_type(
+    expr: &Expr,
+    runtime: &LoweringRuntime,
+) -> Option<(Vec<HostTypeTerm>, HostTypeTerm)> {
     let meta = match expr {
         Expr::List(list, _) => match list.elements.get(1) {
             Some(Expr::Map(meta, _)) => meta,
@@ -17000,16 +17135,19 @@ fn expr_fn_type(expr: &Expr) -> Option<(Vec<HostTypeTerm>, HostTypeTerm)> {
     };
     meta.ty()
         .map(|ty| ty.expression())
-        .and_then(parse_fn_type_expr)
+        .and_then(|ty| parse_fn_type_expr(ty, runtime))
 }
 
-fn parse_fn_type_expr(expr: &Expr) -> Option<(Vec<HostTypeTerm>, HostTypeTerm)> {
+fn parse_fn_type_expr(
+    expr: &Expr,
+    runtime: &LoweringRuntime,
+) -> Option<(Vec<HostTypeTerm>, HostTypeTerm)> {
     let (args, ret) = parse_fn_type_expr_parts(expr)?;
     Some((
         args.iter()
-            .map(|arg| decode_host_type_or_raise(arg, &UnordMap::new()))
+            .map(|arg| decode_host_type_or_raise(arg, &UnordMap::new(), runtime))
             .collect(),
-        decode_host_type_or_raise(&ret, &UnordMap::new()),
+        decode_host_type_or_raise(&ret, &UnordMap::new(), runtime),
     ))
 }
 
@@ -17358,9 +17496,13 @@ fn collect_host_type_variable_substitutions(
     }
 }
 
-fn decode_host_type_or_raise(expr: &Expr, subst: &UnordMap<String, HostTypeTerm>) -> HostTypeTerm {
+fn decode_host_type_or_raise(
+    expr: &Expr,
+    subst: &UnordMap<String, HostTypeTerm>,
+    runtime: &LoweringRuntime,
+) -> HostTypeTerm {
     decode_host_type_with_subst(expr, subst).unwrap_or_else(|error| {
-        crate::lower::raise_fatal_lowering_diagnostic(
+        runtime.raise_fatal_lowering_diagnostic(
             crate::lower::LowerDiagnostic::new(
                 format!("invalid checked host type metadata: {error} ([05-UNS-1]; chelis#730)"),
                 Some(expr.span()),
@@ -18520,6 +18662,7 @@ impl GenericAdtConstructor {
 }
 
 fn adt_constructor_definitions(program: &HostLoweringSession<'_>) -> Vec<GenericAdtConstructor> {
+    let runtime = program.runtime();
     let mut definitions = Vec::new();
     for definition in program.adt_registry().defs.values() {
         // These prelude declarations have dedicated host representations and
@@ -18567,7 +18710,11 @@ fn adt_constructor_definitions(program: &HostLoweringSession<'_>) -> Vec<Generic
                 .map(|(name, ty)| GenericAdtField {
                     name: name.clone(),
                     term: rename_host_type_variables(
-                        decode_host_type_or_raise(&type_to_deep_expr(ty), &UnordMap::new()),
+                        decode_host_type_or_raise(
+                            &type_to_deep_expr(ty),
+                            &UnordMap::new(),
+                            runtime,
+                        ),
                         &checker_parameter_names,
                     ),
                 })
@@ -19199,13 +19346,17 @@ fn param_name(expr: &Expr) -> Option<String> {
     }
 }
 
-fn param_host_type(expr: &Expr, subst: &UnordMap<String, HostTypeTerm>) -> Option<HostTypeTerm> {
+fn param_host_type(
+    expr: &Expr,
+    subst: &UnordMap<String, HostTypeTerm>,
+    runtime: &LoweringRuntime,
+) -> Option<HostTypeTerm> {
     match expr {
-        Expr::MetaExpr(meta, _) => expr_type(expr, subst)
+        Expr::MetaExpr(meta, _) => expr_type(expr, subst, runtime)
             .filter(|ty| !ty.is_unresolved())
-            .or_else(|| param_host_type(&meta.expr, subst)),
+            .or_else(|| param_host_type(&meta.expr, subst, runtime)),
         Expr::List(_, _) | Expr::BareList(_, _) => {
-            expr_type(expr, subst).filter(|ty| !ty.is_unresolved())
+            expr_type(expr, subst, runtime).filter(|ty| !ty.is_unresolved())
         }
         _ => None,
     }
@@ -19429,34 +19580,79 @@ mod tests {
 
     #[test]
     fn literal_result_claim_transfer_requires_a_pure_called_helper() {
-        let checked = deep_check(include_str!(
-            "../tests/fixtures/core/src/host/literal_result_claim_transfer_requires_a_pure_called_helper.deep"
-        ));
-        let session = HostLoweringSession::new(&checked);
-        assert!(top_level_fn_transfers_literal_result_claims(
-            &session, "pure"
-        ));
-        assert!(!top_level_fn_transfers_literal_result_claims(
-            &session, "random"
-        ));
+        crate::lowering_runtime::with_native_lowering_runtime(|runtime| {
+            let checked = deep_check(include_str!(
+                "../tests/fixtures/core/src/host/literal_result_claim_transfer_requires_a_pure_called_helper.deep"
+            ));
+            let session = HostLoweringSession::new(&checked, runtime);
+            assert!(top_level_fn_transfers_literal_result_claims(
+                &session, "pure"
+            ));
+            assert!(!top_level_fn_transfers_literal_result_claims(
+                &session, "random"
+            ));
+        })
     }
 
     #[test]
     fn concat_admission_uses_static_named_extent_metadata() {
-        let body = parse_one_expr(
-            "(app {} (var {} concat) (app {} (var {} Cons) (var {} x) (app {} (var {} Cons) (var {} x) (var {} Nil))) (lit {} 1))",
-        );
-        let defs = BTreeMap::new();
-        for (width, host) in [
-            (DimInfo::Lit(2), false),
-            (DimInfo::Named("width".to_string(), Some(2)), false),
-            (DimInfo::Named("width".to_string(), None), true),
-        ] {
-            let tensor = TensorType {
-                dims: vec![DimInfo::Lit(2), width],
-                precision: Prim::F32,
-            };
+        crate::lowering_runtime::with_native_lowering_runtime(|runtime| {
+            let body = parse_one_expr(
+                "(app {} (var {} concat) (app {} (var {} Cons) (var {} x) (app {} (var {} Cons) (var {} x) (var {} Nil))) (lit {} 1))",
+            );
+            let defs = BTreeMap::new();
+            for (width, host) in [
+                (DimInfo::Lit(2), false),
+                (DimInfo::Named("width".to_string(), Some(2)), false),
+                (DimInfo::Named("width".to_string(), None), true),
+            ] {
+                let tensor = TensorType {
+                    dims: vec![DimInfo::Lit(2), width],
+                    precision: Prim::F32,
+                };
+                let mut walk = UncarriableWalk {
+                    runtime,
+                    defs: &defs,
+                    type_subst: &UnordMap::new(),
+                    active: UnordSet::new(),
+                    completed: UnordMap::new(),
+                    cycle_cutoff: false,
+                    def_visits: 0,
+                    evaluation_dropout: false,
+                    scopes: vec![UnordMap::from([(
+                        "x".to_string(),
+                        AdmissionBinding {
+                            constructor: false,
+                            concat: ConcatInputFact::Tensor(tensor.clone()),
+                        },
+                    )])],
+                };
+                assert_eq!(walk.expr(&body).is_some(), host, "{tensor:?}");
+                if !host {
+                    crate::lower::try_lower_subexpr_program(
+                        &body,
+                        UnordMap::from([("x".to_string(), tensor)]),
+                        UnordMap::new(),
+                        UnordMap::new(),
+                        runtime,
+                    )
+                    .expect("the same known extent is representable by static concat");
+                }
+            }
+        })
+    }
+
+    #[test]
+    fn concat_admission_does_not_project_destructuring_aliases() {
+        crate::lowering_runtime::with_native_lowering_runtime(|runtime| {
+            // Private structural control: the walk has no tuple/list projection
+            // proof. A nested binder must not inherit its RHS's whole List fact.
+            let body = parse_one_expr(
+                "(let {} (bind {} (tuple {} (var {} a) (var {} b)) (var {} xs)) (app {} (var {} concat) (var {} b) (lit {} 1)))",
+            );
+            let defs = BTreeMap::new();
             let mut walk = UncarriableWalk {
+                runtime,
                 defs: &defs,
                 type_subst: &UnordMap::new(),
                 active: UnordSet::new(),
@@ -19465,94 +19661,67 @@ mod tests {
                 def_visits: 0,
                 evaluation_dropout: false,
                 scopes: vec![UnordMap::from([(
-                    "x".to_string(),
+                    "xs".to_string(),
                     AdmissionBinding {
                         constructor: false,
-                        concat: ConcatInputFact::Tensor(tensor.clone()),
+                        concat: ConcatInputFact::List(vec![ConcatInputFact::Tensor(TensorType {
+                            dims: vec![DimInfo::Lit(2), DimInfo::Named("width".to_string(), None)],
+                            precision: Prim::F32,
+                        })]),
                     },
                 )])],
             };
-            assert_eq!(walk.expr(&body).is_some(), host, "{tensor:?}");
-            if !host {
-                crate::lower::try_lower_subexpr_program(
-                    &body,
-                    UnordMap::from([("x".to_string(), tensor)]),
-                    UnordMap::new(),
-                    UnordMap::new(),
-                )
-                .expect("the same known extent is representable by static concat");
-            }
-        }
-    }
-
-    #[test]
-    fn concat_admission_does_not_project_destructuring_aliases() {
-        // Private structural control: the walk has no tuple/list projection
-        // proof. A nested binder must not inherit its RHS's whole List fact.
-        let body = parse_one_expr(
-            "(let {} (bind {} (tuple {} (var {} a) (var {} b)) (var {} xs)) (app {} (var {} concat) (var {} b) (lit {} 1)))",
-        );
-        let defs = BTreeMap::new();
-        let mut walk = UncarriableWalk {
-            defs: &defs,
-            type_subst: &UnordMap::new(),
-            active: UnordSet::new(),
-            completed: UnordMap::new(),
-            cycle_cutoff: false,
-            def_visits: 0,
-            evaluation_dropout: false,
-            scopes: vec![UnordMap::from([(
-                "xs".to_string(),
-                AdmissionBinding {
-                    constructor: false,
-                    concat: ConcatInputFact::List(vec![ConcatInputFact::Tensor(TensorType {
-                        dims: vec![DimInfo::Lit(2), DimInfo::Named("width".to_string(), None)],
-                        precision: Prim::F32,
-                    })]),
-                },
-            )])],
-        };
-        assert!(walk.expr(&body).is_none());
+            assert!(walk.expr(&body).is_none());
+        })
     }
 
     #[test]
     fn concat_admission_captures_actuals_before_formal_shadowing() {
-        // Admission-only: the older tensor lowerer has a separate x/y
-        // substitution collision for this source. This test does not claim
-        // kernel execution; the fresh-formal integration twin covers that.
-        for (x_width, y_width, host) in [
-            ("(d-name {} *)", "(d-lit {} 2)", true),
-            ("(d-lit {} 2)", "(d-name {} *)", false),
-        ] {
-            let source = include_str!("../tests/fixtures/core/src/host/concat_shadowing.deep")
-                .replace("(d-name {} xwidth)", x_width)
-                .replace("(d-name {} ywidth)", y_width);
-            let checked = deep_check(&source);
-            let session = HostLoweringSession::new(&checked);
-            let program = &session;
-            let defs = cached_program_defs(program);
-            let (_, _, run) = stamped_parts(&defs["run"]).unwrap();
-            let (_, _, params) = stamped_parts(&run[0]).unwrap();
-            let params: Vec<_> = params
-                .iter()
-                .map(|param| HostParam {
-                    name: param_name(param).unwrap(),
-                    ty: param_host_type(param, &program.invocation.type_subst.borrow()).unwrap(),
-                })
-                .collect();
-            assert_eq!(
-                body_form_the_dag_cannot_carry(program, &run[1], &params, false).is_some(),
-                host,
-                "{source}"
-            );
-        }
+        crate::lowering_runtime::with_native_lowering_runtime(|runtime| {
+            // Admission-only: the older tensor lowerer has a separate x/y
+            // substitution collision for this source. This test does not claim
+            // kernel execution; the fresh-formal integration twin covers that.
+            for (x_width, y_width, host) in [
+                ("(d-name {} *)", "(d-lit {} 2)", true),
+                ("(d-lit {} 2)", "(d-name {} *)", false),
+            ] {
+                let source = include_str!("../tests/fixtures/core/src/host/concat_shadowing.deep")
+                    .replace("(d-name {} xwidth)", x_width)
+                    .replace("(d-name {} ywidth)", y_width);
+                let checked = deep_check(&source);
+                let session = HostLoweringSession::new(&checked, runtime);
+                let program = &session;
+                let defs = cached_program_defs(program);
+                let (_, _, run) = stamped_parts(&defs["run"]).unwrap();
+                let (_, _, params) = stamped_parts(&run[0]).unwrap();
+                let params: Vec<_> = params
+                    .iter()
+                    .map(|param| HostParam {
+                        name: param_name(param).unwrap(),
+                        ty: param_host_type(
+                            param,
+                            &program.invocation.type_subst.borrow(),
+                            runtime,
+                        )
+                        .unwrap(),
+                    })
+                    .collect();
+                assert_eq!(
+                    body_form_the_dag_cannot_carry(program, &run[1], &params, false).is_some(),
+                    host,
+                    "{source}"
+                );
+            }
+        })
     }
 
     fn admission_test_walk<'a>(
         defs: &'a BTreeMap<String, Expr>,
         type_subst: &'a UnordMap<String, HostTypeTerm>,
+        runtime: &'a LoweringRuntime,
     ) -> UncarriableWalk<'a> {
         UncarriableWalk {
+            runtime,
             defs,
             type_subst,
             active: UnordSet::new(),
@@ -19566,132 +19735,140 @@ mod tests {
 
     #[test]
     fn concat_admission_shared_context_visits_each_helper_once() {
-        // Sharing must not expand into every call path. Count body visits,
-        // not wall time; the trailing rank must still choose Host.
-        let depth = 12;
-        let ty = "(t-tensor {} (d-lit {} 2) (t-prim {} f32))";
-        let mut source = deep_fanout_def("level_0", ty, &deep_var("x"));
-        for level in 1..=depth {
-            let call = deep_app(
-                &format!("level_{}", level - 1),
-                &["(copy {} (var {} x))".to_owned()],
+        crate::lowering_runtime::with_native_lowering_runtime(|runtime| {
+            // Sharing must not expand into every call path. Count body visits,
+            // not wall time; the trailing rank must still choose Host.
+            let depth = 12;
+            let ty = "(t-tensor {} (d-lit {} 2) (t-prim {} f32))";
+            let mut source = deep_fanout_def("level_0", ty, &deep_var("x"));
+            for level in 1..=depth {
+                let call = deep_app(
+                    &format!("level_{}", level - 1),
+                    &["(copy {} (var {} x))".to_owned()],
+                );
+                source.push_str(&deep_fanout_def(
+                    &format!("level_{level}"),
+                    ty,
+                    &deep_app("add", &[call.clone(), call]),
+                ));
+            }
+            let body = deep_let(
+                "z",
+                &deep_app(
+                    &format!("level_{depth}"),
+                    &["(copy {} (var {} x))".to_owned()],
+                ),
+                &deep_let("_", &deep_app("rank", &[deep_var("x")]), &deep_var("z")),
             );
-            source.push_str(&deep_fanout_def(
-                &format!("level_{level}"),
-                ty,
-                &deep_app("add", &[call.clone(), call]),
-            ));
-        }
-        let body = deep_let(
-            "z",
-            &deep_app(
-                &format!("level_{depth}"),
-                &["(copy {} (var {} x))".to_owned()],
-            ),
-            &deep_let("_", &deep_app("rank", &[deep_var("x")]), &deep_var("z")),
-        );
-        source.push_str(&deep_fanout_def("run", ty, &body));
-        let program = deep_check(&source);
-        let defs = cached_program_defs(&HostLoweringSession::new(&program));
-        let type_subst = UnordMap::new();
-        let mut walk = admission_test_walk(&defs, &type_subst);
-        assert!(
-            walk.def("run", &defs["run"], None)
-                .unwrap()
-                .contains("rank")
-        );
-        assert_eq!(walk.def_visits, depth + 2);
+            source.push_str(&deep_fanout_def("run", ty, &body));
+            let program = deep_check(&source);
+            let defs = cached_program_defs(&HostLoweringSession::new(&program, runtime));
+            let type_subst = UnordMap::new();
+            let mut walk = admission_test_walk(&defs, &type_subst, runtime);
+            assert!(
+                walk.def("run", &defs["run"], None)
+                    .unwrap()
+                    .contains("rank")
+            );
+            assert_eq!(walk.def_visits, depth + 2);
+        })
     }
 
     #[test]
     fn concat_admission_completed_context_retains_order_and_exact_facts() {
-        let program = deep_check(include_str!(
-            "../tests/fixtures/core/src/host/concat_admission_completed_context_retains_order_and_exact_facts.deep"
-        ));
-        let defs = cached_program_defs(&HostLoweringSession::new(&program));
-        let fixed = ConcatInputFact::Tensor(TensorType {
-            dims: vec![DimInfo::Lit(2), DimInfo::Lit(2)],
-            precision: Prim::F32,
-        });
-        let dynamic = ConcatInputFact::Tensor(TensorType {
-            dims: vec![DimInfo::Lit(2), DimInfo::Named("width".to_string(), None)],
-            precision: Prim::F32,
-        });
-        let type_subst = UnordMap::new();
-        for order in [[false, true, false, true], [true, false, true, false]] {
-            let mut walk = admission_test_walk(&defs, &type_subst);
-            for host in order {
-                let actuals = if host {
-                    vec![fixed.clone(), dynamic.clone()]
-                } else {
-                    vec![dynamic.clone(), fixed.clone()]
-                };
+        crate::lowering_runtime::with_native_lowering_runtime(|runtime| {
+            let program = deep_check(include_str!(
+                "../tests/fixtures/core/src/host/concat_admission_completed_context_retains_order_and_exact_facts.deep"
+            ));
+            let defs = cached_program_defs(&HostLoweringSession::new(&program, runtime));
+            let fixed = ConcatInputFact::Tensor(TensorType {
+                dims: vec![DimInfo::Lit(2), DimInfo::Lit(2)],
+                precision: Prim::F32,
+            });
+            let dynamic = ConcatInputFact::Tensor(TensorType {
+                dims: vec![DimInfo::Lit(2), DimInfo::Named("width".to_string(), None)],
+                precision: Prim::F32,
+            });
+            let type_subst = UnordMap::new();
+            for order in [[false, true, false, true], [true, false, true, false]] {
+                let mut walk = admission_test_walk(&defs, &type_subst, runtime);
+                for host in order {
+                    let actuals = if host {
+                        vec![fixed.clone(), dynamic.clone()]
+                    } else {
+                        vec![dynamic.clone(), fixed.clone()]
+                    };
+                    assert_eq!(
+                        walk.def("second", &defs["second"], Some(actuals)).is_some(),
+                        host
+                    );
+                }
                 assert_eq!(
-                    walk.def("second", &defs["second"], Some(actuals)).is_some(),
-                    host
+                    walk.def_visits, 2,
+                    "two distinct ordered contexts, not four calls"
                 );
             }
-            assert_eq!(
-                walk.def_visits, 2,
-                "two distinct ordered contexts, not four calls"
-            );
-        }
+        })
     }
 
     #[test]
     fn concat_admission_completed_callee_does_not_capture_caller_bindings() {
-        let program = deep_check(include_str!(
-            "../tests/fixtures/core/src/host/concat_admission_completed_callee_does_not_capture_caller_bindings.deep"
-        ));
-        let defs = cached_program_defs(&HostLoweringSession::new(&program));
-        let type_subst = UnordMap::new();
-        let mut walk = admission_test_walk(&defs, &type_subst);
-        // A free callee name resolves against program definitions, not a
-        // same-spelled caller alias, including its constructor classification.
-        for constructor in [false, true] {
-            walk.scopes = vec![UnordMap::from([(
-                "global".to_string(),
-                AdmissionBinding {
-                    constructor,
-                    concat: ConcatInputFact::Unknown,
-                },
-            )])];
-            assert!(
-                walk.def("call", &defs["call"], None)
-                    .unwrap()
-                    .contains("rank")
-            );
-            assert_eq!(walk.bound("global"), Some(constructor));
-        }
-        assert_eq!(walk.def_visits, 2, "call and global each visited once");
+        crate::lowering_runtime::with_native_lowering_runtime(|runtime| {
+            let program = deep_check(include_str!(
+                "../tests/fixtures/core/src/host/concat_admission_completed_callee_does_not_capture_caller_bindings.deep"
+            ));
+            let defs = cached_program_defs(&HostLoweringSession::new(&program, runtime));
+            let type_subst = UnordMap::new();
+            let mut walk = admission_test_walk(&defs, &type_subst, runtime);
+            // A free callee name resolves against program definitions, not a
+            // same-spelled caller alias, including its constructor classification.
+            for constructor in [false, true] {
+                walk.scopes = vec![UnordMap::from([(
+                    "global".to_string(),
+                    AdmissionBinding {
+                        constructor,
+                        concat: ConcatInputFact::Unknown,
+                    },
+                )])];
+                assert!(
+                    walk.def("call", &defs["call"], None)
+                        .unwrap()
+                        .contains("rank")
+                );
+                assert_eq!(walk.bound("global"), Some(constructor));
+            }
+            assert_eq!(walk.def_visits, 2, "call and global each visited once");
+        })
     }
 
     #[test]
     fn concat_admission_cycle_cutoff_is_not_a_completed_negative() {
-        // Private walk control: b reached under active a cannot conclude that
-        // a lacks Host forms. A later fresh b must still see a's trailing rank.
-        let defs = BTreeMap::from([
-            (
-                "a".to_string(),
-                parse_one_expr(
-                    "(fn {} (params {}) (tuple {} (app {} (var {} b)) (app {} (var {} rank) (lit {} 1))))",
+        crate::lowering_runtime::with_native_lowering_runtime(|runtime| {
+            // Private walk control: b reached under active a cannot conclude that
+            // a lacks Host forms. A later fresh b must still see a's trailing rank.
+            let defs = BTreeMap::from([
+                (
+                    "a".to_string(),
+                    parse_one_expr(
+                        "(fn {} (params {}) (tuple {} (app {} (var {} b)) (app {} (var {} rank) (lit {} 1))))",
+                    ),
                 ),
-            ),
-            (
-                "b".to_string(),
-                parse_one_expr("(fn {} (params {}) (app {} (var {} a)))"),
-            ),
-        ]);
-        let type_subst = UnordMap::new();
-        let mut walk = admission_test_walk(&defs, &type_subst);
-        for name in ["a", "b", "a", "b"] {
-            assert!(
-                walk.def(name, &defs[name], Some(Vec::new()))
-                    .unwrap()
-                    .contains("rank")
-            );
-            assert!(walk.active.is_empty(), "active guard must unwind");
-        }
+                (
+                    "b".to_string(),
+                    parse_one_expr("(fn {} (params {}) (app {} (var {} a)))"),
+                ),
+            ]);
+            let type_subst = UnordMap::new();
+            let mut walk = admission_test_walk(&defs, &type_subst, runtime);
+            for name in ["a", "b", "a", "b"] {
+                assert!(
+                    walk.def(name, &defs[name], Some(Vec::new()))
+                        .unwrap()
+                        .contains("rank")
+                );
+                assert!(walk.active.is_empty(), "active guard must unwind");
+            }
+        })
     }
 
     #[test]
@@ -19884,196 +20061,205 @@ mod tests {
     /// surfaces with its callee-body attribution in whole-program lowering.
     #[test]
     fn failed_mono_probe_restores_state_and_defers_the_real_error() {
-        let mut source = include_str!(
+        crate::lowering_runtime::with_native_lowering_runtime(|runtime| {
+            let mut source = include_str!(
             "../tests/fixtures/core/src/host/failed_mono_probe_restores_state_and_defers_the_real_error.deep"
         ).to_owned();
-        source.push_str(
-            r#"
+            source.push_str(
+                r#"
             (defsig {} good_probe (t-fn {} (t-prim {} bool)))
             (def {} good_probe
               (fn {} (params {})
                 (app {} (var {} bad)
                   (record {} Full (kv {} value (lit {type: (t-prim {} bool)} true))))))
         "#,
-        );
-        let checked = deep_check(&source);
-        let session = HostLoweringSession::new(&checked);
-        let body = find_top_level_def_expr(checked.exprs(), "bad").unwrap();
-        let helpers = TensorHelperSink::new(false, false);
-        let specialize = |prim| {
-            ensure_mono_specialization(
-                body,
-                "bad",
-                body,
-                &[HostTypeTerm::Adt(
-                    "Box".into(),
-                    vec![HostTypeTerm::Scalar(HostPrecisionTerm::Concrete(prim))],
-                )],
-                &HostTypeTerm::Bool,
-                &session,
-                &helpers,
-            )
-            .expect("the concrete recursive specialization must lower")
-        };
-        let first = specialize(Prim::Int32);
-        assert_eq!(
-            top_level_fn_helper_summary_rejects(&session, "bad_wrap"),
-            Ok(false),
-            "a speculative lowering error is not a summary rejection"
-        );
-        assert_eq!(
-            top_level_fn_helper_summary_rejects(&session, "good_probe"),
-            Ok(false)
-        );
-        let error = lower_host_program(&session, &BTreeMap::new())
-            .expect_err("real lowering must report the genuine bad call");
-        assert_eq!(error.span_id.as_deref(), Some("surf:119..200"));
-
-        // Request a new signature before reusing the old one: clearing the
-        // outer memo would now emit [second, first], not [first, second].
-        let second = specialize(Prim::F32);
-        assert_eq!(specialize(Prim::Int32), first);
-        let emitted = std::mem::take(&mut session.invocation.mono.borrow_mut().functions);
-        assert_eq!(
-            emitted
-                .iter()
-                .map(|lowered| lowered.function.name.as_str())
-                .collect::<Vec<_>>(),
-            [first.as_str(), second.as_str()]
-        );
-        for lowered in emitted {
-            let HostExprKind::MatchAdt { arms, .. } = &lowered.function.body.kind else {
-                panic!("the specialization must retain its recursive match");
-            };
-            assert!(
-                arms.iter().any(|arm| matches!(
-                    &arm.expr.kind,
-                    HostExprKind::Call { function, .. } if function == &lowered.function.name
-                )),
-                "the recursive edge must still call its emitted specialization"
             );
-        }
+            let checked = deep_check(&source);
+            let session = HostLoweringSession::new(&checked, runtime);
+            let body = find_top_level_def_expr(checked.exprs(), "bad").unwrap();
+            let helpers = TensorHelperSink::new(false, false);
+            let specialize = |prim| {
+                ensure_mono_specialization(
+                    body,
+                    "bad",
+                    body,
+                    &[HostTypeTerm::Adt(
+                        "Box".into(),
+                        vec![HostTypeTerm::Scalar(HostPrecisionTerm::Concrete(prim))],
+                    )],
+                    &HostTypeTerm::Bool,
+                    &session,
+                    &helpers,
+                )
+                .expect("the concrete recursive specialization must lower")
+            };
+            let first = specialize(Prim::Int32);
+            assert_eq!(
+                top_level_fn_helper_summary_rejects(&session, "bad_wrap"),
+                Ok(false),
+                "a speculative lowering error is not a summary rejection"
+            );
+            assert_eq!(
+                top_level_fn_helper_summary_rejects(&session, "good_probe"),
+                Ok(false)
+            );
+            let error = lower_host_program(&session, &BTreeMap::new())
+                .expect_err("real lowering must report the genuine bad call");
+            assert_eq!(error.span_id.as_deref(), Some("surf:119..200"));
+
+            // Request a new signature before reusing the old one: clearing the
+            // outer memo would now emit [second, first], not [first, second].
+            let second = specialize(Prim::F32);
+            assert_eq!(specialize(Prim::Int32), first);
+            let emitted = std::mem::take(&mut session.invocation.mono.borrow_mut().functions);
+            assert_eq!(
+                emitted
+                    .iter()
+                    .map(|lowered| lowered.function.name.as_str())
+                    .collect::<Vec<_>>(),
+                [first.as_str(), second.as_str()]
+            );
+            for lowered in emitted {
+                let HostExprKind::MatchAdt { arms, .. } = &lowered.function.body.kind else {
+                    panic!("the specialization must retain its recursive match");
+                };
+                assert!(
+                    arms.iter().any(|arm| matches!(
+                        &arm.expr.kind,
+                        HostExprKind::Call { function, .. } if function == &lowered.function.name
+                    )),
+                    "the recursive edge must still call its emitted specialization"
+                );
+            }
+        })
     }
 
     #[test]
     fn host_type_substitution_is_nested_session_local_and_unwind_safe() {
-        let checked = deep_check("(lit {type: (t-prim {} i64)} 0)");
-        let session = HostLoweringSession::new(&checked);
-        let other = HostLoweringSession::new(&checked);
-        let a = parse_one_expr("(lit {type: (t-var {} a)} 1)");
-        let b = parse_one_expr("(lit {type: (t-var {} b)} 1)");
-        let scope = UnordMap::new();
-        let unbound_a = HostTypeTerm::TypeVariable("a".into());
-        let unbound_b = HostTypeTerm::TypeVariable("b".into());
-        let outer = ActiveTypeSubstGuard::push(
-            UnordMap::from([
-                ("a".into(), HostTypeTerm::Int64),
-                ("b".into(), HostTypeTerm::Bool),
-            ]),
-            &session,
-        );
-        assert_eq!(expr_host_type(&a, &session, &scope), HostTypeTerm::Int64);
-        assert_eq!(expr_host_type(&a, &other, &scope), unbound_a);
-        let diagnostic = crate::lower::LowerDiagnostic::new(
-            "substitution scope unwind",
-            None,
-            Some("scope:a".into()),
-        )
-        .fatal();
-        let caught: Result<(), _> = crate::lower::catch_lowering_external(|| {
-            let _inner = ActiveTypeSubstGuard::push(
-                UnordMap::from([("a".into(), HostTypeTerm::Float32)]),
+        crate::lowering_runtime::with_native_lowering_runtime(|runtime| {
+            let checked = deep_check("(lit {type: (t-prim {} i64)} 0)");
+            let session = HostLoweringSession::new(&checked, runtime);
+            let other = HostLoweringSession::new(&checked, runtime);
+            let a = parse_one_expr("(lit {type: (t-var {} a)} 1)");
+            let b = parse_one_expr("(lit {type: (t-var {} b)} 1)");
+            let scope = UnordMap::new();
+            let unbound_a = HostTypeTerm::TypeVariable("a".into());
+            let unbound_b = HostTypeTerm::TypeVariable("b".into());
+            let outer = ActiveTypeSubstGuard::push(
+                UnordMap::from([
+                    ("a".into(), HostTypeTerm::Int64),
+                    ("b".into(), HostTypeTerm::Bool),
+                ]),
                 &session,
             );
-            assert_eq!(expr_host_type(&a, &session, &scope), HostTypeTerm::Float32);
-            assert_eq!(expr_host_type(&b, &session, &scope), unbound_b);
-            crate::lower::raise_fatal_lowering_diagnostic(diagnostic.clone());
-        });
-        assert_eq!(caught, Err(diagnostic));
-        assert_eq!(expr_host_type(&a, &session, &scope), HostTypeTerm::Int64);
-        assert_eq!(expr_host_type(&b, &session, &scope), HostTypeTerm::Bool);
-        {
-            let _invocation = HostInvocationGuard::begin(&session);
+            assert_eq!(expr_host_type(&a, &session, &scope), HostTypeTerm::Int64);
+            assert_eq!(expr_host_type(&a, &other, &scope), unbound_a);
+            let diagnostic = crate::lower::LowerDiagnostic::new(
+                "substitution scope unwind",
+                None,
+                Some("scope:a".into()),
+            )
+            .fatal();
+            let caught: Result<(), _> = runtime.catch_lowering(|| {
+                let _inner = ActiveTypeSubstGuard::push(
+                    UnordMap::from([("a".into(), HostTypeTerm::Float32)]),
+                    &session,
+                );
+                assert_eq!(expr_host_type(&a, &session, &scope), HostTypeTerm::Float32);
+                assert_eq!(expr_host_type(&b, &session, &scope), unbound_b);
+                runtime.raise_fatal_lowering_diagnostic(diagnostic.clone());
+            });
+            assert_eq!(caught, Err(diagnostic));
+            assert_eq!(expr_host_type(&a, &session, &scope), HostTypeTerm::Int64);
+            assert_eq!(expr_host_type(&b, &session, &scope), HostTypeTerm::Bool);
+            {
+                let _invocation = HostInvocationGuard::begin(&session);
+                assert_eq!(expr_host_type(&a, &session, &scope), unbound_a);
+            }
+            assert_eq!(expr_host_type(&a, &session, &scope), HostTypeTerm::Int64);
+            drop(outer);
             assert_eq!(expr_host_type(&a, &session, &scope), unbound_a);
-        }
-        assert_eq!(expr_host_type(&a, &session, &scope), HostTypeTerm::Int64);
-        drop(outer);
-        assert_eq!(expr_host_type(&a, &session, &scope), unbound_a);
+        })
     }
 
     #[test]
     fn host_inlining_scope_retains_outer_owner_and_recovers_after_unwind() {
-        let checked = deep_check(
-            r#"
+        crate::lowering_runtime::with_native_lowering_runtime(|runtime| {
+            let checked = deep_check(
+                r#"
             (defsig {} id (t-fn {} (t-prim {} i64) (t-prim {} i64)))
             (def {} id (fn {} (params {} (x {type: (t-prim {} i64)})) (var {} x)))
         "#,
-        );
-        let session = HostLoweringSession::new(&checked);
-        let other = HostLoweringSession::new(&checked);
-        let call = parse_one_expr("(app {} (var {} id) (lit {type: (t-prim {} i64)} 7))");
-        let assert_value = |program: &HostLoweringSession<'_>| {
-            let expanded = inline_top_level_host_call(&call, program).expect("fresh inline scope");
-            let lowered = lower_host_expr(
-                &expanded,
-                program,
-                &UnordMap::new(),
-                &mut TensorHelperSink::new(false, false),
+            );
+            let session = HostLoweringSession::new(&checked, runtime);
+            let other = HostLoweringSession::new(&checked, runtime);
+            let call = parse_one_expr("(app {} (var {} id) (lit {type: (t-prim {} i64)} 7))");
+            let assert_value = |program: &HostLoweringSession<'_>| {
+                let expanded =
+                    inline_top_level_host_call(&call, program).expect("fresh inline scope");
+                let lowered = lower_host_expr(
+                    &expanded,
+                    program,
+                    &UnordMap::new(),
+                    &mut TensorHelperSink::new(false, false),
+                )
+                .unwrap();
+                assert!(matches!(lowered.kind, HostExprKind::Int(7)));
+            };
+            let diagnostic = crate::lower::LowerDiagnostic::new(
+                "inlining scope unwind",
+                None,
+                Some("scope:id".into()),
             )
-            .unwrap();
-            assert!(matches!(lowered.kind, HostExprKind::Int(7)));
-        };
-        let diagnostic = crate::lower::LowerDiagnostic::new(
-            "inlining scope unwind",
-            None,
-            Some("scope:id".into()),
-        )
-        .fatal();
-        let caught: Result<(), _> = crate::lower::catch_lowering_external(|| {
-            let _outer = InliningGuard::begin("id", &session);
-            {
-                let _duplicate = InliningGuard::begin("id", &session);
+            .fatal();
+            let caught: Result<(), _> = runtime.catch_lowering(|| {
+                let _outer = InliningGuard::begin("id", &session);
+                {
+                    let _duplicate = InliningGuard::begin("id", &session);
+                    assert!(inline_top_level_host_call(&call, &session).is_none());
+                }
                 assert!(inline_top_level_host_call(&call, &session).is_none());
-            }
-            assert!(inline_top_level_host_call(&call, &session).is_none());
-            assert_value(&other);
-            crate::lower::raise_fatal_lowering_diagnostic(diagnostic.clone());
-        });
-        assert_eq!(caught, Err(diagnostic));
-        assert_value(&session);
+                assert_value(&other);
+                runtime.raise_fatal_lowering_diagnostic(diagnostic.clone());
+            });
+            assert_eq!(caught, Err(diagnostic));
+            assert_value(&session);
+        })
     }
 
     #[test]
     fn host_preflight_scopes_do_not_share_pointer_facts_between_sessions() {
-        let dynamic = deep_check(include_str!(
-            "../tests/fixtures/core/src/host/issue_1205_callable_scope_restore_semantics.deep"
-        ));
-        let scalar = deep_check(
-            r#"
+        crate::lowering_runtime::with_native_lowering_runtime(|runtime| {
+            let dynamic = deep_check(include_str!(
+                "../tests/fixtures/core/src/host/issue_1205_callable_scope_restore_semantics.deep"
+            ));
+            let scalar = deep_check(
+                r#"
             (def {} bc (fn {} (params {} (c {type: (t-prim {} f32)})) (var {} c)))
         "#,
-        );
-        let outer = HostLoweringSession::new(&dynamic);
-        let inner = HostLoweringSession::new(&scalar);
-        let call = parse_one_expr("(app {} (var {} bc) (lit {type: (t-prim {} f32)} 1.0))");
-        let guard = TensorHelperPreflightGuard::begin(&call, &outer);
-        assert!(tensor_helper_preflight_rejects(&call, &outer));
-        let diagnostic = crate::lower::LowerDiagnostic::new(
-            "preflight scope unwind",
-            None,
-            Some("scope:bc".into()),
-        )
-        .fatal();
-        let caught: Result<(), _> = crate::lower::catch_lowering_external(|| {
-            let _inner = TensorHelperPreflightGuard::begin_if_uncovered(&call, &inner);
-            assert!(!tensor_helper_preflight_rejects(&call, &inner));
+            );
+            let outer = HostLoweringSession::new(&dynamic, runtime);
+            let inner = HostLoweringSession::new(&scalar, runtime);
+            let call = parse_one_expr("(app {} (var {} bc) (lit {type: (t-prim {} f32)} 1.0))");
+            let guard = TensorHelperPreflightGuard::begin(&call, &outer);
             assert!(tensor_helper_preflight_rejects(&call, &outer));
-            crate::lower::raise_fatal_lowering_diagnostic(diagnostic.clone());
-        });
-        assert_eq!(caught, Err(diagnostic));
-        assert!(tensor_helper_preflight_rejects(&call, &outer));
-        drop(guard);
-        assert!(!tensor_helper_preflight_rejects(&call, &outer));
+            let diagnostic = crate::lower::LowerDiagnostic::new(
+                "preflight scope unwind",
+                None,
+                Some("scope:bc".into()),
+            )
+            .fatal();
+            let caught: Result<(), _> = runtime.catch_lowering(|| {
+                let _inner = TensorHelperPreflightGuard::begin_if_uncovered(&call, &inner);
+                assert!(!tensor_helper_preflight_rejects(&call, &inner));
+                assert!(tensor_helper_preflight_rejects(&call, &outer));
+                runtime.raise_fatal_lowering_diagnostic(diagnostic.clone());
+            });
+            assert_eq!(caught, Err(diagnostic));
+            assert!(tensor_helper_preflight_rejects(&call, &outer));
+            drop(guard);
+            assert!(!tensor_helper_preflight_rejects(&call, &outer));
+        })
     }
 
     /// A nested probe's already-returned error retains the existing deferral.
@@ -20091,103 +20277,113 @@ mod tests {
     }
 
     fn assert_issue_1922_summary_probe(name: &str, raises_here: bool) {
-        let deep: Vec<Expr> =
-            serde_json::from_str(include_str!("../tests/fixtures/helper_summary_fatal.json"))
-                .expect("original helper-summary AST");
-        let checked = chelis_types::check_ir_program(&deep, chelis_types::ProgramOrigin::Unlinked)
-            .unwrap_or_else(|result| panic!("IR check failed: {:?}", result.errors));
-        let session = HostLoweringSession::new(&checked);
-        for _ in 0..2 {
-            let caught =
-                std::panic::catch_unwind(|| top_level_fn_helper_summary_rejects(&session, name));
-            if let Err(payload) = &caught {
-                eprintln!(
-                    "escaped diagnostic: {:?}",
-                    payload.downcast_ref::<crate::lower::LowerDiagnostic>()
-                );
+        crate::lowering_runtime::with_native_lowering_runtime(|runtime| {
+            let deep: Vec<Expr> =
+                serde_json::from_str(include_str!("../tests/fixtures/helper_summary_fatal.json"))
+                    .expect("original helper-summary AST");
+            let checked =
+                chelis_types::check_ir_program(&deep, chelis_types::ProgramOrigin::Unlinked)
+                    .unwrap_or_else(|result| panic!("IR check failed: {:?}", result.errors));
+            let session = HostLoweringSession::new(&checked, runtime);
+            for _ in 0..2 {
+                let caught = std::panic::catch_unwind(|| {
+                    top_level_fn_helper_summary_rejects(&session, name)
+                });
+                if let Err(payload) = &caught {
+                    eprintln!(
+                        "escaped diagnostic: {:?}",
+                        payload.downcast_ref::<crate::lower::LowerDiagnostic>()
+                    );
+                }
+                let result = caught.expect("summary probe must not unwind");
+                if raises_here {
+                    let error = result.expect_err("direct fatal diagnostic must not be deferred");
+                    assert!(error.fatal, "{error:?}");
+                    assert_eq!(error.span_id.as_deref(), Some("surf:471..509"));
+                } else {
+                    assert_eq!(
+                        result,
+                        Ok(false),
+                        "preserve already-returned error deferral"
+                    );
+                }
             }
-            let result = caught.expect("summary probe must not unwind");
-            if raises_here {
-                let error = result.expect_err("direct fatal diagnostic must not be deferred");
-                assert!(error.fatal, "{error:?}");
-                assert_eq!(error.span_id.as_deref(), Some("surf:471..509"));
-            } else {
-                assert_eq!(
-                    result,
-                    Ok(false),
-                    "preserve already-returned error deferral"
-                );
-            }
-        }
+        })
     }
 
     #[test]
     fn named_tensor_entry_exposes_only_source_fixed_execution() {
-        let fixed = deep_check(include_str!(
-            "../tests/fixtures/core/src/host/named_tensor_entry_exposes_only_source_fixed_execution.deep"
-        ));
-        let plan = lower_named_tensor_entry_execution_plan(&fixed, "main")
-            .expect("fixed entry lowers")
-            .expect("fixed entry retains its execution plan");
-        plan.verify_ownership()
-            .expect("entry plan validates and seals against its DAG");
+        crate::lowering_runtime::with_native_lowering_runtime(|runtime| {
+            let fixed = deep_check(include_str!(
+                "../tests/fixtures/core/src/host/named_tensor_entry_exposes_only_source_fixed_execution.deep"
+            ));
+            let plan = lower_named_tensor_entry_execution_plan(&fixed, "main", runtime)
+                .expect("fixed entry lowers")
+                .expect("fixed entry retains its execution plan");
+            plan.verify_ownership()
+                .expect("entry plan validates and seals against its DAG");
 
-        let ordinary = deep_check(include_str!(
-            "../tests/fixtures/core/src/host/named_tensor_entry_exposes_only_source_fixed_execution_2.deep"
-        ));
-        assert!(
-            lower_named_tensor_entry_execution_plan(&ordinary, "main")
-                .expect("ordinary entry classification")
-                .is_none(),
-            "a no-Dropout entry stays on the legacy DAG path"
-        );
+            let ordinary = deep_check(include_str!(
+                "../tests/fixtures/core/src/host/named_tensor_entry_exposes_only_source_fixed_execution_2.deep"
+            ));
+            assert!(
+                lower_named_tensor_entry_execution_plan(&ordinary, "main", runtime)
+                    .expect("ordinary entry classification")
+                    .is_none(),
+                "a no-Dropout entry stays on the legacy DAG path"
+            );
+        })
     }
 
     #[test]
     fn named_execution_plan_keeps_authored_unused_interface_obligations() {
-        let checked = deep_check(include_str!(
-            "../tests/fixtures/core/src/host/named_execution_plan_keeps_authored_unused_interface_obligations.deep"
-        ));
-        let plan = lower_named_tensor_entry_execution_plan(&checked, "main")
-            .expect("fixed entry lowers")
-            .expect("fixed entry retains its execution plan");
-        let loads = plan
-            .dag_for_inspection()
-            .nodes()
-            .iter()
-            .filter_map(|node| match &node.op {
-                crate::dag::RiscOp::Load { name } => Some(name.as_str()),
-                _ => None,
-            })
-            .collect::<Vec<_>>();
-        assert_eq!(
-            loads,
-            vec!["x", "unused"],
-            "an authored repeated-dimension obligation keeps an unread parameter"
-        );
-        assert!(
-            plan.dag_for_inspection()
+        crate::lowering_runtime::with_native_lowering_runtime(|runtime| {
+            let checked = deep_check(include_str!(
+                "../tests/fixtures/core/src/host/named_execution_plan_keeps_authored_unused_interface_obligations.deep"
+            ));
+            let plan = lower_named_tensor_entry_execution_plan(&checked, "main", runtime)
+                .expect("fixed entry lowers")
+                .expect("fixed entry retains its execution plan");
+            let loads = plan
+                .dag_for_inspection()
                 .nodes()
                 .iter()
-                .any(|node| matches!(
-                    &node.op,
-                    crate::dag::RiscOp::ExtentWitness { parameter, claims, .. }
-                        if parameter == "unused" && !claims.is_empty()
-                ))
-        );
-        plan.verify_ownership()
-            .expect("authored interface plan remains sealed");
+                .filter_map(|node| match &node.op {
+                    crate::dag::RiscOp::Load { name } => Some(name.as_str()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(
+                loads,
+                vec!["x", "unused"],
+                "an authored repeated-dimension obligation keeps an unread parameter"
+            );
+            assert!(
+                plan.dag_for_inspection()
+                    .nodes()
+                    .iter()
+                    .any(|node| matches!(
+                        &node.op,
+                        crate::dag::RiscOp::ExtentWitness { parameter, claims, .. }
+                            if parameter == "unused" && !claims.is_empty()
+                    ))
+            );
+            plan.verify_ownership()
+                .expect("authored interface plan remains sealed");
+        })
     }
 
     #[test]
     fn named_tensor_entry_rejects_runtime_dropout_control() {
-        let checked = deep_check(include_str!(
-            "../tests/fixtures/core/src/host/named_tensor_entry_rejects_runtime_dropout_control.deep"
-        ));
-        let diagnostic = lower_named_tensor_entry_execution_plan(&checked, "main")
-            .expect_err("runtime rate has no fixed execution plan");
-        assert!(diagnostic.fatal, "unsupported Dropout control stays loud");
-        assert!(diagnostic.message.contains("not fixed-control"));
+        crate::lowering_runtime::with_native_lowering_runtime(|runtime| {
+            let checked = deep_check(include_str!(
+                "../tests/fixtures/core/src/host/named_tensor_entry_rejects_runtime_dropout_control.deep"
+            ));
+            let diagnostic = lower_named_tensor_entry_execution_plan(&checked, "main", runtime)
+                .expect_err("runtime rate has no fixed execution plan");
+            assert!(diagnostic.fatal, "unsupported Dropout control stays loud");
+            assert!(diagnostic.message.contains("not fixed-control"));
+        })
     }
 
     fn synthetic_tensor_function(name: &str, origin: HostFunctionOrigin) -> ConcreteHostFunction {
@@ -20347,6 +20543,7 @@ mod tests {
             .name("issue-1829-fanout".to_string())
             .stack_size(64 * 1024 * 1024)
             .spawn(move || {
+                crate::lowering_runtime::with_native_lowering_runtime(|runtime| {
                 let checked = deep_check(&issue_1829_fanout_source(depth));
                 let names = (0..=depth)
                     .map(|level| format!("f{level}"))
@@ -20354,7 +20551,7 @@ mod tests {
                 reset_host_work_profile();
                 reset_host_summary_probe_builds();
                 {
-                    let session = HostLoweringSession::new(&checked);
+                    let session = HostLoweringSession::new(&checked, runtime);
                     for name in &names {
                         host_def_kernel(&session, name, None)
                             .expect("#1829 fixture reaches a kernel decision");
@@ -20380,6 +20577,7 @@ mod tests {
                     "#1829: the always-compiled probe counter and the test-only profile \
                      must count the same misses, or a downstream receipt reads the wrong number"
                 );
+            })
             })
             .expect("#1829 probe thread starts")
             .join()
@@ -20412,12 +20610,14 @@ mod tests {
     #[test]
     fn issue_2181_callable_parameter_inlining_is_not_exponential_in_binder_count() {
         fn substitution_nodes(binders: usize) -> usize {
-            let checked = deep_check(&issue_2181_binder_chain_source(binders));
-            let lowered = top_level_lowering_map(checked.exprs(), checked.type_env());
-            reset_host_work_profile();
-            lower_host_program(&HostLoweringSession::new(&checked), &lowered)
-                .expect("#2181 fixture must lower");
-            take_host_work_profile().substitution_nodes
+            crate::lowering_runtime::with_native_lowering_runtime(|runtime| {
+                let checked = deep_check(&issue_2181_binder_chain_source(binders));
+                let lowered = top_level_lowering_map(checked.exprs(), checked.type_env(), runtime);
+                reset_host_work_profile();
+                lower_host_program(&HostLoweringSession::new(&checked, runtime), &lowered)
+                    .expect("#2181 fixture must lower");
+                take_host_work_profile().substitution_nodes
+            })
         }
         let small = substitution_nodes(8);
         let doubled = substitution_nodes(16);
@@ -20446,39 +20646,41 @@ mod tests {
     /// whose flag and refcount no longer exist.
     #[test]
     fn issue_1829_a_nested_session_neither_clears_nor_reads_the_enclosing_one() {
-        let outer = deep_check(include_str!(
-            "../tests/fixtures/core/src/host/issue_1829_a_nested_session_neither_clears_nor_reads_the_enclosing_one.deep"
-        ));
-        let inner = deep_check(include_str!(
-            "../tests/fixtures/core/src/host/issue_1829_a_nested_session_neither_clears_nor_reads_the_enclosing_one_2.deep"
-        ));
-        let outer_session = HostLoweringSession::new(&outer);
+        crate::lowering_runtime::with_native_lowering_runtime(|runtime| {
+            let outer = deep_check(include_str!(
+                "../tests/fixtures/core/src/host/issue_1829_a_nested_session_neither_clears_nor_reads_the_enclosing_one.deep"
+            ));
+            let inner = deep_check(include_str!(
+                "../tests/fixtures/core/src/host/issue_1829_a_nested_session_neither_clears_nor_reads_the_enclosing_one_2.deep"
+            ));
+            let outer_session = HostLoweringSession::new(&outer, runtime);
 
-        assert!(
-            cached_program_defs(&outer_session).contains_key("outer_fn"),
-            "#1829: the enclosing session must actually derive facts, or this \
+            assert!(
+                cached_program_defs(&outer_session).contains_key("outer_fn"),
+                "#1829: the enclosing session must actually derive facts, or this \
              receipt would pass without measuring anything"
-        );
-
-        {
-            let inner_session = HostLoweringSession::new(&inner);
-            let inner_defs = cached_program_defs(&inner_session);
-            assert!(
-                inner_defs.contains_key("inner_fn") && !inner_defs.contains_key("outer_fn"),
-                "#1829: an inner session's facts describe its own program only"
             );
-            assert!(
-                !cached_program_defs(&outer_session).contains_key("inner_fn"),
-                "#1829: an inner session must not write into the enclosing one"
-            );
-        }
 
-        // The inner session is gone. The enclosing one is untouched, and the
-        // borrow checker, not a refcount, is what made that true.
-        assert!(
-            cached_program_defs(&outer_session).contains_key("outer_fn"),
-            "#1829: an inner session's drop must not clear the enclosing session"
-        );
+            {
+                let inner_session = HostLoweringSession::new(&inner, runtime);
+                let inner_defs = cached_program_defs(&inner_session);
+                assert!(
+                    inner_defs.contains_key("inner_fn") && !inner_defs.contains_key("outer_fn"),
+                    "#1829: an inner session's facts describe its own program only"
+                );
+                assert!(
+                    !cached_program_defs(&outer_session).contains_key("inner_fn"),
+                    "#1829: an inner session must not write into the enclosing one"
+                );
+            }
+
+            // The inner session is gone. The enclosing one is untouched, and the
+            // borrow checker, not a refcount, is what made that true.
+            assert!(
+                cached_program_defs(&outer_session).contains_key("outer_fn"),
+                "#1829: an inner session's drop must not clear the enclosing session"
+            );
+        })
     }
 
     /// chelis#1835 fixture: a fan-out chain of defs, each calling the next
@@ -20526,17 +20728,20 @@ mod tests {
     /// becomes a call to an extracted tensor helper attached to the emitted
     /// host function; a host-lane body has none.
     fn issue_1835_c_lane_kernel_defs(checked: &CheckedProgram, names: &[String]) -> Vec<bool> {
-        let compiled = try_lower_compiled_program(checked).expect("#1835 fixture lowers on C");
-        let host = compiled.host.expect("#1835 fixture emits a host program");
-        names
-            .iter()
-            .map(|name| {
-                host.functions
-                    .iter()
-                    .find(|function| &function.name == name)
-                    .is_some_and(|function| !function.tensor_helpers.is_empty())
-            })
-            .collect()
+        crate::lowering_runtime::with_native_lowering_runtime(|runtime| {
+            let compiled =
+                try_lower_compiled_program(checked, runtime).expect("#1835 fixture lowers on C");
+            let host = compiled.host.expect("#1835 fixture emits a host program");
+            names
+                .iter()
+                .map(|name| {
+                    host.functions
+                        .iter()
+                        .find(|function| &function.name == name)
+                        .is_some_and(|function| !function.tensor_helpers.is_empty())
+                })
+                .collect()
+        })
     }
 
     /// chelis#1835 class receipt. `host_def_kernel` is the entry every lane
@@ -20555,12 +20760,14 @@ mod tests {
     /// being read. The pull request records the runs.
     #[test]
     fn issue_1835_kernel_decision_work_is_linear() {
-        const DEPTH: usize = 12;
-        for tensor_result in [true, false] {
-            std::thread::Builder::new()
+        crate::lowering_runtime::with_native_lowering_runtime(|runtime| {
+            const DEPTH: usize = 12;
+            for tensor_result in [true, false] {
+                std::thread::Builder::new()
                 .name(format!("issue-1835-fanout-{tensor_result}"))
                 .stack_size(512 * 1024 * 1024)
                 .spawn(move || {
+                crate::lowering_runtime::with_native_lowering_runtime(|runtime| {
                     let typed = deep_check(&issue_1835_fanout_source(DEPTH, tensor_result));
                     let effected = chelis_effects::check_program(&typed).expect("effect check");
                     let checked =
@@ -20571,7 +20778,7 @@ mod tests {
 
                     // One session, established by the caller because the type
                     // leaves it no choice, and NO other opt-in.
-                    let session = HostLoweringSession::new(&checked);
+                    let session = HostLoweringSession::new(&checked, runtime);
                     reset_host_work_profile();
                     let first_answers = names
                         .iter()
@@ -20632,53 +20839,55 @@ mod tests {
                          (chelis#1277 B2h; tensor_result={tensor_result})"
                     );
                 })
+            })
                 .expect("#1835 fanout thread starts")
                 .join()
                 .expect("#1835 fanout thread completes");
-        }
+            }
 
-        // Both chains above answer uniformly, all-kernel or all-host, so their
-        // cross-lane comparison cannot fail for a PER-DEFINITION disagreement:
-        // two constant vectors of the same constant are equal whatever the
-        // decision did. This program's answers are non-uniform by
-        // construction, one definition per documented class, so the
-        // comparison has something to disagree about.
-        let mixed = deep_check(include_str!(
-            "../tests/fixtures/core/src/host/issue_1835_kernel_decision_work_is_linear.deep"
-        ));
-        let mixed = chelis_types::check_linearity(
-            &chelis_effects::check_program(&mixed).expect("mixed effect check"),
-        )
-        .expect("mixed linearity check");
-        let mixed_names = ["k", "loud", "s", "k2"].map(String::from).to_vec();
-        let mixed_session = HostLoweringSession::new(&mixed);
-        let mixed_answers = mixed_names
-            .iter()
-            .map(|name| {
-                host_def_kernel(&mixed_session, name, None)
-                    .expect("#1835 mixed fixture reaches a kernel decision")
-                    .is_some()
-            })
-            .collect::<Vec<_>>();
-        eprintln!("#1835 mixed answers={mixed_answers:?}");
-        assert!(
-            mixed_answers.iter().any(|kernel| *kernel)
-                && mixed_answers.iter().any(|kernel| !*kernel),
-            "#1835: the mixed fixture must answer non-uniformly, or the cross-lane \
+            // Both chains above answer uniformly, all-kernel or all-host, so their
+            // cross-lane comparison cannot fail for a PER-DEFINITION disagreement:
+            // two constant vectors of the same constant are equal whatever the
+            // decision did. This program's answers are non-uniform by
+            // construction, one definition per documented class, so the
+            // comparison has something to disagree about.
+            let mixed = deep_check(include_str!(
+                "../tests/fixtures/core/src/host/issue_1835_kernel_decision_work_is_linear.deep"
+            ));
+            let mixed = chelis_types::check_linearity(
+                &chelis_effects::check_program(&mixed).expect("mixed effect check"),
+            )
+            .expect("mixed linearity check");
+            let mixed_names = ["k", "loud", "s", "k2"].map(String::from).to_vec();
+            let mixed_session = HostLoweringSession::new(&mixed, runtime);
+            let mixed_answers = mixed_names
+                .iter()
+                .map(|name| {
+                    host_def_kernel(&mixed_session, name, None)
+                        .expect("#1835 mixed fixture reaches a kernel decision")
+                        .is_some()
+                })
+                .collect::<Vec<_>>();
+            eprintln!("#1835 mixed answers={mixed_answers:?}");
+            assert!(
+                mixed_answers.iter().any(|kernel| *kernel)
+                    && mixed_answers.iter().any(|kernel| !*kernel),
+                "#1835: the mixed fixture must answer non-uniformly, or the cross-lane \
              comparison below is two constant vectors again; got {mixed_answers:?}"
-        );
-        assert_eq!(
-            mixed_answers,
-            vec![true, false, false, true],
-            "#1835: a pure tensor body is a kernel, an IO effect row and a non-tensor \
+            );
+            assert_eq!(
+                mixed_answers,
+                vec![true, false, false, true],
+                "#1835: a pure tensor body is a kernel, an IO effect row and a non-tensor \
              result are host code (chelis#1277 B2h's documented classes)"
-        );
-        assert_eq!(
-            mixed_answers,
-            issue_1835_c_lane_kernel_defs(&mixed, &mixed_names),
-            "#1835: the shared decision must answer what the C lane compiles, per \
+            );
+            assert_eq!(
+                mixed_answers,
+                issue_1835_c_lane_kernel_defs(&mixed, &mixed_names),
+                "#1835: the shared decision must answer what the C lane compiles, per \
              definition and not merely in aggregate (chelis#1277 B2h)"
-        );
+            );
+        })
     }
 
     fn issue_1205_source(operations: usize, flat: bool) -> String {
@@ -20749,12 +20958,15 @@ mod tests {
             .name(format!("issue-1205-host-{operations}"))
             .stack_size(64 * 1024 * 1024)
             .spawn(move || {
-                let typed = deep_check(&issue_1205_source(operations, flat));
-                let effected = chelis_effects::check_program(&typed).expect("effect check");
-                let checked = chelis_types::check_linearity(&effected).expect("linearity check");
-                reset_host_work_profile();
-                try_lower_compiled_program(&checked).expect("#1205 fixture lowers");
-                take_host_work_profile()
+                crate::lowering_runtime::with_native_lowering_runtime(|runtime| {
+                    let typed = deep_check(&issue_1205_source(operations, flat));
+                    let effected = chelis_effects::check_program(&typed).expect("effect check");
+                    let checked =
+                        chelis_types::check_linearity(&effected).expect("linearity check");
+                    reset_host_work_profile();
+                    try_lower_compiled_program(&checked, runtime).expect("#1205 fixture lowers");
+                    take_host_work_profile()
+                })
             })
             .expect("#1205 host profile thread starts")
             .join()
@@ -20856,6 +21068,7 @@ mod tests {
             .name("issue-1205-nested-callable-scopes".to_string())
             .stack_size(64 * 1024 * 1024)
             .spawn(|| {
+                crate::lowering_runtime::with_native_lowering_runtime(|runtime| {
                 for nested_fns in [true, false] {
                     let mut rows = Vec::new();
                     for depth in [20, 40, 80, 160] {
@@ -20883,13 +21096,13 @@ mod tests {
                             .replace("frontendperformance.shape", &format!("frontendperformance.nested{}{depth}", shape.to_lowercase()))
                             .replace("__BODY__", &body);
                         let typed = deep_check(&source);
-                        let defs = cached_program_defs(&HostLoweringSession::new(&typed));
+                        let defs = cached_program_defs(&HostLoweringSession::new(&typed, runtime));
                         let nested_body = lookup_program_def(&defs, "nested")
                             .expect("nested definition is present");
 
                         reset_host_work_profile();
                         let summaries = cached_dynamic_to_tensor_def_summaries(
-                            &HostLoweringSession::new(&typed),
+                            &HostLoweringSession::new(&typed, runtime),
                         );
                         assert_eq!(summaries.get("nested"), Some(&true));
                         let summary_profile = take_host_work_profile();
@@ -20934,6 +21147,7 @@ mod tests {
                     }
                 }
             })
+            })
             .expect("#1205 nested callable scope profile thread starts")
             .join()
             .expect("#1205 nested callable scope profile thread completes");
@@ -20941,177 +21155,191 @@ mod tests {
 
     #[test]
     fn issue_1205_callable_scope_restore_semantics() {
-        let mut direct = CallableScope::default();
-        let outer = direct.bind("f".to_string(), Some("bc".to_string()));
-        let duplicate = direct.bind("f".to_string(), Some("other".to_string()));
-        let inner = direct.bind("f".to_string(), None);
-        direct.restore([inner, duplicate, outer]);
-        assert!(
-            !direct.contains_key("f"),
-            "restoring repeated shadow bindings must recover the absent outer scope"
-        );
+        crate::lowering_runtime::with_native_lowering_runtime(|runtime| {
+            let mut direct = CallableScope::default();
+            let outer = direct.bind("f".to_string(), Some("bc".to_string()));
+            let duplicate = direct.bind("f".to_string(), Some("other".to_string()));
+            let inner = direct.bind("f".to_string(), None);
+            direct.restore([inner, duplicate, outer]);
+            assert!(
+                !direct.contains_key("f"),
+                "restoring repeated shadow bindings must recover the absent outer scope"
+            );
 
-        let typed = deep_check(include_str!(
-            "../tests/fixtures/core/src/host/issue_1205_callable_scope_restore_semantics.deep"
-        ));
-        let summaries = cached_dynamic_to_tensor_def_summaries(&HostLoweringSession::new(&typed));
-        let defs = cached_program_defs(&HostLoweringSession::new(&typed));
-        for (definition, final_callee) in [
-            ("sibling", "bc"),
-            ("nested", "f"),
-            ("duplicate", "f"),
-            ("sequential", "h"),
-        ] {
-            assert_eq!(
-                summaries.get(definition),
-                Some(&true),
-                "lexical shadow restoration must preserve the final dynamic call in {definition}"
-            );
-            let body = lookup_program_def(&defs, definition).expect("fixture definition exists");
-            let final_app = issue_1205_find_named_app(body, final_callee)
-                .expect("fixture contains its final named application");
-            let mut facts = UnordMap::new();
-            let body_facts = analyze_tensor_helper_preflight(body, &summaries, &mut facts);
-            assert!(
-                body_facts.reaches_dynamic_to_tensor,
-                "per-expression analysis must preserve the final call in {definition}"
-            );
-            assert!(
-                facts[&(final_app as *const Expr as usize)].reaches_dynamic_to_tensor,
-                "the final {final_callee} application in {definition} must inherit its dynamic summary"
-            );
-        }
+            let typed = deep_check(include_str!(
+                "../tests/fixtures/core/src/host/issue_1205_callable_scope_restore_semantics.deep"
+            ));
+            let summaries =
+                cached_dynamic_to_tensor_def_summaries(&HostLoweringSession::new(&typed, runtime));
+            let defs = cached_program_defs(&HostLoweringSession::new(&typed, runtime));
+            for (definition, final_callee) in [
+                ("sibling", "bc"),
+                ("nested", "f"),
+                ("duplicate", "f"),
+                ("sequential", "h"),
+            ] {
+                assert_eq!(
+                    summaries.get(definition),
+                    Some(&true),
+                    "lexical shadow restoration must preserve the final dynamic call in {definition}"
+                );
+                let body =
+                    lookup_program_def(&defs, definition).expect("fixture definition exists");
+                let final_app = issue_1205_find_named_app(body, final_callee)
+                    .expect("fixture contains its final named application");
+                let mut facts = UnordMap::new();
+                let body_facts = analyze_tensor_helper_preflight(body, &summaries, &mut facts);
+                assert!(
+                    body_facts.reaches_dynamic_to_tensor,
+                    "per-expression analysis must preserve the final call in {definition}"
+                );
+                assert!(
+                    facts[&(final_app as *const Expr as usize)].reaches_dynamic_to_tensor,
+                    "the final {final_callee} application in {definition} must inherit its dynamic summary"
+                );
+            }
+        })
     }
 
     #[test]
     fn issue_1205_preflight_preserves_static_to_tensor_literals() {
-        let typed = deep_check(include_str!(
-            "../tests/fixtures/core/src/host/issue_1205_preflight_preserves_static_to_tensor_literals.deep"
-        ));
-        fn find_to_tensor(expr: &Expr) -> Option<&Expr> {
-            if let Some((DeepTag::App, _, kids)) = stamped_parts(expr)
-                && let Some((DeepTag::Var, _, callee_kids)) = kids.first().and_then(stamped_parts)
-                && callee_kids.first().and_then(symbol_name) == Some("to_tensor")
-            {
-                return Some(expr);
+        crate::lowering_runtime::with_native_lowering_runtime(|runtime| {
+            let typed = deep_check(include_str!(
+                "../tests/fixtures/core/src/host/issue_1205_preflight_preserves_static_to_tensor_literals.deep"
+            ));
+            fn find_to_tensor(expr: &Expr) -> Option<&Expr> {
+                if let Some((DeepTag::App, _, kids)) = stamped_parts(expr)
+                    && let Some((DeepTag::Var, _, callee_kids)) =
+                        kids.first().and_then(stamped_parts)
+                    && callee_kids.first().and_then(symbol_name) == Some("to_tensor")
+                {
+                    return Some(expr);
+                }
+                match expr {
+                    Expr::List(list, _) => list.elements.iter().find_map(find_to_tensor),
+                    Expr::Node(node, _) => node.children_slice().iter().find_map(find_to_tensor),
+                    Expr::MetaExpr(meta, _) => find_to_tensor(&meta.expr),
+                    Expr::BareList(elements, _) => elements.iter().find_map(find_to_tensor),
+                    Expr::UnknownForm(data) => data.children.iter().find_map(find_to_tensor),
+                    Expr::Map(map, _) => map.find_expression(|value| find_to_tensor(value)),
+                    Expr::Atom(_, _) => None,
+                }
             }
-            match expr {
-                Expr::List(list, _) => list.elements.iter().find_map(find_to_tensor),
-                Expr::Node(node, _) => node.children_slice().iter().find_map(find_to_tensor),
-                Expr::MetaExpr(meta, _) => find_to_tensor(&meta.expr),
-                Expr::BareList(elements, _) => elements.iter().find_map(find_to_tensor),
-                Expr::UnknownForm(data) => data.children.iter().find_map(find_to_tensor),
-                Expr::Map(map, _) => map.find_expression(|value| find_to_tensor(value)),
-                Expr::Atom(_, _) => None,
-            }
-        }
-        let literal = typed
-            .exprs()
-            .iter()
-            .find_map(find_to_tensor)
-            .expect("fixture contains a to_tensor application");
-        assert!(
-            crate::lower::is_static_to_tensor_literal(literal),
-            "fixture must exercise the lowerer's literal recognizer"
-        );
-        assert!(
-            !expr_is_runtime_shaped_to_tensor(literal),
-            "the preflight must share the lowerer's static-literal exemption"
-        );
-        let effected = chelis_effects::check_program(&typed).expect("effect check");
-        let checked = chelis_types::check_linearity(&effected).expect("linearity check");
-        reset_host_work_profile();
-        try_lower_compiled_program(&checked).expect("static to_tensor fixture lowers");
-        let profile = take_host_work_profile();
-        assert_eq!(
-            profile.tensor_helper_preflight_rejections, 0,
-            "the runtime-shaped preflight must not reject a static literal: {profile:?}"
-        );
-        assert_eq!(profile.tensor_helper_builtin_load_rejections, 0);
+            let literal = typed
+                .exprs()
+                .iter()
+                .find_map(find_to_tensor)
+                .expect("fixture contains a to_tensor application");
+            assert!(
+                crate::lower::is_static_to_tensor_literal(literal),
+                "fixture must exercise the lowerer's literal recognizer"
+            );
+            assert!(
+                !expr_is_runtime_shaped_to_tensor(literal),
+                "the preflight must share the lowerer's static-literal exemption"
+            );
+            let effected = chelis_effects::check_program(&typed).expect("effect check");
+            let checked = chelis_types::check_linearity(&effected).expect("linearity check");
+            reset_host_work_profile();
+            try_lower_compiled_program(&checked, runtime).expect("static to_tensor fixture lowers");
+            let profile = take_host_work_profile();
+            assert_eq!(
+                profile.tensor_helper_preflight_rejections, 0,
+                "the runtime-shaped preflight must not reject a static literal: {profile:?}"
+            );
+            assert_eq!(profile.tensor_helper_builtin_load_rejections, 0);
+        })
     }
 
     #[test]
     fn issue_1205_preflight_does_not_confuse_shadowed_operands_with_calls() {
-        let typed = deep_check(include_str!(
-            "../tests/fixtures/core/src/host/issue_1205_preflight_does_not_confuse_shadowed_operands_with_calls.deep"
-        ));
-        let summaries = cached_dynamic_to_tensor_def_summaries(&HostLoweringSession::new(&typed));
-        assert_eq!(
-            summaries.get("bc"),
-            Some(&true),
-            "the top-level bc definition must exercise the transitive summary"
-        );
+        crate::lowering_runtime::with_native_lowering_runtime(|runtime| {
+            let typed = deep_check(include_str!(
+                "../tests/fixtures/core/src/host/issue_1205_preflight_does_not_confuse_shadowed_operands_with_calls.deep"
+            ));
+            let summaries =
+                cached_dynamic_to_tensor_def_summaries(&HostLoweringSession::new(&typed, runtime));
+            assert_eq!(
+                summaries.get("bc"),
+                Some(&true),
+                "the top-level bc definition must exercise the transitive summary"
+            );
 
-        let add = typed
-            .exprs()
-            .iter()
-            .find_map(|expr| issue_1205_find_named_app(expr, "add"))
-            .expect("fixture contains the twice body");
-        let mut facts = UnordMap::new();
-        let add_facts = analyze_tensor_helper_preflight(add, &summaries, &mut facts);
-        assert!(
-            !add_facts.reaches_dynamic_to_tensor,
-            "a tensor operand named bc is not a call to the top-level bc definition"
-        );
+            let add = typed
+                .exprs()
+                .iter()
+                .find_map(|expr| issue_1205_find_named_app(expr, "add"))
+                .expect("fixture contains the twice body");
+            let mut facts = UnordMap::new();
+            let add_facts = analyze_tensor_helper_preflight(add, &summaries, &mut facts);
+            assert!(
+                !add_facts.reaches_dynamic_to_tensor,
+                "a tensor operand named bc is not a call to the top-level bc definition"
+            );
+        })
     }
 
     #[test]
     fn issue_1205_preflight_tracks_callable_shadowing_and_aliases() {
-        let shadowed = deep_check(include_str!(
-            "../tests/fixtures/core/src/host/issue_1205_preflight_tracks_callable_shadowing_and_aliases.deep"
-        ));
-        let shadowed_summaries =
-            cached_dynamic_to_tensor_def_summaries(&HostLoweringSession::new(&shadowed));
-        assert_eq!(shadowed_summaries.get("bc"), Some(&true));
-        for name in ["local", "wrapper", "out"] {
-            assert_eq!(
-                shadowed_summaries.get(name),
-                Some(&false),
-                "a local callable named bc must shadow the top-level helper in {name}"
+        crate::lowering_runtime::with_native_lowering_runtime(|runtime| {
+            let shadowed = deep_check(include_str!(
+                "../tests/fixtures/core/src/host/issue_1205_preflight_tracks_callable_shadowing_and_aliases.deep"
+            ));
+            let shadowed_summaries = cached_dynamic_to_tensor_def_summaries(
+                &HostLoweringSession::new(&shadowed, runtime),
             );
-        }
-        let shadowed_defs = cached_program_defs(&HostLoweringSession::new(&shadowed));
-        let local_body = lookup_program_def(&shadowed_defs, "local").expect("local definition");
-        let local_call = issue_1205_find_named_app(local_body, "bc").expect("local bc call");
-        let mut shadowed_facts = UnordMap::new();
-        analyze_tensor_helper_preflight(local_body, &shadowed_summaries, &mut shadowed_facts);
-        assert!(
-            !shadowed_facts[&(local_call as *const Expr as usize)].reaches_dynamic_to_tensor,
-            "the local bc call must not inherit the top-level bc summary"
-        );
-
-        let aliased = deep_check(include_str!(
-            "../tests/fixtures/core/src/host/issue_1205_preflight_tracks_callable_shadowing_and_aliases_2.deep"
-        ));
-        let aliased_summaries =
-            cached_dynamic_to_tensor_def_summaries(&HostLoweringSession::new(&aliased));
-        for name in ["bc", "aliased", "wrapper", "out"] {
-            assert_eq!(
-                aliased_summaries.get(name),
-                Some(&true),
-                "the alias f = bc must propagate the dynamic helper summary through {name}"
+            assert_eq!(shadowed_summaries.get("bc"), Some(&true));
+            for name in ["local", "wrapper", "out"] {
+                assert_eq!(
+                    shadowed_summaries.get(name),
+                    Some(&false),
+                    "a local callable named bc must shadow the top-level helper in {name}"
+                );
+            }
+            let shadowed_defs = cached_program_defs(&HostLoweringSession::new(&shadowed, runtime));
+            let local_body = lookup_program_def(&shadowed_defs, "local").expect("local definition");
+            let local_call = issue_1205_find_named_app(local_body, "bc").expect("local bc call");
+            let mut shadowed_facts = UnordMap::new();
+            analyze_tensor_helper_preflight(local_body, &shadowed_summaries, &mut shadowed_facts);
+            assert!(
+                !shadowed_facts[&(local_call as *const Expr as usize)].reaches_dynamic_to_tensor,
+                "the local bc call must not inherit the top-level bc summary"
             );
-        }
-        let aliased_defs = cached_program_defs(&HostLoweringSession::new(&aliased));
-        let aliased_body =
-            lookup_program_def(&aliased_defs, "aliased").expect("aliased definition");
-        let alias_call = issue_1205_find_named_app(aliased_body, "f").expect("local f call");
-        let mut aliased_facts = UnordMap::new();
-        analyze_tensor_helper_preflight(aliased_body, &aliased_summaries, &mut aliased_facts);
-        assert!(
-            aliased_facts[&(alias_call as *const Expr as usize)].reaches_dynamic_to_tensor,
-            "the local f call must inherit the aliased top-level bc summary"
-        );
 
-        let effected = chelis_effects::check_program(&aliased).expect("effect check");
-        let checked = chelis_types::check_linearity(&effected).expect("linearity check");
-        reset_host_work_profile();
-        try_lower_compiled_program(&checked).expect("aliased fixture lowers");
-        let profile = take_host_work_profile();
-        assert_eq!(
-            profile.tensor_helper_builtin_load_rejections, 0,
-            "aliased dynamic helpers must be rejected by preflight, not after DAG lowering: {profile:?}"
-        );
+            let aliased = deep_check(include_str!(
+                "../tests/fixtures/core/src/host/issue_1205_preflight_tracks_callable_shadowing_and_aliases_2.deep"
+            ));
+            let aliased_summaries = cached_dynamic_to_tensor_def_summaries(
+                &HostLoweringSession::new(&aliased, runtime),
+            );
+            for name in ["bc", "aliased", "wrapper", "out"] {
+                assert_eq!(
+                    aliased_summaries.get(name),
+                    Some(&true),
+                    "the alias f = bc must propagate the dynamic helper summary through {name}"
+                );
+            }
+            let aliased_defs = cached_program_defs(&HostLoweringSession::new(&aliased, runtime));
+            let aliased_body =
+                lookup_program_def(&aliased_defs, "aliased").expect("aliased definition");
+            let alias_call = issue_1205_find_named_app(aliased_body, "f").expect("local f call");
+            let mut aliased_facts = UnordMap::new();
+            analyze_tensor_helper_preflight(aliased_body, &aliased_summaries, &mut aliased_facts);
+            assert!(
+                aliased_facts[&(alias_call as *const Expr as usize)].reaches_dynamic_to_tensor,
+                "the local f call must inherit the aliased top-level bc summary"
+            );
+
+            let effected = chelis_effects::check_program(&aliased).expect("effect check");
+            let checked = chelis_types::check_linearity(&effected).expect("linearity check");
+            reset_host_work_profile();
+            try_lower_compiled_program(&checked, runtime).expect("aliased fixture lowers");
+            let profile = take_host_work_profile();
+            assert_eq!(
+                profile.tensor_helper_builtin_load_rejections, 0,
+                "aliased dynamic helpers must be rejected by preflight, not after DAG lowering: {profile:?}"
+            );
+        })
     }
 
     /// harden-bounded-monomorphization D4: the interning identity is the
@@ -21144,80 +21372,92 @@ mod tests {
 
     #[test]
     fn adt_constructor_layouts_come_from_checked_registry() {
-        let checked = deep_check(include_str!(
-            "../tests/fixtures/core/src/host/adt_constructor_layouts_come_from_checked_registry.deep"
-        ));
-        let definitions = adt_constructor_definitions(&HostLoweringSession::new(&checked));
-        assert!(
-            definitions
+        crate::lowering_runtime::with_native_lowering_runtime(|runtime| {
+            let checked = deep_check(include_str!(
+                "../tests/fixtures/core/src/host/adt_constructor_layouts_come_from_checked_registry.deep"
+            ));
+            let definitions =
+                adt_constructor_definitions(&HostLoweringSession::new(&checked, runtime));
+            assert!(
+                definitions
+                    .iter()
+                    .all(|definition| definition.adt_name != "Option"),
+                "prelude ADTs with dedicated host layouts must not enter the generic constructor table"
+            );
+            let column = definitions
                 .iter()
-                .all(|definition| definition.adt_name != "Option"),
-            "prelude ADTs with dedicated host layouts must not enter the generic constructor table"
-        );
-        let column = definitions
-            .iter()
-            .find(|definition| definition.adt_name == "Column")
-            .expect("Column constructor metadata");
-        assert_eq!(column.parameters.len(), 2);
-        assert_eq!(
-            column.stored_parameters,
-            [false, true],
-            "the dimension parameter is erased while the dtype is stored"
-        );
-        assert!(matches!(
-            column.fields[0].term,
-            HostTypeTerm::PolymorphicTensor(HostTensorTypeTerm {
-                precision: HostPrecisionTerm::Variable(_),
-                shape: HostShapeTerm::Concrete(_),
-            })
-        ));
-        let frame = definitions
-            .iter()
-            .find(|definition| definition.adt_name == "Frame")
-            .expect("Frame constructor metadata");
-        assert_eq!(
-            frame.stored_parameters,
-            [false, true],
-            "nested Frame -> Hamt -> Column storage classification"
-        );
-        assert!(
-            checked
-                .signature_inference()
-                .functions
-                .get("from_column")
-                .is_some_and(|signature| {
-                    signature.authored_signature && signature.authored_signature_type.is_some()
-                }),
-            "checker metadata must record the authored generic signature"
-        );
-        assert!(
-            top_level_fn_is_type_polymorphic(&HostLoweringSession::new(&checked), "from_column"),
-            "the stored dtype behind Frame -> Hamt -> Column must classify from checker metadata"
-        );
+                .find(|definition| definition.adt_name == "Column")
+                .expect("Column constructor metadata");
+            assert_eq!(column.parameters.len(), 2);
+            assert_eq!(
+                column.stored_parameters,
+                [false, true],
+                "the dimension parameter is erased while the dtype is stored"
+            );
+            assert!(matches!(
+                column.fields[0].term,
+                HostTypeTerm::PolymorphicTensor(HostTensorTypeTerm {
+                    precision: HostPrecisionTerm::Variable(_),
+                    shape: HostShapeTerm::Concrete(_),
+                })
+            ));
+            let frame = definitions
+                .iter()
+                .find(|definition| definition.adt_name == "Frame")
+                .expect("Frame constructor metadata");
+            assert_eq!(
+                frame.stored_parameters,
+                [false, true],
+                "nested Frame -> Hamt -> Column storage classification"
+            );
+            assert!(
+                checked
+                    .signature_inference()
+                    .functions
+                    .get("from_column")
+                    .is_some_and(|signature| {
+                        signature.authored_signature && signature.authored_signature_type.is_some()
+                    }),
+                "checker metadata must record the authored generic signature"
+            );
+            assert!(
+                top_level_fn_is_type_polymorphic(
+                    &HostLoweringSession::new(&checked, runtime),
+                    "from_column"
+                ),
+                "the stored dtype behind Frame -> Hamt -> Column must classify from checker metadata"
+            );
+        })
     }
 
     #[test]
     fn generalized_unannotated_callback_is_not_classified_as_authored_polymorphism() {
-        let checked = deep_check(include_str!(
-            "../tests/fixtures/core/src/host/generalized_unannotated_callback_is_not_classified_as_authored_polymorphism.deep"
-        ));
-        let apply = checked
-            .signature_inference()
-            .functions
-            .get("apply")
-            .expect("generalized callback metadata");
-        assert!(!apply.authored_signature);
-        assert!(apply.authored_signature_type.is_none());
-        assert!(
-            !top_level_fn_is_type_polymorphic(&HostLoweringSession::new(&checked), "apply"),
-            "an inferred/generalized callback is not an authored generic ABI"
-        );
+        crate::lowering_runtime::with_native_lowering_runtime(|runtime| {
+            let checked = deep_check(include_str!(
+                "../tests/fixtures/core/src/host/generalized_unannotated_callback_is_not_classified_as_authored_polymorphism.deep"
+            ));
+            let apply = checked
+                .signature_inference()
+                .functions
+                .get("apply")
+                .expect("generalized callback metadata");
+            assert!(!apply.authored_signature);
+            assert!(apply.authored_signature_type.is_none());
+            assert!(
+                !top_level_fn_is_type_polymorphic(
+                    &HostLoweringSession::new(&checked, runtime),
+                    "apply"
+                ),
+                "an inferred/generalized callback is not an authored generic ABI"
+            );
+        })
     }
 
     #[test]
     fn authored_signature_classifier_requires_exact_or_unambiguous_name() {
-        let checked = parse_and_check(
-            r#"
+        crate::lowering_runtime::with_native_lowering_runtime(|runtime| {
+            let checked = parse_and_check(
+                r#"
                 (defsig {} Left.identity (a)
                   (t-fn {} (t-var {} a) (t-var {} a)))
                 (def {} Left.identity
@@ -21227,59 +21467,77 @@ mod tests {
                 (def {} Right.identity
                   (fn {} (params {} (x {type: (t-var {} b)})) (var {} x)))
             "#,
-        );
-        assert!(
-            top_level_fn_is_type_polymorphic(&HostLoweringSession::new(&checked), "Left.identity"),
-            "an exact qualified checker record must classify"
-        );
-        assert!(
-            top_level_fn_is_type_polymorphic(&HostLoweringSession::new(&checked), "Right.identity"),
-            "the other exact qualified checker record must classify"
-        );
-        assert!(
-            !top_level_fn_is_type_polymorphic(&HostLoweringSession::new(&checked), "identity"),
-            "an ambiguous terminal name must not select either qualified checker record"
-        );
+            );
+            assert!(
+                top_level_fn_is_type_polymorphic(
+                    &HostLoweringSession::new(&checked, runtime),
+                    "Left.identity"
+                ),
+                "an exact qualified checker record must classify"
+            );
+            assert!(
+                top_level_fn_is_type_polymorphic(
+                    &HostLoweringSession::new(&checked, runtime),
+                    "Right.identity"
+                ),
+                "the other exact qualified checker record must classify"
+            );
+            assert!(
+                !top_level_fn_is_type_polymorphic(
+                    &HostLoweringSession::new(&checked, runtime),
+                    "identity"
+                ),
+                "an ambiguous terminal name must not select either qualified checker record"
+            );
+        })
     }
 
     #[test]
     fn empty_to_tensor_uses_checked_default_before_concrete_resolution() {
-        let checked = deep_check(include_str!(
-            "../tests/fixtures/core/src/host/empty_to_tensor_uses_checked_default_before_concrete_resolution.deep"
-        ));
-        let compiled = try_lower_compiled_program(&checked)
-            .expect("the checked empty tensor default must resolve before codegen");
-        assert!(compiled.host.is_some());
+        crate::lowering_runtime::with_native_lowering_runtime(|runtime| {
+            let checked = deep_check(include_str!(
+                "../tests/fixtures/core/src/host/empty_to_tensor_uses_checked_default_before_concrete_resolution.deep"
+            ));
+            let compiled = try_lower_compiled_program(&checked, runtime)
+                .expect("the checked empty tensor default must resolve before codegen");
+            assert!(compiled.host.is_some());
+        })
     }
 
     #[test]
     fn host_program_uses_builtin_detects_process_run() {
-        // Hull subprocess exec: a global binding that applies process_run is
-        // detected so the build backends can reject it before codegen.
-        let checked = deep_check(include_str!(
-            "../tests/fixtures/core/src/host/host_program_uses_builtin_detects_process_run.deep"
-        ));
-        let compiled = try_lower_compiled_program(&checked).expect("fixture must lower");
-        let host = compiled.host.expect("host program present");
-        assert!(
-            host_program_uses_builtin(&host, "process_run"),
-            "host_program_uses_builtin must detect a process_run global binding"
-        );
+        crate::lowering_runtime::with_native_lowering_runtime(|runtime| {
+            // Hull subprocess exec: a global binding that applies process_run is
+            // detected so the build backends can reject it before codegen.
+            let checked = deep_check(include_str!(
+                "../tests/fixtures/core/src/host/host_program_uses_builtin_detects_process_run.deep"
+            ));
+            let compiled =
+                try_lower_compiled_program(&checked, runtime).expect("fixture must lower");
+            let host = compiled.host.expect("host program present");
+            assert!(
+                host_program_uses_builtin(&host, "process_run"),
+                "host_program_uses_builtin must detect a process_run global binding"
+            );
+        })
     }
 
     #[test]
     fn host_program_uses_builtin_is_false_without_process_run() {
-        // Negative parity: a program that uses only file IO must not report
-        // process_run usage, so the positive assertion is not vacuous.
-        let checked = deep_check(include_str!(
-            "../tests/fixtures/core/src/host/host_program_uses_builtin_is_false_without_process_run.deep"
-        ));
-        let compiled = try_lower_compiled_program(&checked).expect("fixture must lower");
-        let host = compiled.host.expect("host program present");
-        assert!(
-            !host_program_uses_builtin(&host, "process_run"),
-            "host_program_uses_builtin must be false for a read_file-only program"
-        );
+        crate::lowering_runtime::with_native_lowering_runtime(|runtime| {
+            // Negative parity: a program that uses only file IO must not report
+            // process_run usage, so the positive assertion is not vacuous.
+            let checked = deep_check(include_str!(
+                "../tests/fixtures/core/src/host/host_program_uses_builtin_is_false_without_process_run.deep"
+            ));
+            let compiled =
+                try_lower_compiled_program(&checked, runtime).expect("fixture must lower");
+            let host = compiled.host.expect("host program present");
+            assert!(
+                !host_program_uses_builtin(&host, "process_run"),
+                "host_program_uses_builtin must be false for a read_file-only program"
+            );
+        })
     }
 
     /// chelis#336: restore the guard that a function-typed parameter survives
@@ -21293,38 +21551,43 @@ mod tests {
     /// value type.
     #[test]
     fn host_program_preserves_fn_typed_param_through_lowering() {
-        let checked = deep_check(include_str!(
-            "../tests/fixtures/core/src/host/host_program_preserves_fn_typed_param_through_lowering.deep"
-        ));
-        let compiled = try_lower_compiled_program(&checked).expect("fixture must lower");
-        let host = compiled.host.expect("host program present");
-        let apply_each = host
-            .functions
-            .iter()
-            .find(|f| f.name == "apply_each")
-            .expect("apply_each must survive as a host function (not inlined)");
-        let f_param = apply_each
-            .params
-            .iter()
-            .find(|p| p.name == "f")
-            .expect("apply_each must keep its `f` parameter");
-        match &f_param.ty {
-            ConcreteHostType::Function(params, ret) => {
-                assert_eq!(params.len(), 1, "f takes one scalar arg, got {params:?}");
-                assert!(
-                    matches!(params[0], ConcreteHostType::Scalar(Prim::F32 | Prim::F64)),
-                    "f's arg must be a scalar, got {:?}",
-                    params[0]
-                );
-                assert!(
-                    matches!(**ret, ConcreteHostType::Scalar(Prim::F32 | Prim::F64)),
-                    "f's return must be a scalar, got {ret:?}"
-                );
+        crate::lowering_runtime::with_native_lowering_runtime(|runtime| {
+            let checked = deep_check(include_str!(
+                "../tests/fixtures/core/src/host/host_program_preserves_fn_typed_param_through_lowering.deep"
+            ));
+            let compiled =
+                try_lower_compiled_program(&checked, runtime).expect("fixture must lower");
+            let host = compiled.host.expect("host program present");
+            let apply_each = host
+                .functions
+                .iter()
+                .find(|f| f.name == "apply_each")
+                .expect("apply_each must survive as a host function (not inlined)");
+            let f_param = apply_each
+                .params
+                .iter()
+                .find(|p| p.name == "f")
+                .expect("apply_each must keep its `f` parameter");
+            match &f_param.ty {
+                ConcreteHostType::Function(params, ret) => {
+                    assert_eq!(params.len(), 1, "f takes one scalar arg, got {params:?}");
+                    assert!(
+                        matches!(params[0], ConcreteHostType::Scalar(Prim::F32 | Prim::F64)),
+                        "f's arg must be a scalar, got {:?}",
+                        params[0]
+                    );
+                    assert!(
+                        matches!(**ret, ConcreteHostType::Scalar(Prim::F32 | Prim::F64)),
+                        "f's return must be a scalar, got {ret:?}"
+                    );
+                }
+                other => {
+                    panic!(
+                        "fn-typed param `f` must lower to ConcreteHostType::Function, got {other:?}"
+                    )
+                }
             }
-            other => {
-                panic!("fn-typed param `f` must lower to ConcreteHostType::Function, got {other:?}")
-            }
-        }
+        })
     }
 
     /// chelis#336 negative parity: a program with no higher-order parameter
@@ -21332,20 +21595,23 @@ mod tests {
     /// is not vacuously satisfied by some unrelated fn-typed param.
     #[test]
     fn host_program_has_no_fn_typed_param_without_hof() {
-        let checked = deep_check(include_str!(
-            "../tests/fixtures/core/src/host/host_program_has_no_fn_typed_param_without_hof.deep"
-        ));
-        let compiled = try_lower_compiled_program(&checked).expect("fixture must lower");
-        let host = compiled.host.expect("host program present");
-        let has_fn_param = host
-            .functions
-            .iter()
-            .flat_map(|f| f.params.iter())
-            .any(|p| matches!(p.ty, ConcreteHostType::Function(_, _)));
-        assert!(
-            !has_fn_param,
-            "a non-HOF program must not lower any HostTypeTerm::Fn parameter"
-        );
+        crate::lowering_runtime::with_native_lowering_runtime(|runtime| {
+            let checked = deep_check(include_str!(
+                "../tests/fixtures/core/src/host/host_program_has_no_fn_typed_param_without_hof.deep"
+            ));
+            let compiled =
+                try_lower_compiled_program(&checked, runtime).expect("fixture must lower");
+            let host = compiled.host.expect("host program present");
+            let has_fn_param = host
+                .functions
+                .iter()
+                .flat_map(|f| f.params.iter())
+                .any(|p| matches!(p.ty, ConcreteHostType::Function(_, _)));
+            assert!(
+                !has_fn_param,
+                "a non-HOF program must not lower any HostTypeTerm::Fn parameter"
+            );
+        })
     }
 
     // ── Issue #308: scalar_to_tensor operand-precision plumbing ──
@@ -21363,13 +21629,19 @@ mod tests {
     }
 
     fn infer_scalar_to_tensor_host_type(arg_src: &str) -> Option<HostTypeTerm> {
-        let app = parse_deep_app(&format!("(app {{}} (var {{}} scalar_to_tensor) {arg_src})"));
-        // Empty checked program: the arm under test must not depend on
-        // program-level lookups for the precision recovery.
-        let program = deep_check(include_str!(
-            "../tests/fixtures/core/src/host/infer_scalar_to_tensor_host_type.deep"
-        ));
-        infer_app_expr_host_type(&app, &HostLoweringSession::new(&program), &UnordMap::new())
+        crate::lowering_runtime::with_native_lowering_runtime(|runtime| {
+            let app = parse_deep_app(&format!("(app {{}} (var {{}} scalar_to_tensor) {arg_src})"));
+            // Empty checked program: the arm under test must not depend on
+            // program-level lookups for the precision recovery.
+            let program = deep_check(include_str!(
+                "../tests/fixtures/core/src/host/infer_scalar_to_tensor_host_type.deep"
+            ));
+            infer_app_expr_host_type(
+                &app,
+                &HostLoweringSession::new(&program, runtime),
+                &UnordMap::new(),
+            )
+        })
     }
 
     #[test]
@@ -21470,18 +21742,20 @@ mod tests {
     }
 
     fn infer_concat_host_type(axis_src: &str) -> Option<HostTypeTerm> {
-        let app = parse_deep_app(&format!(
-            "(app {{}} (var {{}} concat) (var {{}} rows) {axis_src})"
-        ));
-        let program = deep_check(include_str!(
-            "../tests/fixtures/core/src/host/infer_scalar_to_tensor_host_type.deep"
-        ));
-        let mut scope = UnordMap::new();
-        scope.insert(
-            "rows".to_string(),
-            HostTypeTerm::List(Box::new(HostTypeTerm::Tensor(rank2_element()))),
-        );
-        infer_app_expr_host_type(&app, &HostLoweringSession::new(&program), &scope)
+        crate::lowering_runtime::with_native_lowering_runtime(|runtime| {
+            let app = parse_deep_app(&format!(
+                "(app {{}} (var {{}} concat) (var {{}} rows) {axis_src})"
+            ));
+            let program = deep_check(include_str!(
+                "../tests/fixtures/core/src/host/infer_scalar_to_tensor_host_type.deep"
+            ));
+            let mut scope = UnordMap::new();
+            scope.insert(
+                "rows".to_string(),
+                HostTypeTerm::List(Box::new(HostTypeTerm::Tensor(rank2_element()))),
+            );
+            infer_app_expr_host_type(&app, &HostLoweringSession::new(&program, runtime), &scope)
+        })
     }
 
     #[test]
@@ -21654,8 +21928,9 @@ mod tests {
 
     #[test]
     fn named_tensor_entry_inserts_copy_for_consuming_fanout() {
-        let checked = parse_and_check(
-            r#"
+        crate::lowering_runtime::with_native_lowering_runtime(|runtime| {
+            let checked = parse_and_check(
+                r#"
                 (def {} consume
                   (fn {type: (t-fn {}
                                 (t-tensor {} (d-lit {} 2) (d-lit {} 3) (t-prim {} f32))
@@ -21679,20 +21954,23 @@ mod tests {
                         (var {} consume)
                         (var {} x)))))
             "#,
-        );
-        let dag = lower_named_tensor_entry_dag(&checked, "double_it").expect("lower entry");
-        let copy_count = dag
-            .nodes()
-            .iter()
-            .filter(|node| matches!(node.op, RiscOp::Copy))
-            .count();
-        assert_eq!(copy_count, 1, "{:?}", dag.nodes());
+            );
+            let dag =
+                lower_named_tensor_entry_dag(&checked, "double_it", runtime).expect("lower entry");
+            let copy_count = dag
+                .nodes()
+                .iter()
+                .filter(|node| matches!(node.op, RiscOp::Copy))
+                .count();
+            assert_eq!(copy_count, 1, "{:?}", dag.nodes());
+        })
     }
 
     #[test]
     fn named_entry_dag_accepts_scalar_numeric_params() {
-        let checked = parse_and_check(
-            r#"
+        crate::lowering_runtime::with_native_lowering_runtime(|runtime| {
+            let checked = parse_and_check(
+                r#"
                 (def {} add_scalar
                   (fn {type: (t-fn {}
                                 (t-prim {} f32)
@@ -21706,22 +21984,24 @@ mod tests {
                       (var {} x)
                       (var {} y))))
             "#,
-        );
+            );
 
-        let dag = lower_named_tensor_entry_dag(&checked, "add_scalar").expect("lower scalar entry");
-        let root = dag.roots().first().and_then(|id| dag.get(*id)).unwrap();
+            let dag = lower_named_tensor_entry_dag(&checked, "add_scalar", runtime)
+                .expect("lower scalar entry");
+            let root = dag.roots().first().and_then(|id| dag.get(*id)).unwrap();
 
-        assert_eq!(root.op, RiscOp::Add, "{:?}", dag.nodes());
-        let scalar_loads = dag
-            .nodes()
-            .iter()
-            .filter(|node| {
-                matches!(node.op, RiscOp::Load { .. })
-                    && node.output_type.dims.is_empty()
-                    && node.output_type.precision == Prim::F32
-            })
-            .count();
-        assert_eq!(scalar_loads, 2, "{:?}", dag.nodes());
+            assert_eq!(root.op, RiscOp::Add, "{:?}", dag.nodes());
+            let scalar_loads = dag
+                .nodes()
+                .iter()
+                .filter(|node| {
+                    matches!(node.op, RiscOp::Load { .. })
+                        && node.output_type.dims.is_empty()
+                        && node.output_type.precision == Prim::F32
+                })
+                .count();
+            assert_eq!(scalar_loads, 2, "{:?}", dag.nodes());
+        })
     }
 
     // ── WS-4: declared float width survives entry-param lowering ──
@@ -21735,8 +22015,9 @@ mod tests {
 
     #[test]
     fn named_entry_dag_lowers_f64_scalar_params_to_f64_loads() {
-        let checked = parse_and_check(
-            r#"
+        crate::lowering_runtime::with_native_lowering_runtime(|runtime| {
+            let checked = parse_and_check(
+                r#"
                 (def {} add_scalar
                   (fn {type: (t-fn {}
                                 (t-prim {} f64)
@@ -21750,36 +22031,38 @@ mod tests {
                       (var {} x)
                       (var {} y))))
             "#,
-        );
+            );
 
-        let dag =
-            lower_named_tensor_entry_dag(&checked, "add_scalar").expect("lower f64 scalar entry");
-        let root = dag.roots().first().and_then(|id| dag.get(*id)).unwrap();
-        assert_eq!(root.op, RiscOp::Add, "{:?}", dag.nodes());
+            let dag = lower_named_tensor_entry_dag(&checked, "add_scalar", runtime)
+                .expect("lower f64 scalar entry");
+            let root = dag.roots().first().and_then(|id| dag.get(*id)).unwrap();
+            assert_eq!(root.op, RiscOp::Add, "{:?}", dag.nodes());
 
-        let f64_loads = dag
-            .nodes()
-            .iter()
-            .filter(|node| {
-                matches!(node.op, RiscOp::Load { .. })
-                    && node.output_type.dims.is_empty()
-                    && node.output_type.precision == Prim::F64
-            })
-            .count();
-        assert_eq!(
-            f64_loads,
-            2,
-            "an f64 scalar entry param must lower to an f64 Load, not f32: {:?}",
-            dag.nodes()
-        );
+            let f64_loads = dag
+                .nodes()
+                .iter()
+                .filter(|node| {
+                    matches!(node.op, RiscOp::Load { .. })
+                        && node.output_type.dims.is_empty()
+                        && node.output_type.precision == Prim::F64
+                })
+                .count();
+            assert_eq!(
+                f64_loads,
+                2,
+                "an f64 scalar entry param must lower to an f64 Load, not f32: {:?}",
+                dag.nodes()
+            );
+        })
     }
 
     #[test]
     fn named_entry_dag_does_not_downgrade_f64_scalar_params_to_f32() {
-        // Negative twin: the historical bug. NO scalar Load produced for
-        // a declared-f64 entry param may carry `Prim::F32`.
-        let checked = parse_and_check(
-            r#"
+        crate::lowering_runtime::with_native_lowering_runtime(|runtime| {
+            // Negative twin: the historical bug. NO scalar Load produced for
+            // a declared-f64 entry param may carry `Prim::F32`.
+            let checked = parse_and_check(
+                r#"
                 (def {} add_scalar
                   (fn {type: (t-fn {}
                                 (t-prim {} f64)
@@ -21793,25 +22076,26 @@ mod tests {
                       (var {} x)
                       (var {} y))))
             "#,
-        );
+            );
 
-        let dag =
-            lower_named_tensor_entry_dag(&checked, "add_scalar").expect("lower f64 scalar entry");
-        let f32_scalar_loads = dag
-            .nodes()
-            .iter()
-            .filter(|node| {
-                matches!(node.op, RiscOp::Load { .. })
-                    && node.output_type.dims.is_empty()
-                    && node.output_type.precision == Prim::F32
-            })
-            .count();
-        assert_eq!(
-            f32_scalar_loads,
-            0,
-            "an f64 scalar entry param must NOT be silently downgraded to an f32 Load: {:?}",
-            dag.nodes()
-        );
+            let dag = lower_named_tensor_entry_dag(&checked, "add_scalar", runtime)
+                .expect("lower f64 scalar entry");
+            let f32_scalar_loads = dag
+                .nodes()
+                .iter()
+                .filter(|node| {
+                    matches!(node.op, RiscOp::Load { .. })
+                        && node.output_type.dims.is_empty()
+                        && node.output_type.precision == Prim::F32
+                })
+                .count();
+            assert_eq!(
+                f32_scalar_loads,
+                0,
+                "an f64 scalar entry param must NOT be silently downgraded to an f32 Load: {:?}",
+                dag.nodes()
+            );
+        })
     }
 
     #[test]
@@ -21905,8 +22189,9 @@ mod tests {
 
     #[test]
     fn tensor_helper_exp_body_keeps_exp_root() {
-        let checked = parse_and_check(
-            r#"
+        crate::lowering_runtime::with_native_lowering_runtime(|runtime| {
+            let checked = parse_and_check(
+                r#"
                 (def {} softplus
                   (fn {type: (t-fn {}
                                 (t-tensor {} (d-lit {} 4) (t-prim {} f32))
@@ -21917,35 +22202,37 @@ mod tests {
                       (var {} exp)
                       (var {} x))))
             "#,
-        );
-        let defs = collect_program_defs(checked.exprs());
-        let body = lookup_program_def(&defs, "softplus").unwrap();
-        let fn_list = as_list(body).unwrap();
-        let body = children(fn_list).get(1).unwrap();
-        let mut scope = UnordMap::new();
-        scope.insert(
-            "x".to_string(),
-            HostTypeTerm::Tensor(TensorType {
+            );
+            let defs = collect_program_defs(checked.exprs());
+            let body = lookup_program_def(&defs, "softplus").unwrap();
+            let fn_list = as_list(body).unwrap();
+            let body = children(fn_list).get(1).unwrap();
+            let mut scope = UnordMap::new();
+            scope.insert(
+                "x".to_string(),
+                HostTypeTerm::Tensor(TensorType {
+                    dims: vec![DimInfo::Lit(4)],
+                    precision: Prim::F32,
+                }),
+            );
+            let expected = TensorType {
                 dims: vec![DimInfo::Lit(4)],
                 precision: Prim::F32,
-            }),
-        );
-        let expected = TensorType {
-            dims: vec![DimInfo::Lit(4)],
-            precision: Prim::F32,
-        };
-        let session = HostLoweringSession::new(&checked);
-        let context = cached_subexpr_lowering_context(&session);
-        let dag = lower_tensor_helper_dag(body, &session, &scope, &expected, &context)
-            .expect("helper dag");
-        let root = dag.roots().first().and_then(|id| dag.get(*id)).unwrap();
-        assert_eq!(root.op, RiscOp::Exp, "{:?}", dag.nodes());
+            };
+            let session = HostLoweringSession::new(&checked, runtime);
+            let context = cached_subexpr_lowering_context(&session);
+            let dag = lower_tensor_helper_dag(body, &session, &scope, &expected, &context)
+                .expect("helper dag");
+            let root = dag.roots().first().and_then(|id| dag.get(*id)).unwrap();
+            assert_eq!(root.op, RiscOp::Exp, "{:?}", dag.nodes());
+        })
     }
 
     #[test]
     fn tensor_helper_hoists_host_lane_tensor_args_with_f32_type() {
-        let checked = parse_and_check(
-            r#"
+        crate::lowering_runtime::with_native_lowering_runtime(|runtime| {
+            let checked = parse_and_check(
+                r#"
                 (defsig {}
                   jac_row
                   (n)
@@ -22035,64 +22322,67 @@ mod tests {
                     (cast {} (lit {type: (t-prim {} f32)} 1.0) (t-prim {} f32))
                     (cast {} (lit {type: (t-prim {} f32)} 3.0) (t-prim {} f32))))
             "#,
-        );
-        let lowered = top_level_lowering_map(checked.exprs(), checked.type_env());
-        let host = lower_host_program(&HostLoweringSession::new(&checked), &lowered)
-            .expect("host program must lower");
-        let out_binding = host
-            .globals
-            .iter()
-            .find(|binding| binding.name == "out")
-            .expect("out host binding");
-        let (bindings, body) = match &out_binding.value.kind {
-            HostExprKind::Let { bindings, body, .. } => (bindings, body.as_ref()),
-            other => panic!("expected out to hoist host-lane tensor arg into let, got {other:?}"),
-        };
-        let theta_binding = bindings
-            .iter()
-            .find(|binding| binding.name.starts_with("__host_tensor_arg_"))
-            .unwrap_or_else(|| {
-                panic!(
-                    "theta temp binding missing; hoisted bindings were {:?}",
-                    bindings
-                        .iter()
-                        .map(|binding| (&binding.name, &binding.ty))
-                        .collect::<Vec<_>>()
-                )
-            });
-        match &theta_binding.ty {
-            HostTypeTerm::Tensor(tensor) => assert_eq!(tensor.precision, Prim::F32),
-            other => panic!("expected hoisted theta binding to be tensor-typed, got {other:?}"),
-        }
-        let helper_index = match &body.kind {
-            HostExprKind::TensorCall { helper, .. } => *helper,
-            other => panic!("expected hoisted body to call tensor helper, got {other:?}"),
-        };
-        let helper = host
-            .global_tensor_helpers
-            .get(helper_index)
-            .expect("helper index in range");
-        assert!(
-            helper
-                .inputs
+            );
+            let lowered = top_level_lowering_map(checked.exprs(), checked.type_env(), runtime);
+            let host = lower_host_program(&HostLoweringSession::new(&checked, runtime), &lowered)
+                .expect("host program must lower");
+            let out_binding = host
+                .globals
                 .iter()
-                .any(|input| input.name == theta_binding.name),
-            "helper inputs should reference hoisted tensor temp: {:?}",
-            helper
-                .inputs
+                .find(|binding| binding.name == "out")
+                .expect("out host binding");
+            let (bindings, body) = match &out_binding.value.kind {
+                HostExprKind::Let { bindings, body, .. } => (bindings, body.as_ref()),
+                other => {
+                    panic!("expected out to hoist host-lane tensor arg into let, got {other:?}")
+                }
+            };
+            let theta_binding = bindings
                 .iter()
-                .map(|input| (&input.name, &input.ty))
-                .collect::<Vec<_>>()
-        );
-        assert!(
-            helper.inputs.iter().all(|input| input.name != "to_tensor"),
-            "helper inputs must not contain raw `to_tensor` load: {:?}",
-            helper
-                .inputs
-                .iter()
-                .map(|input| (&input.name, &input.ty))
-                .collect::<Vec<_>>()
-        );
+                .find(|binding| binding.name.starts_with("__host_tensor_arg_"))
+                .unwrap_or_else(|| {
+                    panic!(
+                        "theta temp binding missing; hoisted bindings were {:?}",
+                        bindings
+                            .iter()
+                            .map(|binding| (&binding.name, &binding.ty))
+                            .collect::<Vec<_>>()
+                    )
+                });
+            match &theta_binding.ty {
+                HostTypeTerm::Tensor(tensor) => assert_eq!(tensor.precision, Prim::F32),
+                other => panic!("expected hoisted theta binding to be tensor-typed, got {other:?}"),
+            }
+            let helper_index = match &body.kind {
+                HostExprKind::TensorCall { helper, .. } => *helper,
+                other => panic!("expected hoisted body to call tensor helper, got {other:?}"),
+            };
+            let helper = host
+                .global_tensor_helpers
+                .get(helper_index)
+                .expect("helper index in range");
+            assert!(
+                helper
+                    .inputs
+                    .iter()
+                    .any(|input| input.name == theta_binding.name),
+                "helper inputs should reference hoisted tensor temp: {:?}",
+                helper
+                    .inputs
+                    .iter()
+                    .map(|input| (&input.name, &input.ty))
+                    .collect::<Vec<_>>()
+            );
+            assert!(
+                helper.inputs.iter().all(|input| input.name != "to_tensor"),
+                "helper inputs must not contain raw `to_tensor` load: {:?}",
+                helper
+                    .inputs
+                    .iter()
+                    .map(|input| (&input.name, &input.ty))
+                    .collect::<Vec<_>>()
+            );
+        })
     }
 
     #[test]
@@ -23111,42 +23401,45 @@ mod tests {
     /// used to gate inlining is gone with the inlining.
     #[test]
     fn nonrecursive_generic_match_is_a_bounded_callsite_specialization() {
-        let checked = deep_check(include_str!(
-            "../tests/fixtures/core/src/host/nonrecursive_generic_match_is_a_bounded_callsite_specialization.deep"
-        ));
-        let lowered = try_lower_compiled_program(&checked)
-            .expect("the bounded generic match must lower through its concrete caller");
-        let host = lowered
-            .host
-            .as_ref()
-            .expect("the program lowers a host lane");
-        assert!(
-            host.functions
-                .iter()
-                .any(|function| function.origin == HostFunctionOrigin::Monomorphized),
-            "the non-recursive generic must reach lowering as a specialization, not an inline paste"
-        );
+        crate::lowering_runtime::with_native_lowering_runtime(|runtime| {
+            let checked = deep_check(include_str!(
+                "../tests/fixtures/core/src/host/nonrecursive_generic_match_is_a_bounded_callsite_specialization.deep"
+            ));
+            let lowered = try_lower_compiled_program(&checked, runtime)
+                .expect("the bounded generic match must lower through its concrete caller");
+            let host = lowered
+                .host
+                .as_ref()
+                .expect("the program lowers a host lane");
+            assert!(
+                host.functions
+                    .iter()
+                    .any(|function| function.origin == HostFunctionOrigin::Monomorphized),
+                "the non-recursive generic must reach lowering as a specialization, not an inline paste"
+            );
+        })
     }
 
     #[test]
     fn manifested_host_lane_overrides_legacy_tensor_root_classification() {
-        let checked = deep_check(include_str!(
-            "../tests/fixtures/core/src/host/manifested_host_lane_overrides_legacy_tensor_root_classification.deep"
-        ));
-        let realizability = chelis_effects::realizability::infer_realizability(
-            &checked,
-            &[
-                Prim::F32,
-                Prim::Bool,
-                Prim::Bf16,
-                Prim::F16,
-                Prim::Int32,
-                Prim::Int64,
-            ],
-        );
-        let manifest =
-            chelis_effects::realizability::compute_root_manifest(&checked, &realizability);
-        assert!(
+        crate::lowering_runtime::with_native_lowering_runtime(|runtime| {
+            let checked = deep_check(include_str!(
+                "../tests/fixtures/core/src/host/manifested_host_lane_overrides_legacy_tensor_root_classification.deep"
+            ));
+            let realizability = chelis_effects::realizability::infer_realizability(
+                &checked,
+                &[
+                    Prim::F32,
+                    Prim::Bool,
+                    Prim::Bf16,
+                    Prim::F16,
+                    Prim::Int32,
+                    Prim::Int64,
+                ],
+            );
+            let manifest =
+                chelis_effects::realizability::compute_root_manifest(&checked, &realizability);
+            assert!(
             manifest
                 .entries
                 .iter()
@@ -23154,17 +23447,18 @@ mod tests {
             "the C-like capability set must route the f64 root to Host"
         );
 
-        let legacy = try_lower_compiled_program(&checked).expect("legacy lowering");
-        assert!(
-            legacy.host.is_none(),
-            "the fixture must exercise the legacy classifier's Tensor decision"
-        );
-        let manifested = try_lower_compiled_program_with_manifest(&checked, &manifest)
-            .expect("manifested lowering");
-        assert!(
-            manifested.host.is_some(),
-            "manifested lowering must retain the C-target Host realization"
-        );
+            let legacy = try_lower_compiled_program(&checked, runtime).expect("legacy lowering");
+            assert!(
+                legacy.host.is_none(),
+                "the fixture must exercise the legacy classifier's Tensor decision"
+            );
+            let manifested = try_lower_compiled_program_with_manifest(&checked, &manifest, runtime)
+                .expect("manifested lowering");
+            assert!(
+                manifested.host.is_some(),
+                "manifested lowering must retain the C-target Host realization"
+            );
+        })
     }
 
     /// chelis#1201 / coral#26: a generic ADT constructed in a position the
@@ -23178,12 +23472,14 @@ mod tests {
     /// coral's `Hamt` node constructors take.
     #[test]
     fn generic_adt_built_outside_a_result_position_specializes() {
-        let checked = deep_check(include_str!(
-            "../tests/fixtures/core/src/host/generic_adt_built_outside_a_result_position_specializes.deep"
-        ));
-        try_lower_compiled_program(&checked).expect(
-            "a generic ADT built in a block-local binding must resolve from the specialization",
-        );
+        crate::lowering_runtime::with_native_lowering_runtime(|runtime| {
+            let checked = deep_check(include_str!(
+                "../tests/fixtures/core/src/host/generic_adt_built_outside_a_result_position_specializes.deep"
+            ));
+            try_lower_compiled_program(&checked, runtime).expect(
+                "a generic ADT built in a block-local binding must resolve from the specialization",
+            );
+        })
     }
 
     /// chelis#1201: a bare nullary generic constructor used as a call
@@ -23196,11 +23492,13 @@ mod tests {
     /// `generic_adt_built_outside_a_result_position_specializes`.
     #[test]
     fn nullary_generic_constructor_in_argument_position_specializes() {
-        let checked = deep_check(include_str!(
-            "../tests/fixtures/core/src/host/nullary_generic_constructor_in_argument_position_specializes.deep"
-        ));
-        try_lower_compiled_program(&checked)
-            .expect("a nullary generic constructor in argument position must lower");
+        crate::lowering_runtime::with_native_lowering_runtime(|runtime| {
+            let checked = deep_check(include_str!(
+                "../tests/fixtures/core/src/host/nullary_generic_constructor_in_argument_position_specializes.deep"
+            ));
+            try_lower_compiled_program(&checked, runtime)
+                .expect("a nullary generic constructor in argument position must lower");
+        })
     }
 
     /// chelis#1201: a generic container instantiated at a DIMENSION-generic
@@ -23215,11 +23513,13 @@ mod tests {
     /// as a guard on that fix.
     #[test]
     fn generic_container_over_a_dimension_generic_adt_specializes() {
-        let checked = deep_check(include_str!(
-            "../tests/fixtures/core/src/host/generic_container_over_a_dimension_generic_adt_specializes.deep"
-        ));
-        try_lower_compiled_program(&checked)
-            .expect("a generic container over a dim-generic element must lower");
+        crate::lowering_runtime::with_native_lowering_runtime(|runtime| {
+            let checked = deep_check(include_str!(
+                "../tests/fixtures/core/src/host/generic_container_over_a_dimension_generic_adt_specializes.deep"
+            ));
+            try_lower_compiled_program(&checked, runtime)
+                .expect("a generic container over a dim-generic element must lower");
+        })
     }
 
     /// chelis#1216: a RECURSIVE function generic over an erased ADT
@@ -23234,42 +23534,44 @@ mod tests {
     /// this shape.
     #[test]
     fn recursive_dimension_generic_call_is_monomorphized() {
-        let checked = deep_check(include_str!(
-            "../tests/fixtures/core/src/host/recursive_dimension_generic_call_is_monomorphized.deep"
-        ));
-        let lowered = try_lower_compiled_program(&checked)
-            .expect("a recursive dimension-generic call must lower through monomorphization");
-        let host = lowered
-            .host
-            .as_ref()
-            .expect("the program lowers a host lane");
-        // PR #1218 review: any-Monomorphized was too weak — pin the
-        // specialization to `all_eq_len` itself...
-        let specialization = host
-            .functions
-            .iter()
-            .find(|function| {
-                function.origin == HostFunctionOrigin::Monomorphized
-                    && function.name.starts_with("all_eq_len__mono_")
-            })
-            .expect("the specialization must belong to `all_eq_len`, not merely exist");
-        // ...and pin its recursive edge to the OWNING specialized symbol:
-        // the reported defect was precisely that edge falling through to a
-        // plain call to the elided generic symbol. Direct recursion at one
-        // instantiation memoizes to one symbol, so the edge must name the
-        // specialization it lives in.
-        let body = format!("{:?}", specialization.body);
-        assert!(
-            body.contains(&format!("function: \"{}\"", specialization.name)),
-            "the recursive edge must call the owning specialized symbol \
+        crate::lowering_runtime::with_native_lowering_runtime(|runtime| {
+            let checked = deep_check(include_str!(
+                "../tests/fixtures/core/src/host/recursive_dimension_generic_call_is_monomorphized.deep"
+            ));
+            let lowered = try_lower_compiled_program(&checked, runtime)
+                .expect("a recursive dimension-generic call must lower through monomorphization");
+            let host = lowered
+                .host
+                .as_ref()
+                .expect("the program lowers a host lane");
+            // PR #1218 review: any-Monomorphized was too weak — pin the
+            // specialization to `all_eq_len` itself...
+            let specialization = host
+                .functions
+                .iter()
+                .find(|function| {
+                    function.origin == HostFunctionOrigin::Monomorphized
+                        && function.name.starts_with("all_eq_len__mono_")
+                })
+                .expect("the specialization must belong to `all_eq_len`, not merely exist");
+            // ...and pin its recursive edge to the OWNING specialized symbol:
+            // the reported defect was precisely that edge falling through to a
+            // plain call to the elided generic symbol. Direct recursion at one
+            // instantiation memoizes to one symbol, so the edge must name the
+            // specialization it lives in.
+            let body = format!("{:?}", specialization.body);
+            assert!(
+                body.contains(&format!("function: \"{}\"", specialization.name)),
+                "the recursive edge must call the owning specialized symbol \
              `{}`, got body:\n{body}",
-            specialization.name
-        );
-        assert!(
-            !body.contains("function: \"all_eq_len\""),
-            "no edge may still call the elided generic symbol `all_eq_len`, \
+                specialization.name
+            );
+            assert!(
+                !body.contains("function: \"all_eq_len\""),
+                "no edge may still call the elided generic symbol `all_eq_len`, \
              got body:\n{body}"
-        );
+            );
+        })
     }
 
     // ── chelis#1271: cross-package constructor-name collision ────────
@@ -23331,113 +23633,130 @@ mod tests {
     }
 
     fn lower_against(program: &CheckedProgram, source: &str) -> Result<HostExpr, String> {
-        let program = &HostLoweringSession::new(program);
-        let mut helpers = TensorHelperSink::new(false, false);
-        lower_host_expr(&deep_expr(source), program, &UnordMap::new(), &mut helpers)
-            .map_err(|diagnostic| diagnostic.message)
+        crate::lowering_runtime::with_native_lowering_runtime(|runtime| {
+            let program = &HostLoweringSession::new(program, runtime);
+            let mut helpers = TensorHelperSink::new(false, false);
+            lower_host_expr(&deep_expr(source), program, &UnordMap::new(), &mut helpers)
+                .map_err(|diagnostic| diagnostic.message)
+        })
     }
 
     #[test]
     fn constructor_resolution_prefers_the_exact_spelling() {
-        // The repair: the mangled name IS the identity
-        // (spec/04-type-system.md, "Module identity"), so the
-        // later-sorting package still resolves to its own declaration.
-        let checked = parse_and_check(COLLIDING_DECLARATIONS);
-        let AdtConstructorResolution::Unique(definition) = resolve_adt_constructor_definition(
-            &HostLoweringSession::new(&checked),
-            "Blib__Wrapped",
-        ) else {
-            panic!("an exactly-spelled constructor must resolve uniquely");
-        };
-        assert_eq!(definition.adt_name, "Blib__Wrapped");
-        assert_eq!(
-            definition
-                .fields
-                .iter()
-                .map(|field| field.name.as_deref())
-                .collect::<Vec<_>>(),
-            [Some("extra"), Some("amount")],
-            "the exact spelling must carry its own field list and order"
-        );
+        crate::lowering_runtime::with_native_lowering_runtime(|runtime| {
+            // The repair: the mangled name IS the identity
+            // (spec/04-type-system.md, "Module identity"), so the
+            // later-sorting package still resolves to its own declaration.
+            let checked = parse_and_check(COLLIDING_DECLARATIONS);
+            let AdtConstructorResolution::Unique(definition) = resolve_adt_constructor_definition(
+                &HostLoweringSession::new(&checked, runtime),
+                "Blib__Wrapped",
+            ) else {
+                panic!("an exactly-spelled constructor must resolve uniquely");
+            };
+            assert_eq!(definition.adt_name, "Blib__Wrapped");
+            assert_eq!(
+                definition
+                    .fields
+                    .iter()
+                    .map(|field| field.name.as_deref())
+                    .collect::<Vec<_>>(),
+                [Some("extra"), Some("amount")],
+                "the exact spelling must carry its own field list and order"
+            );
+        })
     }
 
     #[test]
     fn constructor_resolution_still_answers_a_unique_terminal_spelling() {
-        // The terminal fallback is what lets a short, unqualified
-        // spelling reach its declaration; the repair narrows it, it does
-        // not remove it.
-        let checked = parse_and_check(concat!(
-            "(deftype {} Blib__Wrapped () (variant {} Blib__Wrapped ",
-            "(field {} amount (t-prim {} f32))))\n"
-        ));
-        let AdtConstructorResolution::Unique(definition) =
-            resolve_adt_constructor_definition(&HostLoweringSession::new(&checked), "Wrapped")
-        else {
-            panic!("an uncontested terminal spelling must still resolve");
-        };
-        assert_eq!(definition.adt_name, "Blib__Wrapped");
+        crate::lowering_runtime::with_native_lowering_runtime(|runtime| {
+            // The terminal fallback is what lets a short, unqualified
+            // spelling reach its declaration; the repair narrows it, it does
+            // not remove it.
+            let checked = parse_and_check(concat!(
+                "(deftype {} Blib__Wrapped () (variant {} Blib__Wrapped ",
+                "(field {} amount (t-prim {} f32))))\n"
+            ));
+            let AdtConstructorResolution::Unique(definition) = resolve_adt_constructor_definition(
+                &HostLoweringSession::new(&checked, runtime),
+                "Wrapped",
+            ) else {
+                panic!("an uncontested terminal spelling must still resolve");
+            };
+            assert_eq!(definition.adt_name, "Blib__Wrapped");
+        })
     }
 
     #[test]
     fn constructor_resolution_refuses_a_contested_terminal_spelling() {
-        // Negative parity: when the short spelling really is ambiguous,
-        // lowering must say so and name both sides rather than restore
-        // the defect under a different first-match rule.
-        let checked = parse_and_check(COLLIDING_DECLARATIONS);
-        let AdtConstructorResolution::Ambiguous(candidates) =
-            resolve_adt_constructor_definition(&HostLoweringSession::new(&checked), "Wrapped")
-        else {
-            panic!("a contested terminal spelling must not resolve");
-        };
-        assert_eq!(candidates, ["Adep__Wrapped", "Blib__Wrapped"]);
-        let message =
-            ambiguous_constructor_error(&deep_expr("(var {} Wrapped)"), "Wrapped", &candidates)
-                .message;
-        assert!(
-            message.contains("`Adep__Wrapped`") && message.contains("`Blib__Wrapped`"),
-            "the diagnostic must name both candidates; got: {message}"
-        );
-        assert!(
-            message.contains("unsupported:") && message.contains("[04-TOT-3]"),
-            "the diagnostic must keep the branded lowering shape; got: {message}"
-        );
+        crate::lowering_runtime::with_native_lowering_runtime(|runtime| {
+            // Negative parity: when the short spelling really is ambiguous,
+            // lowering must say so and name both sides rather than restore
+            // the defect under a different first-match rule.
+            let checked = parse_and_check(COLLIDING_DECLARATIONS);
+            let AdtConstructorResolution::Ambiguous(candidates) =
+                resolve_adt_constructor_definition(
+                    &HostLoweringSession::new(&checked, runtime),
+                    "Wrapped",
+                )
+            else {
+                panic!("a contested terminal spelling must not resolve");
+            };
+            assert_eq!(candidates, ["Adep__Wrapped", "Blib__Wrapped"]);
+            let message =
+                ambiguous_constructor_error(&deep_expr("(var {} Wrapped)"), "Wrapped", &candidates)
+                    .message;
+            assert!(
+                message.contains("`Adep__Wrapped`") && message.contains("`Blib__Wrapped`"),
+                "the diagnostic must name both candidates; got: {message}"
+            );
+            assert!(
+                message.contains("unsupported:") && message.contains("[04-TOT-3]"),
+                "the diagnostic must keep the branded lowering shape; got: {message}"
+            );
+        })
     }
 
     #[test]
     fn constructor_resolution_keeps_same_name_declarations_deterministic() {
-        // Settled by decision, with no open owner: two declarations
-        // carrying the SAME name are not a qualified-versus-unqualified
-        // ambiguity, so no name rule can separate them. The gate is the
-        // checker, which resolves a same-name constructor by call shape
-        // or rejects it, and this repair leaves the case exactly as it
-        // was. Locked so a later change to that decision is deliberate.
-        let checked = parse_and_check(concat!(
-            "(deftype {} AaaBox () (variant {} Boxed (field {} amount (t-prim {} f32))))\n",
-            "(deftype {} BbbBox () (variant {} Boxed (field {} amount (t-prim {} f32))))\n"
-        ));
-        let AdtConstructorResolution::Unique(definition) =
-            resolve_adt_constructor_definition(&HostLoweringSession::new(&checked), "Boxed")
-        else {
-            panic!("same-name declarations keep their existing deterministic choice");
-        };
-        assert_eq!(definition.adt_name, "AaaBox");
+        crate::lowering_runtime::with_native_lowering_runtime(|runtime| {
+            // Settled by decision, with no open owner: two declarations
+            // carrying the SAME name are not a qualified-versus-unqualified
+            // ambiguity, so no name rule can separate them. The gate is the
+            // checker, which resolves a same-name constructor by call shape
+            // or rejects it, and this repair leaves the case exactly as it
+            // was. Locked so a later change to that decision is deliberate.
+            let checked = parse_and_check(concat!(
+                "(deftype {} AaaBox () (variant {} Boxed (field {} amount (t-prim {} f32))))\n",
+                "(deftype {} BbbBox () (variant {} Boxed (field {} amount (t-prim {} f32))))\n"
+            ));
+            let AdtConstructorResolution::Unique(definition) = resolve_adt_constructor_definition(
+                &HostLoweringSession::new(&checked, runtime),
+                "Boxed",
+            ) else {
+                panic!("same-name declarations keep their existing deterministic choice");
+            };
+            assert_eq!(definition.adt_name, "AaaBox");
+        })
     }
 
     #[test]
     fn adt_field_lookup_prefers_the_exact_type_name() {
-        // Field access resolves through the ADT name and had the same
-        // collision: admitting both declarations made them disagree on
-        // the index of `amount` and rejected a valid access.
-        let checked = parse_and_check(COLLIDING_DECLARATIONS);
-        let found = lookup_adt_field_on_type(
-            &HostLoweringSession::new(&checked),
-            "Blib__Wrapped",
-            &[],
-            "amount",
-        )
-        .expect("no instantiation error")
-        .expect("`amount` is declared on Blib__Wrapped");
-        assert_eq!(found.0, 1, "`amount` is field 1 in the exact declaration");
+        crate::lowering_runtime::with_native_lowering_runtime(|runtime| {
+            // Field access resolves through the ADT name and had the same
+            // collision: admitting both declarations made them disagree on
+            // the index of `amount` and rejected a valid access.
+            let checked = parse_and_check(COLLIDING_DECLARATIONS);
+            let found = lookup_adt_field_on_type(
+                &HostLoweringSession::new(&checked, runtime),
+                "Blib__Wrapped",
+                &[],
+                "amount",
+            )
+            .expect("no instantiation error")
+            .expect("`amount` is declared on Blib__Wrapped");
+            assert_eq!(found.0, 1, "`amount` is field 1 in the exact declaration");
+        })
     }
 
     #[test]

@@ -20,7 +20,10 @@ fn deep_to_library(source: &str) -> Result<LoweredLibrary, String> {
         .map_err(|errors| format!("effects failed: {errors:?}"))?;
     let checked = chelis_types::check_linearity(&checked)
         .map_err(|errors| format!("linearity failed: {errors:?}"))?;
-    try_lower_program_to_library(&checked).map_err(|error| format!("lowering failed: {error:?}"))
+    chelis_ir::lowering_runtime::with_native_lowering_runtime(|runtime| {
+        try_lower_program_to_library(&checked, runtime)
+    })
+    .map_err(|error| format!("lowering failed: {error:?}"))
 }
 
 #[test]

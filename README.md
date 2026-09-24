@@ -363,14 +363,30 @@ names, metadata, and cached libraries cannot authorize a new source unit. Origin
 not serialized. Native checks cover rejection boundaries and linked/contextual
 checking through lowering and evaluation, including cancellation/reuse and concurrency.
 
+Lowering's native dependency is explicit too: acquire `&LoweringRuntime` with
+`chelis_ir::lowering_runtime::with_native_lowering_runtime` and pass it through
+canonical lowering and semantic completion APIs. Completion needs it when computing
+suppression-dependent DAG root classifications; pure type analysis and cached-library
+validation do not. `HostLoweringSession::new(program, runtime)` borrows the same
+thread-bound service. Checked products and persisted caches contain no runtime handle.
+
+The native adapter and panic hook retain the per-thread storage. Nested calls share
+its state; guards clear flags to false, and fatal re-raise explicitly restores quiet
+output after an inner catch. Process-isolated regression coverage observes payloads,
+hook/finalizer order, payload destruction, nested scopes, and thread isolation.
+The API smoke covers strict/contextual evaluation (`21`), fatal AD rejection through
+DAG and host paths, nested reuse, and concurrent invocations.
+
 Explicit inputs and ownership are progress toward FCIS, not purity: cancellation,
 global IDs, counters, stack growth, and panic handling remain native boundaries.
 These changes are not checker/host-lowering extraction or wrapper correspondence
 proofs.
 
-Whole `chelis_pipeline_core` extraction is still blocked before LLBC generation:
-Charon rejects the thread-local reference reached through
-`chelis_ir::lower::SUPPRESS_LOWERING_PANIC_OUTPUT`. The AD slice is not the full core.
+Whole `chelis_pipeline_core` extraction is still blocked before LLBC generation.
+The current first failure is Charon/Hax's external closure-region handling for
+`chelis_ir::lower::try_lower_program_to_library::{closure#0}` with two erased capture
+regions. Native suppression TLS now lives behind `lowering_runtime`; moving that
+boundary does not supply its hook/unwind correspondence. The AD slice is not the full core.
 
 There is no Rust/Lean/LaCaDiLE correspondence theorem or full-core proof-acceptance
 claim. Unsupported runtime paths have not been replaced with opaque shims,

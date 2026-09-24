@@ -179,10 +179,11 @@ impl Profile<'_> {
         caller_depth: usize,
         body_depth: usize,
         caller: &Environment,
+        runtime: &LoweringRuntime,
     ) {
         use crate::evaluation::LegacyEvaluationReason as Reason;
         for arg in args {
-            self.visit(arg, caller_depth, caller);
+            self.visit(arg, caller_depth, caller, runtime);
         }
         if let Some(name) = &closure.name
             && !self.active.insert(name.clone())
@@ -223,7 +224,7 @@ impl Profile<'_> {
             .collect::<Option<Vec<_>>>();
         if let Some(actual_types) = actual_types {
             let formals = (0..params.len())
-                .map(|index| extract_param_type(&closure.function, index).cloned())
+                .map(|index| extract_param_type(&closure.function, index, runtime).cloned())
                 .collect::<Vec<_>>();
             env.precisions
                 .merge(tensor_prec_substitutions(&formals, &actual_types));
@@ -235,7 +236,7 @@ impl Profile<'_> {
         }
         for (index, param) in params.iter().enumerate() {
             let mut names = UnordSet::new();
-            collect_param_bound_names(param, &mut names);
+            collect_param_bound_names(param, &mut names, runtime);
             for name in names.into_sorted() {
                 env.bind(
                     &name,
@@ -244,13 +245,13 @@ impl Profile<'_> {
                 );
             }
         }
-        self.visit(body, body_depth, &env);
+        self.visit(body, body_depth, &env, runtime);
         if let Some(name) = closure.name {
             self.active.remove(&name);
         }
     }
 
-    fn visit(&mut self, expr: &Expr, depth: usize, env: &Environment) {
+    fn visit(&mut self, expr: &Expr, depth: usize, env: &Environment, runtime: &LoweringRuntime) {
         use crate::evaluation::LegacyEvaluationReason as Reason;
         let Some((tag, metadata, kids)) = stamped_parts(expr) else {
             return;
@@ -259,7 +260,7 @@ impl Profile<'_> {
             && let Some(callee) = kids.first()
         {
             if let Some(closure) = self.callable(callee, env) {
-                self.apply(closure, &kids[1..], depth, depth, env);
+                self.apply(closure, &kids[1..], depth, depth, env, runtime);
                 return;
             }
             if let Some((DeepTag::Grad, _, grad)) = stamped_parts(callee)
@@ -270,7 +271,7 @@ impl Profile<'_> {
                 if depth != 0 {
                     self.reason.get_or_insert(Reason::HigherOrderAd);
                 }
-                self.apply(closure, &kids[1..], depth, depth + 1, env);
+                self.apply(closure, &kids[1..], depth, depth + 1, env, runtime);
                 return;
             }
         }
@@ -285,7 +286,7 @@ impl Profile<'_> {
         }
         if tag == DeepTag::Var {
             if let Some(closure) = self.callable(expr, env) {
-                self.apply(closure, &[], depth, depth, env);
+                self.apply(closure, &[], depth, depth, env, runtime);
             } else if let Some(name) = bare_var_name(expr)
                 && !env.bound.contains(&name)
                 && let Some(body) = self.defs.get(&name)
@@ -301,6 +302,7 @@ impl Profile<'_> {
                             shadowed_neg: self.defs.contains_key("neg"),
                             ..Environment::default()
                         },
+                        runtime,
                     );
                     self.active.remove(&name);
                 } else {
@@ -314,14 +316,14 @@ impl Profile<'_> {
             if let Some((_, _, params)) = kids.first().and_then(stamped_parts) {
                 for param in params {
                     let mut names = UnordSet::new();
-                    collect_param_bound_names(param, &mut names);
+                    collect_param_bound_names(param, &mut names, runtime);
                     for name in names.into_sorted() {
                         scoped.bind(&name, None, None);
                     }
                 }
             }
             if let Some(body) = kids.get(1) {
-                self.visit(body, depth, &scoped);
+                self.visit(body, depth, &scoped, runtime);
             }
             return;
         }
@@ -331,7 +333,7 @@ impl Profile<'_> {
                 for pair in bindings.as_chunks::<2>().0 {
                     let callable = self.callable(&pair[1], &scoped);
                     if callable.is_none() {
-                        self.visit(&pair[1], depth, &scoped);
+                        self.visit(&pair[1], depth, &scoped, runtime);
                     }
                     let value = scoped.scalar(&pair[1]);
                     let precision = scoped.precision(&pair[1]);
@@ -344,7 +346,7 @@ impl Profile<'_> {
                 }
             }
             if let Some(body) = kids.get(1) {
-                self.visit(body, depth, &scoped);
+                self.visit(body, depth, &scoped, runtime);
             }
             return;
         }
@@ -384,7 +386,7 @@ impl Profile<'_> {
                 };
                 if let Some(branch) = branch {
                     if let Some(selected) = kids.get(if branch { 1 } else { 2 }) {
-                        self.visit(selected, depth, env);
+                        self.visit(selected, depth, env, runtime);
                     }
                     return;
                 }
@@ -398,7 +400,7 @@ impl Profile<'_> {
             _ => depth,
         };
         for child in kids {
-            self.visit(child, next_depth, env);
+            self.visit(child, next_depth, env, runtime);
         }
     }
 }
@@ -408,6 +410,7 @@ pub(super) fn profile(
     defs: &BTreeMap<String, Expr>,
     inputs: &[(String, TensorType)],
     resource_policy: crate::evaluation::ResourcePolicy,
+    runtime: &LoweringRuntime,
 ) -> crate::evaluation::EvaluationProfile {
     use crate::evaluation::{EvaluationProfile, LegacyEvaluationReason};
     let mut profile = Profile {
@@ -424,7 +427,7 @@ pub(super) fn profile(
     for (name, ty) in inputs {
         env.bind(name, None, Some(ty.precision));
     }
-    profile.visit(expr, 0, &env);
+    profile.visit(expr, 0, &env, runtime);
     if let Some(reason) = profile.reason {
         EvaluationProfile::Legacy(reason)
     } else if profile.dropout {
@@ -440,34 +443,37 @@ mod tests {
 
     #[test]
     fn typed_static_control_preserves_referenced_declaration_profile() {
-        use crate::evaluation::{EvaluationProfile, LegacyEvaluationReason};
-        let reference = chelis_deep::parser::parse_str("(var {} draw)")
-            .unwrap()
-            .pop()
-            .unwrap();
-        for (rate, expected) in [
-            ("(lit {} 0.5)", EvaluationProfile::FixedControl),
-            (
-                "(var {} runtime)",
-                EvaluationProfile::Legacy(LegacyEvaluationReason::RuntimeRate),
-            ),
-        ] {
-            let body = chelis_deep::parser::parse_str(&format!(
-                "(app {{}} (var {{}} dropout) (var {{}} x) {rate})"
-            ))
-            .unwrap()
-            .pop()
-            .unwrap();
-            assert_eq!(
-                profile(
-                    &reference,
-                    &BTreeMap::from([("draw".into(), body)]),
-                    &[],
-                    crate::evaluation::ResourcePolicy::Legacy,
+        crate::lowering_runtime::with_native_lowering_runtime(|runtime| {
+            use crate::evaluation::{EvaluationProfile, LegacyEvaluationReason};
+            let reference = chelis_deep::parser::parse_str("(var {} draw)")
+                .unwrap()
+                .pop()
+                .unwrap();
+            for (rate, expected) in [
+                ("(lit {} 0.5)", EvaluationProfile::FixedControl),
+                (
+                    "(var {} runtime)",
+                    EvaluationProfile::Legacy(LegacyEvaluationReason::RuntimeRate),
                 ),
-                expected
-            );
-        }
+            ] {
+                let body = chelis_deep::parser::parse_str(&format!(
+                    "(app {{}} (var {{}} dropout) (var {{}} x) {rate})"
+                ))
+                .unwrap()
+                .pop()
+                .unwrap();
+                assert_eq!(
+                    profile(
+                        &reference,
+                        &BTreeMap::from([("draw".into(), body)]),
+                        &[],
+                        crate::evaluation::ResourcePolicy::Legacy,
+                        runtime,
+                    ),
+                    expected
+                );
+            }
+        })
     }
 
     #[test]

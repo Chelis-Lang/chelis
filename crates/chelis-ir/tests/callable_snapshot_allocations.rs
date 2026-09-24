@@ -65,7 +65,10 @@ fn lowering_scalar_helpers_keeps_scope_snapshot_allocations_bounded() {
             let checked = chelis_effects::check_program(&checked).unwrap();
             let checked = chelis_types::check_linearity(&checked).unwrap();
             let before = BYTES.load(Ordering::Relaxed);
-            let lowered = chelis_ir::lower::try_lower_program_to_library(&checked).unwrap();
+            let lowered = chelis_ir::lowering_runtime::with_native_lowering_runtime(|runtime| {
+                chelis_ir::lower::try_lower_program_to_library(&checked, runtime)
+            })
+            .unwrap();
             let allocated = BYTES.load(Ordering::Relaxed) - before;
             eprintln!("16 scalar helpers allocated {allocated} bytes during lowering");
             assert!(!lowered.dag().nodes().is_empty());

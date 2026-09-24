@@ -49,8 +49,14 @@ fn traced_helper_is_the_ordinary_retained_helper_and_projects_with_its_function(
     let program = manifested(include_str!(
         "fixtures/core/tests/helper_lowering_trace/traced_helper_is_the_ordinary_retained_helper_and_projects_with_its_function.json"
     ));
-    let (_, ordinary) = try_lower_manifested_execution_program(&program).unwrap();
-    let (_, traced) = try_lower_manifested_execution_program_with_trace(&program).unwrap();
+    let (_, ordinary) = chelis_ir::lowering_runtime::with_native_lowering_runtime(|runtime| {
+        try_lower_manifested_execution_program(&program, runtime)
+    })
+    .unwrap();
+    let (_, traced) = chelis_ir::lowering_runtime::with_native_lowering_runtime(|runtime| {
+        try_lower_manifested_execution_program_with_trace(&program, runtime)
+    })
+    .unwrap();
     let ordinary = ordinary.expect("ordinary host plan");
     let traced = traced.expect("traced host plan");
 
@@ -104,7 +110,10 @@ fn traced_helper_is_the_ordinary_retained_helper_and_projects_with_its_function(
     assert!(projected.function_helper_trace("discarded", 0).is_err());
     assert!(projected.into_ordinary().is_err());
 
-    let (_, traced) = try_lower_manifested_execution_program_with_trace(&program).unwrap();
+    let (_, traced) = chelis_ir::lowering_runtime::with_native_lowering_runtime(|runtime| {
+        try_lower_manifested_execution_program_with_trace(&program, runtime)
+    })
+    .unwrap();
     let ordinary = traced
         .unwrap()
         .discard_helper_traces()
@@ -123,7 +132,10 @@ fn helper_trace_retains_actual_ad_and_ordered_duplicate_root_packing() {
     let program = manifested(include_str!(
         "fixtures/core/tests/helper_lowering_trace/helper_trace_retains_actual_ad_and_ordered_duplicate_root_packing.json"
     ));
-    let (_, plan) = try_lower_manifested_execution_program_with_trace(&program).unwrap();
+    let (_, plan) = chelis_ir::lowering_runtime::with_native_lowering_runtime(|runtime| {
+        try_lower_manifested_execution_program_with_trace(&program, runtime)
+    })
+    .unwrap();
     let plan = plan.expect("host execution plan");
     let function = plan
         .program()
@@ -187,7 +199,10 @@ fn named_axis_helper_records_the_retained_dimension_rebinding_output() {
     let program = manifested(include_str!(
         "fixtures/core/tests/helper_lowering_trace/named_axis_helper_records_the_retained_dimension_rebinding_output.json"
     ));
-    let (_, plan) = try_lower_manifested_execution_program_with_trace(&program).unwrap();
+    let (_, plan) = chelis_ir::lowering_runtime::with_native_lowering_runtime(|runtime| {
+        try_lower_manifested_execution_program_with_trace(&program, runtime)
+    })
+    .unwrap();
     let plan = plan.expect("host execution plan");
     let function = plan
         .program()
@@ -212,7 +227,10 @@ fn fixed_control_helper_trace_captures_actual_pre_and_post_ad_execution() {
     let program = manifested(include_str!(
         "fixtures/core/tests/helper_lowering_trace/fixed_control_helper_trace_captures_actual_pre_and_post_ad_execution.json"
     ));
-    let (_, plan) = try_lower_manifested_execution_program_with_trace(&program).unwrap();
+    let (_, plan) = chelis_ir::lowering_runtime::with_native_lowering_runtime(|runtime| {
+        try_lower_manifested_execution_program_with_trace(&program, runtime)
+    })
+    .unwrap();
     let plan = plan.expect("host execution plan");
     let trace = plan
         .function_helper_trace("derivative", 0)
@@ -280,7 +298,10 @@ fn resource_requirement_survives_actual_ad_splice() {
     let program = manifested(include_str!(
         "fixtures/core/tests/helper_lowering_trace/resource_requirement_survives_actual_ad_splice.json"
     ));
-    let (_, plan) = try_lower_manifested_execution_program_with_trace(&program).unwrap();
+    let (_, plan) = chelis_ir::lowering_runtime::with_native_lowering_runtime(|runtime| {
+        try_lower_manifested_execution_program_with_trace(&program, runtime)
+    })
+    .unwrap();
     let plan = plan.expect("C execution host plan");
     let trace = plan
         .function_helper_trace("derivative", 0)
@@ -381,14 +402,19 @@ fn failed_helper_attempt_returns_no_trace_and_cannot_pollute_the_next_compilatio
     let rejected = manifested(include_str!(
         "fixtures/core/tests/helper_lowering_trace/failed_helper_attempt_returns_no_trace_and_cannot_pollute_the_next_compilation.json"
     ));
-    let error = try_lower_manifested_execution_program_with_trace(&rejected)
-        .expect_err("the actual AD pass rejects floor");
+    let error = chelis_ir::lowering_runtime::with_native_lowering_runtime(|runtime| {
+        try_lower_manifested_execution_program_with_trace(&rejected, runtime)
+    })
+    .expect_err("the actual AD pass rejects floor");
     assert!(error.to_string().contains("floor"));
 
     let accepted = manifested(include_str!(
         "fixtures/core/tests/helper_lowering_trace/failed_helper_attempt_returns_no_trace_and_cannot_pollute_the_next_compilation_2.json"
     ));
-    let (_, plan) = try_lower_manifested_execution_program_with_trace(&accepted).unwrap();
+    let (_, plan) = chelis_ir::lowering_runtime::with_native_lowering_runtime(|runtime| {
+        try_lower_manifested_execution_program_with_trace(&accepted, runtime)
+    })
+    .unwrap();
     let plan = plan.expect("successful host plan");
     let trace = plan
         .function_helper_trace("derivative", 0)

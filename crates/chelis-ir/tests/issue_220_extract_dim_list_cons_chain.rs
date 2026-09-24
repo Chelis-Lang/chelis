@@ -75,12 +75,15 @@ fn lower_with_x_bound() -> chelis_ir::dag::Dag {
             precision: Prim::F32,
         },
     );
-    lower_subexpr_program(
-        &cons_chain_reshape_expr(),
-        scoped,
-        UnordMap::new(),
-        UnordMap::new(),
-    )
+    chelis_ir::lowering_runtime::with_native_lowering_runtime(|runtime| {
+        lower_subexpr_program(
+            &cons_chain_reshape_expr(),
+            scoped,
+            UnordMap::new(),
+            UnordMap::new(),
+            runtime,
+        )
+    })
 }
 
 #[test]

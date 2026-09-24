@@ -69,7 +69,9 @@ fn lower_over_symbolic_x(expr: &Expr) -> Dag {
             precision: Prim::F32,
         },
     );
-    lower_subexpr_program(expr, scoped, UnordMap::new(), UnordMap::new())
+    chelis_ir::lowering_runtime::with_native_lowering_runtime(|runtime| {
+        lower_subexpr_program(expr, scoped, UnordMap::new(), UnordMap::new(), runtime)
+    })
 }
 
 fn reshape_axis_dims(dag: &Dag) -> Vec<DimInfo> {
@@ -155,18 +157,21 @@ fn shared_producer_concat_lowers_to_pad_add_not_the_host_placeholder() {
 /// disposition is evidence of actual Host execution.
 #[test]
 fn two_reshapes_from_distinct_producers_reject_forced_dag() {
-    let error = chelis_ir::lower::try_lower_subexpr_program(
-        &concat_of_two_rows("(var {} m)", "(var {} k)"),
-        UnordMap::from([(
-            "x".to_string(),
-            TensorType {
-                dims: vec![DimInfo::Named("n".into(), None)],
-                precision: Prim::F32,
-            },
-        )]),
-        UnordMap::new(),
-        UnordMap::new(),
-    )
+    let error = chelis_ir::lowering_runtime::with_native_lowering_runtime(|runtime| {
+        chelis_ir::lower::try_lower_subexpr_program(
+            &concat_of_two_rows("(var {} m)", "(var {} k)"),
+            UnordMap::from([(
+                "x".to_string(),
+                TensorType {
+                    dims: vec![DimInfo::Named("n".into(), None)],
+                    precision: Prim::F32,
+                },
+            )]),
+            UnordMap::new(),
+            UnordMap::new(),
+            runtime,
+        )
+    })
     .expect_err("distinct producers cannot prove the non-concat axes equal");
     assert_eq!(
         error.message,

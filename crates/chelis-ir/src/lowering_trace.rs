@@ -12,6 +12,7 @@ use std::rc::Rc;
 use crate::dag::{Dag, NodeId, TensorType};
 use crate::grad::GradResult;
 use crate::lower::{LowerDiagnostic, LoweredLibrary};
+use crate::lowering_runtime::LoweringRuntime;
 use chelis_types::CheckedProgram;
 use chelis_unord::UnordMap;
 
@@ -257,16 +258,18 @@ impl HelperLoweringTrace {
 
 pub fn try_lower_program_to_evaluation_library_with_trace(
     program: &CheckedProgram,
+    runtime: &LoweringRuntime,
 ) -> Result<(crate::lower::EvaluationLibrary, EvaluationLoweringTrace), LowerDiagnostic> {
-    crate::lower::try_lower_program_to_evaluation_library_with_trace(program)
+    crate::lower::try_lower_program_to_evaluation_library_with_trace(program, runtime)
 }
 
 /// Run the ordinary library lowering with explicit snapshot collection.
 /// Failure returns the ordinary diagnostic, never a partial successful trace.
 pub fn try_lower_program_to_library_with_trace(
     program: &CheckedProgram,
+    runtime: &LoweringRuntime,
 ) -> Result<(LoweredLibrary, LoweringTrace), LowerDiagnostic> {
-    crate::lower::try_lower_program_to_library_with_trace(program)
+    crate::lower::try_lower_program_to_library_with_trace(program, runtime)
 }
 
 #[derive(Default)]

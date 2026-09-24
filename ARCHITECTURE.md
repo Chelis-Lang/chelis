@@ -186,13 +186,15 @@ process-global state, and exit outcomes separately from graph values. At minimum
 - Cancellation uses shared `Arc<AtomicBool>` identity and relaxed atomic accesses;
   a concurrent model must account for permitted observations, not assume an immediately
   synchronized ordinary Boolean.
-- Lowering's suppression guards clear their flags to false; they do not generally
-  restore an outer Boolean. `raise_fatal_lowering_diagnostic` explicitly re-enables
-  suppression after an inner catch. A uniform restore-previous model would be wrong.
-- `catch_lowering` catches unwind payloads, including typed diagnostics and
-  `UnrepresentableDag`, after guard destruction and stack growth. Successful values,
-  returned diagnostics, unwinding and non-unwinding aborts are distinct outcomes.
-  Panic-hook state and any claimed diagnostic-output behavior also need a relation.
+- `LoweringRuntime` owns the native thread's suppression flags. Its guards clear
+  them to false; they do not generally restore an outer Boolean.
+  `raise_fatal_lowering_diagnostic` explicitly re-enables output suppression after
+  an inner catch. A uniform restore-previous model would be wrong.
+- `LoweringRuntime::catch_lowering` catches unwind payloads after the closure's
+  finalizers run on the grown stack. Its output-suppression guard remains live
+  through payload conversion and destruction, then clears before returning.
+  Successful values, returned diagnostics, unwinding and non-unwinding aborts
+  are distinct outcomes. Panic-hook observations also need a relation.
 
 Charon currently rejects `mir::Rvalue::ThreadLocalRef`. Aeneas's default
 `drop_as_no_op` and symbolic panic handling do not supply TLS restoration,
@@ -211,8 +213,8 @@ not universal proofs.
 
 Host lowering now owns its invocation state in `HostLoweringSession`, separate from
 the program-bound fact caches. The existing session reference carried by `LowerCtx`
-also carries specialization state through staged DAG lowering; public function
-signatures and checked-program identity are unchanged.
+also carries specialization state through staged DAG lowering. Checked-program
+identity is unchanged; the native service is now a separate borrowed input.
 
 `HostInvocationGuard` starts each whole-program call with empty state and restores
 its caller on return or unwind. Inlining and pointer-keyed preflight facts have
@@ -288,6 +290,34 @@ lowering, and evaluation; observes `7` and a contextual `7 * 3 = 21`; and exerci
 layered composition, cancellation/reuse, and four concurrent invocations. These
 checks exercise the retained core, not the removed native linker implementation.
 
+Lowering now receives an explicit `&LoweringRuntime` from
+`chelis_ir::lowering_runtime::with_native_lowering_runtime`. The native adapter
+borrows one persistent per-thread service; nested acquisition neither resets nor
+copies it. `HostLoweringSession::new(program, runtime)` and `LowerCtx` carry that
+reference through DAG, host, staged, evaluation, and trace paths. Sessions holding
+the service are thread-bound. Checked programs, lowered libraries, and immutable
+subexpression contexts contain no runtime handle and keep their existing layouts.
+
+Canonical lowering APIs require the runtime as their final argument. Semantic
+completion and contextual composition also need it while computing DAG root
+classifications: those predicates retain suppression-dependent malformed-binder
+rejections. Pure type analysis, cached-library validation, and immutable context
+construction remain runtime-free. No second classifier or error policy was added.
+
+Only the native adapter and process-global panic hook select thread-local
+suppression state. The hook observes it before unwinding. `catch_lowering`
+retains the 512 MiB stack boundary and existing payload conversion; fatal
+re-raise, speculative markers, and clear-to-false scope destruction are unchanged.
+This isolates a native dependency rather than replacing control panics with
+`Result` or proving the native shell pure.
+
+The process-isolated native regression observes returning and unwinding nested
+catches, speculative payload selection, fatal re-raise, hook/finalizer order,
+payload-destruction coverage, nested acquisition, and cross-thread isolation.
+The production API smoke exercises checking, strict and sealed contextual lowering,
+evaluation of `7 * 3 = 21`, live-input fatal AD rejection through DAG and host paths,
+reuse, and four concurrent threads.
+
 These are steps toward FCIS, not evidence of a pure functional core. Explicit ownership
 removes hidden dependencies in these subsystems; it does not remove cancellation,
 global ID allocation, counters, stack growth, or panic effects from the remaining
@@ -309,7 +339,7 @@ remain inputs with their existing seals; an invocation state must not mint them.
 | Former `LINKED_PROGRAM` | Immutable `ProgramOrigin` input, retained by `PreparedProgram` (implemented) | Only the trusted native linker asserts `Linked`. Each unit supplies its own origin; names, metadata, cached contexts, and other active invocations grant no authority. No mutable scope or restoration guard remains. |
 | Former `INLINING_STACK`, tensor-helper preflight stack, `ACTIVE_TYPE_SUBST` | `HostLoweringSession::invocation` and scoped guards (implemented) | Preserve scope order and the current specialization's bindings. Nested sessions do not share mutable frames. |
 | Former `MONO_SPECIALIZATIONS` and `MonoProbeGuard` | Host invocation state plus scoped probe snapshot (implemented) | Preserve entry initialization, completion order, and rollback of speculative definitions and in-progress entries. Rollback restores the outer snapshot; it does not clear it. |
-| Panic-suppression flags | Explicit per-thread shell state | Preserve clear-to-false behavior and the explicit re-enable in `raise_fatal_lowering_diagnostic`; do not apply a uniform restore-previous rule. |
+| Former lowering-module panic-suppression flags | Explicit borrowed `LoweringRuntime`; per-thread storage and hook bridge confined to `lowering_runtime` (implemented) | Preserve shared thread state, clear-to-false behavior, and explicit fatal re-enable. Native hook/unwind semantics still require a wrapper relation. |
 | Cancellation token identity and relaxed loads | Native runtime services | Keep shared token identity and the original polling points. A frozen entry Boolean is not equivalent to cancellation arriving during a check. |
 | Atomic host-inference IDs, persistent thread counters, panic hook | Native runtime services | Preserve allocation/observation order and lifetime across invocations, including native ID wrapping or an explicit no-wrap bound. Resetting a global ID supply per run can invalidate identity comparisons. |
 | Stack growth, depth guards, first stack-bail record | Native resource boundary | Preserve the first reported site/span and normal-versus-abort behavior. Arbitrary Lean fuel is not a replacement for native stack availability. |
@@ -375,10 +405,14 @@ observations. Production AD generation and Lean acceptance are recorded in
 [README.md](README.md#verification-status-and-remaining-boundaries). Neither those
 checks nor compilation supply a Rust/Lean/LaCaDiLE correspondence theorem.
 
-The full core remains blocked before LLBC generation at Charon's
-`mir::Rvalue::ThreadLocalRef`, reached through
-`chelis_ir::lower::SUPPRESS_LOWERING_PANIC_OUTPUT`. An accepted AD slice is not
-whole-core extraction.
+The full core remains blocked before LLBC generation. After the runtime-input
+cutover, the first observed failure is Charon/Hax's external closure-region handling
+for `chelis_ir::lower::try_lower_program_to_library::{closure#0}`: rustc exports no
+closure region requirements for zero erased signature regions and two erased
+capture regions. The former first failure was the lowering module's suppression
+TLS. Native TLS still exists inside `lowering_runtime`; its hook, unwind, and stack
+semantics remain separate obligations even after the closure-region issue is fixed.
+An accepted AD slice is not whole-core extraction.
 
 The patched formatter has explicit arguments and callback state, including partial
 output on writer failure; it no longer uses the upstream erased formatter model.

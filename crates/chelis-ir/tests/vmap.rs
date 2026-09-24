@@ -521,7 +521,9 @@ fn lower_deep_program(src: &str) -> Result<Dag, chelis_ir::lower::LowerDiagnosti
         .unwrap_or_else(|r| panic!("Deep program must check clean: {:?}", r.errors));
     let checked = chelis_effects::check_program(&checked).expect("effects");
     let checked = chelis_types::check_linearity(&checked).expect("linearity");
-    chelis_ir::lower::try_lower_program(&checked)
+    chelis_ir::lowering_runtime::with_native_lowering_runtime(|runtime| {
+        chelis_ir::lower::try_lower_program(&checked, runtime)
+    })
 }
 
 /// REJECT: a present-but-non-constant `vmap` mapped axis is rejected by the
@@ -599,8 +601,10 @@ fn issue524_runtime_vmap_axis_is_rejected_at_check_time() {
 #[test]
 fn issue524_constant_vmap_axis_still_lowers() {
     let checked = check_effects_linearity_deep(VMAP_CONST_AXIS_DEEP);
-    let dag = chelis_ir::lower::try_lower_program(&checked)
-        .expect("a constant vmap axis must still lower cleanly");
+    let dag = chelis_ir::lowering_runtime::with_native_lowering_runtime(|runtime| {
+        chelis_ir::lower::try_lower_program(&checked, runtime)
+    })
+    .expect("a constant vmap axis must still lower cleanly");
     assert!(!dag.nodes().is_empty(), "lowered DAG must be non-empty");
 }
 
@@ -761,7 +765,10 @@ fn vmap_grad_records_the_batched_forward_activation_as_a_shape_dep() {
     let checked = check_ir_program(&exprs, chelis_types::ProgramOrigin::Unlinked).expect("check");
     let checked = chelis_effects::check_program(&checked).expect("effects");
     let checked = chelis_types::check_linearity(&checked).expect("linearity");
-    let dag = chelis_ir::lower::try_lower_program(&checked).expect("lower vmap(grad(h))");
+    let dag = chelis_ir::lowering_runtime::with_native_lowering_runtime(|runtime| {
+        chelis_ir::lower::try_lower_program(&checked, runtime)
+    })
+    .expect("lower vmap(grad(h))");
 
     let carrying: Vec<_> = dag
         .roots()

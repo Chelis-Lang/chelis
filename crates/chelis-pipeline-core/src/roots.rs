@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
 
 use chelis_deep::{DeepTag, Expr as DeepExpr};
+use chelis_ir::lowering_runtime::LoweringRuntime;
 use chelis_types::CheckedProgram;
 
 use crate::{AllRootNames, IrName, RootMetadata, TensorRootNames};
@@ -8,6 +9,7 @@ use crate::{AllRootNames, IrName, RootMetadata, TensorRootNames};
 pub(crate) fn root_metadata(
     program: &CheckedProgram,
     lowered_names: Option<&BTreeMap<String, bool>>,
+    runtime: &LoweringRuntime,
 ) -> RootMetadata {
     let all_names = AllRootNames(root_names_from_checked_exprs(
         program.exprs(),
@@ -18,8 +20,11 @@ pub(crate) fn root_metadata(
     let lowered_names = match lowered_names {
         Some(map) => Some(map),
         None => {
-            owned_lowered_names =
-                chelis_ir::lower::top_level_lowering_map(program.exprs(), program.type_env());
+            owned_lowered_names = chelis_ir::lower::top_level_lowering_map(
+                program.exprs(),
+                program.type_env(),
+                runtime,
+            );
             Some(&owned_lowered_names)
         }
     };

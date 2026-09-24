@@ -181,14 +181,21 @@ fn parity_monolithic_vs_composed_for_library_snippet_pairs() {
 
         // Monolithic baseline.
         let mono_checked = check_monolithic(&combined_src);
-        let mono_dag = lower_program(&mono_checked);
+        let mono_dag = chelis_ir::lowering_runtime::with_native_lowering_runtime(|runtime| {
+            lower_program(&mono_checked, runtime)
+        });
         let mono_roots = eval_dag_root_values(&mono_dag, &UnordMap::new());
 
         // Composed.
         let (_lib_exprs, ctx, lib_checked) = check_lib(case.library_src);
-        let library: LoweredLibrary = lower_program_to_library(&lib_checked);
+        let library: LoweredLibrary =
+            chelis_ir::lowering_runtime::with_native_lowering_runtime(|runtime| {
+                lower_program_to_library(&lib_checked, runtime)
+            });
         let new_checked = check_with_ctx(&ctx, case.new_src);
-        let composed_dag = lower_program_with_context(&library, &new_checked);
+        let composed_dag = chelis_ir::lowering_runtime::with_native_lowering_runtime(|runtime| {
+            lower_program_with_context(&library, &new_checked, runtime)
+        });
         let composed_roots = eval_dag_root_values(&composed_dag, &UnordMap::new());
 
         // The new-code root must be present in BOTH and agree.
@@ -245,7 +252,9 @@ fn node_id_disjointness_new_code_above_library_max() {
     ";
 
     let (_, ctx, lib_checked) = check_lib(library_src);
-    let library = lower_program_to_library(&lib_checked);
+    let library = chelis_ir::lowering_runtime::with_native_lowering_runtime(|runtime| {
+        lower_program_to_library(&lib_checked, runtime)
+    });
     let library_max_id = library
         .dag()
         .nodes()
@@ -255,7 +264,9 @@ fn node_id_disjointness_new_code_above_library_max() {
         .expect("library has nodes");
 
     let new_checked = check_with_ctx(&ctx, new_src);
-    let composed_dag = lower_program_with_context(&library, &new_checked);
+    let composed_dag = chelis_ir::lowering_runtime::with_native_lowering_runtime(|runtime| {
+        lower_program_with_context(&library, &new_checked, runtime)
+    });
 
     // All library NodeIds appear unchanged in the composed DAG.
     for lib_node in library.dag().nodes() {
@@ -318,7 +329,9 @@ fn library_dag_is_not_mutated_by_lower_program_with_context() {
     ";
 
     let (_, ctx, lib_checked) = check_lib(library_src);
-    let library = lower_program_to_library(&lib_checked);
+    let library = chelis_ir::lowering_runtime::with_native_lowering_runtime(|runtime| {
+        lower_program_to_library(&lib_checked, runtime)
+    });
 
     let library_len_before = library.dag().len();
     let library_roots_before = library.dag().roots().to_vec();
@@ -330,7 +343,9 @@ fn library_dag_is_not_mutated_by_lower_program_with_context() {
         .collect();
 
     let new_checked = check_with_ctx(&ctx, new_src);
-    let _composed_dag = lower_program_with_context(&library, &new_checked);
+    let _composed_dag = chelis_ir::lowering_runtime::with_native_lowering_runtime(|runtime| {
+        lower_program_with_context(&library, &new_checked, runtime)
+    });
 
     // Library carrier must be untouched after composition.
     assert_eq!(library.dag().len(), library_len_before);
@@ -345,7 +360,9 @@ fn library_dag_is_not_mutated_by_lower_program_with_context() {
 
     // And the composed call is repeatable (no hidden state) — running again
     // must produce the same result.
-    let again = lower_program_with_context(&library, &new_checked);
+    let again = chelis_ir::lowering_runtime::with_native_lowering_runtime(|runtime| {
+        lower_program_with_context(&library, &new_checked, runtime)
+    });
     let evaled_a = eval_dag_root_values(&_composed_dag, &UnordMap::new());
     let evaled_b = eval_dag_root_values(&again, &UnordMap::new());
     assert_eq!(
@@ -379,14 +396,18 @@ fn library_value_def_is_referenced_not_duplicated() {
     ";
 
     let (_, ctx, lib_checked) = check_lib(library_src);
-    let library = lower_program_to_library(&lib_checked);
+    let library = chelis_ir::lowering_runtime::with_native_lowering_runtime(|runtime| {
+        lower_program_to_library(&lib_checked, runtime)
+    });
     let lib_v_id = *library
         .symbol_table()
         .get("lib_v")
         .expect("library symbol_table holds top-level def `lib_v`");
 
     let new_checked = check_with_ctx(&ctx, new_src);
-    let composed_dag = lower_program_with_context(&library, &new_checked);
+    let composed_dag = chelis_ir::lowering_runtime::with_native_lowering_runtime(|runtime| {
+        lower_program_with_context(&library, &new_checked, runtime)
+    });
 
     // `lib_v` occupies the same NodeId in the composed DAG as in the library.
     let lib_v_in_composed = composed_dag.get(lib_v_id).expect("lib_v present");
@@ -432,8 +453,12 @@ fn lowered_library_dag_matches_lower_program() {
                (var {type: (t-tensor {} (t-prim {} f32))} b)))
     ";
     let (_, _, lib_checked) = check_lib(library_src);
-    let dag_a = lower_program(&lib_checked);
-    let library = lower_program_to_library(&lib_checked);
+    let dag_a = chelis_ir::lowering_runtime::with_native_lowering_runtime(|runtime| {
+        lower_program(&lib_checked, runtime)
+    });
+    let library = chelis_ir::lowering_runtime::with_native_lowering_runtime(|runtime| {
+        lower_program_to_library(&lib_checked, runtime)
+    });
     assert_eq!(dag_a.len(), library.dag().len());
     assert_eq!(dag_a.roots(), library.dag().roots());
     for (na, nb) in dag_a.nodes().iter().zip(library.dag().nodes().iter()) {
@@ -447,7 +472,9 @@ fn lowered_library_dag_matches_lower_program() {
 #[test]
 fn shadowed_host_value_lowers_and_references_follow_source_order() {
     let (_, ctx, lib_checked) = check_lib("(def {} value (lit {} \"host\"))");
-    let library = lower_program_to_library(&lib_checked);
+    let library = chelis_ir::lowering_runtime::with_native_lowering_runtime(|runtime| {
+        lower_program_to_library(&lib_checked, runtime)
+    });
     let new_checked = check_with_ctx(
         &ctx,
         "
@@ -457,7 +484,9 @@ fn shadowed_host_value_lowers_and_references_follow_source_order() {
         (def {} a_last (lit {type: (t-prim {} i32)} 3))
         ",
     );
-    let dag = lower_program_with_context(&library, &new_checked);
+    let dag = chelis_ir::lowering_runtime::with_native_lowering_runtime(|runtime| {
+        lower_program_with_context(&library, &new_checked, runtime)
+    });
     let values = eval_dag_root_values(&dag, &UnordMap::new());
     assert_eq!(
         values
@@ -469,7 +498,9 @@ fn shadowed_host_value_lowers_and_references_follow_source_order() {
 
     // The replacement must not rewrite the cached library's classification.
     let original_reference = check_with_ctx(&ctx, "(def {} original (var {} value))");
-    let original_dag = lower_program_with_context(&library, &original_reference);
+    let original_dag = chelis_ir::lowering_runtime::with_native_lowering_runtime(|runtime| {
+        lower_program_with_context(&library, &original_reference, runtime)
+    });
     assert!(original_dag.roots().is_empty());
     assert!(library.dag().roots().is_empty());
 
@@ -495,7 +526,9 @@ fn shadowed_tensor_value_does_not_reclassify_materialized_or_lexically_bound_val
           (fn {} (params {} (value {type: (t-prim {} i32)})) (var {} value)))
         ",
     );
-    let library = lower_program_to_library(&lib_checked);
+    let library = chelis_ir::lowering_runtime::with_native_lowering_runtime(|runtime| {
+        lower_program_to_library(&lib_checked, runtime)
+    });
     let library_roots = library.dag().roots().to_vec();
     let new_checked = check_with_ctx(
         &ctx,
@@ -508,7 +541,9 @@ fn shadowed_tensor_value_does_not_reclassify_materialized_or_lexically_bound_val
           (app {} (var {} identity) (lit {type: (t-prim {} i32)} 9)))
         ",
     );
-    let dag = lower_program_with_context(&library, &new_checked);
+    let dag = chelis_ir::lowering_runtime::with_native_lowering_runtime(|runtime| {
+        lower_program_with_context(&library, &new_checked, runtime)
+    });
     let new_roots = &dag.roots()[library_roots.len()..];
     let values = eval_tensor_roots_with(&dag, new_roots, |_| None).expect("new roots evaluate");
     assert_eq!(
@@ -521,7 +556,9 @@ fn shadowed_tensor_value_does_not_reclassify_materialized_or_lexically_bound_val
     assert_eq!(library.dag().roots(), library_roots);
 
     let original_reference = check_with_ctx(&ctx, "(def {} original (var {} value))");
-    let original_dag = lower_program_with_context(&library, &original_reference);
+    let original_dag = chelis_ir::lowering_runtime::with_native_lowering_runtime(|runtime| {
+        lower_program_with_context(&library, &original_reference, runtime)
+    });
     let root = *original_dag.roots().last().expect("original scalar root");
     let values = eval_tensor_roots_with(&original_dag, &[root], |_| None)
         .expect("original library binding evaluates");
@@ -551,7 +588,9 @@ fn shadowed_callable_reclassifies_transitive_library_calls() {
             (app {} (var {} bridge) (var {} x))))
         ",
     );
-    let library = lower_program_to_library(&lib_checked);
+    let library = chelis_ir::lowering_runtime::with_native_lowering_runtime(|runtime| {
+        lower_program_to_library(&lib_checked, runtime)
+    });
     let new_checked = check_with_ctx(
         &ctx,
         "
@@ -563,7 +602,9 @@ fn shadowed_callable_reclassifies_transitive_library_calls() {
           (app {} (var {} outer) (lit {type: (t-tensor {} (t-prim {} i32))} 4)))
         ",
     );
-    let dag = lower_program_with_context(&library, &new_checked);
+    let dag = chelis_ir::lowering_runtime::with_native_lowering_runtime(|runtime| {
+        lower_program_with_context(&library, &new_checked, runtime)
+    });
     let root = *dag
         .roots()
         .last()
@@ -590,7 +631,9 @@ fn host_replacement_excludes_transitive_library_calls_from_new_roots() {
             (app {} (var {} bridge) (var {} x))))
         ",
     );
-    let library = lower_program_to_library(&lib_checked);
+    let library = chelis_ir::lowering_runtime::with_native_lowering_runtime(|runtime| {
+        lower_program_to_library(&lib_checked, runtime)
+    });
     let new_checked = check_with_ctx(
         &ctx,
         "
@@ -602,7 +645,9 @@ fn host_replacement_excludes_transitive_library_calls_from_new_roots() {
         (def {} tensor_result (lit {type: (t-prim {} i32)} 7))
         ",
     );
-    let dag = lower_program_with_context(&library, &new_checked);
+    let dag = chelis_ir::lowering_runtime::with_native_lowering_runtime(|runtime| {
+        lower_program_with_context(&library, &new_checked, runtime)
+    });
     let new_roots = &dag.roots()[library.dag().roots().len()..];
     let values = eval_tensor_roots_with(&dag, new_roots, |_| None)
         .expect("unaffected tensor root evaluates");

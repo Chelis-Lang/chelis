@@ -35,9 +35,11 @@ fn checked_deep(src: &str) -> chelis_types::CheckedProgram {
 
 fn decision(src: &str, name: &str) -> Result<bool, String> {
     let program = checked_deep(src);
-    host_def_kernel(&HostLoweringSession::new(&program), name, None)
-        .map(|kernel| kernel.is_some())
-        .map_err(|diagnostic| diagnostic.to_string())
+    chelis_ir::lowering_runtime::with_native_lowering_runtime(|runtime| {
+        host_def_kernel(&HostLoweringSession::new(&program, runtime), name, None)
+    })
+    .map(|kernel| kernel.is_some())
+    .map_err(|diagnostic| diagnostic.to_string())
 }
 
 #[test]
@@ -125,9 +127,11 @@ fn tensor_helper_retains_declaring_parameter_order() {
             counter: 9,
         }),
     ] {
-        let kernel = host_def_kernel(&HostLoweringSession::new(&program), "f", random)
-            .unwrap()
-            .unwrap();
+        let kernel = chelis_ir::lowering_runtime::with_native_lowering_runtime(|runtime| {
+            host_def_kernel(&HostLoweringSession::new(&program, runtime), "f", random)
+        })
+        .unwrap()
+        .unwrap();
         assert_eq!(
             kernel
                 .inputs
@@ -139,7 +143,10 @@ fn tensor_helper_retains_declaring_parameter_order() {
         assert_eq!(kernel.next_random_counter, random.map(|s| s.counter));
         assert_load_order_after_rebuilding(&kernel.dag, &["b", "z", "a"]);
     }
-    let dag = lower_named_tensor_entry_dag(&program, "f").unwrap();
+    let dag = chelis_ir::lowering_runtime::with_native_lowering_runtime(|runtime| {
+        lower_named_tensor_entry_dag(&program, "f", runtime)
+    })
+    .unwrap();
     assert_load_order_after_rebuilding(&dag, &["b", "z", "a"]);
 }
 
@@ -179,12 +186,15 @@ fn signatureless_helper_retains_assigned_abi_order() {
                 },
             );
         }
-        let dag = chelis_ir::lower::try_lower_subexpr_program(
-            &expr,
-            scope,
-            UnordMap::new(),
-            UnordMap::new(),
-        )
+        let dag = chelis_ir::lowering_runtime::with_native_lowering_runtime(|runtime| {
+            chelis_ir::lower::try_lower_subexpr_program(
+                &expr,
+                scope,
+                UnordMap::new(),
+                UnordMap::new(),
+                runtime,
+            )
+        })
         .unwrap();
         assert_load_order_after_rebuilding(&dag, &["a", "z"]);
     }

@@ -3,11 +3,12 @@
 //! Walks the Deep AST and produces a flat DAG of RISC primitive nodes.
 
 use chelis_unord::{UnordMap, UnordSet};
-use std::any::Any;
 use std::cell::Cell;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
+
+use crate::lowering_runtime::{LoweringRuntime, UnrepresentableDag};
 
 mod static_controls;
 
@@ -15,40 +16,6 @@ mod static_controls;
 /// seed. The active helper path obtains the real seed from the host handler;
 /// the inactive path's value is discarded by the enclosing blend.
 const COMPILED_HANDLER_OWNED_SEED: u64 = 0;
-
-thread_local! {
-    /// When set, `lower_unrepresentable` panics with a quiet empty payload
-    /// that `catch_unwind` catches without printing a backtrace. Scoped
-    /// via `with_suppress_unrepresentable_panic`, which always clears the
-    /// flag on exit. Used by the host-lane tensor-helper fallback path:
-    /// it runs the DAG lowerer speculatively, catches any un-representable
-    /// panic, and proceeds with host lowering — we don't want that
-    /// speculative attempt to write a misleading panic to stderr.
-    static SUPPRESS_UNREPRESENTABLE_PANIC: Cell<bool> = const { Cell::new(false) };
-    /// Set while a public `try_lower_*` API is converting legacy lowering
-    /// unwinds into structured diagnostics. The panic hook stays quiet in
-    /// that scope so users see only the returned diagnostic.
-    static SUPPRESS_LOWERING_PANIC_OUTPUT: Cell<bool> = const { Cell::new(false) };
-}
-
-pub fn with_suppress_unrepresentable_panic<R>(f: impl FnOnce() -> R) -> R {
-    struct Guard;
-    impl Drop for Guard {
-        fn drop(&mut self) {
-            SUPPRESS_UNREPRESENTABLE_PANIC.with(|cell| cell.set(false));
-        }
-    }
-    SUPPRESS_UNREPRESENTABLE_PANIC.with(|cell| cell.set(true));
-    let _guard = Guard;
-    f()
-}
-
-fn unrepresentable_panic_suppressed() -> bool {
-    SUPPRESS_UNREPRESENTABLE_PANIC.with(|cell| cell.get())
-}
-
-/// Marker payload for a suppressed un-representable-DAG unwind.
-struct UnrepresentableDag;
 
 /// User-facing lowering diagnostic returned by `try_lower_*` APIs.
 ///
@@ -428,24 +395,13 @@ fn lower_diagnostic_for_expr(message: impl Into<String>, expr: &Expr) -> LowerDi
     LowerDiagnostic::new(message, span, span_id)
 }
 
-fn raise_lowering_diagnostic(diagnostic: LowerDiagnostic) -> ! {
-    // A fatal diagnostic must not be downgraded to the silent
-    // un-representable panic — the host-fallback boundary at
-    // `host::try_lower_compiled_program` keys off this so the user
-    // receives the AD rejection text instead of an undefined-symbol
-    // host call. Issue #197.
-    if !diagnostic.fatal && unrepresentable_panic_suppressed() {
-        std::panic::panic_any(UnrepresentableDag);
-    }
-    std::panic::panic_any(diagnostic);
-}
-
 fn raise_lowering_error(
     message: impl Into<String>,
     span: Option<Span>,
     span_id: Option<String>,
+    runtime: &LoweringRuntime,
 ) -> ! {
-    raise_lowering_diagnostic(LowerDiagnostic::new(message, span, span_id))
+    runtime.raise_lowering_diagnostic(LowerDiagnostic::new(message, span, span_id))
 }
 
 /// Raise a *fatal* lowering diagnostic — one the host-fallback path
@@ -458,16 +414,20 @@ fn raise_fatal_lowering_error(
     message: impl Into<String>,
     span: Option<Span>,
     span_id: Option<String>,
+    runtime: &LoweringRuntime,
 ) -> ! {
-    raise_lowering_diagnostic(LowerDiagnostic::new(message, span, span_id).fatal())
+    runtime.raise_lowering_diagnostic(LowerDiagnostic::new(message, span, span_id).fatal())
 }
 
 fn raise_fatal_unsupported(
     unsupported: Unsupported,
     span: Option<Span>,
     span_id: Option<String>,
+    runtime: &LoweringRuntime,
 ) -> ! {
-    raise_lowering_diagnostic(LowerDiagnostic::from_unsupported(unsupported, span, span_id).fatal())
+    runtime.raise_lowering_diagnostic(
+        LowerDiagnostic::from_unsupported(unsupported, span, span_id).fatal(),
+    )
 }
 
 /// chelis#730 Phase 1, section C1.4 raise-or-prove: a malformed or
@@ -482,7 +442,12 @@ fn raise_fatal_unsupported(
 /// fallback lane legitimately owns several of these shapes (strings,
 /// host-only forms) and its own failure paths stay loud now that the
 /// emitter stub arm is an error (section C3).
-fn raise_malformed_deep(what: &str, span: Option<Span>, span_id: Option<String>) -> ! {
+fn raise_malformed_deep(
+    what: &str,
+    span: Option<Span>,
+    span_id: Option<String>,
+    runtime: &LoweringRuntime,
+) -> ! {
     raise_lowering_error(
         format!(
             "{what} cannot be lowered to the executable IR \
@@ -491,112 +456,8 @@ fn raise_malformed_deep(what: &str, span: Option<Span>, span_id: Option<String>)
         ),
         span,
         span_id,
+        runtime,
     )
-}
-
-/// Re-raise an already-constructed fatal lowering diagnostic.
-/// Crate-internal so the host-side sub-lowering paths can resurface
-/// a fatal AD rejection caught by their inner `try_lower_*` call
-/// without losing the structured `op`/reason text.
-///
-/// The inner `catch_lowering` Guard's `Drop` impl unconditionally
-/// clears `SUPPRESS_LOWERING_PANIC_OUTPUT` on the way out, so a
-/// re-raise from a sub-lowering site (inside the outer
-/// `catch_lowering` scope) would otherwise produce a default
-/// "thread 'main' panicked at ... Box<dyn Any>" line on stderr in
-/// addition to the structured diagnostic. Re-set the suppression
-/// flag here so the outer scope sees a clean panic.
-pub(crate) fn raise_fatal_lowering_diagnostic(diagnostic: LowerDiagnostic) -> ! {
-    SUPPRESS_LOWERING_PANIC_OUTPUT.with(|cell| cell.set(true));
-    let fatal = if diagnostic.fatal {
-        diagnostic
-    } else {
-        diagnostic.fatal()
-    };
-    raise_lowering_diagnostic(fatal);
-}
-
-fn panic_payload_to_lower_diagnostic(payload: &(dyn Any + Send)) -> LowerDiagnostic {
-    if payload.is::<UnrepresentableDag>() {
-        return LowerDiagnostic::new(
-            "program uses a form that is not supported by IR evaluation yet; use `chelis build --target c` instead",
-            None,
-            None,
-        );
-    }
-    if let Some(diagnostic) = payload.downcast_ref::<LowerDiagnostic>() {
-        return diagnostic.clone();
-    }
-    let message = payload
-        .downcast_ref::<String>()
-        .cloned()
-        .or_else(|| {
-            payload
-                .downcast_ref::<&str>()
-                .map(|value| (*value).to_string())
-        })
-        .unwrap_or_else(|| "internal lowering error".to_string());
-    LowerDiagnostic::new(message, None, None)
-}
-
-/// chelis#620 red-team fix: stack segment for every lowering entry. The
-/// bounded unroll legally builds DAGs up to `MAX_STATIC_RECURSION_DEPTH`
-/// levels deep, and the passes that CONSUME that DAG inside the entry's
-/// dynamic extent (reverse-mode grad construction, DCE, verify) recurse
-/// per node without lowering's per-level `stacker::maybe_grow` -- so
-/// before this grow, a ~484-level combining builder (the cap's own im2col
-/// justification) lowered fine and then SIGABRT'd in a consumer below the
-/// cap, violating the "loud diagnostic, never a crash" contract. One grow
-/// at the boundary covers every pass in the closure, the same pattern as
-/// chelis-types' `with_grown_stack` (infer.rs WI-1) and the same 512 MiB
-/// segment size.
-const LOWERING_GROW_SEGMENT_BYTES: usize = 512 * 1024 * 1024;
-
-fn catch_lowering<R>(f: impl FnOnce() -> R + std::panic::UnwindSafe) -> Result<R, LowerDiagnostic> {
-    struct Guard;
-    impl Drop for Guard {
-        fn drop(&mut self) {
-            SUPPRESS_LOWERING_PANIC_OUTPUT.with(|cell| cell.set(false));
-        }
-    }
-
-    install_chelis_panic_hook();
-    SUPPRESS_LOWERING_PANIC_OUTPUT.with(|cell| cell.set(true));
-    let _guard = Guard;
-    std::panic::catch_unwind(|| stacker::grow(LOWERING_GROW_SEGMENT_BYTES, f))
-        .map_err(|payload| panic_payload_to_lower_diagnostic(&*payload))
-}
-
-/// Public alias for [`catch_lowering`] so other modules in this crate
-/// (e.g. `host`) can wrap their own lowering entry points and surface
-/// panics from `try_extract_tensor_type` (WS-A5 RT-3a F2: unresolved
-/// `TensorPrec::Var` reaching the conversion boundary) as
-/// `LowerDiagnostic`. Crate-internal only by design; the build CLI
-/// goes through `host::try_lower_compiled_program` instead.
-pub(crate) fn catch_lowering_external<R>(
-    f: impl FnOnce() -> R + std::panic::UnwindSafe,
-) -> Result<R, LowerDiagnostic> {
-    catch_lowering(f)
-}
-
-static CHELIS_PANIC_HOOK_INSTALLED: OnceLock<()> = OnceLock::new();
-
-/// Install a one-time global panic hook that suppresses panic output when the
-/// current thread is inside a `with_suppress_unrepresentable_panic` scope.
-/// Safe to call multiple times — the hook is installed at most once.
-pub fn install_chelis_panic_hook() {
-    CHELIS_PANIC_HOOK_INSTALLED.get_or_init(|| {
-        let prev = std::panic::take_hook();
-        std::panic::set_hook(Box::new(move |info| {
-            if SUPPRESS_UNREPRESENTABLE_PANIC.with(|cell| cell.get()) {
-                return;
-            }
-            if SUPPRESS_LOWERING_PANIC_OUTPUT.with(|cell| cell.get()) {
-                return;
-            }
-            prev(info);
-        }));
-    });
 }
 
 use chelis_deep::ast::{Atom, Expr, ExprCarrier, List, Metadata};
@@ -617,14 +478,17 @@ use crate::tier2;
 use crate::vmap;
 
 /// Lower a checked Deep program into a RISC DAG.
-pub fn lower_program(program: &CheckedProgram) -> Dag {
-    try_lower_program(program).unwrap_or_else(|diagnostic| panic!("{diagnostic}"))
+pub fn lower_program(program: &CheckedProgram, runtime: &LoweringRuntime) -> Dag {
+    try_lower_program(program, runtime).unwrap_or_else(|diagnostic| panic!("{diagnostic}"))
 }
 
 /// Lower a checked Deep program into a RISC DAG, returning a diagnostic for
 /// forms that are valid Chelis but not supported by IR evaluation.
-pub fn try_lower_program(program: &CheckedProgram) -> Result<Dag, LowerDiagnostic> {
-    try_lower_program_to_library(program).map(|library| library.dag)
+pub fn try_lower_program(
+    program: &CheckedProgram,
+    runtime: &LoweringRuntime,
+) -> Result<Dag, LowerDiagnostic> {
+    try_lower_program_to_library(program, runtime).map(|library| library.dag)
 }
 
 /// Phase F carrier for a lowered library and its composition metadata.
@@ -776,7 +640,11 @@ impl EvaluationProgram {
         Ok(selected)
     }
 
-    pub fn select_roots(&self, names: &[String]) -> Result<SelectedEvaluation, String> {
+    pub fn select_roots(
+        &self,
+        names: &[String],
+        runtime: &LoweringRuntime,
+    ) -> Result<SelectedEvaluation, String> {
         // Explicit observation may select a draw-free region: its seed
         // controls still matter. Keep profile-based ordinary dispatch as-is.
         if !matches!(
@@ -810,7 +678,7 @@ impl EvaluationProgram {
             .flat_map(|id| self.entries[*id].occurrences.iter().copied())
             .collect();
         let execution = self.execution.selected(&remap, &occurrences)?;
-        let (dag, execution) = normalize_evaluation_dag(dag, execution);
+        let (dag, execution) = normalize_evaluation_dag(dag, execution, runtime);
         if dag.roots().len() != names.len() {
             return Err("selected execution changed value-root arity".into());
         }
@@ -888,8 +756,12 @@ impl LoweredLibrary {
 ///
 /// The carrier DAG is identical to `lower_program(program)`. The carrier also
 /// keeps the private metadata that contextual lowering requires.
-pub fn lower_program_to_library(program: &CheckedProgram) -> LoweredLibrary {
-    try_lower_program_to_library(program).unwrap_or_else(|diagnostic| panic!("{diagnostic}"))
+pub fn lower_program_to_library(
+    program: &CheckedProgram,
+    runtime: &LoweringRuntime,
+) -> LoweredLibrary {
+    try_lower_program_to_library(program, runtime)
+        .unwrap_or_else(|diagnostic| panic!("{diagnostic}"))
 }
 
 /// Decode-once consumption-boundary check (chelis#731 Phase 3; chelis#887).
@@ -944,14 +816,16 @@ fn assert_decode_once_in_env(site: &str, env: &BTreeMap<String, Expr>) {
 
 pub fn try_lower_program_to_library(
     program: &CheckedProgram,
+    runtime: &LoweringRuntime,
 ) -> Result<LoweredLibrary, LowerDiagnostic> {
     assert_checked_library_boundary(program);
-    catch_lowering(|| {
+    runtime.catch_lowering(|| {
         lower_program_to_library_inner(
             program,
             None,
             #[cfg(feature = "lowering-trace")]
             None,
+            runtime,
         )
     })
 }
@@ -960,15 +834,17 @@ pub fn try_lower_program_to_library(
 /// caches. The ordinary library lowering and its semantic checks are shared.
 pub fn try_lower_program_to_evaluation_library(
     program: &CheckedProgram,
+    runtime: &LoweringRuntime,
 ) -> Result<EvaluationLibrary, LowerDiagnostic> {
     assert_checked_library_boundary(program);
-    catch_lowering(|| {
+    runtime.catch_lowering(|| {
         let mut execution = None;
         let library = lower_program_to_library_inner(
             program,
             Some(&mut execution),
             #[cfg(feature = "lowering-trace")]
             None,
+            runtime,
         );
         let (execution, entries) =
             execution.expect("evaluation library returns execution products");
@@ -993,6 +869,7 @@ fn assert_checked_library_boundary(program: &CheckedProgram) {
 #[cfg(feature = "lowering-trace")]
 pub(crate) fn try_lower_program_to_evaluation_library_with_trace(
     program: &CheckedProgram,
+    runtime: &LoweringRuntime,
 ) -> Result<
     (
         EvaluationLibrary,
@@ -1001,11 +878,15 @@ pub(crate) fn try_lower_program_to_evaluation_library_with_trace(
     LowerDiagnostic,
 > {
     assert_checked_library_boundary(program);
-    catch_lowering(|| {
+    runtime.catch_lowering(|| {
         let collector = crate::lowering_trace::Collector::new_execution();
         let mut execution = None;
-        let library =
-            lower_program_to_library_inner(program, Some(&mut execution), Some(collector.clone()));
+        let library = lower_program_to_library_inner(
+            program,
+            Some(&mut execution),
+            Some(collector.clone()),
+            runtime,
+        );
         let (execution, entries) = execution.expect("observed evaluation library metadata");
         let program = EvaluationProgram {
             dag: library.dag.clone(),
@@ -1022,13 +903,15 @@ pub(crate) fn try_lower_program_to_evaluation_library_with_trace(
 #[cfg(feature = "lowering-trace")]
 pub(crate) fn try_lower_program_to_library_with_trace(
     program: &CheckedProgram,
+    runtime: &LoweringRuntime,
 ) -> Result<(LoweredLibrary, crate::lowering_trace::LoweringTrace), LowerDiagnostic> {
     assert_checked_library_boundary(program);
     // The collector is created and consumed inside the unwind boundary. A
     // failed lowering discards all partial observations with its contexts.
-    catch_lowering(|| {
+    runtime.catch_lowering(|| {
         let collector = crate::lowering_trace::Collector::new();
-        let library = lower_program_to_library_inner(program, None, Some(collector.clone()));
+        let library =
+            lower_program_to_library_inner(program, None, Some(collector.clone()), runtime);
         (library, collector.finish())
     })
 }
@@ -1039,6 +922,7 @@ fn lower_program_to_library_inner(
         &mut Option<(crate::evaluation::ExecutionMetadata, Vec<EvaluationEntry>)>,
     >,
     #[cfg(feature = "lowering-trace")] trace: Option<crate::lowering_trace::Collector>,
+    runtime: &LoweringRuntime,
 ) -> LoweredLibrary {
     let detail_profile = std::env::var_os("CHELIS_PROFILE_COMPILE_CONTEXT_DETAIL")
         .map(|v| v == "1")
@@ -1052,7 +936,7 @@ fn lower_program_to_library_inner(
     };
 
     let program_type_env = program.type_env();
-    let lowered_names = top_level_lowering_map(program.exprs(), program_type_env);
+    let lowered_names = top_level_lowering_map(program.exprs(), program_type_env, runtime);
     log_sub("top_level_lowering_map", &mut sub_t);
     // Reuse the precomputed `lowered_names` rather than calling
     // `top_level_expr_is_lowered`, which would rebuild the map from
@@ -1060,8 +944,8 @@ fn lower_program_to_library_inner(
     // before this fix; ~20s on Coral).
     for_each_top_level_item(program.exprs(), &mut |expr| {
         if top_level_expr_is_lowered_with_names(expr, program_type_env, &lowered_names) {
-            assert_ir_lowerable(expr);
-            assert_ir_typed(expr);
+            assert_ir_lowerable(expr, runtime);
+            assert_ir_typed(expr, runtime);
         }
     });
     log_sub("assertions_loop", &mut sub_t);
@@ -1079,6 +963,7 @@ fn lower_program_to_library_inner(
         program_defs.clone(),
         program_signatures.clone(),
         program.linearity().clone(),
+        runtime,
     );
     ctx.local_tensor_ascriptions = Arc::new(program.local_tensor_ascriptions().to_vec());
     if execution_out.is_some() {
@@ -1144,7 +1029,7 @@ fn lower_program_to_library_inner(
     // identity) and `foo.N` (as the specific element).
     let mut pre_dce_table: UnordMap<String, NodeId> = UnordMap::new();
     for (name, value) in ctx.bindings.to_sorted() {
-        flatten_binding_into(name, value, &mut pre_dce_table);
+        flatten_binding_into(name, value, &mut pre_dce_table, runtime);
     }
     log_sub("flatten_bindings", &mut sub_t);
 
@@ -1198,10 +1083,10 @@ fn lower_program_to_library_inner(
         execution
             .remap(&remap)
             .and_then(|()| execution.remap(&linear_remap))
-            .unwrap_or_else(|message| raise_fatal_lowering_error(message, None, None));
+            .unwrap_or_else(|message| raise_fatal_lowering_error(message, None, None, runtime));
         execution
             .complete(&linear_dag)
-            .unwrap_or_else(|message| raise_fatal_lowering_error(message, None, None));
+            .unwrap_or_else(|message| raise_fatal_lowering_error(message, None, None, runtime));
         for entry in &mut ctx.evaluation_entries {
             for node in &mut entry.nodes {
                 *node = linear_remap[&remap[node]];
@@ -1419,8 +1304,12 @@ fn strip_drop_nodes(dag: &Dag) -> (Dag, UnordMap<NodeId, NodeId>) {
 /// library functions inline using the library's `program_defs` —
 /// matching the monolithic `lower_program(library + new)` behaviour
 /// byte-for-byte (modulo any irrelevant extra defs that DCE pruned).
-pub fn lower_program_with_context(library: &LoweredLibrary, new_program: &CheckedProgram) -> Dag {
-    try_lower_program_with_context(library, new_program)
+pub fn lower_program_with_context(
+    library: &LoweredLibrary,
+    new_program: &CheckedProgram,
+    runtime: &LoweringRuntime,
+) -> Dag {
+    try_lower_program_with_context(library, new_program, runtime)
         .map(|composed| composed.dag)
         .unwrap_or_else(|diagnostic| panic!("{diagnostic}"))
 }
@@ -1437,6 +1326,7 @@ pub struct ComposedLowering {
 pub fn try_lower_program_with_context(
     library: &LoweredLibrary,
     new_program: &CheckedProgram,
+    runtime: &LoweringRuntime,
 ) -> Result<ComposedLowering, LowerDiagnostic> {
     assert_decode_once_at_boundary("lower_program_with_context: exprs", new_program.exprs());
     assert_decode_once_at_boundary(
@@ -1451,20 +1341,22 @@ pub fn try_lower_program_with_context(
         "lower_program_with_context: library program_defs",
         &library.program_defs,
     );
-    catch_lowering(|| lower_program_with_context_inner(library, new_program, None))
+    runtime.catch_lowering(|| lower_program_with_context_inner(library, new_program, None, runtime))
 }
 
 pub fn try_lower_program_with_evaluation_context(
     library: &EvaluationLibrary,
     new_program: &CheckedProgram,
+    runtime: &LoweringRuntime,
 ) -> Result<EvaluationProgram, LowerDiagnostic> {
     assert_decode_once_at_boundary("evaluation context extension", new_program.exprs());
-    catch_lowering(|| {
+    runtime.catch_lowering(|| {
         let mut output = None;
         lower_program_with_context_inner(
             &library.library,
             new_program,
             Some((&library.program, &mut output)),
+            runtime,
         );
         output.expect("evaluation context lowering returns its execution product")
     })
@@ -1474,14 +1366,15 @@ fn lower_program_with_context_inner(
     library: &LoweredLibrary,
     new_program: &CheckedProgram,
     execution: Option<(&EvaluationProgram, &mut Option<EvaluationProgram>)>,
+    runtime: &LoweringRuntime,
 ) -> ComposedLowering {
     let new_type_env = new_program.type_env();
     let lowered_names =
-        top_level_lowering_map_with_context(library, new_program.exprs(), new_type_env);
+        top_level_lowering_map_with_context(library, new_program.exprs(), new_type_env, runtime);
     for_each_top_level_item(new_program.exprs(), &mut |expr| {
         if top_level_expr_is_lowered_with_names(expr, new_type_env, &lowered_names) {
-            assert_ir_lowerable(expr);
-            assert_ir_typed(expr);
+            assert_ir_lowerable(expr, runtime);
+            assert_ir_typed(expr, runtime);
         }
     });
 
@@ -1515,6 +1408,7 @@ fn lower_program_with_context_inner(
         program_defs,
         program_signatures,
         new_program.linearity().clone(),
+        runtime,
     );
     let local_tensor_ascriptions = chelis_types::compose_local_tensor_ascriptions(
         &library.local_tensor_ascriptions,
@@ -1526,6 +1420,7 @@ fn lower_program_with_context_inner(
             "local tensor-ascription identity space overflowed during contextual lowering",
             None,
             None,
+            runtime,
         )
     });
     ctx.local_tensor_ascriptions = Arc::new(local_tensor_ascriptions);
@@ -1549,10 +1444,10 @@ fn lower_program_with_context_inner(
         });
         metadata
             .remap(&library_remap)
-            .unwrap_or_else(|message| raise_fatal_lowering_error(message, None, None));
+            .unwrap_or_else(|message| raise_fatal_lowering_error(message, None, None, runtime));
         metadata
             .complete(&ctx.dag)
-            .unwrap_or_else(|message| raise_fatal_lowering_error(message, None, None));
+            .unwrap_or_else(|message| raise_fatal_lowering_error(message, None, None, runtime));
         ctx.execution = Some(metadata);
         ctx.evaluation_entries = program.entries.clone();
         for (owner, entry) in ctx.evaluation_entries.iter_mut().enumerate() {
@@ -1586,7 +1481,7 @@ fn lower_program_with_context_inner(
     for_each_top_level_item(new_program.exprs(), &mut |expr| {
         if top_level_expr_name(expr).and_then(|name| lowered_names.get(name).copied()) == Some(true)
             || (top_level_expr_name(expr).is_none()
-                && top_level_expr_is_lowered(expr, new_program.exprs(), new_type_env))
+                && top_level_expr_is_lowered(expr, new_program.exprs(), new_type_env, runtime))
         {
             if execution.is_some() {
                 ctx.lower_evaluation_top_level(expr);
@@ -1609,10 +1504,10 @@ fn lower_program_with_context_inner(
         metadata.spine.record_nodes(&ctx.dag);
         metadata
             .remap(&remap)
-            .unwrap_or_else(|message| raise_fatal_lowering_error(message, None, None));
+            .unwrap_or_else(|message| raise_fatal_lowering_error(message, None, None, runtime));
         metadata
             .complete(&dag)
-            .unwrap_or_else(|message| raise_fatal_lowering_error(message, None, None));
+            .unwrap_or_else(|message| raise_fatal_lowering_error(message, None, None, runtime));
         for entry in &mut ctx.evaluation_entries {
             for node in &mut entry.nodes {
                 *node = remap[node];
@@ -1633,19 +1528,25 @@ fn lower_program_with_context_inner(
     }
 }
 
-fn flatten_binding_into(prefix: &str, value: &LoweredValue, out: &mut UnordMap<String, NodeId>) {
+fn flatten_binding_into(
+    prefix: &str,
+    value: &LoweredValue,
+    out: &mut UnordMap<String, NodeId>,
+    runtime: &LoweringRuntime,
+) {
     match value {
         LoweredValue::Host { .. } => raise_lowering_error(
             "a host value cannot be exported as a tensor binding",
             None,
             None,
+            runtime,
         ),
         LoweredValue::Node(id) => {
             out.insert(prefix.to_string(), *id);
         }
         LoweredValue::Tuple(items) => {
             for (index, item) in items.iter().enumerate() {
-                flatten_binding_into(&format!("{prefix}.{index}"), item, out);
+                flatten_binding_into(&format!("{prefix}.{index}"), item, out, runtime);
             }
         }
         // ADT gradient values flatten field-wise, keyed by field name when
@@ -1660,7 +1561,7 @@ fn flatten_binding_into(prefix: &str, value: &LoweredValue, out: &mut UnordMap<S
                     .as_ref()
                     .and_then(|names| names.get(index).cloned())
                     .unwrap_or_else(|| index.to_string());
-                flatten_binding_into(&format!("{prefix}.{label}"), field, out);
+                flatten_binding_into(&format!("{prefix}.{label}"), field, out, runtime);
             }
         }
     }
@@ -1675,9 +1576,16 @@ pub fn lower_subexpr_program(
     scoped_tensor_types: UnordMap<String, TensorType>,
     full_type_env: UnordMap<String, Expr>,
     program_defs: UnordMap<String, Expr>,
+    runtime: &LoweringRuntime,
 ) -> Dag {
-    try_lower_subexpr_program(expr, scoped_tensor_types, full_type_env, program_defs)
-        .unwrap_or_else(|diagnostic| panic!("{diagnostic}"))
+    try_lower_subexpr_program(
+        expr,
+        scoped_tensor_types,
+        full_type_env,
+        program_defs,
+        runtime,
+    )
+    .unwrap_or_else(|diagnostic| panic!("{diagnostic}"))
 }
 
 pub fn try_lower_subexpr_program(
@@ -1685,6 +1593,7 @@ pub fn try_lower_subexpr_program(
     scoped_tensor_types: UnordMap<String, TensorType>,
     full_type_env: UnordMap<String, Expr>,
     program_defs: UnordMap<String, Expr>,
+    runtime: &LoweringRuntime,
 ) -> Result<Dag, LowerDiagnostic> {
     try_lower_subexpr_program_with_random_state(
         expr,
@@ -1693,6 +1602,7 @@ pub fn try_lower_subexpr_program(
         program_defs,
         None,
         0,
+        runtime,
     )
 }
 
@@ -1703,6 +1613,7 @@ pub fn try_lower_subexpr_program_with_random_state(
     program_defs: UnordMap<String, Expr>,
     random_seed: Option<u64>,
     random_counter: u64,
+    runtime: &LoweringRuntime,
 ) -> Result<Dag, LowerDiagnostic> {
     try_lower_subexpr_program_with_random_state_progress(
         expr,
@@ -1711,6 +1622,7 @@ pub fn try_lower_subexpr_program_with_random_state(
         program_defs,
         random_seed,
         random_counter,
+        runtime,
     )
     .map(|(dag, _)| dag)
 }
@@ -1725,6 +1637,7 @@ pub fn try_lower_subexpr_program_with_random_state_progress(
     program_defs: UnordMap<String, Expr>,
     random_seed: Option<u64>,
     random_counter: u64,
+    runtime: &LoweringRuntime,
 ) -> Result<(Dag, u64), LowerDiagnostic> {
     assert_decode_once_at_boundary("lower_subexpr_program: expr", std::slice::from_ref(expr));
     let full_type_env = full_type_env
@@ -1746,6 +1659,7 @@ pub fn try_lower_subexpr_program_with_random_state_progress(
         &context,
         random_seed,
         random_counter,
+        runtime,
     )
 }
 
@@ -1757,6 +1671,7 @@ pub fn try_lower_subexpr_evaluation_plan(
     full_type_env: UnordMap<String, Expr>,
     program_defs: UnordMap<String, Expr>,
     execution: &crate::evaluation::RandomExecutionContext,
+    runtime: &LoweringRuntime,
 ) -> Result<crate::evaluation::EvaluationPlan, LowerDiagnostic> {
     assert_decode_once_at_boundary(
         "lower_subexpr_evaluation_plan: expr",
@@ -1778,6 +1693,7 @@ pub fn try_lower_subexpr_evaluation_plan(
         None,
         false,
         execution,
+        runtime,
     )
 }
 
@@ -1788,6 +1704,7 @@ pub(crate) fn try_lower_subexpr_evaluation_with_ordered_inputs(
     result_claim: Option<&TensorType>,
     authored_signature: bool,
     execution: &crate::evaluation::RandomExecutionContext,
+    runtime: &LoweringRuntime,
 ) -> Result<crate::evaluation::EvaluationPlan, LowerDiagnostic> {
     try_lower_subexpr_evaluation_with_ordered_inputs_impl(
         expr,
@@ -1796,6 +1713,7 @@ pub(crate) fn try_lower_subexpr_evaluation_with_ordered_inputs(
         result_claim,
         execution,
         SubexprLoweringOptions {
+            runtime,
             include_list_controls: false,
             authored_signature,
             resource_policy: crate::evaluation::ResourcePolicy::Legacy,
@@ -1813,6 +1731,7 @@ pub(crate) fn try_lower_tensor_helper_evaluation_with_ordered_inputs(
     result_claim: Option<&TensorType>,
     authored_signature: bool,
     execution: &crate::evaluation::RandomExecutionContext,
+    runtime: &LoweringRuntime,
 ) -> Result<crate::evaluation::EvaluationPlan, LowerDiagnostic> {
     try_lower_subexpr_evaluation_with_ordered_inputs_impl(
         expr,
@@ -1821,6 +1740,7 @@ pub(crate) fn try_lower_tensor_helper_evaluation_with_ordered_inputs(
         result_claim,
         execution,
         SubexprLoweringOptions {
+            runtime,
             include_list_controls: false,
             authored_signature,
             resource_policy: crate::evaluation::ResourcePolicy::Legacy,
@@ -1838,6 +1758,7 @@ pub(crate) fn try_lower_subexpr_c_execution_with_ordered_inputs(
     result_claim: Option<&TensorType>,
     authored_signature: bool,
     execution: &crate::evaluation::RandomExecutionContext,
+    runtime: &LoweringRuntime,
 ) -> Result<crate::evaluation::EvaluationPlan, LowerDiagnostic> {
     try_lower_subexpr_evaluation_with_ordered_inputs_impl(
         expr,
@@ -1846,6 +1767,7 @@ pub(crate) fn try_lower_subexpr_c_execution_with_ordered_inputs(
         result_claim,
         execution,
         SubexprLoweringOptions {
+            runtime,
             include_list_controls: false,
             authored_signature,
             resource_policy: crate::evaluation::ResourcePolicy::RecordRequirements,
@@ -1863,6 +1785,7 @@ pub(crate) fn try_lower_tensor_helper_c_execution_with_ordered_inputs(
     result_claim: Option<&TensorType>,
     authored_signature: bool,
     execution: &crate::evaluation::RandomExecutionContext,
+    runtime: &LoweringRuntime,
 ) -> Result<crate::evaluation::EvaluationPlan, LowerDiagnostic> {
     try_lower_subexpr_evaluation_with_ordered_inputs_impl(
         expr,
@@ -1871,6 +1794,7 @@ pub(crate) fn try_lower_tensor_helper_c_execution_with_ordered_inputs(
         result_claim,
         execution,
         SubexprLoweringOptions {
+            runtime,
             include_list_controls: false,
             authored_signature,
             resource_policy: crate::evaluation::ResourcePolicy::RecordRequirements,
@@ -1889,6 +1813,7 @@ pub(crate) fn try_lower_subexpr_c_execution_with_ordered_inputs_and_trace(
     result_claim: Option<&TensorType>,
     authored_signature: bool,
     execution: &crate::evaluation::RandomExecutionContext,
+    runtime: &LoweringRuntime,
 ) -> Result<
     (
         crate::evaluation::EvaluationPlan,
@@ -1904,6 +1829,7 @@ pub(crate) fn try_lower_subexpr_c_execution_with_ordered_inputs_and_trace(
         result_claim,
         execution,
         SubexprLoweringOptions {
+            runtime,
             include_list_controls: false,
             authored_signature,
             resource_policy: crate::evaluation::ResourcePolicy::RecordRequirements,
@@ -1922,6 +1848,7 @@ pub(crate) fn try_lower_tensor_helper_c_execution_with_ordered_inputs_and_trace(
     result_claim: Option<&TensorType>,
     authored_signature: bool,
     execution: &crate::evaluation::RandomExecutionContext,
+    runtime: &LoweringRuntime,
 ) -> Result<
     (
         crate::evaluation::EvaluationPlan,
@@ -1937,6 +1864,7 @@ pub(crate) fn try_lower_tensor_helper_c_execution_with_ordered_inputs_and_trace(
         result_claim,
         execution,
         SubexprLoweringOptions {
+            runtime,
             include_list_controls: false,
             authored_signature,
             resource_policy: crate::evaluation::ResourcePolicy::RecordRequirements,
@@ -1953,10 +1881,16 @@ fn try_lower_subexpr_evaluation_with_ordered_inputs_impl(
     context: &SubexprLoweringContext,
     result_claim: Option<&TensorType>,
     execution: &crate::evaluation::RandomExecutionContext,
-    options: SubexprLoweringOptions,
+    options: SubexprLoweringOptions<'_>,
 ) -> Result<crate::evaluation::EvaluationPlan, LowerDiagnostic> {
+    let runtime = options.runtime;
     if let crate::evaluation::EvaluationProfile::Legacy(reason) = context
-        .evaluation_profile_with_resource_policy(expr, &scoped_types, options.resource_policy)
+        .evaluation_profile_with_resource_policy(
+            expr,
+            &scoped_types,
+            options.resource_policy,
+            runtime,
+        )
         && reason != crate::evaluation::LegacyEvaluationReason::NoDropout
     {
         return Err(LowerDiagnostic::new(
@@ -1971,7 +1905,7 @@ fn try_lower_subexpr_evaluation_with_ordered_inputs_impl(
     // whole attempt on unwind. It contains `RefCell` only to compose nested
     // lowering contexts, so assert safety at this narrow catch boundary
     // rather than weakening `catch_lowering` for unrelated callers.
-    catch_lowering(std::panic::AssertUnwindSafe(|| {
+    runtime.catch_lowering(std::panic::AssertUnwindSafe(|| {
         let mut metadata = None;
         let (dag, _, _, _) = lower_subexpr_program_inner_impl(
             expr,
@@ -1991,6 +1925,7 @@ fn try_lower_subexpr_evaluation_with_ordered_inputs_impl(
                 message,
                 Some(expr.span()),
                 expr.span_id().map(ToOwned::to_owned),
+                runtime,
             )
         })
     }))
@@ -2074,6 +2009,7 @@ impl SubexprLoweringContext {
         expr: &Expr,
         scoped_types: UnordMap<String, TensorType>,
         random: crate::host::RandomLoweringState,
+        runtime: &LoweringRuntime,
     ) -> Result<(Dag, crate::host::RandomLoweringState), LowerDiagnostic> {
         try_lower_subexpr_program_with_context_and_random_state(
             expr,
@@ -2081,6 +2017,7 @@ impl SubexprLoweringContext {
             self,
             random.seed,
             random.counter,
+            runtime,
         )
         .map(|(dag, counter)| (dag, crate::host::RandomLoweringState { counter, ..random }))
     }
@@ -2090,6 +2027,7 @@ impl SubexprLoweringContext {
         expr: &Expr,
         scoped_types: UnordMap<String, TensorType>,
         execution: &crate::evaluation::RandomExecutionContext,
+        runtime: &LoweringRuntime,
     ) -> Result<crate::evaluation::EvaluationPlan, LowerDiagnostic> {
         try_lower_subexpr_evaluation_with_ordered_inputs(
             expr,
@@ -2098,6 +2036,7 @@ impl SubexprLoweringContext {
             None,
             false,
             execution,
+            runtime,
         )
     }
 
@@ -2272,11 +2211,13 @@ impl SubexprLoweringContext {
         &self,
         expr: &Expr,
         bound: &[(String, TensorType)],
+        runtime: &LoweringRuntime,
     ) -> crate::evaluation::EvaluationProfile {
         self.evaluation_profile_with_resource_policy(
             expr,
             bound,
             crate::evaluation::ResourcePolicy::Legacy,
+            runtime,
         )
     }
 
@@ -2284,11 +2225,13 @@ impl SubexprLoweringContext {
         &self,
         expr: &Expr,
         bound: &[(String, TensorType)],
+        runtime: &LoweringRuntime,
     ) -> crate::evaluation::EvaluationProfile {
         self.evaluation_profile_with_resource_policy(
             expr,
             bound,
             crate::evaluation::ResourcePolicy::RecordRequirements,
+            runtime,
         )
     }
 
@@ -2297,6 +2240,7 @@ impl SubexprLoweringContext {
         expr: &Expr,
         bound: &[(String, TensorType)],
         resource_policy: crate::evaluation::ResourcePolicy,
+        runtime: &LoweringRuntime,
     ) -> crate::evaluation::EvaluationProfile {
         let defs = self
             .program_defs
@@ -2304,7 +2248,7 @@ impl SubexprLoweringContext {
             .filter(|(name, _)| !bound.iter().any(|(bound, _)| bound == *name))
             .map(|(name, body)| (name.clone(), body.clone()))
             .collect();
-        static_controls::profile(expr, &defs, bound, resource_policy)
+        static_controls::profile(expr, &defs, bound, resource_policy, runtime)
     }
 }
 
@@ -2353,9 +2297,10 @@ pub(crate) fn try_lower_subexpr_program_with_context_and_controls(
     expr: &Expr,
     scoped_tensor_types: UnordMap<String, TensorType>,
     context: &SubexprLoweringContext,
+    runtime: &LoweringRuntime,
 ) -> Result<LoweredSubexprWithControls, LowerDiagnostic> {
     assert_decode_once_at_boundary("lower_subexpr_program: expr", std::slice::from_ref(expr));
-    catch_lowering(|| {
+    runtime.catch_lowering(|| {
         let (dag, _, value_root_count, list_checks) = lower_subexpr_program_inner_impl(
             expr,
             scoped_tensor_types.into_sorted(),
@@ -2366,6 +2311,7 @@ pub(crate) fn try_lower_subexpr_program_with_context_and_controls(
                 counter: 0,
             },
             SubexprLoweringOptions {
+                runtime,
                 include_list_controls: true,
                 // The scope is the ambient bindings this subexpression captured.
                 authored_signature: false,
@@ -2390,6 +2336,7 @@ pub(crate) fn try_lower_subexpr_program_with_context_and_random_state(
     context: &SubexprLoweringContext,
     random_seed: Option<u64>,
     random_counter: u64,
+    runtime: &LoweringRuntime,
 ) -> Result<(Dag, u64), LowerDiagnostic> {
     // An expression without a declaring signature assigns its internal ABI
     // deterministically. Signature-bearing helpers use the ordered boundary.
@@ -2398,9 +2345,12 @@ pub(crate) fn try_lower_subexpr_program_with_context_and_random_state(
         scoped_tensor_types.into_sorted(),
         context,
         None,
-        random_seed,
-        random_counter,
+        crate::host::RandomLoweringState {
+            seed: random_seed,
+            counter: random_counter,
+        },
         false,
+        runtime,
     )
 }
 
@@ -2412,20 +2362,18 @@ pub(crate) fn try_lower_subexpr_program_with_ordered_inputs(
     scoped_bindings: Vec<(String, TensorType)>,
     context: &SubexprLoweringContext,
     result_claim: Option<&TensorType>,
-    random_seed: Option<u64>,
-    random_counter: u64,
+    random: crate::host::RandomLoweringState,
     authored_signature: bool,
+    runtime: &LoweringRuntime,
 ) -> Result<(Dag, u64), LowerDiagnostic> {
     try_lower_subexpr_program_with_ordered_inputs_impl(
         expr,
         scoped_bindings,
         context,
         result_claim,
-        crate::host::RandomLoweringState {
-            seed: random_seed,
-            counter: random_counter,
-        },
+        random,
         SubexprLoweringOptions {
+            runtime,
             include_list_controls: false,
             authored_signature,
             resource_policy: crate::evaluation::ResourcePolicy::Legacy,
@@ -2441,20 +2389,18 @@ pub(crate) fn try_lower_tensor_helper_program_with_ordered_inputs(
     scoped_bindings: Vec<(String, TensorType)>,
     context: &SubexprLoweringContext,
     result_claim: Option<&TensorType>,
-    random_seed: Option<u64>,
-    random_counter: u64,
+    random: crate::host::RandomLoweringState,
     authored_signature: bool,
+    runtime: &LoweringRuntime,
 ) -> Result<(Dag, u64), LowerDiagnostic> {
     try_lower_subexpr_program_with_ordered_inputs_impl(
         expr,
         scoped_bindings,
         context,
         result_claim,
-        crate::host::RandomLoweringState {
-            seed: random_seed,
-            counter: random_counter,
-        },
+        random,
         SubexprLoweringOptions {
+            runtime,
             include_list_controls: false,
             authored_signature,
             resource_policy: crate::evaluation::ResourcePolicy::Legacy,
@@ -2471,9 +2417,9 @@ pub(crate) fn try_lower_subexpr_program_with_ordered_inputs_and_trace(
     scoped_bindings: Vec<(String, TensorType)>,
     context: &SubexprLoweringContext,
     result_claim: Option<&TensorType>,
-    random_seed: Option<u64>,
-    random_counter: u64,
+    random: crate::host::RandomLoweringState,
     authored_signature: bool,
+    runtime: &LoweringRuntime,
 ) -> Result<(Dag, u64, crate::lowering_trace::HelperLoweringTrace), LowerDiagnostic> {
     let collector = crate::lowering_trace::Collector::new_helper();
     let (dag, random_counter) = try_lower_subexpr_program_with_ordered_inputs_impl(
@@ -2481,11 +2427,9 @@ pub(crate) fn try_lower_subexpr_program_with_ordered_inputs_and_trace(
         scoped_bindings,
         context,
         result_claim,
-        crate::host::RandomLoweringState {
-            seed: random_seed,
-            counter: random_counter,
-        },
+        random,
         SubexprLoweringOptions {
+            runtime,
             include_list_controls: false,
             authored_signature,
             resource_policy: crate::evaluation::ResourcePolicy::Legacy,
@@ -2502,9 +2446,9 @@ pub(crate) fn try_lower_tensor_helper_program_with_ordered_inputs_and_trace(
     scoped_bindings: Vec<(String, TensorType)>,
     context: &SubexprLoweringContext,
     result_claim: Option<&TensorType>,
-    random_seed: Option<u64>,
-    random_counter: u64,
+    random: crate::host::RandomLoweringState,
     authored_signature: bool,
+    runtime: &LoweringRuntime,
 ) -> Result<(Dag, u64, crate::lowering_trace::HelperLoweringTrace), LowerDiagnostic> {
     let collector = crate::lowering_trace::Collector::new_helper();
     let (dag, random_counter) = try_lower_subexpr_program_with_ordered_inputs_impl(
@@ -2512,11 +2456,9 @@ pub(crate) fn try_lower_tensor_helper_program_with_ordered_inputs_and_trace(
         scoped_bindings,
         context,
         result_claim,
-        crate::host::RandomLoweringState {
-            seed: random_seed,
-            counter: random_counter,
-        },
+        random,
         SubexprLoweringOptions {
+            runtime,
             include_list_controls: false,
             authored_signature,
             resource_policy: crate::evaluation::ResourcePolicy::Legacy,
@@ -2533,8 +2475,9 @@ fn try_lower_subexpr_program_with_ordered_inputs_impl(
     context: &SubexprLoweringContext,
     result_claim: Option<&TensorType>,
     random: crate::host::RandomLoweringState,
-    options: SubexprLoweringOptions,
+    options: SubexprLoweringOptions<'_>,
 ) -> Result<(Dag, u64), LowerDiagnostic> {
+    let runtime = options.runtime;
     assert_decode_once_at_boundary("lower_subexpr_program: expr", std::slice::from_ref(expr));
     // chelis#1923: this is the one lowering ingress that receives UNCHECKED
     // Deep, measured and in use. Every whole-program entry takes a
@@ -2547,7 +2490,7 @@ fn try_lower_subexpr_program_with_ordered_inputs_impl(
     let folded = chelis_deep::pipe::fold_pipes(expr);
     let expr = &folded;
     // As above, a failed attempt owns and discards its complete collector.
-    catch_lowering(std::panic::AssertUnwindSafe(|| {
+    runtime.catch_lowering(std::panic::AssertUnwindSafe(|| {
         let (dag, random_counter, _, _) = lower_subexpr_program_inner_impl(
             expr,
             scoped_bindings,
@@ -2596,13 +2539,15 @@ pub(crate) fn try_lower_staged_host_region(
     LowerDiagnostic,
 > {
     use crate::host::staged::{StagingAttempt, StagingStatus};
+    let runtime = program.runtime();
     let status = std::rc::Rc::new(Cell::new(StagingStatus::Searching));
-    let result = catch_lowering(std::panic::AssertUnwindSafe(|| {
+    let result = runtime.catch_lowering(std::panic::AssertUnwindSafe(|| {
         let mut ctx = LowerCtx::new(
             context.program_types.clone(),
             context.program_defs.clone(),
             context.program_signatures.clone(),
             LinearityInfo::default(),
+            runtime,
         );
         ctx.local_tensor_ascriptions = context.local_tensor_ascriptions.clone();
         ctx.host_program = Some(program);
@@ -2674,15 +2619,15 @@ pub(crate) fn try_lower_staged_host_region(
         if ctx.host_sources.is_empty() {
             return None;
         }
-        let root = result.expect_node("staged host tensor region");
+        let root = result.expect_node("staged host tensor region", runtime);
         ctx.dag.add_root(root);
         let mut evaluation = ctx.execution.take().map(|mut metadata| {
             metadata.spine.record_nodes(&ctx.dag);
             metadata
                 .complete(&ctx.dag)
-                .unwrap_or_else(|message| raise_fatal_lowering_error(message, None, None));
+                .unwrap_or_else(|message| raise_fatal_lowering_error(message, None, None, runtime));
             crate::evaluation::StagedEvaluationPlan::new(ctx.dag.clone(), metadata)
-                .unwrap_or_else(|message| raise_fatal_lowering_error(message, None, None))
+                .unwrap_or_else(|message| raise_fatal_lowering_error(message, None, None, runtime))
         });
         let plan = crate::host::staged::partition(
             &ctx.dag,
@@ -2693,7 +2638,12 @@ pub(crate) fn try_lower_staged_host_region(
             evaluation.as_mut(),
         )
         .unwrap_or_else(|error| {
-            raise_lowering_error(error, Some(expr.span()), expr.span_id().map(str::to_owned))
+            raise_lowering_error(
+                error,
+                Some(expr.span()),
+                expr.span_id().map(str::to_owned),
+                runtime,
+            )
         });
         if let Some(output) = execution_out.as_mut() {
             **output = evaluation;
@@ -2716,7 +2666,9 @@ pub(crate) fn try_lower_staged_host_region(
 /// runtime list controls belong in this DAG, and whether the scope came from a
 /// signature someone wrote. Neither is recoverable from the expression, and
 /// passing them as bare positional booleans made the call sites unreadable.
-struct SubexprLoweringOptions {
+struct SubexprLoweringOptions<'a> {
+    /// The native service is borrowed for this attempt, never cached with facts.
+    runtime: &'a LoweringRuntime,
     include_list_controls: bool,
     /// See [`LowerCtx::signature_is_authored`].
     authored_signature: bool,
@@ -2738,10 +2690,11 @@ fn lower_subexpr_program_inner_impl(
     context: &SubexprLoweringContext,
     result_claim: Option<&TensorType>,
     random: crate::host::RandomLoweringState,
-    options: SubexprLoweringOptions,
+    options: SubexprLoweringOptions<'_>,
     execution_out: Option<&mut Option<crate::evaluation::ExecutionMetadata>>,
 ) -> (Dag, u64, usize, Vec<RuntimeListCheckDescriptor>) {
     let SubexprLoweringOptions {
+        runtime,
         include_list_controls,
         authored_signature,
         resource_policy,
@@ -2754,6 +2707,7 @@ fn lower_subexpr_program_inner_impl(
         context.program_defs.clone(),
         context.program_signatures.clone(),
         LinearityInfo::default(),
+        runtime,
     );
     ctx.local_tensor_ascriptions = context.local_tensor_ascriptions.clone();
     #[cfg(feature = "lowering-trace")]
@@ -2839,7 +2793,7 @@ fn lower_subexpr_program_inner_impl(
     #[cfg(feature = "lowering-trace")]
     if let Some(trace) = &trace {
         let mut roots = packed_value_roots.into_iter();
-        let packed_result = value.trace_value_from_roots(&mut roots);
+        let packed_result = value.trace_value_from_roots(&mut roots, runtime);
         assert!(roots.next().is_none());
         trace.helper_result(ctx.dag.roots(), packed_result);
     }
@@ -2888,6 +2842,7 @@ fn lower_subexpr_program_inner_impl(
             ctx.execution.expect("plan lowering metadata"),
             #[cfg(feature = "lowering-trace")]
             trace.as_ref(),
+            runtime,
         );
         if let Some(output) = execution_out {
             *output = Some(metadata);
@@ -2925,12 +2880,14 @@ fn lower_subexpr_program_inner_impl(
 fn normalize_evaluation_dag(
     dag: Dag,
     execution: crate::evaluation::ExecutionMetadata,
+    runtime: &LoweringRuntime,
 ) -> (Dag, crate::evaluation::ExecutionMetadata) {
     normalize_evaluation_dag_with_trace(
         dag,
         execution,
         #[cfg(feature = "lowering-trace")]
         None,
+        runtime,
     )
 }
 
@@ -2938,6 +2895,7 @@ fn normalize_evaluation_dag_with_trace(
     dag: Dag,
     mut execution: crate::evaluation::ExecutionMetadata,
     #[cfg(feature = "lowering-trace")] trace: Option<&crate::lowering_trace::Collector>,
+    runtime: &LoweringRuntime,
 ) -> (Dag, crate::evaluation::ExecutionMetadata) {
     execution.spine.record_nodes(&dag);
     execution
@@ -2966,14 +2924,14 @@ fn normalize_evaluation_dag_with_trace(
         crate::optimize::dead_code_eliminate_with_retained(&dag, &execution.spine.nodes());
     execution
         .remap(&dce_remap)
-        .unwrap_or_else(|message| raise_fatal_lowering_error(message, None, None));
+        .unwrap_or_else(|message| raise_fatal_lowering_error(message, None, None, runtime));
     #[cfg(feature = "lowering-trace")]
     let after_dce_execution = trace
         .map(|_| crate::lowering_trace::Collector::execution_observation(&after_dce, &execution));
     let (after_copies, copy_remap) = insert_copy_nodes_for_consuming_fanout(&after_dce);
     execution
         .remap(&copy_remap)
-        .unwrap_or_else(|message| raise_fatal_lowering_error(message, None, None));
+        .unwrap_or_else(|message| raise_fatal_lowering_error(message, None, None, runtime));
     #[cfg(feature = "lowering-trace")]
     let after_copies_execution = trace.map(|_| {
         crate::lowering_trace::Collector::execution_observation(&after_copies, &execution)
@@ -2985,7 +2943,7 @@ fn normalize_evaluation_dag_with_trace(
     // precede their consumer and terminal Drops follow the source spine.
     execution
         .complete(&after_drops)
-        .unwrap_or_else(|message| raise_fatal_lowering_error(message, None, None));
+        .unwrap_or_else(|message| raise_fatal_lowering_error(message, None, None, runtime));
     #[cfg(feature = "lowering-trace")]
     if let Some(trace) = trace {
         let after_drops_execution =
@@ -3904,6 +3862,7 @@ fn tensor_rank_substitutions(
     formal_param_exprs: &[Option<Expr>],
     actual_args: &[TensorType],
     dim_axis_positions: &UnordMap<String, (usize, DimInfo)>,
+    runtime: &LoweringRuntime,
 ) -> UnordMap<String, Vec<DimInfo>> {
     let mut subst = UnordMap::new();
     for (formal_expr, actual) in formal_param_exprs.iter().zip(actual_args.iter()) {
@@ -3918,7 +3877,7 @@ fn tensor_rank_substitutions(
         // because the checker already unified them; the debug_assert is the
         // tripwire for a checker regression that let two positions diverge.
         for (var_name, run) in
-            extract_rank_var_bindings(formal_expr, &actual.dims, dim_axis_positions)
+            extract_rank_var_bindings(formal_expr, &actual.dims, dim_axis_positions, runtime)
         {
             match subst.entry(var_name) {
                 chelis_unord::Entry::Occupied(existing) => {
@@ -3954,9 +3913,14 @@ fn activation_rank_substitutions(
     authored_formals: &[Option<Expr>],
     actual_args: &[TensorType],
     dim_axis_positions: &UnordMap<String, (usize, DimInfo)>,
+    runtime: &LoweringRuntime,
 ) -> UnordMap<String, Vec<DimInfo>> {
-    let mut substitutions =
-        tensor_rank_substitutions(actualization_formals, actual_args, dim_axis_positions);
+    let mut substitutions = tensor_rank_substitutions(
+        actualization_formals,
+        actual_args,
+        dim_axis_positions,
+        runtime,
+    );
     for (actualization, authored) in actualization_formals.iter().zip(authored_formals) {
         let (Some(actualization), Some(authored)) = (actualization, authored) else {
             continue;
@@ -4030,6 +3994,7 @@ fn extract_rank_var_bindings(
     expr: &Expr,
     actual_dims: &[DimInfo],
     dim_axis_positions: &UnordMap<String, (usize, DimInfo)>,
+    runtime: &LoweringRuntime,
 ) -> Vec<(String, Vec<DimInfo>)> {
     let Some(slots) = tensor_formal_dim_slots(expr) else {
         return Vec::new();
@@ -4110,6 +4075,7 @@ fn extract_rank_var_bindings(
                                         ),
                                         None,
                                         None,
+                                        runtime,
                                     )
                                 }
                                 // Anchor absent by name AND not soundly
@@ -4125,6 +4091,7 @@ fn extract_rank_var_bindings(
                                     ),
                                     None,
                                     None,
+                                    runtime,
                                 ),
                             },
                         };
@@ -4158,8 +4125,9 @@ pub fn top_level_expr_is_lowered(
     expr: &Expr,
     program_exprs: &[Expr],
     type_env: &BTreeMap<String, Expr>,
+    runtime: &LoweringRuntime,
 ) -> bool {
-    let lowered_names = top_level_lowering_map(program_exprs, type_env);
+    let lowered_names = top_level_lowering_map(program_exprs, type_env, runtime);
     top_level_expr_is_lowered_with_names(expr, type_env, &lowered_names)
 }
 
@@ -4180,6 +4148,7 @@ pub fn top_level_lowering_map_from_realizability(
 pub fn top_level_lowering_map(
     exprs: &[Expr],
     type_env: &BTreeMap<String, Expr>,
+    runtime: &LoweringRuntime,
 ) -> BTreeMap<String, bool> {
     let top_level_defs = collect_top_level_defs(exprs);
     let top_level_sigs = collect_top_level_sigs(exprs);
@@ -4187,6 +4156,7 @@ pub fn top_level_lowering_map(
     let types = LowerabilityTypes {
         signatures: &top_level_sigs,
         dtype_bound_names: &dtype_bound_names,
+        type_env,
     };
     let mut cache = BTreeMap::new();
     let mut visiting = UnordSet::new();
@@ -4195,9 +4165,9 @@ pub fn top_level_lowering_map(
             name,
             &top_level_defs,
             &types,
-            type_env,
             &mut cache,
             &mut visiting,
+            runtime,
         );
         cache.insert(name.clone(), lowered);
     }
@@ -4216,6 +4186,7 @@ pub fn top_level_lowering_map_with_context(
     library: &LoweredLibrary,
     new_exprs: &[Expr],
     new_type_env: &BTreeMap<String, Expr>,
+    runtime: &LoweringRuntime,
 ) -> BTreeMap<String, bool> {
     let new_defs = collect_top_level_defs(new_exprs);
     let new_sigs = collect_top_level_sigs(new_exprs);
@@ -4264,6 +4235,7 @@ pub fn top_level_lowering_map_with_context(
     let types = LowerabilityTypes {
         signatures: &top_level_sigs,
         dtype_bound_names: &dtype_bound_names,
+        type_env: new_type_env,
     };
     // The checked contextual environment already includes retained library
     // types. Do not reconstruct signatures from lossy library TensorTypes.
@@ -4276,16 +4248,20 @@ pub fn top_level_lowering_map_with_context(
             name,
             &top_level_defs,
             &types,
-            new_type_env,
             &mut cache,
             &mut visiting,
+            runtime,
         );
         cache.insert(name.clone(), lowered);
     }
     cache
 }
 
-pub fn expr_is_dag_lowerable(expr: &Expr, program: &CheckedProgram) -> bool {
+pub fn expr_is_dag_lowerable(
+    expr: &Expr,
+    program: &CheckedProgram,
+    runtime: &LoweringRuntime,
+) -> bool {
     if expr_requires_host_runtime(expr) {
         return false;
     }
@@ -4296,6 +4272,7 @@ pub fn expr_is_dag_lowerable(expr: &Expr, program: &CheckedProgram) -> bool {
     let types = LowerabilityTypes {
         signatures: &top_level_sigs,
         dtype_bound_names: &dtype_bound_names,
+        type_env: program.type_env(),
     };
     let mut cache = BTreeMap::new();
     let mut visiting = UnordSet::new();
@@ -4303,10 +4280,10 @@ pub fn expr_is_dag_lowerable(expr: &Expr, program: &CheckedProgram) -> bool {
         expr,
         &top_level_defs,
         &types,
-        program.type_env(),
         &mut cache,
         &mut visiting,
         &UnordSet::new(),
+        runtime,
     )
 }
 
@@ -4955,16 +4932,18 @@ fn collect_top_level_sigs_from_expr(expr: &Expr, sigs: &mut BTreeMap<String, Exp
 struct LowerabilityTypes<'a> {
     signatures: &'a BTreeMap<String, Expr>,
     dtype_bound_names: &'a BTreeMap<String, UnordSet<String>>,
+    type_env: &'a BTreeMap<String, Expr>,
 }
 
 fn def_is_lowered(
     name: &str,
     top_level_defs: &BTreeMap<String, Expr>,
     types: &LowerabilityTypes<'_>,
-    type_env: &BTreeMap<String, Expr>,
     cache: &mut BTreeMap<String, bool>,
     visiting: &mut UnordSet<String>,
+    runtime: &LoweringRuntime,
 ) -> bool {
+    let type_env = types.type_env;
     if let Some(lowered) = cache.get(name) {
         return *lowered;
     }
@@ -5002,7 +4981,7 @@ fn def_is_lowered(
                         .is_some_and(|result| result.tag() == Some(DeepTag::TTensor))
             })
         }) && matches!(
-            evaluation_profile_from_defs(body, top_level_defs),
+            evaluation_profile_from_defs(body, top_level_defs, runtime),
             crate::evaluation::EvaluationProfile::Legacy(
                 crate::evaluation::LegacyEvaluationReason::RuntimeRate
             )
@@ -5011,10 +4990,10 @@ fn def_is_lowered(
                 body,
                 top_level_defs,
                 types,
-                type_env,
                 cache,
                 visiting,
                 &UnordSet::new(),
+                runtime,
             )
             && !lookup_declared_type_expr(types.signatures, type_env, name)
                 .is_some_and(|ty| type_is_never_lowerable(ty, types.dtype_bound_names.get(name)))
@@ -5065,11 +5044,12 @@ fn expr_depends_on_nonlowerable_name(
     expr: &Expr,
     top_level_defs: &BTreeMap<String, Expr>,
     types: &LowerabilityTypes<'_>,
-    type_env: &BTreeMap<String, Expr>,
     cache: &mut BTreeMap<String, bool>,
     visiting: &mut UnordSet<String>,
     bound_names: &UnordSet<String>,
+    runtime: &LoweringRuntime,
 ) -> bool {
+    let type_env = types.type_env;
     if let Some((tag, meta, kids)) = match expr.carrier() {
         ExprCarrier::DecodedNode(tag, metadata, children) => Some((tag, metadata, children)),
         ExprCarrier::StructuralList(_)
@@ -5093,11 +5073,11 @@ fn expr_depends_on_nonlowerable_name(
                 type_expr_has_precision_var(ty)
                     || type_expr_has_rank_var(ty)
                     || fn_type_has_bounded_scalar_var(ty, types.dtype_bound_names.get(&name))
-            }) || (evaluation_profile_from_defs(body, top_level_defs)
+            }) || (evaluation_profile_from_defs(body, top_level_defs, runtime)
                 == crate::evaluation::EvaluationProfile::Legacy(
                     crate::evaluation::LegacyEvaluationReason::RuntimeRate,
                 )
-                && evaluation_profile_from_defs(expr, top_level_defs)
+                && evaluation_profile_from_defs(expr, top_level_defs, runtime)
                     == crate::evaluation::EvaluationProfile::FixedControl))
         {
             if def_body_requires_host_runtime(body) || !visiting.insert(name.clone()) {
@@ -5107,10 +5087,10 @@ fn expr_depends_on_nonlowerable_name(
                 body,
                 top_level_defs,
                 types,
-                type_env,
                 cache,
                 visiting,
                 &UnordSet::new(),
+                runtime,
             );
             visiting.remove(&name);
             return requires_host
@@ -5119,10 +5099,10 @@ fn expr_depends_on_nonlowerable_name(
                         arg,
                         top_level_defs,
                         types,
-                        type_env,
                         cache,
                         visiting,
                         bound_names,
+                        runtime,
                     )
                 });
         }
@@ -5131,7 +5111,7 @@ fn expr_depends_on_nonlowerable_name(
             && !bound_names.contains(name)
             && top_level_defs.contains_key(name)
         {
-            return !def_is_lowered(name, top_level_defs, types, type_env, cache, visiting);
+            return !def_is_lowered(name, top_level_defs, types, cache, visiting, runtime);
         }
         if tag == DeepTag::Fn {
             let mut scoped = bound_names.clone();
@@ -5147,7 +5127,7 @@ fn expr_depends_on_nonlowerable_name(
                     | ExprCarrier::MalformedLegacyList(_) => return true,
                 };
                 for param in params_kids {
-                    collect_param_bound_names(param, &mut scoped);
+                    collect_param_bound_names(param, &mut scoped, runtime);
                 }
             }
             return kids.get(1).is_some_and(|body| {
@@ -5155,10 +5135,10 @@ fn expr_depends_on_nonlowerable_name(
                     body,
                     top_level_defs,
                     types,
-                    type_env,
                     cache,
                     visiting,
                     &scoped,
+                    runtime,
                 )
             });
         }
@@ -5181,10 +5161,10 @@ fn expr_depends_on_nonlowerable_name(
                         &binding_kids[index + 1],
                         top_level_defs,
                         types,
-                        type_env,
                         cache,
                         visiting,
                         &scoped,
+                        runtime,
                     ) {
                         return true;
                     }
@@ -5199,10 +5179,10 @@ fn expr_depends_on_nonlowerable_name(
                     body,
                     top_level_defs,
                     types,
-                    type_env,
                     cache,
                     visiting,
                     &scoped,
+                    runtime,
                 )
             });
         }
@@ -5212,10 +5192,10 @@ fn expr_depends_on_nonlowerable_name(
                     scrutinee,
                     top_level_defs,
                     types,
-                    type_env,
                     cache,
                     visiting,
                     bound_names,
+                    runtime,
                 )
             }) {
                 return true;
@@ -5240,20 +5220,20 @@ fn expr_depends_on_nonlowerable_name(
                         guard,
                         top_level_defs,
                         types,
-                        type_env,
                         cache,
                         visiting,
                         &scoped,
+                        runtime,
                     )
                 }) || arm_kids.get(2).is_some_and(|body| {
                     expr_depends_on_nonlowerable_name(
                         body,
                         top_level_defs,
                         types,
-                        type_env,
                         cache,
                         visiting,
                         &scoped,
+                        runtime,
                     )
                 }) {
                     return true;
@@ -5266,20 +5246,20 @@ fn expr_depends_on_nonlowerable_name(
                 value,
                 top_level_defs,
                 types,
-                type_env,
                 cache,
                 visiting,
                 bound_names,
+                runtime,
             )
         }) || kids.iter().any(|child| {
             expr_depends_on_nonlowerable_name(
                 child,
                 top_level_defs,
                 types,
-                type_env,
                 cache,
                 visiting,
                 bound_names,
+                runtime,
             )
         });
     }
@@ -5294,10 +5274,10 @@ fn expr_depends_on_nonlowerable_name(
                 value,
                 top_level_defs,
                 types,
-                type_env,
                 cache,
                 visiting,
                 bound_names,
+                runtime,
             )
         }),
         ExprCarrier::MetadataExpression(meta) => {
@@ -5305,19 +5285,19 @@ fn expr_depends_on_nonlowerable_name(
                 &meta.expr,
                 top_level_defs,
                 types,
-                type_env,
                 cache,
                 visiting,
                 bound_names,
+                runtime,
             ) || meta.metadata.any_expression(|value| {
                 expr_depends_on_nonlowerable_name(
                     value,
                     top_level_defs,
                     types,
-                    type_env,
                     cache,
                     visiting,
                     bound_names,
+                    runtime,
                 )
             })
         }
@@ -5326,10 +5306,10 @@ fn expr_depends_on_nonlowerable_name(
                 child,
                 top_level_defs,
                 types,
-                type_env,
                 cache,
                 visiting,
                 bound_names,
+                runtime,
             )
         }),
         ExprCarrier::UndecodableHead(_, metadata, children) => match expr {
@@ -5339,20 +5319,20 @@ fn expr_depends_on_nonlowerable_name(
                         value,
                         top_level_defs,
                         types,
-                        type_env,
                         cache,
                         visiting,
                         bound_names,
+                        runtime,
                     )
                 }) || children.iter().any(|child| {
                     expr_depends_on_nonlowerable_name(
                         child,
                         top_level_defs,
                         types,
-                        type_env,
                         cache,
                         visiting,
                         bound_names,
+                        runtime,
                     )
                 })
             }
@@ -5361,10 +5341,10 @@ fn expr_depends_on_nonlowerable_name(
                     child,
                     top_level_defs,
                     types,
-                    type_env,
                     cache,
                     visiting,
                     bound_names,
+                    runtime,
                 )
             }),
             _ => unreachable!("only List and UnknownForm have undecodable heads"),
@@ -5374,16 +5354,16 @@ fn expr_depends_on_nonlowerable_name(
                 child,
                 top_level_defs,
                 types,
-                type_env,
                 cache,
                 visiting,
                 bound_names,
+                runtime,
             )
         }),
     }
 }
 
-fn collect_param_bound_names(param: &Expr, out: &mut UnordSet<String>) {
+fn collect_param_bound_names(param: &Expr, out: &mut UnordSet<String>, runtime: &LoweringRuntime) {
     match param.carrier() {
         ExprCarrier::Atom(Atom::Name(name)) => {
             out.insert(name.clone());
@@ -5398,7 +5378,7 @@ fn collect_param_bound_names(param: &Expr, out: &mut UnordSet<String>) {
                 || !matches!(children.first(), Some(Expr::Atom(Atom::Name(_), _)))
                 || !matches!(children.get(1), Some(Expr::Map(_, _)))
             {
-                raise_malformed_parameter(param);
+                raise_malformed_parameter(param, runtime);
             }
             if let Some(name) = children.first().and_then(symbol_name) {
                 out.insert(name.to_string());
@@ -5410,7 +5390,7 @@ fn collect_param_bound_names(param: &Expr, out: &mut UnordSet<String>) {
             Expr::List(_, _) if children.is_empty() => {
                 out.insert(name.to_string());
             }
-            Expr::List(_, _) => raise_malformed_parameter(param),
+            Expr::List(_, _) => raise_malformed_parameter(param, runtime),
             Expr::UnknownForm(_) => {
                 // Unreachable by role construction (chelis#1087): a param
                 // slot is a Binder position, where the stamp pass produces
@@ -5427,7 +5407,7 @@ fn collect_param_bound_names(param: &Expr, out: &mut UnordSet<String>) {
             }
             _ => unreachable!("only List and UnknownForm have undecodable heads"),
         },
-        ExprCarrier::MalformedLegacyList(_) => raise_malformed_parameter(param),
+        ExprCarrier::MalformedLegacyList(_) => raise_malformed_parameter(param, runtime),
         ExprCarrier::Atom(_) | ExprCarrier::MetadataMap(_) | ExprCarrier::MetadataExpression(_) => {
         }
     }
@@ -5529,7 +5509,7 @@ fn if_expr_is_dag_lowerable(expr: &Expr) -> bool {
     cond_ty.precision == Prim::Bool && (cond_ty.dims.is_empty() || cond_ty.dims == result_ty.dims)
 }
 
-fn assert_ir_lowerable(expr: &Expr) {
+fn assert_ir_lowerable(expr: &Expr, runtime: &LoweringRuntime) {
     match expr.carrier() {
         ExprCarrier::DecodedNode(tag, meta, kids) => {
             // Declaration nodes carry no runtime IR. Their meta map holds
@@ -5540,54 +5520,54 @@ fn assert_ir_lowerable(expr: &Expr) {
                 return;
             }
             if (tag == DeepTag::If && !if_expr_is_dag_lowerable(expr)) || tag == DeepTag::Match {
-                raise_lowering_diagnostic(lower_diagnostic_for_expr(
+                runtime.raise_lowering_diagnostic(lower_diagnostic_for_expr(
                     unsupported_lowering_message(tag.as_str()),
                     expr,
                 ));
             }
-            meta.visit_expressions(&mut |value, _| assert_ir_lowerable(value));
+            meta.visit_expressions(&mut |value, _| assert_ir_lowerable(value, runtime));
             for child in kids {
-                assert_ir_lowerable(child);
+                assert_ir_lowerable(child, runtime);
             }
         }
         ExprCarrier::StructuralList(elements) => {
             for elem in elements {
-                assert_ir_lowerable(elem);
+                assert_ir_lowerable(elem, runtime);
             }
         }
         ExprCarrier::UndecodableHead(_, metadata, children) => match expr {
             Expr::List(_, _) => {
-                metadata.visit_expressions(&mut |value, _| assert_ir_lowerable(value));
+                metadata.visit_expressions(&mut |value, _| assert_ir_lowerable(value, runtime));
                 for child in children {
-                    assert_ir_lowerable(child);
+                    assert_ir_lowerable(child, runtime);
                 }
             }
             Expr::UnknownForm(_) => {
                 for child in children {
-                    assert_ir_lowerable(child);
+                    assert_ir_lowerable(child, runtime);
                 }
             }
             _ => unreachable!("only List and UnknownForm have undecodable heads"),
         },
         ExprCarrier::MetadataMap(map) => {
-            map.visit_expressions(&mut |value, _| assert_ir_lowerable(value));
+            map.visit_expressions(&mut |value, _| assert_ir_lowerable(value, runtime));
         }
         ExprCarrier::MetadataExpression(inner) => {
             inner
                 .metadata
-                .visit_expressions(&mut |value, _| assert_ir_lowerable(value));
-            assert_ir_lowerable(&inner.expr);
+                .visit_expressions(&mut |value, _| assert_ir_lowerable(value, runtime));
+            assert_ir_lowerable(&inner.expr, runtime);
         }
         ExprCarrier::MalformedLegacyList(list) => {
             for child in &list.elements {
-                assert_ir_lowerable(child);
+                assert_ir_lowerable(child, runtime);
             }
         }
         ExprCarrier::Atom(_) => {}
     }
 }
 
-fn assert_ir_typed(expr: &Expr) {
+fn assert_ir_typed(expr: &Expr, runtime: &LoweringRuntime) {
     match expr.carrier() {
         ExprCarrier::DecodedNode(tag, meta, kids) => {
             // Declaration metadata is specification input, not runtime IR.
@@ -5600,49 +5580,49 @@ fn assert_ir_typed(expr: &Expr) {
             {
                 let rendered = chelis_deep::printer::print_canonical(std::slice::from_ref(expr))
                     .replace('\n', " ");
-                raise_lowering_diagnostic(lower_diagnostic_for_expr(
+                runtime.raise_lowering_diagnostic(lower_diagnostic_for_expr(
                     format!(
                         "shape-sensitive IR app nodes must carry explicit type metadata before lowering: {rendered}"
                     ),
                     expr,
                 ));
             }
-            meta.visit_expressions(&mut |value, _| assert_ir_typed(value));
+            meta.visit_expressions(&mut |value, _| assert_ir_typed(value, runtime));
             for child in kids {
-                assert_ir_typed(child);
+                assert_ir_typed(child, runtime);
             }
         }
         ExprCarrier::StructuralList(elements) => {
             for elem in elements {
-                assert_ir_typed(elem);
+                assert_ir_typed(elem, runtime);
             }
         }
         ExprCarrier::UndecodableHead(_, metadata, children) => match expr {
             Expr::List(_, _) => {
-                metadata.visit_expressions(&mut |value, _| assert_ir_typed(value));
+                metadata.visit_expressions(&mut |value, _| assert_ir_typed(value, runtime));
                 for child in children {
-                    assert_ir_typed(child);
+                    assert_ir_typed(child, runtime);
                 }
             }
             Expr::UnknownForm(_) => {
                 for child in children {
-                    assert_ir_typed(child);
+                    assert_ir_typed(child, runtime);
                 }
             }
             _ => unreachable!("only List and UnknownForm have undecodable heads"),
         },
         ExprCarrier::MetadataMap(map) => {
-            map.visit_expressions(&mut |value, _| assert_ir_typed(value));
+            map.visit_expressions(&mut |value, _| assert_ir_typed(value, runtime));
         }
         ExprCarrier::MetadataExpression(inner) => {
             inner
                 .metadata
-                .visit_expressions(&mut |value, _| assert_ir_typed(value));
-            assert_ir_typed(&inner.expr);
+                .visit_expressions(&mut |value, _| assert_ir_typed(value, runtime));
+            assert_ir_typed(&inner.expr, runtime);
         }
         ExprCarrier::MalformedLegacyList(list) => {
             for child in &list.elements {
-                assert_ir_typed(child);
+                assert_ir_typed(child, runtime);
             }
         }
         ExprCarrier::Atom(_) => {}
@@ -5795,6 +5775,7 @@ fn string_literal(expr: &Expr) -> Option<&str> {
 pub fn evaluation_profile(
     expr: &Expr,
     program_defs: &UnordMap<String, Expr>,
+    runtime: &LoweringRuntime,
 ) -> crate::evaluation::EvaluationProfile {
     evaluation_profile_from_defs(
         expr,
@@ -5803,6 +5784,7 @@ pub fn evaluation_profile(
             .into_iter()
             .map(|(name, body)| (name.clone(), body.clone()))
             .collect(),
+        runtime,
     )
 }
 
@@ -5815,19 +5797,22 @@ pub fn evaluation_profile(
 pub fn evaluation_profile_sorted(
     expr: &Expr,
     program_defs: &BTreeMap<String, Expr>,
+    runtime: &LoweringRuntime,
 ) -> crate::evaluation::EvaluationProfile {
-    evaluation_profile_from_defs(expr, program_defs)
+    evaluation_profile_from_defs(expr, program_defs, runtime)
 }
 
 fn evaluation_profile_from_defs(
     expr: &Expr,
     program_defs: &BTreeMap<String, Expr>,
+    runtime: &LoweringRuntime,
 ) -> crate::evaluation::EvaluationProfile {
     static_controls::profile(
         expr,
         program_defs,
         &[],
         crate::evaluation::ResourcePolicy::Legacy,
+        runtime,
     )
 }
 
@@ -6098,33 +6083,36 @@ fn rebuild_runtime_list_view(
 /// Flatten every scalar/tensor leaf of a recursive List/tuple/ADT value.
 /// Empty structures contribute no leaves while retaining their position in
 /// the separate reconstruction template.
-fn recursive_list_leaf_nodes(value: &LoweredValue) -> Vec<NodeId> {
-    fn walk(value: &LoweredValue, out: &mut Vec<NodeId>) {
+fn recursive_list_leaf_nodes(value: &LoweredValue, runtime: &LoweringRuntime) -> Vec<NodeId> {
+    fn walk(value: &LoweredValue, out: &mut Vec<NodeId>, runtime: &LoweringRuntime) {
         match value {
-            LoweredValue::Host { .. } => {
-                raise_lowering_error("a host value has no tensor cotangent leaves", None, None)
-            }
+            LoweredValue::Host { .. } => raise_lowering_error(
+                "a host value has no tensor cotangent leaves",
+                None,
+                None,
+                runtime,
+            ),
             LoweredValue::Node(node) => out.push(*node),
             LoweredValue::Adt { .. } if adt_cons_chain_values(value).is_some() => {
                 for item in adt_cons_chain_values(value).expect("guarded above") {
-                    walk(&item, out);
+                    walk(&item, out, runtime);
                 }
             }
             LoweredValue::Tuple(items) => {
                 for item in items {
-                    walk(item, out);
+                    walk(item, out, runtime);
                 }
             }
             LoweredValue::Adt { fields, .. } => {
                 for field in fields {
-                    walk(field, out);
+                    walk(field, out, runtime);
                 }
             }
         }
     }
 
     let mut leaves = Vec::new();
-    walk(value, &mut leaves);
+    walk(value, &mut leaves, runtime);
     leaves
 }
 
@@ -6134,26 +6122,28 @@ fn recursive_list_leaf_nodes(value: &LoweredValue) -> Vec<NodeId> {
 fn rebuild_recursive_list_like(
     template: &LoweredValue,
     leaves: &mut impl Iterator<Item = LoweredValue>,
+    runtime: &LoweringRuntime,
 ) -> LoweredValue {
     match template {
         LoweredValue::Host { .. } => raise_lowering_error(
             "a host value cannot be rebuilt from tensor cotangent leaves",
             None,
             None,
+            runtime,
         ),
         LoweredValue::Node(_) => leaves.next().expect("recursive List leaf count mismatch"),
         LoweredValue::Adt { .. } if adt_cons_chain_values(template).is_some() => {
             let items = adt_cons_chain_values(template)
                 .expect("guarded above")
                 .into_iter()
-                .map(|item| rebuild_recursive_list_like(&item, leaves))
+                .map(|item| rebuild_recursive_list_like(&item, leaves, runtime))
                 .collect();
             rebuild_cons_chain(items)
         }
         LoweredValue::Tuple(items) => LoweredValue::Tuple(
             items
                 .iter()
-                .map(|item| rebuild_recursive_list_like(item, leaves))
+                .map(|item| rebuild_recursive_list_like(item, leaves, runtime))
                 .collect(),
         ),
         LoweredValue::Adt {
@@ -6167,7 +6157,7 @@ fn rebuild_recursive_list_like(
             field_names: field_names.clone(),
             fields: fields
                 .iter()
-                .map(|field| rebuild_recursive_list_like(field, leaves))
+                .map(|field| rebuild_recursive_list_like(field, leaves, runtime))
                 .collect(),
         },
     }
@@ -6855,7 +6845,7 @@ impl ResolvedFunction {
     /// assert that two parameter axes share one binder. Rank variables are
     /// actualized later for the current call, without importing a caller-side
     /// result label as a new signature equality.
-    fn parameter_type(&self, index: usize) -> Option<&Expr> {
+    fn parameter_type(&self, index: usize, runtime: &LoweringRuntime) -> Option<&Expr> {
         self.signature
             .as_deref()
             .and_then(|expr| match expr.carrier() {
@@ -6870,7 +6860,7 @@ impl ResolvedFunction {
                 | ExprCarrier::MalformedLegacyList(_) => None,
             })
             .and_then(|(tag, _, kids)| (tag == DeepTag::TFn).then(|| kids.get(index)).flatten())
-            .or_else(|| extract_param_type(&self.expression, index))
+            .or_else(|| extract_param_type(&self.expression, index, runtime))
     }
 
     fn result_type(&self) -> Option<&Expr> {
@@ -6990,42 +6980,20 @@ pub(crate) struct LoweredSubexprWithControls {
 
 impl LoweredValue {
     #[cfg(feature = "lowering-trace")]
-    fn trace_value(&self) -> crate::lowering_trace::Value {
+    fn trace_value(&self, runtime: &LoweringRuntime) -> crate::lowering_trace::Value {
         use crate::lowering_trace::Value;
         match self {
-            Self::Host { .. } => {
-                raise_lowering_error("a host value is not a tensor AD result", None, None)
-            }
+            Self::Host { .. } => raise_lowering_error(
+                "a host value is not a tensor AD result",
+                None,
+                None,
+                runtime,
+            ),
             Self::Node(id) => Value::Node(*id),
-            Self::Tuple(items) => Value::Tuple(items.iter().map(Self::trace_value).collect()),
-            Self::Adt {
-                ctor,
-                field_names,
-                fields,
-                ..
-            } => Value::Adt {
-                ctor: ctor.clone(),
-                field_names: field_names.clone(),
-                fields: fields.iter().map(Self::trace_value).collect(),
-            },
-        }
-    }
-
-    #[cfg(feature = "lowering-trace")]
-    fn trace_value_from_roots(
-        &self,
-        roots: &mut impl Iterator<Item = NodeId>,
-    ) -> crate::lowering_trace::Value {
-        use crate::lowering_trace::Value;
-        match self {
-            Self::Host { .. } => {
-                raise_lowering_error("a host value is not a tensor helper result", None, None)
-            }
-            Self::Node(_) => Value::Node(roots.next().expect("packed tensor result root")),
             Self::Tuple(items) => Value::Tuple(
                 items
                     .iter()
-                    .map(|item| item.trace_value_from_roots(roots))
+                    .map(|value| Self::trace_value(value, runtime))
                     .collect(),
             ),
             Self::Adt {
@@ -7038,7 +7006,44 @@ impl LoweredValue {
                 field_names: field_names.clone(),
                 fields: fields
                     .iter()
-                    .map(|field| field.trace_value_from_roots(roots))
+                    .map(|value| Self::trace_value(value, runtime))
+                    .collect(),
+            },
+        }
+    }
+
+    #[cfg(feature = "lowering-trace")]
+    fn trace_value_from_roots(
+        &self,
+        roots: &mut impl Iterator<Item = NodeId>,
+        runtime: &LoweringRuntime,
+    ) -> crate::lowering_trace::Value {
+        use crate::lowering_trace::Value;
+        match self {
+            Self::Host { .. } => raise_lowering_error(
+                "a host value is not a tensor helper result",
+                None,
+                None,
+                runtime,
+            ),
+            Self::Node(_) => Value::Node(roots.next().expect("packed tensor result root")),
+            Self::Tuple(items) => Value::Tuple(
+                items
+                    .iter()
+                    .map(|item| item.trace_value_from_roots(roots, runtime))
+                    .collect(),
+            ),
+            Self::Adt {
+                ctor,
+                field_names,
+                fields,
+                ..
+            } => Value::Adt {
+                ctor: ctor.clone(),
+                field_names: field_names.clone(),
+                fields: fields
+                    .iter()
+                    .map(|field| field.trace_value_from_roots(roots, runtime))
                     .collect(),
             },
         }
@@ -7063,7 +7068,7 @@ impl LoweredValue {
         }
     }
 
-    fn expect_node(&self, context: &str) -> NodeId {
+    fn expect_node(&self, context: &str, runtime: &LoweringRuntime) -> NodeId {
         match self {
             Self::Host { .. } => raise_lowering_error(
                 format!(
@@ -7071,12 +7076,14 @@ impl LoweredValue {
                 ),
                 None,
                 None,
+                runtime,
             ),
             Self::Node(id) => *id,
             Self::Tuple(_) => raise_lowering_error(
                 format!("{context} expected a single tensor value"),
                 None,
                 None,
+                runtime,
             ),
             Self::Adt { ctor, .. } => raise_lowering_error(
                 format!(
@@ -7085,6 +7092,7 @@ impl LoweredValue {
                 ),
                 None,
                 None,
+                runtime,
             ),
         }
     }
@@ -7181,7 +7189,11 @@ impl CallableDependencyState {
     }
 }
 
-fn extract_param_type(expr: &Expr, index: usize) -> Option<&Expr> {
+fn extract_param_type<'expr>(
+    expr: &'expr Expr,
+    index: usize,
+    runtime: &LoweringRuntime,
+) -> Option<&'expr Expr> {
     let fn_kids = match expr.carrier() {
         ExprCarrier::DecodedNode(DeepTag::Fn, _, children) => children,
         ExprCarrier::DecodedNode(_, _, _)
@@ -7210,32 +7222,36 @@ fn extract_param_type(expr: &Expr, index: usize) -> Option<&Expr> {
             Expr::List(_, _) if children.is_empty() => {
                 metadata.ty().map(|value| value.expression())
             }
-            Expr::List(_, _) => raise_malformed_parameter(param),
+            Expr::List(_, _) => raise_malformed_parameter(param, runtime),
             Expr::UnknownForm(_) => None,
             _ => unreachable!("only List and UnknownForm have undecodable heads"),
         },
         ExprCarrier::MetadataExpression(meta) => meta.metadata.ty().map(|value| value.expression()),
         ExprCarrier::StructuralList(elements) => {
             let [Expr::Atom(Atom::Name(_), _), Expr::Map(meta, _)] = elements else {
-                raise_malformed_parameter(param);
+                raise_malformed_parameter(param, runtime);
             };
             meta.ty().map(|value| value.expression())
         }
-        ExprCarrier::MalformedLegacyList(_) => raise_malformed_parameter(param),
+        ExprCarrier::MalformedLegacyList(_) => raise_malformed_parameter(param, runtime),
         ExprCarrier::Atom(_) | ExprCarrier::MetadataMap(_) => None,
     };
     authored.or_else(|| fn_type_arg_exprs(expr)?.get(index).copied())
 }
 
-fn raise_malformed_parameter(param: &Expr) -> ! {
+fn raise_malformed_parameter(param: &Expr, runtime: &LoweringRuntime) -> ! {
     raise_malformed_deep(
         "a raw parameter form that does not contain exactly a name and metadata map",
         Some(param.span()),
         param.span_id().map(str::to_string),
+        runtime,
     )
 }
 
-fn param_name_and_type_expr(param: &Expr) -> Option<(String, Option<&Expr>)> {
+fn param_name_and_type_expr<'expr>(
+    param: &'expr Expr,
+    runtime: &LoweringRuntime,
+) -> Option<(String, Option<&'expr Expr>)> {
     match param.carrier() {
         ExprCarrier::Atom(Atom::Name(name)) => Some((name.clone(), None)),
         ExprCarrier::MetadataExpression(meta) => {
@@ -7247,7 +7263,7 @@ fn param_name_and_type_expr(param: &Expr) -> Option<(String, Option<&Expr>)> {
         }
         ExprCarrier::StructuralList(elements) => {
             let [Expr::Atom(Atom::Name(name), _), Expr::Map(meta, _)] = elements else {
-                raise_malformed_parameter(param);
+                raise_malformed_parameter(param, runtime);
             };
             let ty_expr = meta.ty().map(|value| value.expression());
             Some((name.clone(), ty_expr))
@@ -7257,11 +7273,11 @@ fn param_name_and_type_expr(param: &Expr) -> Option<(String, Option<&Expr>)> {
                 name.to_string(),
                 metadata.ty().map(|value| value.expression()),
             )),
-            Expr::List(_, _) => raise_malformed_parameter(param),
+            Expr::List(_, _) => raise_malformed_parameter(param, runtime),
             Expr::UnknownForm(_) => None,
             _ => unreachable!("only List and UnknownForm have undecodable heads"),
         },
-        ExprCarrier::MalformedLegacyList(_) => raise_malformed_parameter(param),
+        ExprCarrier::MalformedLegacyList(_) => raise_malformed_parameter(param, runtime),
         ExprCarrier::DecodedNode(_, _, _) | ExprCarrier::Atom(_) | ExprCarrier::MetadataMap(_) => {
             None
         }
@@ -7336,6 +7352,7 @@ fn permuted_tensor_type(ty: &TensorType, axes: &[usize]) -> TensorType {
 }
 
 struct LowerCtx<'program> {
+    runtime: &'program LoweringRuntime,
     host_program: Option<&'program crate::host::HostLoweringSession<'program>>,
     host_sources: Vec<crate::host::staged::HostSource>,
     host_value_types: BTreeMap<NodeId, crate::host_type_state::HostTypeTerm>,
@@ -7546,8 +7563,10 @@ impl<'program> LowerCtx<'program> {
         program_defs: impl Into<Arc<BTreeMap<String, Expr>>>,
         program_signatures: impl Into<Arc<BTreeMap<String, Expr>>>,
         linearity: LinearityInfo,
+        runtime: &'program LoweringRuntime,
     ) -> Self {
         Self {
+            runtime,
             host_program: None,
             host_sources: Vec::new(),
             host_value_types: BTreeMap::new(),
@@ -8234,7 +8253,7 @@ impl<'program> LowerCtx<'program> {
             .expect("evaluation lowering owns execution metadata")
             .spine
             .full_occurrence_count();
-        let profile = evaluation_profile_from_defs(expr, &self.program_defs);
+        let profile = evaluation_profile_from_defs(expr, &self.program_defs, self.runtime);
         let compatibility = !matches!(
             profile,
             crate::evaluation::EvaluationProfile::FixedControl
@@ -8473,6 +8492,7 @@ impl<'program> LowerCtx<'program> {
                 "a staged aggregate capture has an untyped leaf",
                 Some(at.span()),
                 at.span_id().map(str::to_owned),
+                self.runtime,
             )
         });
         let mut captures = Vec::new();
@@ -8945,6 +8965,7 @@ impl<'program> LowerCtx<'program> {
                 "a bare metadata map in expression position",
                 Some(expr.span()),
                 self.current_span_id.clone(),
+                self.runtime,
             ),
             Expr::MetaExpr(meta_expr, _) => self.lower_expr_unclaimed(&meta_expr.expr, claim),
             // Bridge: reconstruct List so existing tag-dispatch logic runs unchanged (#908)
@@ -8956,6 +8977,7 @@ impl<'program> LowerCtx<'program> {
                 "a transitional Expr variant in expression position",
                 Some(expr.span()),
                 self.current_span_id.clone(),
+                self.runtime,
             ),
         };
         if let LoweredValue::Adt { host, .. } = &mut result
@@ -9033,9 +9055,12 @@ impl<'program> LowerCtx<'program> {
 
     fn add_named_roots(&mut self, prefix: &str, value: &mut LoweredValue) {
         match value {
-            LoweredValue::Host { .. } => {
-                raise_lowering_error("a host value cannot become a tensor root", None, None)
-            }
+            LoweredValue::Host { .. } => raise_lowering_error(
+                "a host value cannot become a tensor root",
+                None,
+                None,
+                self.runtime,
+            ),
             LoweredValue::Node(id) if !prefix.contains('.') && !self.dag.roots().contains(id) => {
                 // Top-level def whose body lowered to a single existing
                 // node — no new Store is emitted. This is a region-merge
@@ -9155,17 +9180,19 @@ impl<'program> LowerCtx<'program> {
                  only)",
                 None,
                 self.current_span_id.clone(),
+                self.runtime,
             ),
             Atom::Tag(_) => raise_malformed_deep(
                 "a bare Deep tag atom in expression position",
                 None,
                 self.current_span_id.clone(),
+                self.runtime,
             ),
         }
     }
 
     fn lower_expr_node(&mut self, expr: &Expr, context: &str) -> NodeId {
-        self.lower_expr(expr).expect_node(context)
+        self.lower_expr(expr).expect_node(context, self.runtime)
     }
 
     fn lower_list(&mut self, list: &List, span: Span, claim: Option<&TensorType>) -> LoweredValue {
@@ -9175,6 +9202,7 @@ impl<'program> LowerCtx<'program> {
                 "an empty Deep list node",
                 Some(span),
                 self.current_span_id.clone(),
+                self.runtime,
             );
         }
 
@@ -9189,6 +9217,7 @@ impl<'program> LowerCtx<'program> {
                 "a Deep list node whose tag position is not a symbol",
                 Some(span),
                 self.current_span_id.clone(),
+                self.runtime,
             );
         }
 
@@ -9304,6 +9333,7 @@ impl<'program> LowerCtx<'program> {
                  child expression is required)",
                 Some(span),
                 self.current_span_id.clone(),
+                self.runtime,
             );
         }
         let mut last = LoweredValue::Node(self.dag.add_node(
@@ -9334,6 +9364,7 @@ impl<'program> LowerCtx<'program> {
                 &format!("an unknown childless Deep tag `{tag}`"),
                 Some(span),
                 self.current_span_id.clone(),
+                self.runtime,
             );
         }
         let mut last = LoweredValue::Node(self.dag.add_node(
@@ -9355,6 +9386,7 @@ impl<'program> LowerCtx<'program> {
                 "a `def` form with fewer than 4 elements",
                 None,
                 self.current_span_id.clone(),
+                self.runtime,
             );
         }
         let name = match &elems[2] {
@@ -9404,6 +9436,7 @@ impl<'program> LowerCtx<'program> {
                 "a `let` form with fewer than 4 elements",
                 None,
                 self.current_span_id.clone(),
+                self.runtime,
             );
         }
         let saved = self.bindings.clone();
@@ -9513,6 +9546,7 @@ impl<'program> LowerCtx<'program> {
                                     ),
                                     Some(bind_kids[i + 1].span()),
                                     bind_kids[i + 1].span_id().map(str::to_owned),
+                                    self.runtime,
                                 )
                             };
                             for (axis, _) in &claims {
@@ -9846,6 +9880,7 @@ impl<'program> LowerCtx<'program> {
                             ),
                             Some(ascription.ascription_span()),
                             None,
+                            self.runtime,
                         )
                     });
                 self.dag.add_node(
@@ -9871,7 +9906,7 @@ impl<'program> LowerCtx<'program> {
                             ascription.binding_name()
                         ),
                         Some(ascription.ascription_span()),
-                        None,
+                        None, self.runtime,
                     )
                 });
                 let original = self.dag.get(required).expect("declaring extent witness");
@@ -9919,6 +9954,7 @@ impl<'program> LowerCtx<'program> {
                     ),
                     None,
                     None,
+                    self.runtime,
                 )
             };
             for (_, token) in claims {
@@ -9936,6 +9972,7 @@ impl<'program> LowerCtx<'program> {
                         ),
                         Some(ascription.initializer_span()),
                         None,
+                        self.runtime,
                     )
                 }
             }
@@ -9994,6 +10031,7 @@ impl<'program> LowerCtx<'program> {
                  (spec/05-risc-primitives.md; chelis#856)",
                 elems.first().map(Expr::span),
                 self.current_span_id.clone(),
+                self.runtime,
             )
         }
         let value = match chelis_types::finalize_scalar("const", prim, raw) {
@@ -10006,6 +10044,7 @@ impl<'program> LowerCtx<'program> {
                 ),
                 elems.first().map(Expr::span),
                 self.current_span_id.clone(),
+                self.runtime,
             ),
         };
 
@@ -10074,6 +10113,7 @@ impl<'program> LowerCtx<'program> {
                     ),
                     elems.first().map(Expr::span),
                     elems.first().and_then(Expr::span_id).map(ToOwned::to_owned),
+                    self.runtime,
                 );
             }
             // chelis#520 D1: an unbound uppercase-initial name in
@@ -10112,6 +10152,7 @@ impl<'program> LowerCtx<'program> {
             "a var form with no usable name",
             None,
             self.current_span_id.clone(),
+            self.runtime,
         )
     }
 
@@ -10131,6 +10172,7 @@ impl<'program> LowerCtx<'program> {
                 "an `app` form with no callee",
                 Some(app_span),
                 self.current_span_id.clone(),
+                self.runtime,
             );
         }
 
@@ -10172,6 +10214,7 @@ impl<'program> LowerCtx<'program> {
                             "statically staged List length does not fit i64",
                             Some(elems[3].span()),
                             elems[3].span_id().map(ToOwned::to_owned),
+                            self.runtime,
                         )
                     });
                     return LoweredValue::Node(self.int64_constant(value));
@@ -10320,6 +10363,7 @@ impl<'program> LowerCtx<'program> {
                 "an unresolved callable has no staged host producer",
                 None,
                 None,
+                self.runtime,
             ),
             LoweredValue::Node(input) => {
                 let ty = self
@@ -10449,6 +10493,7 @@ impl<'program> LowerCtx<'program> {
                              argument is omitted, never when a non-constant axis is supplied",
                             Some(axis_expr.span()),
                             axis_expr.span_id().map(ToOwned::to_owned),
+                            self.runtime,
                         ),
                     },
                 };
@@ -10556,7 +10601,7 @@ impl<'program> LowerCtx<'program> {
         let grad_param_type_exprs: Vec<Option<Expr>> = param_names
             .iter()
             .enumerate()
-            .map(|(index, _)| extract_param_type(fn_expr, index).cloned())
+            .map(|(index, _)| extract_param_type(fn_expr, index, self.runtime).cloned())
             .collect();
         // Classify each already-lowered argument. A `Node` is the
         // scalar/tensor lane. Tuples and ADTs are recursively flattened to
@@ -10578,10 +10623,11 @@ impl<'program> LowerCtx<'program> {
                     "an opaque host value has no tensor gradient input",
                     None,
                     None,
+                    self.runtime,
                 ),
                 LoweredValue::Node(id) => GradArgPlan::Tensor(*id),
                 LoweredValue::Tuple(_) | LoweredValue::Adt { .. } => {
-                    let leaf_nodes = recursive_list_leaf_nodes(arg);
+                    let leaf_nodes = recursive_list_leaf_nodes(arg, self.runtime);
                     GradArgPlan::Structured {
                         template: arg.clone(),
                         leaf_nodes,
@@ -10631,6 +10677,7 @@ impl<'program> LowerCtx<'program> {
             &subst_param_type_exprs,
             &subst_actual_types,
             &self.dim_axis_positions,
+            self.runtime,
         ));
         // Formal parameter shapes for the differentiated function. Use the
         // call-site-tolerant variant so a precision var that the grad call
@@ -10651,6 +10698,7 @@ impl<'program> LowerCtx<'program> {
             self.program_defs.clone(),
             self.program_signatures.clone(),
             LinearityInfo::default(),
+            self.runtime,
         );
         // This ordinary-grad subcontext lowers called declarations as private
         // pure helpers. Their literal result tokens must survive into zero or
@@ -10818,7 +10866,7 @@ impl<'program> LowerCtx<'program> {
                     let mut leaf_values = leaf_values.into_iter();
                     subctx.bindings.insert(
                         name.clone(),
-                        rebuild_recursive_list_like(template, &mut leaf_values),
+                        rebuild_recursive_list_like(template, &mut leaf_values, self.runtime),
                     );
                 }
                 Some(GradArgPlan::Tensor(actual)) => {
@@ -10874,7 +10922,8 @@ impl<'program> LowerCtx<'program> {
             }
         }
         let lowered_output = subctx.lower_resolved_body(fn_expr, &param_names, body);
-        let output = lowered_output.expect_node("grad requires a scalar floating output");
+        let output =
+            lowered_output.expect_node("grad requires a scalar floating output", self.runtime);
         // The subcontext starts at the enclosing handler's current ordinal.
         // Hand the consumed ordinal count back before lowering any following
         // expression in the same `with seed` region; otherwise that expression
@@ -10963,6 +11012,7 @@ impl<'program> LowerCtx<'program> {
                 format!("`grad(...)` lowering rejected: {ad_err}"),
                 Some(body.span()),
                 body.span_id().map(ToOwned::to_owned),
+                self.runtime,
             )
         });
 
@@ -11023,6 +11073,7 @@ impl<'program> LowerCtx<'program> {
                     format!("internal `grad(...)` splice correspondence failed: {message}"),
                     Some(body.span()),
                     body.span_id().map(ToOwned::to_owned),
+                    self.runtime,
                 )
             });
         #[cfg(feature = "lowering-trace")]
@@ -11057,6 +11108,7 @@ impl<'program> LowerCtx<'program> {
                     message,
                     Some(body.span()),
                     body.span_id().map(ToOwned::to_owned),
+                    self.runtime,
                 )
             });
         }
@@ -11170,7 +11222,11 @@ impl<'program> LowerCtx<'program> {
                         }
                     }
                     let mut leaves = leaves.into_iter();
-                    packed.push(rebuild_recursive_list_like(template, &mut leaves));
+                    packed.push(rebuild_recursive_list_like(
+                        template,
+                        &mut leaves,
+                        self.runtime,
+                    ));
                 }
             }
         }
@@ -11259,7 +11315,7 @@ impl<'program> LowerCtx<'program> {
                     before_splice: before_splice.expect("pre-splice observation"),
                     after_splice: after_splice.expect("post-splice observation"),
                     after_packing: self.dag.clone(),
-                    result: result.trace_value(),
+                    result: result.trace_value(self.runtime),
                 },
             );
         }
@@ -11375,12 +11431,12 @@ impl<'program> LowerCtx<'program> {
         let param_type_exprs: Vec<Option<Expr>> = param_names
             .iter()
             .enumerate()
-            .map(|(index, _)| extract_param_type(fn_expr, index).cloned())
+            .map(|(index, _)| extract_param_type(fn_expr, index, self.runtime).cloned())
             .collect();
         let authored_param_type_exprs = param_names
             .iter()
             .enumerate()
-            .map(|(index, _)| fn_expr.parameter_type(index).cloned())
+            .map(|(index, _)| fn_expr.parameter_type(index, self.runtime).cloned())
             .collect::<Vec<_>>();
         let prec_subst_for_params = self.prec_substitutions.clone();
         let rank_subst_for_params = self.rank_substitutions.clone();
@@ -11540,6 +11596,7 @@ impl<'program> LowerCtx<'program> {
             &authored_formal_type_exprs,
             &actual_types,
             &self.dim_axis_positions,
+            self.runtime,
         );
         self.rank_substitutions.merge(rank_subst);
         // chelis#620 (Inlining-F1 successor): recursion lowers by BOUNDED
@@ -11610,6 +11667,7 @@ impl<'program> LowerCtx<'program> {
                                 ),
                                 None,
                                 call_span.clone(),
+                                self.runtime,
                             )
                         })
                 } else {
@@ -11622,7 +11680,7 @@ impl<'program> LowerCtx<'program> {
             .enumerate()
             .map(|(index, _)| {
                 fn_expr
-                    .parameter_type(index)
+                    .parameter_type(index, self.runtime)
                     .map(|expr| {
                         Self::formal_param_type_for_call(
                             expr,
@@ -11636,7 +11694,7 @@ impl<'program> LowerCtx<'program> {
         let witness_param_type_exprs = param_names
             .iter()
             .enumerate()
-            .map(|(index, _)| fn_expr.parameter_type(index).cloned())
+            .map(|(index, _)| fn_expr.parameter_type(index, self.runtime).cloned())
             .collect::<Vec<_>>();
         self.prepare_parameter_witnesses(
             &param_names,
@@ -11744,12 +11802,12 @@ impl<'program> LowerCtx<'program> {
         let authored_formal_type_exprs = params
             .iter()
             .enumerate()
-            .map(|(index, _)| function.parameter_type(index).cloned())
+            .map(|(index, _)| function.parameter_type(index, self.runtime).cloned())
             .collect::<Vec<_>>();
         let actualization_formal_type_exprs = params
             .iter()
             .enumerate()
-            .map(|(index, _)| extract_param_type(function, index).cloned())
+            .map(|(index, _)| extract_param_type(function, index, self.runtime).cloned())
             .collect::<Vec<_>>();
         let bound_parameters = params
             .iter()
@@ -11789,6 +11847,7 @@ impl<'program> LowerCtx<'program> {
             &bound_authored_formals,
             &bound_actual_types,
             &self.dim_axis_positions,
+            self.runtime,
         ));
         let formal_types = params
             .iter()
@@ -11838,6 +11897,7 @@ impl<'program> LowerCtx<'program> {
                             ),
                             None,
                             self.current_span_id.clone(),
+                            self.runtime,
                         )
                     })
             } else {
@@ -11924,10 +11984,10 @@ impl<'program> LowerCtx<'program> {
         axis: usize,
     ) -> VectorizedParameterInstantiation {
         let authored_formal_type_exprs = (0..parameter_count)
-            .map(|index| function.parameter_type(index).cloned())
+            .map(|index| function.parameter_type(index, self.runtime).cloned())
             .collect::<Vec<_>>();
         let actualization_formal_type_exprs = (0..parameter_count)
-            .map(|index| extract_param_type(function, index).cloned())
+            .map(|index| extract_param_type(function, index, self.runtime).cloned())
             .collect::<Vec<_>>();
         let invocation_types = actual_types
             .iter()
@@ -11950,6 +12010,7 @@ impl<'program> LowerCtx<'program> {
             &authored_formal_type_exprs,
             &invocation_types,
             &dim_axis_positions,
+            self.runtime,
         ));
         let parameter_types = authored_formal_type_exprs
             .iter()
@@ -12117,6 +12178,7 @@ impl<'program> LowerCtx<'program> {
             self.program_defs.clone(),
             self.program_signatures.clone(),
             LinearityInfo::default(),
+            self.runtime,
         );
         #[cfg(feature = "lowering-trace")]
         {
@@ -12179,6 +12241,7 @@ impl<'program> LowerCtx<'program> {
                 format!("`vmap` lowering failed: {message}"),
                 Some(body.span()),
                 body.span_id().map(ToOwned::to_owned),
+                self.runtime,
             ),
         };
 
@@ -12238,6 +12301,7 @@ impl<'program> LowerCtx<'program> {
                     format!("internal `vmap` root correspondence failed: {message}"),
                     Some(body.span()),
                     body.span_id().map(ToOwned::to_owned),
+                    self.runtime,
                 )
             });
         let remap = self
@@ -12247,6 +12311,7 @@ impl<'program> LowerCtx<'program> {
                     format!("internal `vmap` splice correspondence failed: {message}"),
                     Some(body.span()),
                     body.span_id().map(ToOwned::to_owned),
+                    self.runtime,
                 )
             });
         self.restore_vmapped_entry_witness_axes(
@@ -12269,6 +12334,7 @@ impl<'program> LowerCtx<'program> {
                             "internal `vmap` result leaf has no spliced final root",
                             Some(body.span()),
                             body.span_id().map(ToOwned::to_owned),
+                            self.runtime,
                         )
                     })
             })
@@ -12390,6 +12456,7 @@ impl<'program> LowerCtx<'program> {
             self.program_defs.clone(),
             self.program_signatures.clone(),
             LinearityInfo::default(),
+            self.runtime,
         );
         #[cfg(feature = "lowering-trace")]
         {
@@ -12433,7 +12500,10 @@ impl<'program> LowerCtx<'program> {
 
         let output = subctx
             .lower_resolved_body(fn_expr, &param_names, body)
-            .expect_node("vmap(grad(...)) requires a scalar floating output");
+            .expect_node(
+                "vmap(grad(...)) requires a scalar floating output",
+                self.runtime,
+            );
         if subctx
             .callable_dependency_state
             .output_depends_on_unresolved(&subctx.dag, output)
@@ -12468,6 +12538,7 @@ impl<'program> LowerCtx<'program> {
                 format!("`vmap(grad(...))` lowering rejected: {ad_err}"),
                 Some(body.span()),
                 body.span_id().map(ToOwned::to_owned),
+                self.runtime,
             )
         });
         let (vmapped, batched_ids) = match vmap::vectorize_axis0_with_node_map_and_captures(
@@ -12480,6 +12551,7 @@ impl<'program> LowerCtx<'program> {
                 format!("`vmap(grad(...))` lowering failed: {message}"),
                 Some(body.span()),
                 body.span_id().map(ToOwned::to_owned),
+                self.runtime,
             ),
         };
         let invalid_mapping = |message: String| -> ! {
@@ -12487,6 +12559,7 @@ impl<'program> LowerCtx<'program> {
                 format!("`vmap(grad(...))` root correspondence failed: {message}"),
                 Some(body.span()),
                 body.span_id().map(ToOwned::to_owned),
+                self.runtime,
             )
         };
         let root_map = vectorized_root_map(&grad_result.dag, &vmapped)
@@ -12784,7 +12857,7 @@ impl<'program> LowerCtx<'program> {
         // "runtime scrutinee" match.
         let names = param_kids
             .iter()
-            .filter_map(|param| param_name_and_type_expr(param).map(|(name, _)| name))
+            .filter_map(|param| param_name_and_type_expr(param, self.runtime).map(|(name, _)| name))
             .collect();
         Some((names, body))
     }
@@ -13499,6 +13572,7 @@ impl<'program> LowerCtx<'program> {
                         ),
                         Some(app_span),
                         self.current_span_id.clone(),
+                        self.runtime,
                     );
                 }
                 let dims = x_ty
@@ -13717,7 +13791,7 @@ impl<'program> LowerCtx<'program> {
                                     "use integer literal window and stride lists",
                                 ),
                                 Some(list_arg.span()),
-                                list_arg.span_id().map(ToOwned::to_owned),
+                                list_arg.span_id().map(ToOwned::to_owned), self.runtime,
                             )
                         })
                 };
@@ -13908,6 +13982,7 @@ impl<'program> LowerCtx<'program> {
                         ),
                         Some(args[1].span()),
                         args[1].span_id().map(ToOwned::to_owned),
+                        self.runtime,
                     );
                 }
                 // chelis#339: the inserted name must not collide with an axis
@@ -13942,6 +14017,7 @@ impl<'program> LowerCtx<'program> {
                         ),
                         Some(args[1].span()),
                         args[1].span_id().map(ToOwned::to_owned),
+                        self.runtime,
                     );
                 }
                 let axis = match &named_insert {
@@ -13961,6 +14037,7 @@ impl<'program> LowerCtx<'program> {
                                 ),
                                 Some(args[0].span()),
                                 args[0].span_id().map(ToOwned::to_owned),
+                                self.runtime,
                             ),
                         },
                     },
@@ -13987,6 +14064,7 @@ impl<'program> LowerCtx<'program> {
                             unsupported.to_string(),
                             Some(args[1].span()),
                             args[1].span_id().map(ToOwned::to_owned),
+                            self.runtime,
                         )
                     }),
                 };
@@ -14067,6 +14145,7 @@ impl<'program> LowerCtx<'program> {
                                     ),
                                     Some(size_arg.span()),
                                     size_arg.span_id().map(ToOwned::to_owned),
+                                    self.runtime,
                                 )
                             })),
                         }
@@ -14100,7 +14179,7 @@ impl<'program> LowerCtx<'program> {
                                                 "tensor axis {source_axis} exceeds the i32 axis carrier"
                                             ),
                                             Some(size_arg.span()),
-                                            size_arg.span_id().map(ToOwned::to_owned),
+                                            size_arg.span_id().map(ToOwned::to_owned), self.runtime,
                                         )
                                     },
                                 )),
@@ -14112,6 +14191,7 @@ impl<'program> LowerCtx<'program> {
                                 ),
                                 Some(app_span),
                                 self.current_span_id.clone(),
+                                self.runtime,
                             )
                         }
                     }
@@ -14379,7 +14459,7 @@ impl<'program> LowerCtx<'program> {
                 for arg in args {
                     let _ = self.lower_expr(arg);
                 }
-                if unrepresentable_panic_suppressed() {
+                if self.runtime.unrepresentable_panic_suppressed() {
                     std::panic::panic_any(UnrepresentableDag);
                 }
                 raise_lowering_error(
@@ -14389,6 +14469,7 @@ impl<'program> LowerCtx<'program> {
                      read in host evaluation, which resolves a runtime axis.",
                     Some(app_span),
                     self.current_span_id.clone(),
+                    self.runtime,
                 )
             }
 
@@ -14497,6 +14578,7 @@ impl<'program> LowerCtx<'program> {
                 ),
                 None,
                 span_id,
+                self.runtime,
             )
         };
         let finalize_staged = |staged: &StagedScalar| match staged {
@@ -15031,6 +15113,7 @@ impl<'program> LowerCtx<'program> {
                     format!("{name} requires non-negative {argument}, got {raw}"),
                     Some(count_arg.span()),
                     count_arg.span_id().map(ToOwned::to_owned),
+                    self.runtime,
                 );
             }
             let count = usize::try_from(raw).unwrap_or(usize::MAX);
@@ -15040,6 +15123,7 @@ impl<'program> LowerCtx<'program> {
                         format!("index {raw} out of bounds for list of len {}", items.len()),
                         Some(count_arg.span()),
                         count_arg.span_id().map(ToOwned::to_owned),
+                        self.runtime,
                     )
                 })),
                 "take" => Some(rebuild_cons_chain(items.into_iter().take(count).collect())),
@@ -15269,7 +15353,7 @@ impl<'program> LowerCtx<'program> {
             let item = self.rank1_item(source_node, index, &elem_ty);
             let item_out = self
                 .lower_plain_callable_with_values(&fn_expr, &[LoweredValue::Node(item)])
-                .expect_node("map callback");
+                .expect_node("map callback", self.runtime);
             mapped.push(item_out);
         }
         self.stack_scalar_nodes(&mapped, out_dim)
@@ -15302,7 +15386,7 @@ impl<'program> LowerCtx<'program> {
                         LoweredValue::Node(rhs_item),
                     ])],
                 )
-                .expect_node("map zip callback");
+                .expect_node("map zip callback", self.runtime);
             mapped.push(item_out);
         }
         self.stack_scalar_nodes(&mapped, DimInfo::Lit(len))
@@ -15318,7 +15402,7 @@ impl<'program> LowerCtx<'program> {
             let item = self.rank1_item(source_node, index, &elem_ty);
             let mask = self
                 .lower_plain_callable_with_values(&fn_expr, &[LoweredValue::Node(item)])
-                .expect_node("filter predicate");
+                .expect_node("filter predicate", self.runtime);
             let mask_as_value = self.dag.add_node(
                 RiscOp::Cast {
                     new_precision: elem_ty.precision,
@@ -15365,7 +15449,7 @@ impl<'program> LowerCtx<'program> {
             let item = self.rank1_item(source_node, index, &elem_ty);
             acc = self.lower_plain_callable_with_values(&fn_expr, &[acc, LoweredValue::Node(item)]);
         }
-        let acc_node = acc.expect_node("fold callback");
+        let acc_node = acc.expect_node("fold callback", self.runtime);
         if let Some(node) = self.dag.get(acc_node)
             && node.output_type == Self::default_type()
             && ty != &Self::default_type()
@@ -15535,6 +15619,7 @@ impl<'program> LowerCtx<'program> {
             ),
             Some(expr.span()),
             expr.span_id().map(ToOwned::to_owned),
+            self.runtime,
         );
     }
 
@@ -15755,6 +15840,7 @@ impl<'program> LowerCtx<'program> {
                         ),
                         Some(axis_expr.span()),
                         axis_expr.span_id().map(ToOwned::to_owned),
+                        self.runtime,
                     ),
                     AnchorRecovery::Unrecorded => {}
                 }
@@ -15766,6 +15852,7 @@ impl<'program> LowerCtx<'program> {
                 ),
                 Some(axis_expr.span()),
                 axis_expr.span_id().map(ToOwned::to_owned),
+                self.runtime,
             );
         }
         let raw = self.extract_axis_raw(axis_expr, op);
@@ -15809,6 +15896,7 @@ impl<'program> LowerCtx<'program> {
                     ),
                     Some(anchor_expr.span()),
                     anchor_expr.span_id().map(ToOwned::to_owned),
+                    self.runtime,
                 ),
                 AnchorRecovery::Unrecorded => {}
             }
@@ -15824,6 +15912,7 @@ impl<'program> LowerCtx<'program> {
             ),
             Some(anchor_expr.span()),
             anchor_expr.span_id().map(ToOwned::to_owned),
+            self.runtime,
         );
     }
 
@@ -15844,6 +15933,7 @@ impl<'program> LowerCtx<'program> {
                 ),
                 Some(axis_expr.span()),
                 axis_expr.span_id().map(ToOwned::to_owned),
+                self.runtime,
             );
         }
         normalized as usize
@@ -16382,6 +16472,7 @@ impl<'program> LowerCtx<'program> {
                             ),
                             None,
                             span.clone(),
+                            self.runtime,
                         )
                     }),
                 None => (0..rank)
@@ -17007,6 +17098,7 @@ impl<'program> LowerCtx<'program> {
             ),
             None,
             self.current_span_id.clone(),
+            self.runtime,
         );
     }
 
@@ -17546,7 +17638,12 @@ impl<'program> LowerCtx<'program> {
                      handler silently (chelis#730 census row 9)"
                 ),
             );
-            raise_fatal_lowering_error(unsupported.to_string(), None, current_span_id.clone())
+            raise_fatal_lowering_error(
+                unsupported.to_string(),
+                None,
+                current_span_id.clone(),
+                self.runtime,
+            )
         };
         match effect_kind {
             Ok(EffectKind::Random) if elems.len() >= 4 => {
@@ -17557,6 +17654,7 @@ impl<'program> LowerCtx<'program> {
                         "a Random handler retains its host control boundary around staged calls",
                         Some(elems[3].span()),
                         self.current_span_id.clone(),
+                        self.runtime,
                     );
                 }
                 let saved_seed = self.random_seed;
@@ -17581,6 +17679,7 @@ impl<'program> LowerCtx<'program> {
                         unsupported.to_string(),
                         Some(elems[2].span()),
                         elems[2].span_id().map(ToOwned::to_owned),
+                        self.runtime,
                     )
                 });
                 self.random_seed = Some(seed);
@@ -17620,6 +17719,7 @@ impl<'program> LowerCtx<'program> {
                             "a checked Resource handler must retain its literal device",
                             Some(elems[2].span()),
                             elems[2].span_id().map(ToOwned::to_owned),
+                            self.runtime,
                         )
                     });
                     self.execution
@@ -17773,6 +17873,7 @@ impl<'program> LowerCtx<'program> {
                 ),
                 Some(expr.span()),
                 expr.span_id().map(ToOwned::to_owned),
+                self.runtime,
             )
         })
     }
@@ -17811,6 +17912,7 @@ impl<'program> LowerCtx<'program> {
                 ),
                 Some(expr.span()),
                 expr.span_id().map(ToOwned::to_owned),
+                self.runtime,
             ),
         };
         value.unwrap_or_else(|trap| {
@@ -17818,6 +17920,7 @@ impl<'program> LowerCtx<'program> {
                 trap.to_string(),
                 Some(expr.span()),
                 expr.span_id().map(ToOwned::to_owned),
+                self.runtime,
             )
         })
     }
@@ -17892,7 +17995,7 @@ impl<'program> LowerCtx<'program> {
         let mut srcs = Vec::new();
         for (axis, elem) in elements.iter().enumerate() {
             if let Some(value) = self.stage_host_value(elem, true) {
-                let actual = value.expect_node("i64 target producer");
+                let actual = value.expect_node("i64 target producer", self.runtime);
                 let slot = inputs.len();
                 inputs.push(actual);
                 computed_targets.push((axis, slot));
@@ -17917,6 +18020,7 @@ impl<'program> LowerCtx<'program> {
                             ),
                             Some(elem.span()),
                             elem.span_id().map(ToOwned::to_owned),
+                            self.runtime,
                         );
                     }
                     self.dag.add_node(
@@ -17981,6 +18085,7 @@ impl<'program> LowerCtx<'program> {
                         ),
                         Some(elem.span()),
                         elem.span_id().map(ToOwned::to_owned),
+                        self.runtime,
                     );
                 }
                 op_dims.push(RtDim::Lit(value as usize));
@@ -18183,6 +18288,7 @@ impl<'program> LowerCtx<'program> {
                 ),
                 None,
                 self.current_span_id.clone(),
+                self.runtime,
             ),
         };
         if input_prec.is_float() {
@@ -18211,7 +18317,7 @@ impl<'program> LowerCtx<'program> {
             // raise is recoverable and the host-emission channel is the
             // loud terminal (section C3's laundering rule - the scalar
             // arms reject tensor operands).
-            if unrepresentable_panic_suppressed() {
+            if self.runtime.unrepresentable_panic_suppressed() {
                 std::panic::panic_any(UnrepresentableDag);
             }
             if self.allow_host_list_ad_rewrites {
@@ -18219,9 +18325,15 @@ impl<'program> LowerCtx<'program> {
                     unsupported.to_string(),
                     None,
                     self.current_span_id.clone(),
+                    self.runtime,
                 )
             }
-            raise_lowering_error(unsupported.to_string(), None, self.current_span_id.clone())
+            raise_lowering_error(
+                unsupported.to_string(),
+                None,
+                self.current_span_id.clone(),
+                self.runtime,
+            )
         }
     }
 
@@ -18245,6 +18357,7 @@ impl<'program> LowerCtx<'program> {
                 ),
                 None,
                 self.current_span_id.clone(),
+                self.runtime,
             ),
         };
 
@@ -18303,13 +18416,23 @@ impl<'program> LowerCtx<'program> {
             Stage::Lowering,
             authority,
         );
-        if unrepresentable_panic_suppressed() {
+        if self.runtime.unrepresentable_panic_suppressed() {
             std::panic::panic_any(UnrepresentableDag);
         }
         if self.allow_host_list_ad_rewrites {
-            raise_fatal_lowering_error(unsupported.to_string(), None, self.current_span_id.clone())
+            raise_fatal_lowering_error(
+                unsupported.to_string(),
+                None,
+                self.current_span_id.clone(),
+                self.runtime,
+            )
         }
-        raise_lowering_error(unsupported.to_string(), None, self.current_span_id.clone())
+        raise_lowering_error(
+            unsupported.to_string(),
+            None,
+            self.current_span_id.clone(),
+            self.runtime,
+        )
     }
 
     /// `(fn {} (params {} p1 p2 ...) body)`
@@ -18319,6 +18442,7 @@ impl<'program> LowerCtx<'program> {
                 "an `fn` form with fewer than 4 elements",
                 None,
                 self.current_span_id.clone(),
+                self.runtime,
             );
         }
         let saved = self.bindings.clone();
@@ -18360,7 +18484,9 @@ impl<'program> LowerCtx<'program> {
         // `LoweredValue`.
         if let Some((DeepTag::Params, _, params)) = stamped_parts(&elems[2]) {
             for (index, param) in params.iter().enumerate() {
-                if let Some((name, authored_ty_expr)) = param_name_and_type_expr(param) {
+                if let Some((name, authored_ty_expr)) =
+                    param_name_and_type_expr(param, self.runtime)
+                {
                     let checked_ty_expr = checked_param_types.and_then(|types| types.get(index));
                     let ty_expr = match authored_ty_expr {
                         Some(authored) if !Self::type_expr_contains_nominal(authored) => {
@@ -18400,11 +18526,12 @@ impl<'program> LowerCtx<'program> {
                 "an `fn` form without its parameter list",
                 Some(elems[2].span()),
                 self.current_span_id.clone(),
+                self.runtime,
             );
         };
         let params_and_types = params
             .iter()
-            .filter_map(param_name_and_type_expr)
+            .filter_map(|value| param_name_and_type_expr(value, self.runtime))
             .filter_map(|(name, ty)| {
                 let input = self.bindings[&name].as_single_node()?;
                 let formal = match ty {
@@ -18535,6 +18662,7 @@ impl<'program> LowerCtx<'program> {
             "a pipe reached lowering unfolded",
             None,
             self.current_span_id.clone(),
+            self.runtime,
         )
     }
 
@@ -18553,6 +18681,7 @@ impl<'program> LowerCtx<'program> {
                 "a `cast` form with fewer than 4 elements",
                 None,
                 self.current_span_id.clone(),
+                self.runtime,
             );
         }
         let x = self.lower_expr_node(&elems[2], "cast input");
@@ -18578,6 +18707,7 @@ impl<'program> LowerCtx<'program> {
                 unsupported.to_string(),
                 Some(elems[3].span()),
                 elems[3].span_id().map(ToOwned::to_owned),
+                self.runtime,
             )
         };
         let new_precision = if let Some(prim) = Self::try_extract_prim(&elems[3]) {
@@ -18633,6 +18763,7 @@ impl<'program> LowerCtx<'program> {
                 ),
                 Some(elems[4].span()),
                 elems[4].span_id().map(ToOwned::to_owned),
+                self.runtime,
             ),
         };
         let ty = TensorType {
@@ -18673,6 +18804,7 @@ impl<'program> LowerCtx<'program> {
                 "host control flow must execute in its source stage",
                 None,
                 None,
+                self.runtime,
             ),
             LoweredValue::Node(id) => id,
             LoweredValue::Tuple(_) => self.reject_static_adt(
@@ -18702,6 +18834,7 @@ impl<'program> LowerCtx<'program> {
                 "an `if` form with no condition",
                 None,
                 self.current_span_id.clone(),
+                self.runtime,
             );
         };
         let Some(then_expr) = elems.get(3) else {
@@ -18709,6 +18842,7 @@ impl<'program> LowerCtx<'program> {
                 "an `if` form with no then-branch",
                 None,
                 self.current_span_id.clone(),
+                self.runtime,
             );
         };
         let Some(else_expr) = elems.get(4) else {
@@ -18716,6 +18850,7 @@ impl<'program> LowerCtx<'program> {
                 "an `if` form with no else-branch",
                 None,
                 self.current_span_id.clone(),
+                self.runtime,
             );
         };
 
@@ -18745,6 +18880,7 @@ impl<'program> LowerCtx<'program> {
                 "dynamic tensor branches retain host control flow; scalar source stages cannot be hoisted out of a branch",
                 Some(cond_expr.span()),
                 self.current_span_id.clone(),
+                self.runtime,
             );
         }
         let saved_local_path = self.local_ascription_path_condition;
@@ -18916,7 +19052,12 @@ impl<'program> LowerCtx<'program> {
             last = Some(self.lower_expr(expr));
         }
         last.unwrap_or_else(|| {
-            raise_malformed_deep("an empty `par` block", None, self.current_span_id.clone())
+            raise_malformed_deep(
+                "an empty `par` block",
+                None,
+                self.current_span_id.clone(),
+                self.runtime,
+            )
         })
     }
 
@@ -18932,6 +19073,7 @@ impl<'program> LowerCtx<'program> {
                 "a `jit` form with no inner expression",
                 None,
                 self.current_span_id.clone(),
+                self.runtime,
             )
         }
     }
@@ -18945,7 +19087,7 @@ impl<'program> LowerCtx<'program> {
                     items
                         .iter()
                         .map(|item| {
-                            let id = item.expect_node("realize tuple leaf");
+                            let id = item.expect_node("realize tuple leaf", self.runtime);
                             let output_type = self
                                 .dag
                                 .get(id)
@@ -18961,7 +19103,7 @@ impl<'program> LowerCtx<'program> {
                         .collect(),
                 );
             }
-            let input = input.expect_node("realize input");
+            let input = input.expect_node("realize input", self.runtime);
             let output_type = self
                 .dag
                 .get(input)
@@ -18978,6 +19120,7 @@ impl<'program> LowerCtx<'program> {
                 "a `realize` form with no inner expression",
                 None,
                 self.current_span_id.clone(),
+                self.runtime,
             )
         }
     }
@@ -18992,6 +19135,7 @@ impl<'program> LowerCtx<'program> {
                 "a `copy` form with no inner expression",
                 None,
                 self.current_span_id.clone(),
+                self.runtime,
             )
         }
     }
@@ -19053,6 +19197,7 @@ impl<'program> LowerCtx<'program> {
                 "a `borrow` form with no inner expression",
                 None,
                 self.current_span_id.clone(),
+                self.runtime,
             )
         }
     }
@@ -19071,6 +19216,7 @@ impl<'program> LowerCtx<'program> {
                  C1.4, flagged by chelis#782)",
                 Some(elems[3].span()),
                 elems[3].span_id().map(ToOwned::to_owned),
+                self.runtime,
             )
         });
         tuple.tuple_get(index).unwrap_or_else(|| {
@@ -19078,6 +19224,7 @@ impl<'program> LowerCtx<'program> {
                 format!("tuple-get index {index} out of bounds during lowering"),
                 elems.get(3).map(Expr::span),
                 elems.get(3).and_then(Expr::span_id).map(ToOwned::to_owned),
+                self.runtime,
             )
         })
     }
@@ -19280,7 +19427,7 @@ impl<'program> LowerCtx<'program> {
     /// expression rather than a tag's `elems` slice (chelis#620, e.g. the
     /// recursion-unroll caps in `lower_plain_callable_app`).
     fn reject_lowering_slice(&self, span_expr: Option<&Expr>, message: String) -> ! {
-        if unrepresentable_panic_suppressed() {
+        if self.runtime.unrepresentable_panic_suppressed() {
             std::panic::panic_any(UnrepresentableDag);
         }
         if self.allow_host_list_ad_rewrites {
@@ -19288,12 +19435,14 @@ impl<'program> LowerCtx<'program> {
                 message,
                 span_expr.map(Expr::span),
                 span_expr.and_then(Expr::span_id).map(ToOwned::to_owned),
+                self.runtime,
             )
         }
         raise_lowering_error(
             message,
             span_expr.map(Expr::span),
             span_expr.and_then(Expr::span_id).map(ToOwned::to_owned),
+            self.runtime,
         )
     }
 
@@ -19324,6 +19473,7 @@ impl<'program> LowerCtx<'program> {
                 "dynamic `if` then-branch has no lowered producer",
                 None,
                 self.current_span_id.clone(),
+                self.runtime,
             );
         };
         let Some(else_branch) = self.dag.get(else_node) else {
@@ -19331,6 +19481,7 @@ impl<'program> LowerCtx<'program> {
                 "dynamic `if` else-branch has no lowered producer",
                 None,
                 self.current_span_id.clone(),
+                self.runtime,
             );
         };
         let then_ty = &then_branch.output_type;
@@ -19356,6 +19507,7 @@ impl<'program> LowerCtx<'program> {
                 ),
                 None,
                 self.current_span_id.clone(),
+                self.runtime,
             );
         }
         let dims = then_ty
@@ -19412,7 +19564,7 @@ impl<'program> LowerCtx<'program> {
         for expr in elems.iter().skip(2) {
             let _ = self.lower_expr(expr);
         }
-        if unrepresentable_panic_suppressed() {
+        if self.runtime.unrepresentable_panic_suppressed() {
             // Speculative DAG attempt from the host-lane fallback — unwind
             // without writing a stderr panic-location trace. `catch_unwind`
             // in the caller turns this into an `Err` and falls back to
@@ -19424,6 +19576,7 @@ impl<'program> LowerCtx<'program> {
             unsupported_lowering_message(tag),
             expr.map(Expr::span),
             expr.and_then(Expr::span_id).map(ToOwned::to_owned),
+            self.runtime,
         )
     }
 
@@ -19434,6 +19587,7 @@ impl<'program> LowerCtx<'program> {
             unsupported_lowering_message(tag),
             expr.map(Expr::span),
             expr.and_then(Expr::span_id).map(ToOwned::to_owned),
+            self.runtime,
         )
     }
 
@@ -19561,22 +19715,23 @@ mod fused_zero_tests {
 
     #[test]
     fn fused_zero_live_unresolved_is_rootless_but_dead_call_is_complete() {
-        for (style, call) in [
-            ("direct", "(app {} (var {} f) (var {} x))"),
-            ("helper", "(app {} (var {} apply) (var {} f) (var {} x))"),
-            ("pipe", "(pipe {} (var {} x) (var {} f))"),
-        ] {
-            for dead in [false, true] {
-                let body = if dead {
-                    format!(
+        crate::lowering_runtime::with_native_lowering_runtime(|runtime| {
+            for (style, call) in [
+                ("direct", "(app {} (var {} f) (var {} x))"),
+                ("helper", "(app {} (var {} apply) (var {} f) (var {} x))"),
+                ("pipe", "(pipe {} (var {} x) (var {} f))"),
+            ] {
+                for dead in [false, true] {
+                    let body = if dead {
+                        format!(
                         "(let {{}} (bind {{}} discarded {call})
                            (lit {{surf_literal_style: \"explicit\", type: (t-prim {{}} f32)}} 3.0))"
                     )
-                } else {
-                    call.into()
-                };
-                let source = format!(
-                    r#"
+                    } else {
+                        call.into()
+                    };
+                    let source = format!(
+                        r#"
                     (defsig {{}} apply
                       (t-fn {{}}
                         (t-fn {{}} (t-tensor {{}} (t-prim {{}} f32)) (t-prim {{}} f32))
@@ -19600,114 +19755,122 @@ mod fused_zero_tests {
                             (vmap {{}} (grad {{}} (var {{}} target)) (lit {{type: (t-prim {{}} i32)}} 0))
                             (var {{}} xs)))))
                     "#
-                );
-                let expressions = chelis_deep::parser::parse_str(&source).unwrap();
-                let checked = chelis_types::check_typed_program(
-                    &expressions,
-                    chelis_types::ProgramOrigin::Unlinked,
-                )
-                .unwrap();
-                let checked = chelis_effects::check_program(&checked).unwrap();
-                let checked = chelis_types::check_linearity(&checked).unwrap();
-                let library = try_lower_program_to_library(&checked).unwrap();
-                assert_eq!(
-                    library.rootless_defs().contains("mapped"),
-                    !dead,
-                    "{style}, dead={dead}"
-                );
-                assert_eq!(
-                    library.symbol_table().contains_key("mapped"),
-                    dead,
-                    "{style}, dead={dead}"
-                );
+                    );
+                    let expressions = chelis_deep::parser::parse_str(&source).unwrap();
+                    let checked = chelis_types::check_typed_program(
+                        &expressions,
+                        chelis_types::ProgramOrigin::Unlinked,
+                    )
+                    .unwrap();
+                    let checked = chelis_effects::check_program(&checked).unwrap();
+                    let checked = chelis_types::check_linearity(&checked).unwrap();
+                    let library = try_lower_program_to_library(&checked, runtime).unwrap();
+                    assert_eq!(
+                        library.rootless_defs().contains("mapped"),
+                        !dead,
+                        "{style}, dead={dead}"
+                    );
+                    assert_eq!(
+                        library.symbol_table().contains_key("mapped"),
+                        dead,
+                        "{style}, dead={dead}"
+                    );
+                }
             }
-        }
+        })
     }
 
     #[test]
     fn fused_zero_vectorized_root_correspondence_survives_inserted_nodes() {
-        let mut dag = Dag::new();
-        let float = tensor_type(&[], Prim::F32);
-        let x = dag.add_node(
-            RiscOp::Load { name: "x".into() },
-            vec![],
-            float.clone(),
-            None,
-        );
-        let y = dag.add_node(
-            RiscOp::Load { name: "y".into() },
-            vec![],
-            float.clone(),
-            None,
-        );
-        let mut terms = Vec::new();
-        for (input, n) in [(x, 3), (y, 5)] {
-            let integer = dag.add_node(
-                RiscOp::Const {
-                    value: chelis_types::scalar_from_i64("test", Prim::Int64, n).unwrap(),
-                },
+        crate::lowering_runtime::with_native_lowering_runtime(|runtime| {
+            let mut dag = Dag::new();
+            let float = tensor_type(&[], Prim::F32);
+            let x = dag.add_node(
+                RiscOp::Load { name: "x".into() },
                 vec![],
-                tensor_type(&[], Prim::Int64),
-                None,
-            );
-            let coefficient = dag.add_node(
-                RiscOp::Cast {
-                    new_precision: Prim::F32,
-                },
-                vec![integer],
                 float.clone(),
                 None,
             );
-            let extent_use = dag.add_node(
-                RiscOp::Expand {
-                    axis: 0,
-                    size: crate::dag::RtDim::Node(1),
-                },
-                vec![input, integer],
-                tensor_type(&[n as usize], Prim::F32),
+            let y = dag.add_node(
+                RiscOp::Load { name: "y".into() },
+                vec![],
+                float.clone(),
                 None,
             );
-            // Root this consumer so AD pruning retains the integer's shared
-            // extent role; the coefficient's ordinary use then needs an Expand.
-            dag.add_root(extent_use);
-            terms.push(dag.add_node(RiscOp::Mul, vec![input, coefficient], float.clone(), None));
-        }
-        let forward = dag.add_node(RiscOp::Add, terms, float, None);
-        let grad = grad_dag_checked(&dag, forward, &[x, y]).unwrap();
-        let vectorized = vmap::vectorize_axis0(&grad.dag, DimInfo::Lit(2)).unwrap();
-        assert_eq!(grad.dag.roots().len(), vectorized.roots().len());
-        let roots = vectorized_root_map(&grad.dag, &vectorized).unwrap();
-        assert!(
-            grad.grad_nodes
-                .to_sorted()
-                .iter()
-                .any(|(_, id)| roots[id] != **id),
-            "fixture must shift an old gradient ID"
-        );
-        let mut ctx = context();
-        let mut args = UnordMap::new();
-        for name in ["x", "y"] {
-            args.insert(
-                name.into(),
-                ctx.dag.add_node(
-                    RiscOp::Load { name: name.into() },
+            let mut terms = Vec::new();
+            for (input, n) in [(x, 3), (y, 5)] {
+                let integer = dag.add_node(
+                    RiscOp::Const {
+                        value: chelis_types::scalar_from_i64("test", Prim::Int64, n).unwrap(),
+                    },
                     vec![],
-                    tensor_type(&[2], Prim::F32),
+                    tensor_type(&[], Prim::Int64),
                     None,
-                ),
+                );
+                let coefficient = dag.add_node(
+                    RiscOp::Cast {
+                        new_precision: Prim::F32,
+                    },
+                    vec![integer],
+                    float.clone(),
+                    None,
+                );
+                let extent_use = dag.add_node(
+                    RiscOp::Expand {
+                        axis: 0,
+                        size: crate::dag::RtDim::Node(1),
+                    },
+                    vec![input, integer],
+                    tensor_type(&[n as usize], Prim::F32),
+                    None,
+                );
+                // Root this consumer so AD pruning retains the integer's shared
+                // extent role; the coefficient's ordinary use then needs an Expand.
+                dag.add_root(extent_use);
+                terms.push(dag.add_node(
+                    RiscOp::Mul,
+                    vec![input, coefficient],
+                    float.clone(),
+                    None,
+                ));
+            }
+            let forward = dag.add_node(RiscOp::Add, terms, float, None);
+            let grad = grad_dag_checked(&dag, forward, &[x, y]).unwrap();
+            let vectorized = vmap::vectorize_axis0(&grad.dag, DimInfo::Lit(2)).unwrap();
+            assert_eq!(grad.dag.roots().len(), vectorized.roots().len());
+            let roots = vectorized_root_map(&grad.dag, &vectorized).unwrap();
+            assert!(
+                grad.grad_nodes
+                    .to_sorted()
+                    .iter()
+                    .any(|(_, id)| roots[id] != **id),
+                "fixture must shift an old gradient ID"
             );
-        }
-        let splice = ctx.splice_dag(&vectorized, &args).unwrap();
-        let selected = [
-            splice[&roots[&grad.grad_nodes[&x]]],
-            splice[&roots[&grad.grad_nodes[&y]]],
-        ];
-        let values = eval_tensor_roots_with_strict(&ctx.dag, &selected, |_| {
-            Some(value(&[2], Prim::F32, &[2.0, 7.0]))
+            let mut ctx = context(runtime);
+            let mut args = UnordMap::new();
+            for name in ["x", "y"] {
+                args.insert(
+                    name.into(),
+                    ctx.dag.add_node(
+                        RiscOp::Load { name: name.into() },
+                        vec![],
+                        tensor_type(&[2], Prim::F32),
+                        None,
+                    ),
+                );
+            }
+            let splice = ctx.splice_dag(&vectorized, &args).unwrap();
+            let selected = [
+                splice[&roots[&grad.grad_nodes[&x]]],
+                splice[&roots[&grad.grad_nodes[&y]]],
+            ];
+            let values = eval_tensor_roots_with_strict(&ctx.dag, &selected, |_| {
+                Some(value(&[2], Prim::F32, &[2.0, 7.0]))
+            })
+            .unwrap();
+            assert_eq!(values[&selected[0]].to_f64_lossy_vec(), [3.0, 3.0]);
+            assert_eq!(values[&selected[1]].to_f64_lossy_vec(), [5.0, 5.0]);
         })
-        .unwrap();
-        assert_eq!(values[&selected[0]].to_f64_lossy_vec(), [3.0, 3.0]);
-        assert_eq!(values[&selected[1]].to_f64_lossy_vec(), [5.0, 5.0]);
     }
 
     fn parsed(source: &str) -> Expr {
@@ -19716,69 +19879,80 @@ mod fused_zero_tests {
 
     #[test]
     fn fused_zero_consumer_maps_shared_coefficient_gradients() {
-        let expressions = chelis_deep::parser::parse_str(include_str!(
-            "../tests/fixtures/core/src/lower/shared_coefficient.deep"
-        ))
-        .unwrap();
-        let checked =
-            chelis_types::check_typed_program(&expressions, chelis_types::ProgramOrigin::Unlinked)
-                .unwrap();
-        let mut ctx = LowerCtx::new(
-            BTreeMap::new(),
-            collect_top_level_defs(checked.exprs()),
-            collect_top_level_sigs(checked.exprs()),
-            LinearityInfo::default(),
-        );
-        let CallableExpr::Plain(function) =
-            ctx.resolve_callable_expr(&parsed("(var {} loss)")).unwrap()
-        else {
-            panic!("named function")
-        };
-        let actuals: Vec<_> = ["a", "b"]
-            .into_iter()
-            .map(|name| {
-                ctx.dag.add_node(
-                    RiscOp::Load { name: name.into() },
-                    vec![],
-                    tensor_type(&[2, 3], Prim::F32),
-                    None,
-                )
-            })
-            .collect();
-        // Exercise the actual fused consumer, not a second root/splice algorithm.
-        let result =
-            ctx.lower_vmap_grad_callable_with_nodes(&function, None, 0, &actuals, function.span());
-        let LoweredValue::Tuple(slots) = result else {
-            panic!("two selected groups")
-        };
-        let roots: Vec<_> = slots
-            .iter()
-            .map(|slot| slot.as_single_node().unwrap())
-            .collect();
-        for node in ctx.dag.nodes() {
-            assert!(
-                node.inputs
-                    .iter()
-                    .chain(&node.shape_deps)
-                    .chain(&node.result_claim_deps)
-                    .all(|dependency| dependency.0 < node.id.0),
-                "fused consumer introduced a non-topological dependency: {node:?}"
+        crate::lowering_runtime::with_native_lowering_runtime(|runtime| {
+            let expressions = chelis_deep::parser::parse_str(include_str!(
+                "../tests/fixtures/core/src/lower/shared_coefficient.deep"
+            ))
+            .unwrap();
+            let checked = chelis_types::check_typed_program(
+                &expressions,
+                chelis_types::ProgramOrigin::Unlinked,
+            )
+            .unwrap();
+            let mut ctx = LowerCtx::new(
+                BTreeMap::new(),
+                collect_top_level_defs(checked.exprs()),
+                collect_top_level_sigs(checked.exprs()),
+                LinearityInfo::default(),
+                runtime,
             );
-        }
-        let values = eval_tensor_roots_with_strict(&ctx.dag, &roots, |_| {
-            Some(value(&[2, 3], Prim::F32, &[2.0; 6]))
+            let CallableExpr::Plain(function) =
+                ctx.resolve_callable_expr(&parsed("(var {} loss)")).unwrap()
+            else {
+                panic!("named function")
+            };
+            let actuals: Vec<_> = ["a", "b"]
+                .into_iter()
+                .map(|name| {
+                    ctx.dag.add_node(
+                        RiscOp::Load { name: name.into() },
+                        vec![],
+                        tensor_type(&[2, 3], Prim::F32),
+                        None,
+                    )
+                })
+                .collect();
+            // Exercise the actual fused consumer, not a second root/splice algorithm.
+            let result = ctx.lower_vmap_grad_callable_with_nodes(
+                &function,
+                None,
+                0,
+                &actuals,
+                function.span(),
+            );
+            let LoweredValue::Tuple(slots) = result else {
+                panic!("two selected groups")
+            };
+            let roots: Vec<_> = slots
+                .iter()
+                .map(|slot| slot.as_single_node().unwrap())
+                .collect();
+            for node in ctx.dag.nodes() {
+                assert!(
+                    node.inputs
+                        .iter()
+                        .chain(&node.shape_deps)
+                        .chain(&node.result_claim_deps)
+                        .all(|dependency| dependency.0 < node.id.0),
+                    "fused consumer introduced a non-topological dependency: {node:?}"
+                );
+            }
+            let values = eval_tensor_roots_with_strict(&ctx.dag, &roots, |_| {
+                Some(value(&[2, 3], Prim::F32, &[2.0; 6]))
+            })
+            .unwrap();
+            assert_eq!(values[&roots[0]].to_f64_lossy_vec(), [9.0; 6]);
+            assert_eq!(values[&roots[1]].to_f64_lossy_vec(), [15.0; 6]);
         })
-        .unwrap();
-        assert_eq!(values[&roots[0]].to_f64_lossy_vec(), [9.0; 6]);
-        assert_eq!(values[&roots[1]].to_f64_lossy_vec(), [15.0; 6]);
     }
 
-    fn context() -> LowerCtx<'static> {
+    fn context(runtime: &LoweringRuntime) -> LowerCtx<'_> {
         LowerCtx::new(
             BTreeMap::new(),
             BTreeMap::new(),
             BTreeMap::new(),
             LinearityInfo::default(),
+            runtime,
         )
     }
 
@@ -19804,216 +19978,224 @@ mod fused_zero_tests {
 
     #[test]
     fn fused_zero_unused_first_keeps_live_reuse_identity() {
-        let mut ctx = context();
-        let ty = tensor_type(&[2], Prim::F32);
-        let a = ctx
-            .dag
-            .add_node(RiscOp::Load { name: "a".into() }, vec![], ty.clone(), None);
-        let b = ctx
-            .dag
-            .add_node(RiscOp::Load { name: "b".into() }, vec![], ty, None);
-        ctx.bindings.insert("a".into(), LoweredValue::Node(a));
-        ctx.bindings.insert("b".into(), LoweredValue::Node(b));
-        let function = "(fn {} (params {} (unused {type: (t-tensor {} (t-prim {} f32))}) (x {type: (t-tensor {} (t-prim {} f32))})) (app {} (var {} mul) (var {} x) (var {} x)))";
-        let result = ctx.lower_expr(&parsed(&format!(
-            "(app {{}} (vmap {{}} (grad {{}} {function}) 0) (var {{}} a) (var {{}} b))"
-        )));
-        let LoweredValue::Tuple(slots) = result else {
-            panic!("missing selected zero group")
-        };
-        assert_eq!(slots.len(), 2);
-        let zero = slots[0].as_single_node().unwrap();
-        let live = slots[1].as_single_node().unwrap();
-        assert_eq!(ctx.dag.get(zero).unwrap().reusable_input, Some(a));
-        assert_eq!(ctx.dag.get(live).unwrap().reusable_input, Some(b));
-        let supplied = UnordMap::from([
-            ("a", value(&[2], Prim::F32, &[3.0, 11.0])),
-            ("b", value(&[2], Prim::F32, &[2.0, 7.0])),
-        ]);
-        let values = eval_tensor_roots_with_strict(&ctx.dag, &[zero, live], |name| {
-            supplied.get(name).cloned()
+        crate::lowering_runtime::with_native_lowering_runtime(|runtime| {
+            let mut ctx = context(runtime);
+            let ty = tensor_type(&[2], Prim::F32);
+            let a = ctx
+                .dag
+                .add_node(RiscOp::Load { name: "a".into() }, vec![], ty.clone(), None);
+            let b = ctx
+                .dag
+                .add_node(RiscOp::Load { name: "b".into() }, vec![], ty, None);
+            ctx.bindings.insert("a".into(), LoweredValue::Node(a));
+            ctx.bindings.insert("b".into(), LoweredValue::Node(b));
+            let function = "(fn {} (params {} (unused {type: (t-tensor {} (t-prim {} f32))}) (x {type: (t-tensor {} (t-prim {} f32))})) (app {} (var {} mul) (var {} x) (var {} x)))";
+            let result = ctx.lower_expr(&parsed(&format!(
+                "(app {{}} (vmap {{}} (grad {{}} {function}) 0) (var {{}} a) (var {{}} b))"
+            )));
+            let LoweredValue::Tuple(slots) = result else {
+                panic!("missing selected zero group")
+            };
+            assert_eq!(slots.len(), 2);
+            let zero = slots[0].as_single_node().unwrap();
+            let live = slots[1].as_single_node().unwrap();
+            assert_eq!(ctx.dag.get(zero).unwrap().reusable_input, Some(a));
+            assert_eq!(ctx.dag.get(live).unwrap().reusable_input, Some(b));
+            let supplied = UnordMap::from([
+                ("a", value(&[2], Prim::F32, &[3.0, 11.0])),
+                ("b", value(&[2], Prim::F32, &[2.0, 7.0])),
+            ]);
+            let values = eval_tensor_roots_with_strict(&ctx.dag, &[zero, live], |name| {
+                supplied.get(name).cloned()
+            })
+            .unwrap();
+            assert_eq!(values[&zero].to_f64_lossy_vec(), [0.0, 0.0]);
+            assert_eq!(values[&live].to_f64_lossy_vec(), [4.0, 14.0]);
         })
-        .unwrap();
-        assert_eq!(values[&zero].to_f64_lossy_vec(), [0.0, 0.0]);
-        assert_eq!(values[&live].to_f64_lossy_vec(), [4.0, 14.0]);
     }
 
     #[test]
     fn fused_zero_empty_batch_preserves_precision_and_rank() {
-        for precision in [Prim::F32, Prim::F64] {
-            let mut ctx = context();
-            let ty = tensor_type(&[0], precision);
-            let input = ctx
-                .dag
-                .add_node(RiscOp::Load { name: "x".into() }, vec![], ty, None);
-            ctx.bindings.insert("xs".into(), LoweredValue::Node(input));
-            let p = precision.name();
-            let function = format!(
-                "(fn {{}} (params {{}} (x {{type: (t-tensor {{}} (t-prim {{}} {p}))}})) (lit {{type: (t-prim {{}} {p})}} 3.0))"
-            );
-            let root = ctx
-                .lower_expr(&parsed(&format!(
-                    "(app {{}} (vmap {{}} (grad {{}} {function}) 0) (var {{}} xs))"
-                )))
-                .expect_node("constant fused gradient owns one zero root");
-            let values = eval_tensor_roots_with_strict(&ctx.dag, &[root], |_| {
-                Some(value(&[0], precision, &[]))
-            })
-            .unwrap();
-            assert_eq!(values[&root].shape, [0]);
-            assert_eq!(values[&root].prim(), precision);
-            assert!(values[&root].to_f64_lossy_vec().is_empty());
-        }
+        crate::lowering_runtime::with_native_lowering_runtime(|runtime| {
+            for precision in [Prim::F32, Prim::F64] {
+                let mut ctx = context(runtime);
+                let ty = tensor_type(&[0], precision);
+                let input = ctx
+                    .dag
+                    .add_node(RiscOp::Load { name: "x".into() }, vec![], ty, None);
+                ctx.bindings.insert("xs".into(), LoweredValue::Node(input));
+                let p = precision.name();
+                let function = format!(
+                    "(fn {{}} (params {{}} (x {{type: (t-tensor {{}} (t-prim {{}} {p}))}})) (lit {{type: (t-prim {{}} {p})}} 3.0))"
+                );
+                let root = ctx
+                    .lower_expr(&parsed(&format!(
+                        "(app {{}} (vmap {{}} (grad {{}} {function}) 0) (var {{}} xs))"
+                    )))
+                    .expect_node("constant fused gradient owns one zero root", runtime);
+                let values = eval_tensor_roots_with_strict(&ctx.dag, &[root], |_| {
+                    Some(value(&[0], precision, &[]))
+                })
+                .unwrap();
+                assert_eq!(values[&root].shape, [0]);
+                assert_eq!(values[&root].prim(), precision);
+                assert!(values[&root].to_f64_lossy_vec().is_empty());
+            }
+        })
     }
 
     #[test]
     fn fused_zero_unbatched_actual_uses_materialized_shape_and_reuse() {
-        let mut ctx = context();
-        let a = ctx.dag.add_node(
-            RiscOp::Load { name: "a".into() },
-            vec![],
-            tensor_type(&[2], Prim::F32),
-            None,
-        );
-        let b = ctx.dag.add_node(
-            RiscOp::Load { name: "b".into() },
-            vec![],
-            tensor_type(&[], Prim::F32),
-            None,
-        );
-        ctx.bindings.insert("a".into(), LoweredValue::Node(a));
-        ctx.bindings.insert("b".into(), LoweredValue::Node(b));
-        let function = "(fn {} (params {} (x {type: (t-tensor {} (t-prim {} f32))}) (unused {type: (t-tensor {} (t-prim {} f32))})) (app {} (var {} mul) (var {} x) (var {} x)))";
-        let result = ctx.lower_expr(&parsed(&format!(
-            "(app {{}} (vmap {{}} (grad {{}} {function}) 0) (var {{}} a) (var {{}} b))"
-        )));
-        let LoweredValue::Tuple(slots) = result else {
-            panic!("two selected groups")
-        };
-        let zero = slots[1].as_single_node().unwrap();
-        let materialized = ctx.dag.get(zero).unwrap().reusable_input.unwrap();
-        assert_ne!(materialized, b);
-        assert_eq!(
-            ctx.dag.get(materialized).unwrap().output_type,
-            tensor_type(&[2], Prim::F32)
-        );
-        assert_eq!(
-            ctx.dag.get(zero).unwrap().output_type,
-            tensor_type(&[2], Prim::F32)
-        );
-        let values = eval_tensor_roots_with_strict(&ctx.dag, &[zero], |name| {
-            Some(if name == "a" {
-                value(&[2], Prim::F32, &[2.0, 7.0])
-            } else {
-                value(&[], Prim::F32, &[11.0])
-            })
-        })
-        .unwrap();
-        assert_eq!(
-            values[&zero]
-                .to_f64_lossy_vec()
-                .iter()
-                .map(|v| v.to_bits())
-                .collect::<Vec<_>>(),
-            [0, 0]
-        );
-    }
-
-    #[test]
-    fn fused_zero_forward_carrier_dependency_survives_vectorization_and_dce() {
-        // Independent graph regression for the repair: a shared
-        // root expands after vectorization, and its input retains the witness.
-        for observed in [2, 3] {
-            let mut dag = Dag::new();
-            let int = tensor_type(&[], Prim::Int64);
-            let constant = |dag: &mut Dag, n| {
-                dag.add_node(
-                    RiscOp::Const {
-                        value: chelis_types::scalar_from_i64("test", Prim::Int64, n).unwrap(),
-                    },
-                    vec![],
-                    int.clone(),
-                    None,
-                )
-            };
-            let actual = constant(&mut dag, observed);
-            let required = constant(&mut dag, 2);
-            let witness = dag.add_node(
-                RiscOp::CheckedReshapeExtent {
-                    claims: vec!["rows".into()],
-                    axis: crate::dag::RtAxis::Lit(0),
-                },
-                vec![actual, required],
-                int.clone(),
-                Some("fused-witness".into()),
-            );
-            let forward = dag.add_node(
-                RiscOp::Const {
-                    value: chelis_types::scalar_from_i64("test", Prim::Int64, 7).unwrap(),
-                },
+        crate::lowering_runtime::with_native_lowering_runtime(|runtime| {
+            let mut ctx = context(runtime);
+            let a = ctx.dag.add_node(
+                RiscOp::Load { name: "a".into() },
                 vec![],
-                int,
+                tensor_type(&[2], Prim::F32),
                 None,
             );
-            dag.add_shape_dep(forward, witness);
-            let operand = dag.add_node(
-                RiscOp::Load {
-                    name: "operand".into(),
-                },
+            let b = ctx.dag.add_node(
+                RiscOp::Load { name: "b".into() },
                 vec![],
                 tensor_type(&[], Prim::F32),
                 None,
             );
-            dag.add_node(
-                RiscOp::Expand {
-                    axis: 0,
-                    size: crate::dag::RtDim::Node(1),
-                },
-                vec![operand, forward],
-                tensor_type(&[7], Prim::F32),
-                None,
-            );
-            dag.add_root(forward);
-            let (vectorized, operator_map) =
-                vmap::vectorize_axis0_with_node_map(&dag, DimInfo::Lit(2)).unwrap();
-            assert_eq!(vectorized.roots().len(), 1);
-            let root = vectorized.roots()[0];
-            let operator = operator_map[forward.0];
-            assert_ne!(root, operator, "root expansion is not the rebuilt operator");
-            assert!(operator.0 < root.0);
-            assert_eq!(vectorized.get(operator).unwrap().output_type.dims.len(), 0);
-            assert_eq!(vectorized.get(root).unwrap().output_type.dims.len(), 1);
-            assert!(vectorized.get(root).unwrap().inputs.contains(&operator));
-            assert!(matches!(
-                vectorized.get(root).unwrap().op,
-                RiscOp::Expand { .. }
-            ));
-            assert!(vectorized.get(root).unwrap().shape_deps.is_empty());
-            let mut ctx = context();
-            let remap = ctx.splice_dag(&vectorized, &UnordMap::new()).unwrap();
-            let forward = remap[&root];
-            let zero = ctx.zero_tensor_node(&tensor_type(&[2], Prim::F32), None);
-            ctx.dag.add_shape_dep(zero, forward);
-            ctx.dag.set_roots(vec![zero]);
-            let pruned = crate::optimize::dead_code_eliminate(&ctx.dag);
+            ctx.bindings.insert("a".into(), LoweredValue::Node(a));
+            ctx.bindings.insert("b".into(), LoweredValue::Node(b));
+            let function = "(fn {} (params {} (x {type: (t-tensor {} (t-prim {} f32))}) (unused {type: (t-tensor {} (t-prim {} f32))})) (app {} (var {} mul) (var {} x) (var {} x)))";
+            let result = ctx.lower_expr(&parsed(&format!(
+                "(app {{}} (vmap {{}} (grad {{}} {function}) 0) (var {{}} a) (var {{}} b))"
+            )));
+            let LoweredValue::Tuple(slots) = result else {
+                panic!("two selected groups")
+            };
+            let zero = slots[1].as_single_node().unwrap();
+            let materialized = ctx.dag.get(zero).unwrap().reusable_input.unwrap();
+            assert_ne!(materialized, b);
             assert_eq!(
-                pruned
-                    .nodes()
-                    .iter()
-                    .filter(|n| matches!(n.op, RiscOp::CheckedReshapeExtent { .. }))
-                    .count(),
-                1
+                ctx.dag.get(materialized).unwrap().output_type,
+                tensor_type(&[2], Prim::F32)
             );
-            let values = eval_tensor_roots_with_strict(&pruned, pruned.roots(), |_| None);
-            if observed == 2 {
-                assert_eq!(
-                    values.unwrap()[&pruned.roots()[0]].to_f64_lossy_vec(),
-                    [0.0, 0.0]
+            assert_eq!(
+                ctx.dag.get(zero).unwrap().output_type,
+                tensor_type(&[2], Prim::F32)
+            );
+            let values = eval_tensor_roots_with_strict(&ctx.dag, &[zero], |name| {
+                Some(if name == "a" {
+                    value(&[2], Prim::F32, &[2.0, 7.0])
+                } else {
+                    value(&[], Prim::F32, &[11.0])
+                })
+            })
+            .unwrap();
+            assert_eq!(
+                values[&zero]
+                    .to_f64_lossy_vec()
+                    .iter()
+                    .map(|v| v.to_bits())
+                    .collect::<Vec<_>>(),
+                [0, 0]
+            );
+        })
+    }
+
+    #[test]
+    fn fused_zero_forward_carrier_dependency_survives_vectorization_and_dce() {
+        crate::lowering_runtime::with_native_lowering_runtime(|runtime| {
+            // Independent graph regression for the repair: a shared
+            // root expands after vectorization, and its input retains the witness.
+            for observed in [2, 3] {
+                let mut dag = Dag::new();
+                let int = tensor_type(&[], Prim::Int64);
+                let constant = |dag: &mut Dag, n| {
+                    dag.add_node(
+                        RiscOp::Const {
+                            value: chelis_types::scalar_from_i64("test", Prim::Int64, n).unwrap(),
+                        },
+                        vec![],
+                        int.clone(),
+                        None,
+                    )
+                };
+                let actual = constant(&mut dag, observed);
+                let required = constant(&mut dag, 2);
+                let witness = dag.add_node(
+                    RiscOp::CheckedReshapeExtent {
+                        claims: vec!["rows".into()],
+                        axis: crate::dag::RtAxis::Lit(0),
+                    },
+                    vec![actual, required],
+                    int.clone(),
+                    Some("fused-witness".into()),
                 );
-            } else {
-                assert!(values.unwrap_err().contains("rows"));
+                let forward = dag.add_node(
+                    RiscOp::Const {
+                        value: chelis_types::scalar_from_i64("test", Prim::Int64, 7).unwrap(),
+                    },
+                    vec![],
+                    int,
+                    None,
+                );
+                dag.add_shape_dep(forward, witness);
+                let operand = dag.add_node(
+                    RiscOp::Load {
+                        name: "operand".into(),
+                    },
+                    vec![],
+                    tensor_type(&[], Prim::F32),
+                    None,
+                );
+                dag.add_node(
+                    RiscOp::Expand {
+                        axis: 0,
+                        size: crate::dag::RtDim::Node(1),
+                    },
+                    vec![operand, forward],
+                    tensor_type(&[7], Prim::F32),
+                    None,
+                );
+                dag.add_root(forward);
+                let (vectorized, operator_map) =
+                    vmap::vectorize_axis0_with_node_map(&dag, DimInfo::Lit(2)).unwrap();
+                assert_eq!(vectorized.roots().len(), 1);
+                let root = vectorized.roots()[0];
+                let operator = operator_map[forward.0];
+                assert_ne!(root, operator, "root expansion is not the rebuilt operator");
+                assert!(operator.0 < root.0);
+                assert_eq!(vectorized.get(operator).unwrap().output_type.dims.len(), 0);
+                assert_eq!(vectorized.get(root).unwrap().output_type.dims.len(), 1);
+                assert!(vectorized.get(root).unwrap().inputs.contains(&operator));
+                assert!(matches!(
+                    vectorized.get(root).unwrap().op,
+                    RiscOp::Expand { .. }
+                ));
+                assert!(vectorized.get(root).unwrap().shape_deps.is_empty());
+                let mut ctx = context(runtime);
+                let remap = ctx.splice_dag(&vectorized, &UnordMap::new()).unwrap();
+                let forward = remap[&root];
+                let zero = ctx.zero_tensor_node(&tensor_type(&[2], Prim::F32), None);
+                ctx.dag.add_shape_dep(zero, forward);
+                ctx.dag.set_roots(vec![zero]);
+                let pruned = crate::optimize::dead_code_eliminate(&ctx.dag);
+                assert_eq!(
+                    pruned
+                        .nodes()
+                        .iter()
+                        .filter(|n| matches!(n.op, RiscOp::CheckedReshapeExtent { .. }))
+                        .count(),
+                    1
+                );
+                let values = eval_tensor_roots_with_strict(&pruned, pruned.roots(), |_| None);
+                if observed == 2 {
+                    assert_eq!(
+                        values.unwrap()[&pruned.roots()[0]].to_f64_lossy_vec(),
+                        [0.0, 0.0]
+                    );
+                } else {
+                    assert!(values.unwrap_err().contains("rows"));
+                }
             }
-        }
+        })
     }
 }
 
@@ -20337,281 +20519,296 @@ mod tests {
 
     #[test]
     fn evaluation_normalization_drops_only_inert_scope_witnesses() {
-        let tensor = TensorType {
-            dims: vec![DimInfo::Lit(4)],
-            precision: Prim::F32,
-        };
-        let extent = TensorType {
-            dims: Vec::new(),
-            precision: Prim::Int64,
-        };
-        let mut dag = Dag::new();
-        let used = dag.add_node(
-            RiscOp::Load {
-                name: "used".into(),
-            },
-            Vec::new(),
-            tensor.clone(),
-            None,
-        );
-        let used_witness = dag.add_node(
-            RiscOp::ExtentWitness {
-                site: crate::dag::ExtentWitnessSite::Caller,
-                parameter: "used".into(),
-                axis: RtAxis::Lit(0),
-                requirements: Vec::new(),
-                claims: Vec::new(),
-            },
-            vec![used],
-            extent.clone(),
-            None,
-        );
-        let unused = dag.add_node(
-            RiscOp::Load {
-                name: "unused".into(),
-            },
-            Vec::new(),
-            tensor.clone(),
-            None,
-        );
-        dag.add_node(
-            RiscOp::ExtentWitness {
-                site: crate::dag::ExtentWitnessSite::Caller,
-                parameter: "unused".into(),
-                axis: RtAxis::Lit(0),
-                requirements: Vec::new(),
-                claims: Vec::new(),
-            },
-            vec![unused],
-            extent.clone(),
-            None,
-        );
-        let required = dag.add_node(
-            RiscOp::Load {
-                name: "required".into(),
-            },
-            Vec::new(),
-            tensor.clone(),
-            None,
-        );
-        dag.add_node(
-            RiscOp::ExtentWitness {
-                site: crate::dag::ExtentWitnessSite::Caller,
-                parameter: "required".into(),
-                axis: RtAxis::Lit(0),
-                requirements: vec![
-                    chelis_types::scalar_from_i64("test", Prim::Int64, 5)
-                        .expect("literal requirement"),
-                ],
-                claims: Vec::new(),
-            },
-            vec![required],
-            extent.clone(),
-            None,
-        );
-        let claimed = dag.add_node(
-            RiscOp::Load {
-                name: "claimed".into(),
-            },
-            Vec::new(),
-            tensor.clone(),
-            None,
-        );
-        dag.add_node(
-            RiscOp::ExtentWitness {
-                site: crate::dag::ExtentWitnessSite::Caller,
-                parameter: "claimed".into(),
-                axis: RtAxis::Lit(0),
-                requirements: Vec::new(),
-                claims: vec![crate::dag::ExtentClaim {
-                    claim: "same".into(),
-                    requirement_declares: true,
-                }],
-            },
-            vec![claimed, used_witness],
-            extent,
-            None,
-        );
-        let result = dag.add_node(RiscOp::Copy, vec![used], tensor, None);
-        dag.add_shape_dep(result, used_witness);
-        dag.add_root(result);
+        crate::lowering_runtime::with_native_lowering_runtime(|runtime| {
+            let tensor = TensorType {
+                dims: vec![DimInfo::Lit(4)],
+                precision: Prim::F32,
+            };
+            let extent = TensorType {
+                dims: Vec::new(),
+                precision: Prim::Int64,
+            };
+            let mut dag = Dag::new();
+            let used = dag.add_node(
+                RiscOp::Load {
+                    name: "used".into(),
+                },
+                Vec::new(),
+                tensor.clone(),
+                None,
+            );
+            let used_witness = dag.add_node(
+                RiscOp::ExtentWitness {
+                    site: crate::dag::ExtentWitnessSite::Caller,
+                    parameter: "used".into(),
+                    axis: RtAxis::Lit(0),
+                    requirements: Vec::new(),
+                    claims: Vec::new(),
+                },
+                vec![used],
+                extent.clone(),
+                None,
+            );
+            let unused = dag.add_node(
+                RiscOp::Load {
+                    name: "unused".into(),
+                },
+                Vec::new(),
+                tensor.clone(),
+                None,
+            );
+            dag.add_node(
+                RiscOp::ExtentWitness {
+                    site: crate::dag::ExtentWitnessSite::Caller,
+                    parameter: "unused".into(),
+                    axis: RtAxis::Lit(0),
+                    requirements: Vec::new(),
+                    claims: Vec::new(),
+                },
+                vec![unused],
+                extent.clone(),
+                None,
+            );
+            let required = dag.add_node(
+                RiscOp::Load {
+                    name: "required".into(),
+                },
+                Vec::new(),
+                tensor.clone(),
+                None,
+            );
+            dag.add_node(
+                RiscOp::ExtentWitness {
+                    site: crate::dag::ExtentWitnessSite::Caller,
+                    parameter: "required".into(),
+                    axis: RtAxis::Lit(0),
+                    requirements: vec![
+                        chelis_types::scalar_from_i64("test", Prim::Int64, 5)
+                            .expect("literal requirement"),
+                    ],
+                    claims: Vec::new(),
+                },
+                vec![required],
+                extent.clone(),
+                None,
+            );
+            let claimed = dag.add_node(
+                RiscOp::Load {
+                    name: "claimed".into(),
+                },
+                Vec::new(),
+                tensor.clone(),
+                None,
+            );
+            dag.add_node(
+                RiscOp::ExtentWitness {
+                    site: crate::dag::ExtentWitnessSite::Caller,
+                    parameter: "claimed".into(),
+                    axis: RtAxis::Lit(0),
+                    requirements: Vec::new(),
+                    claims: vec![crate::dag::ExtentClaim {
+                        claim: "same".into(),
+                        requirement_declares: true,
+                    }],
+                },
+                vec![claimed, used_witness],
+                extent,
+                None,
+            );
+            let result = dag.add_node(RiscOp::Copy, vec![used], tensor, None);
+            dag.add_shape_dep(result, used_witness);
+            dag.add_root(result);
 
-        let (normalized, _) =
-            normalize_evaluation_dag(dag, crate::evaluation::ExecutionMetadata::new(None));
-        let loads = normalized
-            .nodes()
-            .iter()
-            .filter_map(|node| match &node.op {
-                RiscOp::Load { name } => Some(name.as_str()),
-                _ => None,
-            })
-            .collect::<Vec<_>>();
-        assert_eq!(loads, vec!["used", "required", "claimed"]);
-        assert!(normalized.nodes().iter().any(|node| matches!(
-            &node.op,
-            RiscOp::ExtentWitness { parameter, .. } if parameter == "used"
-        )));
-        assert!(!normalized.nodes().iter().any(|node| matches!(
-            &node.op,
-            RiscOp::ExtentWitness { parameter, .. } if parameter == "unused"
-        )));
-        assert!(normalized.nodes().iter().any(|node| matches!(
-            &node.op,
-            RiscOp::ExtentWitness { parameter, requirements, .. }
-                if parameter == "required" && !requirements.is_empty()
-        )));
-        assert!(normalized.nodes().iter().any(|node| matches!(
-            &node.op,
-            RiscOp::ExtentWitness { parameter, claims, .. }
-                if parameter == "claimed" && !claims.is_empty()
-        )));
+            let (normalized, _) = normalize_evaluation_dag(
+                dag,
+                crate::evaluation::ExecutionMetadata::new(None),
+                runtime,
+            );
+            let loads = normalized
+                .nodes()
+                .iter()
+                .filter_map(|node| match &node.op {
+                    RiscOp::Load { name } => Some(name.as_str()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(loads, vec!["used", "required", "claimed"]);
+            assert!(normalized.nodes().iter().any(|node| matches!(
+                &node.op,
+                RiscOp::ExtentWitness { parameter, .. } if parameter == "used"
+            )));
+            assert!(!normalized.nodes().iter().any(|node| matches!(
+                &node.op,
+                RiscOp::ExtentWitness { parameter, .. } if parameter == "unused"
+            )));
+            assert!(normalized.nodes().iter().any(|node| matches!(
+                &node.op,
+                RiscOp::ExtentWitness { parameter, requirements, .. }
+                    if parameter == "required" && !requirements.is_empty()
+            )));
+            assert!(normalized.nodes().iter().any(|node| matches!(
+                &node.op,
+                RiscOp::ExtentWitness { parameter, claims, .. }
+                    if parameter == "claimed" && !claims.is_empty()
+            )));
 
-        let required_witness = normalized
-            .nodes()
-            .iter()
-            .find(|node| {
-                matches!(
-                    &node.op,
-                    RiscOp::ExtentWitness { parameter, .. } if parameter == "required"
-                )
-            })
-            .expect("required witness remains")
-            .id;
-        let error =
-            crate::eval::eval_tensor_roots_with_strict(&normalized, &[required_witness], |_| {
-                Some(crate::eval::TensorValue::from_vec(vec![4], vec![1.0; 4]))
-            })
+            let required_witness = normalized
+                .nodes()
+                .iter()
+                .find(|node| {
+                    matches!(
+                        &node.op,
+                        RiscOp::ExtentWitness { parameter, .. } if parameter == "required"
+                    )
+                })
+                .expect("required witness remains")
+                .id;
+            let error = crate::eval::eval_tensor_roots_with_strict(
+                &normalized,
+                &[required_witness],
+                |_| Some(crate::eval::TensorValue::from_vec(vec![4], vec![1.0; 4])),
+            )
             .expect_err("the retained false extent claim must still reject");
-        assert!(
-            error.contains("claimed = 5, required axis 0 = 4"),
-            "{error}"
-        );
+            assert!(
+                error.contains("claimed = 5, required axis 0 = 4"),
+                "{error}"
+            );
+        })
     }
 
     #[cfg(feature = "lowering-trace")]
     #[test]
     fn helper_ingress_splits_duplicate_result_roots_in_order() {
-        use crate::lowering_trace::Value;
+        crate::lowering_runtime::with_native_lowering_runtime(|runtime| {
+            use crate::lowering_trace::Value;
 
-        let tensor = TensorType {
-            dims: vec![DimInfo::Lit(3)],
-            precision: Prim::F32,
-        };
-        let expr = chelis_deep::parser::parse_str(
+            let tensor = TensorType {
+                dims: vec![DimInfo::Lit(3)],
+                precision: Prim::F32,
+            };
+            let expr = chelis_deep::parser::parse_str(
             "(tuple {type: (t-tuple {} (t-tensor {} (d-lit {} 3) (t-prim {} f32)) (t-tensor {} (d-lit {} 3) (t-prim {} f32)))} (var {type: (t-tensor {} (d-lit {} 3) (t-prim {} f32))} x) (var {type: (t-tensor {} (d-lit {} 3) (t-prim {} f32))} x))",
         )
         .expect("parse typed duplicate tuple")
         .remove(0);
-        let context = SubexprLoweringContext {
-            program_types: Arc::new(BTreeMap::new()),
-            program_defs: Arc::new(BTreeMap::new()),
-            program_signatures: Arc::new(BTreeMap::new()),
-            local_tensor_ascriptions: Arc::new(Vec::new()),
-        };
-        let (dag, _, trace) = try_lower_subexpr_program_with_ordered_inputs_and_trace(
-            &expr,
-            vec![("x".into(), tensor)],
-            &context,
-            None,
-            None,
-            0,
-            false,
-        )
-        .expect("duplicate tuple lowers through the actual helper ingress");
-
-        assert_eq!(trace.packed_roots.len(), 2);
-        assert_ne!(trace.packed_roots[0], trace.packed_roots[1]);
-        assert_eq!(
-            trace.packed_roots,
-            trace.lowering.normalization.before_dce.roots()
-        );
-        assert!(matches!(
-            trace
-                .lowering
-                .normalization
-                .before_dce
-                .get(trace.packed_roots[1])
-                .unwrap()
-                .op,
-            RiscOp::Copy
-        ));
-        assert_eq!(
-            trace.packed_result,
-            Value::Tuple(
-                trace
-                    .packed_roots
-                    .iter()
-                    .copied()
-                    .map(Value::Node)
-                    .collect()
+            let context = SubexprLoweringContext {
+                program_types: Arc::new(BTreeMap::new()),
+                program_defs: Arc::new(BTreeMap::new()),
+                program_signatures: Arc::new(BTreeMap::new()),
+                local_tensor_ascriptions: Arc::new(Vec::new()),
+            };
+            let (dag, _, trace) = try_lower_subexpr_program_with_ordered_inputs_and_trace(
+                &expr,
+                vec![("x".into(), tensor)],
+                &context,
+                None,
+                crate::host::RandomLoweringState {
+                    seed: None,
+                    counter: 0,
+                },
+                false,
+                runtime,
             )
-        );
-        assert_eq!(dag.roots().len(), 2);
+            .expect("duplicate tuple lowers through the actual helper ingress");
+
+            assert_eq!(trace.packed_roots.len(), 2);
+            assert_ne!(trace.packed_roots[0], trace.packed_roots[1]);
+            assert_eq!(
+                trace.packed_roots,
+                trace.lowering.normalization.before_dce.roots()
+            );
+            assert!(matches!(
+                trace
+                    .lowering
+                    .normalization
+                    .before_dce
+                    .get(trace.packed_roots[1])
+                    .unwrap()
+                    .op,
+                RiscOp::Copy
+            ));
+            assert_eq!(
+                trace.packed_result,
+                Value::Tuple(
+                    trace
+                        .packed_roots
+                        .iter()
+                        .copied()
+                        .map(Value::Node)
+                        .collect()
+                )
+            );
+            assert_eq!(dag.roots().len(), 2);
+        })
     }
 
     #[cfg(feature = "lowering-trace")]
     #[test]
     fn trace_value_preserves_structured_slots_without_claiming_host_capture() {
-        use crate::lowering_trace::Value;
-        let original = LoweredValue::Tuple(vec![
-            LoweredValue::Adt {
-                host: None,
-                ctor: "Mixed".into(),
-                field_names: Some(vec!["t".into(), "n".into()]),
-                fields: vec![LoweredValue::Node(NodeId(7)), LoweredValue::Tuple(vec![])],
-            },
-            LoweredValue::Adt {
-                host: None,
-                ctor: "Positional".into(),
-                field_names: None,
-                fields: vec![LoweredValue::Node(NodeId(2))],
-            },
-        ]);
-        let observed = original.trace_value();
-        assert_eq!(
-            observed,
-            Value::Tuple(vec![
-                Value::Adt {
+        crate::lowering_runtime::with_native_lowering_runtime(|runtime| {
+            use crate::lowering_trace::Value;
+            let original = LoweredValue::Tuple(vec![
+                LoweredValue::Adt {
+                    host: None,
                     ctor: "Mixed".into(),
                     field_names: Some(vec!["t".into(), "n".into()]),
-                    fields: vec![Value::Node(NodeId(7)), Value::Tuple(vec![])],
+                    fields: vec![LoweredValue::Node(NodeId(7)), LoweredValue::Tuple(vec![])],
                 },
-                Value::Adt {
+                LoweredValue::Adt {
+                    host: None,
                     ctor: "Positional".into(),
                     field_names: None,
-                    fields: vec![Value::Node(NodeId(2))],
-                }
-            ])
-        );
-        assert_ne!(
-            observed,
-            Value::Tuple(vec![Value::Node(NodeId(7)), Value::Node(NodeId(2))])
-        );
+                    fields: vec![LoweredValue::Node(NodeId(2))],
+                },
+            ]);
+            let observed = original.trace_value(runtime);
+            assert_eq!(
+                observed,
+                Value::Tuple(vec![
+                    Value::Adt {
+                        ctor: "Mixed".into(),
+                        field_names: Some(vec!["t".into(), "n".into()]),
+                        fields: vec![Value::Node(NodeId(7)), Value::Tuple(vec![])],
+                    },
+                    Value::Adt {
+                        ctor: "Positional".into(),
+                        field_names: None,
+                        fields: vec![Value::Node(NodeId(2))],
+                    }
+                ])
+            );
+            assert_ne!(
+                observed,
+                Value::Tuple(vec![Value::Node(NodeId(7)), Value::Node(NodeId(2))])
+            );
+        })
     }
 
     #[test]
     fn collect_param_bound_names_preserves_legacy_and_bare_binders() {
-        let span = Span::new(0, 0);
-        let legacy = Expr::List(
-            List {
-                elements: vec![
-                    Expr::Atom(Atom::Name("legacy".into()), span),
+        crate::lowering_runtime::with_native_lowering_runtime(|runtime| {
+            let span = Span::new(0, 0);
+            let legacy = Expr::List(
+                List {
+                    elements: vec![
+                        Expr::Atom(Atom::Name("legacy".into()), span),
+                        Expr::Map(Metadata::default(), span),
+                    ],
+                },
+                span,
+            );
+            let bare = Expr::BareList(
+                vec![
+                    Expr::Atom(Atom::Name("bare".into()), span),
                     Expr::Map(Metadata::default(), span),
                 ],
-            },
-            span,
-        );
-        let bare = Expr::BareList(
-            vec![
-                Expr::Atom(Atom::Name("bare".into()), span),
-                Expr::Map(Metadata::default(), span),
-            ],
-            span,
-        );
-        let mut out = chelis_unord::UnordSet::new();
-        collect_param_bound_names(&legacy, &mut out);
-        collect_param_bound_names(&bare, &mut out);
-        assert_eq!(out.into_sorted(), ["bare", "legacy"]);
+                span,
+            );
+            let mut out = chelis_unord::UnordSet::new();
+            collect_param_bound_names(&legacy, &mut out, runtime);
+            collect_param_bound_names(&bare, &mut out, runtime);
+            assert_eq!(out.into_sorted(), ["bare", "legacy"]);
+        })
     }
 
     /// chelis#1087: the param-slot UnknownForm arm is unreachable by role
@@ -20622,14 +20819,16 @@ mod tests {
     #[test]
     #[should_panic(expected = "unreachable by role construction")]
     fn collect_param_bound_names_unknown_form_guard_fires() {
-        let mut out = chelis_unord::UnordSet::new();
-        let unknown = Expr::UnknownForm(Box::new(chelis_deep::ast::UnknownFormData {
-            head: "mystery".to_string(),
-            meta: chelis_deep::ast::Metadata::default(),
-            children: vec![],
-            span: chelis_deep::Span::new(0, 0),
-        }));
-        collect_param_bound_names(&unknown, &mut out);
+        crate::lowering_runtime::with_native_lowering_runtime(|runtime| {
+            let mut out = chelis_unord::UnordSet::new();
+            let unknown = Expr::UnknownForm(Box::new(chelis_deep::ast::UnknownFormData {
+                head: "mystery".to_string(),
+                meta: chelis_deep::ast::Metadata::default(),
+                children: vec![],
+                span: chelis_deep::Span::new(0, 0),
+            }));
+            collect_param_bound_names(&unknown, &mut out, runtime);
+        })
     }
 
     fn runtime_metadata(expr: Expr) -> Metadata {
@@ -20639,16 +20838,17 @@ mod tests {
         ))
     }
 
-    fn empty_lower_ctx() -> LowerCtx<'static> {
+    fn empty_lower_ctx(runtime: &LoweringRuntime) -> LowerCtx<'_> {
         LowerCtx::new(
             BTreeMap::new(),
             BTreeMap::new(),
             BTreeMap::new(),
             LinearityInfo::default(),
+            runtime,
         )
     }
 
-    fn pattern_scope_depends_on_bad(pattern: Expr) -> bool {
+    fn pattern_scope_depends_on_bad(pattern: Expr, runtime: &LoweringRuntime) -> bool {
         let span = Span::new(0, 0);
         let arm = Expr::List(
             List {
@@ -20689,74 +20889,77 @@ mod tests {
         let types = LowerabilityTypes {
             signatures: &signatures,
             dtype_bound_names: &dtype_bound_names,
+            type_env: &BTreeMap::new(),
         };
         let mut cache = BTreeMap::from([("bad".into(), false)]);
         expr_depends_on_nonlowerable_name(
             &match_expr,
             &top_level_defs,
             &types,
-            &BTreeMap::new(),
             &mut cache,
             &mut UnordSet::new(),
             &UnordSet::new(),
+            runtime,
         )
     }
 
     #[test]
     fn pattern_scope_ignores_metadata_and_malformed_list_decoy_binders() {
-        let span = Span::new(0, 0);
-        let metadata_pattern = chelis_deep::parser::parse_str(
-            "(match {} (lit {} 0) \
+        crate::lowering_runtime::with_native_lowering_runtime(|runtime| {
+            let span = Span::new(0, 0);
+            let metadata_pattern = chelis_deep::parser::parse_str(
+                "(match {} (lit {} 0) \
              (arm {} (pat-var {} bad) () (lit {} 0)))",
-        )
-        .expect("metadata match parses")
-        .remove(0);
-        let metadata_decoy = Expr::MetaExpr(
-            chelis_deep::MetaExpr {
-                metadata: runtime_metadata(metadata_pattern),
-                expr: Box::new(Expr::node(
-                    DeepTag::PatWild,
-                    Metadata::default(),
-                    Vec::new(),
-                    span,
-                )),
-            },
-            span,
-        );
-        let malformed_decoy = Expr::List(
-            List {
-                elements: vec![
-                    Expr::Atom(Atom::Tag(DeepTag::PatWild), span),
-                    Expr::Atom(Atom::Name("not-metadata".into()), span),
-                    Expr::node(
-                        DeepTag::PatVar,
+            )
+            .expect("metadata match parses")
+            .remove(0);
+            let metadata_decoy = Expr::MetaExpr(
+                chelis_deep::MetaExpr {
+                    metadata: runtime_metadata(metadata_pattern),
+                    expr: Box::new(Expr::node(
+                        DeepTag::PatWild,
                         Metadata::default(),
-                        vec![Expr::Atom(Atom::Name("bad".into()), span)],
+                        Vec::new(),
                         span,
-                    ),
-                ],
-            },
-            span,
-        );
-        let real_binder = Expr::node(
-            DeepTag::PatVar,
-            Metadata::default(),
-            vec![Expr::Atom(Atom::Name("bad".into()), span)],
-            span,
-        );
+                    )),
+                },
+                span,
+            );
+            let malformed_decoy = Expr::List(
+                List {
+                    elements: vec![
+                        Expr::Atom(Atom::Tag(DeepTag::PatWild), span),
+                        Expr::Atom(Atom::Name("not-metadata".into()), span),
+                        Expr::node(
+                            DeepTag::PatVar,
+                            Metadata::default(),
+                            vec![Expr::Atom(Atom::Name("bad".into()), span)],
+                            span,
+                        ),
+                    ],
+                },
+                span,
+            );
+            let real_binder = Expr::node(
+                DeepTag::PatVar,
+                Metadata::default(),
+                vec![Expr::Atom(Atom::Name("bad".into()), span)],
+                span,
+            );
 
-        assert!(
-            pattern_scope_depends_on_bad(metadata_decoy),
-            "metadata-only PatVar names must not hide real nonlowerable dependencies"
-        );
-        assert!(
-            pattern_scope_depends_on_bad(malformed_decoy),
-            "malformed legacy patterns must not contribute binders"
-        );
-        assert!(
-            !pattern_scope_depends_on_bad(real_binder),
-            "a real executable pattern binder still scopes the arm"
-        );
+            assert!(
+                pattern_scope_depends_on_bad(metadata_decoy, runtime),
+                "metadata-only PatVar names must not hide real nonlowerable dependencies"
+            );
+            assert!(
+                pattern_scope_depends_on_bad(malformed_decoy, runtime),
+                "malformed legacy patterns must not contribute binders"
+            );
+            assert!(
+                !pattern_scope_depends_on_bad(real_binder, runtime),
+                "a real executable pattern binder still scopes the arm"
+            );
+        })
     }
 
     fn local_ascription_fixture() -> (chelis_types::CheckedLocalTensorAscription, Expr) {
@@ -20880,120 +21083,45 @@ mod tests {
 
     #[test]
     fn parameter_readers_distinguish_legacy_bare_and_unknown_sources() {
-        let span = Span::new(0, 0);
-        let ty = Expr::node(
-            DeepTag::TPrim,
-            Metadata::default(),
-            vec![Expr::Atom(Atom::Name("f32".into()), span)],
-            span,
-        );
-        let metadata = Metadata::from(chelis_deep::annotations::MetadataValue::Type(
-            chelis_deep::annotations::TypeSyntax::try_new(ty).expect("parameter type"),
-        ));
-        let legacy = Expr::List(
-            List {
-                elements: vec![
-                    Expr::Atom(Atom::Name("x".into()), span),
-                    Expr::Map(metadata.clone(), span),
-                ],
-            },
-            span,
-        );
-        let bare = Expr::BareList(
-            vec![
-                Expr::Atom(Atom::Name("x".into()), span),
-                Expr::Map(metadata.clone(), span),
-            ],
-            span,
-        );
-        let unknown = Expr::UnknownForm(Box::new(chelis_deep::ast::UnknownFormData {
-            head: "x".into(),
-            meta: metadata,
-            children: Vec::new(),
-            span,
-        }));
-        let fn_with_param = |param| {
-            Expr::node(
-                DeepTag::Fn,
+        crate::lowering_runtime::with_native_lowering_runtime(|runtime| {
+            let span = Span::new(0, 0);
+            let ty = Expr::node(
+                DeepTag::TPrim,
                 Metadata::default(),
-                vec![
-                    Expr::node(DeepTag::Params, Metadata::default(), vec![param], span),
-                    Expr::node(
-                        DeepTag::Lit,
-                        Metadata::default(),
-                        vec![Expr::Atom(Atom::Int(0), span)],
-                        span,
-                    ),
-                ],
+                vec![Expr::Atom(Atom::Name("f32".into()), span)],
                 span,
-            )
-        };
-
-        for accepted in [&legacy, &bare] {
-            let Some((name, Some(param_ty))) = param_name_and_type_expr(accepted) else {
-                panic!("legacy List and BareList typed parameters remain accepted");
-            };
-            assert_eq!(name, "x");
-            assert_eq!(param_ty.tag(), Some(DeepTag::TPrim));
-            assert_eq!(
-                extract_param_type(&fn_with_param(accepted.clone()), 0).and_then(Expr::tag),
-                Some(DeepTag::TPrim)
             );
-        }
-        assert_eq!(param_name_and_type_expr(&unknown), None);
-        assert_eq!(extract_param_type(&fn_with_param(unknown), 0), None);
-    }
-
-    #[test]
-    fn raw_parameter_forms_with_extra_children_fail_loudly() {
-        let span = Span::new(0, 0);
-        let ty = Expr::node(
-            DeepTag::TPrim,
-            Metadata::default(),
-            vec![Expr::Atom(Atom::Name("f32".into()), span)],
-            span,
-        );
-        let metadata = Metadata::from(chelis_deep::annotations::MetadataValue::Type(
-            chelis_deep::annotations::TypeSyntax::try_new(ty).expect("parameter type"),
-        ));
-        let malformed = [
-            Expr::List(
+            let metadata = Metadata::from(chelis_deep::annotations::MetadataValue::Type(
+                chelis_deep::annotations::TypeSyntax::try_new(ty).expect("parameter type"),
+            ));
+            let legacy = Expr::List(
                 List {
                     elements: vec![
                         Expr::Atom(Atom::Name("x".into()), span),
                         Expr::Map(metadata.clone(), span),
-                        Expr::Atom(Atom::Name("extra".into()), span),
-                    ],
-                },
-                span,
-            ),
-            Expr::BareList(
-                vec![
-                    Expr::Atom(Atom::Name("x".into()), span),
-                    Expr::Map(metadata, span),
-                    Expr::Atom(Atom::Name("extra".into()), span),
-                ],
-                span,
-            ),
-        ];
-
-        for param in malformed {
-            let params = Expr::List(
-                List {
-                    elements: vec![
-                        Expr::Atom(Atom::Tag(DeepTag::Params), span),
-                        Expr::Map(Metadata::default(), span),
-                        param,
                     ],
                 },
                 span,
             );
-            let function = Expr::List(
-                List {
-                    elements: vec![
-                        Expr::Atom(Atom::Tag(DeepTag::Fn), span),
-                        Expr::Map(Metadata::default(), span),
-                        params,
+            let bare = Expr::BareList(
+                vec![
+                    Expr::Atom(Atom::Name("x".into()), span),
+                    Expr::Map(metadata.clone(), span),
+                ],
+                span,
+            );
+            let unknown = Expr::UnknownForm(Box::new(chelis_deep::ast::UnknownFormData {
+                head: "x".into(),
+                meta: metadata,
+                children: Vec::new(),
+                span,
+            }));
+            let fn_with_param = |param| {
+                Expr::node(
+                    DeepTag::Fn,
+                    Metadata::default(),
+                    vec![
+                        Expr::node(DeepTag::Params, Metadata::default(), vec![param], span),
                         Expr::node(
                             DeepTag::Lit,
                             Metadata::default(),
@@ -21001,23 +21129,107 @@ mod tests {
                             span,
                         ),
                     ],
-                },
+                    span,
+                )
+            };
+
+            for accepted in [&legacy, &bare] {
+                let Some((name, Some(param_ty))) = param_name_and_type_expr(accepted, runtime)
+                else {
+                    panic!("legacy List and BareList typed parameters remain accepted");
+                };
+                assert_eq!(name, "x");
+                assert_eq!(param_ty.tag(), Some(DeepTag::TPrim));
+                assert_eq!(
+                    extract_param_type(&fn_with_param(accepted.clone()), 0, runtime)
+                        .and_then(Expr::tag),
+                    Some(DeepTag::TPrim)
+                );
+            }
+            assert_eq!(param_name_and_type_expr(&unknown, runtime), None);
+            assert_eq!(
+                extract_param_type(&fn_with_param(unknown), 0, runtime),
+                None
+            );
+        })
+    }
+
+    #[test]
+    fn raw_parameter_forms_with_extra_children_fail_loudly() {
+        crate::lowering_runtime::with_native_lowering_runtime(|runtime| {
+            let span = Span::new(0, 0);
+            let ty = Expr::node(
+                DeepTag::TPrim,
+                Metadata::default(),
+                vec![Expr::Atom(Atom::Name("f32".into()), span)],
                 span,
             );
-            let outcome = catch_lowering(move || {
-                let mut ctx = empty_lower_ctx();
-                ctx.lower_expr(&function)
-            });
-            let Err(diagnostic) = outcome else {
-                panic!("a malformed raw parameter must not disappear through filter_map");
-            };
-            assert!(
-                diagnostic
-                    .to_string()
-                    .contains("exactly a name and metadata map"),
-                "{diagnostic}"
-            );
-        }
+            let metadata = Metadata::from(chelis_deep::annotations::MetadataValue::Type(
+                chelis_deep::annotations::TypeSyntax::try_new(ty).expect("parameter type"),
+            ));
+            let malformed = [
+                Expr::List(
+                    List {
+                        elements: vec![
+                            Expr::Atom(Atom::Name("x".into()), span),
+                            Expr::Map(metadata.clone(), span),
+                            Expr::Atom(Atom::Name("extra".into()), span),
+                        ],
+                    },
+                    span,
+                ),
+                Expr::BareList(
+                    vec![
+                        Expr::Atom(Atom::Name("x".into()), span),
+                        Expr::Map(metadata, span),
+                        Expr::Atom(Atom::Name("extra".into()), span),
+                    ],
+                    span,
+                ),
+            ];
+
+            for param in malformed {
+                let params = Expr::List(
+                    List {
+                        elements: vec![
+                            Expr::Atom(Atom::Tag(DeepTag::Params), span),
+                            Expr::Map(Metadata::default(), span),
+                            param,
+                        ],
+                    },
+                    span,
+                );
+                let function = Expr::List(
+                    List {
+                        elements: vec![
+                            Expr::Atom(Atom::Tag(DeepTag::Fn), span),
+                            Expr::Map(Metadata::default(), span),
+                            params,
+                            Expr::node(
+                                DeepTag::Lit,
+                                Metadata::default(),
+                                vec![Expr::Atom(Atom::Int(0), span)],
+                                span,
+                            ),
+                        ],
+                    },
+                    span,
+                );
+                let outcome = runtime.catch_lowering(move || {
+                    let mut ctx = empty_lower_ctx(runtime);
+                    ctx.lower_expr(&function)
+                });
+                let Err(diagnostic) = outcome else {
+                    panic!("a malformed raw parameter must not disappear through filter_map");
+                };
+                assert!(
+                    diagnostic
+                        .to_string()
+                        .contains("exactly a name and metadata map"),
+                    "{diagnostic}"
+                );
+            }
+        })
     }
 
     fn parse_and_check(src: &str) -> chelis_types::CheckedProgram {
@@ -21195,9 +21407,9 @@ mod tests {
         assert_decode_once_in_env("test", &env);
     }
 
-    fn parse_and_lower(src: &str) -> Dag {
+    fn parse_and_lower(src: &str, runtime: &LoweringRuntime) -> Dag {
         let checked = parse_and_check(src);
-        lower_program(&checked)
+        lower_program(&checked, runtime)
     }
 
     /// `compute_reduce_window_out_dims` refines any *statically-known*
@@ -21245,13 +21457,14 @@ mod tests {
         );
     }
 
-    fn parse_and_lower_unchecked(src: &str) -> Dag {
+    fn parse_and_lower_unchecked(src: &str, runtime: &LoweringRuntime) -> Dag {
         let exprs = chelis_deep::parser::parse_str(src).expect("parse failed");
         let mut ctx = LowerCtx::new(
             BTreeMap::new(),
             BTreeMap::new(),
             BTreeMap::new(),
             LinearityInfo::default(),
+            runtime,
         );
         for expr in &exprs {
             let _ = ctx.lower_expr(expr);
@@ -21261,257 +21474,277 @@ mod tests {
 
     #[test]
     fn static_reshape_folding_requires_independent_axis_sources() {
-        let mut ctx = LowerCtx::new(
-            BTreeMap::new(),
-            BTreeMap::new(),
-            BTreeMap::new(),
-            LinearityInfo::default(),
-        );
-        let input = ctx.dag.add_node(
-            RiscOp::Load { name: "x".into() },
-            vec![],
-            TensorType {
-                dims: vec![DimInfo::Lit(4)],
-                precision: Prim::F32,
-            },
-            None,
-        );
-        let copied = ctx.dag.add_node(
-            RiscOp::Copy,
-            vec![input],
-            TensorType {
-                dims: vec![DimInfo::Lit(99)],
-                precision: Prim::F32,
-            },
-            None,
-        );
-        assert_eq!(ctx.independently_known_axis_extent(input, 0), Some(4));
-        assert_eq!(
-            ctx.independently_known_axis_extent(copied, 0),
-            Some(4),
-            "a wrapper's claimed metadata is not its actual source"
-        );
-        let actual = ctx.dag.add_node(
-            RiscOp::Const {
-                value: chelis_types::scalar_from_i64("reshape", Prim::Int64, 2).unwrap(),
-            },
-            vec![],
-            TensorType {
-                dims: vec![],
-                precision: Prim::Int64,
-            },
-            None,
-        );
-        let reshape = ctx.dag.add_node(
-            RiscOp::Reshape {
-                new_shape: vec![RtDim::Node(1)],
-            },
-            vec![input, actual],
-            TensorType {
-                dims: vec![DimInfo::Lit(99)],
-                precision: Prim::F32,
-            },
-            None,
-        );
-        assert_eq!(
-            ctx.independently_known_axis_extent(reshape, 0),
-            Some(2),
-            "the actual scalar value, not result metadata, establishes the extent"
-        );
-        ctx.dag.node_mut(actual).unwrap().op = RiscOp::Load {
-            name: "size".into(),
-        };
-        assert_eq!(
-            ctx.independently_known_axis_extent(reshape, 0),
-            None,
-            "an operation's result claim cannot certify an unknown scalar target"
-        );
+        crate::lowering_runtime::with_native_lowering_runtime(|runtime| {
+            let mut ctx = LowerCtx::new(
+                BTreeMap::new(),
+                BTreeMap::new(),
+                BTreeMap::new(),
+                LinearityInfo::default(),
+                runtime,
+            );
+            let input = ctx.dag.add_node(
+                RiscOp::Load { name: "x".into() },
+                vec![],
+                TensorType {
+                    dims: vec![DimInfo::Lit(4)],
+                    precision: Prim::F32,
+                },
+                None,
+            );
+            let copied = ctx.dag.add_node(
+                RiscOp::Copy,
+                vec![input],
+                TensorType {
+                    dims: vec![DimInfo::Lit(99)],
+                    precision: Prim::F32,
+                },
+                None,
+            );
+            assert_eq!(ctx.independently_known_axis_extent(input, 0), Some(4));
+            assert_eq!(
+                ctx.independently_known_axis_extent(copied, 0),
+                Some(4),
+                "a wrapper's claimed metadata is not its actual source"
+            );
+            let actual = ctx.dag.add_node(
+                RiscOp::Const {
+                    value: chelis_types::scalar_from_i64("reshape", Prim::Int64, 2).unwrap(),
+                },
+                vec![],
+                TensorType {
+                    dims: vec![],
+                    precision: Prim::Int64,
+                },
+                None,
+            );
+            let reshape = ctx.dag.add_node(
+                RiscOp::Reshape {
+                    new_shape: vec![RtDim::Node(1)],
+                },
+                vec![input, actual],
+                TensorType {
+                    dims: vec![DimInfo::Lit(99)],
+                    precision: Prim::F32,
+                },
+                None,
+            );
+            assert_eq!(
+                ctx.independently_known_axis_extent(reshape, 0),
+                Some(2),
+                "the actual scalar value, not result metadata, establishes the extent"
+            );
+            ctx.dag.node_mut(actual).unwrap().op = RiscOp::Load {
+                name: "size".into(),
+            };
+            assert_eq!(
+                ctx.independently_known_axis_extent(reshape, 0),
+                None,
+                "an operation's result claim cannot certify an unknown scalar target"
+            );
+        })
     }
 
     #[test]
     fn typed_fail_placeholder_keeps_a_backward_shape_dependency() {
-        let mut ctx = LowerCtx::new(
-            BTreeMap::new(),
-            BTreeMap::new(),
-            BTreeMap::new(),
-            LinearityInfo::default(),
-        );
-        let out_ty = TensorType {
-            dims: vec![DimInfo::Named("result".to_string(), None)],
-            precision: Prim::F32,
-        };
-        // Primary owner inference now gives `fail(...)` the enclosing
-        // tensor result type, so the initial placeholder can already have
-        // the right rank even though its extent remains anonymous.
-        let early_placeholder = ctx.dag.add_node(
-            RiscOp::synth_const(
+        crate::lowering_runtime::with_native_lowering_runtime(|runtime| {
+            let mut ctx = LowerCtx::new(
+                BTreeMap::new(),
+                BTreeMap::new(),
+                BTreeMap::new(),
+                LinearityInfo::default(),
+                runtime,
+            );
+            let out_ty = TensorType {
+                dims: vec![DimInfo::Named("result".to_string(), None)],
+                precision: Prim::F32,
+            };
+            // Primary owner inference now gives `fail(...)` the enclosing
+            // tensor result type, so the initial placeholder can already have
+            // the right rank even though its extent remains anonymous.
+            let early_placeholder = ctx.dag.add_node(
+                RiscOp::synth_const(
+                    TensorType {
+                        dims: vec![DimInfo::Named(String::new(), None)],
+                        precision: Prim::F32,
+                    }
+                    .precision,
+                    0.0,
+                ),
+                vec![],
                 TensorType {
                     dims: vec![DimInfo::Named(String::new(), None)],
                     precision: Prim::F32,
-                }
-                .precision,
-                0.0,
-            ),
-            vec![],
-            TensorType {
-                dims: vec![DimInfo::Named(String::new(), None)],
-                precision: Prim::F32,
-            },
-            None,
-        );
-        // The sibling is lowered later for `if fail(...) else <body>`.
-        let sibling = ctx.dag.add_node(
-            RiscOp::Load { name: "x".into() },
-            vec![],
-            out_ty.clone(),
-            None,
-        );
-        let conformed = ctx.conform_branch_placeholder(early_placeholder, &out_ty, sibling);
-        let placeholder = ctx.dag.get(conformed).expect("conformed placeholder node");
-        let [shape_source] = placeholder.shape_deps.as_slice() else {
-            panic!(
-                "the placeholder needs exactly one sibling shape source: {:?}",
-                placeholder.shape_deps
+                },
+                None,
             );
-        };
-        assert_ne!(
-            conformed, early_placeholder,
-            "a later sibling requires a fresh, topologically ordered placeholder"
-        );
-        assert_eq!(*shape_source, sibling);
-        assert!(
-            shape_source.0 < placeholder.id.0,
-            "shape-only dependencies must point backward so remapping passes preserve them: \
+            // The sibling is lowered later for `if fail(...) else <body>`.
+            let sibling = ctx.dag.add_node(
+                RiscOp::Load { name: "x".into() },
+                vec![],
+                out_ty.clone(),
+                None,
+            );
+            let conformed = ctx.conform_branch_placeholder(early_placeholder, &out_ty, sibling);
+            let placeholder = ctx.dag.get(conformed).expect("conformed placeholder node");
+            let [shape_source] = placeholder.shape_deps.as_slice() else {
+                panic!(
+                    "the placeholder needs exactly one sibling shape source: {:?}",
+                    placeholder.shape_deps
+                );
+            };
+            assert_ne!(
+                conformed, early_placeholder,
+                "a later sibling requires a fresh, topologically ordered placeholder"
+            );
+            assert_eq!(*shape_source, sibling);
+            assert!(
+                shape_source.0 < placeholder.id.0,
+                "shape-only dependencies must point backward so remapping passes preserve them: \
              source={} placeholder={}",
-            shape_source.0,
-            placeholder.id.0
-        );
+                shape_source.0,
+                placeholder.id.0
+            );
+        })
     }
 
     #[test]
     fn runtime_if_uses_actualized_branch_rank_instead_of_stamped_spreads() {
-        let mut ctx = LowerCtx::new(
-            BTreeMap::new(),
-            BTreeMap::new(),
-            BTreeMap::new(),
-            LinearityInfo::default(),
-        );
-        let actual_ty = TensorType {
-            dims: vec![
-                DimInfo::Lit(1),
-                DimInfo::Lit(2),
-                DimInfo::Lit(3),
-                DimInfo::Lit(1),
-            ],
-            precision: Prim::F32,
-        };
-        let then_node = ctx.dag.add_node(
-            RiscOp::Load {
-                name: "then".into(),
-            },
-            vec![],
-            actual_ty.clone(),
-            None,
-        );
-        let else_node = ctx.dag.add_node(
-            RiscOp::Load {
-                name: "else".into(),
-            },
-            vec![],
-            actual_ty.clone(),
-            None,
-        );
-        let stale_stamped_ty = TensorType {
-            dims: vec![
-                DimInfo::Named("seq".into(), None),
-                DimInfo::Named("post".into(), None),
-            ],
-            precision: Prim::F32,
-        };
+        crate::lowering_runtime::with_native_lowering_runtime(|runtime| {
+            let mut ctx = LowerCtx::new(
+                BTreeMap::new(),
+                BTreeMap::new(),
+                BTreeMap::new(),
+                LinearityInfo::default(),
+                runtime,
+            );
+            let actual_ty = TensorType {
+                dims: vec![
+                    DimInfo::Lit(1),
+                    DimInfo::Lit(2),
+                    DimInfo::Lit(3),
+                    DimInfo::Lit(1),
+                ],
+                precision: Prim::F32,
+            };
+            let then_node = ctx.dag.add_node(
+                RiscOp::Load {
+                    name: "then".into(),
+                },
+                vec![],
+                actual_ty.clone(),
+                None,
+            );
+            let else_node = ctx.dag.add_node(
+                RiscOp::Load {
+                    name: "else".into(),
+                },
+                vec![],
+                actual_ty.clone(),
+                None,
+            );
+            let stale_stamped_ty = TensorType {
+                dims: vec![
+                    DimInfo::Named("seq".into(), None),
+                    DimInfo::Named("post".into(), None),
+                ],
+                precision: Prim::F32,
+            };
 
-        assert_eq!(
-            ctx.actualized_runtime_if_output_type(then_node, else_node, &stale_stamped_ty),
-            actual_ty
-        );
+            assert_eq!(
+                ctx.actualized_runtime_if_output_type(then_node, else_node, &stale_stamped_ty),
+                actual_ty
+            );
+        })
     }
 
     #[test]
     fn runtime_if_uses_concrete_sibling_type_for_bottom_placeholder() {
-        let mut ctx = LowerCtx::new(
-            BTreeMap::new(),
-            BTreeMap::new(),
-            BTreeMap::new(),
-            LinearityInfo::default(),
-        );
-        let placeholder = ctx.dag.add_node(
-            RiscOp::synth_const(Prim::F32, 0.0),
-            vec![],
-            TensorType::scalar_f32(),
-            None,
-        );
-        let actual_ty = TensorType {
-            dims: vec![DimInfo::Named("batch".into(), None), DimInfo::Lit(3)],
-            precision: Prim::F32,
-        };
-        let sibling = ctx.dag.add_node(
-            RiscOp::Load { name: "x".into() },
-            vec![],
-            actual_ty.clone(),
-            None,
-        );
+        crate::lowering_runtime::with_native_lowering_runtime(|runtime| {
+            let mut ctx = LowerCtx::new(
+                BTreeMap::new(),
+                BTreeMap::new(),
+                BTreeMap::new(),
+                LinearityInfo::default(),
+                runtime,
+            );
+            let placeholder = ctx.dag.add_node(
+                RiscOp::synth_const(Prim::F32, 0.0),
+                vec![],
+                TensorType::scalar_f32(),
+                None,
+            );
+            let actual_ty = TensorType {
+                dims: vec![DimInfo::Named("batch".into(), None), DimInfo::Lit(3)],
+                precision: Prim::F32,
+            };
+            let sibling = ctx.dag.add_node(
+                RiscOp::Load { name: "x".into() },
+                vec![],
+                actual_ty.clone(),
+                None,
+            );
 
-        assert_eq!(
-            ctx.actualized_runtime_if_output_type(placeholder, sibling, &TensorType::scalar_f32()),
-            actual_ty
-        );
+            assert_eq!(
+                ctx.actualized_runtime_if_output_type(
+                    placeholder,
+                    sibling,
+                    &TensorType::scalar_f32()
+                ),
+                actual_ty
+            );
+        })
     }
 
     #[test]
     fn runtime_if_rejects_incompatible_non_placeholder_branch_types() {
-        let mut ctx = LowerCtx::new(
-            BTreeMap::new(),
-            BTreeMap::new(),
-            BTreeMap::new(),
-            LinearityInfo::default(),
-        );
-        let then_node = ctx.dag.add_node(
-            RiscOp::Load {
-                name: "then".into(),
-            },
-            vec![],
-            TensorType {
-                dims: vec![DimInfo::Lit(2)],
-                precision: Prim::F32,
-            },
-            None,
-        );
-        let else_node = ctx.dag.add_node(
-            RiscOp::Load {
-                name: "else".into(),
-            },
-            vec![],
-            TensorType {
-                dims: vec![DimInfo::Lit(2), DimInfo::Lit(1)],
-                precision: Prim::F32,
-            },
-            None,
-        );
-
-        let err = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            let _ = ctx.actualized_runtime_if_output_type(
-                then_node,
-                else_node,
-                &TensorType::scalar_f32(),
+        crate::lowering_runtime::with_native_lowering_runtime(|runtime| {
+            let mut ctx = LowerCtx::new(
+                BTreeMap::new(),
+                BTreeMap::new(),
+                BTreeMap::new(),
+                LinearityInfo::default(),
+                runtime,
             );
-        }))
-        .expect_err("incompatible checked branch producers must fail loudly");
-        let Some(diagnostic) = err.downcast_ref::<LowerDiagnostic>() else {
-            panic!("incompatible branch producers must raise a lowering diagnostic");
-        };
-        let message = diagnostic.to_string();
-        assert!(
-            message.contains("checked dynamic `if` branches lowered to incompatible tensor types")
-        );
+            let then_node = ctx.dag.add_node(
+                RiscOp::Load {
+                    name: "then".into(),
+                },
+                vec![],
+                TensorType {
+                    dims: vec![DimInfo::Lit(2)],
+                    precision: Prim::F32,
+                },
+                None,
+            );
+            let else_node = ctx.dag.add_node(
+                RiscOp::Load {
+                    name: "else".into(),
+                },
+                vec![],
+                TensorType {
+                    dims: vec![DimInfo::Lit(2), DimInfo::Lit(1)],
+                    precision: Prim::F32,
+                },
+                None,
+            );
+
+            let err = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let _ = ctx.actualized_runtime_if_output_type(
+                    then_node,
+                    else_node,
+                    &TensorType::scalar_f32(),
+                );
+            }))
+            .expect_err("incompatible checked branch producers must fail loudly");
+            let Some(diagnostic) = err.downcast_ref::<LowerDiagnostic>() else {
+                panic!("incompatible branch producers must raise a lowering diagnostic");
+            };
+            let message = diagnostic.to_string();
+            assert!(
+                message
+                    .contains("checked dynamic `if` branches lowered to incompatible tensor types")
+            );
+        })
     }
 
     fn non_drop_len(dag: &Dag) -> usize {
@@ -21530,13 +21763,15 @@ mod tests {
 
     #[test]
     fn lower_single_const() {
-        let dag = parse_and_lower("(def {} x (lit {type: (t-prim {} f32)} 1.0))");
-        assert_eq!(dag.len(), 1);
-        assert_eq!(
-            dag.get(NodeId(0)).unwrap().op,
-            RiscOp::synth_const(Prim::F32, 1.0)
-        );
-        assert!(verify::verify(&dag).is_empty());
+        crate::lowering_runtime::with_native_lowering_runtime(|runtime| {
+            let dag = parse_and_lower("(def {} x (lit {type: (t-prim {} f32)} 1.0))", runtime);
+            assert_eq!(dag.len(), 1);
+            assert_eq!(
+                dag.get(NodeId(0)).unwrap().op,
+                RiscOp::synth_const(Prim::F32, 1.0)
+            );
+            assert!(verify::verify(&dag).is_empty());
+        })
     }
 
     /// Build a `LowerCtx` with `x: tensor[<size>, f32]` pre-bound to a
@@ -21544,7 +21779,7 @@ mod tests {
     /// the bound `x` node id. Mirrors how the body of a `def f(x) = ...`
     /// lowers with `x` already a parameter binding — the context the
     /// issue #318 `shape(&x, ...)` size argument resolves in.
-    fn lower_with_bound_x(size: usize, expr_src: &str) -> Dag {
+    fn lower_with_bound_x(size: usize, expr_src: &str, runtime: &LoweringRuntime) -> Dag {
         let x_ty = TensorType {
             dims: vec![DimInfo::Lit(size)],
             precision: chelis_types::types::Prim::F32,
@@ -21554,6 +21789,7 @@ mod tests {
             BTreeMap::new(),
             BTreeMap::new(),
             LinearityInfo::default(),
+            runtime,
         );
         let x = ctx
             .dag
@@ -21586,7 +21822,8 @@ mod tests {
     /// expand — never the collapsed `tensor[1]`.
     #[test]
     fn issue_318_expand_shape_arg_recovers_rank0_source_extent() {
-        let expr = r#"
+        crate::lowering_runtime::with_native_lowering_runtime(|runtime| {
+            let expr = r#"
             (app {type: (t-tensor {} (d-lit {} 2) (t-prim {} f32))}
                  (var {} insert)
                  (app {type: (t-prim {} f32)}
@@ -21600,21 +21837,22 @@ mod tests {
                             (cast {} (lit {} 0) (t-prim {} i32)))
                        (t-prim {} i32)))
         "#;
-        let dag = lower_with_bound_x(2, expr);
-        let (size, dims) = only_expand(&dag);
-        assert_eq!(
-            size,
-            RtDim::InputAxis {
-                tensor: 1,
-                axis: RtAxis::Lit(0),
-            },
-            "shape-derived extent must retain x's axis-0 source structurally; got {size:?}",
-        );
-        assert_eq!(
-            dims,
-            vec![DimInfo::Lit(2)],
-            "rank-0-source expand output must be tensor[2], not the collapsed tensor[1]; got {dims:?}",
-        );
+            let dag = lower_with_bound_x(2, expr, runtime);
+            let (size, dims) = only_expand(&dag);
+            assert_eq!(
+                size,
+                RtDim::InputAxis {
+                    tensor: 1,
+                    axis: RtAxis::Lit(0),
+                },
+                "shape-derived extent must retain x's axis-0 source structurally; got {size:?}",
+            );
+            assert_eq!(
+                dims,
+                vec![DimInfo::Lit(2)],
+                "rank-0-source expand output must be tensor[2], not the collapsed tensor[1]; got {dims:?}",
+            );
+        })
     }
 
     /// Reading the extent from `shape(&x, 0)` must not accrue a dead node
@@ -21627,7 +21865,8 @@ mod tests {
     /// (the line-review concern), so assert the count explicitly.
     #[test]
     fn issue_318_expand_shape_arg_no_dead_node() {
-        let expr = r#"
+        crate::lowering_runtime::with_native_lowering_runtime(|runtime| {
+            let expr = r#"
             (app {type: (t-tensor {} (d-lit {} 2) (t-prim {} f32))}
                  (var {} insert)
                  (app {type: (t-prim {} f32)}
@@ -21641,17 +21880,18 @@ mod tests {
                             (cast {} (lit {} 0) (t-prim {} i32)))
                        (t-prim {} i32)))
         "#;
-        let dag = lower_with_bound_x(2, expr);
-        let x_loads = dag
-            .nodes()
-            .iter()
-            .filter(|n| matches!(&n.op, RiscOp::Load { name } if name == "x"))
-            .count();
-        assert_eq!(
-            x_loads, 1,
-            "the shape-arg operand `&x` must reuse the bound `x` Load, not \
+            let dag = lower_with_bound_x(2, expr, runtime);
+            let x_loads = dag
+                .nodes()
+                .iter()
+                .filter(|n| matches!(&n.op, RiscOp::Load { name } if name == "x"))
+                .count();
+            assert_eq!(
+                x_loads, 1,
+                "the shape-arg operand `&x` must reuse the bound `x` Load, not \
              re-materialize it; found {x_loads} `Load {{ name: \"x\" }}` nodes",
-        );
+            );
+        })
     }
 
     /// The fix recovers the broadcast EXTENT only; it leaves the rank rule
@@ -21673,8 +21913,9 @@ mod tests {
     /// lock that the size fix did not perturb the rank rule.
     #[test]
     fn issue_318_insert_shape_arg_recovers_extent_without_changing_rank_rule() {
-        // Source: a rank-1 size-1 constant `tensor[1]`.
-        let expr = r#"
+        crate::lowering_runtime::with_native_lowering_runtime(|runtime| {
+            // Source: a rank-1 size-1 constant `tensor[1]`.
+            let expr = r#"
             (app {type: (t-tensor {} (d-lit {} 2) (d-lit {} 1) (t-prim {} f32))}
                  (var {} insert)
                  (cast {type: (t-tensor {} (d-lit {} 1) (t-prim {} f32))}
@@ -21688,22 +21929,23 @@ mod tests {
                             (cast {} (lit {} 0) (t-prim {} i32)))
                        (t-prim {} i32)))
         "#;
-        let dag = lower_with_bound_x(2, expr);
-        let (size, dims) = only_expand(&dag);
-        assert_eq!(
-            size,
-            RtDim::InputAxis {
-                tensor: 1,
-                axis: RtAxis::Lit(0),
-            },
-            "shape-derived extent must retain x's inserted-axis source structurally; got {size:?}",
-        );
-        assert_eq!(
-            dims,
-            vec![DimInfo::Lit(2), DimInfo::Lit(1)],
-            "rank rule is unchanged: `insert` adds axis 0 \
+            let dag = lower_with_bound_x(2, expr, runtime);
+            let (size, dims) = only_expand(&dag);
+            assert_eq!(
+                size,
+                RtDim::InputAxis {
+                    tensor: 1,
+                    axis: RtAxis::Lit(0),
+                },
+                "shape-derived extent must retain x's inserted-axis source structurally; got {size:?}",
+            );
+            assert_eq!(
+                dims,
+                vec![DimInfo::Lit(2), DimInfo::Lit(1)],
+                "rank rule is unchanged: `insert` adds axis 0 \
              ([1] -> [2, 1]); got {dims:?}",
-        );
+            );
+        })
     }
 
     /// Negative parity: the extent must track the tensor NAMED in the
@@ -21711,7 +21953,8 @@ mod tests {
     /// `tensor[3]`, so `shape(&x, 0)` must recover `3`.
     #[test]
     fn issue_318_expand_shape_arg_tracks_named_tensor_size() {
-        let expr = r#"
+        crate::lowering_runtime::with_native_lowering_runtime(|runtime| {
+            let expr = r#"
             (app {type: (t-tensor {} (d-lit {} 3) (t-prim {} f32))}
                  (var {} insert)
                  (app {type: (t-prim {} f32)}
@@ -21725,21 +21968,22 @@ mod tests {
                             (cast {} (lit {} 0) (t-prim {} i32)))
                        (t-prim {} i32)))
         "#;
-        let dag = lower_with_bound_x(3, expr);
-        let (size, dims) = only_expand(&dag);
-        assert_eq!(
-            size,
-            RtDim::InputAxis {
-                tensor: 1,
-                axis: RtAxis::Lit(0),
-            },
-            "extent must track the named tensor x's axis-0 source; got {size:?}",
-        );
-        assert_eq!(
-            dims,
-            vec![DimInfo::Lit(3)],
-            "expand output must be tensor[3]; got {dims:?}"
-        );
+            let dag = lower_with_bound_x(3, expr, runtime);
+            let (size, dims) = only_expand(&dag);
+            assert_eq!(
+                size,
+                RtDim::InputAxis {
+                    tensor: 1,
+                    axis: RtAxis::Lit(0),
+                },
+                "extent must track the named tensor x's axis-0 source; got {size:?}",
+            );
+            assert_eq!(
+                dims,
+                vec![DimInfo::Lit(3)],
+                "expand output must be tensor[3]; got {dims:?}"
+            );
+        })
     }
 
     /// Negative-parity / regression lock: the LITERAL-size form (the #288
@@ -21747,7 +21991,8 @@ mod tests {
     /// so the shape-derived recovery did not regress the literal path.
     #[test]
     fn issue_318_expand_literal_size_still_recovers_extent() {
-        let expr = r#"
+        crate::lowering_runtime::with_native_lowering_runtime(|runtime| {
+            let expr = r#"
             (app {type: (t-tensor {} (d-lit {} 2) (t-prim {} f32))}
                  (var {} insert)
                  (app {type: (t-prim {} f32)}
@@ -21756,18 +22001,19 @@ mod tests {
                  (cast {} (lit {} 0) (t-prim {} i32))
                  (cast {} (lit {} 2) (t-prim {} i32)))
         "#;
-        let dag = lower_with_bound_x(2, expr);
-        let (size, dims) = only_expand(&dag);
-        assert_eq!(
-            size,
-            RtDim::Lit(2),
-            "literal size 2 must still extract; got {size:?}"
-        );
-        assert_eq!(
-            dims,
-            vec![DimInfo::Lit(2)],
-            "literal expand output must be tensor[2]; got {dims:?}"
-        );
+            let dag = lower_with_bound_x(2, expr, runtime);
+            let (size, dims) = only_expand(&dag);
+            assert_eq!(
+                size,
+                RtDim::Lit(2),
+                "literal size 2 must still extract; got {size:?}"
+            );
+            assert_eq!(
+                dims,
+                vec![DimInfo::Lit(2)],
+                "literal expand output must be tensor[2]; got {dims:?}"
+            );
+        })
     }
 
     /// Build a `LowerCtx` with `x: tensor[<size>, f32]` pre-bound, lower
@@ -21776,7 +22022,7 @@ mod tests {
     /// len = shape(x, 0); ... }` lowers with `x` already a parameter
     /// binding — the chelis#369 context where the `expand` size argument is
     /// a `var len` reference, not a direct `shape(...)` app.
-    fn lower_body_with_bound_x(size: usize, body_src: &str) -> Dag {
+    fn lower_body_with_bound_x(size: usize, body_src: &str, runtime: &LoweringRuntime) -> Dag {
         let x_ty = TensorType {
             dims: vec![DimInfo::Lit(size)],
             precision: chelis_types::types::Prim::F32,
@@ -21786,6 +22032,7 @@ mod tests {
             BTreeMap::new(),
             BTreeMap::new(),
             LinearityInfo::default(),
+            runtime,
         );
         let x = ctx
             .dag
@@ -21804,9 +22051,10 @@ mod tests {
     /// is what produced the `Lit(3) vs Lit(1)` backward-DAG failure).
     #[test]
     fn issue_369_expand_let_bound_shape_recovers_extent() {
-        // (let {} (bind {} len (shape x 0))
-        //   (insert (scalar_to_tensor 3.0) 0 (cast len i32)))
-        let body = r#"
+        crate::lowering_runtime::with_native_lowering_runtime(|runtime| {
+            // (let {} (bind {} len (shape x 0))
+            //   (insert (scalar_to_tensor 3.0) 0 (cast len i32)))
+            let body = r#"
             (let {}
                  (bind {}
                        len
@@ -21822,23 +22070,24 @@ mod tests {
                       (cast {} (lit {} 0) (t-prim {} i32))
                       (cast {} (var {} len) (t-prim {} i32))))
         "#;
-        let dag = lower_body_with_bound_x(3, body);
-        let (size, dims) = only_expand(&dag);
-        assert_eq!(
-            size,
-            RtDim::InputAxis {
-                tensor: 1,
-                axis: RtAxis::Lit(0),
-            },
-            "a `let len = shape(x, 0)`-bound extent must retain x's axis-0 \
+            let dag = lower_body_with_bound_x(3, body, runtime);
+            let (size, dims) = only_expand(&dag);
+            assert_eq!(
+                size,
+                RtDim::InputAxis {
+                    tensor: 1,
+                    axis: RtAxis::Lit(0),
+                },
+                "a `let len = shape(x, 0)`-bound extent must retain x's axis-0 \
              source through the `let` indirection (chelis#369); got {size:?}",
-        );
-        assert_eq!(
-            dims,
-            vec![DimInfo::Lit(3)],
-            "rank-0-source expand output must be tensor[3], not the collapsed \
+            );
+            assert_eq!(
+                dims,
+                vec![DimInfo::Lit(3)],
+                "rank-0-source expand output must be tensor[3], not the collapsed \
              tensor[1] (chelis#369); got {dims:?}",
-        );
+            );
+        })
     }
 
     /// chelis#369 non-hardcoding guard: the same `let len = shape(x, 0)`
@@ -21851,10 +22100,11 @@ mod tests {
     /// fixed constant.
     #[test]
     fn issue_369_expand_let_bound_shape_recovers_distinct_extent_5() {
-        // Identical structure to the extent-3 test, but `x: tensor[5]` and
-        // the expand output is annotated `tensor[5]`. A recovery that
-        // reads x's dim yields Concrete(5); a hardcoded Concrete(3) fails.
-        let body = r#"
+        crate::lowering_runtime::with_native_lowering_runtime(|runtime| {
+            // Identical structure to the extent-3 test, but `x: tensor[5]` and
+            // the expand output is annotated `tensor[5]`. A recovery that
+            // reads x's dim yields Concrete(5); a hardcoded Concrete(3) fails.
+            let body = r#"
             (let {}
                  (bind {}
                        len
@@ -21870,25 +22120,26 @@ mod tests {
                       (cast {} (lit {} 0) (t-prim {} i32))
                       (cast {} (var {} len) (t-prim {} i32))))
         "#;
-        let dag = lower_body_with_bound_x(5, body);
-        let (size, dims) = only_expand(&dag);
-        assert_eq!(
-            size,
-            RtDim::InputAxis {
-                tensor: 1,
-                axis: RtAxis::Lit(0),
-            },
-            "a `let len = shape(x, 0)`-bound extent on `x: tensor[5]` must \
+            let dag = lower_body_with_bound_x(5, body, runtime);
+            let (size, dims) = only_expand(&dag);
+            assert_eq!(
+                size,
+                RtDim::InputAxis {
+                    tensor: 1,
+                    axis: RtAxis::Lit(0),
+                },
+                "a `let len = shape(x, 0)`-bound extent on `x: tensor[5]` must \
              retain the witnessed source, not a hardcoded value \
              (chelis#369 non-hardcoding); got {size:?}",
-        );
-        assert_eq!(
-            dims,
-            vec![DimInfo::Lit(5)],
-            "rank-0-source expand output must be tensor[5] at this extent, \
+            );
+            assert_eq!(
+                dims,
+                vec![DimInfo::Lit(5)],
+                "rank-0-source expand output must be tensor[5] at this extent, \
              proving the recovered size is x's axis-0 dim, not a constant; \
              got {dims:?}",
-        );
+            );
+        })
     }
 
     /// chelis#369 negative parity + chelis#469/#528 positive parity: the
@@ -21901,8 +22152,9 @@ mod tests {
     /// C-`[1]`) and not `x`'s 3.
     #[test]
     fn issue_369_expand_let_bound_non_shape_does_not_recover() {
-        // len is bound to a static int (`cast(7, i32)`), not a shape read.
-        let body = r#"
+        crate::lowering_runtime::with_native_lowering_runtime(|runtime| {
+            // len is bound to a static int (`cast(7, i32)`), not a shape read.
+            let body = r#"
             (let {}
                  (bind {} len (cast {} (lit {} 7) (t-prim {} i32)))
                  (app {type: (t-tensor {} (d-lit {} 1) (t-prim {} f32))}
@@ -21913,17 +22165,18 @@ mod tests {
                       (cast {} (lit {} 0) (t-prim {} i32))
                       (cast {} (var {} len) (t-prim {} i32))))
         "#;
-        let dag = lower_body_with_bound_x(3, body);
-        let (size, _dims) = only_expand(&dag);
-        // Folds to the `let`-bound static value 7 (NOT `x`'s shape extent 3,
-        // proving the shape-recovery path did not fire, and NOT the size-1
-        // default, proving the static value is materialized).
-        assert_eq!(
-            size,
-            RtDim::Lit(7),
-            "a `let`-bound static size must fold to its own extent 7, never \
+            let dag = lower_body_with_bound_x(3, body, runtime);
+            let (size, _dims) = only_expand(&dag);
+            // Folds to the `let`-bound static value 7 (NOT `x`'s shape extent 3,
+            // proving the shape-recovery path did not fire, and NOT the size-1
+            // default, proving the static value is materialized).
+            assert_eq!(
+                size,
+                RtDim::Lit(7),
+                "a `let`-bound static size must fold to its own extent 7, never \
              recover x's 3 or default to 1; got {size:?}",
-        );
+            );
+        })
     }
 
     /// chelis#369 negative parity: re-binding a name that WAS a shape binding
@@ -21934,10 +22187,11 @@ mod tests {
     /// path in `lower_let` for both `shape_bindings` and `static_size_bindings`.
     #[test]
     fn issue_369_expand_shadowed_let_binding_does_not_leak_stale_shape() {
-        // len = shape(x, 0)          -- shape binding
-        // len = cast(5, i32)       -- re-bound to a static value
-        // expand(s, 0, cast(len, i32))  -- must recover 5, NOT the stale 3
-        let body = r#"
+        crate::lowering_runtime::with_native_lowering_runtime(|runtime| {
+            // len = shape(x, 0)          -- shape binding
+            // len = cast(5, i32)       -- re-bound to a static value
+            // expand(s, 0, cast(len, i32))  -- must recover 5, NOT the stale 3
+            let body = r#"
             (let {}
                  (bind {}
                        len
@@ -21955,37 +22209,41 @@ mod tests {
                       (cast {} (lit {} 0) (t-prim {} i32))
                       (cast {} (var {} len) (t-prim {} i32))))
         "#;
-        let dag = lower_body_with_bound_x(3, body);
-        let (size, _dims) = only_expand(&dag);
-        assert_eq!(
-            size,
-            RtDim::Lit(5),
-            "a re-bound (shadowed) `len` must fold to the NEW static 5, never \
+            let dag = lower_body_with_bound_x(3, body, runtime);
+            let (size, _dims) = only_expand(&dag);
+            assert_eq!(
+                size,
+                RtDim::Lit(5),
+                "a re-bound (shadowed) `len` must fold to the NEW static 5, never \
              recover the stale shape extent 3; got {size:?}",
-        );
+            );
+        })
     }
 
     #[test]
     fn lowering_marks_reusable_input_from_linearity_hint() {
-        let src = r#"
+        crate::lowering_runtime::with_native_lowering_runtime(|runtime| {
+            let src = r#"
             (def {} x (var {type: (t-tensor {} (d-lit {} 4) (t-prim {} f32))} x))
             (def {} y
               (app {type: (t-tensor {} (d-lit {} 4) (t-prim {} f32))}
                    (var {} relu)
                    (var {type: (t-tensor {} (d-lit {} 4) (t-prim {} f32))} x)))
         "#;
-        let dag = parse_and_lower(src);
-        let node = dag
-            .roots()
-            .last()
-            .and_then(|id| dag.get(*id))
-            .expect("lowered root node");
-        assert_eq!(node.reusable_input, Some(NodeId(0)));
+            let dag = parse_and_lower(src, runtime);
+            let node = dag
+                .roots()
+                .last()
+                .and_then(|id| dag.get(*id))
+                .expect("lowered root node");
+            assert_eq!(node.reusable_input, Some(NodeId(0)));
+        })
     }
 
     #[test]
     fn lower_gather_uses_sparse_ir_node() {
-        let src = r#"
+        crate::lowering_runtime::with_native_lowering_runtime(|runtime| {
+            let src = r#"
             (def {} values
               (var {type: (t-tensor {} (d-lit {} 4) (d-lit {} 2) (t-prim {} f32))} values))
             (def {} indices
@@ -21997,32 +22255,34 @@ mod tests {
                    (var {type: (t-tensor {} (d-lit {} 3) (t-prim {} i32))} indices)
                    (lit {type: (t-prim {} i32)} 0)))
         "#;
-        let dag = parse_and_lower(src);
-        let gather = dag
-            .nodes()
-            .iter()
-            .find(|node| matches!(node.op, RiscOp::Gather { axis: 0 }))
-            .expect("Surf gather should lower to first-class sparse IR");
-        assert_eq!(
-            gather.output_type,
-            TensorType {
-                dims: vec![DimInfo::Lit(3), DimInfo::Lit(2)],
-                precision: Prim::F32,
-            }
-        );
-        assert!(verify::verify(&dag).is_empty());
+            let dag = parse_and_lower(src, runtime);
+            let gather = dag
+                .nodes()
+                .iter()
+                .find(|node| matches!(node.op, RiscOp::Gather { axis: 0 }))
+                .expect("Surf gather should lower to first-class sparse IR");
+            assert_eq!(
+                gather.output_type,
+                TensorType {
+                    dims: vec![DimInfo::Lit(3), DimInfo::Lit(2)],
+                    precision: Prim::F32,
+                }
+            );
+            assert!(verify::verify(&dag).is_empty());
+        })
     }
 
     #[test]
     fn lower_scatter_replace_uses_sparse_ir_node() {
-        // Surf `scatter_replace(base, indices, updates, axis)` must
-        // lower directly to the first-class `RiscOp::Scatter` sparse
-        // IR node, paralleling the tensor-lane `gather` lowering.
-        // This locks the contract: a Surf-level use of
-        // scatter_replace MUST reach the sparse evaluator/codegen
-        // path, NOT the host-runtime fallback (which the existing
-        // `scatter(..., mode)` builtin uses).
-        let src = r#"
+        crate::lowering_runtime::with_native_lowering_runtime(|runtime| {
+            // Surf `scatter_replace(base, indices, updates, axis)` must
+            // lower directly to the first-class `RiscOp::Scatter` sparse
+            // IR node, paralleling the tensor-lane `gather` lowering.
+            // This locks the contract: a Surf-level use of
+            // scatter_replace MUST reach the sparse evaluator/codegen
+            // path, NOT the host-runtime fallback (which the existing
+            // `scatter(..., mode)` builtin uses).
+            let src = r#"
             (def {} base
               (var {type: (t-tensor {} (d-lit {} 4) (d-lit {} 2) (t-prim {} f32))} base))
             (def {} indices
@@ -22037,94 +22297,104 @@ mod tests {
                    (var {type: (t-tensor {} (d-lit {} 3) (d-lit {} 2) (t-prim {} f32))} updates)
                    (lit {type: (t-prim {} i32)} 0)))
         "#;
-        let dag = parse_and_lower(src);
-        let scatter = dag
-            .nodes()
-            .iter()
-            .find(|node| matches!(node.op, RiscOp::Scatter { axis: 0 }))
-            .expect("Surf scatter_replace should lower to first-class sparse IR");
-        assert_eq!(
-            scatter.output_type,
-            TensorType {
-                dims: vec![DimInfo::Lit(4), DimInfo::Lit(2)],
-                precision: Prim::F32,
-            }
-        );
-        // Defense in depth: the lowered DAG must NOT contain a
-        // ScatterAdd from a Surf scatter_replace — those are
-        // intentionally distinct primitives.
-        let has_scatter_add = dag
-            .nodes()
-            .iter()
-            .any(|node| matches!(node.op, RiscOp::ScatterAdd { .. }));
-        assert!(
-            !has_scatter_add,
-            "scatter_replace must NOT lower to RiscOp::ScatterAdd; \
+            let dag = parse_and_lower(src, runtime);
+            let scatter = dag
+                .nodes()
+                .iter()
+                .find(|node| matches!(node.op, RiscOp::Scatter { axis: 0 }))
+                .expect("Surf scatter_replace should lower to first-class sparse IR");
+            assert_eq!(
+                scatter.output_type,
+                TensorType {
+                    dims: vec![DimInfo::Lit(4), DimInfo::Lit(2)],
+                    precision: Prim::F32,
+                }
+            );
+            // Defense in depth: the lowered DAG must NOT contain a
+            // ScatterAdd from a Surf scatter_replace — those are
+            // intentionally distinct primitives.
+            let has_scatter_add = dag
+                .nodes()
+                .iter()
+                .any(|node| matches!(node.op, RiscOp::ScatterAdd { .. }));
+            assert!(
+                !has_scatter_add,
+                "scatter_replace must NOT lower to RiscOp::ScatterAdd; \
              those are distinct primitives with different semantics"
-        );
-        assert!(verify::verify(&dag).is_empty());
+            );
+            assert!(verify::verify(&dag).is_empty());
+        })
     }
 
     #[test]
     fn lower_add_two_consts() {
-        let src = r#"
+        crate::lowering_runtime::with_native_lowering_runtime(|runtime| {
+            let src = r#"
             (def {} a (lit {type: (t-tensor {} (t-prim {} f32))} 1.0))
             (def {} b (lit {type: (t-tensor {} (t-prim {} f32))} 2.0))
             (def {} c (app {} (var {} add) (var {} a) (var {} b)))
         "#;
-        let dag = parse_and_lower(src);
-        assert_eq!(non_drop_len(&dag), 3);
-        let add_node = dag.get(NodeId(2)).unwrap();
-        assert_eq!(add_node.op, RiscOp::Add);
-        assert_eq!(add_node.inputs, vec![NodeId(0), NodeId(1)]);
-        assert!(verify::verify(&dag).is_empty());
+            let dag = parse_and_lower(src, runtime);
+            assert_eq!(non_drop_len(&dag), 3);
+            let add_node = dag.get(NodeId(2)).unwrap();
+            assert_eq!(add_node.op, RiscOp::Add);
+            assert_eq!(add_node.inputs, vec![NodeId(0), NodeId(1)]);
+            assert!(verify::verify(&dag).is_empty());
+        })
     }
 
     #[test]
     fn lower_neg() {
-        let src = r#"
+        crate::lowering_runtime::with_native_lowering_runtime(|runtime| {
+            let src = r#"
             (def {} x (lit {type: (t-tensor {} (t-prim {} f32))} 5.0))
             (def {} y (app {} (var {} neg) (var {} x)))
         "#;
-        let dag = parse_and_lower(src);
-        assert_eq!(dag.len(), 2);
-        let neg_node = dag.get(NodeId(1)).unwrap();
-        assert_eq!(neg_node.op, RiscOp::Neg);
-        assert_eq!(neg_node.inputs, vec![NodeId(0)]);
-        assert!(verify::verify(&dag).is_empty());
+            let dag = parse_and_lower(src, runtime);
+            assert_eq!(dag.len(), 2);
+            let neg_node = dag.get(NodeId(1)).unwrap();
+            assert_eq!(neg_node.op, RiscOp::Neg);
+            assert_eq!(neg_node.inputs, vec![NodeId(0)]);
+            assert!(verify::verify(&dag).is_empty());
+        })
     }
 
     #[test]
     fn lower_sub_preserves_direct_identity() {
-        let src = r#"
+        crate::lowering_runtime::with_native_lowering_runtime(|runtime| {
+            let src = r#"
             (def {} a (lit {type: (t-tensor {} (t-prim {} f32))} 3.0))
             (def {} b (lit {type: (t-tensor {} (t-prim {} f32))} 1.0))
             (def {} c (app {} (var {} sub) (var {} a) (var {} b)))
         "#;
-        let dag = parse_and_lower(src);
-        // a=Const(3), b=Const(1), Sub(a, b)
-        assert_eq!(non_drop_len(&dag), 3);
-        assert!(verify::verify(&dag).is_empty());
-        assert_eq!(root_node(&dag).op, RiscOp::Sub);
+            let dag = parse_and_lower(src, runtime);
+            // a=Const(3), b=Const(1), Sub(a, b)
+            assert_eq!(non_drop_len(&dag), 3);
+            assert!(verify::verify(&dag).is_empty());
+            assert_eq!(root_node(&dag).op, RiscOp::Sub);
+        })
     }
 
     #[test]
     fn lower_relu_preserves_identity() {
-        let src = r#"
+        crate::lowering_runtime::with_native_lowering_runtime(|runtime| {
+            let src = r#"
             (def {} x (lit {type: (t-tensor {} (t-prim {} f32))} -2.0))
             (def {} y (app {} (var {} relu) (var {} x)))
         "#;
-        let dag = parse_and_lower(src);
-        // x=Const(-2), Relu(x). The identity must survive until AD applies
-        // [05-OP-43]'s dedicated zero-at-zero rule.
-        assert_eq!(non_drop_len(&dag), 2);
-        assert!(verify::verify(&dag).is_empty());
-        assert_eq!(root_node(&dag).op, RiscOp::Relu);
+            let dag = parse_and_lower(src, runtime);
+            // x=Const(-2), Relu(x). The identity must survive until AD applies
+            // [05-OP-43]'s dedicated zero-at-zero rule.
+            assert_eq!(non_drop_len(&dag), 2);
+            assert!(verify::verify(&dag).is_empty());
+            assert_eq!(root_node(&dag).op, RiscOp::Relu);
+        })
     }
 
     #[test]
     fn lower_let_binding() {
-        let src = r#"
+        crate::lowering_runtime::with_native_lowering_runtime(|runtime| {
+            let src = r#"
             (let {} (bind {} x (lit {type: (t-tensor {} (t-prim {} f32))} 10.0))
                 (let {}
                   (bind {} out (app {} (var {} neg) (var {} x)))
@@ -22132,35 +22402,39 @@ mod tests {
                     (bind {} __drop_x (app {} (var {} drop) (var {} x)))
                     (var {} out))))
         "#;
-        let dag = parse_and_lower(src);
-        // x=Const(10), Neg(x)
-        assert_eq!(non_drop_len(&dag), 2);
-        assert!(verify::verify(&dag).is_empty());
+            let dag = parse_and_lower(src, runtime);
+            // x=Const(10), Neg(x)
+            assert_eq!(non_drop_len(&dag), 2);
+            assert!(verify::verify(&dag).is_empty());
+        })
     }
 
     #[test]
     fn unconsumed_let_binding_gets_terminal_drop() {
-        let src = r#"
+        crate::lowering_runtime::with_native_lowering_runtime(|runtime| {
+            let src = r#"
             (let {} (bind {} x (lit {type: (t-tensor {} (t-prim {} f32))} 10.0))
                 (let {}
                   (bind {} out (app {} (var {} neg) (var {} x)))
                   (var {} out)))
         "#;
-        let dag = parse_and_lower(src);
-        assert_eq!(non_drop_len(&dag), 2);
-        let drops = dag
-            .nodes()
-            .iter()
-            .filter(|node| matches!(node.op, RiscOp::Drop))
-            .map(|node| node.inputs.clone())
-            .collect::<Vec<_>>();
-        assert_eq!(drops, vec![vec![NodeId(0)]]);
-        assert!(verify::verify(&dag).is_empty());
+            let dag = parse_and_lower(src, runtime);
+            assert_eq!(non_drop_len(&dag), 2);
+            let drops = dag
+                .nodes()
+                .iter()
+                .filter(|node| matches!(node.op, RiscOp::Drop))
+                .map(|node| node.inputs.clone())
+                .collect::<Vec<_>>();
+            assert_eq!(drops, vec![vec![NodeId(0)]]);
+            assert!(verify::verify(&dag).is_empty());
+        })
     }
 
     #[test]
     fn repeated_consuming_user_call_gets_copy() {
-        let src = r#"
+        crate::lowering_runtime::with_native_lowering_runtime(|runtime| {
+            let src = r#"
             (def {} consume
               (fn {type: (t-fn {}
                             (t-tensor {} (d-lit {} 2) (d-lit {} 3) (t-prim {} f32))
@@ -22184,20 +22458,22 @@ mod tests {
                     (var {} consume)
                     (var {} x)))))
         "#;
-        let dag = parse_and_lower(src);
-        let copy_count = dag
-            .nodes()
-            .iter()
-            .filter(|node| matches!(node.op, RiscOp::Copy))
-            .count();
-        assert_eq!(copy_count, 1);
-        assert!(verify::verify(&dag).is_empty());
+            let dag = parse_and_lower(src, runtime);
+            let copy_count = dag
+                .nodes()
+                .iter()
+                .filter(|node| matches!(node.op, RiscOp::Copy))
+                .count();
+            assert_eq!(copy_count, 1);
+            assert!(verify::verify(&dag).is_empty());
+        })
     }
 
     #[test]
     fn context_lowering_inserts_copy_for_library_boundary_fanout() {
-        let library_exprs = chelis_deep::parser::parse_str(
-            r#"
+        crate::lowering_runtime::with_native_lowering_runtime(|runtime| {
+            let library_exprs = chelis_deep::parser::parse_str(
+                r#"
                 (defsig {} consume
                   (t-fn {}
                     (t-tensor {} (d-lit {} 2) (d-lit {} 3) (t-prim {} f32))
@@ -22206,21 +22482,21 @@ mod tests {
                   (fn {} (params {} (x {type: (t-var {} _)}))
                     (realize {} (var {} x))))
             "#,
-        )
-        .expect("parse library");
-        let (type_env, library_checked) = chelis_types::build_compiled_library_context(
-            &library_exprs,
-            chelis_types::ProgramOrigin::Unlinked,
-        )
-        .expect("library checks");
-        let library_checked =
-            chelis_effects::check_program(&library_checked).expect("library effects");
-        let library_checked =
-            chelis_types::check_linearity(&library_checked).expect("library linearity");
-        let library = lower_program_to_library(&library_checked);
+            )
+            .expect("parse library");
+            let (type_env, library_checked) = chelis_types::build_compiled_library_context(
+                &library_exprs,
+                chelis_types::ProgramOrigin::Unlinked,
+            )
+            .expect("library checks");
+            let library_checked =
+                chelis_effects::check_program(&library_checked).expect("library effects");
+            let library_checked =
+                chelis_types::check_linearity(&library_checked).expect("library linearity");
+            let library = lower_program_to_library(&library_checked, runtime);
 
-        let new_exprs = chelis_deep::parser::parse_str(
-            r#"
+            let new_exprs = chelis_deep::parser::parse_str(
+                r#"
                 (defsig {} double_it
                   (t-fn {}
                     (t-tensor {} (d-lit {} 2) (d-lit {} 3) (t-prim {} f32))
@@ -22231,49 +22507,53 @@ mod tests {
                       (app {} (var {} consume) (var {} x))
                       (app {} (var {} consume) (var {} x)))))
             "#,
-        )
-        .expect("parse new code");
-        let new_checked = chelis_types::check_ir_with_context(
-            &type_env,
-            &new_exprs,
-            chelis_types::ProgramOrigin::Unlinked,
-        )
-        .expect("new code checks");
-        let new_checked =
-            chelis_effects::check_effects_with_context(&library_checked, &new_checked)
-                .expect("new code effects");
-        let new_checked =
-            chelis_types::check_linearity_with_context(&library_checked, &new_checked)
-                .expect("new code linearity");
+            )
+            .expect("parse new code");
+            let new_checked = chelis_types::check_ir_with_context(
+                &type_env,
+                &new_exprs,
+                chelis_types::ProgramOrigin::Unlinked,
+            )
+            .expect("new code checks");
+            let new_checked =
+                chelis_effects::check_effects_with_context(&library_checked, &new_checked)
+                    .expect("new code effects");
+            let new_checked =
+                chelis_types::check_linearity_with_context(&library_checked, &new_checked)
+                    .expect("new code linearity");
 
-        let dag = lower_program_with_context(&library, &new_checked);
-        let copy_count = dag
-            .nodes()
-            .iter()
-            .filter(|node| matches!(node.op, RiscOp::Copy))
-            .count();
-        assert_eq!(copy_count, 1, "{:?}", dag.nodes());
-        assert!(verify::verify(&dag).is_empty());
+            let dag = lower_program_with_context(&library, &new_checked, runtime);
+            let copy_count = dag
+                .nodes()
+                .iter()
+                .filter(|node| matches!(node.op, RiscOp::Copy))
+                .count();
+            assert_eq!(copy_count, 1, "{:?}", dag.nodes());
+            assert!(verify::verify(&dag).is_empty());
+        })
     }
 
     #[test]
     fn lower_unknown_var_becomes_load() {
-        let src = "(def {} y (var {} weights))";
-        let dag = parse_and_lower_unchecked(src);
-        assert_eq!(dag.len(), 1);
-        assert_eq!(
-            dag.get(NodeId(0)).unwrap().op,
-            RiscOp::Load {
-                name: "weights".into()
-            }
-        );
-        assert!(verify::verify(&dag).is_empty());
+        crate::lowering_runtime::with_native_lowering_runtime(|runtime| {
+            let src = "(def {} y (var {} weights))";
+            let dag = parse_and_lower_unchecked(src, runtime);
+            assert_eq!(dag.len(), 1);
+            assert_eq!(
+                dag.get(NodeId(0)).unwrap().op,
+                RiscOp::Load {
+                    name: "weights".into()
+                }
+            );
+            assert!(verify::verify(&dag).is_empty());
+        })
     }
 
     #[test]
     fn lm_style_local_grad_wrapper_defs_are_marked_lowerable() {
-        let checked = parse_and_check(
-            r#"
+        crate::lowering_runtime::with_native_lowering_runtime(|runtime| {
+            let checked = parse_and_check(
+                r#"
                 (defsig {}
                   jac_row
                   (n)
@@ -22363,29 +22643,31 @@ mod tests {
                     (cast {} (lit {type: (t-prim {} f32)} 1.0) (t-prim {} f32))
                     (cast {} (lit {type: (t-prim {} f32)} 3.0) (t-prim {} f32))))
             "#,
-        );
-        let lowered = top_level_lowering_map(checked.exprs(), checked.type_env());
-        assert_eq!(
-            lowered.get("jac_row"),
-            Some(&true),
-            "jac_row lowering map: {lowered:?}"
-        );
-        assert_eq!(
-            lowered.get("lm_model"),
-            Some(&false),
-            "lm_model lowering map: {lowered:?}"
-        );
-        assert_eq!(
-            lowered.get("out"),
-            Some(&false),
-            "out lowering map: {lowered:?}"
-        );
+            );
+            let lowered = top_level_lowering_map(checked.exprs(), checked.type_env(), runtime);
+            assert_eq!(
+                lowered.get("jac_row"),
+                Some(&true),
+                "jac_row lowering map: {lowered:?}"
+            );
+            assert_eq!(
+                lowered.get("lm_model"),
+                Some(&false),
+                "lm_model lowering map: {lowered:?}"
+            );
+            assert_eq!(
+                lowered.get("out"),
+                Some(&false),
+                "out lowering map: {lowered:?}"
+            );
+        })
     }
 
     #[test]
     fn lm_style_local_grad_wrapper_subexpr_does_not_load_callable_arg_as_data() {
-        let checked = parse_and_check(
-            r#"
+        crate::lowering_runtime::with_native_lowering_runtime(|runtime| {
+            let checked = parse_and_check(
+                r#"
                 (defsig {}
                   jac_row
                   (n)
@@ -22475,63 +22757,66 @@ mod tests {
                     (cast {} (lit {type: (t-prim {} f32)} 1.0) (t-prim {} f32))
                     (cast {} (lit {type: (t-prim {} f32)} 3.0) (t-prim {} f32))))
             "#,
-        );
-        let out_expr = checked
-            .exprs()
-            .iter()
-            .find(|expr| top_level_expr_name(expr) == Some("out"))
-            .expect("out def");
-        let out_body = match out_expr {
-            Expr::List(list, _) => children(list).get(1).expect("out body"),
-            _ => panic!("out def must be a list"),
-        };
-        let mut ctx = LowerCtx::new(
-            checked
-                .type_env()
+            );
+            let out_expr = checked
+                .exprs()
                 .iter()
-                .map(|(name, ty_expr)| (name.clone(), LowerCtx::type_from_type_expr(ty_expr)))
-                .collect::<BTreeMap<_, _>>(),
-            collect_top_level_defs(checked.exprs()),
-            collect_top_level_sigs(checked.exprs()),
-            LinearityInfo::default(),
-        );
-        let out_kids = match out_body {
-            Expr::List(list, _) => children(list),
-            _ => panic!("out body must be app"),
-        };
-        assert!(
-            matches!(
-                ctx.resolve_callable_expr(&out_kids[0]),
-                Some(CallableExpr::Plain(_))
-            ),
-            "expected jac_row callee to resolve as callable"
-        );
-        assert!(
-            matches!(
-                ctx.resolve_callable_expr(&out_kids[1]),
-                Some(CallableExpr::Plain(_))
-            ),
-            "expected lm_model arg to resolve as callable"
-        );
-        let lowered_value = ctx.lower_expr(out_body);
-        let dag = ctx.dag;
-        for id in lowered_value.flatten_nodes() {
-            // rootless DAGs are hard to inspect in assertions; mirror lower_subexpr_program.
-            // This is test-only.
-            let _ = id;
-        }
-        assert!(
-            !dag.nodes()
-                .iter()
-                .any(|node| matches!(&node.op, RiscOp::Load { name } if name == "model")),
-            "specialized local grad wrapper must not leave callable arg as a data load: {dag:#?}"
-        );
+                .find(|expr| top_level_expr_name(expr) == Some("out"))
+                .expect("out def");
+            let out_body = match out_expr {
+                Expr::List(list, _) => children(list).get(1).expect("out body"),
+                _ => panic!("out def must be a list"),
+            };
+            let mut ctx = LowerCtx::new(
+                checked
+                    .type_env()
+                    .iter()
+                    .map(|(name, ty_expr)| (name.clone(), LowerCtx::type_from_type_expr(ty_expr)))
+                    .collect::<BTreeMap<_, _>>(),
+                collect_top_level_defs(checked.exprs()),
+                collect_top_level_sigs(checked.exprs()),
+                LinearityInfo::default(),
+                runtime,
+            );
+            let out_kids = match out_body {
+                Expr::List(list, _) => children(list),
+                _ => panic!("out body must be app"),
+            };
+            assert!(
+                matches!(
+                    ctx.resolve_callable_expr(&out_kids[0]),
+                    Some(CallableExpr::Plain(_))
+                ),
+                "expected jac_row callee to resolve as callable"
+            );
+            assert!(
+                matches!(
+                    ctx.resolve_callable_expr(&out_kids[1]),
+                    Some(CallableExpr::Plain(_))
+                ),
+                "expected lm_model arg to resolve as callable"
+            );
+            let lowered_value = ctx.lower_expr(out_body);
+            let dag = ctx.dag;
+            for id in lowered_value.flatten_nodes() {
+                // rootless DAGs are hard to inspect in assertions; mirror lower_subexpr_program.
+                // This is test-only.
+                let _ = id;
+            }
+            assert!(
+                !dag.nodes()
+                    .iter()
+                    .any(|node| matches!(&node.op, RiscOp::Load { name } if name == "model")),
+                "specialized local grad wrapper must not leave callable arg as a data load: {dag:#?}"
+            );
+        })
     }
 
     #[test]
     fn nested_callable_param_app_in_grad_body_resolves_named_function_arg() {
-        let checked = parse_and_check(
-            r#"
+        crate::lowering_runtime::with_native_lowering_runtime(|runtime| {
+            let checked = parse_and_check(
+                r#"
                 (defsig {}
                   jac_row
                   (n)
@@ -22585,14 +22870,29 @@ mod tests {
                       (y {type: (t-prim {} f32)}))
                     (app {} (var {} sub) (var {} y) (var {} x))))
             "#,
-        );
-        let program_defs = collect_top_level_defs(checked.exprs());
-        let jac_fn = match program_defs.get("jac_row") {
-            Some(expr) => expr.clone(),
-            None => panic!("missing jac_row"),
-        };
-        let (param_names, jac_body) = {
-            let ctx = LowerCtx::new(
+            );
+            let program_defs = collect_top_level_defs(checked.exprs());
+            let jac_fn = match program_defs.get("jac_row") {
+                Some(expr) => expr.clone(),
+                None => panic!("missing jac_row"),
+            };
+            let (param_names, jac_body) = {
+                let ctx = LowerCtx::new(
+                    checked
+                        .type_env()
+                        .iter()
+                        .map(|(name, ty_expr)| {
+                            (name.clone(), LowerCtx::type_from_type_expr(ty_expr))
+                        })
+                        .collect::<BTreeMap<_, _>>(),
+                    program_defs.clone(),
+                    collect_top_level_sigs(checked.exprs()),
+                    LinearityInfo::default(),
+                    runtime,
+                );
+                ctx.extract_fn_parts(&jac_fn).expect("jac_row fn parts")
+            };
+            let mut inline_ctx = LowerCtx::new(
                 checked
                     .type_env()
                     .iter()
@@ -22601,116 +22901,111 @@ mod tests {
                 program_defs.clone(),
                 collect_top_level_sigs(checked.exprs()),
                 LinearityInfo::default(),
+                runtime,
             );
-            ctx.extract_fn_parts(&jac_fn).expect("jac_row fn parts")
-        };
-        let mut inline_ctx = LowerCtx::new(
-            checked
-                .type_env()
-                .iter()
-                .map(|(name, ty_expr)| (name.clone(), LowerCtx::type_from_type_expr(ty_expr)))
-                .collect::<BTreeMap<_, _>>(),
-            program_defs.clone(),
-            collect_top_level_sigs(checked.exprs()),
-            LinearityInfo::default(),
-        );
-        let app_exprs = chelis_deep::parser::parse_str(
+            let app_exprs = chelis_deep::parser::parse_str(
             "(app {} (var {} jac_row) (var {} lm_model) (app {} (var {} to_tensor) (app {} (var {} Cons) (lit {type: (t-prim {} f32)} 1.0) (app {} (var {} Cons) (lit {type: (t-prim {} f32)} 2.0) (var {} Nil)))) (cast {} (lit {type: (t-prim {} f32)} 1.0) (t-prim {} f32)) (cast {} (lit {type: (t-prim {} f32)} 3.0) (t-prim {} f32)))"
         )
         .expect("parse app expr");
-        let (DeepTag::App, _, app_kids) = stamped_parts(&app_exprs[0]).expect("expected app")
-        else {
-            panic!("expected app");
-        };
-        let out_call_args = app_kids[1..].to_vec();
-        for (name, arg_expr) in param_names.iter().zip(out_call_args.iter()) {
-            if let Some(callable) = inline_ctx.callable_binding_expr(arg_expr) {
-                inline_ctx.local_callables.insert(name.clone(), callable);
-            } else {
-                let arg_id = inline_ctx.lower_expr(arg_expr);
-                inline_ctx.bindings.insert(name.clone(), arg_id);
+            let (DeepTag::App, _, app_kids) = stamped_parts(&app_exprs[0]).expect("expected app")
+            else {
+                panic!("expected app");
+            };
+            let out_call_args = app_kids[1..].to_vec();
+            for (name, arg_expr) in param_names.iter().zip(out_call_args.iter()) {
+                if let Some(callable) = inline_ctx.callable_binding_expr(arg_expr) {
+                    inline_ctx.local_callables.insert(name.clone(), callable);
+                } else {
+                    let arg_id = inline_ctx.lower_expr(arg_expr);
+                    inline_ctx.bindings.insert(name.clone(), arg_id);
+                }
             }
-        }
-        let (DeepTag::Let, _, let_kids) = stamped_parts(jac_body).expect("expected let body")
-        else {
-            panic!("expected let body");
-        };
-        let (DeepTag::Bind, _, bind_kids) =
-            stamped_parts(&let_kids[0]).expect("expected bind list")
-        else {
-            panic!("expected bind list");
-        };
-        let target_fn = bind_kids[1].clone();
-        inline_ctx.local_callables.insert(
-            "target".to_string(),
-            inline_ctx
-                .resolve_callable_expr(&target_fn)
-                .expect("target callable"),
-        );
-        let (DeepTag::Fn, _, target_kids) = stamped_parts(&target_fn).expect("expected target fn")
-        else {
-            panic!("expected target fn");
-        };
-        let inner_app = target_kids[1].clone();
-        let mut subctx = LowerCtx::new(
-            checked
-                .type_env()
-                .iter()
-                .map(|(name, ty_expr)| (name.clone(), LowerCtx::type_from_type_expr(ty_expr)))
-                .collect::<BTreeMap<_, _>>(),
-            program_defs,
-            collect_top_level_sigs(checked.exprs()),
-            LinearityInfo::default(),
-        );
-        subctx.local_callables = inline_ctx.local_callables.clone();
-        let theta_local_ty = extract_param_type(&target_fn, 0).expect("theta_local type");
-        let theta_local = subctx.lower_fn_param_binding("theta_local", Some(theta_local_ty));
-        subctx
-            .bindings
-            .insert("theta_local".to_string(), theta_local);
-        let inner_callee = match &inner_app {
-            Expr::List(list, _) => children(list).first().expect("inner app callee"),
-            _ => panic!("expected inner app"),
-        };
-        assert!(
-            matches!(
-                subctx.resolve_callable_expr(inner_callee),
-                Some(CallableExpr::Plain(_))
-            ),
-            "expected nested callee `(var model)` to resolve as callable before lowering"
-        );
-        let _ = subctx.lower_expr(&inner_app);
-        assert!(
-            !subctx
-                .dag
-                .nodes()
-                .iter()
-                .any(|node| matches!(&node.op, RiscOp::Load { name } if name == "model")),
-            "nested callable param app must inline named function arg rather than load `model`: {:#?}",
-            subctx.dag
-        );
+            let (DeepTag::Let, _, let_kids) = stamped_parts(jac_body).expect("expected let body")
+            else {
+                panic!("expected let body");
+            };
+            let (DeepTag::Bind, _, bind_kids) =
+                stamped_parts(&let_kids[0]).expect("expected bind list")
+            else {
+                panic!("expected bind list");
+            };
+            let target_fn = bind_kids[1].clone();
+            inline_ctx.local_callables.insert(
+                "target".to_string(),
+                inline_ctx
+                    .resolve_callable_expr(&target_fn)
+                    .expect("target callable"),
+            );
+            let (DeepTag::Fn, _, target_kids) =
+                stamped_parts(&target_fn).expect("expected target fn")
+            else {
+                panic!("expected target fn");
+            };
+            let inner_app = target_kids[1].clone();
+            let mut subctx = LowerCtx::new(
+                checked
+                    .type_env()
+                    .iter()
+                    .map(|(name, ty_expr)| (name.clone(), LowerCtx::type_from_type_expr(ty_expr)))
+                    .collect::<BTreeMap<_, _>>(),
+                program_defs,
+                collect_top_level_sigs(checked.exprs()),
+                LinearityInfo::default(),
+                runtime,
+            );
+            subctx.local_callables = inline_ctx.local_callables.clone();
+            let theta_local_ty =
+                extract_param_type(&target_fn, 0, runtime).expect("theta_local type");
+            let theta_local = subctx.lower_fn_param_binding("theta_local", Some(theta_local_ty));
+            subctx
+                .bindings
+                .insert("theta_local".to_string(), theta_local);
+            let inner_callee = match &inner_app {
+                Expr::List(list, _) => children(list).first().expect("inner app callee"),
+                _ => panic!("expected inner app"),
+            };
+            assert!(
+                matches!(
+                    subctx.resolve_callable_expr(inner_callee),
+                    Some(CallableExpr::Plain(_))
+                ),
+                "expected nested callee `(var model)` to resolve as callable before lowering"
+            );
+            let _ = subctx.lower_expr(&inner_app);
+            assert!(
+                !subctx
+                    .dag
+                    .nodes()
+                    .iter()
+                    .any(|node| matches!(&node.op, RiscOp::Load { name } if name == "model")),
+                "nested callable param app must inline named function arg rather than load `model`: {:#?}",
+                subctx.dag
+            );
+        })
     }
 
     #[test]
     fn tuple_return_lowers_to_named_store_roots() {
-        let src = r#"
+        crate::lowering_runtime::with_native_lowering_runtime(|runtime| {
+            let src = r#"
             (def {} grads
               (tuple {}
                 (lit {type: (t-prim {} f32)} 1.0)
                 (lit {type: (t-prim {} f32)} 2.0)))
         "#;
-        let dag = parse_and_lower(src);
-        let roots = dag.roots();
-        assert_eq!(roots.len(), 2);
-        assert!(matches!(
-            dag.get(roots[0]).map(|node| &node.op),
-            Some(RiscOp::Store { name }) if name == "grads.0"
-        ));
-        assert!(matches!(
-            dag.get(roots[1]).map(|node| &node.op),
-            Some(RiscOp::Store { name }) if name == "grads.1"
-        ));
-        assert!(verify::verify(&dag).is_empty());
+            let dag = parse_and_lower(src, runtime);
+            let roots = dag.roots();
+            assert_eq!(roots.len(), 2);
+            assert!(matches!(
+                dag.get(roots[0]).map(|node| &node.op),
+                Some(RiscOp::Store { name }) if name == "grads.0"
+            ));
+            assert!(matches!(
+                dag.get(roots[1]).map(|node| &node.op),
+                Some(RiscOp::Store { name }) if name == "grads.1"
+            ));
+            assert!(verify::verify(&dag).is_empty());
+        })
     }
 
     /// Issue chelis#232: `(export {} forward)` is a module-system
@@ -22723,27 +23018,29 @@ mod tests {
     /// `chelis-compiler-api::compiler::compile_source`.
     #[test]
     fn issue232_export_directive_does_not_emit_dag_root() {
-        let src = r#"
+        crate::lowering_runtime::with_native_lowering_runtime(|runtime| {
+            let src = r#"
             (def {} forward (lit {type: (t-prim {} f32)} 1.0))
             (export {} forward)
         "#;
-        let dag = parse_and_lower(src);
-        // Only `forward`'s lowered value-node is a root. The
-        // `(export {} forward)` directive must contribute zero roots
-        // and zero nodes — it is not a value expression.
-        assert_eq!(
-            dag.roots().len(),
-            1,
-            "export directive must not emit any DAG root: roots={:?}",
-            dag.roots()
-        );
-        assert!(
-            !dag.nodes()
-                .iter()
-                .any(|node| matches!(&node.op, RiscOp::Load { name } if name == "forward")),
-            "export directive must not lower its symbol child to a Load: {:#?}",
-            dag.nodes()
-        );
+            let dag = parse_and_lower(src, runtime);
+            // Only `forward`'s lowered value-node is a root. The
+            // `(export {} forward)` directive must contribute zero roots
+            // and zero nodes — it is not a value expression.
+            assert_eq!(
+                dag.roots().len(),
+                1,
+                "export directive must not emit any DAG root: roots={:?}",
+                dag.roots()
+            );
+            assert!(
+                !dag.nodes()
+                    .iter()
+                    .any(|node| matches!(&node.op, RiscOp::Load { name } if name == "forward")),
+                "export directive must not lower its symbol child to a Load: {:#?}",
+                dag.nodes()
+            );
+        })
     }
 
     /// Issue chelis#232: same shape, `import` instead of `export`.
@@ -22752,31 +23049,34 @@ mod tests {
     /// emit a `Const` node and add it as a root.
     #[test]
     fn issue232_import_directive_does_not_emit_dag_root() {
-        let src = r#"
+        crate::lowering_runtime::with_native_lowering_runtime(|runtime| {
+            let src = r#"
             (def {} forward (lit {type: (t-prim {} f32)} 1.0))
             (import {} Math (params {}))
         "#;
-        // Use `parse_and_lower_unchecked` because the standalone
-        // `(import {} ...)` form isn't run through the regular
-        // type-checker path; we want a direct lowering observation.
-        let exprs = chelis_deep::parser::parse_str(src).expect("parse failed");
-        let mut ctx = LowerCtx::new(
-            BTreeMap::new(),
-            BTreeMap::new(),
-            BTreeMap::new(),
-            LinearityInfo::default(),
-        );
-        for expr in &exprs {
-            ctx.lower_top_level(expr);
-        }
-        // Only `forward`'s root remains. The `import` directive must
-        // contribute zero roots.
-        assert_eq!(
-            ctx.dag.roots().len(),
-            1,
-            "import directive must not emit any DAG root: roots={:?}",
-            ctx.dag.roots()
-        );
+            // Use `parse_and_lower_unchecked` because the standalone
+            // `(import {} ...)` form isn't run through the regular
+            // type-checker path; we want a direct lowering observation.
+            let exprs = chelis_deep::parser::parse_str(src).expect("parse failed");
+            let mut ctx = LowerCtx::new(
+                BTreeMap::new(),
+                BTreeMap::new(),
+                BTreeMap::new(),
+                LinearityInfo::default(),
+                runtime,
+            );
+            for expr in &exprs {
+                ctx.lower_top_level(expr);
+            }
+            // Only `forward`'s root remains. The `import` directive must
+            // contribute zero roots.
+            assert_eq!(
+                ctx.dag.roots().len(),
+                1,
+                "import directive must not emit any DAG root: roots={:?}",
+                ctx.dag.roots()
+            );
+        })
     }
 
     /// Issue chelis#232: `import-all` (the `import Mod` form without
@@ -22784,31 +23084,35 @@ mod tests {
     /// — same lower-time hazard as `export` and `import`.
     #[test]
     fn issue232_import_all_directive_does_not_emit_dag_root() {
-        let src = r#"
+        crate::lowering_runtime::with_native_lowering_runtime(|runtime| {
+            let src = r#"
             (def {} forward (lit {type: (t-prim {} f32)} 1.0))
             (import-all {} Math)
         "#;
-        let exprs = chelis_deep::parser::parse_str(src).expect("parse failed");
-        let mut ctx = LowerCtx::new(
-            BTreeMap::new(),
-            BTreeMap::new(),
-            BTreeMap::new(),
-            LinearityInfo::default(),
-        );
-        for expr in &exprs {
-            ctx.lower_top_level(expr);
-        }
-        assert_eq!(
-            ctx.dag.roots().len(),
-            1,
-            "import-all directive must not emit any DAG root: roots={:?}",
-            ctx.dag.roots()
-        );
+            let exprs = chelis_deep::parser::parse_str(src).expect("parse failed");
+            let mut ctx = LowerCtx::new(
+                BTreeMap::new(),
+                BTreeMap::new(),
+                BTreeMap::new(),
+                LinearityInfo::default(),
+                runtime,
+            );
+            for expr in &exprs {
+                ctx.lower_top_level(expr);
+            }
+            assert_eq!(
+                ctx.dag.roots().len(),
+                1,
+                "import-all directive must not emit any DAG root: roots={:?}",
+                ctx.dag.roots()
+            );
+        })
     }
 
     #[test]
     fn tuple_get_resolves_during_lowering_without_tuple_ir_node() {
-        let src = r#"
+        crate::lowering_runtime::with_native_lowering_runtime(|runtime| {
+            let src = r#"
             (def {} grads
               (tuple {}
                 (lit {type: (t-prim {} f32)} 1.0)
@@ -22818,144 +23122,164 @@ mod tests {
                 (var {} grads)
                 1))
         "#;
-        let dag = parse_and_lower(src);
-        assert!(
-            dag.nodes()
-                .iter()
-                .all(|node| { matches!(node.op, RiscOp::Const { .. } | RiscOp::Store { .. }) })
-        );
-        assert!(verify::verify(&dag).is_empty());
+            let dag = parse_and_lower(src, runtime);
+            assert!(
+                dag.nodes()
+                    .iter()
+                    .all(|node| { matches!(node.op, RiscOp::Const { .. } | RiscOp::Store { .. }) })
+            );
+            assert!(verify::verify(&dag).is_empty());
+        })
     }
 
     // --- H1: Tier 2 comparison ops lowering ---
 
     #[test]
     fn lower_gt_decomposes() {
-        let src = r#"
+        crate::lowering_runtime::with_native_lowering_runtime(|runtime| {
+            let src = r#"
             (def {} a (lit {type: (t-tensor {} (t-prim {} f32))} 5.0))
             (def {} b (lit {type: (t-tensor {} (t-prim {} f32))} 3.0))
             (def {} c (app {} (var {} gt) (var {} a) (var {} b)))
         "#;
-        let dag = parse_and_lower(src);
-        // a, b, CmpLt(b, a)
-        assert_eq!(non_drop_len(&dag), 3);
-        let node = dag.get(NodeId(2)).unwrap();
-        assert_eq!(node.op, RiscOp::CmpLt);
-        // Args are swapped: b, a
-        assert_eq!(node.inputs, vec![NodeId(1), NodeId(0)]);
+            let dag = parse_and_lower(src, runtime);
+            // a, b, CmpLt(b, a)
+            assert_eq!(non_drop_len(&dag), 3);
+            let node = dag.get(NodeId(2)).unwrap();
+            assert_eq!(node.op, RiscOp::CmpLt);
+            // Args are swapped: b, a
+            assert_eq!(node.inputs, vec![NodeId(1), NodeId(0)]);
+        })
     }
 
     #[test]
     fn lower_gte_decomposes() {
-        let src = r#"
+        crate::lowering_runtime::with_native_lowering_runtime(|runtime| {
+            let src = r#"
             (def {} a (lit {type: (t-tensor {} (t-prim {} f32))} 5.0))
             (def {} b (lit {type: (t-tensor {} (t-prim {} f32))} 3.0))
             (def {} c (app {} (var {} gte) (var {} a) (var {} b)))
         "#;
-        let dag = parse_and_lower(src);
-        // a, b, CmpLt(a,b), Const(1), CmpLt(lt, 1)
-        assert_eq!(non_drop_len(&dag), 5);
-        assert_eq!(root_node(&dag).op, RiscOp::CmpLt);
+            let dag = parse_and_lower(src, runtime);
+            // a, b, CmpLt(a,b), Const(1), CmpLt(lt, 1)
+            assert_eq!(non_drop_len(&dag), 5);
+            assert_eq!(root_node(&dag).op, RiscOp::CmpLt);
+        })
     }
 
     #[test]
     fn lower_lte_decomposes() {
-        let src = r#"
+        crate::lowering_runtime::with_native_lowering_runtime(|runtime| {
+            let src = r#"
             (def {} a (lit {type: (t-tensor {} (t-prim {} f32))} 3.0))
             (def {} b (lit {type: (t-tensor {} (t-prim {} f32))} 5.0))
             (def {} c (app {} (var {} lte) (var {} a) (var {} b)))
         "#;
-        let dag = parse_and_lower(src);
-        assert_eq!(non_drop_len(&dag), 5);
+            let dag = parse_and_lower(src, runtime);
+            assert_eq!(non_drop_len(&dag), 5);
+        })
     }
 
     #[test]
     fn lower_eq_decomposes() {
-        let src = r#"
+        crate::lowering_runtime::with_native_lowering_runtime(|runtime| {
+            let src = r#"
             (def {} a (lit {type: (t-tensor {} (t-prim {} f32))} 3.0))
             (def {} b (lit {type: (t-tensor {} (t-prim {} f32))} 3.0))
             (def {} c (app {} (var {} eq) (var {} a) (var {} b)))
         "#;
-        let dag = parse_and_lower(src);
-        // a, b, CmpLt(a,b), CmpLt(b,a), MaxElem, Const(1), CmpLt(or, 1)
-        assert_eq!(non_drop_len(&dag), 7);
+            let dag = parse_and_lower(src, runtime);
+            // a, b, CmpLt(a,b), CmpLt(b,a), MaxElem, Const(1), CmpLt(or, 1)
+            assert_eq!(non_drop_len(&dag), 7);
+        })
     }
 
     // --- Direct Tier-1 MinElem lowering ---
 
     #[test]
     fn lower_min_elem_preserves_direct_identity() {
-        let src = r#"
+        crate::lowering_runtime::with_native_lowering_runtime(|runtime| {
+            let src = r#"
             (def {} a (lit {type: (t-tensor {} (t-prim {} f32))} 5.0))
             (def {} b (lit {type: (t-tensor {} (t-prim {} f32))} 3.0))
             (def {} c (app {} (var {} min_elem) (var {} a) (var {} b)))
         "#;
-        let dag = parse_and_lower(src);
-        // a, b, MinElem(a, b)
-        assert_eq!(non_drop_len(&dag), 3);
-        assert_eq!(root_node(&dag).op, RiscOp::MinElem);
-        assert!(verify::verify(&dag).is_empty());
+            let dag = parse_and_lower(src, runtime);
+            // a, b, MinElem(a, b)
+            assert_eq!(non_drop_len(&dag), 3);
+            assert_eq!(root_node(&dag).op, RiscOp::MinElem);
+            assert!(verify::verify(&dag).is_empty());
+        })
     }
 
     // --- H2: Boolean operators ---
 
     #[test]
     fn lower_and_decomposes() {
-        let src = r#"
+        crate::lowering_runtime::with_native_lowering_runtime(|runtime| {
+            let src = r#"
             (def {} a (lit {type: (t-tensor {} (t-prim {} bool))} true))
             (def {} b (lit {type: (t-tensor {} (t-prim {} bool))} false))
             (def {} c (app {} (var {} and) (var {} a) (var {} b)))
         "#;
-        let dag = parse_and_lower(src);
-        // a, b, Mul(a, b)
-        assert_eq!(non_drop_len(&dag), 3);
-        let node = dag.get(NodeId(2)).unwrap();
-        assert_eq!(node.op, RiscOp::Mul);
+            let dag = parse_and_lower(src, runtime);
+            // a, b, Mul(a, b)
+            assert_eq!(non_drop_len(&dag), 3);
+            let node = dag.get(NodeId(2)).unwrap();
+            assert_eq!(node.op, RiscOp::Mul);
+        })
     }
 
     #[test]
     fn lower_or_decomposes() {
-        let src = r#"
+        crate::lowering_runtime::with_native_lowering_runtime(|runtime| {
+            let src = r#"
             (def {} a (lit {type: (t-tensor {} (t-prim {} bool))} false))
             (def {} b (lit {type: (t-tensor {} (t-prim {} bool))} true))
             (def {} c (app {} (var {} or) (var {} a) (var {} b)))
         "#;
-        let dag = parse_and_lower(src);
-        // a, b, MaxElem(a, b)
-        assert_eq!(dag.len(), 3);
-        let node = dag.get(NodeId(2)).unwrap();
-        assert_eq!(node.op, RiscOp::MaxElem);
+            let dag = parse_and_lower(src, runtime);
+            // a, b, MaxElem(a, b)
+            assert_eq!(dag.len(), 3);
+            let node = dag.get(NodeId(2)).unwrap();
+            assert_eq!(node.op, RiscOp::MaxElem);
+        })
     }
 
     #[test]
     fn lower_not_decomposes() {
-        let src = r#"
+        crate::lowering_runtime::with_native_lowering_runtime(|runtime| {
+            let src = r#"
             (def {} a (lit {type: (t-tensor {} (t-prim {} bool))} true))
             (def {} b (app {} (var {} not) (var {} a)))
         "#;
-        let dag = parse_and_lower(src);
-        // a, Const(1), CmpLt(a, 1)
-        assert_eq!(non_drop_len(&dag), 3);
-        assert_eq!(root_node(&dag).op, RiscOp::CmpLt);
+            let dag = parse_and_lower(src, runtime);
+            // a, Const(1), CmpLt(a, 1)
+            assert_eq!(non_drop_len(&dag), 3);
+            assert_eq!(root_node(&dag).op, RiscOp::CmpLt);
+        })
     }
 
     // --- H3: Movement op stubs ---
 
     #[test]
     fn lower_reshape_recognized() {
-        let src = r#"
+        crate::lowering_runtime::with_native_lowering_runtime(|runtime| {
+            let src = r#"
             (def {} x (var {type: (t-tensor {} (d-lit {} 4) (t-prim {} f32))} x))
             (def {} y (app {type: (t-tensor {} (d-lit {} 4) (t-prim {} f32))} (var {} reshape) (var {} x)))
         "#;
-        let dag = parse_and_lower(src);
-        let last = dag.get(NodeId(dag.len() - 1)).unwrap();
-        assert!(matches!(last.op, RiscOp::Reshape { .. }));
-        assert!(verify::verify(&dag).is_empty());
+            let dag = parse_and_lower(src, runtime);
+            let last = dag.get(NodeId(dag.len() - 1)).unwrap();
+            assert!(matches!(last.op, RiscOp::Reshape { .. }));
+            assert!(verify::verify(&dag).is_empty());
+        })
     }
 
     #[test]
     fn lower_pad_recognized() {
-        let src = r#"
+        crate::lowering_runtime::with_native_lowering_runtime(|runtime| {
+            let src = r#"
             (def {} x (var {type: (t-tensor {} (d-lit {} 4) (t-prim {} f32))} x))
             (def {} y
               (app {type: (t-tensor {} (d-lit {} 6) (t-prim {} f32))}
@@ -22970,15 +23294,17 @@ mod tests {
                         (var {} Nil))
                    0.0))
         "#;
-        let dag = parse_and_lower_unchecked(src);
-        let last = dag.get(NodeId(dag.len() - 1)).unwrap();
-        assert!(matches!(last.op, RiscOp::Pad { .. }));
-        assert!(verify::verify(&dag).is_empty());
+            let dag = parse_and_lower_unchecked(src, runtime);
+            let last = dag.get(NodeId(dag.len() - 1)).unwrap();
+            assert!(matches!(last.op, RiscOp::Pad { .. }));
+            assert!(verify::verify(&dag).is_empty());
+        })
     }
 
     #[test]
     fn lower_shrink_recognized() {
-        let src = r#"
+        crate::lowering_runtime::with_native_lowering_runtime(|runtime| {
+            let src = r#"
             (def {} x (var {type: (t-tensor {} (d-lit {} 4) (t-prim {} f32))} x))
             (def {} y
               (app {type: (t-tensor {} (d-lit {} 2) (t-prim {} f32))}
@@ -22992,14 +23318,16 @@ mod tests {
                                   (var {} Nil)))
                         (var {} Nil))))
         "#;
-        let dag = parse_and_lower_unchecked(src);
-        let last = dag.get(NodeId(dag.len() - 1)).unwrap();
-        assert!(matches!(last.op, RiscOp::Shrink { .. }));
+            let dag = parse_and_lower_unchecked(src, runtime);
+            let last = dag.get(NodeId(dag.len() - 1)).unwrap();
+            assert!(matches!(last.op, RiscOp::Shrink { .. }));
+        })
     }
 
     #[test]
     fn lower_stride_recognized() {
-        let src = r#"
+        crate::lowering_runtime::with_native_lowering_runtime(|runtime| {
+            let src = r#"
             (def {} x (var {type: (t-tensor {} (d-lit {} 4) (t-prim {} f32))} x))
             (def {} y
               (app {type: (t-tensor {} (d-lit {} 2) (t-prim {} f32))}
@@ -23007,10 +23335,11 @@ mod tests {
                    (var {} x)
                    2))
         "#;
-        let dag = parse_and_lower_unchecked(src);
-        let last = dag.get(NodeId(dag.len() - 1)).unwrap();
-        assert!(matches!(last.op, RiscOp::Stride { .. }));
-        assert!(verify::verify(&dag).is_empty());
+            let dag = parse_and_lower_unchecked(src, runtime);
+            let last = dag.get(NodeId(dag.len() - 1)).unwrap();
+            assert!(matches!(last.op, RiscOp::Stride { .. }));
+            assert!(verify::verify(&dag).is_empty());
+        })
     }
 
     /// Issue #291: a `shrink` bound literal written as a Surf-desugared
@@ -23024,11 +23353,12 @@ mod tests {
     /// "failed to construct backward DAG" error in the issue.
     #[test]
     fn lower_shrink_cast_wrapped_cons_bounds_issue_291() {
-        // The exact desugared Deep that Surf emits for
-        // `shrink(x, [[cast(0, i32), cast(2, i32)]])`: an outer
-        // `Cons(pair, Nil)`, where `pair` is `Cons(cast(0), Cons(cast(2),
-        // Nil))` and each `cast` wraps an i32 `lit`.
-        let src = r#"
+        crate::lowering_runtime::with_native_lowering_runtime(|runtime| {
+            // The exact desugared Deep that Surf emits for
+            // `shrink(x, [[cast(0, i32), cast(2, i32)]])`: an outer
+            // `Cons(pair, Nil)`, where `pair` is `Cons(cast(0), Cons(cast(2),
+            // Nil))` and each `cast` wraps an i32 `lit`.
+            let src = r#"
             (def {} x (var {type: (t-tensor {} (d-lit {} 4) (t-prim {} f32))} x))
             (def {} y
               (app {type: (t-tensor {} (d-lit {} 2) (t-prim {} f32))}
@@ -23042,21 +23372,22 @@ mod tests {
                                   (var {} Nil)))
                         (var {} Nil))))
         "#;
-        let dag = parse_and_lower_unchecked(src);
-        let bounds = dag
-            .nodes()
-            .iter()
-            .find_map(|n| match &n.op {
-                RiscOp::Shrink { bounds } => Some(bounds.clone()),
-                _ => None,
-            })
-            .expect("a Shrink node must be present");
-        assert_eq!(
-            bounds,
-            vec![(RtDim::Lit(0), RtDim::Lit(2))],
-            "cast-wrapped cons-chain bounds must extract to (0, 2), not an empty list",
-        );
-        assert!(verify::verify(&dag).is_empty());
+            let dag = parse_and_lower_unchecked(src, runtime);
+            let bounds = dag
+                .nodes()
+                .iter()
+                .find_map(|n| match &n.op {
+                    RiscOp::Shrink { bounds } => Some(bounds.clone()),
+                    _ => None,
+                })
+                .expect("a Shrink node must be present");
+            assert_eq!(
+                bounds,
+                vec![(RtDim::Lit(0), RtDim::Lit(2))],
+                "cast-wrapped cons-chain bounds must extract to (0, 2), not an empty list",
+            );
+            assert!(verify::verify(&dag).is_empty());
+        })
     }
 
     /// Negative parity for #291: the plain (non-cast) `Cons`-chain bound
@@ -23064,7 +23395,8 @@ mod tests {
     /// `extract_int_for_dim` did not regress the literal path.
     #[test]
     fn lower_shrink_plain_cons_bounds_still_extract_issue_291() {
-        let src = r#"
+        crate::lowering_runtime::with_native_lowering_runtime(|runtime| {
+            let src = r#"
             (def {} x (var {type: (t-tensor {} (d-lit {} 4) (t-prim {} f32))} x))
             (def {} y
               (app {type: (t-tensor {} (d-lit {} 2) (t-prim {} f32))}
@@ -23078,51 +23410,56 @@ mod tests {
                                   (var {} Nil)))
                         (var {} Nil))))
         "#;
-        let dag = parse_and_lower_unchecked(src);
-        let bounds = dag
-            .nodes()
-            .iter()
-            .find_map(|n| match &n.op {
-                RiscOp::Shrink { bounds } => Some(bounds.clone()),
-                _ => None,
-            })
-            .expect("a Shrink node must be present");
-        assert_eq!(
-            bounds,
-            vec![(RtDim::Lit(0), RtDim::Lit(2))],
-            "plain cons-chain bounds must still extract to (0, 2)",
-        );
+            let dag = parse_and_lower_unchecked(src, runtime);
+            let bounds = dag
+                .nodes()
+                .iter()
+                .find_map(|n| match &n.op {
+                    RiscOp::Shrink { bounds } => Some(bounds.clone()),
+                    _ => None,
+                })
+                .expect("a Shrink node must be present");
+            assert_eq!(
+                bounds,
+                vec![(RtDim::Lit(0), RtDim::Lit(2))],
+                "plain cons-chain bounds must still extract to (0, 2)",
+            );
+        })
     }
 
     // --- H4: sum/max_reduce lowering ---
 
     #[test]
     fn lower_sum_reduction() {
-        let src = r#"
+        crate::lowering_runtime::with_native_lowering_runtime(|runtime| {
+            let src = r#"
             (def {} x (lit {type: (t-tensor {} (d-lit {} 1) (t-prim {} f32))} 1.0))
             (def {} y (app {type: (t-tensor {} (t-prim {} f32))} (var {} sum) (var {} x) (lit {} 0)))
         "#;
-        let dag = parse_and_lower(src);
-        // x=Const(1), axis_const=Const(0) is lowered inline, Sum{axis:0}
-        let found_sum = dag
-            .nodes()
-            .iter()
-            .any(|n| matches!(n.op, RiscOp::Sum { axis: 0, .. }));
-        assert!(found_sum, "expected a Sum{{axis:0}} node");
+            let dag = parse_and_lower(src, runtime);
+            // x=Const(1), axis_const=Const(0) is lowered inline, Sum{axis:0}
+            let found_sum = dag
+                .nodes()
+                .iter()
+                .any(|n| matches!(n.op, RiscOp::Sum { axis: 0, .. }));
+            assert!(found_sum, "expected a Sum{{axis:0}} node");
+        })
     }
 
     #[test]
     fn lower_max_reduce_reduction() {
-        let src = r#"
+        crate::lowering_runtime::with_native_lowering_runtime(|runtime| {
+            let src = r#"
             (def {} x (lit {type: (t-tensor {} (d-lit {} 1) (t-prim {} f32))} 1.0))
             (def {} y (app {type: (t-tensor {} (t-prim {} f32))} (var {} max_reduce) (var {} x) (lit {} 0)))
         "#;
-        let dag = parse_and_lower(src);
-        let found = dag
-            .nodes()
-            .iter()
-            .any(|n| matches!(n.op, RiscOp::MaxReduce { axis: 0 }));
-        assert!(found, "expected a MaxReduce{{axis:0}} node");
+            let dag = parse_and_lower(src, runtime);
+            let found = dag
+                .nodes()
+                .iter()
+                .any(|n| matches!(n.op, RiscOp::MaxReduce { axis: 0 }));
+            assert!(found, "expected a MaxReduce{{axis:0}} node");
+        })
     }
 
     /// Issue #320: a `max_reduce` whose operand node lowered to the rank-0
@@ -23134,31 +23471,33 @@ mod tests {
     /// re-inserted at the reduction axis.
     #[test]
     fn issue_320_max_reduce_recovers_rank_from_ascription() {
-        // `w` (the stacked operand) carries NO type -> rank-0 node. The
-        // max_reduce app is typed `[m]` (rank 1). Before the fix this
-        // panicked with the rank-0 diagnostic.
-        let src = r#"
+        crate::lowering_runtime::with_native_lowering_runtime(|runtime| {
+            // `w` (the stacked operand) carries NO type -> rank-0 node. The
+            // max_reduce app is typed `[m]` (rank 1). Before the fix this
+            // panicked with the rank-0 diagnostic.
+            let src = r#"
             (def {} w (var {} w))
             (def {} y
               (app {type: (t-tensor {} (d-name {} m) (t-prim {} f32))}
                    (var {} max_reduce) (var {} w) (lit {} 0)))
         "#;
-        let dag = parse_and_lower_unchecked(src);
-        let mr = dag
-            .nodes()
-            .iter()
-            .find(|n| matches!(n.op, RiscOp::MaxReduce { axis: 0 }))
-            .expect("max_reduce must lower (issue #320)");
-        // Result is the ascribed `[m]`.
-        assert_eq!(mr.output_type.dims.len(), 1, "max_reduce result rank 1");
-        // The operand node was recovered to rank 2 (`[reduced_axis, m]`),
-        // so the reduction axis is in range and the adjoint can carry it.
-        let operand = dag.get(mr.inputs[0]).expect("operand node");
-        assert_eq!(
-            operand.output_type.dims.len(),
-            2,
-            "operand rank must be recovered to result_rank + 1 (issue #320)",
-        );
+            let dag = parse_and_lower_unchecked(src, runtime);
+            let mr = dag
+                .nodes()
+                .iter()
+                .find(|n| matches!(n.op, RiscOp::MaxReduce { axis: 0 }))
+                .expect("max_reduce must lower (issue #320)");
+            // Result is the ascribed `[m]`.
+            assert_eq!(mr.output_type.dims.len(), 1, "max_reduce result rank 1");
+            // The operand node was recovered to rank 2 (`[reduced_axis, m]`),
+            // so the reduction axis is in range and the adjoint can carry it.
+            let operand = dag.get(mr.inputs[0]).expect("operand node");
+            assert_eq!(
+                operand.output_type.dims.len(),
+                2,
+                "operand rank must be recovered to result_rank + 1 (issue #320)",
+            );
+        })
     }
 
     /// Issue #320 end-to-end (max_reduce): a windowed operand that lowers to
@@ -23171,13 +23510,14 @@ mod tests {
     /// indices {2, 3}, so `df/dx = [0, 0, 1, 1]`.
     #[test]
     fn issue_320_grad_eval_windowed_max_reduce_end_to_end() {
-        use crate::eval::{TensorValue, eval_tensor};
-        use crate::grad::grad_dag_checked;
+        crate::lowering_runtime::with_native_lowering_runtime(|runtime| {
+            use crate::eval::{TensorValue, eval_tensor};
+            use crate::grad::grad_dag_checked;
 
-        // `w = reshape(x, [2,2])` with NO type on the reshape app -> rank-0
-        // operand node, but a real producer (Reshape over the `x` Load).
-        // `max_reduce(w, 0)` is typed `[2]`; `sum(..., 0)` -> scalar loss.
-        let src = r#"
+            // `w = reshape(x, [2,2])` with NO type on the reshape app -> rank-0
+            // operand node, but a real producer (Reshape over the `x` Load).
+            // `max_reduce(w, 0)` is typed `[2]`; `sum(..., 0)` -> scalar loss.
+            let src = r#"
             (def {} x (var {type: (t-tensor {} (d-lit {} 4) (t-prim {} f32))} x))
             (def {} w (app {} (var {} reshape) (var {} x)
                           (app {} (var {} Cons) (lit {} 2)
@@ -23187,40 +23527,41 @@ mod tests {
             (def {} loss (app {type: (t-tensor {} (t-prim {} f32))}
                               (var {} sum) (var {} m) (lit {} 0)))
         "#;
-        let dag = parse_and_lower_unchecked(src);
-        // The loss is the scalar `Sum` consuming the `MaxReduce`.
-        let mr_id = dag
-            .nodes()
-            .iter()
-            .find(|n| matches!(n.op, RiscOp::MaxReduce { .. }))
-            .expect("max_reduce node")
-            .id;
-        let loss = dag
-            .nodes()
-            .iter()
-            .find(|n| matches!(n.op, RiscOp::Sum { .. }) && n.inputs.contains(&mr_id))
-            .expect("loss sum node")
-            .id;
-        let x_node = dag
-            .nodes()
-            .iter()
-            .find(|n| matches!(&n.op, RiscOp::Load { name } if name.as_str() == "x"))
-            .expect("x load")
-            .id;
-        let result = grad_dag_checked(&dag, loss, &[x_node])
-            .expect("grad through windowed max_reduce must construct (issue #320)");
-        let grad_x = result.grad_nodes[&x_node];
-        let mut inputs = chelis_unord::UnordMap::new();
-        inputs.insert(
-            "x".to_string(),
-            TensorValue::from_vec(vec![4], vec![1.0, 2.0, 4.0, 3.0]),
-        );
-        let vals = eval_tensor(&result.dag, &inputs).expect("windowed max_reduce grad eval");
-        assert_eq!(
-            vals[&grad_x].to_f64_lossy_vec(),
-            vec![0.0, 0.0, 1.0, 1.0],
-            "subgradient must route to each column's argmax (issue #320)",
-        );
+            let dag = parse_and_lower_unchecked(src, runtime);
+            // The loss is the scalar `Sum` consuming the `MaxReduce`.
+            let mr_id = dag
+                .nodes()
+                .iter()
+                .find(|n| matches!(n.op, RiscOp::MaxReduce { .. }))
+                .expect("max_reduce node")
+                .id;
+            let loss = dag
+                .nodes()
+                .iter()
+                .find(|n| matches!(n.op, RiscOp::Sum { .. }) && n.inputs.contains(&mr_id))
+                .expect("loss sum node")
+                .id;
+            let x_node = dag
+                .nodes()
+                .iter()
+                .find(|n| matches!(&n.op, RiscOp::Load { name } if name.as_str() == "x"))
+                .expect("x load")
+                .id;
+            let result = grad_dag_checked(&dag, loss, &[x_node])
+                .expect("grad through windowed max_reduce must construct (issue #320)");
+            let grad_x = result.grad_nodes[&x_node];
+            let mut inputs = chelis_unord::UnordMap::new();
+            inputs.insert(
+                "x".to_string(),
+                TensorValue::from_vec(vec![4], vec![1.0, 2.0, 4.0, 3.0]),
+            );
+            let vals = eval_tensor(&result.dag, &inputs).expect("windowed max_reduce grad eval");
+            assert_eq!(
+                vals[&grad_x].to_f64_lossy_vec(),
+                vec![0.0, 0.0, 1.0, 1.0],
+                "subgradient must route to each column's argmax (issue #320)",
+            );
+        })
     }
 
     /// chelis#369 end-to-end: the `tensor_full_like` loss body — `len =
@@ -23234,14 +23575,15 @@ mod tests {
     /// (where the bug lives), then grad + eval.
     #[test]
     fn issue_369_grad_eval_let_bound_fulllike_end_to_end() {
-        use crate::eval::{TensorValue, eval_tensor};
-        use crate::grad::grad_dag_checked;
+        crate::lowering_runtime::with_native_lowering_runtime(|runtime| {
+            use crate::eval::{TensorValue, eval_tensor};
+            use crate::grad::grad_dag_checked;
 
-        // `def loss(x: tensor[3, f32]) = {
-        //    len  = shape(x, 0)
-        //    twos = insert(scalar_to_tensor(2.0), 0, cast(len, i32))
-        //    sum(mul(x, twos), 0) }`  -- the exact `tensor_full_like` shape.
-        let body = r#"
+            // `def loss(x: tensor[3, f32]) = {
+            //    len  = shape(x, 0)
+            //    twos = insert(scalar_to_tensor(2.0), 0, cast(len, i32))
+            //    sum(mul(x, twos), 0) }`  -- the exact `tensor_full_like` shape.
+            let body = r#"
             (let {}
                  (bind {}
                        len
@@ -23267,80 +23609,83 @@ mod tests {
                                 (var {} twos))
                            (cast {} (lit {} 0) (t-prim {} i32)))))
         "#;
-        let dag = lower_body_with_bound_x(3, body);
-        // The loss is the scalar `Sum` over `mul(x, twos)`.
-        let loss = dag
-            .nodes()
-            .iter()
-            .find(|n| matches!(n.op, RiscOp::Sum { .. }))
-            .expect("loss sum node")
-            .id;
-        let x_node = dag
-            .nodes()
-            .iter()
-            .find(|n| matches!(&n.op, RiscOp::Load { name } if name.as_str() == "x"))
-            .expect("x load")
-            .id;
-        let result = grad_dag_checked(&dag, loss, &[x_node]).unwrap_or_else(|e| {
-            panic!("grad through let-bound tensor_full_like must construct (chelis#369); got {e:?}")
-        });
-        let grad_x = result.grad_nodes[&x_node];
+            let dag = lower_body_with_bound_x(3, body, runtime);
+            // The loss is the scalar `Sum` over `mul(x, twos)`.
+            let loss = dag
+                .nodes()
+                .iter()
+                .find(|n| matches!(n.op, RiscOp::Sum { .. }))
+                .expect("loss sum node")
+                .id;
+            let x_node = dag
+                .nodes()
+                .iter()
+                .find(|n| matches!(&n.op, RiscOp::Load { name } if name.as_str() == "x"))
+                .expect("x load")
+                .id;
+            let result = grad_dag_checked(&dag, loss, &[x_node]).unwrap_or_else(|e| {
+                panic!(
+                    "grad through let-bound tensor_full_like must construct (chelis#369); got {e:?}"
+                )
+            });
+            let grad_x = result.grad_nodes[&x_node];
 
-        // Analytic: df/dx = [2, 2, 2] for any x.
-        let mut inputs = chelis_unord::UnordMap::new();
-        inputs.insert(
-            "x".to_string(),
-            TensorValue::from_vec(vec![3], vec![1.0, 2.0, 3.0]),
-        );
-        let vals = eval_tensor(&result.dag, &inputs).expect("grad eval");
-        assert_eq!(
-            vals[&grad_x].to_f64_lossy_vec(),
-            vec![2.0, 2.0, 2.0],
-            "d sum(2x) / dx must be [2, 2, 2] (chelis#369)",
-        );
-        assert_eq!(
-            vals[&grad_x].shape,
-            vec![3],
-            "gradient must be tensor[3] (chelis#369)",
-        );
+            // Analytic: df/dx = [2, 2, 2] for any x.
+            let mut inputs = chelis_unord::UnordMap::new();
+            inputs.insert(
+                "x".to_string(),
+                TensorValue::from_vec(vec![3], vec![1.0, 2.0, 3.0]),
+            );
+            let vals = eval_tensor(&result.dag, &inputs).expect("grad eval");
+            assert_eq!(
+                vals[&grad_x].to_f64_lossy_vec(),
+                vec![2.0, 2.0, 2.0],
+                "d sum(2x) / dx must be [2, 2, 2] (chelis#369)",
+            );
+            assert_eq!(
+                vals[&grad_x].shape,
+                vec![3],
+                "gradient must be tensor[3] (chelis#369)",
+            );
 
-        // Finite-difference cross-check of the analytic gradient against the
-        // forward loss DAG (backend-numerics discipline).
-        let base = [0.7f64, -1.3, 2.1];
-        let analytic = {
-            let mut ip = chelis_unord::UnordMap::new();
-            ip.insert(
-                "x".to_string(),
-                TensorValue::from_vec(vec![3], base.to_vec()),
-            );
-            eval_tensor(&result.dag, &ip).expect("analytic grad eval")[&grad_x]
-                .to_f64_lossy_vec()
-                .clone()
-        };
-        let h = 1e-3;
-        for (j, a) in analytic.iter().enumerate() {
-            let mut plus = base;
-            let mut minus = base;
-            plus[j] += h;
-            minus[j] -= h;
-            let mut ip = chelis_unord::UnordMap::new();
-            ip.insert(
-                "x".to_string(),
-                TensorValue::from_vec(vec![3], plus.to_vec()),
-            );
-            let mut im = chelis_unord::UnordMap::new();
-            im.insert(
-                "x".to_string(),
-                TensorValue::from_vec(vec![3], minus.to_vec()),
-            );
-            let fp = eval_tensor(&dag, &ip).expect("plus eval")[&loss].to_f64_lossy_vec()[0];
-            let fm = eval_tensor(&dag, &im).expect("minus eval")[&loss].to_f64_lossy_vec()[0];
-            let numerical = (fp - fm) / (2.0 * h);
-            assert!(
-                (a - numerical).abs() < 1e-3,
-                "finite-diff mismatch at {j}: analytic {a}, numerical {numerical}",
-            );
-        }
+            // Finite-difference cross-check of the analytic gradient against the
+            // forward loss DAG (backend-numerics discipline).
+            let base = [0.7f64, -1.3, 2.1];
+            let analytic = {
+                let mut ip = chelis_unord::UnordMap::new();
+                ip.insert(
+                    "x".to_string(),
+                    TensorValue::from_vec(vec![3], base.to_vec()),
+                );
+                eval_tensor(&result.dag, &ip).expect("analytic grad eval")[&grad_x]
+                    .to_f64_lossy_vec()
+                    .clone()
+            };
+            let h = 1e-3;
+            for (j, a) in analytic.iter().enumerate() {
+                let mut plus = base;
+                let mut minus = base;
+                plus[j] += h;
+                minus[j] -= h;
+                let mut ip = chelis_unord::UnordMap::new();
+                ip.insert(
+                    "x".to_string(),
+                    TensorValue::from_vec(vec![3], plus.to_vec()),
+                );
+                let mut im = chelis_unord::UnordMap::new();
+                im.insert(
+                    "x".to_string(),
+                    TensorValue::from_vec(vec![3], minus.to_vec()),
+                );
+                let fp = eval_tensor(&dag, &ip).expect("plus eval")[&loss].to_f64_lossy_vec()[0];
+                let fm = eval_tensor(&dag, &im).expect("minus eval")[&loss].to_f64_lossy_vec()[0];
+                let numerical = (fp - fm) / (2.0 * h);
+                assert!(
+                    (a - numerical).abs() < 1e-3,
+                    "finite-diff mismatch at {j}: analytic {a}, numerical {numerical}",
+                );
+            }
+        })
     }
 
     /// Issue #320 end-to-end (gather): a windowed `values` operand that
@@ -23351,10 +23696,11 @@ mod tests {
     /// scatter-add adjoint gives `df/dx = [1, 0, 1, 0]`.
     #[test]
     fn issue_320_grad_eval_windowed_gather_end_to_end() {
-        use crate::eval::{TensorValue, eval_tensor};
-        use crate::grad::grad_dag_checked;
+        crate::lowering_runtime::with_native_lowering_runtime(|runtime| {
+            use crate::eval::{TensorValue, eval_tensor};
+            use crate::grad::grad_dag_checked;
 
-        let src = r#"
+            let src = r#"
             (def {} x (var {type: (t-tensor {} (d-lit {} 4) (t-prim {} f32))} x))
             (def {} idx (var {type: (t-tensor {} (d-lit {} 2) (t-prim {} i64))} idx))
             (def {} w (app {} (var {} reshape) (var {} x)
@@ -23364,43 +23710,44 @@ mod tests {
             (def {} loss (app {type: (t-tensor {} (t-prim {} f32))}
                               (var {} sum) (var {} g) (lit {} 0)))
         "#;
-        let dag = parse_and_lower_unchecked(src);
-        let g_id = dag
-            .nodes()
-            .iter()
-            .find(|n| matches!(n.op, RiscOp::Gather { .. }))
-            .expect("gather node")
-            .id;
-        let loss = dag
-            .nodes()
-            .iter()
-            .find(|n| matches!(n.op, RiscOp::Sum { .. }) && n.inputs.contains(&g_id))
-            .expect("loss sum node")
-            .id;
-        let x_node = dag
-            .nodes()
-            .iter()
-            .find(|n| matches!(&n.op, RiscOp::Load { name } if name.as_str() == "x"))
-            .expect("x load")
-            .id;
-        let result = grad_dag_checked(&dag, loss, &[x_node])
-            .expect("grad through windowed gather must construct (issue #320)");
-        let grad_x = result.grad_nodes[&x_node];
-        let mut inputs = chelis_unord::UnordMap::new();
-        inputs.insert(
-            "x".to_string(),
-            TensorValue::from_vec(vec![4], vec![10.0, 20.0, 30.0, 40.0]),
-        );
-        inputs.insert(
-            "idx".to_string(),
-            TensorValue::from_vec(vec![2], vec![0.0, 2.0]),
-        );
-        let vals = eval_tensor(&result.dag, &inputs).expect("windowed gather grad eval");
-        assert_eq!(
-            vals[&grad_x].to_f64_lossy_vec(),
-            vec![1.0, 0.0, 1.0, 0.0],
-            "scatter-add adjoint must route to gathered source slots (issue #320)",
-        );
+            let dag = parse_and_lower_unchecked(src, runtime);
+            let g_id = dag
+                .nodes()
+                .iter()
+                .find(|n| matches!(n.op, RiscOp::Gather { .. }))
+                .expect("gather node")
+                .id;
+            let loss = dag
+                .nodes()
+                .iter()
+                .find(|n| matches!(n.op, RiscOp::Sum { .. }) && n.inputs.contains(&g_id))
+                .expect("loss sum node")
+                .id;
+            let x_node = dag
+                .nodes()
+                .iter()
+                .find(|n| matches!(&n.op, RiscOp::Load { name } if name.as_str() == "x"))
+                .expect("x load")
+                .id;
+            let result = grad_dag_checked(&dag, loss, &[x_node])
+                .expect("grad through windowed gather must construct (issue #320)");
+            let grad_x = result.grad_nodes[&x_node];
+            let mut inputs = chelis_unord::UnordMap::new();
+            inputs.insert(
+                "x".to_string(),
+                TensorValue::from_vec(vec![4], vec![10.0, 20.0, 30.0, 40.0]),
+            );
+            inputs.insert(
+                "idx".to_string(),
+                TensorValue::from_vec(vec![2], vec![0.0, 2.0]),
+            );
+            let vals = eval_tensor(&result.dag, &inputs).expect("windowed gather grad eval");
+            assert_eq!(
+                vals[&grad_x].to_f64_lossy_vec(),
+                vec![1.0, 0.0, 1.0, 0.0],
+                "scatter-add adjoint must route to gathered source slots (issue #320)",
+            );
+        })
     }
 
     /// Issue #320 gather sibling: a `gather` whose `values` operand lowered
@@ -23409,59 +23756,65 @@ mod tests {
     /// of raising the rank-0 diagnostic.
     #[test]
     fn issue_320_gather_recovers_values_rank_from_ascription() {
-        // `values` carries NO type -> rank-0 node. `indices` is `[3]`. The
-        // gather app is typed `[3]` (gather of a rank-1 values over axis 0).
-        let src = r#"
+        crate::lowering_runtime::with_native_lowering_runtime(|runtime| {
+            // `values` carries NO type -> rank-0 node. `indices` is `[3]`. The
+            // gather app is typed `[3]` (gather of a rank-1 values over axis 0).
+            let src = r#"
             (def {} values (var {} values))
             (def {} indices (var {type: (t-tensor {} (d-lit {} 3) (t-prim {} i32))} indices))
             (def {} y
               (app {type: (t-tensor {} (d-lit {} 3) (t-prim {} f32))}
                    (var {} gather) (var {} values) (var {} indices) (lit {} 0)))
         "#;
-        let dag = parse_and_lower_unchecked(src);
-        let g = dag
-            .nodes()
-            .iter()
-            .find(|n| matches!(n.op, RiscOp::Gather { axis: 0 }))
-            .expect("gather must lower (issue #320)");
-        let values = dag.get(g.inputs[0]).expect("values operand node");
-        assert!(
-            !values.output_type.dims.is_empty(),
-            "gather values rank must be recovered to >= 1 (issue #320)",
-        );
+            let dag = parse_and_lower_unchecked(src, runtime);
+            let g = dag
+                .nodes()
+                .iter()
+                .find(|n| matches!(n.op, RiscOp::Gather { axis: 0 }))
+                .expect("gather must lower (issue #320)");
+            let values = dag.get(g.inputs[0]).expect("values operand node");
+            assert!(
+                !values.output_type.dims.is_empty(),
+                "gather values rank must be recovered to >= 1 (issue #320)",
+            );
+        })
     }
 
     // --- C5: CmpLt lowering produces Bool ---
 
     #[test]
     fn lower_cmplt_produces_bool_output() {
-        let src = r#"
+        crate::lowering_runtime::with_native_lowering_runtime(|runtime| {
+            let src = r#"
             (def {} a (lit {type: (t-tensor {} (t-prim {} f32))} 1.0))
             (def {} b (lit {type: (t-tensor {} (t-prim {} f32))} 2.0))
             (def {} c (app {} (var {} cmplt) (var {} a) (var {} b)))
         "#;
-        let dag = parse_and_lower(src);
-        let cmplt_node = dag
-            .nodes()
-            .iter()
-            .find(|n| matches!(n.op, RiscOp::CmpLt))
-            .expect("expected CmpLt node");
-        assert_eq!(
-            cmplt_node.output_type.precision,
-            Prim::Bool,
-            "CmpLt output must be Bool"
-        );
-        assert!(verify::verify(&dag).is_empty());
+            let dag = parse_and_lower(src, runtime);
+            let cmplt_node = dag
+                .nodes()
+                .iter()
+                .find(|n| matches!(n.op, RiscOp::CmpLt))
+                .expect("expected CmpLt node");
+            assert_eq!(
+                cmplt_node.output_type.precision,
+                Prim::Bool,
+                "CmpLt output must be Bool"
+            );
+            assert!(verify::verify(&dag).is_empty());
+        })
     }
 
     // --- C6: type propagation from metadata ---
 
     #[test]
     fn lower_lit_with_type_metadata() {
-        let src = "(def {} x (lit {type: (t-prim {} f64)} 3.14))";
-        let dag = parse_and_lower(src);
-        let node = dag.get(NodeId(0)).unwrap();
-        assert_eq!(node.output_type.precision, Prim::F64);
+        crate::lowering_runtime::with_native_lowering_runtime(|runtime| {
+            let src = "(def {} x (lit {type: (t-prim {} f64)} 3.14))";
+            let dag = parse_and_lower(src, runtime);
+            let node = dag.get(NodeId(0)).unwrap();
+            assert_eq!(node.output_type.precision, Prim::F64);
+        })
     }
 
     /// Negative parity for the row above, and the structural backstop for
@@ -23472,93 +23825,104 @@ mod tests {
     /// a string literal is a lowering rejection, and it says so.
     #[test]
     fn lower_lit_rejects_a_string_literal_with_a_cited_diagnostic() {
-        let expr = chelis_deep::parser::parse_str("(lit {type: (t-prim {} string)} \"hi\")")
-            .expect("parse failed")
-            .into_iter()
-            .next()
-            .expect("one expression");
-        let outcome = catch_lowering(move || {
-            let mut ctx = LowerCtx::new(
-                BTreeMap::new(),
-                BTreeMap::new(),
-                BTreeMap::new(),
-                LinearityInfo::default(),
-            );
-            let _ = ctx.lower_expr(&expr);
-        });
-        let Err(diagnostic) = outcome else {
-            panic!("a string literal has no numeric IR constant and must not lower");
-        };
-        let message = diagnostic.to_string();
-        assert!(
-            message.contains("string literal has no numeric IR constant"),
-            "the rejection must be the cited lowering diagnostic, not \
+        crate::lowering_runtime::with_native_lowering_runtime(|runtime| {
+            let expr = chelis_deep::parser::parse_str("(lit {type: (t-prim {} string)} \"hi\")")
+                .expect("parse failed")
+                .into_iter()
+                .next()
+                .expect("one expression");
+            let outcome = runtime.catch_lowering(move || {
+                let mut ctx = LowerCtx::new(
+                    BTreeMap::new(),
+                    BTreeMap::new(),
+                    BTreeMap::new(),
+                    LinearityInfo::default(),
+                    runtime,
+                );
+                let _ = ctx.lower_expr(&expr);
+            });
+            let Err(diagnostic) = outcome else {
+                panic!("a string literal has no numeric IR constant and must not lower");
+            };
+            let message = diagnostic.to_string();
+            assert!(
+                message.contains("string literal has no numeric IR constant"),
+                "the rejection must be the cited lowering diagnostic, not \
              `finalize_scalar`'s unreachable-arm panic; got: {message}"
-        );
-        assert!(
-            !message.contains("is not a numeric dtype and has no finalize semantics"),
-            "the unreachable-by-construction panic must not be the user-facing \
+            );
+            assert!(
+                !message.contains("is not a numeric dtype and has no finalize semantics"),
+                "the unreachable-by-construction panic must not be the user-facing \
              message; got: {message}"
-        );
+            );
+        })
     }
 
     #[test]
     fn issue_1915_actual_values_precede_formals_and_restore_caller() {
-        let parse = |source: &str| chelis_deep::parser::parse_str(source).unwrap().remove(0);
-        for (params, body) in [("x y", "x) (var {} y"), ("a b", "a) (var {} b")] {
-            let mut ctx = LowerCtx::new(
-                BTreeMap::new(),
-                BTreeMap::from([(
-                    "first".into(),
-                    parse(&format!(
-                        "(fn {{}} (params {{}} {params}) (app {{}} (var {{}} sub) (var {{}} {body})))"
-                    )),
-                )]),
-                BTreeMap::new(),
-                LinearityInfo::default(),
-            );
-            let caller = ctx.lower_expr(&parse("(lit {} 2.0)"));
-            ctx.bindings.insert("x".into(), caller.clone());
-            let result = ctx.lower_expr(&parse("(app {} (var {} first) (lit {} 10.0) (var {} x))"));
-            let root = result.expect_node("scalar result");
-            let values = crate::eval::eval_tensor_roots_with_strict(&ctx.dag, &[root], |_| None)
-                .expect("all actuals were lowered in caller scope");
-            assert_eq!(values[&root].to_f64_lossy_vec(), vec![8.0]);
-            assert_eq!(ctx.bindings["x"].as_single_node(), caller.as_single_node());
-            assert!(!ctx.bindings.contains_key("y"));
-            assert!(!ctx.bindings.contains_key("a"));
-            assert!(!ctx.bindings.contains_key("b"));
-        }
+        crate::lowering_runtime::with_native_lowering_runtime(|runtime| {
+            let parse = |source: &str| chelis_deep::parser::parse_str(source).unwrap().remove(0);
+            for (params, body) in [("x y", "x) (var {} y"), ("a b", "a) (var {} b")] {
+                let mut ctx = LowerCtx::new(
+                    BTreeMap::new(),
+                    BTreeMap::from([(
+                        "first".into(),
+                        parse(&format!(
+                            "(fn {{}} (params {{}} {params}) (app {{}} (var {{}} sub) (var {{}} {body})))"
+                        )),
+                    )]),
+                    BTreeMap::new(),
+                    LinearityInfo::default(),
+                    runtime,
+                );
+                let caller = ctx.lower_expr(&parse("(lit {} 2.0)"));
+                ctx.bindings.insert("x".into(), caller.clone());
+                let result =
+                    ctx.lower_expr(&parse("(app {} (var {} first) (lit {} 10.0) (var {} x))"));
+                let root = result.expect_node("scalar result", runtime);
+                let values =
+                    crate::eval::eval_tensor_roots_with_strict(&ctx.dag, &[root], |_| None)
+                        .expect("all actuals were lowered in caller scope");
+                assert_eq!(values[&root].to_f64_lossy_vec(), vec![8.0]);
+                assert_eq!(ctx.bindings["x"].as_single_node(), caller.as_single_node());
+                assert!(!ctx.bindings.contains_key("y"));
+                assert!(!ctx.bindings.contains_key("a"));
+                assert!(!ctx.bindings.contains_key("b"));
+            }
+        })
     }
 
     #[test]
     fn issue_1915_static_size_actual_precedes_formal_and_restores() {
-        let parse = |source: &str| chelis_deep::parser::parse_str(source).unwrap().remove(0);
-        let mut ctx = LowerCtx::new(
-            BTreeMap::new(),
-            BTreeMap::from([(
-                "repeat".into(),
-                parse(
-                    "(fn {} (params {} n count) (app {} (var {} insert) (lit {} 7.0) (cast {} (lit {} 0) i32) (var {} count)))",
-                ),
-            )]),
-            BTreeMap::new(),
-            LinearityInfo::default(),
-        );
-        let caller = ctx.lower_expr(&parse("(cast {} (lit {} 3) i64)"));
-        ctx.bindings.insert("n".into(), caller.clone());
-        ctx.static_size_bindings.insert("n".into(), 3);
-        let root = ctx
-            .lower_expr(&parse(
-                "(app {} (var {} repeat) (cast {} (lit {} 1) i64) (var {} n))",
-            ))
-            .expect_node("expanded result");
-        let values = crate::eval::eval_tensor_roots_with_strict(&ctx.dag, &[root], |_| None)
-            .expect("static count remains caller-owned");
-        assert_eq!(values[&root].to_f64_lossy_vec(), vec![7.0; 3]);
-        assert_eq!(ctx.static_size_bindings["n"], 3);
-        assert!(!ctx.static_size_bindings.contains_key("count"));
-        assert_eq!(ctx.bindings["n"].as_single_node(), caller.as_single_node());
+        crate::lowering_runtime::with_native_lowering_runtime(|runtime| {
+            let parse = |source: &str| chelis_deep::parser::parse_str(source).unwrap().remove(0);
+            let mut ctx = LowerCtx::new(
+                BTreeMap::new(),
+                BTreeMap::from([(
+                    "repeat".into(),
+                    parse(
+                        "(fn {} (params {} n count) (app {} (var {} insert) (lit {} 7.0) (cast {} (lit {} 0) i32) (var {} count)))",
+                    ),
+                )]),
+                BTreeMap::new(),
+                LinearityInfo::default(),
+                runtime,
+            );
+            let caller = ctx.lower_expr(&parse("(cast {} (lit {} 3) i64)"));
+            ctx.bindings.insert("n".into(), caller.clone());
+            ctx.static_size_bindings.insert("n".into(), 3);
+            let root = ctx
+                .lower_expr(&parse(
+                    "(app {} (var {} repeat) (cast {} (lit {} 1) i64) (var {} n))",
+                ))
+                .expect_node("expanded result", runtime);
+            let values = crate::eval::eval_tensor_roots_with_strict(&ctx.dag, &[root], |_| None)
+                .expect("static count remains caller-owned");
+            assert_eq!(values[&root].to_f64_lossy_vec(), vec![7.0; 3]);
+            assert_eq!(ctx.static_size_bindings["n"], 3);
+            assert!(!ctx.static_size_bindings.contains_key("count"));
+            assert_eq!(ctx.bindings["n"].as_single_node(), caller.as_single_node());
+        })
     }
 
     #[test]
@@ -23612,153 +23976,165 @@ mod tests {
 
     #[test]
     fn issue_794_negative_explicit_seed_reinterprets_signed_int64_bits() {
-        let expr = chelis_deep::parser::parse_str(
-            "(handle-effect {effect: random} \
+        crate::lowering_runtime::with_native_lowering_runtime(|runtime| {
+            let expr = chelis_deep::parser::parse_str(
+                "(handle-effect {effect: random} \
                 (lit {type: (t-prim {} i64)} -1) \
                 (app {type: (t-tensor {} (d-lit {} 2) (t-prim {} f32))} \
                      (var {} uniform_like) \
                      (lit {type: (t-tensor {} (d-lit {} 2) (t-prim {} f32))} 0.0) \
                      (lit {type: (t-prim {} f64)} 0.0) \
                      (lit {type: (t-prim {} f64)} 1.0)))",
-        )
-        .expect("parse handled random expression")
-        .pop()
-        .expect("one expression");
-        let outcome = catch_lowering(move || {
-            let mut ctx = LowerCtx::new(
-                BTreeMap::new(),
-                BTreeMap::new(),
-                BTreeMap::new(),
-                LinearityInfo::default(),
+            )
+            .expect("parse handled random expression")
+            .pop()
+            .expect("one expression");
+            let outcome = runtime.catch_lowering(move || {
+                let mut ctx = LowerCtx::new(
+                    BTreeMap::new(),
+                    BTreeMap::new(),
+                    BTreeMap::new(),
+                    LinearityInfo::default(),
+                    runtime,
+                );
+                ctx.random_seed = Some(7);
+                let _ = ctx.lower_expr(&expr);
+                ctx.dag
+            });
+            let dag = outcome.expect("signed i64 seeds are valid");
+            let seed = dag
+                .nodes()
+                .iter()
+                .find_map(|node| match node.op {
+                    RiscOp::UniformLike { seed, .. } => Some(seed),
+                    _ => None,
+                })
+                .expect("handled body contains a uniform_like node");
+            assert_eq!(
+                seed,
+                u64::MAX,
+                "[05-RNG-1] reinterprets -1i64 as its uint64 two's-complement bits"
             );
-            ctx.random_seed = Some(7);
-            let _ = ctx.lower_expr(&expr);
-            ctx.dag
-        });
-        let dag = outcome.expect("signed i64 seeds are valid");
-        let seed = dag
-            .nodes()
-            .iter()
-            .find_map(|node| match node.op {
-                RiscOp::UniformLike { seed, .. } => Some(seed),
-                _ => None,
-            })
-            .expect("handled body contains a uniform_like node");
-        assert_eq!(
-            seed,
-            u64::MAX,
-            "[05-RNG-1] reinterprets -1i64 as its uint64 two's-complement bits"
-        );
+        })
     }
 
     #[test]
     fn issue_794_non_negative_explicit_seed_still_lowers() {
-        let expr = chelis_deep::parser::parse_str(
-            "(handle-effect {effect: random} \
+        crate::lowering_runtime::with_native_lowering_runtime(|runtime| {
+            let expr = chelis_deep::parser::parse_str(
+                "(handle-effect {effect: random} \
                 (lit {type: (t-prim {} i64)} 7) \
                 (app {type: (t-tensor {} (d-lit {} 2) (t-prim {} f32))} \
                      (var {} uniform_like) \
                      (lit {type: (t-tensor {} (d-lit {} 2) (t-prim {} f32))} 0.0) \
                      (lit {type: (t-prim {} f64)} 0.0) \
                      (lit {type: (t-prim {} f64)} 1.0)))",
-        )
-        .expect("parse handled random expression")
-        .pop()
-        .expect("one expression");
-        let outcome = catch_lowering(move || {
-            let mut ctx = LowerCtx::new(
-                BTreeMap::new(),
-                BTreeMap::new(),
-                BTreeMap::new(),
-                LinearityInfo::default(),
+            )
+            .expect("parse handled random expression")
+            .pop()
+            .expect("one expression");
+            let outcome = runtime.catch_lowering(move || {
+                let mut ctx = LowerCtx::new(
+                    BTreeMap::new(),
+                    BTreeMap::new(),
+                    BTreeMap::new(),
+                    LinearityInfo::default(),
+                    runtime,
+                );
+                let _ = ctx.lower_expr(&expr);
+                ctx.dag
+            });
+            assert!(
+                outcome.is_ok(),
+                "non-negative seed control must lower: {outcome:?}"
             );
-            let _ = ctx.lower_expr(&expr);
-            ctx.dag
-        });
-        assert!(
-            outcome.is_ok(),
-            "non-negative seed control must lower: {outcome:?}"
-        );
+        })
     }
 
     #[test]
     fn issue_794_signed_int64_seed_boundaries_and_exact_cast_stay_admitted() {
-        let cases = [
-            (
-                "(lit {type: (t-prim {} i64)} -9223372036854775808)",
-                i64::MIN as u64,
-            ),
-            (
-                "(lit {type: (t-prim {} i64)} 9223372036854775807)",
-                i64::MAX as u64,
-            ),
-            (
-                "(cast {} (lit {type: (t-prim {} i32)} 7) (t-prim {} i64))",
-                7,
-            ),
-            (
-                "(cast {} (lit {type: (t-prim {} bool)} true) (t-prim {} i64))",
-                1,
-            ),
-            (
-                "(cast {} (lit {type: (t-prim {} f64)} 7.0) (t-prim {} i64))",
-                7,
-            ),
-            (
-                "(cast {} (lit {type: (t-prim {} f64), literal_source: integer} 7) (t-prim {} i64))",
-                7,
-            ),
-        ];
-        let ctx = LowerCtx::new(
-            BTreeMap::new(),
-            BTreeMap::new(),
-            BTreeMap::new(),
-            LinearityInfo::default(),
-        );
-        for (source, expected) in cases {
-            let expr = chelis_deep::parser::parse_str(source)
-                .unwrap_or_else(|error| panic!("parse seed control {source}: {error}"))
-                .pop()
-                .expect("one seed control");
-            assert_eq!(
-                ctx.extract_u64_value(&expr),
-                Some(expected),
-                "signed i64 seed control must remain admitted: {source}"
+        crate::lowering_runtime::with_native_lowering_runtime(|runtime| {
+            let cases = [
+                (
+                    "(lit {type: (t-prim {} i64)} -9223372036854775808)",
+                    i64::MIN as u64,
+                ),
+                (
+                    "(lit {type: (t-prim {} i64)} 9223372036854775807)",
+                    i64::MAX as u64,
+                ),
+                (
+                    "(cast {} (lit {type: (t-prim {} i32)} 7) (t-prim {} i64))",
+                    7,
+                ),
+                (
+                    "(cast {} (lit {type: (t-prim {} bool)} true) (t-prim {} i64))",
+                    1,
+                ),
+                (
+                    "(cast {} (lit {type: (t-prim {} f64)} 7.0) (t-prim {} i64))",
+                    7,
+                ),
+                (
+                    "(cast {} (lit {type: (t-prim {} f64), literal_source: integer} 7) (t-prim {} i64))",
+                    7,
+                ),
+            ];
+            let ctx = LowerCtx::new(
+                BTreeMap::new(),
+                BTreeMap::new(),
+                BTreeMap::new(),
+                LinearityInfo::default(),
+                runtime,
             );
-        }
+            for (source, expected) in cases {
+                let expr = chelis_deep::parser::parse_str(source)
+                    .unwrap_or_else(|error| panic!("parse seed control {source}: {error}"))
+                    .pop()
+                    .expect("one seed control");
+                assert_eq!(
+                    ctx.extract_u64_value(&expr),
+                    Some(expected),
+                    "signed i64 seed control must remain admitted: {source}"
+                );
+            }
+        })
     }
 
     #[test]
     fn issue_794_seed_wrappers_reject_payload_type_disagreement() {
-        let cases = [
-            "(app {type: (t-prim {} i64)} (var {} neg) \
+        crate::lowering_runtime::with_native_lowering_runtime(|runtime| {
+            let cases = [
+                "(app {type: (t-prim {} i64)} (var {} neg) \
                  (lit {type: (t-prim {} bool)} 1))",
-            "(app {type: (t-prim {} i64)} (var {} neg) \
+                "(app {type: (t-prim {} i64)} (var {} neg) \
                  (lit {type: (t-prim {} f64)} 1))",
-            "(app {type: (t-prim {} i64)} (var {} neg) \
+                "(app {type: (t-prim {} i64)} (var {} neg) \
                  (lit {type: (t-prim {} string)} 1))",
-            "(cast {} (lit {type: (t-prim {} bool)} 1) (t-prim {} i64))",
-            "(cast {} (lit {type: (t-prim {} i32)} 7) (t-prim {} i64) trunc)",
-            "(cast {} (cast {} (lit {type: (t-prim {} i32)} 7) \
+                "(cast {} (lit {type: (t-prim {} bool)} 1) (t-prim {} i64))",
+                "(cast {} (lit {type: (t-prim {} i32)} 7) (t-prim {} i64) trunc)",
+                "(cast {} (cast {} (lit {type: (t-prim {} i32)} 7) \
                  (t-prim {} string)) (t-prim {} i64))",
-        ];
-        let ctx = LowerCtx::new(
-            BTreeMap::new(),
-            BTreeMap::new(),
-            BTreeMap::new(),
-            LinearityInfo::default(),
-        );
-        for source in cases {
-            let expr = chelis_deep::parser::parse_str(source)
-                .unwrap_or_else(|error| panic!("parse forged seed {source}: {error}"))
-                .pop()
-                .expect("one forged seed");
-            assert_eq!(
-                ctx.extract_u64_value(&expr),
-                None,
-                "payload/type disagreement must not become a seed: {source}"
+            ];
+            let ctx = LowerCtx::new(
+                BTreeMap::new(),
+                BTreeMap::new(),
+                BTreeMap::new(),
+                LinearityInfo::default(),
+                runtime,
             );
-        }
+            for source in cases {
+                let expr = chelis_deep::parser::parse_str(source)
+                    .unwrap_or_else(|error| panic!("parse forged seed {source}: {error}"))
+                    .pop()
+                    .expect("one forged seed");
+                assert_eq!(
+                    ctx.extract_u64_value(&expr),
+                    None,
+                    "payload/type disagreement must not become a seed: {source}"
+                );
+            }
+        })
     }
 
     /// Negative parity for the typed fold's literal ingress: a BARE atom
@@ -23774,31 +24150,34 @@ mod tests {
     /// is the positive parity: an explicit stamp still folds.
     #[test]
     fn issue_794_bare_atom_seed_payload_requires_an_explicit_stamp() {
-        let cases = [
-            "42",
-            "(cast {} 42 (t-prim {} i64))",
-            "(cast {} 42.0 (t-prim {} i64))",
-            "(cast {} true (t-prim {} i64))",
-            "(app {type: (t-prim {} i64)} (var {} neg) 1)",
-            "(cast {} (cast {} 42 (t-prim {} i32)) (t-prim {} i64))",
-        ];
-        let ctx = LowerCtx::new(
-            BTreeMap::new(),
-            BTreeMap::new(),
-            BTreeMap::new(),
-            LinearityInfo::default(),
-        );
-        for source in cases {
-            let expr = chelis_deep::parser::parse_str(source)
-                .unwrap_or_else(|error| panic!("parse unstamped seed {source}: {error}"))
-                .pop()
-                .expect("one unstamped seed");
-            assert_eq!(
-                ctx.extract_u64_value(&expr),
-                None,
-                "an unstamped literal payload must not become a seed: {source}"
+        crate::lowering_runtime::with_native_lowering_runtime(|runtime| {
+            let cases = [
+                "42",
+                "(cast {} 42 (t-prim {} i64))",
+                "(cast {} 42.0 (t-prim {} i64))",
+                "(cast {} true (t-prim {} i64))",
+                "(app {type: (t-prim {} i64)} (var {} neg) 1)",
+                "(cast {} (cast {} 42 (t-prim {} i32)) (t-prim {} i64))",
+            ];
+            let ctx = LowerCtx::new(
+                BTreeMap::new(),
+                BTreeMap::new(),
+                BTreeMap::new(),
+                LinearityInfo::default(),
+                runtime,
             );
-        }
+            for source in cases {
+                let expr = chelis_deep::parser::parse_str(source)
+                    .unwrap_or_else(|error| panic!("parse unstamped seed {source}: {error}"))
+                    .pop()
+                    .expect("one unstamped seed");
+                assert_eq!(
+                    ctx.extract_u64_value(&expr),
+                    None,
+                    "an unstamped literal payload must not become a seed: {source}"
+                );
+            }
+        })
     }
 
     #[test]
@@ -23831,188 +24210,205 @@ mod tests {
 
     #[test]
     fn issue_794_malformed_cast_modes_use_typed_unsupported_channel() {
-        let seeds = ["(cast {} (lit {type: (t-prim {} i32)} 7) (t-prim {} i64) trunc)"];
-        for seed in seeds {
-            let source = format!(
-                "(handle-effect {{effect: random}} \
+        crate::lowering_runtime::with_native_lowering_runtime(|runtime| {
+            let seeds = ["(cast {} (lit {type: (t-prim {} i32)} 7) (t-prim {} i64) trunc)"];
+            for seed in seeds {
+                let source = format!(
+                    "(handle-effect {{effect: random}} \
                     {seed} \
                     (app {{type: (t-tensor {{}} (d-lit {{}} 2) (t-prim {{}} f32))}} \
                          (var {{}} uniform_like) \
                          (lit {{type: (t-tensor {{}} (d-lit {{}} 2) (t-prim {{}} f32))}} 0.0) \
                          (lit {{type: (t-prim {{}} f64)}} 0.0) \
                          (lit {{type: (t-prim {{}} f64)}} 1.0)))"
-            );
-            let expr = chelis_deep::parser::parse_str(&source)
-                .unwrap_or_else(|error| panic!("parse malformed seed {seed}: {error}"))
-                .pop()
-                .expect("one handled-random expression");
-            let outcome = catch_lowering(move || {
-                let mut ctx = LowerCtx::new(
-                    BTreeMap::new(),
-                    BTreeMap::new(),
-                    BTreeMap::new(),
-                    LinearityInfo::default(),
                 );
-                ctx.random_seed = Some(7);
-                let _ = ctx.lower_expr(&expr);
-            });
-            let diagnostic = outcome.expect_err(&format!(
-                "malformed seed must be rejected, not lowered: {seed}"
-            ));
-            assert!(
-                diagnostic.fatal,
-                "rejection must bypass host fallback: {seed}"
-            );
-            let message = diagnostic.to_string();
-            assert!(message.starts_with("unsupported:"), "{seed}: {message}");
-            assert!(
-                message.contains("[05-RNG-1]") && message.contains("i64"),
-                "{seed}: {message}"
-            );
-        }
+                let expr = chelis_deep::parser::parse_str(&source)
+                    .unwrap_or_else(|error| panic!("parse malformed seed {seed}: {error}"))
+                    .pop()
+                    .expect("one handled-random expression");
+                let outcome = runtime.catch_lowering(move || {
+                    let mut ctx = LowerCtx::new(
+                        BTreeMap::new(),
+                        BTreeMap::new(),
+                        BTreeMap::new(),
+                        LinearityInfo::default(),
+                        runtime,
+                    );
+                    ctx.random_seed = Some(7);
+                    let _ = ctx.lower_expr(&expr);
+                });
+                let diagnostic = outcome.expect_err(&format!(
+                    "malformed seed must be rejected, not lowered: {seed}"
+                ));
+                assert!(
+                    diagnostic.fatal,
+                    "rejection must bypass host fallback: {seed}"
+                );
+                let message = diagnostic.to_string();
+                assert!(message.starts_with("unsupported:"), "{seed}: {message}");
+                assert!(
+                    message.contains("[05-RNG-1]") && message.contains("i64"),
+                    "{seed}: {message}"
+                );
+            }
+        })
     }
 
     #[test]
     fn issue_794_wrong_typed_explicit_seed_uses_typed_unsupported_channel() {
-        let expr = chelis_deep::parser::parse_str(
-            "(handle-effect {effect: random} \
+        crate::lowering_runtime::with_native_lowering_runtime(|runtime| {
+            let expr = chelis_deep::parser::parse_str(
+                "(handle-effect {effect: random} \
                 (lit {type: (t-prim {} f64)} 7) \
                 (app {type: (t-tensor {} (d-lit {} 2) (t-prim {} f32))} \
                      (var {} uniform_like) \
                      (lit {type: (t-tensor {} (d-lit {} 2) (t-prim {} f32))} 0.0) \
                      (lit {type: (t-prim {} f64)} 0.0) \
                      (lit {type: (t-prim {} f64)} 1.0)))",
-        )
-        .expect("parse handled random expression")
-        .pop()
-        .expect("one expression");
-        let outcome = catch_lowering(move || {
-            let mut ctx = LowerCtx::new(
-                BTreeMap::new(),
-                BTreeMap::new(),
-                BTreeMap::new(),
-                LinearityInfo::default(),
+            )
+            .expect("parse handled random expression")
+            .pop()
+            .expect("one expression");
+            let outcome = runtime.catch_lowering(move || {
+                let mut ctx = LowerCtx::new(
+                    BTreeMap::new(),
+                    BTreeMap::new(),
+                    BTreeMap::new(),
+                    LinearityInfo::default(),
+                    runtime,
+                );
+                ctx.random_seed = Some(7);
+                let _ = ctx.lower_expr(&expr);
+            });
+            let diagnostic = outcome.expect_err("an f64 seed is not an i64 seed");
+            assert!(
+                diagnostic.fatal,
+                "host fallback must not swallow the rejection"
             );
-            ctx.random_seed = Some(7);
-            let _ = ctx.lower_expr(&expr);
-        });
-        let diagnostic = outcome.expect_err("an f64 seed is not an i64 seed");
-        assert!(
-            diagnostic.fatal,
-            "host fallback must not swallow the rejection"
-        );
-        let message = diagnostic.to_string();
-        assert!(message.starts_with("unsupported:"), "{message}");
-        assert!(
-            message.contains("[05-RNG-1]") && message.contains("i64"),
-            "{message}"
-        );
+            let message = diagnostic.to_string();
+            assert!(message.starts_with("unsupported:"), "{message}");
+            assert!(
+                message.contains("[05-RNG-1]") && message.contains("i64"),
+                "{message}"
+            );
+        })
     }
 
     #[test]
     fn issue_794_bool_payload_stamped_int64_uses_typed_unsupported_channel() {
-        let expr = chelis_deep::parser::parse_str(
-            "(handle-effect {effect: random} \
+        crate::lowering_runtime::with_native_lowering_runtime(|runtime| {
+            let expr = chelis_deep::parser::parse_str(
+                "(handle-effect {effect: random} \
                 (lit {type: (t-prim {} i64)} true) \
                 (app {type: (t-tensor {} (d-lit {} 2) (t-prim {} f32))} \
                      (var {} uniform_like) \
                      (lit {type: (t-tensor {} (d-lit {} 2) (t-prim {} f32))} 0.0) \
                      (lit {type: (t-prim {} f64)} 0.0) \
                      (lit {type: (t-prim {} f64)} 1.0)))",
-        )
-        .expect("parse handled random expression")
-        .pop()
-        .expect("one expression");
-        let outcome = catch_lowering(move || {
-            let mut ctx = LowerCtx::new(
-                BTreeMap::new(),
-                BTreeMap::new(),
-                BTreeMap::new(),
-                LinearityInfo::default(),
+            )
+            .expect("parse handled random expression")
+            .pop()
+            .expect("one expression");
+            let outcome = runtime.catch_lowering(move || {
+                let mut ctx = LowerCtx::new(
+                    BTreeMap::new(),
+                    BTreeMap::new(),
+                    BTreeMap::new(),
+                    LinearityInfo::default(),
+                    runtime,
+                );
+                ctx.random_seed = Some(7);
+                let _ = ctx.lower_expr(&expr);
+            });
+            let diagnostic = outcome.expect_err("a bool payload is not an i64 seed");
+            assert!(
+                diagnostic.fatal,
+                "host fallback must not swallow the rejection"
             );
-            ctx.random_seed = Some(7);
-            let _ = ctx.lower_expr(&expr);
-        });
-        let diagnostic = outcome.expect_err("a bool payload is not an i64 seed");
-        assert!(
-            diagnostic.fatal,
-            "host fallback must not swallow the rejection"
-        );
-        let message = diagnostic.to_string();
-        assert!(message.starts_with("unsupported:"), "{message}");
-        assert!(
-            message.contains("[05-RNG-1]") && message.contains("i64"),
-            "{message}"
-        );
+            let message = diagnostic.to_string();
+            assert!(message.starts_with("unsupported:"), "{message}");
+            assert!(
+                message.contains("[05-RNG-1]") && message.contains("i64"),
+                "{message}"
+            );
+        })
     }
 
     #[test]
     fn issue_794_runtime_explicit_seed_uses_typed_unsupported_channel() {
-        let expr = chelis_deep::parser::parse_str(
-            "(handle-effect {effect: random} \
+        crate::lowering_runtime::with_native_lowering_runtime(|runtime| {
+            let expr = chelis_deep::parser::parse_str(
+                "(handle-effect {effect: random} \
                 (var {type: (t-prim {} i64)} runtime_seed) \
                 (app {type: (t-tensor {} (d-lit {} 2) (t-prim {} f32))} \
                      (var {} uniform_like) \
                      (lit {type: (t-tensor {} (d-lit {} 2) (t-prim {} f32))} 0.0) \
                      (lit {type: (t-prim {} f64)} 0.0) \
                      (lit {type: (t-prim {} f64)} 1.0)))",
-        )
-        .expect("parse handled random expression")
-        .pop()
-        .expect("one expression");
-        let outcome = catch_lowering(move || {
-            let mut ctx = LowerCtx::new(
-                BTreeMap::new(),
-                BTreeMap::new(),
-                BTreeMap::new(),
-                LinearityInfo::default(),
+            )
+            .expect("parse handled random expression")
+            .pop()
+            .expect("one expression");
+            let outcome = runtime.catch_lowering(move || {
+                let mut ctx = LowerCtx::new(
+                    BTreeMap::new(),
+                    BTreeMap::new(),
+                    BTreeMap::new(),
+                    LinearityInfo::default(),
+                    runtime,
+                );
+                ctx.random_seed = Some(7);
+                let _ = ctx.lower_expr(&expr);
+            });
+            let diagnostic = outcome.expect_err("a runtime seed is not statically resolvable");
+            assert!(
+                diagnostic.fatal,
+                "host fallback must not swallow the rejection"
             );
-            ctx.random_seed = Some(7);
-            let _ = ctx.lower_expr(&expr);
-        });
-        let diagnostic = outcome.expect_err("a runtime seed is not statically resolvable");
-        assert!(
-            diagnostic.fatal,
-            "host fallback must not swallow the rejection"
-        );
-        let message = diagnostic.to_string();
-        assert!(message.starts_with("unsupported:"), "{message}");
-        assert!(
-            message.contains("[05-RNG-1]") && message.contains("i64"),
-            "{message}"
-        );
+            let message = diagnostic.to_string();
+            assert!(message.starts_with("unsupported:"), "{message}");
+            assert!(
+                message.contains("[05-RNG-1]") && message.contains("i64"),
+                "{message}"
+            );
+        })
     }
 
     #[test]
     fn lower_var_with_type_metadata() {
-        let src = "(def {} y (var {type: (t-prim {} f64)} weights))";
-        let dag = parse_and_lower_unchecked(src);
-        let node = dag.get(NodeId(0)).unwrap();
-        assert_eq!(node.output_type.precision, Prim::F64);
+        crate::lowering_runtime::with_native_lowering_runtime(|runtime| {
+            let src = "(def {} y (var {type: (t-prim {} f64)} weights))";
+            let dag = parse_and_lower_unchecked(src, runtime);
+            let node = dag.get(NodeId(0)).unwrap();
+            assert_eq!(node.output_type.precision, Prim::F64);
+        })
     }
 
     // ── Tier-2 rank monomorphization (spec/design/rank_polymorphism.md) ──
 
     #[test]
     fn result_precision_requires_a_checked_numeric_type() {
-        let mut ctx = LowerCtx::new(
-            BTreeMap::new(),
-            BTreeMap::new(),
-            BTreeMap::new(),
-            LinearityInfo::default(),
-        );
-        let tensor = parse_type_expr("(t-tensor {} (d-lit {} 2) (t-var {} p))");
-        assert_eq!(ctx.resolved_type_precision(&tensor), None);
-        ctx.prec_substitutions.insert("p".into(), Prim::F64);
-        assert_eq!(ctx.resolved_type_precision(&tensor), Some(Prim::F64));
-        assert_eq!(
-            ctx.resolved_type_precision(&parse_type_expr("(t-prim {} i64)")),
-            Some(Prim::Int64)
-        );
-        assert_eq!(
-            ctx.resolved_type_precision(&parse_type_expr("(t-tuple {} (t-prim {} f32))")),
-            None
-        );
+        crate::lowering_runtime::with_native_lowering_runtime(|runtime| {
+            let mut ctx = LowerCtx::new(
+                BTreeMap::new(),
+                BTreeMap::new(),
+                BTreeMap::new(),
+                LinearityInfo::default(),
+                runtime,
+            );
+            let tensor = parse_type_expr("(t-tensor {} (d-lit {} 2) (t-var {} p))");
+            assert_eq!(ctx.resolved_type_precision(&tensor), None);
+            ctx.prec_substitutions.insert("p".into(), Prim::F64);
+            assert_eq!(ctx.resolved_type_precision(&tensor), Some(Prim::F64));
+            assert_eq!(
+                ctx.resolved_type_precision(&parse_type_expr("(t-prim {} i64)")),
+                Some(Prim::Int64)
+            );
+            assert_eq!(
+                ctx.resolved_type_precision(&parse_type_expr("(t-tuple {} (t-prim {} f32))")),
+                None
+            );
+        })
     }
 
     fn parse_type_expr(src: &str) -> Expr {
@@ -24028,24 +24424,29 @@ mod tests {
     /// for a concrete-shape tensor.
     #[test]
     fn extract_rank_var_bindings_sole_spread() {
-        let actual = vec![DimInfo::Named("a".into(), None), DimInfo::Lit(4)];
-        let no_positions = UnordMap::new();
+        crate::lowering_runtime::with_native_lowering_runtime(|runtime| {
+            let actual = vec![DimInfo::Named("a".into(), None), DimInfo::Lit(4)];
+            let no_positions = UnordMap::new();
 
-        let bare = parse_type_expr("(t-tensor {} (d-rank {} r) (t-prim {} f32))");
-        assert_eq!(
-            extract_rank_var_bindings(&bare, &actual, &no_positions),
-            vec![("r".to_string(), actual.clone())]
-        );
+            let bare = parse_type_expr("(t-tensor {} (d-rank {} r) (t-prim {} f32))");
+            assert_eq!(
+                extract_rank_var_bindings(&bare, &actual, &no_positions, runtime),
+                vec![("r".to_string(), actual.clone())]
+            );
 
-        let borrowed = parse_type_expr("(t-ref {} (t-tensor {} (d-rank {} rr) (t-prim {} f32)))");
-        assert_eq!(
-            extract_rank_var_bindings(&borrowed, &actual, &no_positions),
-            vec![("rr".to_string(), actual.clone())]
-        );
+            let borrowed =
+                parse_type_expr("(t-ref {} (t-tensor {} (d-rank {} rr) (t-prim {} f32)))");
+            assert_eq!(
+                extract_rank_var_bindings(&borrowed, &actual, &no_positions, runtime),
+                vec![("rr".to_string(), actual.clone())]
+            );
 
-        let concrete =
-            parse_type_expr("(t-tensor {} (d-name {} batch) (d-name {} seq) (t-prim {} f32))");
-        assert!(extract_rank_var_bindings(&concrete, &actual, &no_positions).is_empty());
+            let concrete =
+                parse_type_expr("(t-tensor {} (d-name {} batch) (d-name {} seq) (t-prim {} f32))");
+            assert!(
+                extract_rank_var_bindings(&concrete, &actual, &no_positions, runtime).is_empty()
+            );
+        })
     }
 
     /// chelis#373: a `(d-rank pre) (d-name seq) (d-rank post)` formal whose
@@ -24056,35 +24457,38 @@ mod tests {
     /// than guessing), proving the fallback is the load-bearing recovery.
     #[test]
     fn extract_rank_var_bindings_by_position_when_name_erased() {
-        let formal = parse_type_expr(
-            "(t-ref {} (t-tensor {} (d-rank {} pre) (d-name {} seq) (d-rank {} post) (t-prim {} f32)))",
-        );
-        // Monomorphized actual: seq erased to a concrete Lit at index 1.
-        let actual = vec![DimInfo::Lit(2), DimInfo::Lit(3)];
+        crate::lowering_runtime::with_native_lowering_runtime(|runtime| {
+            let formal = parse_type_expr(
+                "(t-ref {} (t-tensor {} (d-rank {} pre) (d-name {} seq) (d-rank {} post) (t-prim {} f32)))",
+            );
+            // Monomorphized actual: seq erased to a concrete Lit at index 1.
+            let actual = vec![DimInfo::Lit(2), DimInfo::Lit(3)];
 
-        // chelis#549: the anchor is located by its recorded extent `Lit(3)`,
-        // which is unique in the actual, so it resolves to index 1.
-        let positions = UnordMap::from([("seq".to_string(), (1usize, DimInfo::Lit(3)))]);
-        let bindings = extract_rank_var_bindings(&formal, &actual, &positions);
-        assert_eq!(
-            bindings,
-            vec![
-                ("pre".to_string(), vec![DimInfo::Lit(2)]),
-                ("post".to_string(), vec![]),
-            ],
-            "by-position fallback must split at the recorded anchor index"
-        );
+            // chelis#549: the anchor is located by its recorded extent `Lit(3)`,
+            // which is unique in the actual, so it resolves to index 1.
+            let positions = UnordMap::from([("seq".to_string(), (1usize, DimInfo::Lit(3)))]);
+            let bindings = extract_rank_var_bindings(&formal, &actual, &positions, runtime);
+            assert_eq!(
+                bindings,
+                vec![
+                    ("pre".to_string(), vec![DimInfo::Lit(2)]),
+                    ("post".to_string(), vec![]),
+                ],
+                "by-position fallback must split at the recorded anchor index"
+            );
 
-        // A LEADING-spread variant: `(d-rank rest) (d-name seq)` reducing the
-        // trailing axis. `seq` at recorded index 1 splits `rest = [Lit(2)]`.
-        let leading =
-            parse_type_expr("(t-tensor {} (d-rank {} rest) (d-name {} seq) (t-prim {} f32))");
-        let leading_bindings = extract_rank_var_bindings(&leading, &actual, &positions);
-        assert_eq!(
-            leading_bindings,
-            vec![("rest".to_string(), vec![DimInfo::Lit(2)])],
-            "by-position fallback works with a trailing anchor too"
-        );
+            // A LEADING-spread variant: `(d-rank rest) (d-name seq)` reducing the
+            // trailing axis. `seq` at recorded index 1 splits `rest = [Lit(2)]`.
+            let leading =
+                parse_type_expr("(t-tensor {} (d-rank {} rest) (d-name {} seq) (t-prim {} f32))");
+            let leading_bindings =
+                extract_rank_var_bindings(&leading, &actual, &positions, runtime);
+            assert_eq!(
+                leading_bindings,
+                vec![("rest".to_string(), vec![DimInfo::Lit(2)])],
+                "by-position fallback works with a trailing anchor too"
+            );
+        })
     }
 
     /// chelis#373/#549: an out-of-range recorded position whose recorded extent
@@ -24094,7 +24498,8 @@ mod tests {
     /// reached.
     #[test]
     fn extract_rank_var_bindings_rejects_out_of_range_position() {
-        let err = std::panic::catch_unwind(|| {
+        crate::lowering_runtime::with_native_lowering_runtime(|runtime| {
+            let err = std::panic::catch_unwind(|| {
             let formal = parse_type_expr(
                 "(t-ref {} (t-tensor {} (d-rank {} pre) (d-name {} seq) (d-rank {} post) (t-prim {} f32)))",
             );
@@ -24102,17 +24507,18 @@ mod tests {
             // Position 9 is out of range AND extent 99 appears nowhere ->
             // unrecoverable.
             let bad_positions = UnordMap::from([("seq".to_string(), (9usize, DimInfo::Lit(99)))]);
-            let _ = extract_rank_var_bindings(&formal, &actual, &bad_positions);
+            let _ = extract_rank_var_bindings(&formal, &actual, &bad_positions, runtime);
         })
         .expect_err("an unrecoverable anchor must fail loud, not return a partial binding");
-        let msg = err
-            .downcast_ref::<LowerDiagnostic>()
-            .map(ToString::to_string)
-            .unwrap_or_default();
-        assert!(
-            msg.contains("absent from monomorphized actual"),
-            "the loud failure must name the absent-anchor reason, got {msg:?}"
-        );
+            let msg = err
+                .downcast_ref::<LowerDiagnostic>()
+                .map(ToString::to_string)
+                .unwrap_or_default();
+            assert!(
+                msg.contains("absent from monomorphized actual"),
+                "the loud failure must name the absent-anchor reason, got {msg:?}"
+            );
+        })
     }
 
     /// chelis#549 (the headline soundness fix): a recorded position that is
@@ -24121,25 +24527,28 @@ mod tests {
     /// UNIQUE in-range axis, the anchor is relocated there (the permute repro).
     #[test]
     fn extract_rank_var_bindings_relocates_anchor_after_unique_reorder() {
-        let formal = parse_type_expr(
-            "(t-ref {} (t-tensor {} (d-rank {} pre) (d-name {} seq) (d-rank {} post) (t-prim {} f32)))",
-        );
-        // Repro 2's monomorphized, permuted actual: `seq` (Lit(3)) recorded at
-        // index 1 in the bridge formal `[a, seq]`, but a `permute(x, 1, 0)`
-        // reordered the operand to `[Lit(3), Lit(2)]`, so the recorded index 1
-        // now holds `a`'s extent (Lit(2)). The anchor must be relocated to the
-        // unique axis carrying Lit(3) (index 0), not split at the stale 1.
-        let permuted_actual = vec![DimInfo::Lit(3), DimInfo::Lit(2)];
-        let positions = UnordMap::from([("seq".to_string(), (1usize, DimInfo::Lit(3)))]);
-        let bindings = extract_rank_var_bindings(&formal, &permuted_actual, &positions);
-        assert_eq!(
-            bindings,
-            vec![
-                ("pre".to_string(), vec![]),
-                ("post".to_string(), vec![DimInfo::Lit(2)]),
-            ],
-            "a stale in-range index must relocate to the unique extent-matching axis, not split at 1"
-        );
+        crate::lowering_runtime::with_native_lowering_runtime(|runtime| {
+            let formal = parse_type_expr(
+                "(t-ref {} (t-tensor {} (d-rank {} pre) (d-name {} seq) (d-rank {} post) (t-prim {} f32)))",
+            );
+            // Repro 2's monomorphized, permuted actual: `seq` (Lit(3)) recorded at
+            // index 1 in the bridge formal `[a, seq]`, but a `permute(x, 1, 0)`
+            // reordered the operand to `[Lit(3), Lit(2)]`, so the recorded index 1
+            // now holds `a`'s extent (Lit(2)). The anchor must be relocated to the
+            // unique axis carrying Lit(3) (index 0), not split at the stale 1.
+            let permuted_actual = vec![DimInfo::Lit(3), DimInfo::Lit(2)];
+            let positions = UnordMap::from([("seq".to_string(), (1usize, DimInfo::Lit(3)))]);
+            let bindings =
+                extract_rank_var_bindings(&formal, &permuted_actual, &positions, runtime);
+            assert_eq!(
+                bindings,
+                vec![
+                    ("pre".to_string(), vec![]),
+                    ("post".to_string(), vec![DimInfo::Lit(2)]),
+                ],
+                "a stale in-range index must relocate to the unique extent-matching axis, not split at 1"
+            );
+        })
     }
 
     /// chelis#549 negative parity: a stale in-range recorded position whose
@@ -24148,7 +24557,8 @@ mod tests {
     /// possibly-wrong axis. Value alone cannot disambiguate equal-extent axes.
     #[test]
     fn extract_rank_var_bindings_ambiguous_reorder_fails_loud() {
-        let err = std::panic::catch_unwind(|| {
+        crate::lowering_runtime::with_native_lowering_runtime(|runtime| {
+            let err = std::panic::catch_unwind(|| {
             let formal = parse_type_expr(
                 "(t-ref {} (t-tensor {} (d-rank {} pre) (d-name {} seq) (d-rank {} post) (t-prim {} f32)))",
             );
@@ -24158,17 +24568,18 @@ mod tests {
             // holds Lit(3).
             let ambiguous_actual = vec![DimInfo::Lit(2), DimInfo::Lit(2), DimInfo::Lit(3)];
             let positions = UnordMap::from([("seq".to_string(), (2usize, DimInfo::Lit(2)))]);
-            let _ = extract_rank_var_bindings(&formal, &ambiguous_actual, &positions);
+            let _ = extract_rank_var_bindings(&formal, &ambiguous_actual, &positions, runtime);
         })
         .expect_err("an ambiguous post-reorder anchor must fail loud, not split silently");
-        let msg = err
-            .downcast_ref::<LowerDiagnostic>()
-            .map(ToString::to_string)
-            .unwrap_or_default();
-        assert!(
-            msg.contains("chelis#549"),
-            "the loud failure must cite the chelis#549 axis-reorder soundness rule, got {msg:?}"
-        );
+            let msg = err
+                .downcast_ref::<LowerDiagnostic>()
+                .map(ToString::to_string)
+                .unwrap_or_default();
+            assert!(
+                msg.contains("chelis#549"),
+                "the loud failure must cite the chelis#549 axis-reorder soundness rule, got {msg:?}"
+            );
+        })
     }
 
     /// chelis#549 unit coverage of [`recover_anchor_axis`] directly: the
@@ -24278,91 +24689,100 @@ mod tests {
 
     #[test]
     fn checked_result_name_transport_preserves_produced_extent_not_checked_extent() {
-        let mut ctx = LowerCtx::new(
-            BTreeMap::new(),
-            BTreeMap::new(),
-            BTreeMap::new(),
-            LinearityInfo::default(),
-        );
-        let id = ctx.dag.add_node(
-            RiscOp::Load {
-                name: "produced".into(),
-            },
-            vec![],
-            TensorType {
-                dims: vec![DimInfo::Named("raw".into(), Some(7))],
-                precision: Prim::F32,
-            },
-            None,
-        );
-        ctx.refine_checked_result_axis_name(id, 0, &DimInfo::Named("fixed".into(), Some(2)));
-        assert_eq!(
-            ctx.dag.get(id).expect("result").output_type.dims,
-            vec![DimInfo::Named("fixed".into(), Some(7))],
-            "checked optional size is not an imported claim"
-        );
+        crate::lowering_runtime::with_native_lowering_runtime(|runtime| {
+            let mut ctx = LowerCtx::new(
+                BTreeMap::new(),
+                BTreeMap::new(),
+                BTreeMap::new(),
+                LinearityInfo::default(),
+                runtime,
+            );
+            let id = ctx.dag.add_node(
+                RiscOp::Load {
+                    name: "produced".into(),
+                },
+                vec![],
+                TensorType {
+                    dims: vec![DimInfo::Named("raw".into(), Some(7))],
+                    precision: Prim::F32,
+                },
+                None,
+            );
+            ctx.refine_checked_result_axis_name(id, 0, &DimInfo::Named("fixed".into(), Some(2)));
+            assert_eq!(
+                ctx.dag.get(id).expect("result").output_type.dims,
+                vec![DimInfo::Named("fixed".into(), Some(7))],
+                "checked optional size is not an imported claim"
+            );
 
-        ctx.dag.node_mut(id).expect("result").output_type.dims = vec![DimInfo::Lit(3)];
-        ctx.refine_checked_result_axis_name(id, 0, &DimInfo::Named("fixed".into(), Some(2)));
-        assert_eq!(
-            ctx.dag.get(id).expect("result").output_type.dims,
-            vec![DimInfo::Named("fixed".into(), Some(3))],
-            "a produced concrete extent survives the caller-side label"
-        );
+            ctx.dag.node_mut(id).expect("result").output_type.dims = vec![DimInfo::Lit(3)];
+            ctx.refine_checked_result_axis_name(id, 0, &DimInfo::Named("fixed".into(), Some(2)));
+            assert_eq!(
+                ctx.dag.get(id).expect("result").output_type.dims,
+                vec![DimInfo::Named("fixed".into(), Some(3))],
+                "a produced concrete extent survives the caller-side label"
+            );
+        })
     }
 
     #[test]
     fn checked_result_name_transport_preserves_same_shape_producer_types() {
-        let mut ctx = LowerCtx::new(
-            BTreeMap::new(),
-            BTreeMap::new(),
-            BTreeMap::new(),
-            LinearityInfo::default(),
-        );
-        let exact = TensorType {
-            dims: vec![DimInfo::Lit(2)],
-            precision: Prim::F32,
-        };
-        let input = ctx.dag.add_node(
-            RiscOp::Load { name: "x".into() },
-            vec![],
-            exact.clone(),
-            None,
-        );
-        let relu = ctx
-            .dag
-            .add_node(RiscOp::Relu, vec![input], exact.clone(), None);
+        crate::lowering_runtime::with_native_lowering_runtime(|runtime| {
+            let mut ctx = LowerCtx::new(
+                BTreeMap::new(),
+                BTreeMap::new(),
+                BTreeMap::new(),
+                LinearityInfo::default(),
+                runtime,
+            );
+            let exact = TensorType {
+                dims: vec![DimInfo::Lit(2)],
+                precision: Prim::F32,
+            };
+            let input = ctx.dag.add_node(
+                RiscOp::Load { name: "x".into() },
+                vec![],
+                exact.clone(),
+                None,
+            );
+            let relu = ctx
+                .dag
+                .add_node(RiscOp::Relu, vec![input], exact.clone(), None);
 
-        let mut invalid = ctx.dag.clone();
-        invalid.node_mut(relu).expect("relu").output_type.dims[0] =
-            DimInfo::Named("caller".into(), Some(2));
-        assert!(
-            crate::verify::verify(&invalid)
-                .iter()
-                .any(|error| error.contains("relu op")),
-            "directly stamping the primitive demonstrates the invalid representation"
-        );
+            let mut invalid = ctx.dag.clone();
+            invalid.node_mut(relu).expect("relu").output_type.dims[0] =
+                DimInfo::Named("caller".into(), Some(2));
+            assert!(
+                crate::verify::verify(&invalid)
+                    .iter()
+                    .any(|error| error.contains("relu op")),
+                "directly stamping the primitive demonstrates the invalid representation"
+            );
 
-        let view =
-            ctx.refine_checked_result_axis_name(relu, 0, &DimInfo::Named("caller".into(), Some(2)));
-        assert_ne!(view, relu, "the caller label needs its own view node");
-        assert_eq!(
-            ctx.dag.get(relu).expect("relu").output_type,
-            exact,
-            "the same-shape primitive retains the operand's exact type"
-        );
-        let view_node = ctx.dag.get(view).expect("caller view");
-        assert!(matches!(view_node.op, RiscOp::Copy));
-        assert_eq!(view_node.inputs, vec![relu]);
-        assert_eq!(
-            view_node.output_type.dims,
-            vec![DimInfo::Named("caller".into(), Some(2))]
-        );
-        assert!(
-            crate::verify::verify(&ctx.dag).is_empty(),
-            "{:?}",
-            crate::verify::verify(&ctx.dag)
-        );
+            let view = ctx.refine_checked_result_axis_name(
+                relu,
+                0,
+                &DimInfo::Named("caller".into(), Some(2)),
+            );
+            assert_ne!(view, relu, "the caller label needs its own view node");
+            assert_eq!(
+                ctx.dag.get(relu).expect("relu").output_type,
+                exact,
+                "the same-shape primitive retains the operand's exact type"
+            );
+            let view_node = ctx.dag.get(view).expect("caller view");
+            assert!(matches!(view_node.op, RiscOp::Copy));
+            assert_eq!(view_node.inputs, vec![relu]);
+            assert_eq!(
+                view_node.output_type.dims,
+                vec![DimInfo::Named("caller".into(), Some(2))]
+            );
+            assert!(
+                crate::verify::verify(&ctx.dag).is_empty(),
+                "{:?}",
+                crate::verify::verify(&ctx.dag)
+            );
+        })
     }
 
     /// Tier-3: a `(d-rank {} pre) (d-name {} seq) (d-rank {} post)` formal splits
@@ -24370,28 +24790,30 @@ mod tests {
     /// on either side, the lowering twin of `unify_row_against_ground`.
     #[test]
     fn extract_rank_var_bindings_anchored_split() {
-        let formal = parse_type_expr(
-            "(t-ref {} (t-tensor {} (d-rank {} pre) (d-name {} seq) (d-rank {} post) (t-prim {} f32)))",
-        );
-        let actual = vec![
-            DimInfo::Named("batch".into(), None),
-            DimInfo::Named("seq".into(), None),
-            DimInfo::Named("hidden".into(), None),
-        ];
-        let bindings = extract_rank_var_bindings(&formal, &actual, &UnordMap::new());
-        assert_eq!(
-            bindings,
-            vec![
-                (
-                    "pre".to_string(),
-                    vec![DimInfo::Named("batch".into(), None)]
-                ),
-                (
-                    "post".to_string(),
-                    vec![DimInfo::Named("hidden".into(), None)]
-                ),
-            ]
-        );
+        crate::lowering_runtime::with_native_lowering_runtime(|runtime| {
+            let formal = parse_type_expr(
+                "(t-ref {} (t-tensor {} (d-rank {} pre) (d-name {} seq) (d-rank {} post) (t-prim {} f32)))",
+            );
+            let actual = vec![
+                DimInfo::Named("batch".into(), None),
+                DimInfo::Named("seq".into(), None),
+                DimInfo::Named("hidden".into(), None),
+            ];
+            let bindings = extract_rank_var_bindings(&formal, &actual, &UnordMap::new(), runtime);
+            assert_eq!(
+                bindings,
+                vec![
+                    (
+                        "pre".to_string(),
+                        vec![DimInfo::Named("batch".into(), None)]
+                    ),
+                    (
+                        "post".to_string(),
+                        vec![DimInfo::Named("hidden".into(), None)]
+                    ),
+                ]
+            );
+        })
     }
 
     /// `tensor_rank_substitutions` binds a formal `(d-rank {} r)` param to the
@@ -24399,25 +24821,27 @@ mod tests {
     /// boundary), keyed by the rank-var name.
     #[test]
     fn tensor_rank_substitutions_binds_rank_var_to_concrete_dims() {
-        let formals = vec![Some(parse_type_expr(
-            "(t-ref {} (t-tensor {} (d-rank {} r) (t-prim {} f32)))",
-        ))];
-        let actuals = vec![TensorType {
-            dims: vec![
-                DimInfo::Named("a".into(), None),
-                DimInfo::Named("b".into(), None),
-            ],
-            precision: Prim::F32,
-        }];
-        let subst = tensor_rank_substitutions(&formals, &actuals, &UnordMap::new());
-        assert_eq!(
-            subst.get("r"),
-            Some(&vec![
-                DimInfo::Named("a".into(), None),
-                DimInfo::Named("b".into(), None)
-            ]),
-            "rank var `r` must bind to the actual arg's full shape vector"
-        );
+        crate::lowering_runtime::with_native_lowering_runtime(|runtime| {
+            let formals = vec![Some(parse_type_expr(
+                "(t-ref {} (t-tensor {} (d-rank {} r) (t-prim {} f32)))",
+            ))];
+            let actuals = vec![TensorType {
+                dims: vec![
+                    DimInfo::Named("a".into(), None),
+                    DimInfo::Named("b".into(), None),
+                ],
+                precision: Prim::F32,
+            }];
+            let subst = tensor_rank_substitutions(&formals, &actuals, &UnordMap::new(), runtime);
+            assert_eq!(
+                subst.get("r"),
+                Some(&vec![
+                    DimInfo::Named("a".into(), None),
+                    DimInfo::Named("b".into(), None)
+                ]),
+                "rank var `r` must bind to the actual arg's full shape vector"
+            );
+        })
     }
 
     /// chelis#373: `tensor_dim_axis_positions` records a fixed anchor offset
@@ -24529,11 +24953,12 @@ mod tests {
     /// the caller's concrete shape (here `[2, 3]`).
     #[test]
     fn rank_poly_def_lowers_through_concrete_caller() {
-        // Deep form of:
-        //   def relu_forward[r](x: &tensor[..r, f32]) -> tensor[..r, f32] = relu(x)
-        //   def use2d[a, b](x: &tensor[a, b, f32]) -> tensor[a, b, f32] = relu_forward(x)
-        let dag = parse_and_lower(
-            "(defsig {} relu_forward (r) \
+        crate::lowering_runtime::with_native_lowering_runtime(|runtime| {
+            // Deep form of:
+            //   def relu_forward[r](x: &tensor[..r, f32]) -> tensor[..r, f32] = relu(x)
+            //   def use2d[a, b](x: &tensor[a, b, f32]) -> tensor[a, b, f32] = relu_forward(x)
+            let dag = parse_and_lower(
+                "(defsig {} relu_forward (r) \
                (t-fn {} (t-ref {} (t-tensor {} (d-rank {} r) (t-prim {} f32))) \
                         (t-tensor {} (d-rank {} r) (t-prim {} f32)))) \
              (def {} relu_forward \
@@ -24545,26 +24970,28 @@ mod tests {
              (def {} use2d \
                (fn {} (params {} (x {type: (t-ref {} (t-tensor {} (d-var {} a) (d-var {} b) (t-prim {} f32)))})) \
                   (app {} (var {} relu_forward) (var {} x))))",
-        );
-        // The core assertion: lowering *completes* (the pre-feature path
-        // panicked here with the "not yet lowerable" refusal). Every node's
-        // output type is `Dim::Rank`-free by construction — `DimInfo` has no
-        // rank variant — so a successful lowering is exactly a successful
-        // monomorphization. Lock that no node carries a stray named dim that
-        // is the un-substituted rank-var symbol `r` (the symbol would leak
-        // only if a `(d-rank {} r)` were mis-extracted as a named dim).
-        for node in dag.nodes() {
-            for dim in &node.output_type.dims {
-                if let DimInfo::Named(name, _) = dim {
-                    assert_ne!(
-                        name, "r",
-                        "the rank-var symbol `r` must not survive as a named dim after \
+                runtime,
+            );
+            // The core assertion: lowering *completes* (the pre-feature path
+            // panicked here with the "not yet lowerable" refusal). Every node's
+            // output type is `Dim::Rank`-free by construction — `DimInfo` has no
+            // rank variant — so a successful lowering is exactly a successful
+            // monomorphization. Lock that no node carries a stray named dim that
+            // is the un-substituted rank-var symbol `r` (the symbol would leak
+            // only if a `(d-rank {} r)` were mis-extracted as a named dim).
+            for node in dag.nodes() {
+                for dim in &node.output_type.dims {
+                    if let DimInfo::Named(name, _) = dim {
+                        assert_ne!(
+                            name, "r",
+                            "the rank-var symbol `r` must not survive as a named dim after \
                          monomorphization (node op {:?})",
-                        node.op
-                    );
+                            node.op
+                        );
+                    }
                 }
             }
-        }
+        })
     }
 }
 
@@ -24575,7 +25002,7 @@ mod regression_tests {
     use crate::verify;
     use chelis_types::types::Prim;
 
-    fn parse_and_lower(src: &str) -> Dag {
+    fn parse_and_lower(src: &str, runtime: &LoweringRuntime) -> Dag {
         let exprs = chelis_deep::parser::parse_str(src).expect("parse failed");
         let checked = chelis_types::check_ir_program(&exprs, chelis_types::ProgramOrigin::Unlinked)
             .unwrap_or_else(|result| panic!("IR check failed: {:?}", result.errors));
@@ -24583,16 +25010,17 @@ mod regression_tests {
             .unwrap_or_else(|errors| panic!("effect check failed: {errors:?}"));
         let checked = chelis_types::check_linearity(&checked)
             .unwrap_or_else(|errors| panic!("linearity check failed: {errors:?}"));
-        lower_program(&checked)
+        lower_program(&checked, runtime)
     }
 
-    fn parse_and_lower_unchecked(src: &str) -> Dag {
+    fn parse_and_lower_unchecked(src: &str, runtime: &LoweringRuntime) -> Dag {
         let exprs = chelis_deep::parser::parse_str(src).expect("parse failed");
         let mut ctx = LowerCtx::new(
             BTreeMap::new(),
             BTreeMap::new(),
             BTreeMap::new(),
             LinearityInfo::default(),
+            runtime,
         );
         for expr in &exprs {
             let _ = ctx.lower_expr(expr);
@@ -24622,49 +25050,56 @@ mod regression_tests {
     // Fix 1: Tensor type metadata with flat Deep shape format.
     #[test]
     fn fix1_tensor_type_flat_dims() {
-        let src = "(def {} x (lit {type: (t-tensor {} (d-name {} batch) (t-prim {} f32))} 0))";
-        let dag = parse_and_lower(src);
-        let node = dag.get(NodeId(0)).unwrap();
-        assert_eq!(
-            node.output_type.dims,
-            vec![DimInfo::Named("batch".to_string(), None)]
-        );
-        assert_eq!(node.output_type.precision, Prim::F32);
+        crate::lowering_runtime::with_native_lowering_runtime(|runtime| {
+            let src = "(def {} x (lit {type: (t-tensor {} (d-name {} batch) (t-prim {} f32))} 0))";
+            let dag = parse_and_lower(src, runtime);
+            let node = dag.get(NodeId(0)).unwrap();
+            assert_eq!(
+                node.output_type.dims,
+                vec![DimInfo::Named("batch".to_string(), None)]
+            );
+            assert_eq!(node.output_type.precision, Prim::F32);
+        })
     }
 
     #[test]
     fn fix1_tensor_type_multiple_dims() {
-        let src = "(def {} x (lit {type: (t-tensor {} (d-name {} batch) (d-name {} hidden) (t-prim {} f32))} 0))";
-        let dag = parse_and_lower(src);
-        let node = dag.get(NodeId(0)).unwrap();
-        assert_eq!(
-            node.output_type.dims,
-            vec![
-                DimInfo::Named("batch".to_string(), None),
-                DimInfo::Named("hidden".to_string(), None),
-            ]
-        );
-        assert_eq!(node.output_type.precision, Prim::F32);
+        crate::lowering_runtime::with_native_lowering_runtime(|runtime| {
+            let src = "(def {} x (lit {type: (t-tensor {} (d-name {} batch) (d-name {} hidden) (t-prim {} f32))} 0))";
+            let dag = parse_and_lower(src, runtime);
+            let node = dag.get(NodeId(0)).unwrap();
+            assert_eq!(
+                node.output_type.dims,
+                vec![
+                    DimInfo::Named("batch".to_string(), None),
+                    DimInfo::Named("hidden".to_string(), None),
+                ]
+            );
+            assert_eq!(node.output_type.precision, Prim::F32);
+        })
     }
 
     #[test]
     fn fix1_tensor_type_lit_dim() {
-        // Uses an unsupported-precision tensor type (bf16) as the lowerer-only
-        // fixture so the checker would reject it if we ran it. The property
-        // under test is that the lowerer preserves literal-dimension metadata
-        // and non-f32 precisions on its DAG nodes — a property the lowerer
-        // should keep intact even though no front-end source reaches it.
-        let src = "(def {} x (lit {type: (t-tensor {} (d-lit {} 512) (t-prim {} bf16))} 0))";
-        let dag = parse_and_lower_unchecked(src);
-        let node = dag.get(NodeId(0)).unwrap();
-        assert_eq!(node.output_type.dims, vec![DimInfo::Lit(512)]);
-        assert_eq!(node.output_type.precision, Prim::Bf16);
+        crate::lowering_runtime::with_native_lowering_runtime(|runtime| {
+            // Uses an unsupported-precision tensor type (bf16) as the lowerer-only
+            // fixture so the checker would reject it if we ran it. The property
+            // under test is that the lowerer preserves literal-dimension metadata
+            // and non-f32 precisions on its DAG nodes — a property the lowerer
+            // should keep intact even though no front-end source reaches it.
+            let src = "(def {} x (lit {type: (t-tensor {} (d-lit {} 512) (t-prim {} bf16))} 0))";
+            let dag = parse_and_lower_unchecked(src, runtime);
+            let node = dag.get(NodeId(0)).unwrap();
+            assert_eq!(node.output_type.dims, vec![DimInfo::Lit(512)]);
+            assert_eq!(node.output_type.precision, Prim::Bf16);
+        })
     }
 
     // Fix 3: Lexical scoping -- let restores bindings.
     #[test]
     fn fix3_let_multiple_bindings() {
-        let src = r#"
+        crate::lowering_runtime::with_native_lowering_runtime(|runtime| {
+            let src = r#"
             (let {} (bind {} x (lit {type: (t-tensor {} (t-prim {} f32))} 1.0)
                            y (lit {type: (t-tensor {} (t-prim {} f32))} 2.0))
                 (let {}
@@ -24675,46 +25110,52 @@ mod regression_tests {
                       (bind {} __drop_y (app {} (var {} drop) (var {} y)))
                       (var {} out)))))
         "#;
-        let dag = parse_and_lower(src);
-        assert_eq!(non_drop_len(&dag), 3);
-        let add_node = dag.get(NodeId(2)).unwrap();
-        assert_eq!(add_node.op, RiscOp::Add);
-        assert_eq!(add_node.inputs, vec![NodeId(0), NodeId(1)]);
-        assert!(verify::verify(&dag).is_empty());
+            let dag = parse_and_lower(src, runtime);
+            assert_eq!(non_drop_len(&dag), 3);
+            let add_node = dag.get(NodeId(2)).unwrap();
+            assert_eq!(add_node.op, RiscOp::Add);
+            assert_eq!(add_node.inputs, vec![NodeId(0), NodeId(1)]);
+            assert!(verify::verify(&dag).is_empty());
+        })
     }
 
     #[test]
     fn fix3_let_scope_does_not_leak() {
-        let src = r#"
+        crate::lowering_runtime::with_native_lowering_runtime(|runtime| {
+            let src = r#"
             (let {} (bind {} x (lit {} 1.0)) (var {} x))
             (var {} x)
         "#;
-        let dag = parse_and_lower_unchecked(src);
-        let last = dag.get(NodeId(dag.len() - 1)).unwrap();
-        assert!(
-            matches!(&last.op, RiscOp::Load { name } if name == "x"),
-            "x should not be visible after let scope"
-        );
+            let dag = parse_and_lower_unchecked(src, runtime);
+            let last = dag.get(NodeId(dag.len() - 1)).unwrap();
+            assert!(
+                matches!(&last.op, RiscOp::Load { name } if name == "x"),
+                "x should not be visible after let scope"
+            );
+        })
     }
 
     #[test]
     fn fix3_fn_scope_does_not_leak() {
-        let src = r#"
+        crate::lowering_runtime::with_native_lowering_runtime(|runtime| {
+            let src = r#"
             (fn {} (params {} p) (var {} p))
             (var {} p)
         "#;
-        let dag = parse_and_lower_unchecked(src);
-        let last = dag.get(NodeId(dag.len() - 1)).unwrap();
-        assert!(
-            matches!(&last.op, RiscOp::Load { name } if name == "p"),
-            "fn param p should not be visible after fn scope"
-        );
+            let dag = parse_and_lower_unchecked(src, runtime);
+            let last = dag.get(NodeId(dag.len() - 1)).unwrap();
+            assert!(
+                matches!(&last.op, RiscOp::Load { name } if name == "p"),
+                "fn param p should not be visible after fn scope"
+            );
+        })
     }
 
     #[test]
     fn typed_fn_params_preserve_tensor_shape_for_lowering() {
-        let exprs = chelis_deep::parser::parse_str(
-            r#"
+        crate::lowering_runtime::with_native_lowering_runtime(|runtime| {
+            let exprs = chelis_deep::parser::parse_str(
+                r#"
                 (fn {}
                     (params {}
                         (x {type: (t-tensor {} (d-lit {} 32) (d-lit {} 784) (t-prim {} f32))})
@@ -24724,41 +25165,44 @@ mod regression_tests {
                         (var {} x)
                         (var {} w)))
             "#,
-        )
-        .expect("parse failed");
-        let mut ctx = LowerCtx::new(
-            BTreeMap::new(),
-            BTreeMap::new(),
-            BTreeMap::new(),
-            LinearityInfo::default(),
-        );
-        let _ = ctx.lower_expr(&exprs[0]);
-        let load_x = ctx
-            .dag
-            .nodes()
-            .iter()
-            .find(|node| matches!(&node.op, RiscOp::Load { name } if name == "x"))
-            .expect("typed x param should lower to a Load");
-        assert_eq!(
-            load_x.output_type.dims,
-            vec![DimInfo::Lit(32), DimInfo::Lit(784)]
-        );
-        let load_w = ctx
-            .dag
-            .nodes()
-            .iter()
-            .find(|node| matches!(&node.op, RiscOp::Load { name } if name == "w"))
-            .expect("typed w param should lower to a Load");
-        assert_eq!(
-            load_w.output_type.dims,
-            vec![DimInfo::Lit(784), DimInfo::Lit(128)]
-        );
+            )
+            .expect("parse failed");
+            let mut ctx = LowerCtx::new(
+                BTreeMap::new(),
+                BTreeMap::new(),
+                BTreeMap::new(),
+                LinearityInfo::default(),
+                runtime,
+            );
+            let _ = ctx.lower_expr(&exprs[0]);
+            let load_x = ctx
+                .dag
+                .nodes()
+                .iter()
+                .find(|node| matches!(&node.op, RiscOp::Load { name } if name == "x"))
+                .expect("typed x param should lower to a Load");
+            assert_eq!(
+                load_x.output_type.dims,
+                vec![DimInfo::Lit(32), DimInfo::Lit(784)]
+            );
+            let load_w = ctx
+                .dag
+                .nodes()
+                .iter()
+                .find(|node| matches!(&node.op, RiscOp::Load { name } if name == "w"))
+                .expect("typed w param should lower to a Load");
+            assert_eq!(
+                load_w.output_type.dims,
+                vec![DimInfo::Lit(784), DimInfo::Lit(128)]
+            );
+        })
     }
 
     #[test]
     fn pipe_lambda_stage_preserves_tensor_shape_for_following_matmul() {
-        let dag = parse_and_lower(
-            r#"
+        crate::lowering_runtime::with_native_lowering_runtime(|runtime| {
+            let dag = parse_and_lower(
+                r#"
                 (def {} x
                   (var {type: (t-tensor {} (d-lit {} 32) (d-lit {} 784) (t-prim {} f32))} x))
                 (def {} w1
@@ -24786,39 +25230,47 @@ mod regression_tests {
                     (var {} h1)
                     (var {} w2)))
             "#,
-        );
-        let root = dag
-            .roots()
-            .last()
-            .and_then(|id| dag.get(*id))
-            .expect("lowered matmul root");
-        assert_eq!(
-            root.output_type.dims,
-            vec![DimInfo::Lit(32), DimInfo::Lit(10)]
-        );
+                runtime,
+            );
+            let root = dag
+                .roots()
+                .last()
+                .and_then(|id| dag.get(*id))
+                .expect("lowered matmul root");
+            assert_eq!(
+                root.output_type.dims,
+                vec![DimInfo::Lit(32), DimInfo::Lit(10)]
+            );
+        })
     }
 
     // Fix 4: Unsupported constructs.
     #[test]
     fn fix4_grad_is_rejected_before_lowering() {
-        let err = std::panic::catch_unwind(|| {
-            let _ = parse_and_lower_unchecked("(grad {} (var {} f))");
+        crate::lowering_runtime::with_native_lowering_runtime(|runtime| {
+            let err = std::panic::catch_unwind(|| {
+                let _ = parse_and_lower_unchecked("(grad {} (var {} f))", runtime);
+            })
+            .expect_err("grad should be rejected");
+            assert!(
+                captured_lower_message(err)
+                    .contains("`grad` is not supported by IR evaluation yet")
+            );
         })
-        .expect_err("grad should be rejected");
-        assert!(
-            captured_lower_message(err).contains("`grad` is not supported by IR evaluation yet")
-        );
     }
 
     #[test]
     fn fix4_vmap_is_rejected_before_lowering() {
-        let err = std::panic::catch_unwind(|| {
-            let _ = parse_and_lower_unchecked("(vmap {} (var {} f))");
+        crate::lowering_runtime::with_native_lowering_runtime(|runtime| {
+            let err = std::panic::catch_unwind(|| {
+                let _ = parse_and_lower_unchecked("(vmap {} (var {} f))", runtime);
+            })
+            .expect_err("vmap should be rejected");
+            assert!(
+                captured_lower_message(err)
+                    .contains("`vmap` is not supported by IR evaluation yet")
+            );
         })
-        .expect_err("vmap should be rejected");
-        assert!(
-            captured_lower_message(err).contains("`vmap` is not supported by IR evaluation yet")
-        );
     }
 
     // chelis#776: the compiled-backend lowering must see through the
@@ -24846,83 +25298,93 @@ mod regression_tests {
 
     #[test]
     fn uniform_like_cast_wrapped_bounds_resolve_statically() {
-        let src = format!(
-            "(app {{}} (var {{}} uniform_like) {WRAPPED_ARG_TEMPLATE} \
+        crate::lowering_runtime::with_native_lowering_runtime(|runtime| {
+            let src = format!(
+                "(app {{}} (var {{}} uniform_like) {WRAPPED_ARG_TEMPLATE} \
              (cast {{}} (lit {{}} 2.0) (t-prim {{}} f32)) \
              (cast {{}} (lit {{}} 5.0) (t-prim {{}} f32)))"
-        );
-        assert_eq!(
-            uniform_like_low_high(&parse_and_lower_unchecked(&src)),
-            (2.0, 5.0)
-        );
+            );
+            assert_eq!(
+                uniform_like_low_high(&parse_and_lower_unchecked(&src, runtime)),
+                (2.0, 5.0)
+            );
+        })
     }
 
     #[test]
     fn uniform_like_negative_literal_bounds_resolve_statically() {
-        // `-3.0` / `-1.0` desugar to `(app {} (var {} neg) (lit ...))`.
-        let src = format!(
-            "(app {{}} (var {{}} uniform_like) {WRAPPED_ARG_TEMPLATE} \
+        crate::lowering_runtime::with_native_lowering_runtime(|runtime| {
+            // `-3.0` / `-1.0` desugar to `(app {} (var {} neg) (lit ...))`.
+            let src = format!(
+                "(app {{}} (var {{}} uniform_like) {WRAPPED_ARG_TEMPLATE} \
              (app {{}} (var {{}} neg) (lit {{}} 3.0)) \
              (app {{}} (var {{}} neg) (lit {{}} 1.0)))"
-        );
-        assert_eq!(
-            uniform_like_low_high(&parse_and_lower_unchecked(&src)),
-            (-3.0, -1.0)
-        );
+            );
+            assert_eq!(
+                uniform_like_low_high(&parse_and_lower_unchecked(&src, runtime)),
+                (-3.0, -1.0)
+            );
+        })
     }
 
     #[test]
     fn uniform_like_mixed_neg_and_cast_bounds_resolve_statically() {
-        // low = cast(neg(3.0), f32); high = cast(5.0, f32).
-        let src = format!(
-            "(app {{}} (var {{}} uniform_like) {WRAPPED_ARG_TEMPLATE} \
+        crate::lowering_runtime::with_native_lowering_runtime(|runtime| {
+            // low = cast(neg(3.0), f32); high = cast(5.0, f32).
+            let src = format!(
+                "(app {{}} (var {{}} uniform_like) {WRAPPED_ARG_TEMPLATE} \
              (cast {{}} (app {{}} (var {{}} neg) (lit {{}} 3.0)) (t-prim {{}} f32)) \
              (cast {{}} (lit {{}} 5.0) (t-prim {{}} f32)))"
-        );
-        assert_eq!(
-            uniform_like_low_high(&parse_and_lower_unchecked(&src)),
-            (-3.0, 5.0)
-        );
+            );
+            assert_eq!(
+                uniform_like_low_high(&parse_and_lower_unchecked(&src, runtime)),
+                (-3.0, 5.0)
+            );
+        })
     }
 
     #[test]
     fn uniform_like_runtime_bound_fails_loudly_not_silent_default() {
-        // A runtime add is not statically foldable: the lowering must raise,
-        // never silently substitute the [0,1) default (the #703 class).
-        let src = format!(
-            "(app {{}} (var {{}} uniform_like) {WRAPPED_ARG_TEMPLATE} \
+        crate::lowering_runtime::with_native_lowering_runtime(|runtime| {
+            // A runtime add is not statically foldable: the lowering must raise,
+            // never silently substitute the [0,1) default (the #703 class).
+            let src = format!(
+                "(app {{}} (var {{}} uniform_like) {WRAPPED_ARG_TEMPLATE} \
              (app {{}} (var {{}} add) (lit {{}} 2.0) (lit {{}} 1.0)) \
              (lit {{}} 5.0))"
-        );
-        let err = std::panic::catch_unwind(|| {
-            let _ = parse_and_lower_unchecked(&src);
+            );
+            let err = std::panic::catch_unwind(|| {
+                let _ = parse_and_lower_unchecked(&src, runtime);
+            })
+            .expect_err("a runtime uniform_like bound must fail lowering");
+            let msg = captured_lower_message(err);
+            assert!(
+                msg.contains("uniform_like")
+                    && msg.contains("statically-resolvable")
+                    && msg.contains("chelis#776"),
+                "unexpected diagnostic: {msg}"
+            );
         })
-        .expect_err("a runtime uniform_like bound must fail lowering");
-        let msg = captured_lower_message(err);
-        assert!(
-            msg.contains("uniform_like")
-                && msg.contains("statically-resolvable")
-                && msg.contains("chelis#776"),
-            "unexpected diagnostic: {msg}"
-        );
     }
 
     #[test]
     fn uniform_like_integer_cast_bound_fails_loudly() {
-        // A dtype-changing cast (even the exactly integral 2.0 -> i32) is
-        // NOT accepted as a static uniform_like bound. The lowering fails
-        // loudly rather than let a cast launder the bound contract
-        // (chelis#776).
-        let src = format!(
-            "(app {{}} (var {{}} uniform_like) {WRAPPED_ARG_TEMPLATE} \
+        crate::lowering_runtime::with_native_lowering_runtime(|runtime| {
+            // A dtype-changing cast (even the exactly integral 2.0 -> i32) is
+            // NOT accepted as a static uniform_like bound. The lowering fails
+            // loudly rather than let a cast launder the bound contract
+            // (chelis#776).
+            let src = format!(
+                "(app {{}} (var {{}} uniform_like) {WRAPPED_ARG_TEMPLATE} \
              (cast {{}} (lit {{}} 2.0) (t-prim {{}} i32)) \
              (lit {{}} 5.0))"
-        );
-        let err = std::panic::catch_unwind(|| {
-            let _ = parse_and_lower_unchecked(&src);
+            );
+            let err = std::panic::catch_unwind(|| {
+                let _ = parse_and_lower_unchecked(&src, runtime);
+            })
+            .expect_err("an integer-cast uniform_like bound must fail lowering");
+            assert!(captured_lower_message(err).contains("statically-resolvable"));
         })
-        .expect_err("an integer-cast uniform_like bound must fail lowering");
-        assert!(captured_lower_message(err).contains("statically-resolvable"));
     }
 
     fn dropout_rate(dag: &Dag) -> f64 {
@@ -24937,25 +25399,32 @@ mod regression_tests {
 
     #[test]
     fn dropout_cast_wrapped_rate_resolves_statically() {
-        let src = format!(
-            "(app {{}} (var {{}} dropout) {WRAPPED_ARG_TEMPLATE} \
+        crate::lowering_runtime::with_native_lowering_runtime(|runtime| {
+            let src = format!(
+                "(app {{}} (var {{}} dropout) {WRAPPED_ARG_TEMPLATE} \
              (cast {{}} (lit {{}} 0.25) (t-prim {{}} f32)))"
-        );
-        assert_eq!(dropout_rate(&parse_and_lower_unchecked(&src)), 0.25);
+            );
+            assert_eq!(
+                dropout_rate(&parse_and_lower_unchecked(&src, runtime)),
+                0.25
+            );
+        })
     }
 
     #[test]
     fn dropout_runtime_rate_fails_loudly() {
-        let src = format!("(app {{}} (var {{}} dropout) {WRAPPED_ARG_TEMPLATE} (var {{}} r))");
-        let err = std::panic::catch_unwind(|| {
-            let _ = parse_and_lower_unchecked(&src);
+        crate::lowering_runtime::with_native_lowering_runtime(|runtime| {
+            let src = format!("(app {{}} (var {{}} dropout) {WRAPPED_ARG_TEMPLATE} (var {{}} r))");
+            let err = std::panic::catch_unwind(|| {
+                let _ = parse_and_lower_unchecked(&src, runtime);
+            })
+            .expect_err("a runtime dropout rate must fail lowering");
+            let msg = captured_lower_message(err);
+            assert!(
+                msg.contains("dropout") && msg.contains("statically-resolvable"),
+                "unexpected diagnostic: {msg}"
+            );
         })
-        .expect_err("a runtime dropout rate must fail lowering");
-        let msg = captured_lower_message(err);
-        assert!(
-            msg.contains("dropout") && msg.contains("statically-resolvable"),
-            "unexpected diagnostic: {msg}"
-        );
     }
 
     fn pad_fill(dag: &Dag) -> chelis_types::ScalarValue {
@@ -24973,134 +25442,153 @@ mod regression_tests {
 
     #[test]
     fn pad_cast_wrapped_fill_resolves_statically() {
-        let src = format!(
-            "(app {{}} (var {{}} pad) {WRAPPED_ARG_TEMPLATE} {PAD_PADDING} \
+        crate::lowering_runtime::with_native_lowering_runtime(|runtime| {
+            let src = format!(
+                "(app {{}} (var {{}} pad) {WRAPPED_ARG_TEMPLATE} {PAD_PADDING} \
              (cast {{}} (lit {{}} 7.0) (t-prim {{}} f32)))"
-        );
-        assert_eq!(
-            pad_fill(&parse_and_lower_unchecked(&src)).as_f64_lossy(),
-            7.0
-        );
+            );
+            assert_eq!(
+                pad_fill(&parse_and_lower_unchecked(&src, runtime)).as_f64_lossy(),
+                7.0
+            );
+        })
     }
 
     #[test]
     fn issue_878_pad_fill_preserves_exact_int64_above_f64_boundary() {
-        let exact = 9_007_199_254_740_993i64;
-        let src = format!(
-            "(app {{type: (t-tensor {{}} (d-lit {{}} 6) (t-prim {{}} i64))}} \
+        crate::lowering_runtime::with_native_lowering_runtime(|runtime| {
+            let exact = 9_007_199_254_740_993i64;
+            let src = format!(
+                "(app {{type: (t-tensor {{}} (d-lit {{}} 6) (t-prim {{}} i64))}} \
              (var {{}} pad) \
              (lit {{type: (t-tensor {{}} (d-lit {{}} 4) (t-prim {{}} i64))}} 0) \
              {PAD_PADDING} \
              (cast {{}} (lit {{}} {exact}) (t-prim {{}} i64)))"
-        );
-        let fill = pad_fill(&parse_and_lower_unchecked(&src));
-        assert_eq!(fill.prim(), Prim::Int64);
-        assert_eq!(fill.as_i64_exact(), Some(exact));
+            );
+            let fill = pad_fill(&parse_and_lower_unchecked(&src, runtime));
+            assert_eq!(fill.prim(), Prim::Int64);
+            assert_eq!(fill.as_i64_exact(), Some(exact));
+        })
     }
 
     #[test]
     fn pad_runtime_fill_fails_loudly() {
-        let src =
-            format!("(app {{}} (var {{}} pad) {WRAPPED_ARG_TEMPLATE} {PAD_PADDING} (var {{}} f))");
-        let err = std::panic::catch_unwind(|| {
-            let _ = parse_and_lower_unchecked(&src);
+        crate::lowering_runtime::with_native_lowering_runtime(|runtime| {
+            let src = format!(
+                "(app {{}} (var {{}} pad) {WRAPPED_ARG_TEMPLATE} {PAD_PADDING} (var {{}} f))"
+            );
+            let err = std::panic::catch_unwind(|| {
+                let _ = parse_and_lower_unchecked(&src, runtime);
+            })
+            .expect_err("a runtime pad fill must fail lowering");
+            let msg = captured_lower_message(err);
+            assert!(
+                msg.contains("pad") && msg.contains("statically-resolvable"),
+                "unexpected diagnostic: {msg}"
+            );
         })
-        .expect_err("a runtime pad fill must fail lowering");
-        let msg = captured_lower_message(err);
-        assert!(
-            msg.contains("pad") && msg.contains("statically-resolvable"),
-            "unexpected diagnostic: {msg}"
-        );
     }
 
     #[test]
     fn pad_no_fill_arg_keeps_structural_zero_default() {
-        // No explicit fill argument: the `else` arm is a true structural
-        // default (pad with zeros), NOT a user-value substitution — it must
-        // still resolve to 0.0, not go loud (chelis#776 fix is scoped to the
-        // present-but-unresolvable case).
-        let src = format!("(app {{}} (var {{}} pad) {WRAPPED_ARG_TEMPLATE} {PAD_PADDING})");
-        assert_eq!(
-            pad_fill(&parse_and_lower_unchecked(&src)).as_f64_lossy(),
-            0.0
-        );
+        crate::lowering_runtime::with_native_lowering_runtime(|runtime| {
+            // No explicit fill argument: the `else` arm is a true structural
+            // default (pad with zeros), NOT a user-value substitution — it must
+            // still resolve to 0.0, not go loud (chelis#776 fix is scoped to the
+            // present-but-unresolvable case).
+            let src = format!("(app {{}} (var {{}} pad) {WRAPPED_ARG_TEMPLATE} {PAD_PADDING})");
+            assert_eq!(
+                pad_fill(&parse_and_lower_unchecked(&src, runtime)).as_f64_lossy(),
+                0.0
+            );
+        })
     }
 
     #[test]
     fn jit_is_passthrough_at_lowering() {
-        // Spec/03-deep-syntax.md §2.7: `jit` is a compilation trigger,
-        // semantically a no-op at evaluation. Lowering must produce the same
-        // DAG as the inner expression.
-        let src = "(jit {} (lit {} 42.0))";
-        let dag = parse_and_lower(src);
-        assert_eq!(non_drop_len(&dag), 1);
-        assert_eq!(
-            dag.get(NodeId(0)).unwrap().op,
-            RiscOp::synth_const(Prim::F32, 42.0)
-        );
+        crate::lowering_runtime::with_native_lowering_runtime(|runtime| {
+            // Spec/03-deep-syntax.md §2.7: `jit` is a compilation trigger,
+            // semantically a no-op at evaluation. Lowering must produce the same
+            // DAG as the inner expression.
+            let src = "(jit {} (lit {} 42.0))";
+            let dag = parse_and_lower(src, runtime);
+            assert_eq!(non_drop_len(&dag), 1);
+            assert_eq!(
+                dag.get(NodeId(0)).unwrap().op,
+                RiscOp::synth_const(Prim::F32, 42.0)
+            );
+        })
     }
 
     #[test]
     fn par_is_sequential_at_lowering() {
-        // Spec/03-deep-syntax.md §2.3: `par` v1 is sequential composition.
-        // All children are lowered in order; the par's value is the value of
-        // the last child. The DAG carries every intermediate child as well so
-        // any side-effecting node (e.g. realize) is preserved.
-        let src = "(par {} (lit {} 1.0) (lit {} 2.0) (lit {} 3.0))";
-        let dag = parse_and_lower_unchecked(src);
-        // Three Const nodes, one per child. The par node itself does not
-        // produce an extra DAG node; its value is reused from the last child.
-        assert_eq!(non_drop_len(&dag), 3);
-        assert_eq!(
-            dag.get(NodeId(0)).unwrap().op,
-            RiscOp::synth_const(Prim::F32, 1.0)
-        );
-        assert_eq!(
-            dag.get(NodeId(1)).unwrap().op,
-            RiscOp::synth_const(Prim::F32, 2.0)
-        );
-        assert_eq!(
-            dag.get(NodeId(2)).unwrap().op,
-            RiscOp::synth_const(Prim::F32, 3.0)
-        );
+        crate::lowering_runtime::with_native_lowering_runtime(|runtime| {
+            // Spec/03-deep-syntax.md §2.3: `par` v1 is sequential composition.
+            // All children are lowered in order; the par's value is the value of
+            // the last child. The DAG carries every intermediate child as well so
+            // any side-effecting node (e.g. realize) is preserved.
+            let src = "(par {} (lit {} 1.0) (lit {} 2.0) (lit {} 3.0))";
+            let dag = parse_and_lower_unchecked(src, runtime);
+            // Three Const nodes, one per child. The par node itself does not
+            // produce an extra DAG node; its value is reused from the last child.
+            assert_eq!(non_drop_len(&dag), 3);
+            assert_eq!(
+                dag.get(NodeId(0)).unwrap().op,
+                RiscOp::synth_const(Prim::F32, 1.0)
+            );
+            assert_eq!(
+                dag.get(NodeId(1)).unwrap().op,
+                RiscOp::synth_const(Prim::F32, 2.0)
+            );
+            assert_eq!(
+                dag.get(NodeId(2)).unwrap().op,
+                RiscOp::synth_const(Prim::F32, 3.0)
+            );
+        })
     }
 
     #[test]
     fn fix4_realize_lowers_to_materialization_barrier() {
-        let src = "(realize {} (lit {} 42.0))";
-        let dag = parse_and_lower(src);
-        assert_eq!(non_drop_len(&dag), 2);
-        assert_eq!(
-            dag.get(NodeId(0)).unwrap().op,
-            RiscOp::synth_const(Prim::F32, 42.0)
-        );
-        assert_eq!(dag.get(NodeId(1)).unwrap().op, RiscOp::Realize);
+        crate::lowering_runtime::with_native_lowering_runtime(|runtime| {
+            let src = "(realize {} (lit {} 42.0))";
+            let dag = parse_and_lower(src, runtime);
+            assert_eq!(non_drop_len(&dag), 2);
+            assert_eq!(
+                dag.get(NodeId(0)).unwrap().op,
+                RiscOp::synth_const(Prim::F32, 42.0)
+            );
+            assert_eq!(dag.get(NodeId(1)).unwrap().op, RiscOp::Realize);
+        })
     }
 
     #[test]
     fn fix4_copy_lowers_to_copy_node() {
-        let src = "(copy {} (lit {type: (t-tensor {} (t-prim {} f32))} 7.0))";
-        let dag = parse_and_lower(src);
-        assert_eq!(non_drop_len(&dag), 2);
-        assert_eq!(
-            dag.get(NodeId(0)).unwrap().op,
-            RiscOp::synth_const(Prim::F32, 7.0)
-        );
-        assert_eq!(dag.get(NodeId(1)).unwrap().op, RiscOp::Copy);
-        assert_eq!(dag.get(NodeId(1)).unwrap().inputs, vec![NodeId(0)]);
+        crate::lowering_runtime::with_native_lowering_runtime(|runtime| {
+            let src = "(copy {} (lit {type: (t-tensor {} (t-prim {} f32))} 7.0))";
+            let dag = parse_and_lower(src, runtime);
+            assert_eq!(non_drop_len(&dag), 2);
+            assert_eq!(
+                dag.get(NodeId(0)).unwrap().op,
+                RiscOp::synth_const(Prim::F32, 7.0)
+            );
+            assert_eq!(dag.get(NodeId(1)).unwrap().op, RiscOp::Copy);
+            assert_eq!(dag.get(NodeId(1)).unwrap().inputs, vec![NodeId(0)]);
+        })
     }
 
     #[test]
     fn explicit_drop_lowers_to_drop_node() {
-        let src = "(app {} (var {} drop) (lit {type: (t-tensor {} (t-prim {} f32))} 7.0))";
-        let dag = parse_and_lower(src);
-        assert_eq!(dag.len(), 2);
-        assert_eq!(
-            dag.get(NodeId(0)).unwrap().op,
-            RiscOp::synth_const(Prim::F32, 7.0)
-        );
-        assert_eq!(dag.get(NodeId(1)).unwrap().op, RiscOp::Drop);
-        assert_eq!(dag.get(NodeId(1)).unwrap().inputs, vec![NodeId(0)]);
+        crate::lowering_runtime::with_native_lowering_runtime(|runtime| {
+            let src = "(app {} (var {} drop) (lit {type: (t-tensor {} (t-prim {} f32))} 7.0))";
+            let dag = parse_and_lower(src, runtime);
+            assert_eq!(dag.len(), 2);
+            assert_eq!(
+                dag.get(NodeId(0)).unwrap().op,
+                RiscOp::synth_const(Prim::F32, 7.0)
+            );
+            assert_eq!(dag.get(NodeId(1)).unwrap().op, RiscOp::Drop);
+            assert_eq!(dag.get(NodeId(1)).unwrap().inputs, vec![NodeId(0)]);
+        })
     }
 
     // Fix 9: Cast with (t-prim {} i32) node. Exercises the lowerer's
@@ -25109,531 +25597,607 @@ mod regression_tests {
     // regression uses i32 as a representative non-f32 scalar target.
     #[test]
     fn fix9_cast_with_tprim_node() {
-        let src = r#"
+        crate::lowering_runtime::with_native_lowering_runtime(|runtime| {
+            let src = r#"
             (def {} x (lit {} 1.0))
             (def {} y (cast {} (var {} x) (t-prim {} i32)))
         "#;
-        let dag = parse_and_lower(src);
-        let cast_node = dag
-            .nodes()
-            .iter()
-            .find(|n| matches!(&n.op, RiscOp::Cast { .. }))
-            .expect("expected a Cast node");
-        assert_eq!(
-            cast_node.op,
-            RiscOp::Cast {
-                new_precision: Prim::Int32
-            }
-        );
-        assert_eq!(cast_node.output_type.precision, Prim::Int32);
+            let dag = parse_and_lower(src, runtime);
+            let cast_node = dag
+                .nodes()
+                .iter()
+                .find(|n| matches!(&n.op, RiscOp::Cast { .. }))
+                .expect("expected a Cast node");
+            assert_eq!(
+                cast_node.op,
+                RiscOp::Cast {
+                    new_precision: Prim::Int32
+                }
+            );
+            assert_eq!(cast_node.output_type.precision, Prim::Int32);
+        })
     }
 
     #[test]
     fn fix9_cast_bare_symbol_still_works() {
-        let src = r#"
+        crate::lowering_runtime::with_native_lowering_runtime(|runtime| {
+            let src = r#"
             (def {} x (lit {} 1.0))
             (def {} y (cast {} (var {} x) f16))
         "#;
-        let dag = parse_and_lower(src);
-        let cast_node = dag
-            .nodes()
-            .iter()
-            .find(|n| matches!(&n.op, RiscOp::Cast { .. }))
-            .expect("expected a Cast node");
-        assert_eq!(
-            cast_node.op,
-            RiscOp::Cast {
-                new_precision: Prim::F16
-            }
-        );
+            let dag = parse_and_lower(src, runtime);
+            let cast_node = dag
+                .nodes()
+                .iter()
+                .find(|n| matches!(&n.op, RiscOp::Cast { .. }))
+                .expect("expected a Cast node");
+            assert_eq!(
+                cast_node.op,
+                RiscOp::Cast {
+                    new_precision: Prim::F16
+                }
+            );
+        })
     }
 
     #[test]
     fn fix9_cast_preserves_input_dims() {
-        // Casting a tensor to bf16 is rejected by the checker (unsupported
-        // tensor precision for Phase 0f), so this test bypasses the checker
-        // to keep exercising the IR lowerer property: a Cast node should
-        // inherit the input tensor's dims regardless of target precision.
-        let src = r#"
+        crate::lowering_runtime::with_native_lowering_runtime(|runtime| {
+            // Casting a tensor to bf16 is rejected by the checker (unsupported
+            // tensor precision for Phase 0f), so this test bypasses the checker
+            // to keep exercising the IR lowerer property: a Cast node should
+            // inherit the input tensor's dims regardless of target precision.
+            let src = r#"
             (def {} x (var {type: (t-tensor {} (d-lit {} 2) (d-lit {} 3) (t-prim {} f32))} x))
             (def {} y (cast {} (var {} x) (t-prim {} bf16)))
         "#;
-        let dag = parse_and_lower_unchecked(src);
-        let cast_node = dag
-            .nodes()
-            .iter()
-            .find(|n| matches!(&n.op, RiscOp::Cast { .. }))
-            .expect("expected a Cast node");
-        assert_eq!(
-            cast_node.output_type.dims,
-            vec![DimInfo::Lit(2), DimInfo::Lit(3)]
-        );
-        assert!(verify::verify(&dag).is_empty());
+            let dag = parse_and_lower_unchecked(src, runtime);
+            let cast_node = dag
+                .nodes()
+                .iter()
+                .find(|n| matches!(&n.op, RiscOp::Cast { .. }))
+                .expect("expected a Cast node");
+            assert_eq!(
+                cast_node.output_type.dims,
+                vec![DimInfo::Lit(2), DimInfo::Lit(3)]
+            );
+            assert!(verify::verify(&dag).is_empty());
+        })
     }
 
     #[test]
     fn binder_float_literal_default_is_structural_not_value_keyed() {
-        for (literal, target) in [
-            ("16777217.0", Prim::Int64),
-            ("-16777217.0", Prim::Int64),
-            ("127.5", Prim::Int8),
-            ("128.0", Prim::Int8),
-        ] {
-            let expr = chelis_deep::parser::parse_str(&format!(
-                "(cast {{}} \
+        crate::lowering_runtime::with_native_lowering_runtime(|runtime| {
+            for (literal, target) in [
+                ("16777217.0", Prim::Int64),
+                ("-16777217.0", Prim::Int64),
+                ("127.5", Prim::Int8),
+                ("128.0", Prim::Int8),
+            ] {
+                let expr = chelis_deep::parser::parse_str(&format!(
+                    "(cast {{}} \
                     (lit {{surf_literal_style: \"unsuffixed\", type: (t-var {{}} p)}} {literal}) \
                     (t-var {{}} p))"
-            ))
-            .unwrap_or_else(|error| panic!("parse binder literal {literal}: {error}"))
-            .pop()
-            .expect("one binder cast");
-            let mut ctx = LowerCtx::new(
-                BTreeMap::new(),
-                BTreeMap::new(),
-                BTreeMap::new(),
-                LinearityInfo::default(),
-            );
-            ctx.prec_substitutions.insert("p".to_string(), target);
-            let _ = ctx.lower_expr(&expr);
+                ))
+                .unwrap_or_else(|error| panic!("parse binder literal {literal}: {error}"))
+                .pop()
+                .expect("one binder cast");
+                let mut ctx = LowerCtx::new(
+                    BTreeMap::new(),
+                    BTreeMap::new(),
+                    BTreeMap::new(),
+                    LinearityInfo::default(),
+                    runtime,
+                );
+                ctx.prec_substitutions.insert("p".to_string(), target);
+                let _ = ctx.lower_expr(&expr);
 
-            let nodes = ctx.dag.nodes();
-            assert_eq!(nodes.len(), 2);
-            assert!(matches!(nodes[0].op, RiscOp::Const { .. }));
-            assert_eq!(nodes[0].output_type.precision, Prim::F32, "{literal}");
-            assert_eq!(
-                nodes[1].op,
-                RiscOp::Cast {
-                    new_precision: target
-                },
-                "{literal}"
-            );
-        }
+                let nodes = ctx.dag.nodes();
+                assert_eq!(nodes.len(), 2);
+                assert!(matches!(nodes[0].op, RiscOp::Const { .. }));
+                assert_eq!(nodes[0].output_type.precision, Prim::F32, "{literal}");
+                assert_eq!(
+                    nodes[1].op,
+                    RiscOp::Cast {
+                        new_precision: target
+                    },
+                    "{literal}"
+                );
+            }
+        })
     }
 
     #[test]
     fn float_if_lowers_via_masked_select() {
-        // chelis#620: the condition must be a RUNTIME value (an unbound var
-        // lowers to a Load, which the static fold refuses) so the mask-blend
-        // path stays exercised; a literal condition now prunes statically.
-        let dag = parse_and_lower_unchecked("(if {} (var {} c) (lit {} 1.0) (lit {} 0.0))");
-        assert!(
-            dag.nodes()
-                .iter()
-                .any(|node| matches!(node.op, RiscOp::Mul)),
-            "expected lowered if to synthesize masked multiplications"
-        );
-        assert!(
-            dag.nodes()
-                .iter()
-                .any(|node| matches!(node.op, RiscOp::Add)),
-            "expected lowered if to synthesize additive select"
-        );
+        crate::lowering_runtime::with_native_lowering_runtime(|runtime| {
+            // chelis#620: the condition must be a RUNTIME value (an unbound var
+            // lowers to a Load, which the static fold refuses) so the mask-blend
+            // path stays exercised; a literal condition now prunes statically.
+            let dag =
+                parse_and_lower_unchecked("(if {} (var {} c) (lit {} 1.0) (lit {} 0.0))", runtime);
+            assert!(
+                dag.nodes()
+                    .iter()
+                    .any(|node| matches!(node.op, RiscOp::Mul)),
+                "expected lowered if to synthesize masked multiplications"
+            );
+            assert!(
+                dag.nodes()
+                    .iter()
+                    .any(|node| matches!(node.op, RiscOp::Add)),
+                "expected lowered if to synthesize additive select"
+            );
+        })
     }
 
     #[test]
     fn static_cond_if_prunes_untaken_branch() {
-        // chelis#620: a compile-time-resolvable condition selects the taken
-        // branch at lowering time; the untaken branch is never lowered and no
-        // mask arithmetic is synthesized. The `if` analogue of
-        // `static_ctor_scrutinee_match_selects_taken_arm`.
-        let dag = parse_and_lower(
-            "(if {} (lit {} true) \
+        crate::lowering_runtime::with_native_lowering_runtime(|runtime| {
+            // chelis#620: a compile-time-resolvable condition selects the taken
+            // branch at lowering time; the untaken branch is never lowered and no
+            // mask arithmetic is synthesized. The `if` analogue of
+            // `static_ctor_scrutinee_match_selects_taken_arm`.
+            let dag = parse_and_lower(
+                "(if {} (lit {} true) \
              (lit {type: (t-prim {} f32)} 2.5) \
              (lit {type: (t-prim {} f32)} 9.0))",
-        );
-        assert!(
-            dag.nodes().iter().any(
-                |node| matches!(node.op, RiscOp::Const { value } if value.as_f64_lossy() == 2.5)
-            ),
-            "taken branch's literal must be lowered: {dag:?}"
-        );
-        assert!(
-            !dag.nodes().iter().any(
-                |node| matches!(node.op, RiscOp::Const { value } if value.as_f64_lossy() == 9.0)
-            ),
-            "untaken branch's literal must not be lowered: {dag:?}"
-        );
-        assert!(
-            !dag.nodes()
-                .iter()
-                .any(|node| matches!(node.op, RiscOp::Mul)),
-            "static pruning must not synthesize mask arithmetic: {dag:?}"
-        );
+                runtime,
+            );
+            assert!(
+                dag.nodes().iter().any(
+                    |node| matches!(node.op, RiscOp::Const { value } if value.as_f64_lossy() == 2.5)
+                ),
+                "taken branch's literal must be lowered: {dag:?}"
+            );
+            assert!(
+                !dag.nodes().iter().any(
+                    |node| matches!(node.op, RiscOp::Const { value } if value.as_f64_lossy() == 9.0)
+                ),
+                "untaken branch's literal must not be lowered: {dag:?}"
+            );
+            assert!(
+                !dag.nodes()
+                    .iter()
+                    .any(|node| matches!(node.op, RiscOp::Mul)),
+                "static pruning must not synthesize mask arithmetic: {dag:?}"
+            );
+        })
     }
 
     #[test]
     fn static_cond_if_returns_adt_branch_verbatim() {
-        // chelis#620: with a static condition, an ADT-valued branch flows
-        // through the `if` verbatim; downstream static match selection sees
-        // the pruned constructor. Previously this panicked with "if then
-        // branch expected a single tensor value, got an ADT value".
-        let dag = parse_and_lower_unchecked(
-            "(match {} (if {} (lit {} true) (var {} ModeA) (var {} ModeB)) \
+        crate::lowering_runtime::with_native_lowering_runtime(|runtime| {
+            // chelis#620: with a static condition, an ADT-valued branch flows
+            // through the `if` verbatim; downstream static match selection sees
+            // the pruned constructor. Previously this panicked with "if then
+            // branch expected a single tensor value, got an ADT value".
+            let dag = parse_and_lower_unchecked(
+                "(match {} (if {} (lit {} true) (var {} ModeA) (var {} ModeB)) \
              (arm {} (pat-ctor {} ModeA) () (lit {type: (t-prim {} f32)} 2.5)) \
              (arm {} (pat-ctor {} ModeB) () (lit {type: (t-prim {} f32)} 9.0)))",
-        );
-        assert!(
-            dag.nodes().iter().any(
-                |node| matches!(node.op, RiscOp::Const { value } if value.as_f64_lossy() == 2.5)
-            ),
-            "arm selected by the pruned constructor must lower: {dag:?}"
-        );
-        assert!(
-            !dag.nodes().iter().any(
-                |node| matches!(node.op, RiscOp::Const { value } if value.as_f64_lossy() == 9.0)
-            ),
-            "dead arm must not lower: {dag:?}"
-        );
+                runtime,
+            );
+            assert!(
+                dag.nodes().iter().any(
+                    |node| matches!(node.op, RiscOp::Const { value } if value.as_f64_lossy() == 2.5)
+                ),
+                "arm selected by the pruned constructor must lower: {dag:?}"
+            );
+            assert!(
+                !dag.nodes().iter().any(
+                    |node| matches!(node.op, RiscOp::Const { value } if value.as_f64_lossy() == 9.0)
+                ),
+                "dead arm must not lower: {dag:?}"
+            );
+        })
     }
 
     #[test]
     fn static_cond_if_folds_int_comparison_chain() {
-        // chelis#620: the fold sees through the lowered comparison
-        // vocabulary (gte lowers to CmpLt + not) and integer arithmetic:
-        // gte(add(1, 2), mul(1, 3)) == gte(3, 3) == true.
-        let dag = parse_and_lower_unchecked(
-            "(if {} (app {} (var {} gte) \
+        crate::lowering_runtime::with_native_lowering_runtime(|runtime| {
+            // chelis#620: the fold sees through the lowered comparison
+            // vocabulary (gte lowers to CmpLt + not) and integer arithmetic:
+            // gte(add(1, 2), mul(1, 3)) == gte(3, 3) == true.
+            let dag = parse_and_lower_unchecked(
+                "(if {} (app {} (var {} gte) \
              (app {} (var {} add) (lit {} 1) (lit {} 2)) \
              (app {} (var {} mul) (lit {} 1) (lit {} 3))) \
              (lit {type: (t-prim {} f32)} 2.5) \
              (lit {type: (t-prim {} f32)} 9.0))",
-        );
-        assert!(
-            dag.nodes().iter().any(
-                |node| matches!(node.op, RiscOp::Const { value } if value.as_f64_lossy() == 2.5)
-            ),
-            "gte(3, 3) must fold true and take the then branch: {dag:?}"
-        );
-        assert!(
-            !dag.nodes().iter().any(
-                |node| matches!(node.op, RiscOp::Const { value } if value.as_f64_lossy() == 9.0)
-            ),
-            "untaken branch must not lower: {dag:?}"
-        );
+                runtime,
+            );
+            assert!(
+                dag.nodes().iter().any(
+                    |node| matches!(node.op, RiscOp::Const { value } if value.as_f64_lossy() == 2.5)
+                ),
+                "gte(3, 3) must fold true and take the then branch: {dag:?}"
+            );
+            assert!(
+                !dag.nodes().iter().any(
+                    |node| matches!(node.op, RiscOp::Const { value } if value.as_f64_lossy() == 9.0)
+                ),
+                "untaken branch must not lower: {dag:?}"
+            );
+        })
     }
 
     #[test]
     fn static_cond_fold_refuses_fractional_checked_cast() {
-        // A fractional checked cast Domain-traps. Static recognition must
-        // decline so the runtime mask path retains the cast and its trap.
-        let dag = parse_and_lower_unchecked(
-            "(if {} (app {} (var {} gt) \
+        crate::lowering_runtime::with_native_lowering_runtime(|runtime| {
+            // A fractional checked cast Domain-traps. Static recognition must
+            // decline so the runtime mask path retains the cast and its trap.
+            let dag = parse_and_lower_unchecked(
+                "(if {} (app {} (var {} gt) \
              (cast {} (lit {} 0.9) i32) (cast {} (lit {} 0) i32)) \
              (lit {type: (t-prim {} f32)} 2.5) \
              (lit {type: (t-prim {} f32)} 9.0))",
-        );
-        assert!(
-            dag.nodes()
-                .iter()
-                .any(|node| matches!(node.op, RiscOp::Mul)),
-            "fractional checked cast must stay on the runtime mask path: {dag:?}"
-        );
+                runtime,
+            );
+            assert!(
+                dag.nodes()
+                    .iter()
+                    .any(|node| matches!(node.op, RiscOp::Mul)),
+                "fractional checked cast must stay on the runtime mask path: {dag:?}"
+            );
+        })
     }
 
     #[test]
     fn static_cond_fold_uses_f16_storage_semantics() {
-        // 2049 rounds to 2048 at f16 storage width, so the comparison is
-        // false. Keeping the constants/casts sealed through the fold makes
-        // the else branch the only lowered payload.
-        let dag = parse_and_lower_unchecked(
-            "(if {} (app {} (var {} lt) \
+        crate::lowering_runtime::with_native_lowering_runtime(|runtime| {
+            // 2049 rounds to 2048 at f16 storage width, so the comparison is
+            // false. Keeping the constants/casts sealed through the fold makes
+            // the else branch the only lowered payload.
+            let dag = parse_and_lower_unchecked(
+                "(if {} (app {} (var {} lt) \
              (cast {} (lit {} 2048.0) f16) (cast {} (lit {} 2049.0) f16)) \
              (lit {type: (t-prim {} f32)} 111.0) \
              (lit {type: (t-prim {} f32)} 222.0))",
-        );
-        assert!(
+                runtime,
+            );
+            assert!(
             dag.nodes().iter().any(
                 |node| matches!(node.op, RiscOp::Const { value } if value.as_f64_lossy() == 222.0)
             ),
             "f16-finalized comparison must select the else branch: {dag:?}"
         );
-        assert!(
+            assert!(
             !dag.nodes().iter().any(
                 |node| matches!(node.op, RiscOp::Const { value } if value.as_f64_lossy() == 111.0)
             ),
             "the untaken branch must not be lowered: {dag:?}"
         );
+        })
     }
 
     #[test]
     fn static_cond_fold_uses_bf16_storage_semantics() {
-        // 257 rounds to 256 at bf16 storage width, the sibling boundary to
-        // the f16 test above.
-        let dag = parse_and_lower_unchecked(
-            "(if {} (app {} (var {} lt) \
+        crate::lowering_runtime::with_native_lowering_runtime(|runtime| {
+            // 257 rounds to 256 at bf16 storage width, the sibling boundary to
+            // the f16 test above.
+            let dag = parse_and_lower_unchecked(
+                "(if {} (app {} (var {} lt) \
              (cast {} (lit {} 256.0) bf16) (cast {} (lit {} 257.0) bf16)) \
              (lit {type: (t-prim {} f32)} 111.0) \
              (lit {type: (t-prim {} f32)} 222.0))",
-        );
-        assert!(
+                runtime,
+            );
+            assert!(
             dag.nodes().iter().any(
                 |node| matches!(node.op, RiscOp::Const { value } if value.as_f64_lossy() == 222.0)
             ),
             "bf16-finalized comparison must select the else branch: {dag:?}"
         );
-        assert!(
+            assert!(
             !dag.nodes().iter().any(
                 |node| matches!(node.op, RiscOp::Const { value } if value.as_f64_lossy() == 111.0)
             ),
             "the untaken branch must not be lowered: {dag:?}"
         );
+        })
     }
 
     #[test]
     fn static_cond_fold_compares_int64_exactly_above_binary64_mantissa() {
-        let dag = parse_and_lower_unchecked(
-            "(if {} (app {} (var {} lt) \
+        crate::lowering_runtime::with_native_lowering_runtime(|runtime| {
+            let dag = parse_and_lower_unchecked(
+                "(if {} (app {} (var {} lt) \
              (lit {type: (t-prim {} i64)} 9007199254740992) \
              (lit {type: (t-prim {} i64)} 9007199254740993)) \
              (lit {type: (t-prim {} f32)} 111.0) \
              (lit {type: (t-prim {} f32)} 222.0))",
-        );
-        assert!(
+                runtime,
+            );
+            assert!(
             dag.nodes().iter().any(
                 |node| matches!(node.op, RiscOp::Const { value } if value.as_f64_lossy() == 111.0)
             ),
             "exact i64 comparison must select the then branch: {dag:?}"
         );
-        assert!(
+            assert!(
             !dag.nodes().iter().any(
                 |node| matches!(node.op, RiscOp::Const { value } if value.as_f64_lossy() == 222.0)
             ),
             "the untaken branch must not be lowered: {dag:?}"
         );
+        })
     }
 
     #[test]
     fn static_cond_fold_declines_on_integer_overflow() {
-        let dag = parse_and_lower_unchecked(
-            "(if {} (app {} (var {} lt) \
+        crate::lowering_runtime::with_native_lowering_runtime(|runtime| {
+            let dag = parse_and_lower_unchecked(
+                "(if {} (app {} (var {} lt) \
              (app {} (var {} add) (cast {} (lit {} 127) i8) \
                                     (cast {} (lit {} 1) i8)) \
              (cast {} (lit {} 0) i8)) \
              (lit {type: (t-prim {} f32)} 111.0) \
              (lit {type: (t-prim {} f32)} 222.0))",
-        );
-        assert!(
-            dag.nodes()
-                .iter()
-                .any(|node| matches!(node.op, RiscOp::Mul)),
-            "a trapping typed kernel must decline the fold and retain runtime control flow: \
+                runtime,
+            );
+            assert!(
+                dag.nodes()
+                    .iter()
+                    .any(|node| matches!(node.op, RiscOp::Mul)),
+                "a trapping typed kernel must decline the fold and retain runtime control flow: \
              {dag:?}"
-        );
+            );
+        })
     }
 
     #[test]
     fn static_cond_fold_refuses_zero_divisor() {
-        // chelis#620: floor_div by zero traps at runtime (chelis#550); the
-        // fold must refuse rather than fold the trap away, leaving the if on
-        // the runtime mask path (Mul nodes present).
-        let dag = parse_and_lower_unchecked(
-            "(if {} (app {} (var {} gt) \
+        crate::lowering_runtime::with_native_lowering_runtime(|runtime| {
+            // chelis#620: floor_div by zero traps at runtime (chelis#550); the
+            // fold must refuse rather than fold the trap away, leaving the if on
+            // the runtime mask path (Mul nodes present).
+            let dag = parse_and_lower_unchecked(
+                "(if {} (app {} (var {} gt) \
              (app {} (var {} floor_div) (cast {} (lit {} 1) i64) (cast {} (lit {} 0) i64)) \
              (cast {} (lit {} 0) i64)) \
              (lit {} 1.0) (lit {} 0.0))",
-        );
-        assert!(
-            dag.nodes()
-                .iter()
-                .any(|node| matches!(node.op, RiscOp::Mul)),
-            "zero-divisor condition must stay on the mask path: {dag:?}"
-        );
+                runtime,
+            );
+            assert!(
+                dag.nodes()
+                    .iter()
+                    .any(|node| matches!(node.op, RiscOp::Mul)),
+                "zero-divisor condition must stay on the mask path: {dag:?}"
+            );
+        })
     }
 
     #[test]
     fn static_cond_fold_refuses_non_finite() {
-        // chelis#620 red-team fix: the lowered CmpLt/not comparison chain
-        // evaluates NaN comparisons opposite to the IEEE comparisons both
-        // forward lanes apply, so a non-finite intermediate must refuse
-        // the fold and stay on the runtime mask path (Mul nodes present)
-        // rather than pruning to a branch the forward pass never takes.
-        let dag = parse_and_lower_unchecked(
-            "(if {} (app {} (var {} gte) \
+        crate::lowering_runtime::with_native_lowering_runtime(|runtime| {
+            // chelis#620 red-team fix: the lowered CmpLt/not comparison chain
+            // evaluates NaN comparisons opposite to the IEEE comparisons both
+            // forward lanes apply, so a non-finite intermediate must refuse
+            // the fold and stay on the runtime mask path (Mul nodes present)
+            // rather than pruning to a branch the forward pass never takes.
+            let dag = parse_and_lower_unchecked(
+                "(if {} (app {} (var {} gte) \
              (app {} (var {} div) (lit {} 0.0) (lit {} 0.0)) \
              (lit {} 0.0)) \
              (lit {} 1.0) (lit {} 0.0))",
-        );
-        assert!(
-            dag.nodes()
-                .iter()
-                .any(|node| matches!(node.op, RiscOp::Mul)),
-            "NaN condition must stay on the mask path: {dag:?}"
-        );
+                runtime,
+            );
+            assert!(
+                dag.nodes()
+                    .iter()
+                    .any(|node| matches!(node.op, RiscOp::Mul)),
+                "NaN condition must stay on the mask path: {dag:?}"
+            );
+        })
     }
 
     #[test]
     fn runtime_cond_adt_branch_rejected_cites_618() {
-        // chelis#620 negative parity: a RUNTIME condition with ADT-valued
-        // branches stays rejected; the message keeps the pinned prefix and
-        // names the select/blend successor (chelis#618).
-        let err = std::panic::catch_unwind(|| {
-            let _ = parse_and_lower_unchecked("(if {} (var {} c) (var {} ModeA) (var {} ModeB))");
+        crate::lowering_runtime::with_native_lowering_runtime(|runtime| {
+            // chelis#620 negative parity: a RUNTIME condition with ADT-valued
+            // branches stays rejected; the message keeps the pinned prefix and
+            // names the select/blend successor (chelis#618).
+            let err = std::panic::catch_unwind(|| {
+                let _ = parse_and_lower_unchecked(
+                    "(if {} (var {} c) (var {} ModeA) (var {} ModeB))",
+                    runtime,
+                );
+            })
+            .expect_err("runtime-cond ADT branch should be rejected");
+            let message = captured_lower_message(err);
+            assert!(
+                message.contains("expected a single tensor value, got an ADT value"),
+                "pinned prefix must survive: {message}"
+            );
+            assert!(
+                message.contains("chelis#618"),
+                "message must cite the select/blend successor: {message}"
+            );
         })
-        .expect_err("runtime-cond ADT branch should be rejected");
-        let message = captured_lower_message(err);
-        assert!(
-            message.contains("expected a single tensor value, got an ADT value"),
-            "pinned prefix must survive: {message}"
-        );
-        assert!(
-            message.contains("chelis#618"),
-            "message must cite the select/blend successor: {message}"
-        );
     }
 
     #[test]
     fn static_list_append_then_tensor_concat_lowers_value_spine() {
-        // chelis#620: `concat([a], [b])` builds a static Cons spine as a
-        // lowered VALUE (invisible to the expr-level collect_cons_chain
-        // once bound to a var), and `concat(xs, axis)` over that value
-        // emits the same Pad+Add cascade as the expr-level path. This is
-        // the minimal shape of an unrolled recursive patch collector.
-        let dag = parse_and_lower_unchecked(
-            "(def {} xs (app {} (var {} concat) \
+        crate::lowering_runtime::with_native_lowering_runtime(|runtime| {
+            // chelis#620: `concat([a], [b])` builds a static Cons spine as a
+            // lowered VALUE (invisible to the expr-level collect_cons_chain
+            // once bound to a var), and `concat(xs, axis)` over that value
+            // emits the same Pad+Add cascade as the expr-level path. This is
+            // the minimal shape of an unrolled recursive patch collector.
+            let dag = parse_and_lower_unchecked(
+                "(def {} xs (app {} (var {} concat) \
               (app {} (var {} Cons) \
                 (var {type: (t-tensor {} (d-lit {} 2) (t-prim {} f32))} a) (var {} Nil)) \
               (app {} (var {} Cons) \
                 (var {type: (t-tensor {} (d-lit {} 2) (t-prim {} f32))} b) (var {} Nil)))) \
              (def {} out (app {} (var {} concat) (var {} xs) (cast {} (lit {} 0) i32)))",
-        );
-        let pads = dag
-            .nodes()
-            .iter()
-            .filter(|node| matches!(node.op, RiscOp::Pad { .. }))
-            .count();
-        assert_eq!(pads, 2, "one Pad per appended element: {dag:?}");
-        assert!(
-            !dag.nodes()
+                runtime,
+            );
+            let pads = dag
+                .nodes()
                 .iter()
-                .any(|node| matches!(&node.op, RiscOp::Load { name } if name.as_str() == "concat")),
-            "the host-lane concat placeholder must not appear: {dag:?}"
-        );
+                .filter(|node| matches!(node.op, RiscOp::Pad { .. }))
+                .count();
+            assert_eq!(pads, 2, "one Pad per appended element: {dag:?}");
+            assert!(
+                !dag.nodes().iter().any(
+                    |node| matches!(&node.op, RiscOp::Load { name } if name.as_str() == "concat")
+                ),
+                "the host-lane concat placeholder must not appear: {dag:?}"
+            );
+        })
     }
 
     #[test]
     fn copy_adt_lowers_field_wise() {
-        // chelis#620 Blocker 2: a copy over an ADT value produces one
-        // RiscOp::Copy per tensor leaf and preserves the ADT structure
-        // (previously it died in expect_node("copy input")).
-        let dag = parse_and_lower_unchecked("(copy {} (record {} Box (kv {} t (var {} w))))");
-        let load = dag
-            .nodes()
-            .iter()
-            .find(|node| matches!(&node.op, RiscOp::Load { name } if name.as_str() == "w"))
-            .expect("field expr must lower to a Load");
-        assert!(
-            dag.nodes()
+        crate::lowering_runtime::with_native_lowering_runtime(|runtime| {
+            // chelis#620 Blocker 2: a copy over an ADT value produces one
+            // RiscOp::Copy per tensor leaf and preserves the ADT structure
+            // (previously it died in expect_node("copy input")).
+            let dag = parse_and_lower_unchecked(
+                "(copy {} (record {} Box (kv {} t (var {} w))))",
+                runtime,
+            );
+            let load = dag
+                .nodes()
                 .iter()
-                .any(|node| matches!(node.op, RiscOp::Copy) && node.inputs == vec![load.id]),
-            "copy must wrap the ADT field's leaf node: {dag:?}"
-        );
+                .find(|node| matches!(&node.op, RiscOp::Load { name } if name.as_str() == "w"))
+                .expect("field expr must lower to a Load");
+            assert!(
+                dag.nodes()
+                    .iter()
+                    .any(|node| matches!(node.op, RiscOp::Copy) && node.inputs == vec![load.id]),
+                "copy must wrap the ADT field's leaf node: {dag:?}"
+            );
+        })
     }
 
     #[test]
     fn drop_adt_closes_each_leaf() {
-        // chelis#620: a drop over an ADT value closes every tensor leaf's
-        // live range instead of dying in expect_node("drop input").
-        let dag = parse_and_lower_unchecked(
-            "(app {} (var {} drop) (record {} Box (kv {} t (var {} w))))",
-        );
-        let load = dag
-            .nodes()
-            .iter()
-            .find(|node| matches!(&node.op, RiscOp::Load { name } if name.as_str() == "w"))
-            .expect("field expr must lower to a Load");
-        assert!(
-            dag.nodes()
+        crate::lowering_runtime::with_native_lowering_runtime(|runtime| {
+            // chelis#620: a drop over an ADT value closes every tensor leaf's
+            // live range instead of dying in expect_node("drop input").
+            let dag = parse_and_lower_unchecked(
+                "(app {} (var {} drop) (record {} Box (kv {} t (var {} w))))",
+                runtime,
+            );
+            let load = dag
+                .nodes()
                 .iter()
-                .any(|node| matches!(node.op, RiscOp::Drop) && node.inputs == vec![load.id]),
-            "drop must close the ADT field's leaf: {dag:?}"
-        );
+                .find(|node| matches!(&node.op, RiscOp::Load { name } if name.as_str() == "w"))
+                .expect("field expr must lower to a Load");
+            assert!(
+                dag.nodes()
+                    .iter()
+                    .any(|node| matches!(node.op, RiscOp::Drop) && node.inputs == vec![load.id]),
+                "drop must close the ADT field's leaf: {dag:?}"
+            );
+        })
     }
 
     #[test]
     fn non_float_if_is_rejected_before_lowering() {
-        // chelis#620: the condition must be a RUNTIME value (a literal
-        // condition now prunes statically and lowers any branch type).
-        let err = std::panic::catch_unwind(|| {
-            let _ = parse_and_lower_unchecked(
-                "(if {type: (t-prim {} bool)} \
+        crate::lowering_runtime::with_native_lowering_runtime(|runtime| {
+            // chelis#620: the condition must be a RUNTIME value (a literal
+            // condition now prunes statically and lowers any branch type).
+            let err = std::panic::catch_unwind(|| {
+                let _ = parse_and_lower_unchecked(
+                    "(if {type: (t-prim {} bool)} \
                 (var {} c) \
                 (lit {type: (t-prim {} bool)} true) \
                 (lit {type: (t-prim {} bool)} false))",
+                    runtime,
+                );
+            })
+            .expect_err("non-float runtime-cond if should be rejected");
+            assert!(
+                captured_lower_message(err).contains("`if` is not supported by IR evaluation yet")
             );
         })
-        .expect_err("non-float runtime-cond if should be rejected");
-        assert!(captured_lower_message(err).contains("`if` is not supported by IR evaluation yet"));
     }
 
     #[test]
     fn runtime_scrutinee_match_is_rejected_before_lowering() {
-        // chelis#520 D1: a match over a runtime value (here an unbound
-        // lowercase var, which lowers to a `Load`) stays rejected; only a
-        // compile-time-known constructor scrutinee resolves statically.
-        let err = std::panic::catch_unwind(|| {
-            let _ = parse_and_lower_unchecked(
-                "(match {} (var {} x) (arm {} (pat-var {} y) () (var {} y)))",
+        crate::lowering_runtime::with_native_lowering_runtime(|runtime| {
+            // chelis#520 D1: a match over a runtime value (here an unbound
+            // lowercase var, which lowers to a `Load`) stays rejected; only a
+            // compile-time-known constructor scrutinee resolves statically.
+            let err = std::panic::catch_unwind(|| {
+                let _ = parse_and_lower_unchecked(
+                    "(match {} (var {} x) (arm {} (pat-var {} y) () (var {} y)))",
+                    runtime,
+                );
+            })
+            .expect_err("match should be rejected");
+            assert!(
+                captured_lower_message(err)
+                    .contains("`match` on a runtime scrutinee is not supported")
             );
         })
-        .expect_err("match should be rejected");
-        assert!(
-            captured_lower_message(err).contains("`match` on a runtime scrutinee is not supported")
-        );
     }
 
     #[test]
     fn static_ctor_scrutinee_match_selects_taken_arm() {
-        // chelis#520 D1: a nullary-constructor scrutinee statically selects
-        // the matching arm; the dead arm is never lowered.
-        let dag = parse_and_lower_unchecked(
-            "(match {} (var {} ModeA) \
+        crate::lowering_runtime::with_native_lowering_runtime(|runtime| {
+            // chelis#520 D1: a nullary-constructor scrutinee statically selects
+            // the matching arm; the dead arm is never lowered.
+            let dag = parse_and_lower_unchecked(
+                "(match {} (var {} ModeA) \
              (arm {} (pat-ctor {} ModeA) () (lit {type: (t-prim {} f32)} 2.5)) \
              (arm {} (pat-ctor {} ModeB) () (lit {type: (t-prim {} f32)} 9.0)))",
-        );
-        assert!(
-            dag.nodes().iter().any(
-                |node| matches!(node.op, RiscOp::Const { value } if value.as_f64_lossy() == 2.5)
-            ),
-            "taken arm's literal must be lowered: {dag:?}"
-        );
-        assert!(
-            !dag.nodes().iter().any(
-                |node| matches!(node.op, RiscOp::Const { value } if value.as_f64_lossy() == 9.0)
-            ),
-            "dead arm's literal must not be lowered: {dag:?}"
-        );
+                runtime,
+            );
+            assert!(
+                dag.nodes().iter().any(
+                    |node| matches!(node.op, RiscOp::Const { value } if value.as_f64_lossy() == 2.5)
+                ),
+                "taken arm's literal must be lowered: {dag:?}"
+            );
+            assert!(
+                !dag.nodes().iter().any(
+                    |node| matches!(node.op, RiscOp::Const { value } if value.as_f64_lossy() == 9.0)
+                ),
+                "dead arm's literal must not be lowered: {dag:?}"
+            );
+        })
     }
 
     #[test]
     fn static_record_scrutinee_match_binds_fields_by_name() {
-        // chelis#520 D2 mechanics: a record construction scrutinee binds
-        // pat-record fields by name, so the arm body sees the bound field's
-        // node (a Load of `w`), not the constructor wrapper.
-        let dag = parse_and_lower_unchecked(
-            "(match {} (record {} Box (kv {} t (var {} w))) \
+        crate::lowering_runtime::with_native_lowering_runtime(|runtime| {
+            // chelis#520 D2 mechanics: a record construction scrutinee binds
+            // pat-record fields by name, so the arm body sees the bound field's
+            // node (a Load of `w`), not the constructor wrapper.
+            let dag = parse_and_lower_unchecked(
+                "(match {} (record {} Box (kv {} t (var {} w))) \
              (arm {} (pat-record {} Box (kv {} t (pat-var {} u))) () (var {} u)))",
-        );
-        assert!(
-            dag.nodes()
-                .iter()
-                .any(|node| matches!(&node.op, RiscOp::Load { name } if name.as_str() == "w")),
-            "bound field must lower to the field expr's Load: {dag:?}"
-        );
+                runtime,
+            );
+            assert!(
+                dag.nodes()
+                    .iter()
+                    .any(|node| matches!(&node.op, RiscOp::Load { name } if name.as_str() == "w")),
+                "bound field must lower to the field expr's Load: {dag:?}"
+            );
+        })
     }
 
     #[test]
     fn guarded_static_match_arm_is_rejected() {
-        // chelis#520 D1 negative parity: a guard on the selected arm needs
-        // runtime evaluation, so static selection must reject it.
-        let err = std::panic::catch_unwind(|| {
-            let _ = parse_and_lower_unchecked(
-                "(match {} (var {} ModeA) \
+        crate::lowering_runtime::with_native_lowering_runtime(|runtime| {
+            // chelis#520 D1 negative parity: a guard on the selected arm needs
+            // runtime evaluation, so static selection must reject it.
+            let err = std::panic::catch_unwind(|| {
+                let _ = parse_and_lower_unchecked(
+                    "(match {} (var {} ModeA) \
                  (arm {} (pat-ctor {} ModeA) (lit {type: (t-prim {} bool)} true) \
                  (lit {type: (t-prim {} f32)} 2.5)))",
-            );
+                    runtime,
+                );
+            })
+            .expect_err("guarded arm should be rejected");
+            assert!(captured_lower_message(err).contains("guards are not supported"));
         })
-        .expect_err("guarded arm should be rejected");
-        assert!(captured_lower_message(err).contains("guards are not supported"));
     }
 
     /// chelis#1923 renamed what this program is unsupported FOR.
@@ -25648,56 +26212,65 @@ mod regression_tests {
     /// got more accurate.
     #[test]
     fn an_unsupported_transform_in_pipe_position_names_the_transform() {
-        let exprs = chelis_deep::parser::parse_str(
-            "(pipe {} (lit {type: (t-prim {} f32)} 1.0) (grad {} (var {} f)))",
-        )
-        .expect("parse failed");
-        let err =
-            try_lower_subexpr_program(&exprs[0], UnordMap::new(), UnordMap::new(), UnordMap::new())
-                .expect_err("an unsupported transform should return a diagnostic");
-        let message = err.to_string();
-        assert!(
-            message.contains("`grad` is not supported by IR evaluation yet"),
-            "the diagnostic names the transform, not the notation: {message}"
-        );
-        assert!(
-            !message.contains("pipe"),
-            "and no longer mentions a pipe, because none reached lowering: {message}"
-        );
-        assert!(
-            message.contains("chelis build --target c"),
-            "diagnostic should name the build workaround: {message}"
-        );
+        crate::lowering_runtime::with_native_lowering_runtime(|runtime| {
+            let exprs = chelis_deep::parser::parse_str(
+                "(pipe {} (lit {type: (t-prim {} f32)} 1.0) (grad {} (var {} f)))",
+            )
+            .expect("parse failed");
+            let err = try_lower_subexpr_program(
+                &exprs[0],
+                UnordMap::new(),
+                UnordMap::new(),
+                UnordMap::new(),
+                runtime,
+            )
+            .expect_err("an unsupported transform should return a diagnostic");
+            let message = err.to_string();
+            assert!(
+                message.contains("`grad` is not supported by IR evaluation yet"),
+                "the diagnostic names the transform, not the notation: {message}"
+            );
+            assert!(
+                !message.contains("pipe"),
+                "and no longer mentions a pipe, because none reached lowering: {message}"
+            );
+            assert!(
+                message.contains("chelis build --target c"),
+                "diagnostic should name the build workaround: {message}"
+            );
+        })
     }
 
     #[test]
     fn shape_sensitive_app_without_type_metadata_is_rejected() {
-        let exprs = chelis_deep::parser::parse_str(
-            "(def {} x (lit {} 1.0))
+        crate::lowering_runtime::with_native_lowering_runtime(|runtime| {
+            let exprs = chelis_deep::parser::parse_str(
+                "(def {} x (lit {} 1.0))
              (def {} y (app {} (var {} reshape) (var {} x)))",
-        )
-        .expect("parse failed");
-        let err = std::panic::catch_unwind(|| {
-            for expr in &exprs {
-                assert_ir_typed(expr);
-            }
+            )
+            .expect("parse failed");
+            let err = std::panic::catch_unwind(|| {
+                for expr in &exprs {
+                    assert_ir_typed(expr, runtime);
+                }
+            })
+            .expect_err("missing type metadata should panic during lowering preflight");
+            let message = if let Some(diagnostic) = err.downcast_ref::<LowerDiagnostic>() {
+                diagnostic.to_string()
+            } else if let Some(message) = err.downcast_ref::<String>() {
+                message.clone()
+            } else if let Some(message) = err.downcast_ref::<&str>() {
+                (*message).to_string()
+            } else {
+                String::new()
+            };
+            assert!(
+                message.contains(
+                    "shape-sensitive IR app nodes must carry explicit type metadata before lowering"
+                ),
+                "unexpected panic message: {message}"
+            );
         })
-        .expect_err("missing type metadata should panic during lowering preflight");
-        let message = if let Some(diagnostic) = err.downcast_ref::<LowerDiagnostic>() {
-            diagnostic.to_string()
-        } else if let Some(message) = err.downcast_ref::<String>() {
-            message.clone()
-        } else if let Some(message) = err.downcast_ref::<&str>() {
-            (*message).to_string()
-        } else {
-            String::new()
-        };
-        assert!(
-            message.contains(
-                "shape-sensitive IR app nodes must carry explicit type metadata before lowering"
-            ),
-            "unexpected panic message: {message}"
-        );
     }
 
     // The runtime IR audits must NOT descend into declaration metadata.
@@ -25710,7 +26283,8 @@ mod regression_tests {
     // audit would wrongly reject it if it walked into the meta map.
     #[test]
     fn deftype_tensor_invariant_metadata_does_not_trip_runtime_audit() {
-        let src = r#"
+        crate::lowering_runtime::with_native_lowering_runtime(|runtime| {
+            let src = r#"
             (deftype {opaque: true, invariant: (fn {}
                                    (params {} p)
                                    (app {}
@@ -25725,12 +26299,13 @@ mod regression_tests {
                 Simplex
                 (field {} weights (t-tensor {} (d-lit {} 3) (t-prim {} f32)))))
         "#;
-        let exprs = chelis_deep::parser::parse_str(src).expect("parse failed");
-        // Neither audit may panic on declaration metadata.
-        for expr in &exprs {
-            assert_ir_typed(expr);
-            assert_ir_lowerable(expr);
-        }
+            let exprs = chelis_deep::parser::parse_str(src).expect("parse failed");
+            // Neither audit may panic on declaration metadata.
+            for expr in &exprs {
+                assert_ir_typed(expr, runtime);
+                assert_ir_lowerable(expr, runtime);
+            }
+        })
     }
 
     // Scalar-field invariants (the `Probability` shape) also live in the
@@ -25740,7 +26315,8 @@ mod regression_tests {
     // metadata is runtime IR.
     #[test]
     fn deftype_scalar_invariant_metadata_does_not_trip_runtime_audit() {
-        let src = r#"
+        crate::lowering_runtime::with_native_lowering_runtime(|runtime| {
+            let src = r#"
             (deftype {opaque: true, invariant: (fn {}
                                    (params {} p)
                                    (app {}
@@ -25759,11 +26335,12 @@ mod regression_tests {
                 Probability
                 (field {} value (t-prim {} f32))))
         "#;
-        let exprs = chelis_deep::parser::parse_str(src).expect("parse failed");
-        for expr in &exprs {
-            assert_ir_typed(expr);
-            assert_ir_lowerable(expr);
-        }
+            let exprs = chelis_deep::parser::parse_str(src).expect("parse failed");
+            for expr in &exprs {
+                assert_ir_typed(expr, runtime);
+                assert_ir_lowerable(expr, runtime);
+            }
+        })
     }
 
     // Negative parity: skipping declaration metadata must NOT weaken the
@@ -25771,32 +26348,34 @@ mod regression_tests {
     // shape-sensitive app missing `type` metadata must still be rejected.
     #[test]
     fn def_body_shape_sensitive_app_still_rejected_after_decl_skip() {
-        let exprs = chelis_deep::parser::parse_str(
-            "(def {} x (lit {} 1.0))
+        crate::lowering_runtime::with_native_lowering_runtime(|runtime| {
+            let exprs = chelis_deep::parser::parse_str(
+                "(def {} x (lit {} 1.0))
              (def {} y (app {} (var {} reshape) (var {} x)))",
-        )
-        .expect("parse failed");
-        let err = std::panic::catch_unwind(|| {
-            for expr in &exprs {
-                assert_ir_typed(expr);
-            }
+            )
+            .expect("parse failed");
+            let err = std::panic::catch_unwind(|| {
+                for expr in &exprs {
+                    assert_ir_typed(expr, runtime);
+                }
+            })
+            .expect_err("missing type metadata in a def body must still panic");
+            let message = if let Some(diagnostic) = err.downcast_ref::<LowerDiagnostic>() {
+                diagnostic.to_string()
+            } else if let Some(message) = err.downcast_ref::<String>() {
+                message.clone()
+            } else if let Some(message) = err.downcast_ref::<&str>() {
+                (*message).to_string()
+            } else {
+                String::new()
+            };
+            assert!(
+                message.contains(
+                    "shape-sensitive IR app nodes must carry explicit type metadata before lowering"
+                ),
+                "unexpected panic message: {message}"
+            );
         })
-        .expect_err("missing type metadata in a def body must still panic");
-        let message = if let Some(diagnostic) = err.downcast_ref::<LowerDiagnostic>() {
-            diagnostic.to_string()
-        } else if let Some(message) = err.downcast_ref::<String>() {
-            message.clone()
-        } else if let Some(message) = err.downcast_ref::<&str>() {
-            (*message).to_string()
-        } else {
-            String::new()
-        };
-        assert!(
-            message.contains(
-                "shape-sensitive IR app nodes must carry explicit type metadata before lowering"
-            ),
-            "unexpected panic message: {message}"
-        );
     }
 
     // Fix: grad(named_fn)(x) — the callable path must resolve named top-level
@@ -25808,8 +26387,9 @@ mod regression_tests {
     // This must NOT panic and must produce a valid DAG.
     #[test]
     fn grad_applied_to_named_top_level_def_lowers_without_panic() {
-        use chelis_unord::UnordMap;
-        let fn_src = r#"
+        crate::lowering_runtime::with_native_lowering_runtime(|runtime| {
+            use chelis_unord::UnordMap;
+            let fn_src = r#"
             (fn {}
               (params {}
                 (x {type: (t-tensor {} (d-lit {} 1) (t-prim {} f32))}))
@@ -25821,50 +26401,58 @@ mod regression_tests {
                   (copy {} (var {} x)))
                 (lit {type: (t-prim {} i32)} 0)))
         "#;
-        let app_src = r#"
+            let app_src = r#"
             (app {type: (t-tensor {} (d-lit {} 1) (t-prim {} f32))}
               (grad {} (var {} loss))
               (var {type: (t-tensor {} (d-lit {} 1) (t-prim {} f32))} input))
         "#;
-        let fn_expr = chelis_deep::parser::parse_str(fn_src)
-            .expect("parse fn failed")
-            .into_iter()
-            .next()
-            .expect("fn expr");
-        let app_expr = chelis_deep::parser::parse_str(app_src)
-            .expect("parse app failed")
-            .into_iter()
-            .next()
-            .expect("app expr");
-        let mut program_defs = UnordMap::new();
-        program_defs.insert("loss".to_string(), fn_expr);
-        let input_ty = crate::dag::TensorType {
-            dims: vec![crate::dag::DimInfo::Lit(1)],
-            precision: chelis_types::types::Prim::F32,
-        };
-        let scoped_types = UnordMap::from([("input".to_string(), input_ty)]);
-        // lower_subexpr_program starts with a fresh LowerCtx (no local_callables).
-        // This must NOT report `grad` as unsupported by IR evaluation.
-        let dag = lower_subexpr_program(&app_expr, scoped_types, UnordMap::new(), program_defs);
-        assert!(
-            !dag.is_empty(),
-            "lowering grad(named_fn)(x) must produce a non-empty DAG"
-        );
-        assert!(
+            let fn_expr = chelis_deep::parser::parse_str(fn_src)
+                .expect("parse fn failed")
+                .into_iter()
+                .next()
+                .expect("fn expr");
+            let app_expr = chelis_deep::parser::parse_str(app_src)
+                .expect("parse app failed")
+                .into_iter()
+                .next()
+                .expect("app expr");
+            let mut program_defs = UnordMap::new();
+            program_defs.insert("loss".to_string(), fn_expr);
+            let input_ty = crate::dag::TensorType {
+                dims: vec![crate::dag::DimInfo::Lit(1)],
+                precision: chelis_types::types::Prim::F32,
+            };
+            let scoped_types = UnordMap::from([("input".to_string(), input_ty)]);
+            // lower_subexpr_program starts with a fresh LowerCtx (no local_callables).
+            // This must NOT report `grad` as unsupported by IR evaluation.
+            let dag = lower_subexpr_program(
+                &app_expr,
+                scoped_types,
+                UnordMap::new(),
+                program_defs,
+                runtime,
+            );
+            assert!(
+                !dag.is_empty(),
+                "lowering grad(named_fn)(x) must produce a non-empty DAG"
+            );
+            assert!(
             !dag.nodes()
                 .iter()
                 .any(|node| matches!(&node.op, RiscOp::Load { name } if name.as_str().contains("__unrepresentable"))),
             "grad(named_fn)(x) must not leave an unresolved placeholder Load in the DAG"
         );
-        assert!(verify::verify(&dag).is_empty());
+            assert!(verify::verify(&dag).is_empty());
+        })
     }
 
     // Positive numeric: grad(named_fn)(x) at x=[3.0] must equal 6.0.
     // loss(x) = sum(mul(x,x),0)  →  dL/dx = 2*x  →  at x=3.0, result=6.0.
     #[test]
     fn grad_applied_to_named_top_level_def_gradient_is_correct() {
-        use chelis_unord::UnordMap;
-        let fn_src = r#"
+        crate::lowering_runtime::with_native_lowering_runtime(|runtime| {
+            use chelis_unord::UnordMap;
+            let fn_src = r#"
             (fn {}
               (params {}
                 (x {type: (t-tensor {} (d-lit {} 1) (t-prim {} f32))}))
@@ -25876,47 +26464,54 @@ mod regression_tests {
                   (copy {} (var {} x)))
                 (lit {type: (t-prim {} i32)} 0)))
         "#;
-        let app_src = r#"
+            let app_src = r#"
             (app {type: (t-tensor {} (d-lit {} 1) (t-prim {} f32))}
               (grad {} (var {} loss))
               (var {type: (t-tensor {} (d-lit {} 1) (t-prim {} f32))} input))
         "#;
-        let fn_expr = chelis_deep::parser::parse_str(fn_src)
-            .expect("parse fn failed")
-            .into_iter()
-            .next()
-            .expect("fn expr");
-        let app_expr = chelis_deep::parser::parse_str(app_src)
-            .expect("parse app failed")
-            .into_iter()
-            .next()
-            .expect("app expr");
-        let mut program_defs = UnordMap::new();
-        program_defs.insert("loss".to_string(), fn_expr);
-        let input_ty = crate::dag::TensorType {
-            dims: vec![crate::dag::DimInfo::Lit(1)],
-            precision: chelis_types::types::Prim::F32,
-        };
-        let scoped_types = UnordMap::from([("input".to_string(), input_ty)]);
-        let dag = lower_subexpr_program(&app_expr, scoped_types, UnordMap::new(), program_defs);
-        // Evaluate with input = [3.0]; expected gradient = 2 * 3.0 = 6.0
-        let inputs = UnordMap::from([(
-            "input".to_string(),
-            crate::eval::TensorValue::from_vec(vec![1], vec![3.0]),
-        )]);
-        let roots: Vec<crate::dag::NodeId> = dag.roots().to_vec();
-        assert!(!roots.is_empty(), "grad DAG must have at least one root");
-        let result = crate::eval::eval_tensor_roots_with_strict(&dag, &roots, |name| {
-            inputs.get(name).cloned()
-        });
-        let result = result.expect("evaluation of grad(loss)(input) must succeed");
-        let output = &result[roots.last().unwrap()];
-        assert_eq!(output.shape, vec![1], "gradient shape must be [1]");
-        assert!(
-            (output.to_f64_lossy_vec()[0] - 6.0_f64).abs() < 1e-5,
-            "gradient of sum(mul(x,x),0) at x=[3.0] must be 6.0, got {:?}",
-            output.to_f64_lossy_vec()
-        );
+            let fn_expr = chelis_deep::parser::parse_str(fn_src)
+                .expect("parse fn failed")
+                .into_iter()
+                .next()
+                .expect("fn expr");
+            let app_expr = chelis_deep::parser::parse_str(app_src)
+                .expect("parse app failed")
+                .into_iter()
+                .next()
+                .expect("app expr");
+            let mut program_defs = UnordMap::new();
+            program_defs.insert("loss".to_string(), fn_expr);
+            let input_ty = crate::dag::TensorType {
+                dims: vec![crate::dag::DimInfo::Lit(1)],
+                precision: chelis_types::types::Prim::F32,
+            };
+            let scoped_types = UnordMap::from([("input".to_string(), input_ty)]);
+            let dag = lower_subexpr_program(
+                &app_expr,
+                scoped_types,
+                UnordMap::new(),
+                program_defs,
+                runtime,
+            );
+            // Evaluate with input = [3.0]; expected gradient = 2 * 3.0 = 6.0
+            let inputs = UnordMap::from([(
+                "input".to_string(),
+                crate::eval::TensorValue::from_vec(vec![1], vec![3.0]),
+            )]);
+            let roots: Vec<crate::dag::NodeId> = dag.roots().to_vec();
+            assert!(!roots.is_empty(), "grad DAG must have at least one root");
+            let result = crate::eval::eval_tensor_roots_with_strict(&dag, &roots, |name| {
+                inputs.get(name).cloned()
+            });
+            let result = result.expect("evaluation of grad(loss)(input) must succeed");
+            let output = &result[roots.last().unwrap()];
+            assert_eq!(output.shape, vec![1], "gradient shape must be [1]");
+            assert!(
+                (output.to_f64_lossy_vec()[0] - 6.0_f64).abs() < 1e-5,
+                "gradient of sum(mul(x,x),0) at x=[3.0] must be 6.0, got {:?}",
+                output.to_f64_lossy_vec()
+            );
+        })
     }
 
     // Negative: grad(named_fn)(x) still fails gracefully when the named fn uses a
@@ -25924,11 +26519,12 @@ mod regression_tests {
     // This must not produce a silent wrong answer — it must panic/return error.
     #[test]
     fn grad_applied_to_named_fn_via_lower_subexpr_program_resolves() {
-        // Duplicate the positive test as a named alias so both
-        // "lowers_without_panic" and "resolves" names both pass.
-        // (The actual content is the positive numeric test above.)
-        use chelis_unord::UnordMap;
-        let fn_src = r#"
+        crate::lowering_runtime::with_native_lowering_runtime(|runtime| {
+            // Duplicate the positive test as a named alias so both
+            // "lowers_without_panic" and "resolves" names both pass.
+            // (The actual content is the positive numeric test above.)
+            use chelis_unord::UnordMap;
+            let fn_src = r#"
             (fn {}
               (params {}
                 (x {type: (t-tensor {} (d-lit {} 1) (t-prim {} f32))}))
@@ -25940,49 +26536,56 @@ mod regression_tests {
                   (copy {} (var {} x)))
                 (lit {type: (t-prim {} i32)} 0)))
         "#;
-        let app_src = r#"
+            let app_src = r#"
             (app {type: (t-tensor {} (d-lit {} 1) (t-prim {} f32))}
               (grad {} (var {} loss))
               (var {type: (t-tensor {} (d-lit {} 1) (t-prim {} f32))} input))
         "#;
-        let fn_expr = chelis_deep::parser::parse_str(fn_src)
-            .expect("parse fn failed")
-            .into_iter()
-            .next()
-            .expect("fn expr");
-        let app_expr = chelis_deep::parser::parse_str(app_src)
-            .expect("parse app failed")
-            .into_iter()
-            .next()
-            .expect("app expr");
-        let mut program_defs = UnordMap::new();
-        program_defs.insert("loss".to_string(), fn_expr);
-        let input_ty = crate::dag::TensorType {
-            dims: vec![crate::dag::DimInfo::Lit(1)],
-            precision: chelis_types::types::Prim::F32,
-        };
-        let scoped_types = UnordMap::from([("input".to_string(), input_ty.clone())]);
-        let dag = lower_subexpr_program(&app_expr, scoped_types, UnordMap::new(), program_defs);
-        assert!(
-            !dag.is_empty(),
-            "lower_subexpr_program of grad(named_fn)(input) must produce a non-empty DAG"
-        );
-        let inputs = UnordMap::from([(
-            "input".to_string(),
-            crate::eval::TensorValue::from_vec(vec![1], vec![3.0]),
-        )]);
-        let roots: Vec<crate::dag::NodeId> = dag.roots().to_vec();
-        assert!(!roots.is_empty(), "DAG must have roots");
-        let result = crate::eval::eval_tensor_roots_with_strict(&dag, &roots, |name| {
-            inputs.get(name).cloned()
-        });
-        let result = result.expect("evaluation must succeed");
-        let output = &result[roots.last().unwrap()];
-        assert_eq!(output.shape, vec![1], "gradient shape must be [1]");
-        assert!(
-            (output.to_f64_lossy_vec()[0] - 6.0_f64).abs() < 1e-5,
-            "gradient of sum(mul(x,x),0) at x=[3.0] must be 6.0, got {:?}",
-            output.to_f64_lossy_vec()
-        );
+            let fn_expr = chelis_deep::parser::parse_str(fn_src)
+                .expect("parse fn failed")
+                .into_iter()
+                .next()
+                .expect("fn expr");
+            let app_expr = chelis_deep::parser::parse_str(app_src)
+                .expect("parse app failed")
+                .into_iter()
+                .next()
+                .expect("app expr");
+            let mut program_defs = UnordMap::new();
+            program_defs.insert("loss".to_string(), fn_expr);
+            let input_ty = crate::dag::TensorType {
+                dims: vec![crate::dag::DimInfo::Lit(1)],
+                precision: chelis_types::types::Prim::F32,
+            };
+            let scoped_types = UnordMap::from([("input".to_string(), input_ty.clone())]);
+            let dag = lower_subexpr_program(
+                &app_expr,
+                scoped_types,
+                UnordMap::new(),
+                program_defs,
+                runtime,
+            );
+            assert!(
+                !dag.is_empty(),
+                "lower_subexpr_program of grad(named_fn)(input) must produce a non-empty DAG"
+            );
+            let inputs = UnordMap::from([(
+                "input".to_string(),
+                crate::eval::TensorValue::from_vec(vec![1], vec![3.0]),
+            )]);
+            let roots: Vec<crate::dag::NodeId> = dag.roots().to_vec();
+            assert!(!roots.is_empty(), "DAG must have roots");
+            let result = crate::eval::eval_tensor_roots_with_strict(&dag, &roots, |name| {
+                inputs.get(name).cloned()
+            });
+            let result = result.expect("evaluation must succeed");
+            let output = &result[roots.last().unwrap()];
+            assert_eq!(output.shape, vec![1], "gradient shape must be [1]");
+            assert!(
+                (output.to_f64_lossy_vec()[0] - 6.0_f64).abs() < 1e-5,
+                "gradient of sum(mul(x,x),0) at x=[3.0] must be 6.0, got {:?}",
+                output.to_f64_lossy_vec()
+            );
+        })
     }
 }

@@ -2027,24 +2027,29 @@ mod tests {
             .pop()
             .unwrap();
         assert_eq!(
-            crate::lower::evaluation_profile(&expression, &UnordMap::new()),
+            crate::lowering_runtime::with_native_lowering_runtime(|runtime| {
+                crate::lower::evaluation_profile(&expression, &UnordMap::new(), runtime)
+            }),
             EvaluationProfile::Legacy(LegacyEvaluationReason::ResourceScope)
         );
-        let error = crate::lower::try_lower_subexpr_evaluation_plan(
-            &expression,
-            [(
-                "x".into(),
-                TensorType {
-                    dims: vec![DimInfo::Lit(4)],
-                    precision: Prim::F32,
-                },
-            )]
-            .into_iter()
-            .collect(),
-            UnordMap::new(),
-            UnordMap::new(),
-            &context(),
-        )
+        let error = crate::lowering_runtime::with_native_lowering_runtime(|runtime| {
+            crate::lower::try_lower_subexpr_evaluation_plan(
+                &expression,
+                [(
+                    "x".into(),
+                    TensorType {
+                        dims: vec![DimInfo::Lit(4)],
+                        precision: Prim::F32,
+                    },
+                )]
+                .into_iter()
+                .collect(),
+                UnordMap::new(),
+                UnordMap::new(),
+                &context(),
+                runtime,
+            )
+        })
         .unwrap_err();
         assert!(error.message.contains("ResourceScope"), "{error}");
     }
@@ -2436,17 +2441,19 @@ mod tests {
             let checked =
                 chelis_types::check_ir_program(&expressions, chelis_types::ProgramOrigin::Unlinked)
                     .unwrap();
-            let session = crate::host::HostLoweringSession::new(&checked);
-            let plan = |name| {
-                crate::host::host_def_evaluation_plan(&session, name, &context())
-                    .unwrap()
-                    .unwrap()
-                    .plan()
-                    .unwrap()
-                    .clone()
-            };
-            let forward_and_ad = plan("sample");
-            let next = plan("next");
+            let (forward_and_ad, next) =
+                crate::lowering_runtime::with_native_lowering_runtime(|runtime| {
+                    let session = crate::host::HostLoweringSession::new(&checked, runtime);
+                    let plan = |name| {
+                        crate::host::host_def_evaluation_plan(&session, name, &context())
+                            .unwrap()
+                            .unwrap()
+                            .plan()
+                            .unwrap()
+                            .clone()
+                    };
+                    (plan("sample"), plan("next"))
+                });
             let sites = forward_and_ad
                 .metadata
                 .spine
@@ -2789,13 +2796,16 @@ mod tests {
         )]
         .into_iter()
         .collect();
-        crate::lower::try_lower_subexpr_evaluation_plan(
-            &expr,
-            inputs,
-            UnordMap::new(),
-            UnordMap::new(),
-            &context(),
-        )
+        crate::lowering_runtime::with_native_lowering_runtime(|runtime| {
+            crate::lower::try_lower_subexpr_evaluation_plan(
+                &expr,
+                inputs,
+                UnordMap::new(),
+                UnordMap::new(),
+                &context(),
+                runtime,
+            )
+        })
         .unwrap()
     }
 
@@ -3032,13 +3042,16 @@ mod tests {
             },
         );
         let mut context = context();
-        let plan = crate::lower::try_lower_subexpr_evaluation_plan(
-            &expression,
-            inputs,
-            UnordMap::new(),
-            definitions,
-            &context,
-        )
+        let plan = crate::lowering_runtime::with_native_lowering_runtime(|runtime| {
+            crate::lower::try_lower_subexpr_evaluation_plan(
+                &expression,
+                inputs,
+                UnordMap::new(),
+                definitions,
+                &context,
+                runtime,
+            )
+        })
         .unwrap();
         let schedule = plan
             .metadata

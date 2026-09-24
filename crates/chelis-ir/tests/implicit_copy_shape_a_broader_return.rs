@@ -15,7 +15,10 @@ fn fixture_to_dag(source: &str) -> Result<Dag, String> {
         .map_err(|errs| format!("effects failed: {errs:?}"))?;
     let checked =
         check_linearity(&checked).map_err(|errs| format!("linearity failed: {errs:?}"))?;
-    try_lower_program(&checked).map_err(|diag| format!("lowering failed: {diag:?}"))
+    chelis_ir::lowering_runtime::with_native_lowering_runtime(|runtime| {
+        try_lower_program(&checked, runtime)
+    })
+    .map_err(|diag| format!("lowering failed: {diag:?}"))
 }
 
 #[test]

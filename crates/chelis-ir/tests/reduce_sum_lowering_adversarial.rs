@@ -27,7 +27,9 @@ fn lower_deep(src: &str) -> Result<chelis_ir::dag::Dag, String> {
     })?;
     let checked = chelis_effects::check_program(&checked).expect("fixture effects");
     let checked = chelis_types::check_linearity(&checked).expect("fixture linearity");
-    Ok(lower_program(&checked))
+    Ok(chelis_ir::lowering_runtime::with_native_lowering_runtime(
+        |runtime| lower_program(&checked, runtime),
+    ))
 }
 
 /// CRITICAL: end-to-end smoking gun. A program that passes type-check
