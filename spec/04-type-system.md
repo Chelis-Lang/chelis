@@ -786,6 +786,14 @@ Standard Algorithm W with extensions for tensor types. The flow:
 > dimensions remain distinct, and they unify only when an ordinary body
 > constraint requires equality.
 
+For a literal pattern against an unresolved flexible scrutinee, [04-PAT-1]
+is such an obligation. The lambda stays monomorphic until its first application
+determines the scrutinee type, and the pattern is then checked at that type.
+If no application determines it within the declaration, the declaration is a
+type error rather than a generalized literal-pattern function. An authored
+type binder is governed by [04-INF-6] and is checked at every admissible
+instantiation.
+
 An operation restriction on an inferred scalar-or-tensor operand constrains
 its numeric dtype; it does not turn a dtype-family bound into a family of
 tensor types. An authored `p: Float`, for example, still admits only float

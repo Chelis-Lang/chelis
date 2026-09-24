@@ -282,7 +282,7 @@ pub(super) fn pattern_bindings(
                     literal_pattern_atom,
                     errors,
                 ) {
-                    check_literal_pattern(
+                    if !check_literal_pattern(
                         pat,
                         atom,
                         site,
@@ -291,7 +291,9 @@ pub(super) fn pattern_bindings(
                         subst,
                         adt_reg,
                         errors,
-                    );
+                    ) {
+                        product.defer_literal_pattern(pat, scrutinee_ty, site);
+                    }
                 }
             }
             DeepTag::PatCtor => {
@@ -732,12 +734,7 @@ impl LiteralPatternAtom<'_> {
         match self {
             LiteralPatternAtom::Integer(value) => value.to_string(),
             LiteralPatternAtom::Float(value) => {
-                let printed = value.to_string();
-                if printed.contains(['.', 'e', 'E', 'n', 'i']) {
-                    printed
-                } else {
-                    format!("{printed}.0")
-                }
+                super::literal_width::render_numeric_atom(&deep::Atom::Float(*value))
             }
             LiteralPatternAtom::Bool(value) => value.to_string(),
             LiteralPatternAtom::Str(value) => format!("{value:?}"),
@@ -817,7 +814,7 @@ fn check_literal_pattern(
     subst: &Subst,
     adt_reg: &AdtRegistry,
     errors: &mut DiagnosticSink<'_>,
-) {
+) -> bool {
     let resolved = adt_reg.expand_aliases(&subst.apply(scrutinee_ty));
     // A flexible scrutinee decides nothing yet, and an already-failed one
     // owns its own diagnostic: reporting here would either invent a rejection
@@ -837,10 +834,11 @@ fn check_literal_pattern(
         Type::Var(var) => {
             if let Some((binder, bound)) = env.authored_type_binder(*var, subst) {
                 check_literal_pattern_at_binder(pat, &atom, site, binder, bound, errors);
+                return true;
             }
-            return;
+            return false;
         }
-        Type::Error(_) => return,
+        Type::Error(_) => return true,
         _ => {}
     }
 
@@ -861,7 +859,7 @@ fn check_literal_pattern(
                     .to_string(),
             ],
         );
-        return;
+        return true;
     };
 
     match literal_pattern_failure_at(*prim, &atom) {
@@ -923,6 +921,48 @@ fn check_literal_pattern(
                 prim.name(),
             )],
         ),
+    }
+    true
+}
+
+/// Revisit one pattern captured while its scrutinee was flexible. The same
+/// checker decides concrete and authored-binder outcomes; a still-flexible
+/// scrutinee is an unmet [04-INF-1] semantic obligation at this declaration's
+/// own boundary, so it cannot silently become a polymorphic function.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn validate_deferred_literal_pattern(
+    pat: &deep::Expr,
+    scrutinee_ty: &Type,
+    scrutinee_name: Option<&str>,
+    declaration: Option<&str>,
+    env: &Env,
+    subst: &Subst,
+    adt_reg: &AdtRegistry,
+    errors: &mut DiagnosticSink<'_>,
+) {
+    let Some((DeepTag::PatLit, _, kids)) = stamped_parts(pat) else {
+        return;
+    };
+    let Some(atom) = kids.first().and_then(literal_pattern_atom) else {
+        return; // the original structural read owns this malformed node
+    };
+    let site = scrutinee_name.map_or(PatternSite::Other, PatternSite::ArmOfVariable);
+    if !check_literal_pattern(pat, atom, site, scrutinee_ty, env, subst, adt_reg, errors) {
+        report_literal_pattern_error(
+            pat,
+            errors,
+            format!(
+                "unresolved literal pattern obligation in `{}` at declaration boundary: \
+                 the scrutinee's primitive type is still unknown \
+                 (spec/04-type-system.md [04-PAT-1], [04-INF-1])",
+                declaration.unwrap_or("<anonymous>")
+            ),
+            vec![
+                "Annotate the lambda parameter with a primitive type or apply the lambda \
+                  before this declaration boundary"
+                    .to_string(),
+            ],
+        );
     }
 }
 

@@ -3916,6 +3916,17 @@ is closed.
   a `pat-lit` whose child is not a scalar atom still scores 1.0, because that is
   Deep well-formedness rather than typing, and it is tracked as [#1525].
 
+The flexible-scrutinee continuation is [#2448]. A literal pattern reached
+before its scrutinee variable resolves enters a declaration-owned obligation
+ledger. That obligation prevents a local lambda from being generalized at its
+`let` boundary. The enclosing declaration's final substitution decides the
+same [04-PAT-1] check used for a concrete scrutinee or an authored binder;
+an unresolved variable is rejected under [04-INF-1]. Thus a later top-level
+caller cannot select a dtype after the defining declaration has already
+published a generalized signature. The user-facing diagnostic of a float
+pattern uses the same shortest exponent rendering as numeric literal
+diagnostics ([#2468]).
+
 ---
 
 ### Checked collection-operation transport (chelis#1654)
