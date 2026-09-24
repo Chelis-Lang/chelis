@@ -105,3 +105,41 @@ fn an_invalid_grad_selector_in_a_pipe_is_rejected() {
         "{report}"
     );
 }
+
+#[test]
+fn a_binding_ascription_on_a_pipe_is_checked_like_direct_application() {
+    let dir = tempdir().expect("temporary source directory");
+    for (name, value) in [("direct", "twice(x)"), ("pipe", "x |> twice")] {
+        let path = dir.path().join(format!("{name}-ascription.ch"));
+        fs::write(
+            &path,
+            format!(
+                "def twice(v: f32) -> f32 = add(v, v)\n\
+                 def run(x: f32) -> f32 = {{\n\
+                 \x20 t: i32 = {value}\n\
+                 \x20 cast(t, f32)\n\
+                 }}\n\
+                 out = run(1.5f32)\n"
+            ),
+        )
+        .expect("write source");
+        let check = Command::cargo_bin("chelis")
+            .expect("chelis binary")
+            .env("CHELIS_STYLE_GATE_DISABLE", "1")
+            .args(["check", path.to_str().unwrap()])
+            .output()
+            .expect("check program");
+        assert!(
+            !check.status.success(),
+            "{name}: accepted a wrong binding type"
+        );
+        let report: Value = serde_json::from_slice(&check.stdout).expect("check JSON");
+        assert_ne!(report["score"], 1.0, "{name}: {report}");
+        assert!(
+            report["errors"]
+                .as_array()
+                .is_some_and(|errors| !errors.is_empty()),
+            "{name}: {report}"
+        );
+    }
+}

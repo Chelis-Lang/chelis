@@ -23,7 +23,7 @@
 //! produced the defect, and one that stayed would hide the day the first
 //! stopped agreeing with it.
 
-use crate::annotations::{Metadata, MetadataKey};
+use crate::annotations::{Metadata, MetadataKey, MetadataValue};
 use crate::ast::{Atom, Expr};
 use crate::tag::DeepTag;
 
@@ -311,7 +311,7 @@ fn rebuild(expr: &Expr, tag: DeepTag, meta: &Metadata, children: Vec<Expr>) -> E
 
 /// Fold one already-child-folded `Pipe` expression.
 fn fold_one(pipe: &Expr) -> Option<Expr> {
-    let (tag, _, kids) = stamped(pipe)?;
+    let (tag, owner_meta, kids) = stamped(pipe)?;
     if tag != DeepTag::Pipe {
         return None;
     }
@@ -320,7 +320,47 @@ fn fold_one(pipe: &Expr) -> Option<Expr> {
     for stage in stages {
         acc = fold_stage(stage, acc)?;
     }
-    Some(acc)
+    inherit_pipe_value_annotations(acc, owner_meta)
+}
+
+/// A pipe is surface sugar, but a type written on the pipe expression still
+/// constrains its result. Keep that obligation and its binding-origin marker
+/// on the folded value. Two ascriptions can independently constrain a folded
+/// stage; a one-expression block preserves both instead of overwriting one.
+fn inherit_pipe_value_annotations(mut result: Expr, owner_meta: &Metadata) -> Option<Expr> {
+    let annotations = owner_meta
+        .values()
+        .filter(|value| {
+            matches!(
+                value,
+                MetadataValue::Type(_) | MetadataValue::SurfBindingType(_)
+            )
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    if annotations.is_empty() {
+        return Some(result);
+    }
+    if let Expr::Node(node, _) = &mut result {
+        let mut meta = node.meta().clone();
+        let conflict = annotations.iter().any(|value| match value {
+            MetadataValue::Type(_) => meta.ty().is_some(),
+            MetadataValue::SurfBindingType(_) => meta.surf_binding_type().is_some(),
+            _ => unreachable!("only pipe value annotations were collected"),
+        });
+        if !conflict {
+            for value in annotations {
+                meta.insert(value).ok()?;
+            }
+            node.try_replace_meta(meta).ok()?;
+            return Some(result);
+        }
+    }
+    let meta = Metadata::try_from_values(annotations).ok()?;
+    let span = result.span();
+    crate::node::Node::try_new(DeepTag::Block, meta, vec![result])
+        .ok()
+        .map(|node| Expr::Node(Box::new(node), span))
 }
 
 /// Fold every `Pipe` in a whole program.
@@ -384,6 +424,20 @@ mod tests {
         assert_eq!(
             folded.trim_end(),
             "(app {} (grad {wrt: (var {} v)} (var {} sq)) (var {} x))"
+        );
+    }
+
+    #[test]
+    fn independent_ascriptions_on_a_pipe_and_its_stage_are_both_kept() {
+        let folded = fold_source(
+            "(pipe {type: (t-prim {} i32)} (var {} x) \
+             (fn {} (params {} p) \
+             (app {type: (t-prim {} f32)} (var {} f) (var {} p))))",
+        );
+        assert_eq!(
+            folded.trim_end(),
+            "(block {type: (t-prim {} i32)} \
+             (app {type: (t-prim {} f32)} (var {} f) (var {} x)))"
         );
     }
 
