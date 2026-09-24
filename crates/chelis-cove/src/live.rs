@@ -285,6 +285,12 @@ fn zero_elements(precision: &str, len: usize) -> Result<TensorElements, String> 
         .ok_or_else(|| {
             format!("eval failed\n- cannot auto-evaluate non-runtime dtype `{precision}`")
         })?;
+    // spec/04 §1.1: a key has no default value, so no zero binds one.
+    if !prim.is_data_element_dtype() {
+        return Err(format!(
+            "eval failed\n- cannot auto-evaluate dtype `{precision}`: a key has no zero value"
+        ));
+    }
     let mut zeroes = Vec::new();
     zeroes
         .try_reserve_exact(len)
@@ -374,6 +380,12 @@ mod tests {
             zero_elements("f8e4m3", 1)
                 .expect_err("unsupported runtime dtype must fail loudly")
                 .contains("non-runtime dtype `f8e4m3`")
+        );
+        // A key tensor is a runtime dtype with no zero value to bind.
+        assert!(
+            zero_elements("key", 1)
+                .expect_err("a key input must fail loudly")
+                .contains("a key has no zero value")
         );
     }
 }
