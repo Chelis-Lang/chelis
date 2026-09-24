@@ -1243,6 +1243,24 @@ reason = "test_builtin_atom_registry parses and validates every checked-in built
 tracking_issue = "chelis#1294"
 
 [[path_rule]]
+prefix = "scripts/capacity_census_wire_adapters.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "the stored-value codec cases and native and mirror shape checks are imported by PR script-unit census controls"
+tracking_issue = "chelis#1592"
+
+[[path_rule]]
+prefix = "scripts/test_capacity_census_wire_adapters.py"
+disposition = "owner"
+workflow = "heavy-e2e.yml"
+job = "script-nightly"
+cadence = "daily and workflow_dispatch"
+reason = "the compiler-backed ActualCanonicalCodec and ConstGenericGraph classes execute in script-nightly; lightweight paired controls also execute in PR script-unit"
+tracking_issue = "chelis#2048"
+
+[[path_rule]]
 prefix = "scripts/capacity_census_wire_materialization.py"
 disposition = "owner"
 workflow = "ci.yml"
@@ -2575,6 +2593,24 @@ job = "script-unit"
 cadence = "pull_request and push"
 reason = "change-detector output and path controls run in script-unit"
 tracking_issue = "chelis#1870"
+
+[[path_rule]]
+prefix = "scripts/loud_unsupported_phase2_oracle.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "test_loud_unsupported_phase2_oracle executes the controlled vocabulary and HostAbiType mutation builders and their drift controls in script-unit"
+tracking_issue = "chelis#730"
+
+[[path_rule]]
+prefix = "scripts/test_loud_unsupported_phase2_oracle.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "the Phase 2 mutation-builder, drift and restoration controls run in script-unit"
+tracking_issue = "chelis#730"
 
 [[path_rule]]
 prefix = "scripts/test_loud_unsupported_nightly_workflow.py"
