@@ -1,0 +1,45 @@
+{
+  "description": "Justified assumptions allowed in the transitive closure of the accepted bridge theorems (verification/lean/ClosureAudit.lean). Each entry is a full-match regular expression over declaration names with its justification. Anything in the closure that no entry matches rejects acceptance.",
+  "axioms": [
+    {
+      "match": "propext",
+      "justification": "Lean foundational axiom: propositional extensionality."
+    },
+    {
+      "match": "Classical\\.choice",
+      "justification": "Lean foundational axiom: global choice (classical logic, used by Mathlib analysis for fderiv)."
+    },
+    {
+      "match": "Quot\\.sound",
+      "justification": "Lean foundational axiom: quotient soundness (implies function extensionality)."
+    }
+  ],
+  "opaque": [
+    {
+      "match": "([A-Za-z_.]+\\.)?wrapped\\._@\\.(Mathlib|Aeneas)\\.[A-Za-z_.]+\\.[0-9]+\\._hygCtx\\._hyg\\.[0-9]+",
+      "justification": "`irreducible_def` wrapper (Mathlib.Tactic.IrreducibleDef): an opaque value of the subtype {x // x = definition}; the property fixes the value, so the constant hides no freedom. Used by Mathlib (Real arithmetic, Asymptotics, FDeriv, TangentCone, Filter) and by Aeneas scalar bounds."
+    },
+    {
+      "match": "System\\.Platform\\.getNumBits",
+      "justification": "Lean core platform word size, only known to be 32 or 64. Aeneas usize bounds depend on it, so every theorem holds for both widths (more general than the arm64/x86_64 native targets, which are 64-bit)."
+    },
+    {
+      "match": "Lean\\.opaqueId",
+      "justification": "Lean core identity kept opaque for compilation. Witness path: proof terms of Lean core `grind` commutative-ring normalization (Lean.Grind.CommRing.Mon.revlexWF, well-founded recursion) used inside Mathlib lemma proofs; it occurs in proofs, not in any stated model definition."
+    },
+    {
+      "match": "String\\.Internal\\.[A-Za-z]+",
+      "justification": "Lean core String primitives opaque in Lean v4.29. Witness path: mkPanicMessageWithDecl <- panicWithPosWithDecl <- List.get!Internal (panic-message construction; kernel semantics of a panic return the default value, so the message string never affects a theorem)."
+    }
+  ],
+  "extern": [
+    {
+      "match": "(Nat|Int|UInt8|UInt16|UInt32|UInt64|USize|Char|String|Substring|List|Array|ByteArray|Fin|BitVec|Float|Lean|System|IO|ST)\\.[A-Za-z0-9_.']+",
+      "justification": "Lean core compiled implementations (@[extern]/@[implemented_by]). The kernel checks proofs against the Lean definitions; the compiled code matters only for evaluation-based evidence (#guard/#eval), which is never counted as proof."
+    },
+    {
+      "match": "panicCore",
+      "justification": "Lean core panic reporting for compiled code; kernel semantics return the default value."
+    }
+  ]
+}
