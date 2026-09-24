@@ -9723,3 +9723,121 @@ int main() {{
         "and both roots produce their exact negated inputs: {out}"
     );
 }
+
+/// chelis#2512, spec/04 section 4.7: `x: [n]` forwarded by `neg` under the
+/// name `m`, added to `z: [m]`. The first `m`-stamped axis binds `m`, so with
+/// `neg` first `m` is `x`'s extent and with `z` first it is `z`'s. Either way
+/// the other input axis is indexed at `m`, and before the entry compared it
+/// with the binding one of the two inputs was read past its end.
+fn restamped_binding_run(neg_first: bool, x: &[f32], z: &[f32]) -> std::process::Output {
+    let named = |name: &str| TensorType {
+        dims: vec![DimInfo::Named(name.into(), None)],
+        precision: Prim::F32,
+    };
+    let mut dag = Dag::new();
+    let load = |dag: &mut Dag, name: &str, dim: &str| {
+        dag.add_node(RiscOp::Load { name: name.into() }, vec![], named(dim), None)
+    };
+    let (negated, loaded_z) = if neg_first {
+        let x = load(&mut dag, "x", "n");
+        let negated = dag.add_node(RiscOp::Neg, vec![x], named("m"), None);
+        (negated, load(&mut dag, "z", "m"))
+    } else {
+        let loaded_z = load(&mut dag, "z", "m");
+        let x = load(&mut dag, "x", "n");
+        (dag.add_node(RiscOp::Neg, vec![x], named("m"), None), loaded_z)
+    };
+    let sum = dag.add_node(RiscOp::Add, vec![negated, loaded_z], named("m"), None);
+    dag.add_root(sum);
+    let function = if neg_first {
+        "restamped_binding_neg_first"
+    } else {
+        "restamped_binding_z_first"
+    };
+    let result = codegen(&dag, function).expect("restamped binding codegen");
+    let slot = |name: &str| {
+        result
+            .input_labels
+            .iter()
+            .position(|label| label == name)
+            .expect("input slot")
+    };
+    let values = |data: &[f32]| {
+        data.iter()
+            .map(|value| format!("{value:?}f"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    let harness = format!(
+        r#"{HARNESS_HEADER}
+extern void {function}(chelis_tensor **, int, chelis_tensor **, int);
+int main(void) {{
+    static float x_data[] = {{ {x_values} }};
+    static float z_data[] = {{ {z_values} }};
+    chelis_tensor *inputs[2];
+    inputs[{x_slot}] = chelis_tensor_entry_borrow(1, (int64_t[]){{ {x_len} }}, CHELIS_DTYPE_F32, x_data, sizeof x_data);
+    inputs[{z_slot}] = chelis_tensor_entry_borrow(1, (int64_t[]){{ {z_len} }}, CHELIS_DTYPE_F32, z_data, sizeof z_data);
+    chelis_tensor *outputs[1] = {{ NULL }};
+    {function}(inputs, 2, outputs, 1);
+    chelis_read_view view = chelis_tensor_read_view(outputs[0]);
+    for (int64_t i = 0; i < view.count; ++i) printf("%g ", ((const float *)view.data)[i]);
+    puts("completed");
+    return 0;
+}}
+"#,
+        x_values = values(x),
+        z_values = values(z),
+        x_slot = slot("x"),
+        z_slot = slot("z"),
+        x_len = x.len(),
+        z_len = z.len(),
+    );
+    let name = format!("{function}_{}_{}", x.len(), z.len());
+    compile_and_capture_run(&name, &result.c_source, &harness)
+}
+
+/// chelis#2512 REGRESSION TEST: at the pre-fix tree every row below ran to
+/// completion, sizing the sum by one input's extent and reading the other
+/// input at it. Both node orders and both length orders trap at entry with
+/// the section 4.7 extent trap, naming the binding first.
+#[test]
+fn an_input_axis_a_name_sizes_is_checked_against_that_names_binding() {
+    let mut failures = Vec::new();
+    for (neg_first, x, z, context) in [
+        (true, &[1.0f32, 2.0][..], &[1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0][..], "extent `m`: x axis 0 = 2, z axis 0 = 6"),
+        (true, &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0][..], &[1.0, 2.0][..], "extent `m`: x axis 0 = 6, z axis 0 = 2"),
+        (false, &[1.0, 2.0][..], &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0][..], "extent `m`: z axis 0 = 6, x axis 0 = 2"),
+        (false, &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0][..], &[1.0, 2.0][..], "extent `m`: z axis 0 = 2, x axis 0 = 6"),
+    ] {
+        let run = restamped_binding_run(neg_first, x, z);
+        let output = format!(
+            "{}{}",
+            String::from_utf8_lossy(&run.stdout),
+            String::from_utf8_lossy(&run.stderr)
+        );
+        if run.status.success()
+            || output.contains("completed")
+            || !output.contains(&format!("{context}\nnumeric trap: domain in load at i64"))
+        {
+            failures.push(format!("neg first {neg_first}, x {}, z {}: {output}", x.len(), z.len()));
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+#[test]
+fn an_input_axis_matching_its_names_binding_runs() {
+    for neg_first in [true, false] {
+        let run = restamped_binding_run(neg_first, &[1.0, 2.0, 3.0], &[10.0, 20.0, 30.0]);
+        let output = format!(
+            "{}{}",
+            String::from_utf8_lossy(&run.stdout),
+            String::from_utf8_lossy(&run.stderr)
+        );
+        assert!(run.status.success(), "neg first {neg_first}: {output}");
+        assert!(
+            output.contains("9 18 27 completed"),
+            "neg first {neg_first}: {output}"
+        );
+    }
+}
