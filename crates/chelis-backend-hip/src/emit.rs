@@ -5948,6 +5948,86 @@ mod tests {
         }
     }
 
+    /// `spec/design/randomness_counter_stream.md` §2: whether a draw under a
+    /// runtime activation takes its ordinal is decided when the graph runs,
+    /// so the HIP lane refuses an activated draw key with its typed rejection
+    /// instead of computing a key at emission.
+    ///
+    /// Evidentiary status: LOCK on behaviour present at 7d0b996ca.
+    #[test]
+    fn an_activated_draw_key_is_refused_on_the_device() {
+        let rank0 = |precision| TensorType {
+            dims: vec![],
+            precision,
+        };
+        let mut dag = Dag::new();
+        let like = dag.add_node(
+            RiscOp::Load {
+                name: "like".into(),
+            },
+            vec![],
+            vec_f32(8),
+            None,
+        );
+        let active = dag.add_node(
+            RiscOp::Load {
+                name: "active".into(),
+            },
+            vec![],
+            rank0(Prim::Bool),
+            None,
+        );
+        let low = dag.add_node(
+            RiscOp::synth_const(Prim::F32, 0.0),
+            vec![],
+            rank0(Prim::F32),
+            None,
+        );
+        let high = dag.add_node(
+            RiscOp::synth_const(Prim::F32, 1.0),
+            vec![],
+            rank0(Prim::F32),
+            None,
+        );
+        let seed = dag.add_node(
+            RiscOp::synth_const(Prim::Int64, 7.0),
+            vec![],
+            rank0(Prim::Int64),
+            None,
+        );
+        let key = dag.add_node(
+            RiscOp::DrawKey {
+                handler: chelis_ir::dag::RandomHandler::Scoped { instance: 0 },
+                draw: chelis_ir::dag::RandomDraw::UniformLike,
+                dtype: Prim::F32,
+            },
+            vec![seed, low, high, active],
+            rank0(Prim::Key),
+            None,
+        );
+        let draw = dag.add_node(
+            RiscOp::UniformLike,
+            vec![like, low, high, key, active],
+            vec_f32(8),
+            None,
+        );
+        dag.add_root(draw);
+        let Err(error) = emit_test_dag(&dag, "test_fn") else {
+            panic!("the HIP lane computed a key for an activated draw");
+        };
+        assert_eq!(
+            *error.what,
+            UnsupportedKind::Op("DrawKey".to_string()),
+            "{error}"
+        );
+        assert!(
+            error
+                .context
+                .contains("a HIP draw key under a runtime activation"),
+            "{error}"
+        );
+    }
+
     #[test]
     fn issue_937_uniform_like_f64_uses_f64_sampler_and_bounds() {
         let low = 0.1_f64;
