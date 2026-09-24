@@ -209,7 +209,6 @@ impl AdtRegistry {
             BinderMode::ExplicitKinds(&explicit_params),
             headers,
             vg,
-            errors,
         );
 
         // Parse variants
@@ -256,8 +255,9 @@ impl AdtRegistry {
                                 deep::Expr::Atom(deep::Atom::Name(s), _) => s.clone(),
                                 _ => continue,
                             };
-                            let ftype =
-                                self.expand_aliases(&resolver.resolve(&fchildren[1])?.into_type());
+                            let ftype = self.expand_aliases(
+                                &resolver.resolve(vg, errors, &fchildren[1])?.into_type(),
+                            );
                             fields.push((Some(fname), ftype));
                         }
                     }
@@ -269,7 +269,8 @@ impl AdtRegistry {
                     | deep::ExprCarrier::MetadataExpression(_)
                     | deep::ExprCarrier::MalformedLegacyList(_) => {
                         // Positional type argument
-                        let ftype = self.expand_aliases(&resolver.resolve(field_expr)?.into_type());
+                        let ftype = self
+                            .expand_aliases(&resolver.resolve(vg, errors, field_expr)?.into_type());
                         fields.push((None, ftype));
                     }
                 }

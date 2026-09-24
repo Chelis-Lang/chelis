@@ -850,7 +850,12 @@ mod rejected_signature_resolution_tests {
 
     fn resolve<T>(
         source: &str,
-        operation: impl FnOnce(&mut DeepTypeResolver<'_, '_, '_>, &chelis_deep::Expr) -> T,
+        operation: impl FnOnce(
+            &mut DeepTypeResolver<'_, '_>,
+            &mut VarGen,
+            &mut DiagnosticSink<'_>,
+            &chelis_deep::Expr,
+        ) -> T,
     ) -> (T, Vec<CheckError>) {
         resolve_with_binders(source, &[], operation)
     }
@@ -858,7 +863,12 @@ mod rejected_signature_resolution_tests {
     fn resolve_with_binders<T>(
         source: &str,
         binder_names: &[&str],
-        operation: impl FnOnce(&mut DeepTypeResolver<'_, '_, '_>, &chelis_deep::Expr) -> T,
+        operation: impl FnOnce(
+            &mut DeepTypeResolver<'_, '_>,
+            &mut VarGen,
+            &mut DiagnosticSink<'_>,
+            &chelis_deep::Expr,
+        ) -> T,
     ) -> (T, Vec<CheckError>) {
         let program = chelis_deep::parse_and_stamp_file(&format!("(defsig {{}} fixture {source})"))
             .expect("parse declaration type");
@@ -881,9 +891,8 @@ mod rejected_signature_resolution_tests {
                 BinderMode::ExplicitGeneric(&binders),
                 &headers,
                 &mut variables,
-                &mut sink,
             );
-            operation(&mut resolver, ty)
+            operation(&mut resolver, &mut variables, &mut sink, ty)
         };
         (result, errors)
     }
@@ -892,7 +901,7 @@ mod rejected_signature_resolution_tests {
     fn ordinary_resolution_never_returns_partial_structure_as_success() {
         let (result, errors) = resolve(
             "(t-fn {} (t-prim {} f8e4m3) (t-prim {} i32) (t-prim {} f8e5m2))",
-            |resolver, ty| resolver.resolve(ty),
+            |resolver, variables, sink, ty| resolver.resolve(variables, sink, ty),
         );
         assert!(result.is_err());
         assert_eq!(errors.len(), 2, "{errors:?}");
@@ -904,7 +913,7 @@ mod rejected_signature_resolution_tests {
     fn only_a_rejected_outcome_carries_partial_signature_structure() {
         let (result, errors) = resolve(
             "(t-fn {} (t-prim {} f8e4m3) (t-prim {} i32) (t-prim {} f8e5m2))",
-            |resolver, ty| resolver.resolve_signature(ty),
+            |resolver, variables, sink, ty| resolver.resolve_signature(variables, sink, ty),
         );
         let rejected = result.expect_err("an invalid signature cannot resolve");
         let Type::Fn(arguments, result) = rejected.ty else {
@@ -921,7 +930,7 @@ mod rejected_signature_resolution_tests {
     fn valid_structure_resolves_without_an_error_witness() {
         let (result, errors) = resolve(
             "(t-fn {} (t-prim {} i32) (t-prim {} bool))",
-            |resolver, ty| resolver.resolve_signature(ty),
+            |resolver, variables, sink, ty| resolver.resolve_signature(variables, sink, ty),
         );
         assert_eq!(
             result.expect("valid signature").into_type(),
@@ -935,14 +944,15 @@ mod rejected_signature_resolution_tests {
 
     #[test]
     fn parameter_holes_are_distinct_from_named_binders() {
-        let (hole, errors) = resolve("(t-var {} _)", |resolver, ty| {
-            resolver.resolve_parameter(ty)
+        let (hole, errors) = resolve("(t-var {} _)", |resolver, variables, sink, ty| {
+            resolver.resolve_parameter(variables, sink, ty)
         });
         assert!(hole.expect("a parameter admits a hole").is_none());
         assert!(errors.is_empty());
-        let (named, errors) = resolve_with_binders("(t-var {} a)", &["a"], |resolver, ty| {
-            resolver.resolve_parameter(ty)
-        });
+        let (named, errors) =
+            resolve_with_binders("(t-var {} a)", &["a"], |resolver, variables, sink, ty| {
+                resolver.resolve_parameter(variables, sink, ty)
+            });
         assert!(matches!(
             named
                 .expect("named binder")

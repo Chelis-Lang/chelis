@@ -1722,9 +1722,8 @@ pub(super) fn collect_authored_signature_types(
             BinderMode::ExplicitGeneric(&binders),
             type_headers,
             &mut vg,
-            errors,
         )
-        .resolve(signature_expr)
+        .resolve(&mut vg, errors, signature_expr)
         .ok()
         .map(|resolved| resolved.into_type());
         if let Some(signature) = signature {
@@ -2237,9 +2236,8 @@ pub(super) fn type_from_deep_expr(
         BinderMode::TrustedCompilerMetadata,
         headers,
         &mut vg,
-        errors,
     )
-    .resolve(expr)
+    .resolve(&mut vg, errors, expr)
     .ok()
     .map(|ty| ty.into_type())
 }

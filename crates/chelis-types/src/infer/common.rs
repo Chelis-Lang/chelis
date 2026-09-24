@@ -2053,9 +2053,8 @@ pub(super) fn collect_declarations(
                     BinderMode::ExplicitKinds(&explicit_params),
                     headers,
                     vg,
-                    errors,
                 );
-                if let Ok(aliased_ty) = resolver.resolve(&kids[2]) {
+                if let Ok(aliased_ty) = resolver.resolve(vg, errors, &kids[2]) {
                     let param_args = params
                         .iter()
                         .zip(&param_kinds)
