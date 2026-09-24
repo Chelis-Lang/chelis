@@ -705,8 +705,13 @@ Macro rules:
 - a local binding named `linear_layer` or `cross_entropy` blocks macro expansion for
   that identifier
 - hygiene renames only binders introduced by the macro expansion (block-binding names, `fn`
-  params, pattern binders); free references in the macro body remain free and resolve
+  params, pattern binders), including typed parameters whose names require prefix
+  metadata spelling in Deep; free references in the macro body remain free and resolve
   in the caller's scope
+- expansion preserves an invocation's authored expression type ascription and
+  block-binding type origin on the expanded value; a type ascription in the macro
+  body remains a separate obligation when both apply; substituting a macro
+  parameter preserves a type ascription on that parameter reference
 - macro expansion runs before type checking, effect inference, linearity checking, and
   lowering
 

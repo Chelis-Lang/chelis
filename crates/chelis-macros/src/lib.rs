@@ -105,13 +105,13 @@ enum AdmittedSpecialForm<'a> {
 #[derive(Clone, Copy)]
 enum MacroParameterDisposition<'a> {
     Binder(&'a str),
-    Preserved,
     Invalid,
 }
 
-/// How a `params` child takes part in macro scoping. A bare name and an
-/// annotated `(name {type: ...})` parameter are `fn` parameters, so hygiene
-/// renames them and they block macro expansion of their name
+/// How a `params` child takes part in macro scoping. A bare name, an
+/// annotated `(name {type: ...})` parameter, and the prefix metadata spelling
+/// used for vocabulary names are all `fn` parameters. Hygiene renames them
+/// and they block macro expansion of their name
 /// (spec/02-surf-syntax.md §P5).
 fn macro_parameter_disposition(expr: &Expr) -> MacroParameterDisposition<'_> {
     match expr.carrier() {
@@ -119,17 +119,15 @@ fn macro_parameter_disposition(expr: &Expr) -> MacroParameterDisposition<'_> {
         ExprCarrier::StructuralList([Expr::Atom(Atom::Name(name), _), Expr::Map(_, _)]) => {
             MacroParameterDisposition::Binder(name)
         }
-        ExprCarrier::MetadataExpression(meta)
-            if matches!(meta.expr.as_ref(), Expr::Atom(Atom::Name(_), _)) =>
-        {
-            MacroParameterDisposition::Preserved
-        }
+        ExprCarrier::MetadataExpression(meta) => match meta.expr.as_ref() {
+            Expr::Atom(Atom::Name(name), _) => MacroParameterDisposition::Binder(name),
+            _ => MacroParameterDisposition::Invalid,
+        },
         ExprCarrier::DecodedNode(_, _, _)
         | ExprCarrier::StructuralList(_)
         | ExprCarrier::UndecodableHead(_, _, _)
         | ExprCarrier::Atom(_)
-        | ExprCarrier::MetadataMap(_)
-        | ExprCarrier::MetadataExpression(_) => MacroParameterDisposition::Invalid,
+        | ExprCarrier::MetadataMap(_) => MacroParameterDisposition::Invalid,
     }
 }
 
@@ -484,8 +482,11 @@ impl Expander {
             &mut self.hygiene_counter,
             &UnordMap::new(),
         );
-        let substituted = replace_placeholder_vars(&hygienic, &placeholder_args)?
-            .try_inherit_extensions(node.expr)?;
+        let substituted = inherit_replaced_value_annotations(
+            replace_placeholder_vars(&hygienic, &placeholder_args)?,
+            node.expr,
+        )?
+        .try_inherit_extensions(node.expr)?;
         Ok(Some(annotate_source_expr(
             &substituted,
             &MacroSource::try_from_expression(&invocation)?,
@@ -502,6 +503,57 @@ impl Expander {
         self.expansions += 1;
         Ok(())
     }
+}
+
+/// A replaced expression owns its type obligation and Surf binding origin,
+/// whether it is an invocation or a template parameter reference. If the new
+/// root already owns either key, a one-expression `block` keeps both independent
+/// metadata owners; the block has exactly the expression's value and effect.
+fn inherit_replaced_value_annotations(
+    mut replacement: Expr,
+    owner: &Expr,
+) -> Result<Expr, ExpansionError> {
+    let ExprCarrier::DecodedNode(_, metadata, _) = owner.carrier() else {
+        return Ok(replacement);
+    };
+    let annotations = metadata
+        .values()
+        .filter(|value| {
+            matches!(
+                value,
+                MetadataValue::Type(_) | MetadataValue::SurfBindingType(_)
+            )
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    if annotations.is_empty() {
+        return Ok(replacement);
+    }
+    if let Expr::Node(node, _) = &mut replacement {
+        let mut metadata = node.meta().clone();
+        let conflict = annotations.iter().any(|value| match value {
+            MetadataValue::Type(_) => metadata.ty().is_some(),
+            MetadataValue::SurfBindingType(_) => metadata.surf_binding_type().is_some(),
+            _ => unreachable!("only invocation value annotations were collected"),
+        });
+        if !conflict {
+            for value in annotations {
+                metadata.insert(value)?;
+            }
+            node.try_replace_meta(metadata)?;
+            return Ok(replacement);
+        }
+    }
+    let metadata = Metadata::try_from_values(annotations)?;
+    let span = replacement.span();
+    Ok(Expr::Node(
+        Box::new(chelis_deep::node::Node::try_new(
+            DeepTag::Block,
+            metadata,
+            vec![replacement],
+        )?),
+        span,
+    ))
 }
 
 fn macro_arg_placeholders(
@@ -573,7 +625,10 @@ fn replace_placeholder_vars(
                 && let Some(name) = children.first().and_then(symbol_name)
                 && let Some(replacement) = replacements.get(name)
             {
-                return Ok(replacement.clone().try_inherit_extensions(expr)?);
+                return Ok(
+                    inherit_replaced_value_annotations(replacement.clone(), expr)?
+                        .try_inherit_extensions(expr)?,
+                );
             }
             try_rebuild_macro_node(
                 MacroNode::new(expr, tag, metadata, children),
@@ -742,8 +797,8 @@ fn substitute_expr(
                 && !shadowed.contains(name)
                 && let Some(replacement) = params.get(name)
             {
-                return replacement
-                    .clone()
+                return inherit_replaced_value_annotations(replacement.clone(), expr)
+                    .expect("macro parameter annotation remains valid on a placeholder")
                     .try_inherit_extensions(expr)
                     .expect("fresh macro placeholders have no conflicting extensions");
             }
@@ -1025,11 +1080,19 @@ fn hygienize_params_expr(
                     *span,
                 ));
             }
-            Expr::Atom(_, _)
-            | Expr::Map(_, _)
-            | Expr::MetaExpr(_, _)
-            | Expr::Node(_, _)
-            | Expr::UnknownForm(_) => {
+            Expr::MetaExpr(meta, span) => {
+                let Expr::Atom(Atom::Name(_), name_span) = meta.expr.as_ref() else {
+                    unreachable!("admitted prefix metadata parameter has a name")
+                };
+                children.push(Expr::MetaExpr(
+                    MetaExpr {
+                        metadata: meta.metadata.clone(),
+                        expr: Box::new(Expr::Atom(Atom::Name(fresh), *name_span)),
+                    },
+                    *span,
+                ));
+            }
+            Expr::Atom(_, _) | Expr::Map(_, _) | Expr::Node(_, _) | Expr::UnknownForm(_) => {
                 unreachable!("admitted macro parameter retains its exact source carrier")
             }
         }
@@ -1189,15 +1252,33 @@ fn annotate_source_expr(expr: &Expr, invocation: &MacroSource) -> Expr {
         ExprCarrier::UndecodableHead(_, _, _) => map_unknown_form(unknown_form(expr), |child| {
             annotate_source_expr(child, invocation)
         }),
-        ExprCarrier::MetadataExpression(meta) => Expr::MetaExpr(
-            MetaExpr {
-                metadata: map_meta_entries(&meta.metadata, |value| {
-                    annotate_source_expr(value, invocation)
-                }),
-                expr: Box::new(annotate_source_expr(&meta.expr, invocation)),
-            },
-            expr.span(),
-        ),
+        ExprCarrier::MetadataExpression(meta) => {
+            if matches!(meta.expr.as_ref(), Expr::Atom(Atom::Name(_), _)) {
+                let mut metadata = meta.metadata.clone();
+                if metadata.source().is_none() {
+                    metadata
+                        .insert(MetadataValue::Source(invocation.clone()))
+                        .expect("source is absent");
+                }
+                Expr::MetaExpr(
+                    MetaExpr {
+                        metadata,
+                        expr: meta.expr.clone(),
+                    },
+                    expr.span(),
+                )
+            } else {
+                Expr::MetaExpr(
+                    MetaExpr {
+                        metadata: map_meta_entries(&meta.metadata, |value| {
+                            annotate_source_expr(value, invocation)
+                        }),
+                        expr: Box::new(annotate_source_expr(&meta.expr, invocation)),
+                    },
+                    expr.span(),
+                )
+            }
+        }
         ExprCarrier::DecodedNode(tag, metadata, children) => {
             let node = MacroNode::new(expr, tag, metadata, children);
             let mut metadata = metadata.clone();
@@ -1224,7 +1305,7 @@ fn params_blockers(expr: &Expr) -> Vec<String> {
             .iter()
             .filter_map(|param| match macro_parameter_disposition(param) {
                 MacroParameterDisposition::Binder(name) => Some(name.to_string()),
-                MacroParameterDisposition::Preserved | MacroParameterDisposition::Invalid => None,
+                MacroParameterDisposition::Invalid => None,
             })
             .collect(),
         ExprCarrier::DecodedNode(_, _, _)
@@ -1479,15 +1560,27 @@ mod tests {
         )
     }
 
-    /// A typed parameter is a `fn` parameter, so it blocks macro expansion of
-    /// its name (spec/02-surf-syntax.md §P5). Negative control: a structural
-    /// list that is not a name-and-annotations pair binds nothing.
+    /// Both typed parameter spellings block macro expansion of their names
+    /// (spec/02-surf-syntax.md §P5). Negative control: a structural list that
+    /// is not a name-and-annotations pair binds nothing.
     #[test]
     fn typed_parameter_is_a_macro_blocker() {
         let params = node(DeepTag::Params, vec![typed_parameter("typed_parameter")]);
         assert_eq!(
             params_blockers(&params),
             vec!["typed_parameter".to_string()]
+        );
+
+        let prefix_parameter = Expr::MetaExpr(
+            MetaExpr {
+                metadata: Metadata::default(),
+                expr: Box::new(Expr::Atom(Atom::Name("record".to_string()), zero_span())),
+            },
+            zero_span(),
+        );
+        assert_eq!(
+            params_blockers(&node(DeepTag::Params, vec![prefix_parameter])),
+            vec!["record".to_string()]
         );
 
         let malformed = Expr::BareList(
@@ -1525,8 +1618,7 @@ mod tests {
     #[test]
     fn source_specific_parameters_do_not_freeze_fn_rewrite_passes() {
         // Each parameter with the params node hygiene leaves behind and the
-        // fresh names it spends: a typed parameter is a binder, a prefix
-        // metadata wrapper is preserved.
+        // fresh names it spends: both typed parameter spellings are binders.
         let parameters = [
             (
                 typed_parameter("structural_parameter"),
@@ -1547,7 +1639,17 @@ mod tests {
                     },
                     zero_span(),
                 );
-                (parameter.clone(), node(DeepTag::Params, vec![parameter]), 0)
+                let renamed = Expr::MetaExpr(
+                    chelis_deep::MetaExpr {
+                        metadata: Metadata::default(),
+                        expr: Box::new(Expr::Atom(
+                            Atom::Name("metadata_parameter_macro_0".to_string()),
+                            zero_span(),
+                        )),
+                    },
+                    zero_span(),
+                );
+                (parameter, node(DeepTag::Params, vec![renamed]), 1)
             },
         ];
 
@@ -1588,7 +1690,7 @@ mod tests {
                         [Expr::Atom(Atom::Int(7), _)]
                     ))
                 ),
-                "a preserved parameter carrier must not freeze body expansion: {expanded:?}"
+                "a typed parameter carrier must not freeze body expansion: {expanded:?}"
             );
 
             let function = node(DeepTag::Fn, vec![params.clone(), var("value")]);
@@ -1597,7 +1699,7 @@ mod tests {
             assert_eq!(
                 substitute_expr(&function, &substitutions, &UnordSet::new()),
                 node(DeepTag::Fn, vec![params.clone(), int32_lit(9)]),
-                "a preserved parameter carrier must not freeze substitution"
+                "a typed parameter carrier must not freeze substitution"
             );
 
             let function = node(DeepTag::Fn, vec![params.clone(), var("outer")]);
