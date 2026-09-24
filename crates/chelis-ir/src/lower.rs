@@ -8397,27 +8397,20 @@ impl<'program> LowerCtx<'program> {
         }
     }
 
-    /// The result site's producer has an independent movement-size carrier.
-    /// Use the shared producer walk so Copy/Cast wrappers cannot change this
-    /// admission decision. Op-computed axes keep their existing admission.
+    /// Admit the shared result site's carrier observation, including an axis
+    /// forwarded by a later operation. Re-reading only that operation's own
+    /// size slot loses carried axes and can move their claims onto inputs.
+    /// Op-computed observations keep their existing admission.
     fn runtime_carrier_result_owner_is_admitted(&self, id: NodeId, axis: usize) -> bool {
         crate::axis_sources::result_extent_sites(&self.dag, id)
             .iter()
             .any(|site| {
                 let RtAxis::Lit(output_axis) = site.output_axis();
                 usize::try_from(output_axis).ok() == Some(axis)
-                    && self.dag.get(site.producer()).is_some_and(|node| {
-                        let RtAxis::Lit(producer_axis) = site.producer_axis();
-                        usize::try_from(producer_axis)
-                            .ok()
-                            .is_some_and(|producer_axis| {
-                                crate::axis_sources::expand_or_reshape_carrier(
-                                    &node.op,
-                                    producer_axis,
-                                )
-                                .is_some()
-                            })
-                    })
+                    && matches!(
+                        site.observation(),
+                        crate::axis_sources::LocalGuardObservation::Carrier(_)
+                    )
             })
     }
 

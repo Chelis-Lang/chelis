@@ -369,6 +369,18 @@ def generated_phase_b_corpus() -> tuple[CorpusRow, ...]:
             "cli_producer_guard_order.c_insert_result_guard_owns_attribution_and_effect_order",
         ),
         _row(
+            "producer.insert.forwarded_axis.eval",
+            "lane_divergent",
+            EXECUTES,
+            "cli_producer_guard_order.eval_forwarded_insert_axis_keeps_result_ownership",
+        ),
+        _row(
+            "producer.insert.forwarded_axis.c",
+            "lane_divergent",
+            EXECUTES,
+            "cli_producer_guard_order.c_forwarded_insert_axis_keeps_result_ownership",
+        ),
+        _row(
             "producer.input_entry.eval_c",
             "executes_exactly",
             EXECUTES,

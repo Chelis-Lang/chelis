@@ -1686,9 +1686,13 @@ report first.
 The #2377 receipts execute generic and monomorphic earlier-overflow controls,
 mismatching and agreeing inserts with scalar-only f64 precision evidence,
 effects on both sides of the producer, and an independent wrong input-axis
-claim. Authored literal results with explicit movement-size carriers use producer
-tokens on both lowering paths; physical literal classes use the same output-owner classification and
-coalesce an exact token comparison without dropping a different requirement. Tensor lowering
+claim. The two-insert controls cover an earlier axis carried into either
+position of the returned tensor, on both lanes and both lowering paths.
+Authored literal results whose checked site reads a carrier use producer tokens,
+including forwarded axes; admission reads that site's observation rather than
+re-deriving it from the final primitive's own size slot. Physical literal classes
+use the same output-owner classification and coalesce an exact token comparison
+without dropping a different requirement. Tensor lowering
 retains discarded eager initializers through exact dependencies on its return
 carrier, omitting already reachable values and inert literal/copy subgraphs.
 These receipts establish the enrolled insert/result-order cases; they do not

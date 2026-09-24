@@ -129,3 +129,81 @@ fn input_axis_claim_still_precedes_body_on_both_lanes() {
         assert!(!output.contains("body-ran"), "{output}");
     }
 }
+
+// A second insert forwards the first insert's axis. Both insertion positions
+// exercise the output-to-operand axis relationship instead of assuming axis 0.
+fn assert_forwarded_insert_axis(native: bool) {
+    for monomorphic in [false, true] {
+        for insert_axis in [0, 1] {
+            for width in [2, 3] {
+                for earlier_trap in [false, true] {
+                    let generics = if monomorphic {
+                        "n, m"
+                    } else {
+                        "n, m, p: Float"
+                    };
+                    let parameter = if monomorphic { "" } else { "witness: p, " };
+                    let dtype = if monomorphic { "f64" } else { "p" };
+                    let scalar = if monomorphic { "7.0f64" } else { "witness" };
+                    let actual = if monomorphic { "" } else { "7.0f64, " };
+                    let dims = if insert_axis == 0 { "4, 3" } else { "3, 4" };
+                    let prefix = if earlier_trap {
+                        "_ = [-9223372036854775808i64] |> to_tensor |> neg"
+                    } else {
+                        ""
+                    };
+                    let values = vec!["0i64"; width].join(", ");
+                    let source = format!(
+                        "def candidate[{generics}]({parameter}x: tensor[n, i64], y: tensor[m, i64]) -> tensor[{dims}, {dtype}] = {{\n {prefix}\n a = {scalar} |> scalar_to_tensor |> insert(0i32, shape(y, 0i32))\n insert(a, {insert_axis}i32, shape(x, 0i32))\n}}\nout = candidate({actual}to_tensor([0i64, 0i64, 0i64, 0i64]), to_tensor([{values}]))\n"
+                    );
+                    let (ok, output) = run(&source, native);
+                    assert_eq!(ok, !earlier_trap && width == 3, "{source}\n{output}");
+                    if earlier_trap {
+                        assert!(
+                            output.contains("numeric trap: overflow in neg at i64"),
+                            "{source}\n{output}"
+                        );
+                        assert!(!output.contains("domain in"), "{output}");
+                    } else if width == 2 {
+                        let carried_axis = 1 - insert_axis;
+                        assert!(
+                            output.contains(&format!(
+                                "extent `3`: claimed = 3, insert axis {carried_axis} = 2"
+                            )),
+                            "{output}"
+                        );
+                        assert!(
+                            output
+                                .lines()
+                                .any(|line| line == "numeric trap: domain in insert at i64"),
+                            "{output}"
+                        );
+                    } else {
+                        let values = vec!["7.0"; 12].join(", ");
+                        assert!(
+                            output.contains(&format!(
+                                "out = tensor(shape=[{dims}], data=[{values}])"
+                            )),
+                            "{output}"
+                        );
+                    }
+                    assert_eq!(
+                        output.matches("numeric trap:").count(),
+                        usize::from(!ok),
+                        "{output}"
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn eval_forwarded_insert_axis_keeps_result_ownership() {
+    assert_forwarded_insert_axis(false);
+}
+
+#[test]
+fn c_forwarded_insert_axis_keeps_result_ownership() {
+    assert_forwarded_insert_axis(true);
+}

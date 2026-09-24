@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "corpus_sha256": "dac75ca23966752aa5496687a62efe270e482a1a03fde41d68551ba774cef9ef",
+  "corpus_sha256": "5fc2ed8645ed5f3768d0f2409186abf4ab891dd84dd00a594f8726a39ee5a815",
   "rows": [
     {
       "id": "claim.literal.identity_root.c",
@@ -1741,6 +1741,18 @@
       "baseline": "executes_exactly",
       "phase_b": "executes_exactly",
       "receipt": "cli_producer_guard_order.eval_earlier_trap_precedes_insert_result_guard"
+    },
+    {
+      "id": "producer.insert.forwarded_axis.c",
+      "baseline": "lane_divergent",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_producer_guard_order.c_forwarded_insert_axis_keeps_result_ownership"
+    },
+    {
+      "id": "producer.insert.forwarded_axis.eval",
+      "baseline": "lane_divergent",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_producer_guard_order.eval_forwarded_insert_axis_keeps_result_ownership"
     },
     {
       "id": "producer.insert.site",

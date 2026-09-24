@@ -1263,12 +1263,14 @@
       },
       "expected": [
         "c_earlier_trap_precedes_insert_result_guard",
+        "c_forwarded_insert_axis_keeps_result_ownership",
         "c_insert_result_guard_owns_attribution_and_effect_order",
         "eval_earlier_trap_precedes_insert_result_guard",
+        "eval_forwarded_insert_axis_keeps_result_ownership",
         "eval_insert_result_guard_owns_attribution_and_effect_order",
         "input_axis_claim_still_precedes_body_on_both_lanes"
       ],
-      "note": "Bounded #2377 generic and monomorphic insert result placement, exact traps, precision and effect order with independent input guard controls."
+      "note": "Bounded #2377 generic and monomorphic direct and carried insert result axes: exact traps, values, precision and effect order with independent input guards."
     },
     {
       "phase": "b",
@@ -1280,11 +1282,12 @@
         "mode": "all"
       },
       "expected": [
+        "forwarded_axis_observation_and_physical_claim_keep_their_owners",
         "interface_sized_insert_has_one_local_result_claim",
         "malformed_administrative_producer_is_a_checked_error",
         "missing_result_axis_is_a_checked_error"
       ],
-      "note": "Token-only, physical-only and coalesced producer sites, independent requirements and malformed-axis rejection."
+      "note": "Token-only, physical-only and coalesced producer sites, forwarded-axis observations, independent requirements and malformed-axis rejection."
     }
   ]
 }

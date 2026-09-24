@@ -123,3 +123,48 @@ fn malformed_administrative_producer_is_a_checked_error() {
     let error = local_dim_guard_sites(&dag).unwrap_err();
     assert!(error.contains("producer axis"), "{error}");
 }
+
+#[test]
+fn forwarded_axis_observation_and_physical_claim_keep_their_owners() {
+    use chelis_ir::axis_sources::{LocalGuardObservation, result_extent_sites};
+    for token in [false, true] {
+        let mut dag = graph(1);
+        let inner = dag.roots()[0];
+        let claim = dag.node_mut(inner).unwrap().shape_deps.remove(0);
+        if !token {
+            dag.node_mut(inner).unwrap().output_type.dims = vec![DimInfo::Lit(3)];
+        }
+        let outer = dag.add_node(
+            RiscOp::Expand {
+                axis: 0,
+                size: RtDim::Lit(4),
+            },
+            vec![inner],
+            TensorType {
+                dims: vec![DimInfo::Lit(4), DimInfo::Named(String::new(), None)],
+                precision: Prim::Int64,
+            },
+            None,
+        );
+        if token {
+            dag.add_shape_dep(outer, claim);
+        }
+        dag.set_roots(vec![outer]);
+        let sites = result_extent_sites(&dag, outer);
+        let site = &sites[1];
+        assert_eq!(site.producer(), outer);
+        assert_eq!(site.producer_axis(), RtAxis::Lit(1));
+        assert_eq!(
+            site.observation(),
+            &LocalGuardObservation::Carrier(RtDim::InputAxis {
+                tensor: 0,
+                axis: RtAxis::Lit(0)
+            })
+        );
+        assert!(entry_extent_guards(&dag).is_empty());
+        let guards = local_dim_guard_sites(&dag).unwrap();
+        assert_eq!(guards.len(), 1);
+        assert_eq!(guards[0].0, if token { (outer.0, 1) } else { (inner.0, 0) });
+        assert_eq!(guards[0].1.op, "insert");
+    }
+}
