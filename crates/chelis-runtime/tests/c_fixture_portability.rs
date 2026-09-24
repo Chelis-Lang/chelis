@@ -1,12 +1,12 @@
-//! chelis#2496: test-authored C fixtures meet GCC only on the Linux lanes.
+//! chelis#2496: test-authored C fixtures meet GCC only on Linux.
 //!
 //! Apple clang accepts both defects that chelis#1864 merged: a format macro
 //! whose header arrives only through a macOS framework, and an unbraced `if`
 //! followed by a second statement on its line. A Mac run of a fixture is
-//! therefore no portability evidence. These controls run on every pull request
-//! and prove that the lane compiles with GCC and that the strict fixture flags
-//! still reject both shapes, so that evidence cannot quietly become clang's.
-#![cfg(target_os = "linux")]
+//! therefore no portability evidence. On Linux these controls prove that the
+//! toolchain running them compiles with GCC and that the strict fixture flags
+//! reject both shapes; as a standing target, that is the self-hosted `ci-fast`
+//! toolchain. The repaired twins compile on every platform.
 
 use std::{
     fs,
@@ -53,6 +53,7 @@ impl Drop for Scratch {
     }
 }
 
+#[cfg(target_os = "linux")]
 fn assert_rejected_for(output: &Output, reason: &str) {
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
@@ -86,6 +87,7 @@ int print_count(uint64_t count) { return printf(\"%\" PRIu64 \"\\n\", count); }
 
 /// GCC's `-Wmisleading-indentation`, inside `-Wall`, warns when a guard that
 /// begins its line is followed by a second statement on the same line.
+#[cfg(target_os = "linux")]
 const SAME_LINE_GUARD: &str = "#include <stdlib.h>
 static int calls;
 int record(int input_count) {
@@ -102,6 +104,7 @@ int record(int input_count) {
 }
 ";
 
+#[cfg(target_os = "linux")]
 #[test]
 fn linux_fixture_compiler_is_gcc() {
     let output = Command::new("cc")
@@ -121,11 +124,12 @@ fn linux_fixture_compiler_is_gcc() {
     };
     assert!(
         defines("__GNUC__") && !defines("__clang__"),
-        "the Linux lanes are the only GCC evidence for C fixtures (chelis#2496), \
-         but this lane's `cc` is not GCC"
+        "a Linux toolchain that runs C fixtures must provide GCC as `cc` \
+         (chelis#2496), but this one does not"
     );
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn format_macro_without_its_direct_include_is_rejected() {
     let output = Scratch::new("format-missing")
@@ -141,6 +145,7 @@ fn format_macro_with_its_direct_include_compiles() {
     assert_compiles(&output);
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn unbraced_guard_with_a_same_line_statement_is_rejected() {
     let output = Scratch::new("guard-same-line").compile(SAME_LINE_GUARD);

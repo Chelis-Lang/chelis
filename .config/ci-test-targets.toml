@@ -818,8 +818,9 @@ package = "chelis-cli"
 name = "issue_2334_skip_cursor"
 
 # chelis#2496: a Mac run of a test-authored C fixture is no portability
-# evidence, so every pull request proves that its Linux lane compiles with GCC
-# and that the strict fixture flags still reject both chelis#1864 shapes.
+# evidence. This target proves that the self-hosted ci-fast toolchain compiles
+# with GCC and that the strict fixture flags reject both chelis#1864 shapes;
+# the hosted change-owned and package-expansion lanes reuse its result.
 [[standing_target]]
 package = "chelis-runtime"
 name = "c_fixture_portability"
