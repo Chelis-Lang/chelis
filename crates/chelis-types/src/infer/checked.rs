@@ -98,9 +98,9 @@ pub(super) struct InferenceProduct {
 struct InferredAdmissionContract {
     subject: String,
     variable: TypeVar,
-    /// Declared capabilities in the enclosing function. A local hole may
+    /// The enclosing declaration's authored type binders. A local hole may
     /// resolve to one of these without requiring a concrete instantiation.
-    givens: Vec<(TypeVar, TypeVarRestriction)>,
+    binders: Vec<TypeVar>,
     failed_application: Option<ErrorWitness>,
 }
 
@@ -113,11 +113,15 @@ impl InferredAdmissionContract {
             .into_iter()
             .filter_map(|variable| {
                 let required = subst.tvar_restriction(variable)?;
-                let provided = self.givens.iter().any(|(given, bound)| {
-                    subst.apply(&Type::Var(*given)) == Type::Var(variable)
-                        && bound.intersect(required) == Some(*bound)
-                });
-                (!provided).then_some((variable, required))
+                // A hole that resolved to an authored binder carries that
+                // binder's requirement, which `check_declared_dtype_bounds`
+                // decides against the declared bound. Deciding it here too
+                // reported one defect twice (chelis#2158 round 1).
+                let binder = self
+                    .binders
+                    .iter()
+                    .any(|binder| subst.apply(&Type::Var(*binder)) == Type::Var(variable));
+                (!binder).then_some((variable, required))
             })
             .collect()
     }
@@ -432,7 +436,7 @@ impl InferenceProduct {
                 subst.tvar_restriction(*variable).is_none()
                     && !env.active_declared_type_names().contains_key(variable)
             });
-        self.record_admission_variables(subject, variables, env, subst);
+        self.record_admission_variables(subject, variables, env);
     }
 
     fn record_admission_variables(
@@ -440,29 +444,19 @@ impl InferenceProduct {
         subject: &str,
         variables: impl IntoIterator<Item = TypeVar>,
         env: &Env,
-        subst: &Subst,
     ) {
-        let givens: Vec<_> = env
+        let binders: Vec<TypeVar> = env
             .active_declared_type_names()
             .to_sorted()
             .into_iter()
-            .filter_map(|(variable, _)| {
-                // Unification can move a declared variable's restriction to
-                // its representative before a call result is registered.
-                let Type::Var(resolved) = subst.apply(&Type::Var(*variable)) else {
-                    return None;
-                };
-                subst
-                    .tvar_restriction(resolved)
-                    .map(|bound| (*variable, bound))
-            })
+            .map(|(variable, _)| *variable)
             .collect();
         for variable in variables {
             self.inferred_admission_contracts
                 .push(InferredAdmissionContract {
                     subject: subject.to_string(),
                     variable,
-                    givens: givens.clone(),
+                    binders: binders.clone(),
                     failed_application: None,
                 });
         }
@@ -541,7 +535,6 @@ impl InferenceProduct {
             &format!("result of `{}`", name.unwrap_or("<function value>")),
             variables,
             env,
-            subst,
         );
     }
 
@@ -841,6 +834,15 @@ impl InferenceProduct {
         self.deferred_shape_checks.iter().any(
             |check| matches!(&check.rule, DeferredShapeRule::PostApp { site, .. } if *site == key),
         )
+    }
+
+    /// Whether any call is suspended on this product's ledger. The
+    /// rigid-binder decision (chelis#2216) asks it of the scratch product a
+    /// replay ran on, to see a call that suspended again.
+    pub(super) fn has_post_app_checks(&self) -> bool {
+        self.deferred_shape_checks
+            .iter()
+            .any(|check| matches!(check.rule, DeferredShapeRule::PostApp { .. }))
     }
 
     /// Is this call already suspended for a FULL route replay?
@@ -1182,6 +1184,7 @@ impl InferenceProduct {
                         subst,
                         adt_reg,
                         errors,
+                        false,
                     );
                     continue;
                 }
@@ -1197,6 +1200,11 @@ impl InferenceProduct {
     /// boundary (chelis#2216) both run this one function, so a call cannot be
     /// decided one way when its operand binds and another way at a binder's
     /// instantiation.
+    ///
+    /// `resuspend` makes a dtype replay record a fresh suspension on this
+    /// product when an operand is still unresolved, as a route replay always
+    /// does. The rigid-binder decision asks for it, to see a call that cannot
+    /// be decided at an arbitrary type; the ready replay does not.
     #[allow(clippy::too_many_arguments)]
     pub(super) fn replay_post_app(
         &mut self,
@@ -1207,6 +1215,7 @@ impl InferenceProduct {
         subst: &mut Subst,
         adt_reg: &AdtRegistry,
         errors: &mut DiagnosticSink<'_>,
+        resuspend: bool,
     ) {
         match call.replay {
             PostAppReplay::DtypeAdmissibility => replay_dtype_admissibility(
@@ -1219,9 +1228,9 @@ impl InferenceProduct {
                 subst,
                 errors,
                 self,
+                resuspend,
             ),
             PostAppReplay::Route => {
-                let mut replay_env = call.env.clone();
                 // chelis#1512 round 2 P2-1: `node` is the ledger's own clone
                 // and dies with this replay. Carry the original site so a
                 // route that re-registers inside the replay keys its entry by
@@ -1233,7 +1242,7 @@ impl InferenceProduct {
                     Some(call.func_name.to_string()),
                     settled,
                     result_ty.clone(),
-                    &mut replay_env,
+                    call.env,
                     vg,
                     subst,
                     adt_reg,

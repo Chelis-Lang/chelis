@@ -138,7 +138,7 @@ pub(super) fn finish_unified_app(
     func_name: Option<String>,
     arg_tys: Vec<Type>,
     ret_tv: Type,
-    env: &mut Env,
+    env: &Env,
     vg: &mut VarGen,
     subst: &mut Subst,
     adt_reg: &AdtRegistry,

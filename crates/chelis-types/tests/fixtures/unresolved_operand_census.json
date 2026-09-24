@@ -971,8 +971,8 @@
       "function": "infer_cast",
       "ordinal": 2,
       "pattern": "Type::Var(source)",
-      "disposition": "constrains_the_variable",
-      "reason": "chelis#2158: the arm publishes a scalar at the target, so it records a numeric (for `cast_trunc`, float) family requirement on the source variable, which unification carries to every binding and `check_declared_dtype_bounds` checks against an authored bound"
+      "disposition": "defect(#1512)",
+      "reason": "chelis#2158: a `cast_trunc` source variable carries a `Float` requirement and an authored `cast` source is held to `Numeric`, both checked against an authored bound by `check_declared_dtype_bounds`, but a `cast` source that is an inference variable is not checked: [05-OP-63] also admits `bool`, and no dtype family is the numeric-or-`bool` set"
     },
     {
       "file": "expr_record.rs",

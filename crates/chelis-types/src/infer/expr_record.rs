@@ -1013,24 +1013,36 @@ pub(super) fn infer_cast(
                     }
                     Type::Tensor(dims, TensorPrec::Var(target))
                 }
-                Type::Prim(source) if source.is_numeric() => {
+                // [04-NUM-14] and [05-OP-63] admit a numeric or `bool` scalar
+                // source; [05-OP-6] leaves `cast_trunc` only the float ones.
+                Type::Prim(source) if source.is_numeric() || source == Prim::Bool => {
                     if trunc_pair_rejected(source.is_float()) {
                         return report(errors, trunc_pair_rejection());
                     }
                     Type::Var(target)
                 }
-                // The arm publishes a scalar at the target, so the source is a
-                // numeric scalar, and for `cast_trunc` a float one.
+                // The arm publishes a scalar at the target. A `cast_trunc`
+                // source must be a float one. A `cast` source may be any
+                // numeric or `bool` scalar, and no dtype family is that set,
+                // so only an authored binder is held to one here: every bound
+                // is numeric, and an unbounded binder also denotes types no
+                // cast admits, so it is held to `Numeric`. An inference
+                // variable is left to what binds it (round 1: requiring
+                // `Numeric` of it refused a lambda parameter bound to `bool`).
                 Type::Var(source) => {
                     if trunc_pair_rejected(true) {
                         return report(errors, trunc_pair_rejection());
                     }
                     let required = if mode == CastMode::Trunc {
-                        TypeVarRestriction::ActiveFloat
+                        Some(TypeVarRestriction::ActiveFloat)
                     } else {
-                        TypeVarRestriction::ActiveNumeric
+                        env.authored_type_binder(source, subst)
+                            .map(|_| TypeVarRestriction::ActiveNumeric)
                     };
-                    if let Some(error) = constrain_cast_source(source, required, mode, env, subst) {
+                    if let Some(required) = required
+                        && let Some(error) =
+                            constrain_cast_source(source, required, mode, env, subst)
+                    {
                         return report(errors, error);
                     }
                     Type::Var(target)
@@ -1041,7 +1053,7 @@ pub(super) fn infer_cast(
                     CheckError::new(
                         CheckErrorKind::CastNonTensor,
                         format!(
-                            "cast to a quantified scalar dtype requires a numeric scalar, got {other}"
+                            "cast to a quantified scalar dtype requires a numeric or bool scalar, got {other}"
                         ),
                         vec![],
                     ),

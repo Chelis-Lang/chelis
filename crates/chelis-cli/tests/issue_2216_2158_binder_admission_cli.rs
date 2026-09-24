@@ -130,3 +130,34 @@ fn cast_trunc_from_a_float_binder_checks_clean_and_runs() {
     let native = common::build_and_run(&source, "issue_2158_float_control");
     assert_eq!(native.trim(), interpreted.trim(), "eval vs C");
 }
+
+/// REGRESSION TEST for round 1's over-rejection: [04-NUM-14] and [05-OP-63]
+/// admit a `bool` source for `cast`, so a lambda parameter bound to `bool` and
+/// a `bool` scalar each cast to an `Int` binder target, check at score 1, and
+/// run to `[1]` in both execution lanes.
+#[test]
+fn a_bool_source_cast_to_a_binder_target_checks_clean_and_runs() {
+    for (body, label) in [
+        ("(fn (y) -> cast(y, q))(b)", "issue_2216_bool_lambda"),
+        ("cast(b, q)", "issue_2216_bool_scalar"),
+    ] {
+        let source = format!(
+            "module P.Main\nexport (main)\n\
+             def f[q: Int](b: bool) -> q = {body}\n\
+             def go(b: bool) -> i64 = f(b)\n\
+             def main() -> tensor[1, i64] = to_tensor([go(true)])\n"
+        );
+        let report = check_report(&source);
+        assert_eq!(report["score"].as_f64(), Some(1.0), "{source}\n{report}");
+        let interpreted = run("eval", &source);
+        assert!(
+            interpreted.status.success(),
+            "eval: {}",
+            String::from_utf8_lossy(&interpreted.stderr)
+        );
+        let interpreted = String::from_utf8(interpreted.stdout).expect("UTF-8");
+        assert_eq!(common::parse_tensor_data(&interpreted, "main"), [1.0]);
+        let native = common::build_and_run(&source, label);
+        assert_eq!(native.trim(), interpreted.trim(), "eval vs C: {source}");
+    }
+}

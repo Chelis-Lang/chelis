@@ -19,8 +19,11 @@
 //! suspended call is now replayed at each instantiation of its binders, so a
 //! rejection carries the route's own text and names the instantiation where it
 //! fails, and an operation that accepts every member of the bound stays
-//! accepted. A cast's source requirement is recorded on the variable that
-//! stands for the source dtype, like every other dtype-family policy.
+//! accepted. An unbounded binder is replayed at an arbitrary type, left
+//! unbound, rather than at any one type. A `cast_trunc` source requirement is
+//! recorded on the variable that stands for the source dtype, like every other
+//! dtype-family policy; a `cast` source may also be `bool` ([05-OP-63]), so
+//! only an authored binder is held to a family there.
 //!
 //! What is claimed is the forms below. A flexible inference variable that no
 //! binder denotes keeps its existing suspension (chelis#1489); the last test
@@ -97,6 +100,10 @@ fn rejection_containing(source: &str, fragment: &str) -> (String, Vec<String>) {
         })
 }
 
+/// The instantiation a rejection on an unbounded binder `a` names: an
+/// arbitrary type, not any one type.
+const ARBITRARY_A: &str = "`a` := an arbitrary type";
+
 /// `(program, the route's own diagnostic, the instantiation it names)`: a call
 /// suspended on an operand that an authored binder denotes.
 const SUSPENDED_CALLS: &[(&str, &str, &str)] = &[
@@ -107,7 +114,7 @@ const SUSPENDED_CALLS: &[(&str, &str, &str)] = &[
         "`p := f32`",
     ),
     // Tensor-only operands, under each kind of bound. An unbounded binder
-    // admits every type, `()` among them.
+    // admits every type, and the call is decided at an arbitrary one.
     (
         "def bad[p: Int](k: p) -> i64 = numel(k)",
         "numel expects tensor input, got i8",
@@ -115,8 +122,8 @@ const SUSPENDED_CALLS: &[(&str, &str, &str)] = &[
     ),
     (
         "def bad[a](k: a) -> i64 = numel(k)",
-        "numel expects tensor input, got ()",
-        "`a := ()`",
+        "`numel` admits only some operand types, so it cannot be applied to an operand of an arbitrary type",
+        ARBITRARY_A,
     ),
     (
         "def bad[p: Float](k: p) -> i32 = rank(k)",
@@ -172,8 +179,8 @@ const SUSPENDED_CALLS: &[(&str, &str, &str)] = &[
     ),
     (
         "def bad[a](k: a) -> i64 = string_len(k)",
-        "string_len expects string input, got ()",
-        "`a := ()`",
+        "`string_len` admits only some operand types, so it cannot be applied to an operand of an arbitrary type",
+        ARBITRARY_A,
     ),
     (
         "def bad[p: Float](k: p) -> i32 = fail(k)",
@@ -194,8 +201,8 @@ const SUSPENDED_CALLS: &[(&str, &str, &str)] = &[
     ),
     (
         "def bad[a](xs: List[i32], n: a) -> List[i32] = take(xs, n)",
-        "take expects integer count, got ()",
-        "`a := ()`",
+        "`take` admits only some operand types, so it cannot be applied to an operand of an arbitrary type",
+        ARBITRARY_A,
     ),
     (
         "def bad[p: Float](a: p, b: p) -> List[i64] = range(a, b)",
@@ -204,8 +211,8 @@ const SUSPENDED_CALLS: &[(&str, &str, &str)] = &[
     ),
     (
         "def bad[a](k: a) -> tensor[a] = scalar_to_tensor(k)",
-        "scalar_to_tensor expects scalar numeric/bool input, got ()",
-        "`a := ()`",
+        "`scalar_to_tensor` admits only some operand types, so it cannot be applied to an operand of an arbitrary type",
+        ARBITRARY_A,
     ),
     // A lambda parameter identified with the binder only by its application.
     (
@@ -258,6 +265,51 @@ fn a_call_every_instantiation_admits_stays_accepted() {
         "def ok[p: Float](x: tensor[4, p], r: p) -> tensor[4, p] ! {Random} = dropout(x, r)",
         "def ok[p: Float](k: tensor[3, p]) -> i64 = numel(k)",
         "def ok[p: Float](k: tensor[3, p]) -> i64 = (fn (y) -> numel(y))(k)",
+    ] {
+        accepts(program);
+    }
+}
+
+/// REGRESSION TEST for round 1's representative instantiation. An unbounded
+/// binder was replayed at `()` alone, and `eq` and `neq` were rejected only
+/// because the checker refuses `eq((), ())`, which [05-OP-36] admits, naming a
+/// witness the spec accepts. The call is now decided at an arbitrary type: the
+/// equality operations admit only some types (not a function), so they are
+/// rejected, naming no particular type.
+#[test]
+fn equality_on_an_unbounded_binder_is_rejected_at_an_arbitrary_type() {
+    for operation in ["eq", "neq"] {
+        let program = format!("def bad[a](x: a) -> bool = {operation}(x, x)");
+        let (message, suggestions) = rejection_containing(
+            &program,
+            &format!(
+                "`{operation}` admits only some operand types, so it cannot be applied to an \
+                 operand of an arbitrary type"
+            ),
+        );
+        assert!(
+            message.contains(&format!("does not at {ARBITRARY_A}")) && !message.contains("()"),
+            "{program}: {message}"
+        );
+        assert!(
+            suggestions
+                .first()
+                .is_some_and(|repair| repair.contains("declares no dtype-family bound")),
+            "{program}: {suggestions:?}"
+        );
+    }
+}
+
+/// NEGATIVE PARITY for the test above, passing before the fix too: an
+/// operation that accepts an operand of every type stays accepted on an
+/// unbounded binder.
+#[test]
+fn an_operation_that_accepts_every_type_stays_accepted_on_an_unbounded_binder() {
+    for program in [
+        "def ok[a](x: a) -> a = debug(x)",
+        "def ok[a](x: a) -> unit ! {IO} = print(x)",
+        "def ok[a](x: a, xs: List[i32]) -> a = fold(fn (acc: a, y: i32) -> acc, x, xs)",
+        "def ok[a](xs: List[a], x: a) -> List[a] = append(xs, x)",
     ] {
         accepts(program);
     }
@@ -331,6 +383,55 @@ fn cast_trunc_rejects_a_binder_source_that_admits_an_integer() {
     assert!(
         suggestions.iter().any(|hint| hint.contains("`p: Float`")),
         "{suggestions:?}"
+    );
+}
+
+/// REGRESSION TEST for round 1's over-rejection. [04-NUM-14] and [05-OP-63]
+/// admit a `bool` source for `cast`. The variable-target arm required a
+/// `Numeric` source of a lambda parameter later bound to `bool`, and rejected
+/// a `bool` scalar outright; both are accepted now, at either target family.
+#[test]
+fn a_bool_source_casts_to_a_binder_target() {
+    for family in ["Int", "Float"] {
+        accepts(&format!(
+            "def f[q: {family}](b: bool) -> q = (fn (y) -> cast(y, q))(b)"
+        ));
+        accepts(&format!("def f[q: {family}](b: bool) -> q = cast(b, q)"));
+    }
+}
+
+/// NEGATIVE PARITY for the test above: [05-OP-6] still refuses a `bool`
+/// `cast_trunc` source, and an unbounded authored source, which also denotes
+/// types no cast admits, is still held to `Numeric`. Both were rejected before
+/// the repair too, but the `bool` source was refused as a non-numeric scalar;
+/// it now reaches [05-OP-6]'s own rule.
+#[test]
+fn a_bool_trunc_source_and_an_unbounded_cast_source_stay_rejected() {
+    rejection_containing(
+        "def bad[q: Int](b: bool) -> q = cast_trunc(b, q)",
+        "`cast_trunc` requires a float source and an integer target ([05-OP-6])",
+    );
+    rejection_containing(
+        "def bad[a, q: Int](x: a) -> q = cast(x, q)",
+        "declared type parameter `a` of `bad` requires dtype family `Numeric`",
+    );
+}
+
+/// REGRESSION TEST for round 1's duplicate report. A lambda parameter that the
+/// application identifies with a `Numeric` binder carried `cast_trunc`'s float
+/// requirement, and the defect was reported against the binder and again
+/// against the parameter. It is reported once, against the binder.
+#[test]
+fn a_binder_reached_through_a_lambda_is_reported_once() {
+    let program = "def bad[p: Numeric](k: tensor[2, p]) -> tensor[2, i64] = \
+                   (fn (y) -> cast_trunc(y, i64))(k)";
+    let diagnostics = agreed_diagnostics(program);
+    let [(message, _)] = diagnostics.as_slice() else {
+        panic!("expected exactly one diagnostic for:\n{program}\ngot {diagnostics:?}");
+    };
+    assert!(
+        message.contains("declared type parameter `p` of `bad` requires dtype family `Float`"),
+        "{message}"
     );
 }
 

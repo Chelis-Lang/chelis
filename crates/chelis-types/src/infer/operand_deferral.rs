@@ -309,8 +309,11 @@ pub(super) fn check_shape_route_signature(
 /// publish the left operand itself, which by replay time is the very type
 /// `integer_binop_result_type` derives from it.
 ///
-/// `None` for the suspension: a replay decides against a settled operand, so
-/// no arm here can suspend the call a second time.
+/// A ready replay decides against a settled operand, so it passes no
+/// suspension and no arm here can suspend the call a second time. With
+/// `resuspend`, an operand that is still unresolved suspends the call on
+/// `product` again: the rigid-binder decision (chelis#2216) replays an
+/// unbounded binder unbound, and a call that cannot decide at it must say so.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn replay_dtype_admissibility(
     node: &DeepNode,
@@ -322,7 +325,10 @@ pub(super) fn replay_dtype_admissibility(
     subst: &mut Subst,
     errors: &mut DiagnosticSink<'_>,
     product: &mut InferenceProduct,
+    resuspend: bool,
 ) {
+    let site = resuspend.then(|| DtypeAdmissibilitySite::new(node, kids, func_name, env));
+    let suspension = site.as_ref();
     let owned_name = Some(func_name.to_string());
     let mut route_observed = false;
     let result_ty = Type::Unit;
@@ -335,7 +341,7 @@ pub(super) fn replay_dtype_admissibility(
         subst,
         errors,
         &mut route_observed,
-        None,
+        suspension,
         &result_ty,
         product,
     )
@@ -351,7 +357,7 @@ pub(super) fn replay_dtype_admissibility(
         subst,
         errors,
         &mut route_observed,
-        None,
+        suspension,
         &result_ty,
         product,
     )
@@ -366,7 +372,7 @@ pub(super) fn replay_dtype_admissibility(
         vg,
         subst,
         errors,
-        None,
+        suspension,
         &result_ty,
         product,
     );
