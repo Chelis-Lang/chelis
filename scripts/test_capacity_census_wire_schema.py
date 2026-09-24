@@ -471,10 +471,10 @@ class SchemaCases(unittest.TestCase):
 
         cases = {c.identity: c for c in dag_cases()}
         current = cases["WireDag/json/empty"]
-        self.assertEqual(current.expected["schema_version"], 17)
-        self.assertIsNone(cases["WireDag/json/version-15"].expected)
+        self.assertEqual(current.expected["schema_version"], 18)
         self.assertIsNone(cases["WireDag/json/version-16"].expected)
-        self.assertIsNone(cases["WireDag/json/version-18"].expected)
+        self.assertIsNone(cases["WireDag/json/version-17"].expected)
+        self.assertIsNone(cases["WireDag/json/version-19"].expected)
         for codec in ("json", "construct", "admit"):
             for owner in ("expand", "reshape", "pad", "shrink", "stride"):
                 prefix = f"WireDag/{codec}/owner-{owner}-"

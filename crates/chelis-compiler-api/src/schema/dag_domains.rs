@@ -1,9 +1,10 @@
 //! Numeric field domains and reference scopes, before a WireDag is admitted.
 use super::{
     WireDag, WireDagContractError, WireDagNode, WireDimExpr, WireDimInfo, WireExtentWitnessSite,
-    WireFusedInput, WireRiscOp, WireRtAxis, WireRtDim, host_index, wire_dim_info_equal,
+    WireFusedInput, WireKeyBranch, WireLogicalKind, WireRiscOp, WireRtAxis, WireRtDim, host_index,
+    wire_dim_info_equal,
 };
-use chelis_ir::dag::RandomDraw;
+use chelis_ir::dag::{KeyBranch, RandomDraw};
 use chelis_ir::verify::{KeyGraph, KeyRole, verify_key_rules};
 use chelis_types::types::Prim;
 
@@ -72,44 +73,85 @@ fn is_rank_zero(node: &WireDagNode, precision: &str) -> bool {
     node.output_type.dims.is_empty() && node.output_type.precision == precision
 }
 
-/// A random node's operand layout (spec/10 §3.2, v17): the data or template,
-/// the controls, the key and one optional rank-zero Bool activation for the
-/// primitives and their adjoints; the optional literal seed, the controls and
-/// the optional activation for a draw key. Control values are checked at
-/// execution under [05-OP-8]/[05-OP-37], never here.
+/// A random node's operand layout (spec/10 §3.2, v18): the data or template,
+/// the controls, the key and one optional Bool activation for the primitives
+/// and their adjoints; the optional literal seed, the controls and the
+/// optional activation for a draw key. A primitive's key is rank zero, or a
+/// rank-1 batch whose extent is its data's leading extent; its controls and
+/// activation are then rank zero or that same shape. Control values are
+/// checked at execution under [05-OP-8]/[05-OP-37], never here; the key rules
+/// check where each key comes from.
 fn random_node(dag: &WireDag, node: &WireDagNode, dtype: Prim) -> Result<()> {
     let float = |prim: Prim| matches!(prim, Prim::F16 | Prim::Bf16 | Prim::F32 | Prim::F64);
+    let key_slot = match &node.op {
+        WireRiscOp::UniformLike {} => Some(3),
+        WireRiscOp::Dropout {}
+        | WireRiscOp::DropoutReplay {}
+        | WireRiscOp::UniformBoundAdjoint { .. } => Some(2),
+        _ => None,
+    };
+    // The key batch's one axis, when the primitive draws a rank-1 key batch.
+    let batch = match key_slot {
+        Some(slot) => {
+            let key = input_at(dag, node, slot)?;
+            match key.output_type.dims.as_slice() {
+                [axis] if key.output_type.precision == "key" => Some(axis.clone()),
+                _ => None,
+            }
+        }
+        None => None,
+    };
+    let per_row = |value: &WireDagNode| match value.output_type.dims.as_slice() {
+        [] => true,
+        [axis] => batch
+            .as_ref()
+            .is_some_and(|batch| wire_dim_info_equal(axis, batch)),
+        _ => false,
+    };
     let control = |slot: usize, draw_dtype: Prim, uniform: bool| -> Result<()> {
         let value = input_at(dag, node, slot)?;
-        let admitted = value.output_type.dims.is_empty()
+        let admitted = per_row(value)
             && Prim::parse_interchange_name(&value.output_type.precision)
                 .is_some_and(|prim| prim == draw_dtype || (uniform && prim == Prim::F32));
         if admitted {
             Ok(())
         } else {
             Err(reject(
-                "random control must be a rank-zero value of the draw's dtype (f32 bounds admitted)",
+                "random control must be a rank-zero value of the draw's dtype (f32 bounds admitted), or one per key row",
             ))
         }
     };
     let activation = |slot: usize| -> Result<()> {
         match node.inputs.len() {
             count if count == slot => Ok(()),
-            count if count == slot + 1 && is_rank_zero(input_at(dag, node, slot)?, "bool") => {
+            count
+                if count == slot + 1 && {
+                    let active = input_at(dag, node, slot)?;
+                    active.output_type.precision == "bool" && per_row(active)
+                } =>
+            {
                 Ok(())
             }
             _ => Err(reject(
-                "random operation may end with exactly one rank-zero Bool activation",
+                "random operation may end with exactly one rank-zero Bool activation, or one per key row",
             )),
         }
     };
     let key = |slot: usize| -> Result<()> {
         let key = input_at(dag, node, slot)?;
-        if is_rank_zero(key, "key") && matches!(key.op, WireRiscOp::DrawKey { .. }) {
+        let data_slot = usize::from(matches!(node.op, WireRiscOp::UniformBoundAdjoint { .. }));
+        let leading = input_at(dag, node, data_slot)?.output_type.dims.first();
+        let admitted = key.output_type.precision == "key"
+            && match key.output_type.dims.as_slice() {
+                [] => true,
+                [axis] => leading.is_some_and(|leading| wire_dim_info_equal(axis, leading)),
+                _ => false,
+            };
+        if admitted {
             Ok(())
         } else {
             Err(reject(
-                "random operation requires a key produced by a draw key",
+                "random operation requires a rank-zero key or a key batch matching its data's leading axis",
             ))
         }
     };
@@ -153,12 +195,12 @@ fn random_node(dag: &WireDag, node: &WireDagNode, dtype: Prim) -> Result<()> {
         WireRiscOp::UniformBoundAdjoint { .. } => {
             let template = input_at(dag, node, 0)?;
             if !float(dtype)
-                || !node.output_type.dims.is_empty()
+                || !per_row(node)
                 || template.output_type.precision != node.output_type.precision
                 || !same_as_data_shape(template, input_at(dag, node, 1)?)
             {
                 return Err(reject(
-                    "a uniform bound adjoint is a rank-zero value of its template's dtype over a same-shaped cotangent",
+                    "a uniform bound adjoint is a value of its template's dtype, rank zero or one per key row, over a same-shaped cotangent",
                 ));
             }
             key(2)?;
@@ -175,6 +217,16 @@ fn random_node(dag: &WireDag, node: &WireDagNode, dtype: Prim) -> Result<()> {
             if !is_rank_zero(node, "key") {
                 return Err(reject("draw key produces one rank-zero key"));
             }
+            // A draw key's controls are rank zero: batching is a key
+            // operation's result, never the counter bridge's.
+            let control = |slot: usize, draw_dtype: Prim, uniform: bool| -> Result<()> {
+                let value = input_at(dag, node, slot)?;
+                if value.output_type.dims.is_empty() {
+                    control(slot, draw_dtype, uniform)
+                } else {
+                    Err(reject("a draw key's controls are rank-zero values"))
+                }
+            };
             let seed_slots = match handler {
                 super::WireRandomHandler::Inherited => 0,
                 super::WireRandomHandler::Scoped { .. } => {
@@ -198,6 +250,71 @@ fn random_node(dag: &WireDag, node: &WireDagNode, dtype: Prim) -> Result<()> {
             activation(seed_slots + controls)
         }
         _ => unreachable!("random_node validates only random operations"),
+    }
+}
+
+/// An explicit key operation's operand layout (spec/10 §3.2, v18,
+/// [05-OP-69..72]): element-wise over its key operand's exact shape, except
+/// that `SplitN` appends its count axis last.
+fn key_node(dag: &WireDag, node: &WireDagNode) -> Result<()> {
+    let (operand, arity) = match &node.op {
+        WireRiscOp::KeyFromSeed {} => ("int64", 1),
+        WireRiscOp::Split { .. } => ("key", 1),
+        WireRiscOp::FoldIn {} => ("key", 2),
+        WireRiscOp::SplitN { count } => {
+            bound(count)?;
+            (
+                "key",
+                if matches!(count, WireRtDim::Node { .. }) {
+                    2
+                } else {
+                    1
+                },
+            )
+        }
+        _ => unreachable!("key_node validates only key operations"),
+    };
+    if node.inputs.len() != arity {
+        return Err(reject("key operation has the wrong number of inputs"));
+    }
+    let first = input_at(dag, node, 0)?;
+    if first.output_type.precision != operand || node.output_type.precision != "key" {
+        return Err(reject(
+            "key operation reads the wrong operand dtype or does not produce keys",
+        ));
+    }
+    let valid = match &node.op {
+        WireRiscOp::SplitN { count } => {
+            let key_rank = first.output_type.dims.len();
+            let dims = &node.output_type.dims;
+            dims.len() == key_rank + 1
+                && dims[..key_rank]
+                    .iter()
+                    .zip(&first.output_type.dims)
+                    .all(|(out, key)| wire_dim_info_equal(out, key))
+                && match (count, dims.last()) {
+                    (WireRtDim::Lit { value }, Some(WireDimInfo::Lit { size })) => {
+                        value.get() == size.get()
+                    }
+                    (WireRtDim::Lit { .. }, Some(WireDimInfo::Named { .. })) => true,
+                    (WireRtDim::Node { .. }, _) => true,
+                    _ => false,
+                }
+        }
+        WireRiscOp::FoldIn {} => {
+            let indices = input_at(dag, node, 1)?;
+            indices.output_type.precision == "int64"
+                && same_as_data_shape(first, node)
+                && same_as_data_shape(indices, node)
+        }
+        _ => same_as_data_shape(first, node),
+    };
+    if valid {
+        Ok(())
+    } else {
+        Err(reject(
+            "key operation must be element-wise over one exact shape, with a split's count axis appended last",
+        ))
     }
 }
 
@@ -259,10 +376,26 @@ impl KeyGraph for DecodedKeys<'_> {
                     dtype,
                 }
             }
+            Some(WireRiscOp::KeyFromSeed {}) => KeyRole::KeyFromSeed,
+            Some(WireRiscOp::Split { branch }) => KeyRole::Split {
+                branch: match branch {
+                    WireKeyBranch::Left => KeyBranch::Left,
+                    WireKeyBranch::Right => KeyBranch::Right,
+                },
+            },
+            Some(WireRiscOp::FoldIn {}) => KeyRole::FoldIn,
+            Some(WireRiscOp::SplitN { .. }) => KeyRole::SplitN,
+            Some(WireRiscOp::Load { .. }) => KeyRole::Load,
             Some(WireRiscOp::Dropout {}) => KeyRole::Dropout,
             Some(WireRiscOp::UniformLike {}) => KeyRole::UniformLike,
             Some(WireRiscOp::DropoutReplay {}) => KeyRole::DropoutReplay,
             Some(WireRiscOp::UniformBoundAdjoint { .. }) => KeyRole::UniformBoundAdjoint,
+            Some(WireRiscOp::Logical {
+                logical: WireLogicalKind::And,
+            }) => KeyRole::And,
+            Some(WireRiscOp::Logical {
+                logical: WireLogicalKind::Not,
+            }) => KeyRole::Not,
             _ => KeyRole::Other,
         }
     }
@@ -367,7 +500,15 @@ fn same_shape_result_relation_is_supported(dag: &WireDag, node: &WireDagNode) ->
         return false;
     }
     let mut members = std::collections::BTreeSet::new();
-    for input in &node.inputs {
+    // A draw's data operand is its only same-shape operand; its controls, key
+    // and activation are rank zero or one value per key row.
+    let operands = match node.op {
+        WireRiscOp::UniformLike {} | WireRiscOp::Dropout {} | WireRiscOp::DropoutReplay {} => {
+            &node.inputs[..node.inputs.len().min(1)]
+        }
+        _ => &node.inputs[..],
+    };
+    for input in operands {
         let Some(input) = usize::try_from(*input)
             .ok()
             .and_then(|input| dag.nodes.get(input))
@@ -968,6 +1109,10 @@ pub(super) fn validate(dag: &WireDag) -> Result<()> {
             | WireRiscOp::DropoutReplay {}
             | WireRiscOp::UniformBoundAdjoint { .. }
             | WireRiscOp::DrawKey { .. } => random_node(dag, node, dtype)?,
+            WireRiscOp::KeyFromSeed {}
+            | WireRiscOp::Split { .. }
+            | WireRiscOp::FoldIn {}
+            | WireRiscOp::SplitN { .. } => key_node(dag, node)?,
             _ => {}
         }
     }

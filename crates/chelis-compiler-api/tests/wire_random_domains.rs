@@ -139,7 +139,7 @@ fn version_16_random_payloads_have_no_version_17_spelling() {
 }
 
 #[test]
-fn a_key_is_consumed_once_and_only_by_a_random_primitive() {
+fn a_key_is_consumed_once_and_only_by_a_key_consumer() {
     let dag = lower(HANDLED, "sample");
     let dropout = first(&dag, "dropout");
     let uniform = first(&dag, "uniform_like");
@@ -159,52 +159,300 @@ fn a_key_is_consumed_once_and_only_by_a_random_primitive() {
         "op":{"kind":"neg"},"inputs":[dropout_key],
         "output_type":{"dims":[],"precision":"key"}}),
     );
-    rejects_domain(&foreign, "only a random primitive consumes a key");
+    rejects_domain(
+        &foreign,
+        "only a key operation or a random primitive consumes a key",
+    );
 
-    // A key slot fed by something other than a draw key.
-    let mut not_drawn = dag.clone();
+    // A key slot fed by something that is not a key.
+    let mut not_a_key = dag.clone();
     let rate = input(&dag, dropout, 1);
-    not_drawn["nodes"][dropout]["inputs"][2] = json!(rate);
-    rejects_domain(&not_drawn, "produced by a draw key");
+    not_a_key["nodes"][dropout]["inputs"][2] = json!(rate);
+    rejects_domain(&not_a_key, "requires a rank-zero key or a key batch");
 }
 
-/// spec/10 §3.2: every key is the output of a `DrawKey`, read only by the
-/// draw that consumes it, if any, and that draw's replays. The IR verifier
-/// rejects each payload below, and so does the codec.
-///
-/// Evidentiary status: REGRESSION TEST. At dcc9256c4 `from_validated_json`
-/// accepted the key-precision load, that load as a root, the rooted draw key
-/// and the key shape dependency.
+/// spec/10 §3.2 (v18): a key enters a graph as a key operation's or draw
+/// key's output or as a key-precision `Load`, and may be a root; it is never
+/// a shape dependency, and no constant carries one.
 #[test]
-fn a_key_is_drawn_and_never_a_root_or_a_dependency() {
+fn a_key_may_be_loaded_or_rooted_and_is_never_a_dependency_or_a_constant() {
     let dag = lower(HANDLED, "sample");
     let dropout = first(&dag, "dropout");
     let key = input(&dag, dropout, 2);
 
-    // A key-precision node that no draw key produced, left unconsumed.
-    let mut stray = dag.clone();
-    let id = stray["nodes"].as_array().unwrap().len();
-    stray["nodes"].as_array_mut().unwrap().push(
+    // A key-precision Load, unconsumed: dropping a key is allowed.
+    let mut loaded = dag.clone();
+    let id = loaded["nodes"].as_array().unwrap().len();
+    loaded["nodes"].as_array_mut().unwrap().push(
         json!({"shape_deps":[],"span_id":null,"merged_spans":[],"id":id,
         "op":{"kind":"load","name":"k"},"inputs":[],
         "output_type":{"dims":[],"precision":"key"}}),
     );
-    rejects_domain(&stray, "only a draw key produces one");
+    accepts(&loaded);
 
-    // The same stray key as a root.
-    let mut stray_root = stray.clone();
-    stray_root["roots"].as_array_mut().unwrap().push(json!(id));
-    rejects_domain(&stray_root, "only a draw key produces one");
-
-    // A consumed draw key as a root.
+    // The loaded key as a root, and a consumed draw key as a root.
+    let mut loaded_root = loaded.clone();
+    loaded_root["roots"].as_array_mut().unwrap().push(json!(id));
+    accepts(&loaded_root);
     let mut key_root = dag.clone();
     key_root["roots"].as_array_mut().unwrap().push(json!(key));
-    rejects_domain(&key_root, "is a graph root");
+    accepts(&key_root);
 
     // A key as a shape dependency of its own consumer.
     let mut key_dependency = dag.clone();
     key_dependency["nodes"][dropout]["shape_deps"] = json!([key]);
     rejects_domain(&key_dependency, "as a dependency");
+
+    // A constant typed as a key: every key is a node's output, never bits.
+    let mut constant = dag.clone();
+    let id = constant["nodes"].as_array().unwrap().len();
+    constant["nodes"].as_array_mut().unwrap().push(
+        json!({"shape_deps":[],"span_id":null,"merged_spans":[],"id":id,
+        "op":{"kind":"const","value":{"dtype":"int64","value":7}},"inputs":[],
+        "output_type":{"dims":[],"precision":"key"}}),
+    );
+    let text = constant.to_string();
+    assert!(WireDag::from_validated_json(&text).is_err(), "{text}");
+}
+
+fn wire_node(id: usize, op: Value, inputs: &[usize], dims: &[u64], precision: &str) -> Value {
+    json!({"shape_deps":[],"span_id":null,"merged_spans":[],"id":id,"op":op,
+        "inputs":inputs,
+        "output_type":{"dims":dims.iter().map(|size| json!({"kind":"lit","size":size})).collect::<Vec<_>>(),
+        "precision":precision}})
+}
+
+/// The explicit key chain of spec/10 §3.2 (v18): key_from_seed, both split
+/// branches, fold_in, split_n, a batched dropout, and a key root.
+fn key_chain() -> Value {
+    let nodes = vec![
+        wire_node(
+            0,
+            json!({"kind":"const","value":{"dtype":"int64","value":-3}}),
+            &[],
+            &[],
+            "int64",
+        ),
+        wire_node(1, json!({"kind":"key_from_seed"}), &[0], &[], "key"),
+        wire_node(2, json!({"kind":"split","branch":"left"}), &[1], &[], "key"),
+        wire_node(
+            3,
+            json!({"kind":"split","branch":"right"}),
+            &[1],
+            &[],
+            "key",
+        ),
+        wire_node(
+            4,
+            json!({"kind":"const","value":{"dtype":"int64","value":-5}}),
+            &[],
+            &[],
+            "int64",
+        ),
+        wire_node(5, json!({"kind":"fold_in"}), &[2, 4], &[], "key"),
+        wire_node(
+            6,
+            json!({"kind":"split_n","count":{"bound":"lit","value":3}}),
+            &[5],
+            &[3],
+            "key",
+        ),
+        wire_node(7, json!({"kind":"load","name":"x"}), &[], &[3, 4], "f32"),
+        wire_node(
+            8,
+            json!({"kind":"const","value":{"dtype":"f32","bits":"3f000000"}}),
+            &[],
+            &[],
+            "f32",
+        ),
+        wire_node(9, json!({"kind":"dropout"}), &[7, 8, 6], &[3, 4], "f32"),
+        wire_node(
+            10,
+            json!({"kind":"const","value":{"dtype":"int64","value":9}}),
+            &[],
+            &[],
+            "int64",
+        ),
+        wire_node(11, json!({"kind":"fold_in"}), &[3, 10], &[], "key"),
+    ];
+    json!({"schema_version": WIRE_DAG_SCHEMA_VERSION, "nodes": nodes, "roots": [9, 11]})
+}
+
+fn push(graph: &mut Value, op: Value, inputs: &[usize], dims: &[u64], precision: &str) -> usize {
+    let nodes = graph["nodes"].as_array_mut().unwrap();
+    let id = nodes.len();
+    nodes.push(wire_node(id, op, inputs, dims, precision));
+    id
+}
+
+/// Oracle (d) on the wire: the codec applies the IR verifier's key rules
+/// and its own operand rules to the explicit key operations.
+#[test]
+fn the_codec_admits_the_key_chain_and_rejects_every_malformed_key_form() {
+    accepts(&key_chain());
+
+    let mut two_lefts = key_chain();
+    two_lefts["nodes"][3]["op"]["branch"] = json!("left");
+    rejects_domain(&two_lefts, "split twice for the Left branch");
+
+    let mut split_and_fold = key_chain();
+    split_and_fold["nodes"][5]["inputs"][0] = json!(1);
+    rejects_domain(&split_and_fold, "is consumed twice");
+
+    let mut added = key_chain();
+    let sum = push(&mut added, json!({"kind":"add"}), &[11, 11], &[], "key");
+    added["roots"].as_array_mut().unwrap().push(json!(sum));
+    rejects_domain(
+        &added,
+        "only a key operation or a random primitive consumes a key",
+    );
+
+    let mut selected = key_chain();
+    let condition = push(
+        &mut selected,
+        json!({"kind":"load","name":"c"}),
+        &[],
+        &[],
+        "bool",
+    );
+    let chosen = push(
+        &mut selected,
+        json!({"kind":"where"}),
+        &[condition, 11, 11],
+        &[],
+        "key",
+    );
+    selected["roots"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!(chosen));
+    assert!(WireDag::from_validated_json(&selected.to_string()).is_err());
+
+    let mut dependency = key_chain();
+    dependency["nodes"][9]["shape_deps"] = json!([6]);
+    rejects_domain(&dependency, "as a dependency");
+
+    // V5: a key batch that does not match the data's leading axis.
+    let mut batch = key_chain();
+    batch["nodes"][6]["op"]["count"] = json!({"bound":"lit","value":2});
+    batch["nodes"][6]["output_type"]["dims"] = json!([{"kind":"lit","size":2}]);
+    rejects_domain(&batch, "key batch matching its data's leading axis");
+
+    // A declared count axis that disagrees with its literal count.
+    let mut declared = key_chain();
+    declared["nodes"][6]["output_type"]["dims"] = json!([{"kind":"lit","size":4}]);
+    assert!(WireDag::from_validated_json(&declared.to_string()).is_err());
+
+    // A count carrier outside `lit` and a node at slot 1.
+    let mut axis_count = key_chain();
+    axis_count["nodes"][6]["op"]["count"] =
+        json!({"bound":"input_axis","tensor":1,"axis":{"axis":"lit","value":0}});
+    assert!(WireDag::from_validated_json(&axis_count.to_string()).is_err());
+
+    // A seed of the wrong integer width, and a fold of unequal shapes.
+    let mut narrow = key_chain();
+    narrow["nodes"][0] = wire_node(
+        0,
+        json!({"kind":"const","value":{"dtype":"int32","value":-3}}),
+        &[],
+        &[],
+        "int32",
+    );
+    rejects_domain(&narrow, "wrong operand dtype");
+    let mut unequal = key_chain();
+    let indices = push(
+        &mut unequal,
+        json!({"kind":"load","name":"n"}),
+        &[],
+        &[2],
+        "int64",
+    );
+    unequal["nodes"][11]["inputs"][1] = json!(indices);
+    // Node 11 now reads a later node, which the reference rules reject too;
+    // rebuild it at the end so only the shape rule applies.
+    let fold = push(
+        &mut unequal,
+        json!({"kind":"fold_in"}),
+        &[3, indices],
+        &[],
+        "key",
+    );
+    unequal["nodes"][11]["inputs"][1] = json!(10);
+    unequal["nodes"][11]["op"] = json!({"kind":"neg"});
+    unequal["nodes"][11]["inputs"] = json!([10]);
+    unequal["nodes"][11]["output_type"]["precision"] = json!("int64");
+    unequal["roots"] = json!([9, fold]);
+    rejects_domain(&unequal, "element-wise over one exact shape");
+
+    // A replay of a key no draw consumes.
+    let mut replay = key_chain();
+    let g = push(
+        &mut replay,
+        json!({"kind":"load","name":"g"}),
+        &[],
+        &[3, 4],
+        "f32",
+    );
+    let replayed = push(
+        &mut replay,
+        json!({"kind":"dropout_replay"}),
+        &[g, 8, 11],
+        &[3, 4],
+        "f32",
+    );
+    replay["roots"] = json!([9, replayed]);
+    rejects_domain(&replay, "that no forward random primitive consumes");
+}
+
+/// Rule V3 on the wire: two draws share a key only under exclusive arms.
+#[test]
+fn the_codec_admits_exclusive_arms_and_rejects_overlapping_ones() {
+    let arms = |exclusive: bool| {
+        let mut graph = key_chain();
+        let condition = push(
+            &mut graph,
+            json!({"kind":"load","name":"c"}),
+            &[],
+            &[],
+            "bool",
+        );
+        let other = if exclusive {
+            push(
+                &mut graph,
+                json!({"kind":"logical","logical":"not"}),
+                &[condition],
+                &[],
+                "bool",
+            )
+        } else {
+            condition
+        };
+        let x = push(
+            &mut graph,
+            json!({"kind":"load","name":"y"}),
+            &[],
+            &[4],
+            "f32",
+        );
+        let first = push(
+            &mut graph,
+            json!({"kind":"dropout"}),
+            &[x, 8, 11, condition],
+            &[4],
+            "f32",
+        );
+        let second = push(
+            &mut graph,
+            json!({"kind":"dropout"}),
+            &[x, 8, 11, other],
+            &[4],
+            "f32",
+        );
+        graph["roots"] = json!([9, first, second]);
+        graph
+    };
+    accepts(&arms(true));
+    rejects_domain(&arms(false), "whose activations are not exclusive");
 }
 
 /// spec/10 §3.2: a key is read only by the draw that consumes it and that

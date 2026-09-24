@@ -23,9 +23,9 @@ before consuming any package or symbol metadata.
 
 ## 3. Compiler API Wire Contract
 
-WireDag JSON is an exact-version contract. Schema version 17 is explicitly
+WireDag JSON is an exact-version contract. Schema version 18 is explicitly
 present in every payload and is the only accepted version. A missing version,
-versions 1 through 16, and every future version are decode errors before any IR
+versions 1 through 17, and every future version are decode errors before any IR
 node is consumed. There is no versionless default, legacy migration, additive-
 variant tolerance, or best-effort compatibility path.
 
@@ -163,7 +163,7 @@ int64 node. The decoder enforces the owner matrix from
 `spec/05-risc-primitives.md` §2.4.1, the source rank and dtype, the normalized
 axis range, and the exact input cardinality before IR construction.
 
-Every tagged variant must be known to the version 17 decoder. `OneHot` remains only a transient
+Every tagged variant must be known to the version 18 decoder. `OneHot` remains only a transient
 IR/specialization marker and backends must not receive it after specialization.
 
 Execution-value envelopes carry the independently required exact
@@ -259,22 +259,48 @@ or access under [04-NUM-11].
 grammar, not private alternate encodings. The random operations carry no
 numeric fields: their controls and their key are operand nodes.
 `UniformLike.inputs` is its template, its `low` and `high` bounds, its key,
-and at most one rank-zero Bool path activation. `Dropout.inputs` is its data
-input, its rate, its key, and at most one activation. The bounds and the rate
-are rank-zero operands of the template's or input's exact active float dtype.
-(Not fully implemented; chelis#1295.)
+and at most one Bool path activation. `Dropout.inputs` is its data input, its
+rate, its key, and at most one activation. The bounds and the rate are
+operands of the template's or input's exact active float dtype.
+(Not fully implemented; chelis#1295.) A draw's key is rank zero, or a rank-1
+key batch whose extent equals its first input's leading extent. Under a
+rank-zero key every control and the activation are rank zero. Under a batch
+each is rank zero or has the batch's shape, and row `b` of the draw, the
+first input's elements whose leading index is `b`, draws with `key[b]`, with
+row `b` of each per-row control and activation, and with its elements'
+row-major indices within the row as [05-RNG-2]'s element indices.
 Both operations preserve the first input's exact shape and dtype. Their
 value-domain checks remain [05-OP-8/37], before Random consumption; the codec
 neither inserts casts nor implements an adjoint. `DropoutReplay.inputs` is
 its cotangent, its rate, its forward draw's key and that draw's activation
 when it has one. `UniformBoundAdjoint.inputs` is its template, its
-cotangent, its forward draw's key and that draw's activation when it has one.
-Each reads the key without consuming it. An activation is an earlier-node
+cotangent, its forward draw's key and that draw's activation when it has one;
+its result is rank zero, one canonical tree over every row's contributions, or
+has a key batch's shape, one value per row. Each reads the key without
+consuming it. A `DrawKey`'s controls and activation are rank zero. An activation is an earlier-node
 reference under §3.4, not another template.
 
-`key` is a structural precision with no literal carrier: every key is the
-rank-zero output of a `DrawKey` node, consumed by at most one `UniformLike` or
-`Dropout` and otherwise read only by that draw's replays. `DrawKey` carries
+`key` is a structural precision with no literal or storage carrier in a
+graph, at any rank: no `Const`, `ConstTensor` or `Pad.fill` holds a key. Every
+key is produced by `KeyFromSeed`, `Split`, `FoldIn`, `SplitN` or a `DrawKey`,
+or enters as a key-precision `Load`, and a key may be a root. A key is
+consumed by at most one `UniformLike`, `Dropout`, `FoldIn` or `SplitN`, or by
+at most one `Split` of each branch, and is otherwise read only by its draw's
+replays. Two draws may consume one key only when each carries an activation
+and, for every pair, one activation's `And` conjuncts include a node `X` and
+the other's include `Not(X)`. A key reaching any other operation or a shape
+dependency is a decode error.
+
+`KeyFromSeed.inputs` is one `int64` tensor, and its output is the `key` tensor
+of that shape holding [05-OP-69]'s key of each element. `Split` carries its
+`branch`, `left` or `right`, and takes one `key` tensor; its output has that
+shape and holds [05-RNG-2]'s `derive(k, 0)` or `derive(k, 1)` of each element
+([05-OP-70]). `FoldIn.inputs` is a `key` tensor and an `int64` tensor of
+exactly equal shape, and its output is [05-OP-72]'s key of each pair.
+`SplitN.count` is a `WireRtDim` under the same carrier rules as
+`Expand.size`, except that only `lit` and a `node` at input slot 1 are
+admitted; its output appends that extent to its `key` input's shape, and row
+`j` of each key is [05-OP-71]'s. `DrawKey` carries
 its `handler`, its `draw` (`uniform_like` or `dropout`) and the draw's
 template or input `dtype`. An `inherited` handler takes the next ordinal of
 the stream the graph's caller holds. A `scoped` handler is a `with seed`

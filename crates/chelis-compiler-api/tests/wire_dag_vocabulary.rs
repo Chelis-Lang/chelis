@@ -111,14 +111,19 @@ fn wire_dag_operation_vocabulary_is_pinned_to_its_schema_version() {
         "dropout_replay",
         "uniform_bound_adjoint",
         "draw_key",
+        // Version 18 (chelis#2413): the explicit key operations.
+        "key_from_seed",
+        "split",
+        "fold_in",
+        "split_n",
     ];
     actual.sort();
     expected.sort();
     assert_eq!(
-        WIRE_DAG_SCHEMA_VERSION, 17,
+        WIRE_DAG_SCHEMA_VERSION, 18,
         "review vocabulary and migration history with every version change"
     );
-    assert_eq!(actual.len(), 69);
+    assert_eq!(actual.len(), 73);
     assert_eq!(
         actual, expected,
         "operation changes require a schema-version and migration-history review"
