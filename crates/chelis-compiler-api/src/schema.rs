@@ -4691,7 +4691,7 @@ mod diagnostic_projection_contract {
                     UnsupportedKind::Construct("test checker construct".to_string()),
                     "the diagnostic projection contract",
                     Stage::Checker,
-                    chelis_types::unimplemented_rejection!(2388, "test-only projection authority"),
+                    chelis_types::unimplemented_rejection!(2503, "test-only projection authority"),
                 )),
             },
             K::Other,

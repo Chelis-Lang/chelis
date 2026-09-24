@@ -1162,7 +1162,7 @@ impl<'a> EvalContext<'a> {
             }
             DeepTag::Par => {
                 // Legacy sequential placeholder retained behind the
-                // chelis#2388 checker fence. No checked source program
+                // chelis#2503 checker fence. No checked source program
                 // reaches this path until scheduler-independent cross-lane
                 // effects are complete. Keep the arm fail-closed for a
                 // malformed empty node used by internal probes.

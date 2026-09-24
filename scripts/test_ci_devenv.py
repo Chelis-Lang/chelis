@@ -28,7 +28,7 @@ class ProjectActivationTests(unittest.TestCase):
         self.devenv = self.root / "devenv"
         self.state = self.root / "state"
         self.environment = self.state / "venv"
-        venv.EnvBuilder(with_pip=False).create(self.environment)
+        venv.EnvBuilder(with_pip=False, symlinks=os.name != "nt").create(self.environment)
         self.command_bin = self.root / "commands/bin"
         self.command_bin.mkdir(parents=True)
         self.wrapper = self.command_bin / "chelis-ci-shell"
@@ -137,7 +137,7 @@ class ProjectActivationTests(unittest.TestCase):
     def test_capture_preserves_activated_python_identity_and_rejects_mismatch(self):
         state = self.root / "state"
         environment = state / "venv"
-        venv.EnvBuilder(with_pip=False).create(environment)
+        venv.EnvBuilder(with_pip=False, symlinks=os.name != "nt").create(environment)
         interpreter = environment / "bin/python"
         capture = self.root / "capture.json"
         command = [str(interpreter), str(Path(ci_devenv.__file__)), "capture", str(capture)]

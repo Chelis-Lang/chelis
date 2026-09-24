@@ -17,7 +17,7 @@ Ordinary PRs and main pushes use Linux. Passing required PR checks is **not a ph
 | `pr-candidate-receipt.yml` | Completion of any workflow that can finish the required PR check set | Default-branch-owned receipt binding the exact PR head, synthetic candidate, patch identity, required check runs and their workflow/job provenance; eligible receipts can authorize the guarded targeted-rebase lane |
 | `ci.yml` retained workers | Ordinary PR and main push; accepted targeted rebases run only the owners selected by their interaction frontier | Rust policy and doctests, Python/script units selected by `ci_script_tests.py pr`, focused SMT plus its existing Deep-obligation integration target, Linux glibc compatibility, Docs, backend sanitizer units and explicit backend doctests; change-triggered diagnostic mutation and the offline rejection-authority boundary |
 | `conformance.yml` | PR and main push | Existing frozen Hull conformance gate |
-| `heavy-e2e.yml` | Daily 03:17 UTC and manual dispatch | Full non-ignored default workspace across four workspace shards, an exact feature-enabled owner for the known-red native Random observer debt, plus the dtype owner, script integrations, exhaustive generalization feature partitions, dtype Phases 0–3, faithful observation Phase 2, ownership Phase 2 and launch, runtime representation Phase 0, frontend/domain support, and full backend sanitizer integration coverage |
+| `heavy-e2e.yml` | Daily 03:17 UTC and manual dispatch | Full non-ignored default workspace across four workspace shards, plus the dtype owner, script integrations, exhaustive generalization feature partitions, dtype Phases 0–3, faithful observation Phase 2, ownership Phase 2 and launch, runtime representation Phase 0, frontend/domain support, and full backend sanitizer integration coverage |
 | `macos-nightly.yml` | Daily 04:17 UTC and manual dispatch | Both Mac workspace partitions, both Clippy configurations, architecture/ABI/Metal smokes, and Darwin SMT |
 | `build-cvc5.yml` Darwin producer | Daily 01:17 UTC and manual dispatch | Missing Darwin prebuilt assets; relevant main pushes may produce Linux assets only |
 | `smt-full-prove.yml` | Existing nightly/manual cadence | Full SMT proof validation |
@@ -212,6 +212,29 @@ tests, rejects the row if any default-enabled test appears, and runs the complet
 ignored suite with the same target and per-test receipts. It is not an exclusion
 and zero active tests do not count as success.
 
+Test-authored C fixtures, the C a test writes and compiles with `cc`, are
+portability tests whether or not they were written as one (chelis#2496).
+Authors run them on macOS, where Apple clang accepts both defects that
+chelis#1864 merged: a `PRIu64` whose `<inttypes.h>` arrived only through the
+Accelerate framework that `chelis_math.h` includes on Apple, and an unbraced
+`if` followed by a second statement on its line, which GCC's `-Wall` warns about
+and `-Werror` makes an error. A local run, `gate.py --validation` included, is
+therefore no portability evidence on macOS. Before merge a fixture reaches Linux
+only through the existing selection and nothing wider. An added or directly
+modified fixture target runs in the required change-owned lane with its Cargo
+`required-features` activated, so `chelis-compiler-api::native_random_observer`
+runs every row with `native-random-observer`. A change to a shared fixture
+helper, such as `crates/chelis-compiler-api/tests/ownership_support/`, reaches
+its dependents only through the package-expansion dispatch that precedes merge.
+Each fixture's own compiler choice and flags decide what fails it; one that must
+reject GCC warnings opts into `-std=c11 -Wall -Wextra -Werror`. The standing
+`chelis-runtime::c_fixture_portability` target checks the toolchain it runs on:
+on Linux it fails unless `cc` is GCC and those flags reject both chelis#1864
+shapes while accepting their repaired twins. A lane that does not run it gets no
+evidence from it. Making every fixture target standing would be the
+whole-workspace pull-request suite whose cost chelis#1824 weighs;
+generated-source portability as a class stays with chelis#2063.
+
 The Linux workspace worker executes as four shards of one
 `--partition hash:${{ matrix.shard }}/4` selection rather than as a single run.
 The selection is unchanged and still unfiltered. A hash partition hides nothing:
@@ -375,7 +398,7 @@ The expansion executor splits ordinary targets into bounded exact-package groups
 
 Use `gh workflow run heavy-e2e.yml --ref BRANCH` or `gh workflow run macos-nightly.yml --ref BRANCH` for candidate validation. The exhaustive runtime-representation oracle has a 145-minute total job timeout, preserving mainline's 120-minute budget plus 25 minutes for cold Devenv setup. Dtype and runtime extent have 115-minute total job timeouts, preserving their 90-minute budgets; full Linux execution shards, script integrations and generalization shards have 85-minute total job timeouts, preserving their 60-minute budgets; the remaining extended Linux execution workers have 70-minute total job timeouts, preserving their 45-minute budgets. These increases do not change script execution deadlines. Darwin SMT remains native with a 60-minute job timeout. Exact-main evidence showed dtype finishing green after 80 minutes, while runtime representation completed Phase 1 and reached its final Python/DLPack cohort before the still-running binding census was cancelled at 90 minutes. These budgets preserve complete execution rather than converting slow success into cancellation; census work stays out of the other Linux workers. Existing ignored/manual gates still require their documented prerequisite and explicit invocation. The stdlib self-test corpus remains explicitly invoked nightly. Existing nightly failures must be recorded against a baseline, never treated as passing evidence.
 
-The developer's `gate.py --fast`, `--local`, `integration`, and full/manual commands retain their previous selections. The separate `gate.py ci-fast` stage owns the fixed standing hosted selection on pull requests and `main`. The required change-owned lane runs only for PR candidates and trusted exact-candidate dispatches; package expansion runs only through its explicit PR dispatch. A title or description edit reruns the dedicated acknowledgement check and changelog policy without entering compiler or Hull workflows, so the unchanged candidate's implementation contexts are neither cancelled nor replaced. A base retarget creates a required pending head receipt, validates the open PR's exact head/base and the checked-out two-parent merge, dispatches CI and Hull from the trusted new base, and closes the receipt only after both runs succeed. Run the owning phase oracle on the candidate when claiming phase completion.
+The developer's `gate.py --fast`, `--validation`, `integration`, and full/manual commands retain their previous selections. The separate `gate.py ci-fast` stage owns the fixed standing hosted selection on pull requests and `main`. The required change-owned lane runs only for PR candidates and trusted exact-candidate dispatches; package expansion runs only through its explicit PR dispatch. A title or description edit reruns the dedicated acknowledgement check and changelog policy without entering compiler or Hull workflows, so the unchanged candidate's implementation contexts are neither cancelled nor replaced. A base retarget creates a required pending head receipt, validates the open PR's exact head/base and the checked-out two-parent merge, dispatches CI and Hull from the trusted new base, and closes the receipt only after both runs succeed. Run the owning phase oracle on the candidate when claiming phase completion.
 
 ### Measured figures for the changed-path classification stage
 

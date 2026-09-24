@@ -5129,10 +5129,9 @@ fn helper_is_device_emitted(dag: &Dag) -> bool {
         .any(|node| matches!(node.op, RiscOp::Count { .. }))
 }
 
-/// Apply the chelis#2339 exact-reduction fence to every HIP host helper:
-/// selecting a host entry must not turn the implemented C reduction into a
-/// silent device fallback. Count-bearing helpers additionally receive the
-/// full HIP device capability policy because they are emitted as HIP code.
+/// Fence selected HIP host helpers that would silently execute movement or an
+/// inexact reduction through C. Count-bearing helpers receive the full HIP
+/// device capability policy because they are emitted as HIP code.
 pub fn reject_unsupported_hip_ops_in_host_program(
     program: &chelis_ir::host::ConcreteHostProgram,
 ) -> std::result::Result<(), CompilerError> {
@@ -5140,7 +5139,26 @@ pub fn reject_unsupported_hip_ops_in_host_program(
         if helper_is_device_emitted(dag) {
             reject_unsupported_hip_ops(dag)
         } else {
-            reject_inexact_device_reduction_cells(dag, BuildTarget::Hip)
+            reject_inexact_device_reduction_cells(dag, BuildTarget::Hip)?;
+            for node in dag.nodes() {
+                let operation = match node.op {
+                    RiscOp::Pad { .. } => "pad",
+                    RiscOp::Shrink { .. } => "shrink",
+                    _ => continue,
+                };
+                return Err(unsupported_gate_error(
+                    format!(
+                        "HIP {operation} host fallback is unsupported: lowered node {} would run on the CPU; use `--target c` until HIP device routing is implemented",
+                        node.id.0
+                    ),
+                    "hip",
+                    chelis_types::unimplemented_rejection!(
+                        2493,
+                        "HIP pad and shrink device routing is not implemented for C-host tensor helpers; use `--target c`"
+                    ),
+                ));
+            }
+            Ok(())
         }
     })
 }

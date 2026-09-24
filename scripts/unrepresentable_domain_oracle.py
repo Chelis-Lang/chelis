@@ -59,8 +59,8 @@ Usage:
 
 Acceptance is exit 0 with the final line ``ORACLE: PASS``.
 
-Wiring: `scripts/gate.py`'s `integration` stage and its `--local` pre-push
-subset. Hosted CI runs that stage in the `workspace-tests-shard` matrix,
+Wiring: `scripts/gate.py`'s `integration` stage and its optional
+`--validation` subset. Hosted CI runs that stage in the `workspace-tests-shard` matrix,
 which feeds the stable `Workspace Tests (Linux)` aggregate on every pull
 request that is not docs-only. The stage choice is not incidental:
 obligations 4 and 5 run `cargo nextest`, which the `lint-rust` worker

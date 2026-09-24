@@ -32,7 +32,7 @@ class HostedCommandTests(unittest.TestCase):
         return os.pathsep.join([*reversed(published), os.environ["PATH"]])
 
     def test_shims_run_commands_and_the_gate_with_the_venv_interpreter(self):
-        venv.EnvBuilder(with_pip=False).create(self.root / ".venv")
+        venv.EnvBuilder(with_pip=False, symlinks=os.name != "nt").create(self.root / ".venv")
         interpreter = self.root / ".venv" / "bin" / "python"
         ci_hosted_commands.publish(self.root, self.commands, self.github_env, self.github_path)
         self.assertEqual(self.github_env.read_text(), f"PYO3_PYTHON={interpreter}\n")

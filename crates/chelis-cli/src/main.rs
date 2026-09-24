@@ -4169,11 +4169,6 @@ fn cmd_build(
                         BuildTarget::Hip,
                     ),
                 )?;
-                shared_compiler_gate(
-                    chelis_compiler_api::compiler::reject_unsupported_hip_ops_in_host_program(
-                        host_program,
-                    ),
-                )?;
             }
             let host_requires_host_backend = compiled_host
                 .as_ref()
@@ -4207,6 +4202,11 @@ fn cmd_build(
                     && host_requires_host_backend))
                 && let Some(host_program) = compiled_host.as_mut()
             {
+                shared_compiler_gate(
+                    chelis_compiler_api::compiler::reject_unsupported_hip_ops_in_host_program(
+                        host_program,
+                    ),
+                )?;
                 let selected = std::mem::take(host_program);
                 // The helper manifest is read before C payload selection so a
                 // Count-bearing helper reaches the HIP backend as its source
@@ -4513,11 +4513,6 @@ fn cmd_build_deep(
                         BuildTarget::Hip,
                     ),
                 )?;
-                shared_compiler_gate(
-                    chelis_compiler_api::compiler::reject_unsupported_hip_ops_in_host_program(
-                        host_program,
-                    ),
-                )?;
             }
             let host_requires_host_backend = compiled_host
                 .as_ref()
@@ -4546,6 +4541,11 @@ fn cmd_build_deep(
                     && host_requires_host_backend))
                 && let Some(host_program) = compiled_host.as_mut()
             {
+                shared_compiler_gate(
+                    chelis_compiler_api::compiler::reject_unsupported_hip_ops_in_host_program(
+                        host_program,
+                    ),
+                )?;
                 let selected = std::mem::take(host_program);
                 // The helper manifest is read before C payload selection so a
                 // Count-bearing helper reaches the HIP backend as its source

@@ -1,5 +1,5 @@
 //! chelis#2388: `par` is rejected before any execution lane can erase an
-//! effectful non-final child.
+//! effectful non-final child. chelis#2503 owns the current fence and full support.
 
 use chelis_compiler_api::{
     compiler::{check, compile, eval},
@@ -32,7 +32,7 @@ fn assert_par_fence(
         diagnostic.message
     );
     assert!(
-        diagnostic.message.contains("unimplemented chelis#2388"),
+        diagnostic.message.contains("unimplemented chelis#2503"),
         "{}",
         diagnostic.message
     );
@@ -52,7 +52,7 @@ fn assert_par_fence(
     assert_eq!(identity.payload.atom, None);
     assert_eq!(
         identity.payload.tracking_issue.map(|issue| issue.number()),
-        Some(2388)
+        Some(2503)
     );
     assert_eq!(
         identity.payload.supported_alternative.as_deref(),

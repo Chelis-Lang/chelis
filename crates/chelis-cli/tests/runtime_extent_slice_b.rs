@@ -2312,25 +2312,11 @@ fn a_local_unit_extent_claim_traps_at_its_operation_on_eval() {
     );
 }
 
-/// The HIP lane carries the locally placed claim too, through the shared host
-/// lowering rather than through a HIP-specific guard.
-///
-/// This is the honest disposition for that lane, and it is not the one the
-/// plan assumed. The HIP emitter contains no local guard emission of its own:
-/// `local_dim_guard_sites` has no reader there. Nor does HIP DEVICE codegen
-/// ever see this shape, because `reject_unsupported_hip_ops` refuses a
-/// node-valued movement bound before codegen (chelis#616), and calling the HIP
-/// emitter directly on such a graph panics on that backstop. What the user
-/// gets from `build --target hip` is the C emitter's host lowering, which S2b's
-/// change reaches, so the claim is guarded on this lane by construction.
-///
-/// The row exists because "by construction" is exactly the kind of claim that
-/// stops being true silently. If the host sharing ever ends, this fails.
-///
-/// EVIDENTIARY STATUS: regression test. Before the Local arm had consumers the
-/// emitted HIP host source carried no comparison against 1 at all.
+/// HIP must reject this selected `shrink` host helper before emitting an
+/// artifact. #2493 owns device routing and the local extent guard on that lane;
+/// the C and evaluator rows above retain the executable guard checks.
 #[test]
-fn a_local_unit_extent_claim_is_guarded_on_the_hip_host_lowering() {
+fn a_local_unit_extent_claim_with_shrink_rejects_hip_host_fallback() {
     let dir = tempfile::tempdir().expect("tempdir");
     let path = fixture(&dir, "local_refuted_hip.ch", LOCAL_NON_UNIT_SOURCE);
     let out_dir = dir.path().join("local-refuted-hip-out");
@@ -2349,20 +2335,19 @@ fn a_local_unit_extent_claim_is_guarded_on_the_hip_host_lowering() {
         ])
         .output()
         .expect("hip build");
+    let stderr = String::from_utf8_lossy(&build.stderr);
     assert!(
-        build.status.success(),
-        "the HIP build routes this program to the host lane and succeeds: {}",
-        String::from_utf8_lossy(&build.stderr)
-    );
-    let emitted = std::fs::read_to_string(out_dir.join("local_refuted_hip_hip.cpp"))
-        .expect("HIP host source is written");
-    assert!(
-        emitted.contains(&format!("{}\");", domain_trap_line("expand"))),
-        "the emitted host source carries the claim's guard:\n{emitted}"
+        !build.status.success(),
+        "HIP must reject the host fallback: {stderr}"
     );
     assert!(
-        emitted.contains("extent `1`: claimed = %lld"),
-        "with section 4.7's context on its own line:\n{emitted}"
+        stderr.contains("HIP shrink host fallback is unsupported")
+            && stderr.contains("unimplemented chelis#2493"),
+        "the rejection names the missing device implementation: {stderr}"
+    );
+    assert!(
+        !out_dir.join("local_refuted_hip_hip.cpp").exists(),
+        "a rejected HIP build must not write an artifact"
     );
 }
 

@@ -521,46 +521,17 @@ class SchemaTests(unittest.TestCase):
             manual_owner.cadence,
             "pull_request and exact-candidate workflow_dispatch when directly modified",
         )
-        observer_debt = {
-            identity: owner
-            for identity, owner in config.test_exclusions.items()
-            if owner.tracking_issue == "chelis#2201"
-        }
-        self.assertEqual(
-            {identity.test for identity in observer_debt},
-            {
-                "authored_observer_spellings_do_not_collide_with_private_support_or_wrappers",
-                "feature_on_ordinary_public_call_emits_no_observation",
-                "host_source_identity_qualifies_nested_and_following_helper_occurrences",
-                "nested_host_and_fixed_frames_record_actual_forward_replay_and_restoration",
-                "repeated_direct_callees_keep_linked_identity_and_restore_the_call_stack",
-                "repeated_observed_calls_restart_sequence_and_keep_invocation_identity",
-                "sink_error_is_not_silent_success",
-                "unsupported_argument_effects_cannot_certify_descendant_calls",
-            },
-        )
         for owner in (
             *(
                 owner
                 for owner in config.target_exclusions.values()
                 if owner.tracking_issue == "chelis#1824"
             ),
-            *(
-                owner
-                for owner in config.test_exclusions.values()
-                if owner.tracking_issue != "chelis#2201"
-            ),
+            *config.test_exclusions.values(),
         ):
             self.assertEqual(owner.workflow, "heavy-e2e.yml")
             self.assertEqual(owner.job, "full-workspace")
             self.assertEqual(owner.cadence, "daily 03:17 UTC and workflow_dispatch")
-        for owner in observer_debt.values():
-            self.assertEqual(owner.workflow, "heavy-e2e.yml")
-            self.assertEqual(owner.job, "native-random-observer-debt")
-            self.assertEqual(
-                owner.cadence,
-                "daily 03:17 UTC and workflow_dispatch",
-            )
         self.assertEqual(
             sum(
                 owner.tracking_issue == "chelis#1824"
@@ -620,9 +591,6 @@ class SchemaTests(unittest.TestCase):
         root = Path(__file__).resolve().parents[1]
         heavy = (root / ".github/workflows/heavy-e2e.yml").read_text()
         self.assertIn("\n  full-workspace:\n", heavy)
-        self.assertIn("\n  native-random-observer-debt:\n", heavy)
-        for identity in observer_debt:
-            self.assertIn(f"test(/^{identity.test}$/)", heavy)
         self.assertIn('cron: "17 3 * * *"', heavy)
         heavy_rule = next(
             rule

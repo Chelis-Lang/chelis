@@ -279,7 +279,7 @@ shape).
 
 **STATUS (updated 2026-09-24): the complete structured `chelis check` and wire
 surface above is still the TARGET, not current behavior.** The `Unsupported`
-object now carries the §C2.1 opaque typed authority. Chelis#2388's `par` fence
+object now carries the §C2.1 opaque typed authority. Chelis#2503's `par` fence
 constructs `Stage::Checker` and reaches `chelis check`, `eval`, and `build`
 through the checker diagnostic channel; no type on the `Unsupported` path
 derives `Serialize`. Chelis#1870's bounded in-process trial remains the
@@ -1693,8 +1693,8 @@ substitutes for the other.
 3. Conversions are per-site PR-reviewable units; the plumbing refactor
    (Phase 1 item 1) is one PR that changes signatures with zero behavior
    change, so review is mechanical.
-4. Gate with `scripts/gate.py --local`; macOS Smoke is the workspace
-   oracle.
+4. Gate with `scripts/gate.py --fast` before every push; macOS Smoke is the
+   workspace oracle.
 
 ---
 

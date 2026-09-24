@@ -6348,6 +6348,94 @@ int main(void) {{
     );
 }
 
+/// chelis#2490, [04-NUM-11]: the four-argument public entry `x + x` over one
+/// input declared at `declared`, run on a zero-filled tensor of `supplied`.
+fn direct_entry_dtype_run(declared: Prim, supplied: &str) -> (String, std::process::Output) {
+    let mut dag = Dag::new();
+    let ty = TensorType {
+        dims: vec![DimInfo::Lit(3)],
+        precision: declared,
+    };
+    let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], ty.clone(), None);
+    let out = dag.add_node(RiscOp::Add, vec![x, x], ty, None);
+    dag.add_root(out);
+    let function = format!("direct_entry_dtype_{}", declared.name());
+    let src = codegen(&dag, &function)
+        .expect("direct entry codegen")
+        .c_source;
+    let harness = format!(
+        r#"{HARNESS_HEADER}
+extern void {function}(chelis_tensor **, int, chelis_tensor **, int);
+int main(void) {{
+    chelis_tensor *inputs[1] = {{ chelis_alloc(1, (int64_t[]){{3}}, {supplied}) }};
+    chelis_tensor *outputs[1] = {{ NULL }};
+    {function}(inputs, 1, outputs, 1);
+    puts("completed");
+    return 0;
+}}
+"#
+    );
+    let name = format!("{function}_{}", supplied.to_lowercase());
+    let run = compile_and_capture_run(&name, &src, &harness);
+    (src, run)
+}
+
+/// chelis#2490 REGRESSION TEST: on the pre-fix tree every mismatched row ran
+/// to completion, reading the supplied storage at the declared dtype. The
+/// guard now traps before the load reads the input.
+#[test]
+fn direct_entry_dtype_mismatch_traps_before_the_load_reads() {
+    let mut failures = Vec::new();
+    for (declared, supplied, actual) in [
+        (Prim::Int64, "CHELIS_DTYPE_F64", "f64"),
+        (Prim::Int64, "CHELIS_DTYPE_I32", "i32"),
+        (Prim::F64, "CHELIS_DTYPE_I64", "i64"),
+        (Prim::F32, "CHELIS_DTYPE_BOOL", "bool"),
+        (Prim::F32, "CHELIS_DTYPE_F16", "f16"),
+    ] {
+        let (src, run) = direct_entry_dtype_run(declared, supplied);
+        let guard = src
+            .find("chelis_tensor_read_view(inputs[0]).dtype != ")
+            .unwrap_or(usize::MAX);
+        let load = src.find("chelis_tensor_read_view(t0)").expect("load");
+        let output = format!(
+            "{}{}",
+            String::from_utf8_lossy(&run.stdout),
+            String::from_utf8_lossy(&run.stderr)
+        );
+        let declared = declared.name();
+        if guard > load
+            || run.status.success()
+            || output.contains("completed")
+            || !output.contains(&format!(
+                "input `x` expected dtype {declared}, got {actual}"
+            ))
+            || !output.contains(&format!("numeric trap: domain in load at {declared}\n"))
+        {
+            failures.push(format!("{declared} <- {supplied}: {output}"));
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+#[test]
+fn direct_entry_matching_dtypes_complete() {
+    for (declared, supplied) in [
+        (Prim::Int64, "CHELIS_DTYPE_I64"),
+        (Prim::F64, "CHELIS_DTYPE_F64"),
+        (Prim::F32, "CHELIS_DTYPE_F32"),
+    ] {
+        let (_, run) = direct_entry_dtype_run(declared, supplied);
+        let output = format!(
+            "{}{}",
+            String::from_utf8_lossy(&run.stdout),
+            String::from_utf8_lossy(&run.stderr)
+        );
+        assert!(run.status.success(), "{supplied}: {output}");
+        assert!(output.contains("completed"), "{supplied}: {output}");
+    }
+}
+
 // ---- chelis#1484: the HOST-VALUE lane's elementwise operand guard -------
 //
 // `direct_positive_rank_mismatch_traps_before_indexing` above covers the

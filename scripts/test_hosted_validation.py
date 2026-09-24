@@ -1,4 +1,4 @@
-"""Keep the CI coverage that replaces mandatory --local execution live."""
+"""Keep the CI coverage that replaces mandatory --validation execution live."""
 
 import copy
 from pathlib import Path
