@@ -1,6 +1,6 @@
 {
   "schema_version": 7,
-  "freeze_sha256": "f17c376e0f4ee34ae3736bffd3dc39a0fe1535201fdf2ebe1c73503682a2f425",
+  "freeze_sha256": "15cffc11a1a168e0d8dea041a9c465bbd9c6eab4da3fd777cf2a42115a1b3876",
   "source_inventory": {
     "mutations": [
       {
@@ -2037,6 +2037,22 @@
     {
       "identity": "kind=normalized-key-arithmetic|path=crates/chelis-ir/src/eval.rs|owner=eval_tensor_internal_with_result_claims",
       "deletion_phase": 1
+    },
+    {
+      "identity": "kind=dtype-contract|path=crates/chelis-runtime/src/element.rs|owner=ElementStorage for KeyWord",
+      "deletion_phase": 1
+    },
+    {
+      "identity": "kind=dtype-contract|path=crates/chelis-runtime/src/element.rs|owner=private :: Sealed for KeyWord",
+      "deletion_phase": 1
+    },
+    {
+      "identity": "kind=dtype-contract|path=crates/chelis-vocab/src/lib.rs|owner=Repr::Word64",
+      "deletion_phase": 1
+    },
+    {
+      "identity": "kind=dtype-contract|path=crates/chelis-vocab/src/lib.rs|owner=RuntimeDType::Key",
+      "deletion_phase": 1
     }
   ],
   "active_debt": [
@@ -2987,6 +3003,22 @@
     {
       "identity": "kind=load-store-template|path=crates/chelis-backend-c/src/emit.rs|owner=CEmitter::emit_inherited_result_guards",
       "sample": "__chelis_check_host_result_extent_claims(__chelis_caller_result_claims, {}, (const int64_t[][3]){..."
+    },
+    {
+      "identity": "kind=dtype-contract|path=crates/chelis-runtime/src/element.rs|owner=ElementStorage for KeyWord",
+      "sample": "ElementStorage for KeyWord"
+    },
+    {
+      "identity": "kind=dtype-contract|path=crates/chelis-runtime/src/element.rs|owner=private :: Sealed for KeyWord",
+      "sample": "private :: Sealed for KeyWord"
+    },
+    {
+      "identity": "kind=dtype-contract|path=crates/chelis-vocab/src/lib.rs|owner=Repr::Word64",
+      "sample": "# [doc = \" An opaque 64-bit word with no numeric meaning: a random key\"] # [doc = \" ([05-RNG-2])...."
+    },
+    {
+      "identity": "kind=dtype-contract|path=crates/chelis-vocab/src/lib.rs|owner=RuntimeDType::Key",
+      "sample": "# [doc = \" A random key ([05-RNG-2]): structurally non-numeric, with no\"] # [doc = \" arithmetic r..."
     }
   ]
 }

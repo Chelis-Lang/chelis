@@ -163,11 +163,13 @@ pub enum Prim {
     Int64,
     Bool,
     String,
-    /// The key of one random draw (`spec/design/randomness_counter_stream.md`
-    /// §2): a structurally non-numeric IR element dtype with no arithmetic,
-    /// comparison, cast, storage, or literal carrier. Every key value is
-    /// produced by a graph node. It has no source spelling; its interchange
-    /// spelling is `key`.
+    /// A random key (spec/04 §1.1, [05-RNG-2]): a structurally non-numeric
+    /// element dtype with no arithmetic, comparison, cast, or literal
+    /// carrier. A `tensor[D, key]` is stored with runtime dtype `key`, but
+    /// `key` is not one of the nine active tensor element dtypes that
+    /// [`Prim::is_valid_tensor_precision`] names. Every key value is produced
+    /// by a graph node or enters as an input. It has no source spelling yet;
+    /// its interchange spelling is `key`.
     Key,
 }
 
@@ -271,7 +273,8 @@ impl Prim {
             Prim::Int32 => Ok(RuntimeDType::I32),
             Prim::Int64 => Ok(RuntimeDType::I64),
             Prim::Bool => Ok(RuntimeDType::Bool),
-            Prim::F8e4m3 | Prim::String | Prim::Key => Err(RuntimeDTypeMappingError { prim: self }),
+            Prim::Key => Ok(RuntimeDType::Key),
+            Prim::F8e4m3 | Prim::String => Err(RuntimeDTypeMappingError { prim: self }),
         }
     }
 
@@ -328,10 +331,11 @@ impl Prim {
         !matches!(self, Prim::F8e4m3)
     }
 
-    /// Whether this precision is valid as the element type of a tensor.
-    /// Per spec §1.1 the active tensor element set is f32, f64, bf16, f16,
-    /// i8, i16, i32, i64, and bool. The deferred `f8e4m3` (§1.1.1)
-    /// is rejected.
+    /// Whether this precision is one of spec §1.1's nine active tensor element
+    /// dtypes: f32, f64, bf16, f16, i8, i16, i32, i64, and bool. The deferred
+    /// `f8e4m3` (§1.1.1) is rejected. So is `key`: a `tensor[D, key]` exists,
+    /// but an operation admits key operands only where its own atom names
+    /// `key`, never through this predicate.
     ///
     /// Note: backend support for the reduced floats (`f16`, `bf16`) is
     /// staged separately in WS-A1/A2/A3; the type checker admits them here
@@ -1088,8 +1092,9 @@ mod prim_classification_tests {
         }
     }
 
-    // chelis#2413: a random key is an IR and interchange dtype only. No
-    // source or Deep spelling reaches it, and it is not numeric.
+    // chelis#2413: a random key is an IR and interchange dtype with runtime
+    // storage. No source or Deep spelling reaches it yet, it is not numeric,
+    // and it is not one of the nine active tensor element dtypes.
     #[test]
     fn a_random_key_has_an_interchange_spelling_and_no_source_spelling() {
         assert_eq!(Prim::parse_name("key"), None);
@@ -1099,7 +1104,8 @@ mod prim_classification_tests {
         assert!(!Prim::Key.is_float());
         assert!(!Prim::Key.is_valid_tensor_precision());
         assert!(!Prim::Key.is_valid_scalar_cast_target());
-        assert!(Prim::Key.runtime_dtype().is_err());
+        assert_eq!(Prim::Key.runtime_dtype(), Ok(RuntimeDType::Key));
+        assert!(Prim::String.runtime_dtype().is_err());
     }
 
     #[test]

@@ -1830,7 +1830,7 @@ exact ADT identity by [05-OP-34].
 >
 > `typedef uint8_t chelis_dtype;`
 >
-> `enum { CHELIS_DTYPE_F32 = 0, CHELIS_DTYPE_F64 = 1, CHELIS_DTYPE_I32 = 2, CHELIS_DTYPE_BOOL = 3, CHELIS_DTYPE_I64 = 4, CHELIS_DTYPE_BF16 = 5, CHELIS_DTYPE_F16 = 6, CHELIS_DTYPE_I8 = 7, CHELIS_DTYPE_I16 = 8 };`
+> `enum { CHELIS_DTYPE_F32 = 0, CHELIS_DTYPE_F64 = 1, CHELIS_DTYPE_I32 = 2, CHELIS_DTYPE_BOOL = 3, CHELIS_DTYPE_I64 = 4, CHELIS_DTYPE_BF16 = 5, CHELIS_DTYPE_F16 = 6, CHELIS_DTYPE_I8 = 7, CHELIS_DTYPE_I16 = 8, CHELIS_DTYPE_KEY = 9 };`
 >
 > `typedef struct { chelis_dtype dtype; uint8_t reserved[7]; uint64_t bits; } chelis_scalar;`
 >
@@ -1849,15 +1849,17 @@ exact ADT identity by [05-OP-34].
 > `typedef struct { chelis_value key; chelis_value value; } chelis_dict_entry;`
 >
 > `chelis_dtype` has the closed active IDs `F32=0`, `F64=1`, `I32=2`,
-> `Bool=3`, `I64=4`, `Bf16=5`, `F16=6`, `I8=7`, and `I16=8`. In that
-> order, the low 32/64/32/8/64/16/16/8/16 bits of `chelis_scalar.bits` are
-> the exact stored image and all unused high bits are zero. A bool payload is
-> exactly `0` or `1`. Float construction and transport preserve NaN payload
+> `Bool=3`, `I64=4`, `Bf16=5`, `F16=6`, `I8=7`, `I16=8`, and `Key=9`.
+> `Key` is a tensor dtype only: its element is one opaque 64-bit random key
+> (spec/04 §1.1), and a `chelis_scalar` never carries it. For the other nine
+> IDs in order, the low 32/64/32/8/64/16/16/8/16 bits of `chelis_scalar.bits`
+> are the exact stored image and all unused high bits are zero. A bool payload
+> is exactly `0` or `1`. Float construction and transport preserve NaN payload
 > and signed-zero bits. Every consumer validates both the foreign dtype value
 > and this canonical bit shape before sizing, allocation, storage access, or
-> observation. An unknown dtype, nonzero unused bit, malformed bool, or
-> dtype mismatch traps `Domain` at that boundary; no operation repairs or
-> reinterprets it.
+> observation. An unknown dtype, a `Key` scalar, nonzero unused bit,
+> malformed bool, or dtype mismatch traps `Domain` at that boundary; no
+> operation repairs or reinterprets it.
 >
 > Every `reserved` byte is zero. An optional scalar result is one owned
 > [05-OP-44] option node whose `Some` child is a validated scalar-tagged
