@@ -49,7 +49,7 @@ pub fn analyze_prepared_library(
 /// Complete semantic checks for a prepared library analysis.
 pub fn complete_library_checks(
     prepared: PreparedLibraryAnalysis,
-    runtime: &LoweringRuntime,
+    runtime: &mut LoweringRuntime,
     native: &mut chelis_types::NativeServices,
 ) -> Result<CheckedLibrary, LibraryRejection> {
     let checked = complete_checks(
@@ -65,7 +65,7 @@ pub fn complete_library_checks(
 /// Build a checked library and bind both products from its type session.
 pub fn check_prepared_library(
     prepared: PreparedProgram,
-    runtime: &LoweringRuntime,
+    runtime: &mut LoweringRuntime,
     native: &mut chelis_types::NativeServices,
 ) -> Result<CheckedLibrary, LibraryRejection> {
     complete_library_checks(analyze_prepared_library(prepared, native)?, runtime, native)
@@ -182,7 +182,7 @@ fn prepared_analysis_from_checked(
 pub fn complete_checks(
     analysis: PreparedTypeAnalysis,
     context: SemanticContext,
-    runtime: &LoweringRuntime,
+    runtime: &mut LoweringRuntime,
     native: &mut chelis_types::NativeServices,
 ) -> Result<CheckedCompilation, SemanticRejection> {
     match context {
@@ -193,7 +193,7 @@ pub fn complete_checks(
 fn complete_checks_in_context(
     analysis: PreparedTypeAnalysis,
     library: Option<&CheckedProgram>,
-    runtime: &LoweringRuntime,
+    runtime: &mut LoweringRuntime,
     native: &mut chelis_types::NativeServices,
 ) -> Result<CheckedCompilation, SemanticRejection> {
     let effected = if let Some(library) = library {
@@ -222,7 +222,7 @@ fn complete_checks_in_context(
 /// Complete semantic checks against the library bound to the analysis.
 pub fn complete_context_checks<'library>(
     contextual: ContextualTypeAnalysis<'library>,
-    runtime: &LoweringRuntime,
+    runtime: &mut LoweringRuntime,
     native: &mut chelis_types::NativeServices,
 ) -> Result<ContextCheckedCompilation<'library>, SemanticRejection> {
     let extension = complete_checks_in_context(
@@ -240,7 +240,7 @@ pub fn complete_context_checks<'library>(
 /// Complete checks and compose one library extension with its bound base.
 pub fn complete_context_library_checks(
     contextual: ContextualLibraryTypeAnalysis<'_>,
-    runtime: &LoweringRuntime,
+    runtime: &mut LoweringRuntime,
     native: &mut chelis_types::NativeServices,
 ) -> Result<CheckedLibrary, LibraryRejection> {
     let extension = complete_checks_in_context(
@@ -256,7 +256,7 @@ pub fn complete_context_library_checks(
 
 impl ContextCheckedCompilation<'_> {
     /// Compose this extension with the exact library that produced it.
-    pub fn compose(self, runtime: &LoweringRuntime) -> CheckedCompilation {
+    pub fn compose(self, runtime: &mut LoweringRuntime) -> CheckedCompilation {
         compose_context(self.library, self.extension, runtime)
     }
 }
@@ -264,7 +264,7 @@ impl ContextCheckedCompilation<'_> {
 fn compose_context(
     library: &CheckedLibrary,
     extension: CheckedCompilation,
-    runtime: &LoweringRuntime,
+    runtime: &mut LoweringRuntime,
 ) -> CheckedCompilation {
     let (mut expanded_deep, _, extension_program, _) = extension.into_parts();
     let mut combined_deep = library.program().exprs().to_vec();

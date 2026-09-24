@@ -3,7 +3,6 @@
 //! Walks the Deep AST and produces a flat DAG of RISC primitive nodes.
 
 use chelis_unord::{UnordMap, UnordSet};
-use std::cell::Cell;
 use std::collections::{BTreeMap, BTreeSet};
 use std::convert::Infallible;
 use std::fmt;
@@ -403,7 +402,7 @@ fn raise_lowering_error(
     message: impl Into<String>,
     span: Option<Span>,
     span_id: Option<String>,
-    runtime: &LoweringRuntime,
+    runtime: &mut LoweringRuntime,
 ) -> LoweringFailure {
     runtime.raise_lowering_diagnostic(LowerDiagnostic::new(message, span, span_id))
 }
@@ -418,7 +417,7 @@ fn raise_fatal_lowering_error(
     message: impl Into<String>,
     span: Option<Span>,
     span_id: Option<String>,
-    runtime: &LoweringRuntime,
+    runtime: &mut LoweringRuntime,
 ) -> LoweringFailure {
     runtime.raise_lowering_diagnostic(LowerDiagnostic::new(message, span, span_id).fatal())
 }
@@ -427,7 +426,7 @@ fn raise_fatal_unsupported(
     unsupported: Unsupported,
     span: Option<Span>,
     span_id: Option<String>,
-    runtime: &LoweringRuntime,
+    runtime: &mut LoweringRuntime,
 ) -> LoweringFailure {
     runtime.raise_lowering_diagnostic(
         LowerDiagnostic::from_unsupported(unsupported, span, span_id).fatal(),
@@ -450,7 +449,7 @@ fn raise_malformed_deep(
     what: &str,
     span: Option<Span>,
     span_id: Option<String>,
-    runtime: &LoweringRuntime,
+    runtime: &mut LoweringRuntime,
 ) -> LoweringFailure {
     raise_lowering_error(
         format!(
@@ -471,8 +470,8 @@ use chelis_deep::{
 use chelis_types::unsupported::{Stage, Unsupported, UnsupportedKind};
 use chelis_types::{
     BUILTIN_NAMES, CheckedProgram, CompareOp, FloatBinOp, FloatUnOp, IntBinOp, IntUnOp,
-    LibraryProofId, LinearityInfo, ScalarValue, cast_scalar, compare_scalars, float_binop,
-    float_unop, int_binop, int_unop, scalar_from_i64, types::Prim,
+    LibraryProofId, LinearityInfo, NativeServices, ScalarValue, cast_scalar, compare_scalars,
+    float_binop, float_unop, int_binop, int_unop, scalar_from_i64, types::Prim,
 };
 use chelis_vocab::EffectKind;
 
@@ -482,17 +481,22 @@ use crate::tier2;
 use crate::vmap;
 
 /// Lower a checked Deep program into a RISC DAG.
-pub fn lower_program(program: &CheckedProgram, runtime: &LoweringRuntime) -> Dag {
-    try_lower_program(program, runtime).unwrap_or_else(|diagnostic| panic!("{diagnostic}"))
+pub fn lower_program(
+    program: &CheckedProgram,
+    runtime: &mut LoweringRuntime,
+    native: &mut NativeServices,
+) -> Dag {
+    try_lower_program(program, runtime, native).unwrap_or_else(|diagnostic| panic!("{diagnostic}"))
 }
 
 /// Lower a checked Deep program into a RISC DAG, returning a diagnostic for
 /// forms that are valid Chelis but not supported by IR evaluation.
 pub fn try_lower_program(
     program: &CheckedProgram,
-    runtime: &LoweringRuntime,
+    runtime: &mut LoweringRuntime,
+    native: &mut NativeServices,
 ) -> Result<Dag, LowerDiagnostic> {
-    try_lower_program_to_library(program, runtime).map(|library| library.dag)
+    try_lower_program_to_library(program, runtime, native).map(|library| library.dag)
 }
 
 /// Phase F carrier for a lowered library and its composition metadata.
@@ -647,7 +651,7 @@ impl EvaluationProgram {
     pub fn select_roots(
         &self,
         names: &[String],
-        runtime: &LoweringRuntime,
+        runtime: &mut LoweringRuntime,
     ) -> Result<SelectedEvaluation, String> {
         self.select_roots_inner(names, runtime)
             .unwrap_or_else(|failure| failure.resume_at_boundary())
@@ -656,7 +660,7 @@ impl EvaluationProgram {
     pub(crate) fn select_roots_inner(
         &self,
         names: &[String],
-        runtime: &LoweringRuntime,
+        runtime: &mut LoweringRuntime,
     ) -> LowerResult<Result<SelectedEvaluation, String>> {
         // Explicit observation may select a draw-free region: its seed
         // controls still matter. Keep profile-based ordinary dispatch as-is.
@@ -771,9 +775,10 @@ impl LoweredLibrary {
 /// keeps the private metadata that contextual lowering requires.
 pub fn lower_program_to_library(
     program: &CheckedProgram,
-    runtime: &LoweringRuntime,
+    runtime: &mut LoweringRuntime,
+    native: &mut NativeServices,
 ) -> LoweredLibrary {
-    try_lower_program_to_library(program, runtime)
+    try_lower_program_to_library(program, runtime, native)
         .unwrap_or_else(|diagnostic| panic!("{diagnostic}"))
 }
 
@@ -829,16 +834,18 @@ fn assert_decode_once_in_env(site: &str, env: &BTreeMap<String, Expr>) {
 
 pub fn try_lower_program_to_library(
     program: &CheckedProgram,
-    runtime: &LoweringRuntime,
+    runtime: &mut LoweringRuntime,
+    native: &mut NativeServices,
 ) -> Result<LoweredLibrary, LowerDiagnostic> {
     assert_checked_library_boundary(program);
-    runtime.catch_lowering(|| {
+    runtime.catch_lowering_with(native, |runtime, native| {
         lower_program_to_library_inner(
             program,
             None,
             #[cfg(feature = "lowering-trace")]
             None,
             runtime,
+            native,
         )
     })
 }
@@ -847,10 +854,11 @@ pub fn try_lower_program_to_library(
 /// caches. The ordinary library lowering and its semantic checks are shared.
 pub fn try_lower_program_to_evaluation_library(
     program: &CheckedProgram,
-    runtime: &LoweringRuntime,
+    runtime: &mut LoweringRuntime,
+    native: &mut NativeServices,
 ) -> Result<EvaluationLibrary, LowerDiagnostic> {
     assert_checked_library_boundary(program);
-    runtime.catch_lowering(|| {
+    runtime.catch_lowering_with(native, |runtime, native| {
         let mut execution = None;
         let library = lower_program_to_library_inner(
             program,
@@ -858,6 +866,7 @@ pub fn try_lower_program_to_evaluation_library(
             #[cfg(feature = "lowering-trace")]
             None,
             runtime,
+            native,
         )?;
         let (execution, entries) =
             execution.expect("evaluation library returns execution products");
@@ -882,7 +891,8 @@ fn assert_checked_library_boundary(program: &CheckedProgram) {
 #[cfg(feature = "lowering-trace")]
 pub(crate) fn try_lower_program_to_evaluation_library_with_trace(
     program: &CheckedProgram,
-    runtime: &LoweringRuntime,
+    runtime: &mut LoweringRuntime,
+    native: &mut NativeServices,
 ) -> Result<
     (
         EvaluationLibrary,
@@ -891,14 +901,15 @@ pub(crate) fn try_lower_program_to_evaluation_library_with_trace(
     LowerDiagnostic,
 > {
     assert_checked_library_boundary(program);
-    runtime.catch_lowering(|| {
-        let collector = crate::lowering_trace::Collector::new_execution();
+    runtime.catch_lowering_with(native, |runtime, native| {
+        let mut collector = crate::lowering_trace::Collector::new_execution();
         let mut execution = None;
         let library = lower_program_to_library_inner(
             program,
             Some(&mut execution),
-            Some(collector.clone()),
+            Some(&mut collector),
             runtime,
+            native,
         )?;
         let (execution, entries) = execution.expect("observed evaluation library metadata");
         let program = EvaluationProgram {
@@ -916,15 +927,21 @@ pub(crate) fn try_lower_program_to_evaluation_library_with_trace(
 #[cfg(feature = "lowering-trace")]
 pub(crate) fn try_lower_program_to_library_with_trace(
     program: &CheckedProgram,
-    runtime: &LoweringRuntime,
+    runtime: &mut LoweringRuntime,
+    native: &mut NativeServices,
 ) -> Result<(LoweredLibrary, crate::lowering_trace::LoweringTrace), LowerDiagnostic> {
     assert_checked_library_boundary(program);
     // The collector is created and consumed inside the unwind boundary. A
     // failed lowering discards all partial observations with its contexts.
-    runtime.catch_lowering(|| {
-        let collector = crate::lowering_trace::Collector::new();
-        let library =
-            lower_program_to_library_inner(program, None, Some(collector.clone()), runtime)?;
+    runtime.catch_lowering_with(native, |runtime, native| {
+        let mut collector = crate::lowering_trace::Collector::new();
+        let library = lower_program_to_library_inner(
+            program,
+            None,
+            Some(&mut collector),
+            runtime,
+            native,
+        )?;
         Ok((library, collector.finish()))
     })
 }
@@ -934,23 +951,15 @@ fn lower_program_to_library_inner(
     execution_out: Option<
         &mut Option<(crate::evaluation::ExecutionMetadata, Vec<EvaluationEntry>)>,
     >,
-    #[cfg(feature = "lowering-trace")] trace: Option<crate::lowering_trace::Collector>,
-    runtime: &LoweringRuntime,
+    #[cfg(feature = "lowering-trace")] trace: Option<&mut crate::lowering_trace::Collector>,
+    runtime: &mut LoweringRuntime,
+    native: &mut NativeServices,
 ) -> LowerResult<LoweredLibrary> {
-    let detail_profile = std::env::var_os("CHELIS_PROFILE_COMPILE_CONTEXT_DETAIL")
-        .map(|v| v == "1")
-        .unwrap_or(false);
-    let mut sub_t = std::time::Instant::now();
-    let log_sub = |label: &str, t: &mut std::time::Instant| {
-        if detail_profile {
-            eprintln!("lower_sub: {:>8.4}s {}", t.elapsed().as_secs_f64(), label);
-            *t = std::time::Instant::now();
-        }
-    };
+    let profile = runtime.detail_profile_start();
 
     let program_type_env = program.type_env();
     let lowered_names = top_level_lowering_map_inner(program.exprs(), program_type_env, runtime)?;
-    log_sub("top_level_lowering_map", &mut sub_t);
+    runtime.detail_profile_phase(profile, "top_level_lowering_map");
     // Reuse the precomputed `lowered_names` rather than calling
     // `top_level_expr_is_lowered`, which would rebuild the map from
     // scratch on every call (1850 calls × full library walk = quadratic
@@ -962,22 +971,23 @@ fn lower_program_to_library_inner(
         }
         Ok(())
     })?;
-    log_sub("assertions_loop", &mut sub_t);
+    runtime.detail_profile_phase(profile, "assertions_loop");
     let program_types: BTreeMap<String, TensorType> = program
         .type_env()
         .iter()
         .map(|(name, ty_expr)| (name.clone(), LowerCtx::type_from_type_expr(ty_expr)))
         .collect();
-    log_sub("program_types_build", &mut sub_t);
+    runtime.detail_profile_phase(profile, "program_types_build");
     let program_defs = collect_top_level_defs(program.exprs());
     let program_signatures = collect_top_level_sigs(program.exprs());
-    log_sub("collect_top_level_defs", &mut sub_t);
+    runtime.detail_profile_phase(profile, "collect_top_level_defs");
     let mut ctx = LowerCtx::new(
         program_types.clone(),
         program_defs.clone(),
         program_signatures.clone(),
         program.linearity().clone(),
         runtime,
+        native,
     );
     ctx.local_tensor_ascriptions = Arc::new(program.local_tensor_ascriptions().to_vec());
     if execution_out.is_some() {
@@ -987,12 +997,16 @@ fn lower_program_to_library_inner(
     {
         ctx.trace = trace;
         if lowered_names.values().any(|lowered| !lowered)
-            && let Some(trace) = &ctx.trace
+            && let Some(trace) = ctx.trace.as_deref_mut()
         {
-            trace.boundary(crate::lowering_trace::BoundaryKind::UnloweredDefinitions);
+            trace.boundary(
+                ctx.trace_context,
+                crate::lowering_trace::BoundaryKind::UnloweredDefinitions,
+            );
         }
     }
-    log_sub("lower_ctx_new", &mut sub_t);
+    ctx.runtime
+        .detail_profile_phase(profile, "lower_ctx_new");
     let mut last_dag_size: usize = ctx.dag.len();
     // Same reasoning as the assertions_loop above: prefer the
     // precomputed `lowered_names` over a fresh `top_level_expr_is_lowered`
@@ -1005,11 +1019,7 @@ fn lower_program_to_library_inner(
             || (top_level_expr_name(expr).is_none()
                 && top_level_expr_is_lowered_with_names(expr, program_type_env, &lowered_names))
         {
-            let t0 = if detail_profile {
-                Some(std::time::Instant::now())
-            } else {
-                None
-            };
+            let declaration_start = ctx.runtime.detail_profile_declaration_start(profile);
             // For pre-flight gate counting, we want to know how often
             // top_level_expr_is_lowered fires (each call rebuilds the
             // lowering map — quadratic).
@@ -1018,24 +1028,15 @@ fn lower_program_to_library_inner(
             } else {
                 ctx.lower_top_level(expr)?;
             }
-            if let Some(t0) = t0 {
-                let elapsed = t0.elapsed();
-                let nodes = ctx.dag.len();
-                let added = nodes.saturating_sub(last_dag_size);
-                last_dag_size = nodes;
-                let name = top_level_expr_name(expr).unwrap_or("<anon>");
-                eprintln!(
-                    "lower_decl: {:>8.4}s nodes_added={:>5} dag_total={:>6} {}",
-                    elapsed.as_secs_f64(),
-                    added,
-                    nodes,
-                    name
-                );
-            }
+            let nodes = ctx.dag.len();
+            let name = top_level_expr_name(expr).unwrap_or("<anon>");
+            ctx.runtime
+                .detail_profile_declaration(declaration_start, &mut last_dag_size, nodes, name);
         }
         Ok(())
     })?;
-    log_sub("lower_top_level_loop", &mut sub_t);
+    ctx.runtime
+        .detail_profile_phase(profile, "lower_top_level_loop");
 
     // Collect the pre-DCE name -> NodeId mapping from the lowering ctx's
     // top-level bindings. We flatten tuple-decomposed defs into dotted
@@ -1044,9 +1045,10 @@ fn lower_program_to_library_inner(
     // identity) and `foo.N` (as the specific element).
     let mut pre_dce_table: UnordMap<String, NodeId> = UnordMap::new();
     for (name, value) in ctx.bindings.to_sorted() {
-        flatten_binding_into(name, value, &mut pre_dce_table, runtime)?;
+        flatten_binding_into(name, value, &mut pre_dce_table, ctx.runtime)?;
     }
-    log_sub("flatten_bindings", &mut sub_t);
+    ctx.runtime
+        .detail_profile_phase(profile, "flatten_bindings");
 
     let retained = if execution_out.is_some() {
         ctx.dag
@@ -1058,15 +1060,17 @@ fn lower_program_to_library_inner(
         Vec::new()
     };
     let (dce_dag, remap) = crate::optimize::dead_code_eliminate_with_retained(&ctx.dag, &retained);
-    log_sub("dce", &mut sub_t);
+    ctx.runtime.detail_profile_phase(profile, "dce");
     let (copy_dag, linear_remap) = insert_copy_nodes_for_consuming_fanout(&dce_dag);
-    log_sub("implicit_copy_nodes", &mut sub_t);
+    ctx.runtime
+        .detail_profile_phase(profile, "implicit_copy_nodes");
     #[cfg(feature = "lowering-trace")]
     let copy_snapshot = ctx.trace.as_ref().map(|_| copy_dag.clone());
     let linear_dag = insert_drop_nodes_for_unconsumed_values(copy_dag);
-    log_sub("implicit_drop_nodes", &mut sub_t);
+    ctx.runtime
+        .detail_profile_phase(profile, "implicit_drop_nodes");
     #[cfg(feature = "lowering-trace")]
-    if let (Some(trace), Some(copy_snapshot)) = (&ctx.trace, copy_snapshot) {
+    if let (Some(trace), Some(copy_snapshot)) = (ctx.trace.as_deref_mut(), copy_snapshot) {
         trace.normalization(
             &ctx.dag,
             &dce_dag,
@@ -1090,7 +1094,8 @@ fn lower_program_to_library_inner(
                 .map(|new| (name, new))
         })
         .collect();
-    log_sub("renumber_symbol_table", &mut sub_t);
+    ctx.runtime
+        .detail_profile_phase(profile, "renumber_symbol_table");
 
     if let Some(output) = execution_out {
         let mut execution = ctx.execution.take().expect("evaluation library metadata");
@@ -1098,10 +1103,10 @@ fn lower_program_to_library_inner(
         execution
             .remap(&remap)
             .and_then(|()| execution.remap(&linear_remap))
-            .map_err(|message| raise_fatal_lowering_error(message, None, None, runtime))?;
+            .map_err(|message| raise_fatal_lowering_error(message, None, None, ctx.runtime))?;
         execution
             .complete(&linear_dag)
-            .map_err(|message| raise_fatal_lowering_error(message, None, None, runtime))?;
+            .map_err(|message| raise_fatal_lowering_error(message, None, None, ctx.runtime))?;
         for entry in &mut ctx.evaluation_entries {
             for node in &mut entry.nodes {
                 *node = linear_remap[&remap[node]];
@@ -1322,9 +1327,10 @@ fn strip_drop_nodes(dag: &Dag) -> (Dag, UnordMap<NodeId, NodeId>) {
 pub fn lower_program_with_context(
     library: &LoweredLibrary,
     new_program: &CheckedProgram,
-    runtime: &LoweringRuntime,
+    runtime: &mut LoweringRuntime,
+    native: &mut NativeServices,
 ) -> Dag {
-    try_lower_program_with_context(library, new_program, runtime)
+    try_lower_program_with_context(library, new_program, runtime, native)
         .map(|composed| composed.dag)
         .unwrap_or_else(|diagnostic| panic!("{diagnostic}"))
 }
@@ -1341,7 +1347,8 @@ pub struct ComposedLowering {
 pub fn try_lower_program_with_context(
     library: &LoweredLibrary,
     new_program: &CheckedProgram,
-    runtime: &LoweringRuntime,
+    runtime: &mut LoweringRuntime,
+    native: &mut NativeServices,
 ) -> Result<ComposedLowering, LowerDiagnostic> {
     assert_decode_once_at_boundary("lower_program_with_context: exprs", new_program.exprs());
     assert_decode_once_at_boundary(
@@ -1356,22 +1363,26 @@ pub fn try_lower_program_with_context(
         "lower_program_with_context: library program_defs",
         &library.program_defs,
     );
-    runtime.catch_lowering(|| lower_program_with_context_inner(library, new_program, None, runtime))
+    runtime.catch_lowering_with(native, |runtime, native| {
+        lower_program_with_context_inner(library, new_program, None, runtime, native)
+    })
 }
 
 pub fn try_lower_program_with_evaluation_context(
     library: &EvaluationLibrary,
     new_program: &CheckedProgram,
-    runtime: &LoweringRuntime,
+    runtime: &mut LoweringRuntime,
+    native: &mut NativeServices,
 ) -> Result<EvaluationProgram, LowerDiagnostic> {
     assert_decode_once_at_boundary("evaluation context extension", new_program.exprs());
-    runtime.catch_lowering(|| {
+    runtime.catch_lowering_with(native, |runtime, native| {
         let mut output = None;
         lower_program_with_context_inner(
             &library.library,
             new_program,
             Some((&library.program, &mut output)),
             runtime,
+            native,
         )?;
         Ok(output.expect("evaluation context lowering returns its execution product"))
     })
@@ -1381,7 +1392,8 @@ fn lower_program_with_context_inner(
     library: &LoweredLibrary,
     new_program: &CheckedProgram,
     execution: Option<(&EvaluationProgram, &mut Option<EvaluationProgram>)>,
-    runtime: &LoweringRuntime,
+    runtime: &mut LoweringRuntime,
+    native: &mut NativeServices,
 ) -> LowerResult<ComposedLowering> {
     let new_type_env = new_program.type_env();
     let lowered_names = top_level_lowering_map_with_context_inner(
@@ -1429,6 +1441,7 @@ fn lower_program_with_context_inner(
         program_signatures,
         new_program.linearity().clone(),
         runtime,
+        native,
     );
     let local_tensor_ascriptions = chelis_types::compose_local_tensor_ascriptions(
         &library.local_tensor_ascriptions,
@@ -1440,7 +1453,7 @@ fn lower_program_with_context_inner(
             "local tensor-ascription identity space overflowed during contextual lowering",
             None,
             None,
-            runtime,
+            ctx.runtime,
         )
     })?;
     ctx.local_tensor_ascriptions = Arc::new(local_tensor_ascriptions);
@@ -1464,10 +1477,10 @@ fn lower_program_with_context_inner(
         });
         metadata
             .remap(&library_remap)
-            .map_err(|message| raise_fatal_lowering_error(message, None, None, runtime))?;
+            .map_err(|message| raise_fatal_lowering_error(message, None, None, ctx.runtime))?;
         metadata
             .complete(&ctx.dag)
-            .map_err(|message| raise_fatal_lowering_error(message, None, None, runtime))?;
+            .map_err(|message| raise_fatal_lowering_error(message, None, None, ctx.runtime))?;
         ctx.execution = Some(metadata);
         ctx.evaluation_entries = program.entries.clone();
         for (owner, entry) in ctx.evaluation_entries.iter_mut().enumerate() {
@@ -1505,7 +1518,7 @@ fn lower_program_with_context_inner(
                     expr,
                     new_program.exprs(),
                     new_type_env,
-                    runtime,
+                    ctx.runtime,
                 )?)
         {
             if execution.is_some() {
@@ -1530,10 +1543,10 @@ fn lower_program_with_context_inner(
         metadata.spine.record_nodes(&ctx.dag);
         metadata
             .remap(&remap)
-            .map_err(|message| raise_fatal_lowering_error(message, None, None, runtime))?;
+            .map_err(|message| raise_fatal_lowering_error(message, None, None, ctx.runtime))?;
         metadata
             .complete(&dag)
-            .map_err(|message| raise_fatal_lowering_error(message, None, None, runtime))?;
+            .map_err(|message| raise_fatal_lowering_error(message, None, None, ctx.runtime))?;
         for entry in &mut ctx.evaluation_entries {
             for node in &mut entry.nodes {
                 *node = remap[node];
@@ -1558,7 +1571,7 @@ fn flatten_binding_into(
     prefix: &str,
     value: &LoweredValue,
     out: &mut UnordMap<String, NodeId>,
-    runtime: &LoweringRuntime,
+    runtime: &mut LoweringRuntime,
 ) -> LowerResult<()> {
     match value {
         LoweredValue::Host { .. } => {
@@ -1605,7 +1618,8 @@ pub fn lower_subexpr_program(
     scoped_tensor_types: UnordMap<String, TensorType>,
     full_type_env: UnordMap<String, Expr>,
     program_defs: UnordMap<String, Expr>,
-    runtime: &LoweringRuntime,
+    runtime: &mut LoweringRuntime,
+    native: &mut NativeServices,
 ) -> Dag {
     try_lower_subexpr_program(
         expr,
@@ -1613,6 +1627,7 @@ pub fn lower_subexpr_program(
         full_type_env,
         program_defs,
         runtime,
+        native,
     )
     .unwrap_or_else(|diagnostic| panic!("{diagnostic}"))
 }
@@ -1622,7 +1637,8 @@ pub fn try_lower_subexpr_program(
     scoped_tensor_types: UnordMap<String, TensorType>,
     full_type_env: UnordMap<String, Expr>,
     program_defs: UnordMap<String, Expr>,
-    runtime: &LoweringRuntime,
+    runtime: &mut LoweringRuntime,
+    native: &mut NativeServices,
 ) -> Result<Dag, LowerDiagnostic> {
     try_lower_subexpr_program_with_random_state(
         expr,
@@ -1632,6 +1648,7 @@ pub fn try_lower_subexpr_program(
         None,
         0,
         runtime,
+        native,
     )
 }
 
@@ -1642,7 +1659,8 @@ pub fn try_lower_subexpr_program_with_random_state(
     program_defs: UnordMap<String, Expr>,
     random_seed: Option<u64>,
     random_counter: u64,
-    runtime: &LoweringRuntime,
+    runtime: &mut LoweringRuntime,
+    native: &mut NativeServices,
 ) -> Result<Dag, LowerDiagnostic> {
     try_lower_subexpr_program_with_random_state_progress(
         expr,
@@ -1652,6 +1670,7 @@ pub fn try_lower_subexpr_program_with_random_state(
         random_seed,
         random_counter,
         runtime,
+        native,
     )
     .map(|(dag, _)| dag)
 }
@@ -1666,7 +1685,8 @@ pub fn try_lower_subexpr_program_with_random_state_progress(
     program_defs: UnordMap<String, Expr>,
     random_seed: Option<u64>,
     random_counter: u64,
-    runtime: &LoweringRuntime,
+    runtime: &mut LoweringRuntime,
+    native: &mut NativeServices,
 ) -> Result<(Dag, u64), LowerDiagnostic> {
     assert_decode_once_at_boundary("lower_subexpr_program: expr", std::slice::from_ref(expr));
     let full_type_env = full_type_env
@@ -1689,6 +1709,7 @@ pub fn try_lower_subexpr_program_with_random_state_progress(
         random_seed,
         random_counter,
         runtime,
+        native,
     )
 }
 
@@ -1700,7 +1721,8 @@ pub fn try_lower_subexpr_evaluation_plan(
     full_type_env: UnordMap<String, Expr>,
     program_defs: UnordMap<String, Expr>,
     execution: &crate::evaluation::RandomExecutionContext,
-    runtime: &LoweringRuntime,
+    runtime: &mut LoweringRuntime,
+    native: &mut NativeServices,
 ) -> Result<crate::evaluation::EvaluationPlan, LowerDiagnostic> {
     try_lower_subexpr_evaluation_plan_inner(
         expr,
@@ -1709,6 +1731,7 @@ pub fn try_lower_subexpr_evaluation_plan(
         program_defs,
         execution,
         runtime,
+        native,
     )
     .unwrap_or_else(|failure| failure.resume_at_boundary())
 }
@@ -1719,7 +1742,8 @@ pub(crate) fn try_lower_subexpr_evaluation_plan_inner(
     full_type_env: UnordMap<String, Expr>,
     program_defs: UnordMap<String, Expr>,
     execution: &crate::evaluation::RandomExecutionContext,
-    runtime: &LoweringRuntime,
+    runtime: &mut LoweringRuntime,
+    native: &mut NativeServices,
 ) -> LowerResult<Result<crate::evaluation::EvaluationPlan, LowerDiagnostic>> {
     assert_decode_once_at_boundary(
         "lower_subexpr_evaluation_plan: expr",
@@ -1742,6 +1766,7 @@ pub(crate) fn try_lower_subexpr_evaluation_plan_inner(
         false,
         execution,
         runtime,
+        native,
     )
 }
 
@@ -1752,7 +1777,8 @@ pub(crate) fn try_lower_subexpr_evaluation_with_ordered_inputs(
     result_claim: Option<&TensorType>,
     authored_signature: bool,
     execution: &crate::evaluation::RandomExecutionContext,
-    runtime: &LoweringRuntime,
+    runtime: &mut LoweringRuntime,
+    native: &mut NativeServices,
 ) -> LowerResult<Result<crate::evaluation::EvaluationPlan, LowerDiagnostic>> {
     try_lower_subexpr_evaluation_with_ordered_inputs_impl(
         expr,
@@ -1761,7 +1787,7 @@ pub(crate) fn try_lower_subexpr_evaluation_with_ordered_inputs(
         result_claim,
         execution,
         SubexprLoweringOptions {
-            runtime,
+            native,
             include_list_controls: false,
             authored_signature,
             resource_policy: crate::evaluation::ResourcePolicy::Legacy,
@@ -1769,6 +1795,7 @@ pub(crate) fn try_lower_subexpr_evaluation_with_ordered_inputs(
             #[cfg(feature = "lowering-trace")]
             trace: None,
         },
+        runtime,
     )
 }
 
@@ -1779,7 +1806,8 @@ pub(crate) fn try_lower_tensor_helper_evaluation_with_ordered_inputs(
     result_claim: Option<&TensorType>,
     authored_signature: bool,
     execution: &crate::evaluation::RandomExecutionContext,
-    runtime: &LoweringRuntime,
+    runtime: &mut LoweringRuntime,
+    native: &mut NativeServices,
 ) -> LowerResult<Result<crate::evaluation::EvaluationPlan, LowerDiagnostic>> {
     try_lower_subexpr_evaluation_with_ordered_inputs_impl(
         expr,
@@ -1788,7 +1816,7 @@ pub(crate) fn try_lower_tensor_helper_evaluation_with_ordered_inputs(
         result_claim,
         execution,
         SubexprLoweringOptions {
-            runtime,
+            native,
             include_list_controls: false,
             authored_signature,
             resource_policy: crate::evaluation::ResourcePolicy::Legacy,
@@ -1796,6 +1824,7 @@ pub(crate) fn try_lower_tensor_helper_evaluation_with_ordered_inputs(
             #[cfg(feature = "lowering-trace")]
             trace: None,
         },
+        runtime,
     )
 }
 
@@ -1806,7 +1835,8 @@ pub(crate) fn try_lower_subexpr_c_execution_with_ordered_inputs(
     result_claim: Option<&TensorType>,
     authored_signature: bool,
     execution: &crate::evaluation::RandomExecutionContext,
-    runtime: &LoweringRuntime,
+    runtime: &mut LoweringRuntime,
+    native: &mut NativeServices,
 ) -> LowerResult<Result<crate::evaluation::EvaluationPlan, LowerDiagnostic>> {
     try_lower_subexpr_evaluation_with_ordered_inputs_impl(
         expr,
@@ -1815,7 +1845,7 @@ pub(crate) fn try_lower_subexpr_c_execution_with_ordered_inputs(
         result_claim,
         execution,
         SubexprLoweringOptions {
-            runtime,
+            native,
             include_list_controls: false,
             authored_signature,
             resource_policy: crate::evaluation::ResourcePolicy::RecordRequirements,
@@ -1823,6 +1853,7 @@ pub(crate) fn try_lower_subexpr_c_execution_with_ordered_inputs(
             #[cfg(feature = "lowering-trace")]
             trace: None,
         },
+        runtime,
     )
 }
 
@@ -1833,7 +1864,8 @@ pub(crate) fn try_lower_tensor_helper_c_execution_with_ordered_inputs(
     result_claim: Option<&TensorType>,
     authored_signature: bool,
     execution: &crate::evaluation::RandomExecutionContext,
-    runtime: &LoweringRuntime,
+    runtime: &mut LoweringRuntime,
+    native: &mut NativeServices,
 ) -> LowerResult<Result<crate::evaluation::EvaluationPlan, LowerDiagnostic>> {
     try_lower_subexpr_evaluation_with_ordered_inputs_impl(
         expr,
@@ -1842,7 +1874,7 @@ pub(crate) fn try_lower_tensor_helper_c_execution_with_ordered_inputs(
         result_claim,
         execution,
         SubexprLoweringOptions {
-            runtime,
+            native,
             include_list_controls: false,
             authored_signature,
             resource_policy: crate::evaluation::ResourcePolicy::RecordRequirements,
@@ -1850,6 +1882,7 @@ pub(crate) fn try_lower_tensor_helper_c_execution_with_ordered_inputs(
             #[cfg(feature = "lowering-trace")]
             trace: None,
         },
+        runtime,
     )
 }
 
@@ -1861,7 +1894,8 @@ pub(crate) fn try_lower_subexpr_c_execution_with_ordered_inputs_and_trace(
     result_claim: Option<&TensorType>,
     authored_signature: bool,
     execution: &crate::evaluation::RandomExecutionContext,
-    runtime: &LoweringRuntime,
+    runtime: &mut LoweringRuntime,
+    native: &mut NativeServices,
 ) -> LowerResult<
     Result<
         (
@@ -1871,7 +1905,7 @@ pub(crate) fn try_lower_subexpr_c_execution_with_ordered_inputs_and_trace(
         LowerDiagnostic,
     >,
 > {
-    let collector = crate::lowering_trace::Collector::new_execution_helper();
+    let mut collector = crate::lowering_trace::Collector::new_execution_helper();
     let plan = try_ok!(try_lower_subexpr_evaluation_with_ordered_inputs_impl(
         expr,
         scoped_types,
@@ -1879,13 +1913,14 @@ pub(crate) fn try_lower_subexpr_c_execution_with_ordered_inputs_and_trace(
         result_claim,
         execution,
         SubexprLoweringOptions {
-            runtime,
+            native,
             include_list_controls: false,
             authored_signature,
             resource_policy: crate::evaluation::ResourcePolicy::RecordRequirements,
             literal_result_claim_ownership: LiteralResultClaimOwnership::Legacy,
-            trace: Some(collector.clone()),
+            trace: Some(&mut collector),
         },
+        runtime,
     )?);
     Ok(Ok((plan, collector.finish_helper())))
 }
@@ -1898,7 +1933,8 @@ pub(crate) fn try_lower_tensor_helper_c_execution_with_ordered_inputs_and_trace(
     result_claim: Option<&TensorType>,
     authored_signature: bool,
     execution: &crate::evaluation::RandomExecutionContext,
-    runtime: &LoweringRuntime,
+    runtime: &mut LoweringRuntime,
+    native: &mut NativeServices,
 ) -> LowerResult<
     Result<
         (
@@ -1908,7 +1944,7 @@ pub(crate) fn try_lower_tensor_helper_c_execution_with_ordered_inputs_and_trace(
         LowerDiagnostic,
     >,
 > {
-    let collector = crate::lowering_trace::Collector::new_execution_helper();
+    let mut collector = crate::lowering_trace::Collector::new_execution_helper();
     let plan = try_ok!(try_lower_subexpr_evaluation_with_ordered_inputs_impl(
         expr,
         scoped_types,
@@ -1916,13 +1952,14 @@ pub(crate) fn try_lower_tensor_helper_c_execution_with_ordered_inputs_and_trace(
         result_claim,
         execution,
         SubexprLoweringOptions {
-            runtime,
+            native,
             include_list_controls: false,
             authored_signature,
             resource_policy: crate::evaluation::ResourcePolicy::RecordRequirements,
             literal_result_claim_ownership: LiteralResultClaimOwnership::AuthoredTensorHelper,
-            trace: Some(collector.clone()),
+            trace: Some(&mut collector),
         },
+        runtime,
     )?);
     Ok(Ok((plan, collector.finish_helper())))
 }
@@ -1934,8 +1971,8 @@ fn try_lower_subexpr_evaluation_with_ordered_inputs_impl(
     result_claim: Option<&TensorType>,
     execution: &crate::evaluation::RandomExecutionContext,
     options: SubexprLoweringOptions<'_>,
+    runtime: &mut LoweringRuntime,
 ) -> LowerResult<Result<crate::evaluation::EvaluationPlan, LowerDiagnostic>> {
-    let runtime = options.runtime;
     if let crate::evaluation::EvaluationProfile::Legacy(reason) = context
         .evaluation_profile_with_resource_policy(
             expr,
@@ -1953,11 +1990,13 @@ fn try_lower_subexpr_evaluation_with_ordered_inputs_impl(
         .fatal()));
     }
     let state = execution.state();
-    // The explicit collector is invocation-local and is discarded with this
-    // whole attempt on unwind. It contains `RefCell` only to compose nested
-    // lowering contexts, so assert safety at this narrow catch boundary
-    // rather than weakening `catch_lowering` for unrelated callers.
-    Ok(runtime.catch_lowering(std::panic::AssertUnwindSafe(|| {
+    // The options borrow invocation state across this catch: the trace
+    // collector is discarded with the whole attempt on failure, and the
+    // native services stay valid across an unwind (relaxed cancellation
+    // loads; frame depth resets at the next outermost check entry).
+    let options = std::panic::AssertUnwindSafe(options);
+    Ok(runtime.catch_lowering(move |runtime| {
+        let options = options;
         let mut metadata = None;
         let (dag, _, _, _) = lower_subexpr_program_inner_impl(
             expr,
@@ -1965,8 +2004,9 @@ fn try_lower_subexpr_evaluation_with_ordered_inputs_impl(
             context,
             result_claim,
             state,
-            options,
+            options.0,
             Some(&mut metadata),
+            runtime,
         )?;
         crate::evaluation::EvaluationPlan::new(
             dag,
@@ -1980,7 +2020,7 @@ fn try_lower_subexpr_evaluation_with_ordered_inputs_impl(
                 runtime,
             )
         })
-    })))
+    }))
 }
 
 /// Definition scope for subexpression lowering. Checked value types and
@@ -2061,7 +2101,8 @@ impl SubexprLoweringContext {
         expr: &Expr,
         scoped_types: UnordMap<String, TensorType>,
         random: crate::host::RandomLoweringState,
-        runtime: &LoweringRuntime,
+        runtime: &mut LoweringRuntime,
+        native: &mut NativeServices,
     ) -> Result<(Dag, crate::host::RandomLoweringState), LowerDiagnostic> {
         try_lower_subexpr_program_with_context_and_random_state(
             expr,
@@ -2070,6 +2111,7 @@ impl SubexprLoweringContext {
             random.seed,
             random.counter,
             runtime,
+            native,
         )
         .map(|(dag, counter)| (dag, crate::host::RandomLoweringState { counter, ..random }))
     }
@@ -2079,9 +2121,10 @@ impl SubexprLoweringContext {
         expr: &Expr,
         scoped_types: UnordMap<String, TensorType>,
         execution: &crate::evaluation::RandomExecutionContext,
-        runtime: &LoweringRuntime,
+        runtime: &mut LoweringRuntime,
+        native: &mut NativeServices,
     ) -> Result<crate::evaluation::EvaluationPlan, LowerDiagnostic> {
-        self.lower_evaluation_plan_inner(expr, scoped_types, execution, runtime)
+        self.lower_evaluation_plan_inner(expr, scoped_types, execution, runtime, native)
             .unwrap_or_else(|failure| failure.resume_at_boundary())
     }
 
@@ -2090,7 +2133,8 @@ impl SubexprLoweringContext {
         expr: &Expr,
         scoped_types: UnordMap<String, TensorType>,
         execution: &crate::evaluation::RandomExecutionContext,
-        runtime: &LoweringRuntime,
+        runtime: &mut LoweringRuntime,
+        native: &mut NativeServices,
     ) -> LowerResult<Result<crate::evaluation::EvaluationPlan, LowerDiagnostic>> {
         try_lower_subexpr_evaluation_with_ordered_inputs(
             expr,
@@ -2100,6 +2144,7 @@ impl SubexprLoweringContext {
             false,
             execution,
             runtime,
+            native,
         )
     }
 
@@ -2274,7 +2319,7 @@ impl SubexprLoweringContext {
         &self,
         expr: &Expr,
         bound: &[(String, TensorType)],
-        runtime: &LoweringRuntime,
+        runtime: &mut LoweringRuntime,
     ) -> LowerResult<crate::evaluation::EvaluationProfile> {
         self.evaluation_profile_with_resource_policy(
             expr,
@@ -2288,7 +2333,7 @@ impl SubexprLoweringContext {
         &self,
         expr: &Expr,
         bound: &[(String, TensorType)],
-        runtime: &LoweringRuntime,
+        runtime: &mut LoweringRuntime,
     ) -> LowerResult<crate::evaluation::EvaluationProfile> {
         self.evaluation_profile_with_resource_policy(
             expr,
@@ -2303,7 +2348,7 @@ impl SubexprLoweringContext {
         expr: &Expr,
         bound: &[(String, TensorType)],
         resource_policy: crate::evaluation::ResourcePolicy,
-        runtime: &LoweringRuntime,
+        runtime: &mut LoweringRuntime,
     ) -> LowerResult<crate::evaluation::EvaluationProfile> {
         let defs = self
             .program_defs
@@ -2360,10 +2405,11 @@ pub(crate) fn try_lower_subexpr_program_with_context_and_controls(
     expr: &Expr,
     scoped_tensor_types: UnordMap<String, TensorType>,
     context: &SubexprLoweringContext,
-    runtime: &LoweringRuntime,
+    runtime: &mut LoweringRuntime,
+    native: &mut NativeServices,
 ) -> Result<LoweredSubexprWithControls, LowerDiagnostic> {
     assert_decode_once_at_boundary("lower_subexpr_program: expr", std::slice::from_ref(expr));
-    runtime.catch_lowering(|| {
+    runtime.catch_lowering_with(native, |runtime, native| {
         let (dag, _, value_root_count, list_checks) = lower_subexpr_program_inner_impl(
             expr,
             scoped_tensor_types.into_sorted(),
@@ -2374,7 +2420,7 @@ pub(crate) fn try_lower_subexpr_program_with_context_and_controls(
                 counter: 0,
             },
             SubexprLoweringOptions {
-                runtime,
+                native,
                 include_list_controls: true,
                 // The scope is the ambient bindings this subexpression captured.
                 authored_signature: false,
@@ -2384,6 +2430,7 @@ pub(crate) fn try_lower_subexpr_program_with_context_and_controls(
                 trace: None,
             },
             None,
+            runtime,
         )?;
         Ok(LoweredSubexprWithControls {
             dag,
@@ -2399,7 +2446,8 @@ pub(crate) fn try_lower_subexpr_program_with_context_and_random_state(
     context: &SubexprLoweringContext,
     random_seed: Option<u64>,
     random_counter: u64,
-    runtime: &LoweringRuntime,
+    runtime: &mut LoweringRuntime,
+    native: &mut NativeServices,
 ) -> Result<(Dag, u64), LowerDiagnostic> {
     // An expression without a declaring signature assigns its internal ABI
     // deterministically. Signature-bearing helpers use the ordered boundary.
@@ -2414,6 +2462,7 @@ pub(crate) fn try_lower_subexpr_program_with_context_and_random_state(
         },
         false,
         runtime,
+        native,
     )
 }
 
@@ -2427,7 +2476,8 @@ pub(crate) fn try_lower_subexpr_program_with_ordered_inputs(
     result_claim: Option<&TensorType>,
     random: crate::host::RandomLoweringState,
     authored_signature: bool,
-    runtime: &LoweringRuntime,
+    runtime: &mut LoweringRuntime,
+    native: &mut NativeServices,
 ) -> Result<(Dag, u64), LowerDiagnostic> {
     try_lower_subexpr_program_with_ordered_inputs_impl(
         expr,
@@ -2436,7 +2486,7 @@ pub(crate) fn try_lower_subexpr_program_with_ordered_inputs(
         result_claim,
         random,
         SubexprLoweringOptions {
-            runtime,
+            native,
             include_list_controls: false,
             authored_signature,
             resource_policy: crate::evaluation::ResourcePolicy::Legacy,
@@ -2444,6 +2494,7 @@ pub(crate) fn try_lower_subexpr_program_with_ordered_inputs(
             #[cfg(feature = "lowering-trace")]
             trace: None,
         },
+        runtime,
     )
 }
 
@@ -2454,7 +2505,8 @@ pub(crate) fn try_lower_tensor_helper_program_with_ordered_inputs(
     result_claim: Option<&TensorType>,
     random: crate::host::RandomLoweringState,
     authored_signature: bool,
-    runtime: &LoweringRuntime,
+    runtime: &mut LoweringRuntime,
+    native: &mut NativeServices,
 ) -> Result<(Dag, u64), LowerDiagnostic> {
     try_lower_subexpr_program_with_ordered_inputs_impl(
         expr,
@@ -2463,7 +2515,7 @@ pub(crate) fn try_lower_tensor_helper_program_with_ordered_inputs(
         result_claim,
         random,
         SubexprLoweringOptions {
-            runtime,
+            native,
             include_list_controls: false,
             authored_signature,
             resource_policy: crate::evaluation::ResourcePolicy::Legacy,
@@ -2471,6 +2523,7 @@ pub(crate) fn try_lower_tensor_helper_program_with_ordered_inputs(
             #[cfg(feature = "lowering-trace")]
             trace: None,
         },
+        runtime,
     )
 }
 
@@ -2482,9 +2535,10 @@ pub(crate) fn try_lower_subexpr_program_with_ordered_inputs_and_trace(
     result_claim: Option<&TensorType>,
     random: crate::host::RandomLoweringState,
     authored_signature: bool,
-    runtime: &LoweringRuntime,
+    runtime: &mut LoweringRuntime,
+    native: &mut NativeServices,
 ) -> Result<(Dag, u64, crate::lowering_trace::HelperLoweringTrace), LowerDiagnostic> {
-    let collector = crate::lowering_trace::Collector::new_helper();
+    let mut collector = crate::lowering_trace::Collector::new_helper();
     let (dag, random_counter) = try_lower_subexpr_program_with_ordered_inputs_impl(
         expr,
         scoped_bindings,
@@ -2492,13 +2546,14 @@ pub(crate) fn try_lower_subexpr_program_with_ordered_inputs_and_trace(
         result_claim,
         random,
         SubexprLoweringOptions {
-            runtime,
+            native,
             include_list_controls: false,
             authored_signature,
             resource_policy: crate::evaluation::ResourcePolicy::Legacy,
             literal_result_claim_ownership: LiteralResultClaimOwnership::Legacy,
-            trace: Some(collector.clone()),
+            trace: Some(&mut collector),
         },
+        runtime,
     )?;
     Ok((dag, random_counter, collector.finish_helper()))
 }
@@ -2511,9 +2566,10 @@ pub(crate) fn try_lower_tensor_helper_program_with_ordered_inputs_and_trace(
     result_claim: Option<&TensorType>,
     random: crate::host::RandomLoweringState,
     authored_signature: bool,
-    runtime: &LoweringRuntime,
+    runtime: &mut LoweringRuntime,
+    native: &mut NativeServices,
 ) -> Result<(Dag, u64, crate::lowering_trace::HelperLoweringTrace), LowerDiagnostic> {
-    let collector = crate::lowering_trace::Collector::new_helper();
+    let mut collector = crate::lowering_trace::Collector::new_helper();
     let (dag, random_counter) = try_lower_subexpr_program_with_ordered_inputs_impl(
         expr,
         scoped_bindings,
@@ -2521,13 +2577,14 @@ pub(crate) fn try_lower_tensor_helper_program_with_ordered_inputs_and_trace(
         result_claim,
         random,
         SubexprLoweringOptions {
-            runtime,
+            native,
             include_list_controls: false,
             authored_signature,
             resource_policy: crate::evaluation::ResourcePolicy::Legacy,
             literal_result_claim_ownership: LiteralResultClaimOwnership::AuthoredTensorHelper,
-            trace: Some(collector.clone()),
+            trace: Some(&mut collector),
         },
+        runtime,
     )?;
     Ok((dag, random_counter, collector.finish_helper()))
 }
@@ -2539,8 +2596,8 @@ fn try_lower_subexpr_program_with_ordered_inputs_impl(
     result_claim: Option<&TensorType>,
     random: crate::host::RandomLoweringState,
     options: SubexprLoweringOptions<'_>,
+    runtime: &mut LoweringRuntime,
 ) -> Result<(Dag, u64), LowerDiagnostic> {
-    let runtime = options.runtime;
     assert_decode_once_at_boundary("lower_subexpr_program: expr", std::slice::from_ref(expr));
     // chelis#1923: this is the one lowering ingress that receives UNCHECKED
     // Deep, measured and in use. Every whole-program entry takes a
@@ -2552,19 +2609,23 @@ fn try_lower_subexpr_program_with_ordered_inputs_impl(
     // exactly what this change removed.
     let folded = chelis_deep::pipe::fold_pipes(expr);
     let expr = &folded;
-    // As above, a failed attempt owns and discards its complete collector.
-    runtime.catch_lowering(std::panic::AssertUnwindSafe(|| {
+    // As above, a failed attempt owns and discards its complete collector,
+    // and the native services stay valid across an unwind.
+    let options = std::panic::AssertUnwindSafe(options);
+    runtime.catch_lowering(move |runtime| {
+        let options = options;
         let (dag, random_counter, _, _) = lower_subexpr_program_inner_impl(
             expr,
             scoped_bindings,
             context,
             result_claim,
             random,
-            options,
+            options.0,
             None,
+            runtime,
         )?;
         Ok((dag, random_counter))
-    }))
+    })
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -2592,7 +2653,7 @@ impl StagedHostRegionLoweringOptions {
 pub(crate) fn try_lower_staged_host_region(
     expr: &Expr,
     params: &[crate::host::HostParam],
-    program: &crate::host::HostLoweringSession<'_>,
+    program: &mut crate::host::HostCx<'_>,
     context: &SubexprLoweringContext,
     result_claim: &TensorType,
     options: StagedHostRegionLoweringOptions,
@@ -2602,19 +2663,39 @@ pub(crate) fn try_lower_staged_host_region(
     LowerDiagnostic,
 > {
     use crate::host::staged::{StagingAttempt, StagingStatus};
-    let runtime = program.runtime();
-    let status = std::rc::Rc::new(Cell::new(StagingStatus::Searching));
-    let result = runtime.catch_lowering(std::panic::AssertUnwindSafe(|| {
+    let mut status = StagingStatus::Searching;
+    let crate::host::HostCx {
+        checked,
+        state,
+        runtime,
+        native,
+    } = program;
+    let checked: &CheckedProgram = checked;
+    // The region borrows host invocation state, native services, its status
+    // and its output across this catch. Every host state scope exits on
+    // unwind (`scoped`), the status is written before the raise it explains,
+    // and the native services stay valid across an unwind.
+    let borrowed = std::panic::AssertUnwindSafe((
+        &mut **state,
+        &mut **native,
+        &mut status,
+        &mut execution_out,
+    ));
+    let result = runtime.catch_lowering(move |runtime| {
+        let borrowed = borrowed;
+        let (host_state, native, status, execution_out) = borrowed.0;
         let mut ctx = LowerCtx::new(
             context.program_types.clone(),
             context.program_defs.clone(),
             context.program_signatures.clone(),
             LinearityInfo::default(),
             runtime,
+            native,
         );
         ctx.local_tensor_ascriptions = context.local_tensor_ascriptions.clone();
-        ctx.host_program = Some(program);
-        ctx.host_stage_status = status.clone();
+        ctx.host_program = Some(checked);
+        ctx.host_state = Some(host_state);
+        ctx.host_stage_status = Some(status);
         ctx.literal_result_claim_ownership = options.literal_result_claim_ownership;
         ctx.random_seed = options.random.and_then(|state| state.seed);
         if execution_out.is_some() {
@@ -2682,18 +2763,18 @@ pub(crate) fn try_lower_staged_host_region(
         if ctx.host_sources.is_empty() {
             return Ok(None);
         }
-        let root = result.expect_node("staged host tensor region", runtime)?;
+        let root = result.expect_node("staged host tensor region", ctx.runtime)?;
         ctx.dag.add_root(root);
         let mut evaluation = match ctx.execution.take() {
             Some(mut metadata) => {
                 metadata.spine.record_nodes(&ctx.dag);
                 metadata
                     .complete(&ctx.dag)
-                    .map_err(|message| raise_fatal_lowering_error(message, None, None, runtime))?;
+                    .map_err(|message| raise_fatal_lowering_error(message, None, None, ctx.runtime))?;
                 Some(
                     crate::evaluation::StagedEvaluationPlan::new(ctx.dag.clone(), metadata)
                         .map_err(|message| {
-                            raise_fatal_lowering_error(message, None, None, runtime)
+                            raise_fatal_lowering_error(message, None, None, ctx.runtime)
                         })?,
                 )
             }
@@ -2712,15 +2793,15 @@ pub(crate) fn try_lower_staged_host_region(
                 error,
                 Some(expr.span()),
                 expr.span_id().map(str::to_owned),
-                runtime,
+                ctx.runtime,
             )
         })?;
         if let Some(output) = execution_out.as_mut() {
             **output = evaluation;
         }
         Ok(Some((ctx.dag, plan)))
-    }));
-    match (result, status.get()) {
+    });
+    match (result, status) {
         (Err(_), StagingStatus::HostControlBoundary) => Ok(StagingAttempt::HostControlBoundary),
         (Err(diagnostic), StagingStatus::HasSources) => Err(diagnostic.fatal()),
         (result, _) => result.map(|region| match region {
@@ -2737,15 +2818,15 @@ pub(crate) fn try_lower_staged_host_region(
 /// signature someone wrote. Neither is recoverable from the expression, and
 /// passing them as bare positional booleans made the call sites unreadable.
 struct SubexprLoweringOptions<'a> {
-    /// The native service is borrowed for this attempt, never cached with facts.
-    runtime: &'a LoweringRuntime,
+    /// The native services are borrowed for this attempt, never cached with facts.
+    native: &'a mut NativeServices,
     include_list_controls: bool,
     /// See [`LowerCtx::signature_is_authored`].
     authored_signature: bool,
     resource_policy: crate::evaluation::ResourcePolicy,
     literal_result_claim_ownership: LiteralResultClaimOwnership,
     #[cfg(feature = "lowering-trace")]
-    trace: Option<crate::lowering_trace::Collector>,
+    trace: Option<&'a mut crate::lowering_trace::Collector>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -2762,9 +2843,10 @@ fn lower_subexpr_program_inner_impl(
     random: crate::host::RandomLoweringState,
     options: SubexprLoweringOptions<'_>,
     execution_out: Option<&mut Option<crate::evaluation::ExecutionMetadata>>,
+    runtime: &mut LoweringRuntime,
 ) -> LowerResult<(Dag, u64, usize, Vec<RuntimeListCheckDescriptor>)> {
     let SubexprLoweringOptions {
-        runtime,
+        native,
         include_list_controls,
         authored_signature,
         resource_policy,
@@ -2778,11 +2860,12 @@ fn lower_subexpr_program_inner_impl(
         context.program_signatures.clone(),
         LinearityInfo::default(),
         runtime,
+        native,
     );
     ctx.local_tensor_ascriptions = context.local_tensor_ascriptions.clone();
     #[cfg(feature = "lowering-trace")]
     {
-        ctx.trace = trace.clone();
+        ctx.trace = trace;
     }
     ctx.random_seed = random.seed;
     ctx.random_counter = random.counter;
@@ -2861,9 +2944,9 @@ fn lower_subexpr_program_inner_impl(
         packed_value_roots.push(root_id);
     }
     #[cfg(feature = "lowering-trace")]
-    if let Some(trace) = &trace {
+    if let Some(trace) = ctx.trace.as_deref_mut() {
         let mut roots = packed_value_roots.into_iter();
-        let packed_result = value.trace_value_from_roots(&mut roots, runtime)?;
+        let packed_result = value.trace_value_from_roots(&mut roots, ctx.runtime)?;
         assert!(roots.next().is_none());
         trace.helper_result(ctx.dag.roots(), packed_result);
     }
@@ -2911,8 +2994,8 @@ fn lower_subexpr_program_inner_impl(
             ctx.dag,
             ctx.execution.expect("plan lowering metadata"),
             #[cfg(feature = "lowering-trace")]
-            trace.as_ref(),
-            runtime,
+            ctx.trace,
+            ctx.runtime,
         )?;
         if let Some(output) = execution_out {
             *output = Some(metadata);
@@ -2920,16 +3003,16 @@ fn lower_subexpr_program_inner_impl(
         return Ok((dag, next_random_counter, value_root_count, list_checks));
     }
     #[cfg(feature = "lowering-trace")]
-    let before_dce = trace.as_ref().map(|_| ctx.dag.clone());
+    let before_dce = ctx.trace.as_ref().map(|_| ctx.dag.clone());
     let (dce_dag, dce_remap) = crate::optimize::dead_code_eliminate_with_remap(&ctx.dag);
     let (copy_dag, copy_remap) = insert_copy_nodes_for_consuming_fanout(&dce_dag);
     #[cfg(not(feature = "lowering-trace"))]
     let _ = (&dce_remap, &copy_remap);
     #[cfg(feature = "lowering-trace")]
-    let after_copies = trace.as_ref().map(|_| copy_dag.clone());
+    let after_copies = ctx.trace.as_ref().map(|_| copy_dag.clone());
     let after_drops = insert_drop_nodes_for_unconsumed_values(copy_dag);
     #[cfg(feature = "lowering-trace")]
-    if let Some(trace) = &trace {
+    if let Some(trace) = ctx.trace.as_deref_mut() {
         trace.normalization(
             &before_dce.expect("helper trace before DCE"),
             &dce_dag,
@@ -2950,7 +3033,7 @@ fn lower_subexpr_program_inner_impl(
 fn normalize_evaluation_dag(
     dag: Dag,
     execution: crate::evaluation::ExecutionMetadata,
-    runtime: &LoweringRuntime,
+    runtime: &mut LoweringRuntime,
 ) -> LowerResult<(Dag, crate::evaluation::ExecutionMetadata)> {
     normalize_evaluation_dag_with_trace(
         dag,
@@ -2964,8 +3047,8 @@ fn normalize_evaluation_dag(
 fn normalize_evaluation_dag_with_trace(
     dag: Dag,
     mut execution: crate::evaluation::ExecutionMetadata,
-    #[cfg(feature = "lowering-trace")] trace: Option<&crate::lowering_trace::Collector>,
-    runtime: &LoweringRuntime,
+    #[cfg(feature = "lowering-trace")] trace: Option<&mut crate::lowering_trace::Collector>,
+    runtime: &mut LoweringRuntime,
 ) -> LowerResult<(Dag, crate::evaluation::ExecutionMetadata)> {
     execution.spine.record_nodes(&dag);
     execution
@@ -2987,9 +3070,9 @@ fn normalize_evaluation_dag_with_trace(
         });
     #[cfg(feature = "lowering-trace")]
     let before_dce_execution =
-        trace.map(|_| crate::lowering_trace::Collector::execution_observation(&dag, &execution));
+        trace.as_ref().map(|_| crate::lowering_trace::Collector::execution_observation(&dag, &execution));
     #[cfg(feature = "lowering-trace")]
-    let before_dce = trace.map(|_| dag.clone());
+    let before_dce = trace.as_ref().map(|_| dag.clone());
     let (after_dce, dce_remap) =
         crate::optimize::dead_code_eliminate_with_retained(&dag, &execution.spine.nodes());
     execution
@@ -2997,17 +3080,18 @@ fn normalize_evaluation_dag_with_trace(
         .map_err(|message| raise_fatal_lowering_error(message, None, None, runtime))?;
     #[cfg(feature = "lowering-trace")]
     let after_dce_execution = trace
+        .as_ref()
         .map(|_| crate::lowering_trace::Collector::execution_observation(&after_dce, &execution));
     let (after_copies, copy_remap) = insert_copy_nodes_for_consuming_fanout(&after_dce);
     execution
         .remap(&copy_remap)
         .map_err(|message| raise_fatal_lowering_error(message, None, None, runtime))?;
     #[cfg(feature = "lowering-trace")]
-    let after_copies_execution = trace.map(|_| {
+    let after_copies_execution = trace.as_ref().map(|_| {
         crate::lowering_trace::Collector::execution_observation(&after_copies, &execution)
     });
     #[cfg(feature = "lowering-trace")]
-    let after_copies_trace = trace.map(|_| after_copies.clone());
+    let after_copies_trace = trace.as_ref().map(|_| after_copies.clone());
     let after_drops = insert_drop_nodes_for_unconsumed_values(after_copies);
     // The normalization passes preserve source node order; inserted Copies
     // precede their consumer and terminal Drops follow the source spine.
@@ -3932,7 +4016,7 @@ fn tensor_rank_substitutions(
     formal_param_exprs: &[Option<Expr>],
     actual_args: &[TensorType],
     dim_axis_positions: &UnordMap<String, (usize, DimInfo)>,
-    runtime: &LoweringRuntime,
+    runtime: &mut LoweringRuntime,
 ) -> LowerResult<UnordMap<String, Vec<DimInfo>>> {
     let mut subst = UnordMap::new();
     for (formal_expr, actual) in formal_param_exprs.iter().zip(actual_args.iter()) {
@@ -3983,7 +4067,7 @@ fn activation_rank_substitutions(
     authored_formals: &[Option<Expr>],
     actual_args: &[TensorType],
     dim_axis_positions: &UnordMap<String, (usize, DimInfo)>,
-    runtime: &LoweringRuntime,
+    runtime: &mut LoweringRuntime,
 ) -> LowerResult<UnordMap<String, Vec<DimInfo>>> {
     let mut substitutions = tensor_rank_substitutions(
         actualization_formals,
@@ -4064,7 +4148,7 @@ fn extract_rank_var_bindings(
     expr: &Expr,
     actual_dims: &[DimInfo],
     dim_axis_positions: &UnordMap<String, (usize, DimInfo)>,
-    runtime: &LoweringRuntime,
+    runtime: &mut LoweringRuntime,
 ) -> LowerResult<Vec<(String, Vec<DimInfo>)>> {
     let Some(slots) = tensor_formal_dim_slots(expr) else {
         return Ok(Vec::new());
@@ -4197,7 +4281,7 @@ pub fn top_level_expr_is_lowered(
     expr: &Expr,
     program_exprs: &[Expr],
     type_env: &BTreeMap<String, Expr>,
-    runtime: &LoweringRuntime,
+    runtime: &mut LoweringRuntime,
 ) -> bool {
     top_level_expr_is_lowered_inner(expr, program_exprs, type_env, runtime)
         .unwrap_or_else(|failure| failure.resume_at_boundary())
@@ -4207,7 +4291,7 @@ pub(crate) fn top_level_expr_is_lowered_inner(
     expr: &Expr,
     program_exprs: &[Expr],
     type_env: &BTreeMap<String, Expr>,
-    runtime: &LoweringRuntime,
+    runtime: &mut LoweringRuntime,
 ) -> LowerResult<bool> {
     let lowered_names = top_level_lowering_map_inner(program_exprs, type_env, runtime)?;
     Ok(top_level_expr_is_lowered_with_names(
@@ -4234,7 +4318,7 @@ pub fn top_level_lowering_map_from_realizability(
 pub fn top_level_lowering_map(
     exprs: &[Expr],
     type_env: &BTreeMap<String, Expr>,
-    runtime: &LoweringRuntime,
+    runtime: &mut LoweringRuntime,
 ) -> BTreeMap<String, bool> {
     top_level_lowering_map_inner(exprs, type_env, runtime)
         .unwrap_or_else(|failure| failure.resume_at_boundary())
@@ -4243,7 +4327,7 @@ pub fn top_level_lowering_map(
 pub(crate) fn top_level_lowering_map_inner(
     exprs: &[Expr],
     type_env: &BTreeMap<String, Expr>,
-    runtime: &LoweringRuntime,
+    runtime: &mut LoweringRuntime,
 ) -> LowerResult<BTreeMap<String, bool>> {
     let top_level_defs = collect_top_level_defs(exprs);
     let top_level_sigs = collect_top_level_sigs(exprs);
@@ -4281,7 +4365,7 @@ pub fn top_level_lowering_map_with_context(
     library: &LoweredLibrary,
     new_exprs: &[Expr],
     new_type_env: &BTreeMap<String, Expr>,
-    runtime: &LoweringRuntime,
+    runtime: &mut LoweringRuntime,
 ) -> BTreeMap<String, bool> {
     top_level_lowering_map_with_context_inner(library, new_exprs, new_type_env, runtime)
         .unwrap_or_else(|failure| failure.resume_at_boundary())
@@ -4291,7 +4375,7 @@ pub(crate) fn top_level_lowering_map_with_context_inner(
     library: &LoweredLibrary,
     new_exprs: &[Expr],
     new_type_env: &BTreeMap<String, Expr>,
-    runtime: &LoweringRuntime,
+    runtime: &mut LoweringRuntime,
 ) -> LowerResult<BTreeMap<String, bool>> {
     let new_defs = collect_top_level_defs(new_exprs);
     let new_sigs = collect_top_level_sigs(new_exprs);
@@ -4365,7 +4449,7 @@ pub(crate) fn top_level_lowering_map_with_context_inner(
 pub fn expr_is_dag_lowerable(
     expr: &Expr,
     program: &CheckedProgram,
-    runtime: &LoweringRuntime,
+    runtime: &mut LoweringRuntime,
 ) -> bool {
     expr_is_dag_lowerable_inner(expr, program, runtime)
         .unwrap_or_else(|failure| failure.resume_at_boundary())
@@ -4374,7 +4458,7 @@ pub fn expr_is_dag_lowerable(
 pub(crate) fn expr_is_dag_lowerable_inner(
     expr: &Expr,
     program: &CheckedProgram,
-    runtime: &LoweringRuntime,
+    runtime: &mut LoweringRuntime,
 ) -> LowerResult<bool> {
     if expr_requires_host_runtime(expr) {
         return Ok(false);
@@ -5069,7 +5153,7 @@ fn def_is_lowered(
     types: &LowerabilityTypes<'_>,
     cache: &mut BTreeMap<String, bool>,
     visiting: &mut UnordSet<String>,
-    runtime: &LoweringRuntime,
+    runtime: &mut LoweringRuntime,
 ) -> LowerResult<bool> {
     let type_env = types.type_env;
     if let Some(lowered) = cache.get(name) {
@@ -5179,7 +5263,7 @@ fn expr_depends_on_nonlowerable_name(
     cache: &mut BTreeMap<String, bool>,
     visiting: &mut UnordSet<String>,
     bound_names: &UnordSet<String>,
-    runtime: &LoweringRuntime,
+    runtime: &mut LoweringRuntime,
 ) -> LowerResult<bool> {
     let type_env = types.type_env;
     if let Some((tag, meta, kids)) = match expr.carrier() {
@@ -5505,7 +5589,7 @@ fn expr_depends_on_nonlowerable_name(
 fn collect_param_bound_names(
     param: &Expr,
     out: &mut UnordSet<String>,
-    runtime: &LoweringRuntime,
+    runtime: &mut LoweringRuntime,
 ) -> LowerResult<()> {
     match param.carrier() {
         ExprCarrier::Atom(Atom::Name(name)) => {
@@ -5655,7 +5739,7 @@ fn if_expr_is_dag_lowerable(expr: &Expr) -> bool {
     cond_ty.precision == Prim::Bool && (cond_ty.dims.is_empty() || cond_ty.dims == result_ty.dims)
 }
 
-fn assert_ir_lowerable(expr: &Expr, runtime: &LoweringRuntime) -> LowerResult<()> {
+fn assert_ir_lowerable(expr: &Expr, runtime: &mut LoweringRuntime) -> LowerResult<()> {
     match expr.carrier() {
         ExprCarrier::DecodedNode(tag, meta, kids) => {
             // Declaration nodes carry no runtime IR. Their meta map holds
@@ -5716,7 +5800,7 @@ fn assert_ir_lowerable(expr: &Expr, runtime: &LoweringRuntime) -> LowerResult<()
     Ok(())
 }
 
-fn assert_ir_typed(expr: &Expr, runtime: &LoweringRuntime) -> LowerResult<()> {
+fn assert_ir_typed(expr: &Expr, runtime: &mut LoweringRuntime) -> LowerResult<()> {
     match expr.carrier() {
         ExprCarrier::DecodedNode(tag, meta, kids) => {
             // Declaration metadata is specification input, not runtime IR.
@@ -5925,7 +6009,7 @@ fn string_literal(expr: &Expr) -> Option<&str> {
 pub fn evaluation_profile(
     expr: &Expr,
     program_defs: &UnordMap<String, Expr>,
-    runtime: &LoweringRuntime,
+    runtime: &mut LoweringRuntime,
 ) -> crate::evaluation::EvaluationProfile {
     evaluation_profile_inner(expr, program_defs, runtime)
         .unwrap_or_else(|failure| failure.resume_at_boundary())
@@ -5934,7 +6018,7 @@ pub fn evaluation_profile(
 pub(crate) fn evaluation_profile_inner(
     expr: &Expr,
     program_defs: &UnordMap<String, Expr>,
-    runtime: &LoweringRuntime,
+    runtime: &mut LoweringRuntime,
 ) -> LowerResult<crate::evaluation::EvaluationProfile> {
     evaluation_profile_from_defs(
         expr,
@@ -5956,7 +6040,7 @@ pub(crate) fn evaluation_profile_inner(
 pub fn evaluation_profile_sorted(
     expr: &Expr,
     program_defs: &BTreeMap<String, Expr>,
-    runtime: &LoweringRuntime,
+    runtime: &mut LoweringRuntime,
 ) -> crate::evaluation::EvaluationProfile {
     evaluation_profile_sorted_inner(expr, program_defs, runtime)
         .unwrap_or_else(|failure| failure.resume_at_boundary())
@@ -5965,7 +6049,7 @@ pub fn evaluation_profile_sorted(
 pub(crate) fn evaluation_profile_sorted_inner(
     expr: &Expr,
     program_defs: &BTreeMap<String, Expr>,
-    runtime: &LoweringRuntime,
+    runtime: &mut LoweringRuntime,
 ) -> LowerResult<crate::evaluation::EvaluationProfile> {
     evaluation_profile_from_defs(expr, program_defs, runtime)
 }
@@ -5973,7 +6057,7 @@ pub(crate) fn evaluation_profile_sorted_inner(
 fn evaluation_profile_from_defs(
     expr: &Expr,
     program_defs: &BTreeMap<String, Expr>,
-    runtime: &LoweringRuntime,
+    runtime: &mut LoweringRuntime,
 ) -> LowerResult<crate::evaluation::EvaluationProfile> {
     static_controls::profile(
         expr,
@@ -6253,12 +6337,12 @@ fn rebuild_runtime_list_view(
 /// the separate reconstruction template.
 fn recursive_list_leaf_nodes(
     value: &LoweredValue,
-    runtime: &LoweringRuntime,
+    runtime: &mut LoweringRuntime,
 ) -> LowerResult<Vec<NodeId>> {
     fn walk(
         value: &LoweredValue,
         out: &mut Vec<NodeId>,
-        runtime: &LoweringRuntime,
+        runtime: &mut LoweringRuntime,
     ) -> LowerResult<()> {
         match value {
             LoweredValue::Host { .. } => {
@@ -6300,7 +6384,7 @@ fn recursive_list_leaf_nodes(
 fn rebuild_recursive_list_like(
     template: &LoweredValue,
     leaves: &mut impl Iterator<Item = LoweredValue>,
-    runtime: &LoweringRuntime,
+    runtime: &mut LoweringRuntime,
 ) -> LowerResult<LoweredValue> {
     Ok(match template {
         LoweredValue::Host { .. } => {
@@ -7028,7 +7112,7 @@ impl ResolvedFunction {
     fn parameter_type(
         &self,
         index: usize,
-        runtime: &LoweringRuntime,
+        runtime: &mut LoweringRuntime,
     ) -> LowerResult<Option<&Expr>> {
         let signature_parameter = self
             .signature
@@ -7168,7 +7252,7 @@ pub(crate) struct LoweredSubexprWithControls {
 
 impl LoweredValue {
     #[cfg(feature = "lowering-trace")]
-    fn trace_value(&self, runtime: &LoweringRuntime) -> LowerResult<crate::lowering_trace::Value> {
+    fn trace_value(&self, runtime: &mut LoweringRuntime) -> LowerResult<crate::lowering_trace::Value> {
         use crate::lowering_trace::Value;
         Ok(match self {
             Self::Host { .. } => {
@@ -7206,7 +7290,7 @@ impl LoweredValue {
     fn trace_value_from_roots(
         &self,
         roots: &mut impl Iterator<Item = NodeId>,
-        runtime: &LoweringRuntime,
+        runtime: &mut LoweringRuntime,
     ) -> LowerResult<crate::lowering_trace::Value> {
         use crate::lowering_trace::Value;
         Ok(match self {
@@ -7260,7 +7344,7 @@ impl LoweredValue {
         }
     }
 
-    fn expect_node(&self, context: &str, runtime: &LoweringRuntime) -> LowerResult<NodeId> {
+    fn expect_node(&self, context: &str, runtime: &mut LoweringRuntime) -> LowerResult<NodeId> {
         Ok(match self {
             Self::Host { .. } => {
                 return Err(raise_lowering_error(
@@ -7320,7 +7404,10 @@ impl LoweredValue {
         }
     }
 
-    fn from_flat(template: &LoweredValue, nodes: &mut dyn Iterator<Item = NodeId>) -> LoweredValue {
+    fn from_flat(
+        template: &LoweredValue,
+        nodes: &mut impl Iterator<Item = NodeId>,
+    ) -> LoweredValue {
         match template {
             Self::Host { .. } => template.clone(),
             Self::Node(_) => Self::Node(nodes.next().expect("flattened lowered value mismatch")),
@@ -7390,7 +7477,7 @@ impl CallableDependencyState {
 fn extract_param_type<'expr>(
     expr: &'expr Expr,
     index: usize,
-    runtime: &LoweringRuntime,
+    runtime: &mut LoweringRuntime,
 ) -> LowerResult<Option<&'expr Expr>> {
     let fn_kids = match expr.carrier() {
         ExprCarrier::DecodedNode(DeepTag::Fn, _, children) => children,
@@ -7439,7 +7526,7 @@ fn extract_param_type<'expr>(
     Ok(authored.or_else(|| fn_type_arg_exprs(expr)?.get(index).copied()))
 }
 
-fn raise_malformed_parameter(param: &Expr, runtime: &LoweringRuntime) -> LoweringFailure {
+fn raise_malformed_parameter(param: &Expr, runtime: &mut LoweringRuntime) -> LoweringFailure {
     raise_malformed_deep(
         "a raw parameter form that does not contain exactly a name and metadata map",
         Some(param.span()),
@@ -7450,7 +7537,7 @@ fn raise_malformed_parameter(param: &Expr, runtime: &LoweringRuntime) -> Lowerin
 
 fn param_name_and_type_expr<'expr>(
     param: &'expr Expr,
-    runtime: &LoweringRuntime,
+    runtime: &mut LoweringRuntime,
 ) -> LowerResult<Option<(String, Option<&'expr Expr>)>> {
     Ok(match param.carrier() {
         ExprCarrier::Atom(Atom::Name(name)) => Some((name.clone(), None)),
@@ -7553,18 +7640,48 @@ fn permuted_tensor_type(ty: &TensorType, axes: &[usize]) -> TensorType {
     }
 }
 
+/// A parent context's lexical scope, captured for a transform subcontext.
+struct LexicalScopeSeed {
+    resource_policy: crate::evaluation::ResourcePolicy,
+    local_tensor_ascriptions: Arc<Vec<chelis_types::CheckedLocalTensorAscription>>,
+    /// Captured tensor bindings: name, parent node, type and execution owner.
+    bindings: Vec<(String, NodeId, TensorType, Option<usize>)>,
+    local_callables: Vec<(String, CallableExpr)>,
+    static_rate_bindings: Vec<(String, StagedScalar)>,
+    fn_typed_params: Vec<String>,
+}
+
+/// One DAG-lowering activation.
+///
+/// Explicit native services are single-level borrows (`runtime`, `native`)
+/// and so is the optional host invocation state and trace collector; a child
+/// context reborrows them from its parent for its own lifetime.
 struct LowerCtx<'program> {
-    runtime: &'program LoweringRuntime,
-    host_program: Option<&'program crate::host::HostLoweringSession<'program>>,
+    runtime: &'program mut LoweringRuntime,
+    /// The invocation's native services: lowering-internal static evaluation
+    /// polls cancellation through them at the same node visits as checking.
+    native: &'program mut NativeServices,
+    /// The checked program of the enclosing host lowering, when this context
+    /// lowers a staged host region.
+    host_program: Option<&'program CheckedProgram>,
+    /// That host lowering's invocation state, borrowed for this region.
+    host_state: Option<&'program mut crate::host::HostLoweringState>,
     host_sources: Vec<crate::host::staged::HostSource>,
     host_value_types: BTreeMap<NodeId, crate::host_type_state::HostTypeTerm>,
     host_external_inputs: BTreeMap<NodeId, String>,
     host_parameters:
         BTreeMap<crate::host::staged::HostValueId, (String, crate::host_type_state::HostTypeTerm)>,
     next_host_value: usize,
-    host_stage_status: std::rc::Rc<Cell<crate::host::staged::StagingStatus>>,
+    /// Staging status of a staged host region, written where staging commits
+    /// to sources or meets a host control boundary. The region's caller owns
+    /// it and reads it after its catch, so the value survives a returned
+    /// failure and a caught unwind. Other contexts record nothing.
+    host_stage_status: Option<&'program mut crate::host::staged::StagingStatus>,
     #[cfg(feature = "lowering-trace")]
-    trace: Option<crate::lowering_trace::Collector>,
+    trace: Option<&'program mut crate::lowering_trace::Collector>,
+    /// This context's identity in `trace`.
+    #[cfg(feature = "lowering-trace")]
+    trace_context: crate::lowering_trace::ContextId,
     dag: Dag,
     bindings: UnordMap<String, LoweredValue>,
     list_bindings: UnordMap<String, Expr>,
@@ -7765,21 +7882,24 @@ impl<'program> LowerCtx<'program> {
         program_defs: impl Into<Arc<BTreeMap<String, Expr>>>,
         program_signatures: impl Into<Arc<BTreeMap<String, Expr>>>,
         linearity: LinearityInfo,
-        runtime: &'program LoweringRuntime,
+        runtime: &'program mut LoweringRuntime,
+        native: &'program mut NativeServices,
     ) -> Self {
         Self {
             runtime,
+            native,
             host_program: None,
+            host_state: None,
             host_sources: Vec::new(),
             host_value_types: BTreeMap::new(),
             host_external_inputs: BTreeMap::new(),
             host_parameters: BTreeMap::new(),
             next_host_value: 0,
-            host_stage_status: std::rc::Rc::new(Cell::new(
-                crate::host::staged::StagingStatus::Searching,
-            )),
+            host_stage_status: None,
             #[cfg(feature = "lowering-trace")]
             trace: None,
+            #[cfg(feature = "lowering-trace")]
+            trace_context: crate::lowering_trace::Collector::ROOT,
             dag: Dag::new(),
             bindings: UnordMap::new(),
             list_bindings: UnordMap::new(),
@@ -8013,15 +8133,12 @@ impl<'program> LowerCtx<'program> {
         remap_tensor_dim_symbols(dag, formal_params, actual_args)
     }
 
-    fn seed_subctx_with_lexical_scope(
-        &self,
-        subctx: &mut LowerCtx,
-        shadowed: &[String],
-    ) -> UnordMap<String, NodeId> {
-        subctx.resource_policy = self.resource_policy;
-        subctx.local_tensor_ascriptions = self.local_tensor_ascriptions.clone();
+    /// The lexical scope a transform subcontext inherits, read from this
+    /// context before the subcontext borrows its native services. Names in
+    /// `shadowed` are rebound by the transformed function and are skipped.
+    fn lexical_scope_seed(&self, shadowed: &[String]) -> LexicalScopeSeed {
         let shadowed = shadowed.iter().cloned().collect::<UnordSet<_>>();
-        let mut captures = UnordMap::new();
+        let mut bindings = Vec::new();
         for (name, value) in self
             .bindings
             .to_sorted()
@@ -8036,43 +8153,67 @@ impl<'program> LowerCtx<'program> {
                 .get(*node_id)
                 .map(|node| node.output_type.clone())
                 .unwrap_or_else(Self::default_type);
-            let load = subctx.dag.add_node(
+            bindings.push((
+                name.clone(),
+                *node_id,
+                ty,
+                self.execution_node_owners.get(node_id).copied(),
+            ));
+        }
+        LexicalScopeSeed {
+            resource_policy: self.resource_policy,
+            local_tensor_ascriptions: self.local_tensor_ascriptions.clone(),
+            bindings,
+            local_callables: self
+                .local_callables
+                .to_sorted()
+                .into_iter()
+                .filter(|(name, _)| !shadowed.contains(*name))
+                .map(|(name, value)| (name.clone(), value.clone()))
+                .collect(),
+            static_rate_bindings: self
+                .static_rate_bindings
+                .to_sorted()
+                .into_iter()
+                .filter(|(name, _)| !shadowed.contains(*name))
+                .map(|(name, value)| (name.clone(), *value))
+                .collect(),
+            fn_typed_params: self
+                .fn_typed_params
+                .to_sorted()
+                .into_iter()
+                .filter(|name| !shadowed.contains(*name))
+                .cloned()
+                .collect(),
+        }
+    }
+
+    /// Install a parent's [`LexicalScopeSeed`] in this subcontext: each
+    /// captured tensor becomes a `Load` in the parent's binding order.
+    /// Returns the captured name to parent-node map.
+    fn apply_lexical_scope_seed(&mut self, seed: LexicalScopeSeed) -> UnordMap<String, NodeId> {
+        self.resource_policy = seed.resource_policy;
+        self.local_tensor_ascriptions = seed.local_tensor_ascriptions;
+        let mut captures = UnordMap::new();
+        for (name, node_id, ty, owner) in seed.bindings {
+            let load = self.dag.add_node(
                 RiscOp::Load {
                     name: name.as_str().into(),
                 },
                 vec![],
                 ty,
-                subctx.current_span_id.clone(),
+                self.current_span_id.clone(),
             );
-            subctx
-                .bindings
+            self.bindings
                 .insert(name.clone(), LoweredValue::Node(load));
-            captures.insert(name.clone(), *node_id);
-            if let Some(owner) = self.execution_node_owners.get(node_id) {
-                subctx.execution_node_owners.insert(load, *owner);
+            captures.insert(name, node_id);
+            if let Some(owner) = owner {
+                self.execution_node_owners.insert(load, owner);
             }
         }
-        subctx.local_callables.extend(
-            self.local_callables
-                .to_sorted()
-                .into_iter()
-                .filter(|(name, _)| !shadowed.contains(*name))
-                .map(|(name, value)| (name.clone(), value.clone())),
-        );
-        subctx.static_rate_bindings.extend(
-            self.static_rate_bindings
-                .to_sorted()
-                .into_iter()
-                .filter(|(name, _)| !shadowed.contains(*name))
-                .map(|(name, value)| (name.clone(), *value)),
-        );
-        subctx.fn_typed_params.extend(
-            self.fn_typed_params
-                .to_sorted()
-                .into_iter()
-                .filter(|name| !shadowed.contains(*name))
-                .cloned(),
-        );
+        self.local_callables.extend(seed.local_callables);
+        self.static_rate_bindings.extend(seed.static_rate_bindings);
+        self.fn_typed_params.extend(seed.fn_typed_params);
         captures
     }
 
@@ -8594,6 +8735,23 @@ impl<'program> LowerCtx<'program> {
         }
     }
 
+    /// The enclosing host lowering of a staged host region.
+    fn host_cx(&mut self) -> Option<crate::host::HostCx<'_>> {
+        Some(crate::host::HostCx {
+            checked: self.host_program?,
+            state: self.host_state.as_deref_mut()?,
+            runtime: &mut *self.runtime,
+            native: &mut *self.native,
+        })
+    }
+
+    /// Record a staged host region's status for the region's caller.
+    fn record_stage_status(&mut self, status: crate::host::staged::StagingStatus) {
+        if let Some(recorded) = self.host_stage_status.as_deref_mut() {
+            *recorded = status;
+        }
+    }
+
     fn host_stage_scope(&self) -> UnordMap<String, crate::host_type_state::HostTypeTerm> {
         self.bindings
             .to_sorted()
@@ -8720,7 +8878,9 @@ impl<'program> LowerCtx<'program> {
     fn stage_host_value(&mut self, expr: &Expr, target: bool) -> LowerResult<Option<LoweredValue>> {
         use crate::host::staged::{HostSource, HostValueId, StageValue};
         use crate::host_type_state::{HostPrecisionTerm, HostTypeTerm};
-        let program = try_some!(self.host_program);
+        if self.host_program.is_none() {
+            return Ok(None);
+        }
         if !matches!(
             stamped_parts(expr),
             Some((
@@ -8742,7 +8902,7 @@ impl<'program> LowerCtx<'program> {
         let ty = if target {
             HostTypeTerm::Scalar(HostPrecisionTerm::Concrete(Prim::Int64))
         } else {
-            crate::host::expr_host_type(expr, program, &scope)?
+            crate::host::expr_host_type(expr, &mut try_some!(self.host_cx()), &scope)?
         };
         let is_var = matches!(stamped_parts(expr), Some((DeepTag::Var, _, _)));
         let is_callable = matches!(ty, HostTypeTerm::Fn(..));
@@ -8764,8 +8924,13 @@ impl<'program> LowerCtx<'program> {
                 ty: ty.clone(),
             })
             .collect::<Vec<_>>();
-        let host_form = crate::host::body_form_the_dag_cannot_carry(program, expr, &params, false)?
-            .is_some()
+        let host_form = crate::host::body_form_the_dag_cannot_carry(
+            &mut try_some!(self.host_cx()),
+            expr,
+            &params,
+            false,
+        )?
+        .is_some()
             || matches!(
                 stamped_parts(expr),
                 Some((
@@ -8782,8 +8947,7 @@ impl<'program> LowerCtx<'program> {
         // Selection commits to preserving this source's obligations. A bad
         // capture must fail here even before the first source is appended;
         // falling back to ordinary host execution would lose the claims.
-        self.host_stage_status
-            .set(crate::host::staged::StagingStatus::HasSources);
+        self.record_stage_status(crate::host::staged::StagingStatus::HasSources);
         let mut captures = Vec::new();
         for name in referenced.into_sorted() {
             if let Some(value) = self.bindings.get(&name).cloned() {
@@ -9151,10 +9315,13 @@ impl<'program> LowerCtx<'program> {
         if let Some(value) = self.stage_host_value(expr, false)? {
             return Ok(value);
         }
-        let host_ty = self
-            .host_program
-            .map(|program| crate::host::expr_host_type(expr, program, &self.host_stage_scope()))
-            .transpose()?;
+        let host_ty = if self.host_program.is_some() {
+            let scope = self.host_stage_scope();
+            let mut host = self.host_cx().expect("a staged host region has host state");
+            Some(crate::host::expr_host_type(expr, &mut host, &scope)?)
+        } else {
+            None
+        };
         // Thread the current Deep node's span_id through any add_node()
         // calls made while lowering this expr or its children. We snapshot
         // the previous span_id and restore it on return so sibling exprs
@@ -9888,10 +10055,10 @@ impl<'program> LowerCtx<'program> {
         Ok(())
     }
 
-    fn declaration_name_for_body(&self, body: &Expr) -> LowerResult<Option<String>> {
+    fn declaration_name_for_body(&mut self, body: &Expr) -> LowerResult<Option<String>> {
         let mut owner = None;
         for (name, function) in self.program_defs.iter() {
-            let Some((_, candidate)) = self.extract_fn_parts(function)? else {
+            let Some((_, candidate)) = Self::extract_fn_parts(function, self.runtime)? else {
                 continue;
             };
             if candidate != body {
@@ -10172,7 +10339,7 @@ impl<'program> LowerCtx<'program> {
         })
     }
 
-    fn validate_local_ascription_token_ownership(&self) -> LowerResult<()> {
+    fn validate_local_ascription_token_ownership(&mut self) -> LowerResult<()> {
         for (ascription_id, claims) in &self.local_ascription_tokens {
             let Some(ascription) = self
                 .local_tensor_ascriptions
@@ -10637,12 +10804,12 @@ impl<'program> LowerCtx<'program> {
         })
     }
 
-    fn resolve_callable_expr(&self, expr: &Expr) -> LowerResult<Option<CallableExpr>> {
+    fn resolve_callable_expr(&mut self, expr: &Expr) -> LowerResult<Option<CallableExpr>> {
         self.resolve_callable_expr_inner(expr, &mut UnordSet::new())
     }
 
     fn resolve_callable_expr_inner(
-        &self,
+        &mut self,
         expr: &Expr,
         visited: &mut UnordSet<String>,
     ) -> LowerResult<Option<CallableExpr>> {
@@ -10685,7 +10852,8 @@ impl<'program> LowerCtx<'program> {
                 if let Some(callable) = self.local_callables.get(&name) {
                     return Ok(Some(callable.clone()));
                 }
-                if let Some(body) = self.program_defs.get(&name) {
+                let defs = Arc::clone(&self.program_defs);
+                if let Some(body) = defs.get(&name) {
                     let mut callable = try_some!(self.resolve_callable_expr_inner(body, visited)?);
                     if let CallableExpr::Plain(function) = &mut callable {
                         function.declaration_name = Some(name.clone());
@@ -10778,7 +10946,7 @@ impl<'program> LowerCtx<'program> {
         })
     }
 
-    fn callable_binding_expr(&self, expr: &Expr) -> LowerResult<Option<CallableExpr>> {
+    fn callable_binding_expr(&mut self, expr: &Expr) -> LowerResult<Option<CallableExpr>> {
         self.resolve_callable_expr(expr)
     }
 
@@ -10796,7 +10964,6 @@ impl<'program> LowerCtx<'program> {
     }
 
     fn is_selected_wrt(
-        &self,
         index: usize,
         ty: &TensorType,
         wrt_indices: Option<&[usize]>,
@@ -10836,7 +11003,7 @@ impl<'program> LowerCtx<'program> {
         actual_args: &[LoweredValue],
         app_span: Span,
     ) -> LowerResult<LoweredValue> {
-        let Some((param_names, body)) = self.extract_fn_parts(fn_expr)? else {
+        let Some((param_names, body)) = Self::extract_fn_parts(fn_expr, self.runtime)? else {
             return self.lower_unrepresentable("grad", std::slice::from_ref(fn_expr));
         };
         let grad_param_type_exprs: Vec<Option<Expr>> = param_names
@@ -10880,9 +11047,8 @@ impl<'program> LowerCtx<'program> {
                 })
             })
             .collect::<LowerResult<_>>()?;
-        let node_type = |ctx: &Self, id: NodeId| {
-            ctx.dag
-                .get(id)
+        let node_type = |dag: &Dag, id: NodeId| {
+            dag.get(id)
                 .map(|node| node.output_type.clone())
                 .unwrap_or_else(Self::default_type)
         };
@@ -10895,7 +11061,7 @@ impl<'program> LowerCtx<'program> {
         for (index, plan) in plans.iter().enumerate() {
             if let GradArgPlan::Tensor(id) = plan {
                 subst_param_type_exprs.push(grad_param_type_exprs.get(index).cloned().flatten());
-                subst_actual_types.push(node_type(self, *id));
+                subst_actual_types.push(node_type(&self.dag, *id));
             }
         }
         // issue #289: the precision substitution visible to the grad
@@ -10938,12 +11104,14 @@ impl<'program> LowerCtx<'program> {
                 None => Self::default_type(),
             })
             .collect();
+        let lexical_seed = self.lexical_scope_seed(&param_names);
         let mut subctx = LowerCtx::new(
             self.program_types.clone(),
             self.program_defs.clone(),
             self.program_signatures.clone(),
             LinearityInfo::default(),
             self.runtime,
+            self.native,
         );
         // This ordinary-grad subcontext lowers called declarations as private
         // pure helpers. Their literal result tokens must survive into zero or
@@ -10951,10 +11119,11 @@ impl<'program> LowerCtx<'program> {
         subctx.literal_result_claim_ownership = LiteralResultClaimOwnership::AuthoredTensorHelper;
         #[cfg(feature = "lowering-trace")]
         {
-            subctx.trace = self
-                .trace
-                .as_ref()
-                .map(|trace| trace.child(crate::lowering_trace::ContextKind::Gradient));
+            if let Some(trace) = self.trace.as_deref_mut() {
+                subctx.trace_context =
+                    trace.child(self.trace_context, crate::lowering_trace::ContextKind::Gradient);
+                subctx.trace = Some(trace);
+            }
         }
         // issue #289: propagate the call-site precision-tvar substitution
         // into the grad sub-context so a precision-polymorphic callee
@@ -11018,7 +11187,7 @@ impl<'program> LowerCtx<'program> {
             subctx.current_span_id.clone(),
         );
         subctx.random_path_condition = Some(random_path_true);
-        let captured_bindings = self.seed_subctx_with_lexical_scope(&mut subctx, &param_names);
+        let captured_bindings = subctx.apply_lexical_scope_seed(lexical_seed);
         // Generated structured-leaf Loads share one name-keyed splice map
         // with ordinary parameters and captured values. Keep a fresh-name
         // set over that complete namespace: deriving a load name from an
@@ -11067,14 +11236,14 @@ impl<'program> LowerCtx<'program> {
                 }) => {
                     let differentiable_leaves = leaf_nodes
                         .iter()
-                        .map(|node| node_type(self, *node).precision.is_float())
+                        .map(|node| node_type(&self.dag, *node).precision.is_float())
                         .collect::<Vec<_>>();
                     let differentiable = differentiable_leaves.iter().any(|leaf| *leaf);
                     let selected = differentiable
                         && wrt_indices.is_none_or(|indices| indices.contains(&index));
                     let mut leaf_values = Vec::with_capacity(leaf_nodes.len());
                     for (leaf_index, element_node) in leaf_nodes.iter().enumerate() {
-                        let element_ty = node_type(self, *element_node);
+                        let element_ty = node_type(&self.dag, *element_node);
                         let mut suffix = 0usize;
                         let load_name = loop {
                             let candidate =
@@ -11111,7 +11280,7 @@ impl<'program> LowerCtx<'program> {
                     let mut leaf_values = leaf_values.into_iter();
                     subctx.bindings.insert(
                         name.clone(),
-                        rebuild_recursive_list_like(template, &mut leaf_values, self.runtime)?,
+                        rebuild_recursive_list_like(template, &mut leaf_values, subctx.runtime)?,
                     );
                 }
                 Some(GradArgPlan::Tensor(actual)) => {
@@ -11121,7 +11290,7 @@ impl<'program> LowerCtx<'program> {
                     // Preserve a statically known integer through the fresh
                     // Load so an imported list_index/take_list/drop_list
                     // wrapper can select the correct primal positions.
-                    if let Some(value) = self.static_i64_from_node(*actual) {
+                    if let Some(value) = Self::static_i64_from_node(&self.dag, *actual) {
                         subctx.static_size_bindings.insert(name.clone(), value);
                     }
                     let load = subctx.dag.add_node(
@@ -11132,14 +11301,14 @@ impl<'program> LowerCtx<'program> {
                         param_ty.clone(),
                         subctx.current_span_id.clone(),
                     );
-                    if self.is_selected_wrt(index, &param_ty, wrt_indices) {
+                    if Self::is_selected_wrt(index, &param_ty, wrt_indices) {
                         wrt.push(load);
                         wrt_actuals.push(*actual);
                         result_param_indices.push(index);
                         result_plans.push(GradResultPlan::Tensor);
                     }
                     remap_formal_types.push(param_ty.clone());
-                    remap_actual_types.push(node_type(self, *actual));
+                    remap_actual_types.push(node_type(&self.dag, *actual));
                     subctx
                         .bindings
                         .insert(name.clone(), LoweredValue::Node(load));
@@ -11157,7 +11326,7 @@ impl<'program> LowerCtx<'program> {
                         param_ty.clone(),
                         subctx.current_span_id.clone(),
                     );
-                    if self.is_selected_wrt(index, &param_ty, wrt_indices) {
+                    if Self::is_selected_wrt(index, &param_ty, wrt_indices) {
                         wrt.push(load);
                     }
                     subctx
@@ -11168,7 +11337,7 @@ impl<'program> LowerCtx<'program> {
         }
         let lowered_output = subctx.lower_resolved_body(fn_expr, &param_names, body)?;
         let output =
-            lowered_output.expect_node("grad requires a scalar floating output", self.runtime)?;
+            lowered_output.expect_node("grad requires a scalar floating output", subctx.runtime)?;
         // The subcontext starts at the enclosing handler's current ordinal.
         // Hand the consumed ordinal count back before lowering any following
         // expression in the same `with seed` region; otherwise that expression
@@ -11179,8 +11348,8 @@ impl<'program> LowerCtx<'program> {
             .output_depends_on_unresolved(&subctx.dag, output)
         {
             #[cfg(feature = "lowering-trace")]
-            if let Some(trace) = &subctx.trace {
-                trace.boundary(crate::lowering_trace::BoundaryKind::UnresolvedCallableGradient);
+            if let Some(trace) = subctx.trace.as_deref_mut() {
+                trace.boundary(subctx.trace_context, crate::lowering_trace::BoundaryKind::UnresolvedCallableGradient);
             }
             // The standalone higher-order definition cannot know the
             // contribution from an unresolved callable result that reaches
@@ -11257,21 +11426,26 @@ impl<'program> LowerCtx<'program> {
                 format!("`grad(...)` lowering rejected: {ad_err}"),
                 Some(body.span()),
                 body.span_id().map(ToOwned::to_owned),
-                self.runtime,
+                subctx.runtime,
             )
         })?;
 
         #[cfg(feature = "lowering-trace")]
-        let trace_gradient = subctx
-            .trace
-            .as_ref()
-            .map(|trace| trace.gradient(&subctx.dag, output, &wrt, &grad_result));
+        let trace_gradient = subctx.trace.as_deref_mut().map(|trace| {
+            trace.gradient(
+                subctx.trace_context,
+                &subctx.dag,
+                output,
+                &wrt,
+                &grad_result,
+            )
+        });
 
         #[cfg(feature = "lowering-trace")]
         if let Some(forward) = execution_before_ad {
             subctx
                 .trace
-                .as_ref()
+                .as_deref_mut()
                 .expect("execution snapshot has a collector")
                 .execution_after_ad(
                     trace_gradient.expect("execution snapshot has an AD invocation"),
@@ -11295,18 +11469,24 @@ impl<'program> LowerCtx<'program> {
             .chain(adt_arg_map_entries)
             .chain(captured_bindings.into_sorted())
             .collect::<UnordMap<_, _>>();
+        // The subcontext has finished lowering; keep only its owned results so
+        // the parent can continue with its own native services and trace.
+        let mut sub_execution = subctx.execution.take();
+        let sub_execution_dependencies = std::mem::take(&mut subctx.execution_dependencies);
+        #[cfg(feature = "lowering-trace")]
+        let sub_trace_context = subctx.trace_context;
         let specialized_grad_dag = Self::remap_callable_dim_symbols(
             &grad_result.dag,
             &remap_formal_types,
             &remap_actual_types,
         );
         #[cfg(feature = "lowering-trace")]
-        let before_splice = subctx.trace.as_ref().map(|_| self.dag.clone());
+        let before_splice = self.trace.as_ref().map(|_| self.dag.clone());
         if let Some(execution) = &mut self.execution {
             execution.spine.record_nodes(&self.dag);
         }
         #[cfg(feature = "lowering-trace")]
-        let execution_before_splice = subctx.trace.as_ref().and_then(|_| {
+        let execution_before_splice = self.trace.as_ref().and_then(|_| {
             self.execution.as_ref().map(|execution| {
                 crate::lowering_trace::Collector::execution_observation(&self.dag, execution)
             })
@@ -11323,11 +11503,11 @@ impl<'program> LowerCtx<'program> {
             })?;
         #[cfg(feature = "lowering-trace")]
         let mut effect_remap = None;
-        if let Some(child) = subctx.execution.take() {
+        if let Some(child) = sub_execution.take() {
             let merged = {
                 #[cfg(feature = "lowering-trace")]
                 {
-                    if subctx.trace.is_some() {
+                    if self.trace.is_some() {
                         self.execution
                             .as_mut()
                             .expect("evaluation parent owns its child plan")
@@ -11358,11 +11538,11 @@ impl<'program> LowerCtx<'program> {
             })?;
         }
         self.execution_dependencies
-            .extend(subctx.execution_dependencies.iter().copied());
+            .extend(sub_execution_dependencies.iter().copied());
         #[cfg(feature = "lowering-trace")]
-        let after_splice = subctx.trace.as_ref().map(|_| self.dag.clone());
+        let after_splice = self.trace.as_ref().map(|_| self.dag.clone());
         #[cfg(feature = "lowering-trace")]
-        let execution_after_splice = subctx.trace.as_ref().and_then(|_| {
+        let execution_after_splice = self.trace.as_ref().and_then(|_| {
             self.execution.as_ref().map(|execution| {
                 crate::lowering_trace::Collector::execution_observation(&self.dag, execution)
             })
@@ -11435,7 +11615,7 @@ impl<'program> LowerCtx<'program> {
                         // later value (chelis#520 D2 / chelis#614).
                         None => {
                             let field_ty = actual
-                                .map(|id| node_type(self, id))
+                                .map(|id| node_type(&self.dag, id))
                                 .unwrap_or_else(Self::default_type);
                             let zero = self.zero_tensor_node(&field_ty, actual);
                             cotangents.push(zero);
@@ -11454,7 +11634,7 @@ impl<'program> LowerCtx<'program> {
                             let actual = wrt_actual_iter.next();
                             let node = grad_node.unwrap_or_else(|| {
                                 let element_ty = actual
-                                    .map(|id| node_type(self, id))
+                                    .map(|id| node_type(&self.dag, id))
                                     .unwrap_or_else(Self::default_type);
                                 self.zero_tensor_node(&element_ty, actual)
                             });
@@ -11526,7 +11706,7 @@ impl<'program> LowerCtx<'program> {
             _ => LoweredValue::Tuple(packed),
         };
         #[cfg(feature = "lowering-trace")]
-        if let Some(trace) = &subctx.trace {
+        if let Some(trace) = self.trace.as_deref_mut() {
             if let (
                 Some(remap),
                 Some(before_splice_execution),
@@ -11549,6 +11729,7 @@ impl<'program> LowerCtx<'program> {
                 });
             }
             trace.application(
+                sub_trace_context,
                 trace_gradient.expect("gradient observation"),
                 crate::lowering_trace::Application {
                     formal_types: remap_formal_types,
@@ -11645,7 +11826,7 @@ impl<'program> LowerCtx<'program> {
             .iter()
             .map(|arg| self.static_rate(arg))
             .collect::<Vec<_>>();
-        let Some((param_names, body)) = self.extract_fn_parts(fn_expr)? else {
+        let Some((param_names, body)) = Self::extract_fn_parts(fn_expr, self.runtime)? else {
             return self
                 .lower_unrepresentable("function application", std::slice::from_ref(fn_expr));
         };
@@ -11964,9 +12145,10 @@ impl<'program> LowerCtx<'program> {
         // chelis-types' boundary `stacker::grow` pattern would not: the
         // stack nears exhaustion mid-descent, and every additional level
         // re-enters this function, so the grow site is always in reach.
-        let mut result = stacker::maybe_grow(64 * 1024, 4 * 1024 * 1024, || {
-            self.lower_expr_with_claim(body, Some(&declared_result), authored_result_claim)
-        })?;
+        let mut result =
+            crate::lowering_runtime::grow_stack_if_needed(self, 64 * 1024, 4 * 1024 * 1024, |ctx| {
+                ctx.lower_expr_with_claim(body, Some(&declared_result), authored_result_claim)
+            })?;
         if let Some(ret_ty_expr) = fn_expr.result_type() {
             let ret_ty = Self::type_from_type_expr_with_subst(
                 ret_ty_expr,
@@ -12179,7 +12361,7 @@ impl<'program> LowerCtx<'program> {
         fn_expr: &ResolvedFunction,
         args: &[LoweredValue],
     ) -> LowerResult<LoweredValue> {
-        let Some((param_names, body)) = self.extract_fn_parts(fn_expr)? else {
+        let Some((param_names, body)) = Self::extract_fn_parts(fn_expr, self.runtime)? else {
             return self
                 .lower_unrepresentable("function application", std::slice::from_ref(fn_expr));
         };
@@ -12194,7 +12376,7 @@ impl<'program> LowerCtx<'program> {
             self.fn_typed_params.remove(name);
             if let Some(value) = arg_id
                 .as_single_node()
-                .and_then(|node| self.static_i64_from_node(node))
+                .and_then(|node| Self::static_i64_from_node(&self.dag, node))
             {
                 self.static_size_bindings.insert(name.clone(), value);
             } else {
@@ -12230,7 +12412,7 @@ impl<'program> LowerCtx<'program> {
     /// such as `[..pre, seq, ..post]`; reconstructing from the collapsed
     /// formal `TensorType` loses both spread widths.
     fn vectorized_parameter_instantiation(
-        &self,
+        &mut self,
         function: &ResolvedFunction,
         parameter_count: usize,
         actual_types: &[TensorType],
@@ -12362,10 +12544,10 @@ impl<'program> LowerCtx<'program> {
         app_span: Span,
     ) -> LowerResult<LoweredValue> {
         #[cfg(feature = "lowering-trace")]
-        if let Some(trace) = &self.trace {
-            trace.boundary(crate::lowering_trace::BoundaryKind::Vmap);
+        if let Some(trace) = self.trace.as_deref_mut() {
+            trace.boundary(self.trace_context, crate::lowering_trace::BoundaryKind::Vmap);
         }
-        let Some((param_names, body)) = self.extract_fn_parts(fn_expr)? else {
+        let Some((param_names, body)) = Self::extract_fn_parts(fn_expr, self.runtime)? else {
             return self.lower_unrepresentable("vmap", std::slice::from_ref(fn_expr));
         };
         let actual_types: Vec<TensorType> = actual_args
@@ -12426,19 +12608,22 @@ impl<'program> LowerCtx<'program> {
             );
         };
 
+        let lexical_seed = self.lexical_scope_seed(&param_names);
         let mut subctx = LowerCtx::new(
             self.program_types.clone(),
             self.program_defs.clone(),
             self.program_signatures.clone(),
             LinearityInfo::default(),
             self.runtime,
+            self.native,
         );
         #[cfg(feature = "lowering-trace")]
         {
-            subctx.trace = self
-                .trace
-                .as_ref()
-                .map(|trace| trace.child(crate::lowering_trace::ContextKind::Vmap));
+            if let Some(trace) = self.trace.as_deref_mut() {
+                subctx.trace_context =
+                    trace.child(self.trace_context, crate::lowering_trace::ContextKind::Vmap);
+                subctx.trace = Some(trace);
+            }
         }
         subctx.allow_host_list_ad_rewrites = true;
         subctx.rank_substitutions = vectorized_rank_substitutions;
@@ -12462,18 +12647,20 @@ impl<'program> LowerCtx<'program> {
         // Keep mapped formal Loads before capture Loads in canonical order.
         // A symbolic batch lift can then read a formal's axis as its explicit
         // runtime extent witness.
-        let captured_bindings = self.seed_subctx_with_lexical_scope(&mut subctx, &param_names);
+        let captured_bindings = subctx.apply_lexical_scope_seed(lexical_seed);
         let root_value = subctx.lower_resolved_body(fn_expr, &param_names, body)?;
         for root in root_value.flatten_nodes() {
             subctx.dag.add_root(root);
         }
+        // The subcontext has finished lowering; keep only its completed DAG so
+        // the parent can continue with its own native services.
+        let sub_dag = std::mem::replace(&mut subctx.dag, Dag::new());
         // Body lowering can resolve a top-level binding directly from the
         // program environment instead of the parent's already-materialized
         // binding map. Classify from the completed unbatched DAG: every Load
         // that is not one of this callable's mapped formals is lexical.
         let mapped_formals = param_names.iter().cloned().collect::<UnordSet<_>>();
-        let captured_loads = subctx
-            .dag
+        let captured_loads = sub_dag
             .nodes()
             .iter()
             .filter_map(|node| match &node.op {
@@ -12485,7 +12672,7 @@ impl<'program> LowerCtx<'program> {
             .collect::<UnordSet<_>>();
 
         let vmapped = match vmap::vectorize_axis0_with_captures(
-            &subctx.dag,
+            &sub_dag,
             batch_dim.clone(),
             &captured_loads,
         ) {
@@ -12550,7 +12737,7 @@ impl<'program> LowerCtx<'program> {
             &vmapped_param_types,
             &canonical_actual_types,
         );
-        let roots = vectorized_root_map(&subctx.dag, &specialized_vmapped).map_err(|message| {
+        let roots = vectorized_root_map(&sub_dag, &specialized_vmapped).map_err(|message| {
             raise_fatal_lowering_error(
                 format!("internal `vmap` root correspondence failed: {message}"),
                 Some(body.span()),
@@ -12649,10 +12836,10 @@ impl<'program> LowerCtx<'program> {
         app_span: Span,
     ) -> LowerResult<LoweredValue> {
         #[cfg(feature = "lowering-trace")]
-        if let Some(trace) = &self.trace {
-            trace.boundary(crate::lowering_trace::BoundaryKind::VmapGradient);
+        if let Some(trace) = self.trace.as_deref_mut() {
+            trace.boundary(self.trace_context, crate::lowering_trace::BoundaryKind::VmapGradient);
         }
-        let Some((param_names, body)) = self.extract_fn_parts(fn_expr)? else {
+        let Some((param_names, body)) = Self::extract_fn_parts(fn_expr, self.runtime)? else {
             return self.lower_unrepresentable("vmap(grad)", std::slice::from_ref(fn_expr));
         };
         let actual_types: Vec<TensorType> = actual_args
@@ -12705,19 +12892,22 @@ impl<'program> LowerCtx<'program> {
             );
         };
 
+        let lexical_seed = self.lexical_scope_seed(&param_names);
         let mut subctx = LowerCtx::new(
             self.program_types.clone(),
             self.program_defs.clone(),
             self.program_signatures.clone(),
             LinearityInfo::default(),
             self.runtime,
+            self.native,
         );
         #[cfg(feature = "lowering-trace")]
         {
-            subctx.trace = self
-                .trace
-                .as_ref()
-                .map(|trace| trace.child(crate::lowering_trace::ContextKind::VmapGradient));
+            if let Some(trace) = self.trace.as_deref_mut() {
+                subctx.trace_context =
+                    trace.child(self.trace_context, crate::lowering_trace::ContextKind::VmapGradient);
+                subctx.trace = Some(trace);
+            }
         }
         subctx.allow_host_list_ad_rewrites = true;
         subctx.rank_substitutions = vectorized_rank_substitutions;
@@ -12740,7 +12930,7 @@ impl<'program> LowerCtx<'program> {
                 param_ty.clone(),
                 subctx.current_span_id.clone(),
             );
-            if self.is_selected_wrt(index, &param_ty, wrt_indices) {
+            if Self::is_selected_wrt(index, &param_ty, wrt_indices) {
                 wrt.push(load);
                 wrt_param_indices.push(index);
             }
@@ -12750,21 +12940,21 @@ impl<'program> LowerCtx<'program> {
         }
         // As in ordinary vmap, mapped formal Loads precede invariant capture
         // Loads so a symbolic capture lift can name a real batch witness.
-        let captured_bindings = self.seed_subctx_with_lexical_scope(&mut subctx, &param_names);
+        let captured_bindings = subctx.apply_lexical_scope_seed(lexical_seed);
 
         let output = subctx
             .lower_resolved_body(fn_expr, &param_names, body)?
             .expect_node(
                 "vmap(grad(...)) requires a scalar floating output",
-                self.runtime,
+                subctx.runtime,
             )?;
         if subctx
             .callable_dependency_state
             .output_depends_on_unresolved(&subctx.dag, output)
         {
             #[cfg(feature = "lowering-trace")]
-            if let Some(trace) = &subctx.trace {
-                trace.boundary(crate::lowering_trace::BoundaryKind::UnresolvedCallableGradient);
+            if let Some(trace) = subctx.trace.as_deref_mut() {
+                trace.boundary(subctx.trace_context, crate::lowering_trace::BoundaryKind::UnresolvedCallableGradient);
             }
             // As for ordinary grad, an incomplete live callable is unknown,
             // not an absent adjoint of a completely lowered constant body.
@@ -12810,15 +13000,16 @@ impl<'program> LowerCtx<'program> {
                 ));
             }
         };
-        let invalid_mapping = |message: String| -> LoweringFailure {
+        let invalid_mapping = |runtime: &mut LoweringRuntime, message: String| -> LoweringFailure {
             raise_fatal_lowering_error(
                 format!("`vmap(grad(...))` root correspondence failed: {message}"),
                 Some(body.span()),
                 body.span_id().map(ToOwned::to_owned),
-                self.runtime,
+                runtime,
             )
         };
-        let root_map = vectorized_root_map(&grad_result.dag, &vmapped).map_err(&invalid_mapping)?;
+        let root_map = vectorized_root_map(&grad_result.dag, &vmapped)
+            .map_err(|message| invalid_mapping(self.runtime, message))?;
 
         let batch_source = param_types
             .iter()
@@ -12844,23 +13035,25 @@ impl<'program> LowerCtx<'program> {
 
         let remap = self
             .splice_dag(&vmapped, &arg_map)
-            .map_err(|message| invalid_mapping(format!("splice failed: {message}")))?;
+            .map_err(|message| invalid_mapping(self.runtime, format!("splice failed: {message}")))?;
         self.restore_vmapped_entry_witness_axes(&vmapped, &remap, &param_names, actual_args, axis);
-        let mapped_root = |old: NodeId| {
+        let mapped_root = |runtime: &mut LoweringRuntime, old: NodeId| {
             root_map
                 .get(&old)
                 .and_then(|mapped| remap.get(mapped))
                 .copied()
-                .ok_or_else(|| invalid_mapping(format!("missing root or splice entry for {old:?}")))
+                .ok_or_else(|| {
+                    invalid_mapping(runtime, format!("missing root or splice entry for {old:?}"))
+                })
         };
-        let forward = mapped_root(grad_result.output_node)?;
+        let forward = mapped_root(self.runtime, grad_result.output_node)?;
         let selected: Vec<_> = wrt
             .iter()
             .copied()
             .zip(wrt_param_indices.iter().copied())
             .map(|(load, index)| {
                 let actual = materialized_args.get(index).copied().ok_or_else(|| {
-                    invalid_mapping(format!("missing materialized argument {index}"))
+                    invalid_mapping(self.runtime, format!("missing materialized argument {index}"))
                 })?;
                 Ok((load, index, actual))
             })
@@ -12868,14 +13061,14 @@ impl<'program> LowerCtx<'program> {
         let mut flattened = Vec::with_capacity(selected.len());
         for (load, _, actual) in &selected {
             let gradient = match grad_result.grad_nodes.get(load) {
-                Some(gradient) => mapped_root(*gradient)?,
+                Some(gradient) => mapped_root(self.runtime, *gradient)?,
                 None => {
                     let ty = self
                         .dag
                         .get(*actual)
                         .map(|node| node.output_type.clone())
                         .ok_or_else(|| {
-                            invalid_mapping(format!("invalid materialized argument {actual:?}"))
+                            invalid_mapping(self.runtime, format!("invalid materialized argument {actual:?}"))
                         })?;
                     let zero = self.zero_tensor_node(&ty, Some(*actual));
                     // Retain the whole reachable forward carrier: a root may
@@ -12895,7 +13088,7 @@ impl<'program> LowerCtx<'program> {
             .get(grad_result.output_node.0)
             .and_then(|batched| remap.get(batched))
             .copied()
-            .ok_or_else(|| invalid_mapping("missing forward activation mapping".into()))?;
+            .ok_or_else(|| invalid_mapping(self.runtime, "missing forward activation mapping".into()))?;
         for cotangent in flattened.iter().filter(|id| **id != forward_activation) {
             self.dag.add_shape_dep(*cotangent, forward_activation);
         }
@@ -12912,7 +13105,7 @@ impl<'program> LowerCtx<'program> {
             expected_cotangents: selected.len(),
         })
         .map_err(|message| {
-            invalid_mapping(format!(
+            invalid_mapping(self.runtime, format!(
                 "post-splice closure verification failed: {message}"
             ))
         })?;
@@ -12947,7 +13140,7 @@ impl<'program> LowerCtx<'program> {
                 .iter()
                 .map(|index| {
                     groups.get(index).copied().ok_or_else(|| {
-                        invalid_mapping(format!(
+                        invalid_mapping(self.runtime, format!(
                             "cotangent packing has no selected parameter {index}"
                         ))
                     })
@@ -13089,7 +13282,10 @@ impl<'program> LowerCtx<'program> {
         Ok(remap)
     }
 
-    fn extract_fn_parts<'a>(&self, expr: &'a Expr) -> LowerResult<Option<(Vec<String>, &'a Expr)>> {
+    fn extract_fn_parts<'a>(
+        expr: &'a Expr,
+        runtime: &mut LoweringRuntime,
+    ) -> LowerResult<Option<(Vec<String>, &'a Expr)>> {
         let Some((DeepTag::Fn, _, kids)) = stamped_parts(expr) else {
             return Ok(None);
         };
@@ -13110,7 +13306,7 @@ impl<'program> LowerCtx<'program> {
         // "runtime scrutinee" match.
         let mut names = Vec::new();
         for param in param_kids {
-            if let Some((name, _)) = param_name_and_type_expr(param, self.runtime)? {
+            if let Some((name, _)) = param_name_and_type_expr(param, runtime)? {
                 names.push(name);
             }
         }
@@ -13874,21 +14070,24 @@ impl<'program> LowerCtx<'program> {
                 // carries a wildcard placeholder. See
                 // `Self::reduction_out_dims`.
                 let out_dims = Self::reduction_out_dims(&x_ty.dims, ty, axis);
-                let sum_op = RiscOp::sum_default(axis, operand_prec).unwrap_or_else(|msg| {
-                    // The type checker already rejects unsupported
-                    // operand precisions before lowering; fall back to
-                    // the operand precision so the resulting IR can
-                    // still surface the diagnostic via verify rather
-                    // than panicking the lowering pass.
-                    eprintln!(
-                        "internal: sum lowering fallback (operand `{}`): {msg}",
-                        operand_prec.name()
-                    );
-                    RiscOp::Sum {
-                        axis,
-                        accumulator: operand_prec,
+                let sum_op = match RiscOp::sum_default(axis, operand_prec) {
+                    Ok(sum_op) => sum_op,
+                    Err(msg) => {
+                        // The type checker already rejects unsupported
+                        // operand precisions before lowering; fall back to
+                        // the operand precision so the resulting IR can
+                        // still surface the diagnostic via verify rather
+                        // than panicking the lowering pass.
+                        self.runtime.report_internal(&format!(
+                            "internal: sum lowering fallback (operand `{}`): {msg}",
+                            operand_prec.name()
+                        ));
+                        RiscOp::Sum {
+                            axis,
+                            accumulator: operand_prec,
+                        }
                     }
-                });
+                };
                 let accumulator = match sum_op {
                     RiscOp::Sum { accumulator, .. } => accumulator,
                     _ => operand_prec,
@@ -14018,7 +14217,7 @@ impl<'program> LowerCtx<'program> {
                 // unsupported-builtin stub path (the chelis#776/#782
                 // finding). Runtime-parameterized windows are op-owner
                 // support work, not a silent default.
-                let extract_literal_axis_list = |list_arg: &Expr,
+                let mut extract_literal_axis_list = |list_arg: &Expr,
                                                  which: &str|
                  -> LowerResult<Vec<usize>> {
                     collect_cons_chain(list_arg)
@@ -14839,7 +15038,7 @@ impl<'program> LowerCtx<'program> {
         // 2^53). An out-of-domain literal is a loud lowering
         // diagnostic; cast leaves already applied the checked ladder
         // (or declined static recognition) in `extract_numeric_leaf`.
-        let raise_on =
+        let mut raise_on =
             |trap: chelis_types::NumericTrap, span_id: Option<String>| -> LoweringFailure {
                 raise_lowering_error(
                     format!(
@@ -15539,18 +15738,18 @@ impl<'program> LowerCtx<'program> {
             return Ok(Some(value));
         }
         let node = try_some!(self.lower_expr(expr)?.as_single_node());
-        Ok(self.static_i64_from_node(node))
+        Ok(Self::static_i64_from_node(&self.dag, node))
     }
 
-    fn static_i64_from_node(&self, node: NodeId) -> Option<i64> {
-        let node = self.dag.get(node)?;
+    fn static_i64_from_node(dag: &Dag, node: NodeId) -> Option<i64> {
+        let node = dag.get(node)?;
         match &node.op {
             RiscOp::Const { value } => value.as_i64_exact(),
             // Integer count arguments are commonly materialized as
             // `cast(<literal>, i64)` before an imported wrapper is
             // inlined. The checker has already established an integer
             // result type, so an exact integer input survives the cast.
-            RiscOp::Cast { .. } | RiscOp::Copy => self.static_i64_from_node(*node.inputs.first()?),
+            RiscOp::Cast { .. } | RiscOp::Copy => Self::static_i64_from_node(dag, *node.inputs.first()?),
             _ => None,
         }
     }
@@ -15905,7 +16104,7 @@ impl<'program> LowerCtx<'program> {
     /// rejection (#259 family), so reaching this site with an unresolvable
     /// axis is an internal contract violation, and a plain diagnostic would
     /// be absorbed by the host-fallback path into garbage C.
-    fn extract_axis_raw(&self, expr: &Expr, op: &str) -> LowerResult<i64> {
+    fn extract_axis_raw(&mut self, expr: &Expr, op: &str) -> LowerResult<i64> {
         if let Some(n) = extract_int_axis(expr) {
             return Ok(n);
         }
@@ -16088,7 +16287,7 @@ impl<'program> LowerCtx<'program> {
     /// name resolves to a fixed index. A non-name (integer / `cast`) axis takes
     /// the existing `extract_axis_raw` + `normalize_axis` path.
     fn resolve_reduce_axis(
-        &self,
+        &mut self,
         axis_expr: &Expr,
         operand: NodeId,
         fallback_rank: usize,
@@ -16167,7 +16366,7 @@ impl<'program> LowerCtx<'program> {
     /// loudly — silently inserting at a default axis would broadcast along
     /// the wrong dimension (the repo forbids silent fallbacks).
     fn resolve_expand_anchor(
-        &self,
+        &mut self,
         anchor_expr: &Expr,
         operand: NodeId,
         anchor: &str,
@@ -16231,7 +16430,7 @@ impl<'program> LowerCtx<'program> {
     /// `axis_expr` supplies the span so the diagnostic points at the
     /// offending axis literal.
     fn normalize_axis(
-        &self,
+        &mut self,
         raw: i64,
         rank: usize,
         op: &str,
@@ -16292,12 +16491,12 @@ impl<'program> LowerCtx<'program> {
     /// Const-fold a fully-static integer `expand` SIZE with the same checked
     /// arithmetic walker the checker uses. Axis folding remains on the
     /// narrower [`extract_int_for_dim`] path.
-    fn fold_static_size(&self, expr: &Expr) -> Option<i64> {
+    fn fold_static_size(&mut self, expr: &Expr) -> Option<i64> {
+        let bindings = &self.static_size_bindings;
         chelis_types::fold_static_int_expr(
             expr,
-            |name| self.static_size_bindings.get(name).copied(),
-            // FIXME(fcis-integration): use LoweringRuntime::native_mut()
-            &mut chelis_types::NativeServices::new(None),
+            |name| bindings.get(name).copied(),
+            self.native,
         )
     }
 
@@ -17389,7 +17588,7 @@ impl<'program> LowerCtx<'program> {
     /// `signature_is_authored` must hold and the binder must name a parameter
     /// axis of this same activation, or there is nothing to refute.
     fn reject_refuted_result_axis(
-        &self,
+        &mut self,
         id: NodeId,
         axis: usize,
         dim: &DimInfo,
@@ -17958,7 +18157,7 @@ impl<'program> LowerCtx<'program> {
         // handle-effect arm carries the same closed-set match).
         let effect_kind = decode_effect_kind(list);
         let current_span_id = self.current_span_id.clone();
-        let reject = |what: String| {
+        let mut reject = |what: String| {
             let unsupported = Unsupported::new(
                 UnsupportedKind::EffectKind(what),
                 "a `handle-effect` form in IR lowering",
@@ -17980,8 +18179,7 @@ impl<'program> LowerCtx<'program> {
         Ok(match effect_kind {
             Ok(EffectKind::Random) if elems.len() >= 4 => {
                 if self.host_program.is_some() {
-                    self.host_stage_status
-                        .set(crate::host::staged::StagingStatus::HostControlBoundary);
+                    self.record_stage_status(crate::host::staged::StagingStatus::HostControlBoundary);
                     return Err(raise_lowering_error(
                         "a Random handler retains its host control boundary around staged calls",
                         Some(elems[3].span()),
@@ -18183,7 +18381,7 @@ impl<'program> LowerCtx<'program> {
     /// own evaluator and does not require this DAG lowering to succeed, so a
     /// runtime bound that fails the build still evaluates to the right range.
     fn resolve_static_f64_arg(
-        &self,
+        &mut self,
         expr: &Expr,
         builtin: &str,
         arg_desc: &str,
@@ -18232,7 +18430,7 @@ impl<'program> LowerCtx<'program> {
     }
 
     fn resolve_static_scalar_arg(
-        &self,
+        &mut self,
         expr: &Expr,
         target: Prim,
         builtin: &'static str,
@@ -19068,7 +19266,7 @@ impl<'program> LowerCtx<'program> {
             .get(x)
             .map(|n| n.output_type.clone())
             .unwrap_or_else(Self::default_type);
-        let raise_bogus_target = |found: &str| -> LoweringFailure {
+        let raise_bogus_target = |runtime: &mut LoweringRuntime, found: &str| -> LoweringFailure {
             let unsupported = Unsupported::new(
                 UnsupportedKind::Dtype(found.to_string()),
                 "a `cast` target in IR lowering",
@@ -19085,7 +19283,7 @@ impl<'program> LowerCtx<'program> {
                 unsupported.to_string(),
                 Some(elems[3].span()),
                 elems[3].span_id().map(ToOwned::to_owned),
-                self.runtime,
+                runtime,
             )
         };
         let new_precision = if let Some(prim) = Self::try_extract_prim(&elems[3]) {
@@ -19117,16 +19315,19 @@ impl<'program> LowerCtx<'program> {
             // Bare-symbol spelling (backward compat): parse or raise.
             match Prim::parse_name(pname) {
                 Some(prim) => prim,
-                None => return Err(raise_bogus_target(pname)),
+                None => return Err(raise_bogus_target(self.runtime, pname)),
             }
         } else if let Some((DeepTag::TPrim, _, kids)) = stamped_parts(&elems[3])
             && let Some(Expr::Atom(Atom::Name(pname), _)) = kids.first()
         {
             // `(t-prim {} <name>)` whose name is not a recognized
             // primitive (the chelis#744 repro spelling).
-            return Err(raise_bogus_target(pname));
+            return Err(raise_bogus_target(self.runtime, pname));
         } else {
-            return Err(raise_bogus_target("a non-primitive cast target expression"));
+            return Err(raise_bogus_target(
+                self.runtime,
+                "a non-primitive cast target expression",
+            ));
         };
         // The mode selector is `elems[4..]` (elems 0/1 are the tag and
         // the metadata map). An unrecognized selector is a fatal
@@ -19176,7 +19377,7 @@ impl<'program> LowerCtx<'program> {
     /// is pinned by `issue_520_d1_runtime_ctor_through_if_still_rejected`;
     /// keep it stable.
     fn expect_runtime_if_branch(
-        &self,
+        &mut self,
         branch: LoweredValue,
         which: &str,
         elems: &[Expr],
@@ -19262,8 +19463,7 @@ impl<'program> LowerCtx<'program> {
             return self.lower_expr(selected);
         }
         if self.host_program.is_some() {
-            self.host_stage_status
-                .set(crate::host::staged::StagingStatus::HostControlBoundary);
+            self.record_stage_status(crate::host::staged::StagingStatus::HostControlBoundary);
             return Err(raise_lowering_error(
                 "dynamic tensor branches retain host control flow; scalar source stages cannot be hoisted out of a branch",
                 Some(cond_expr.span()),
@@ -19813,7 +20013,7 @@ impl<'program> LowerCtx<'program> {
     /// recoverable tensor-helper fallback, the issue #197 pattern) and
     /// recoverable everywhere else (so non-grad host-lane routing keeps
     /// falling back to interpretation).
-    fn reject_static_adt(&self, elems: &[Expr], message: String) -> LoweringFailure {
+    fn reject_static_adt(&mut self, elems: &[Expr], message: String) -> LoweringFailure {
         self.reject_lowering_slice(elems.first(), message)
     }
 
@@ -19821,7 +20021,7 @@ impl<'program> LowerCtx<'program> {
     /// suppression-aware raise ladder for callers that carry a span-source
     /// expression rather than a tag's `elems` slice (chelis#620, e.g. the
     /// recursion-unroll caps in `lower_plain_callable_app`).
-    fn reject_lowering_slice(&self, span_expr: Option<&Expr>, message: String) -> LoweringFailure {
+    fn reject_lowering_slice(&mut self, span_expr: Option<&Expr>, message: String) -> LoweringFailure {
         if self.runtime.unrepresentable_panic_suppressed() {
             return self.runtime.raise_unrepresentable();
         }
@@ -19858,7 +20058,7 @@ impl<'program> LowerCtx<'program> {
     /// all statically-known extents; a checked program reaching a disagreement
     /// is an internal lowering error and must fail loudly.
     fn actualized_runtime_if_output_type(
-        &self,
+        &mut self,
         then_node: NodeId,
         else_node: NodeId,
         stamped_out_ty: &TensorType,
@@ -20303,6 +20503,7 @@ mod fused_zero_tests {
                 collect_top_level_sigs(checked.exprs()),
                 LinearityInfo::default(),
                 runtime,
+                native,
             );
             let CallableExpr::Plain(function) = ctx
                 .resolve_callable_expr(&parsed("(var {} loss)"))
@@ -20355,13 +20556,14 @@ mod fused_zero_tests {
         })
     }
 
-    fn context(runtime: &LoweringRuntime) -> LowerCtx<'_> {
+    fn context(runtime: &mut LoweringRuntime) -> LowerCtx<'_> {
         LowerCtx::new(
             BTreeMap::new(),
             BTreeMap::new(),
             BTreeMap::new(),
             LinearityInfo::default(),
             runtime,
+            native,
         )
     }
 
@@ -21271,17 +21473,18 @@ mod tests {
         ))
     }
 
-    fn empty_lower_ctx(runtime: &LoweringRuntime) -> LowerCtx<'_> {
+    fn empty_lower_ctx(runtime: &mut LoweringRuntime) -> LowerCtx<'_> {
         LowerCtx::new(
             BTreeMap::new(),
             BTreeMap::new(),
             BTreeMap::new(),
             LinearityInfo::default(),
             runtime,
+            native,
         )
     }
 
-    fn pattern_scope_depends_on_bad(pattern: Expr, runtime: &LoweringRuntime) -> bool {
+    fn pattern_scope_depends_on_bad(pattern: Expr, runtime: &mut LoweringRuntime) -> bool {
         let span = Span::new(0, 0);
         let arm = Expr::List(
             List {
@@ -21654,7 +21857,7 @@ mod tests {
                     },
                     span,
                 );
-                let outcome = runtime.catch_lowering(move || {
+                let outcome = runtime.catch_lowering(move |runtime| {
                     let mut ctx = empty_lower_ctx(runtime);
                     ctx.lower_expr(&function)
                 });
@@ -21851,7 +22054,7 @@ mod tests {
         assert_decode_once_in_env("test", &env);
     }
 
-    fn parse_and_lower(src: &str, runtime: &LoweringRuntime) -> Dag {
+    fn parse_and_lower(src: &str, runtime: &mut LoweringRuntime) -> Dag {
         let checked = parse_and_check(src);
         lower_program(&checked, runtime)
     }
@@ -21901,7 +22104,7 @@ mod tests {
         );
     }
 
-    fn parse_and_lower_unchecked(src: &str, runtime: &LoweringRuntime) -> LowerResult<Dag> {
+    fn parse_and_lower_unchecked(src: &str, runtime: &mut LoweringRuntime) -> LowerResult<Dag> {
         let exprs = chelis_deep::parser::parse_str(src).expect("parse failed");
         let mut ctx = LowerCtx::new(
             BTreeMap::new(),
@@ -21909,6 +22112,7 @@ mod tests {
             BTreeMap::new(),
             LinearityInfo::default(),
             runtime,
+            native,
         );
         for expr in &exprs {
             ctx.lower_expr(expr)?;
@@ -21925,6 +22129,7 @@ mod tests {
                 BTreeMap::new(),
                 LinearityInfo::default(),
                 runtime,
+                native,
             );
             let input = ctx.dag.add_node(
                 RiscOp::Load { name: "x".into() },
@@ -21997,6 +22202,7 @@ mod tests {
                 BTreeMap::new(),
                 LinearityInfo::default(),
                 runtime,
+                native,
             );
             let out_ty = TensorType {
                 dims: vec![DimInfo::Named("result".to_string(), None)],
@@ -22060,6 +22266,7 @@ mod tests {
                 BTreeMap::new(),
                 LinearityInfo::default(),
                 runtime,
+                native,
             );
             let actual_ty = TensorType {
                 dims: vec![
@@ -22110,6 +22317,7 @@ mod tests {
                 BTreeMap::new(),
                 LinearityInfo::default(),
                 runtime,
+                native,
             );
             let placeholder = ctx.dag.add_node(
                 RiscOp::synth_const(Prim::F32, 0.0),
@@ -22148,6 +22356,7 @@ mod tests {
                 BTreeMap::new(),
                 LinearityInfo::default(),
                 runtime,
+                native,
             );
             let then_node = ctx.dag.add_node(
                 RiscOp::Load {
@@ -22218,7 +22427,7 @@ mod tests {
     /// the bound `x` node id. Mirrors how the body of a `def f(x) = ...`
     /// lowers with `x` already a parameter binding — the context the
     /// issue #318 `shape(&x, ...)` size argument resolves in.
-    fn lower_with_bound_x(size: usize, expr_src: &str, runtime: &LoweringRuntime) -> Dag {
+    fn lower_with_bound_x(size: usize, expr_src: &str, runtime: &mut LoweringRuntime) -> Dag {
         let x_ty = TensorType {
             dims: vec![DimInfo::Lit(size)],
             precision: chelis_types::types::Prim::F32,
@@ -22229,6 +22438,7 @@ mod tests {
             BTreeMap::new(),
             LinearityInfo::default(),
             runtime,
+            native,
         );
         let x = ctx
             .dag
@@ -22461,7 +22671,7 @@ mod tests {
     /// len = shape(x, 0); ... }` lowers with `x` already a parameter
     /// binding — the chelis#369 context where the `expand` size argument is
     /// a `var len` reference, not a direct `shape(...)` app.
-    fn lower_body_with_bound_x(size: usize, body_src: &str, runtime: &LoweringRuntime) -> Dag {
+    fn lower_body_with_bound_x(size: usize, body_src: &str, runtime: &mut LoweringRuntime) -> Dag {
         let x_ty = TensorType {
             dims: vec![DimInfo::Lit(size)],
             precision: chelis_types::types::Prim::F32,
@@ -22472,6 +22682,7 @@ mod tests {
             BTreeMap::new(),
             LinearityInfo::default(),
             runtime,
+            native,
         );
         let x = ctx
             .dag
@@ -23230,6 +23441,7 @@ mod tests {
                 collect_top_level_sigs(checked.exprs()),
                 LinearityInfo::default(),
                 runtime,
+                native,
             );
             let out_kids = match out_body {
                 Expr::List(list, _) => children(list),
@@ -23342,6 +23554,7 @@ mod tests {
                     collect_top_level_sigs(checked.exprs()),
                     LinearityInfo::default(),
                     runtime,
+                    native,
                 );
                 ctx.extract_fn_parts(&jac_fn)
                     .unwrap()
@@ -23357,6 +23570,7 @@ mod tests {
                 collect_top_level_sigs(checked.exprs()),
                 LinearityInfo::default(),
                 runtime,
+                native,
             );
             let app_exprs = chelis_deep::parser::parse_str(
             "(app {} (var {} jac_row) (var {} lm_model) (app {} (var {} to_tensor) (app {} (var {} Cons) (lit {type: (t-prim {} f32)} 1.0) (app {} (var {} Cons) (lit {type: (t-prim {} f32)} 2.0) (var {} Nil)))) (cast {} (lit {type: (t-prim {} f32)} 1.0) (t-prim {} f32)) (cast {} (lit {type: (t-prim {} f32)} 3.0) (t-prim {} f32)))"
@@ -23408,9 +23622,10 @@ mod tests {
                 collect_top_level_sigs(checked.exprs()),
                 LinearityInfo::default(),
                 runtime,
+                native,
             );
             subctx.local_callables = inline_ctx.local_callables.clone();
-            let theta_local_ty = extract_param_type(&target_fn, 0, runtime)
+            let theta_local_ty = extract_param_type(&target_fn, 0, subctx.runtime)
                 .unwrap()
                 .expect("theta_local type");
             let theta_local = subctx.lower_fn_param_binding("theta_local", Some(theta_local_ty));
@@ -23521,6 +23736,7 @@ mod tests {
                 BTreeMap::new(),
                 LinearityInfo::default(),
                 runtime,
+                native,
             );
             for expr in &exprs {
                 ctx.lower_top_level(expr).unwrap();
@@ -23553,6 +23769,7 @@ mod tests {
                 BTreeMap::new(),
                 LinearityInfo::default(),
                 runtime,
+                native,
             );
             for expr in &exprs {
                 ctx.lower_top_level(expr).unwrap();
@@ -24312,13 +24529,14 @@ mod tests {
                 .into_iter()
                 .next()
                 .expect("one expression");
-            let outcome = runtime.catch_lowering(move || {
+            let outcome = runtime.catch_lowering(move |runtime| {
                 let mut ctx = LowerCtx::new(
                     BTreeMap::new(),
                     BTreeMap::new(),
                     BTreeMap::new(),
                     LinearityInfo::default(),
                     runtime,
+                    native,
                 );
                 ctx.lower_expr(&expr)?;
                 Ok(())
@@ -24356,13 +24574,14 @@ mod tests {
                     BTreeMap::new(),
                     LinearityInfo::default(),
                     runtime,
+                    native,
                 );
                 let caller = ctx.lower_expr(&parse("(lit {} 2.0)")).unwrap();
                 ctx.bindings.insert("x".into(), caller.clone());
                 let result = ctx
                     .lower_expr(&parse("(app {} (var {} first) (lit {} 10.0) (var {} x))"))
                     .unwrap();
-                let root = result.expect_node("scalar result", runtime).unwrap();
+                let root = result.expect_node("scalar result", ctx.runtime).unwrap();
                 let values = crate::eval::eval_tensor_roots_with_strict(
                     &ctx.dag,
                     &[root],
@@ -24394,6 +24613,7 @@ mod tests {
                 BTreeMap::new(),
                 LinearityInfo::default(),
                 runtime,
+                native,
             );
             let caller = ctx.lower_expr(&parse("(cast {} (lit {} 3) i64)")).unwrap();
             ctx.bindings.insert("n".into(), caller.clone());
@@ -24403,7 +24623,7 @@ mod tests {
                     "(app {} (var {} repeat) (cast {} (lit {} 1) i64) (var {} n))",
                 ))
                 .unwrap()
-                .expect_node("expanded result", runtime)
+                .expect_node("expanded result", ctx.runtime)
                 .unwrap();
             let values = crate::eval::eval_tensor_roots_with_strict(
                 &ctx.dag,
@@ -24483,13 +24703,14 @@ mod tests {
             .expect("parse handled random expression")
             .pop()
             .expect("one expression");
-            let outcome = runtime.catch_lowering(move || {
+            let outcome = runtime.catch_lowering(move |runtime| {
                 let mut ctx = LowerCtx::new(
                     BTreeMap::new(),
                     BTreeMap::new(),
                     BTreeMap::new(),
                     LinearityInfo::default(),
                     runtime,
+                    native,
                 );
                 ctx.random_seed = Some(7);
                 ctx.lower_expr(&expr)?;
@@ -24527,13 +24748,14 @@ mod tests {
             .expect("parse handled random expression")
             .pop()
             .expect("one expression");
-            let outcome = runtime.catch_lowering(move || {
+            let outcome = runtime.catch_lowering(move |runtime| {
                 let mut ctx = LowerCtx::new(
                     BTreeMap::new(),
                     BTreeMap::new(),
                     BTreeMap::new(),
                     LinearityInfo::default(),
                     runtime,
+                    native,
                 );
                 ctx.lower_expr(&expr)?;
                 Ok(ctx.dag)
@@ -24580,6 +24802,7 @@ mod tests {
                 BTreeMap::new(),
                 LinearityInfo::default(),
                 runtime,
+                native,
             );
             for (source, expected) in cases {
                 let expr = chelis_deep::parser::parse_str(source)
@@ -24616,6 +24839,7 @@ mod tests {
                 BTreeMap::new(),
                 LinearityInfo::default(),
                 runtime,
+                native,
             );
             for source in cases {
                 let expr = chelis_deep::parser::parse_str(source)
@@ -24659,6 +24883,7 @@ mod tests {
                 BTreeMap::new(),
                 LinearityInfo::default(),
                 runtime,
+                native,
             );
             for source in cases {
                 let expr = chelis_deep::parser::parse_str(source)
@@ -24720,13 +24945,14 @@ mod tests {
                     .unwrap_or_else(|error| panic!("parse malformed seed {seed}: {error}"))
                     .pop()
                     .expect("one handled-random expression");
-                let outcome = runtime.catch_lowering(move || {
+                let outcome = runtime.catch_lowering(move |runtime| {
                     let mut ctx = LowerCtx::new(
                         BTreeMap::new(),
                         BTreeMap::new(),
                         BTreeMap::new(),
                         LinearityInfo::default(),
                         runtime,
+                        native,
                     );
                     ctx.random_seed = Some(7);
                     ctx.lower_expr(&expr)?;
@@ -24764,13 +24990,14 @@ mod tests {
             .expect("parse handled random expression")
             .pop()
             .expect("one expression");
-            let outcome = runtime.catch_lowering(move || {
+            let outcome = runtime.catch_lowering(move |runtime| {
                 let mut ctx = LowerCtx::new(
                     BTreeMap::new(),
                     BTreeMap::new(),
                     BTreeMap::new(),
                     LinearityInfo::default(),
                     runtime,
+                    native,
                 );
                 ctx.random_seed = Some(7);
                 ctx.lower_expr(&expr)?;
@@ -24805,13 +25032,14 @@ mod tests {
             .expect("parse handled random expression")
             .pop()
             .expect("one expression");
-            let outcome = runtime.catch_lowering(move || {
+            let outcome = runtime.catch_lowering(move |runtime| {
                 let mut ctx = LowerCtx::new(
                     BTreeMap::new(),
                     BTreeMap::new(),
                     BTreeMap::new(),
                     LinearityInfo::default(),
                     runtime,
+                    native,
                 );
                 ctx.random_seed = Some(7);
                 ctx.lower_expr(&expr)?;
@@ -24846,13 +25074,14 @@ mod tests {
             .expect("parse handled random expression")
             .pop()
             .expect("one expression");
-            let outcome = runtime.catch_lowering(move || {
+            let outcome = runtime.catch_lowering(move |runtime| {
                 let mut ctx = LowerCtx::new(
                     BTreeMap::new(),
                     BTreeMap::new(),
                     BTreeMap::new(),
                     LinearityInfo::default(),
                     runtime,
+                    native,
                 );
                 ctx.random_seed = Some(7);
                 ctx.lower_expr(&expr)?;
@@ -24893,6 +25122,7 @@ mod tests {
                 BTreeMap::new(),
                 LinearityInfo::default(),
                 runtime,
+                native,
             );
             let tensor = parse_type_expr("(t-tensor {} (d-lit {} 2) (t-var {} p))");
             assert_eq!(ctx.resolved_type_precision(&tensor), None);
@@ -25193,6 +25423,7 @@ mod tests {
                 BTreeMap::new(),
                 LinearityInfo::default(),
                 runtime,
+                native,
             );
             let id = ctx.dag.add_node(
                 RiscOp::Load {
@@ -25231,6 +25462,7 @@ mod tests {
                 BTreeMap::new(),
                 LinearityInfo::default(),
                 runtime,
+                native,
             );
             let exact = TensorType {
                 dims: vec![DimInfo::Lit(2)],
@@ -25501,7 +25733,7 @@ mod regression_tests {
     use crate::verify;
     use chelis_types::types::Prim;
 
-    fn parse_and_lower(src: &str, runtime: &LoweringRuntime) -> Dag {
+    fn parse_and_lower(src: &str, runtime: &mut LoweringRuntime) -> Dag {
         let exprs = chelis_deep::parser::parse_str(src).expect("parse failed");
         let checked = chelis_types::check_ir_program(
             &exprs,
@@ -25518,7 +25750,7 @@ mod regression_tests {
         lower_program(&checked, runtime)
     }
 
-    fn parse_and_lower_unchecked(src: &str, runtime: &LoweringRuntime) -> LowerResult<Dag> {
+    fn parse_and_lower_unchecked(src: &str, runtime: &mut LoweringRuntime) -> LowerResult<Dag> {
         let exprs = chelis_deep::parser::parse_str(src).expect("parse failed");
         let mut ctx = LowerCtx::new(
             BTreeMap::new(),
@@ -25526,6 +25758,7 @@ mod regression_tests {
             BTreeMap::new(),
             LinearityInfo::default(),
             runtime,
+            native,
         );
         for expr in &exprs {
             ctx.lower_expr(expr)?;
@@ -25673,6 +25906,7 @@ mod regression_tests {
                 BTreeMap::new(),
                 LinearityInfo::default(),
                 runtime,
+                native,
             );
             ctx.lower_expr(&exprs[0]).unwrap();
             let load_x = ctx
@@ -26176,6 +26410,7 @@ mod regression_tests {
                     BTreeMap::new(),
                     LinearityInfo::default(),
                     runtime,
+                    native,
                 );
                 ctx.prec_substitutions.insert("p".to_string(), target);
                 ctx.lower_expr(&expr).unwrap();

@@ -1,17 +1,27 @@
-//! Native panic services borrowed by DAG and host lowering.
+//! Native lowering services and the trusted primitive boundary of lowering.
 //!
-//! Semantic callers receive [`LoweringRuntime`] explicitly. Only this boundary
-//! selects the current thread's state and connects it to Rust's process-global
-//! panic hook. The state is shared by nested native entries on that thread;
-//! borrowing it does not start or reset a suppression scope.
+//! Semantic lowering receives `&mut` [`LoweringRuntime`] and calls only the
+//! methods below. Every method marked *Primitive* is one native effect on
+//! explicit state and carries its intended Lean model; everything else here
+//! is ordinary code over those primitives. No other lowering code touches
+//! thread-local storage, atomics, the stack, the clock, the environment,
+//! stderr, or unwinding.
 //!
-//! This remains a native effect boundary, not a pure error interpreter. Rust
-//! invokes the hook before unwinding, and lowering's guards deliberately clear
-//! their flags rather than restoring enclosing values.
+//! [`LoweringRuntime`] is a handle to the current thread's lowering state: two
+//! suppression flags `u` (speculative unrepresentable-DAG attempt) and `o`
+//! (quiet output inside a catch), plus a persistent summary-probe counter.
+//! Nested native acquisitions borrow the same per-thread state; acquiring a
+//! handle never resets or copies it. The process-global panic hook reads the
+//! same flags when Rust raises. Scope exits clear their flag to `false`
+//! rather than restoring an enclosing value, and a fatal re-raise explicitly
+//! re-enables `o`.
 
 use std::any::Any;
 use std::cell::Cell;
+use std::marker::PhantomData;
 use std::sync::LazyLock;
+use std::sync::atomic::{AtomicU32, Ordering};
+use std::time::Instant;
 
 use crate::lower::LowerDiagnostic;
 
@@ -172,51 +182,104 @@ fn resume_native_unwind<P: Any + Send>(payload: P) -> ! {
     std::panic::resume_unwind(Box::new(payload))
 }
 
-/// The current native thread's lowering panic state.
+/// Primitive. Run `body` between `enter` and `exit` on explicit `state`.
 ///
-/// Obtain a borrowed service with [`with_native_lowering_runtime`]. The private
-/// constructor prevents a detached state whose suppression flags the native
-/// hook cannot observe. The service is thread-bound; checked programs and
-/// persisted lowering facts do not contain it.
-#[derive(Debug)]
-pub struct LoweringRuntime {
-    suppress_unrepresentable: Cell<bool>,
-    suppress_output: Cell<bool>,
+/// `exit` runs after `body` returns, whatever it returns. If `body` unwinds
+/// natively, `exit` runs before the unwind continues, so a production catch
+/// that observes `state` afterwards sees it exited. The hook has already run
+/// at the raise; frames inside `body` are finalized first, then `exit`, then
+/// the enclosing frames, and resuming does not run the hook again.
+///
+/// Model: `let t := enter s; let r := body s; exit s t; r`.
+pub(crate) fn scoped<S, T, R>(
+    state: &mut S,
+    enter: impl FnOnce(&mut S) -> T,
+    exit: impl FnOnce(&mut S, T),
+    body: impl FnOnce(&mut S) -> R,
+) -> R {
+    let token = enter(state);
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| body(&mut *state))) {
+        Ok(result) => {
+            exit(state, token);
+            result
+        }
+        Err(payload) => {
+            exit(state, token);
+            std::panic::resume_unwind(payload)
+        }
+    }
 }
 
-// Every flag value is valid across an unwind. Scope destruction clears its own
-// flag, including after a nested catch; fatal re-raise explicitly re-enables
-// output suppression. No partially initialized semantic product lives here.
-impl std::panic::RefUnwindSafe for LoweringRuntime {}
+/// Primitive. Run `f` on a fresh native stack segment of `stack_size` bytes
+/// when fewer than `red_zone` bytes remain (`stacker::maybe_grow`).
+///
+/// Model: `f state`.
+pub(crate) fn grow_stack_if_needed<S, R>(
+    state: &mut S,
+    red_zone: usize,
+    stack_size: usize,
+    f: impl FnOnce(&mut S) -> R,
+) -> R {
+    stacker::maybe_grow(red_zone, stack_size, || f(state))
+}
+
+/// Handle to the current native thread's lowering state.
+///
+/// Obtain one with [`with_native_lowering_runtime`]; semantic code only
+/// borrows it. The handle names this thread's state, so it is neither `Send`
+/// nor `Sync`, and checked programs and persisted lowering facts never
+/// contain it. It has no fields a caller can read: every access goes through
+/// a primitive, so the Lean model threads the flags as explicit state.
+pub struct LoweringRuntime {
+    thread_bound: PhantomData<*const ()>,
+}
 
 impl LoweringRuntime {
-    const fn new() -> Self {
-        Self {
-            suppress_unrepresentable: Cell::new(false),
-            suppress_output: Cell::new(false),
-        }
+    /// Primitive. Whether a speculative DAG attempt is active.
+    ///
+    /// Model: read `u`.
+    pub(crate) fn unrepresentable_panic_suppressed(&mut self) -> bool {
+        NATIVE_LOWERING_STATE.with(|state| state.suppress_unrepresentable.get())
+    }
+
+    /// Primitive. Set the speculation flag.
+    ///
+    /// Model: `u := value`.
+    fn set_unrepresentable_panic_suppressed(&mut self, value: bool) {
+        NATIVE_LOWERING_STATE.with(|state| state.suppress_unrepresentable.set(value));
+    }
+
+    /// Primitive. Set the quiet-output flag.
+    ///
+    /// Model: `o := value`.
+    fn set_output_suppressed(&mut self, value: bool) {
+        NATIVE_LOWERING_STATE.with(|state| state.suppress_output.set(value));
     }
 
     /// Run a speculative DAG attempt without native panic output.
     ///
-    /// A nonfatal lowering rejection becomes an `UnrepresentableDag` payload;
-    /// fatal diagnostics retain their structured payload. Return and unwind
-    /// both clear the flag, even when an enclosing scope had set it.
-    pub fn with_suppress_unrepresentable_panic<R>(&self, f: impl FnOnce() -> R) -> R {
-        self.suppress_unrepresentable.set(true);
-        let _guard = ClearOnDrop(&self.suppress_unrepresentable);
-        f()
-    }
-
-    pub(crate) fn unrepresentable_panic_suppressed(&self) -> bool {
-        self.suppress_unrepresentable.get()
+    /// A nonfatal lowering rejection becomes [`LoweringFailure::Unrepresentable`];
+    /// fatal diagnostics stay structured. Return and unwind both clear the
+    /// flag, even when an enclosing scope had set it.
+    ///
+    /// Model: `u := true; let r := f; u := false; r`.
+    pub fn with_suppress_unrepresentable_panic<R>(&mut self, f: impl FnOnce(&mut Self) -> R) -> R {
+        scoped(
+            self,
+            |runtime| runtime.set_unrepresentable_panic_suppressed(true),
+            |runtime, ()| runtime.set_unrepresentable_panic_suppressed(false),
+            f,
+        )
     }
 
     /// Reject the current lowering step.
     ///
     /// A nonfatal rejection under speculation becomes
     /// [`LoweringFailure::Unrepresentable`]; fatal diagnostics stay structured.
-    pub(crate) fn raise_lowering_diagnostic(&self, diagnostic: LowerDiagnostic) -> LoweringFailure {
+    pub(crate) fn raise_lowering_diagnostic(
+        &mut self,
+        diagnostic: LowerDiagnostic,
+    ) -> LoweringFailure {
         // Fatal AD rejection must not become a speculative host fallback.
         if !diagnostic.fatal && self.unrepresentable_panic_suppressed() {
             self.raise_unrepresentable()
@@ -227,7 +290,7 @@ impl LoweringRuntime {
 
     /// Reject a speculative attempt that has no diagnostic of its own.
     /// Callers reach this only while speculation is suppressed.
-    pub(crate) fn raise_unrepresentable(&self) -> LoweringFailure {
+    pub(crate) fn raise_unrepresentable(&mut self) -> LoweringFailure {
         let UnrepresentableDag = self.observe_raise(UnrepresentableDag);
         LoweringFailure::Unrepresentable
     }
@@ -238,8 +301,9 @@ impl LoweringRuntime {
     /// frame unwinds, so the hook observes the same thread, flags, payload
     /// and location as the former unwinding raise, before any finalizer.
     ///
-    /// Model: identity; the hook's stderr effect is external.
-    fn observe_raise<P: Any + Send>(&self, payload: P) -> P {
+    /// Model: append one hook observation `(u, o, kind of P)` to the external
+    /// hook trace; return `payload`.
+    fn observe_raise<P: Any + Send>(&mut self, payload: P) -> P {
         let raised = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
             std::panic::panic_any(payload)
         }));
@@ -254,10 +318,10 @@ impl LoweringRuntime {
 
     /// Re-enable quiet output after an inner catch has cleared its flag.
     pub(crate) fn raise_fatal_lowering_diagnostic(
-        &self,
+        &mut self,
         diagnostic: LowerDiagnostic,
     ) -> LoweringFailure {
-        self.suppress_output.set(true);
+        self.set_output_suppressed(true);
         let fatal = if diagnostic.fatal {
             diagnostic
         } else {
@@ -271,59 +335,255 @@ impl LoweringRuntime {
     /// An explicit [`LoweringFailure`] maps to the diagnostic its former panic
     /// payload produced; an unexpected native panic maps as before.
     pub fn catch_lowering<R>(
-        &self,
-        f: impl FnOnce() -> LowerResult<R> + std::panic::UnwindSafe,
+        &mut self,
+        f: impl FnOnce(&mut LoweringRuntime) -> LowerResult<R> + std::panic::UnwindSafe,
     ) -> Result<R, LowerDiagnostic> {
         self.catch_native_unwind(
-            move || f().map_err(LoweringFailure::into_diagnostic),
-            panic_payload_to_lower_diagnostic,
+            move |runtime| f(runtime).map_err(LoweringFailure::into_diagnostic),
+            unrepresentable_diagnostic,
+            |message| {
+                LowerDiagnostic::new(
+                    message.unwrap_or_else(|| "internal lowering error".to_string()),
+                    None,
+                    None,
+                )
+            },
         )
+    }
+
+    /// [`Self::catch_lowering`] with explicit `state` threaded through the
+    /// catch.
+    ///
+    /// `f` receives the catch's runtime borrow and `state`; its other captures
+    /// must still be unwind safe. After a caught unwind `state` is the
+    /// caller's again, so callers pass state that every mutating scope exits
+    /// on unwind (see [`scoped`]) or that an unwind leaves otherwise valid,
+    /// such as native services whose next outermost entry resets them.
+    ///
+    /// Model: `f runtime state`, mapped as [`Self::catch_lowering`] maps it.
+    pub fn catch_lowering_with<S, R>(
+        &mut self,
+        state: &mut S,
+        f: impl FnOnce(&mut LoweringRuntime, &mut S) -> LowerResult<R> + std::panic::UnwindSafe,
+    ) -> Result<R, LowerDiagnostic> {
+        let state = std::panic::AssertUnwindSafe(state);
+        self.catch_lowering(move |runtime| {
+            // Move the whole wrapper; a field pattern would capture `&mut S`.
+            let wrapped = state;
+            f(runtime, wrapped.0)
+        })
     }
 
     /// Primitive. Run `f` quietly on the grown lowering stack.
     ///
     /// The grown stack covers lowering and its recursive consumers (AD, DCE,
     /// verification), not just the AST walk. An unexpected native unwind is
-    /// converted by `recover`; the guard stays live through that conversion
-    /// and clears output suppression before returning.
+    /// converted in payload order: the unrepresentable marker by `marker`, a
+    /// typed `D` payload by cloning it, and a `String`/`&str` message (or
+    /// `None` for any other payload) by `message`. Quiet output stays enabled
+    /// through that conversion and the payload's destruction, then clears.
     ///
-    /// Model: `f()`; an unexpected native panic is outside the modeled domain.
-    fn catch_native_unwind<T, E>(
-        &self,
-        f: impl FnOnce() -> Result<T, E> + std::panic::UnwindSafe,
-        recover: impl FnOnce(&(dyn Any + Send)) -> E,
-    ) -> Result<T, E> {
-        install_chelis_panic_hook();
-        self.suppress_output.set(true);
-        let _guard = ClearOnDrop(&self.suppress_output);
-        match std::panic::catch_unwind(|| stacker::grow(LOWERING_GROW_SEGMENT_BYTES, f)) {
-            Ok(result) => result,
-            Err(payload) => Err(recover(&*payload)),
+    /// Model: `o := true; let r := f self; o := false; r` (an unexpected
+    /// native panic is outside the modeled domain).
+    fn catch_native_unwind<T, D: Clone + 'static>(
+        &mut self,
+        f: impl FnOnce(&mut Self) -> Result<T, D> + std::panic::UnwindSafe,
+        marker: impl FnOnce() -> D,
+        message: impl FnOnce(Option<String>) -> D,
+    ) -> Result<T, D> {
+        struct ClearQuietOutput;
+        impl Drop for ClearQuietOutput {
+            fn drop(&mut self) {
+                NATIVE_LOWERING_STATE.with(|state| state.suppress_output.set(false));
+            }
         }
+        install_chelis_panic_hook();
+        self.set_output_suppressed(true);
+        let _clear = ClearQuietOutput;
+        let runtime = std::panic::AssertUnwindSafe(self);
+        match std::panic::catch_unwind(move || {
+            let wrapped = runtime;
+            stacker::grow(LOWERING_GROW_SEGMENT_BYTES, move || f(wrapped.0))
+        }) {
+            Ok(result) => result,
+            Err(payload) => Err(if payload.is::<UnrepresentableDag>() {
+                marker()
+            } else if let Some(diagnostic) = payload.downcast_ref::<D>() {
+                diagnostic.clone()
+            } else {
+                message(
+                    payload.downcast_ref::<String>().cloned().or_else(|| {
+                        payload
+                            .downcast_ref::<&str>()
+                            .map(|value| (*value).to_string())
+                    }),
+                )
+            }),
+        }
+    }
+
+    /// Primitive. Allocate a host inference variable id from the
+    /// process-global supply (relaxed `fetch_add`, wrapping at `u32::MAX`).
+    /// The supply is never reset per invocation.
+    ///
+    /// Model: next element of the process-global allocation schedule.
+    pub(crate) fn fresh_host_inference_var(&mut self) -> u32 {
+        NEXT_HOST_INFERENCE_VAR.fetch_add(1, Ordering::Relaxed)
+    }
+
+    /// Primitive. Count one kernel-decision summary probe that missed its memo
+    /// and ran a full callee lowering (chelis#1829). The count persists on
+    /// this thread across invocations and saturates at `u64::MAX`.
+    ///
+    /// Model: `builds := min(builds + 1, u64::MAX)`.
+    pub(crate) fn record_summary_probe_build(&mut self) {
+        NATIVE_LOWERING_STATE.with(|state| {
+            let counted = state.summary_probe_builds.get();
+            state.summary_probe_builds.set(if counted == u64::MAX {
+                counted
+            } else {
+                counted + 1
+            });
+        });
+    }
+
+    /// Primitive. This thread's summary-probe count.
+    ///
+    /// Model: read `builds`.
+    pub(crate) fn summary_probe_builds(&mut self) -> u64 {
+        NATIVE_LOWERING_STATE.with(|state| state.summary_probe_builds.get())
+    }
+
+    /// Primitive. Reset this thread's summary-probe count.
+    ///
+    /// Model: `builds := 0`.
+    pub(crate) fn reset_summary_probe_builds(&mut self) {
+        NATIVE_LOWERING_STATE.with(|state| state.summary_probe_builds.set(0));
+    }
+
+    /// Primitive. Start the detailed library-lowering profile. When
+    /// `CHELIS_PROFILE_COMPILE_CONTEXT_DETAIL=1` this reads the clock and
+    /// returns a nonzero mark; otherwise it returns `0` and reads nothing.
+    ///
+    /// Model: an arbitrary `usize`, consumed only by the profile primitives.
+    pub(crate) fn detail_profile_start(&mut self) -> usize {
+        if std::env::var_os("CHELIS_PROFILE_COMPILE_CONTEXT_DETAIL").is_some_and(|value| value == "1")
+        {
+            self.profile_mark()
+        } else {
+            0
+        }
+    }
+
+    /// Primitive. When `mark` is nonzero, report `"lower_sub: {seconds:>8.4}s
+    /// {label}"` on stderr for the phase since `mark` and restart it.
+    ///
+    /// Model: no-op.
+    pub(crate) fn detail_profile_phase(&mut self, mark: usize, label: &str) {
+        if let Some(elapsed) = profile_restart(mark) {
+            eprintln!("lower_sub: {:>8.4}s {}", elapsed, label);
+        }
+    }
+
+    /// Primitive. When `mark` is nonzero, start one declaration's clock and
+    /// return its nonzero mark; otherwise return `0`.
+    ///
+    /// Model: an arbitrary `usize`, consumed only by the profile primitives.
+    pub(crate) fn detail_profile_declaration_start(&mut self, mark: usize) -> usize {
+        if mark == 0 { 0 } else { self.profile_mark() }
+    }
+
+    /// Primitive. When `start` is nonzero, report one declaration on stderr as
+    /// `"lower_decl: {seconds:>8.4}s nodes_added={:>5} dag_total={:>6} {name}"`
+    /// with `nodes_added` measured from `last_dag_size`, which it advances.
+    ///
+    /// Model: no-op.
+    pub(crate) fn detail_profile_declaration(
+        &mut self,
+        start: usize,
+        last_dag_size: &mut usize,
+        dag_total: usize,
+        name: &str,
+    ) {
+        if let Some(elapsed) = profile_restart(start) {
+            let added = dag_total.saturating_sub(*last_dag_size);
+            *last_dag_size = dag_total;
+            eprintln!(
+                "lower_decl: {:>8.4}s nodes_added={:>5} dag_total={:>6} {}",
+                elapsed, added, dag_total, name
+            );
+        }
+    }
+
+    fn profile_mark(&mut self) -> usize {
+        PROFILE_MARKS.with(|marks| {
+            let mut marks = marks.borrow_mut();
+            marks.push(Instant::now());
+            marks.len()
+        })
+    }
+
+    /// Primitive. Write one internal diagnostic line to stderr.
+    ///
+    /// Model: no-op.
+    pub(crate) fn report_internal(&mut self, line: &str) {
+        eprintln!("{line}");
     }
 }
 
 /// Marker payload for a suppressed unrepresentable-DAG unwind.
 pub(crate) struct UnrepresentableDag;
 
-struct ClearOnDrop<'a>(&'a Cell<bool>);
-
-impl Drop for ClearOnDrop<'_> {
-    fn drop(&mut self) {
-        self.0.set(false);
-    }
+/// The per-thread state a [`LoweringRuntime`] handle names.
+struct NativeLoweringState {
+    /// `u`: a speculative DAG attempt is active.
+    suppress_unrepresentable: Cell<bool>,
+    /// `o`: panic output is quiet inside a lowering catch.
+    suppress_output: Cell<bool>,
+    /// Persistent kernel-decision summary-probe count (chelis#1829).
+    summary_probe_builds: Cell<u64>,
 }
 
 thread_local! {
-    static NATIVE_LOWERING_RUNTIME: LoweringRuntime = const { LoweringRuntime::new() };
+    static NATIVE_LOWERING_STATE: NativeLoweringState = const {
+        NativeLoweringState {
+            suppress_unrepresentable: Cell::new(false),
+            suppress_output: Cell::new(false),
+            summary_probe_builds: Cell::new(0),
+        }
+    };
 }
 
-/// Borrow this thread's native lowering service without changing its state.
+thread_local! {
+    /// Profiling clocks named by nonzero marks; used only when detailed
+    /// lowering profiling is enabled.
+    static PROFILE_MARKS: std::cell::RefCell<Vec<Instant>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// Seconds since `mark`'s clock, restarting it; `None` for mark `0`.
+fn profile_restart(mark: usize) -> Option<f64> {
+    let index = mark.checked_sub(1)?;
+    PROFILE_MARKS.with(|marks| {
+        let mut marks = marks.borrow_mut();
+        let start = marks.get_mut(index)?;
+        let elapsed = start.elapsed().as_secs_f64();
+        *start = Instant::now();
+        Some(elapsed)
+    })
+}
+
+/// Process-global host inference variable supply.
+static NEXT_HOST_INFERENCE_VAR: AtomicU32 = AtomicU32::new(0);
+
+/// Borrow this thread's native lowering state without changing it.
 ///
-/// Native adapters acquire it outside semantic lowering and pass the reference
-/// through their whole operation. Nested acquisitions borrow the same state.
-pub fn with_native_lowering_runtime<R>(f: impl FnOnce(&LoweringRuntime) -> R) -> R {
-    NATIVE_LOWERING_RUNTIME.with(f)
+/// Shell-only: native adapters acquire the handle outside semantic lowering
+/// and pass it through their whole operation. Nested acquisitions name the
+/// same state.
+pub fn with_native_lowering_runtime<R>(f: impl FnOnce(&mut LoweringRuntime) -> R) -> R {
+    f(&mut LoweringRuntime {
+        thread_bound: PhantomData,
+    })
 }
 
 // The existing boundary size also protects recursive consumers of bounded
@@ -333,8 +593,8 @@ const LOWERING_GROW_SEGMENT_BYTES: usize = 512 * 1024 * 1024;
 static CHELIS_PANIC_HOOK_INSTALLED: LazyLock<()> = LazyLock::new(|| {
     let previous = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
-        let suppressed = NATIVE_LOWERING_RUNTIME.with(|runtime| {
-            runtime.suppress_unrepresentable.get() || runtime.suppress_output.get()
+        let suppressed = NATIVE_LOWERING_STATE.with(|state| {
+            state.suppress_unrepresentable.get() || state.suppress_output.get()
         });
         if !suppressed {
             previous(info);
@@ -359,29 +619,10 @@ fn unrepresentable_diagnostic() -> LowerDiagnostic {
     )
 }
 
-fn panic_payload_to_lower_diagnostic(payload: &(dyn Any + Send)) -> LowerDiagnostic {
-    if payload.is::<UnrepresentableDag>() {
-        return unrepresentable_diagnostic();
-    }
-    if let Some(diagnostic) = payload.downcast_ref::<LowerDiagnostic>() {
-        return diagnostic.clone();
-    }
-    let message = payload
-        .downcast_ref::<String>()
-        .cloned()
-        .or_else(|| {
-            payload
-                .downcast_ref::<&str>()
-                .map(|value| (*value).to_string())
-        })
-        .unwrap_or_else(|| "internal lowering error".to_string());
-    LowerDiagnostic::new(message, None, None)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::panic::{catch_unwind, panic_any};
+    use std::panic::{AssertUnwindSafe, catch_unwind, panic_any};
     use std::process::Command;
     use std::sync::mpsc::{self, Receiver, Sender};
 
@@ -449,7 +690,7 @@ mod tests {
                 Some(chelis_deep::Span { offset: 7, len: 13 }),
                 Some("source-node".to_owned()),
             );
-            let result: Result<(), _> = runtime.catch_lowering(|| {
+            let result: Result<(), _> = runtime.catch_lowering(|runtime| {
                 let _drop = RecordDrop("typed", events.clone());
                 Err(runtime.raise_lowering_diagnostic(diagnostic.clone()))
             });
@@ -458,9 +699,9 @@ mod tests {
 
             // Both returning and unwinding inner catches CLEAR an outer flag.
             // A restore-previous guard would incorrectly hide the next hook.
-            let result: Result<(), _> = runtime.catch_lowering(|| {
+            let result: Result<(), _> = runtime.catch_lowering(|runtime| {
                 let _drop = RecordDrop("outer-return", events.clone());
-                assert_eq!(runtime.catch_lowering(|| Ok(17)), Ok(17));
+                assert_eq!(runtime.catch_lowering(|_| Ok(17)), Ok(17));
                 panic_any("after-inner-return");
             });
             assert_eq!(result.unwrap_err().message, "after-inner-return");
@@ -469,9 +710,9 @@ mod tests {
                 &[hook("after-inner-return"), Event::Drop("outer-return")],
             );
 
-            let result: Result<(), _> = runtime.catch_lowering(|| {
+            let result: Result<(), _> = runtime.catch_lowering(|runtime| {
                 let _drop = RecordDrop("outer-unwind", events.clone());
-                let inner: Result<(), _> = runtime.catch_lowering(|| {
+                let inner: Result<(), _> = runtime.catch_lowering(|_| {
                     let _drop = RecordDrop("inner-unwind", events.clone());
                     panic_any("quiet-inner");
                 });
@@ -489,10 +730,11 @@ mod tests {
             );
 
             let fatal = diagnostic.clone().fatal();
-            let result: Result<(), _> = runtime.catch_lowering(|| {
-                runtime.with_suppress_unrepresentable_panic(|| {
-                    let inner: Result<(), _> = runtime
-                        .catch_lowering(|| Err(runtime.raise_lowering_diagnostic(fatal.clone())));
+            let result: Result<(), _> = runtime.catch_lowering(|runtime| {
+                runtime.with_suppress_unrepresentable_panic(|runtime| {
+                    let inner: Result<(), _> = runtime.catch_lowering(|runtime| {
+                        Err(runtime.raise_lowering_diagnostic(fatal.clone()))
+                    });
                     let caught = inner.unwrap_err();
                     assert_eq!(caught, fatal);
                     Err(runtime.raise_fatal_lowering_diagnostic(caught))
@@ -502,28 +744,28 @@ mod tests {
             assert_events(&observed, &[]);
 
             // The same diagnostic becomes a marker only under speculation.
-            let speculative = catch_unwind(|| {
-                runtime.with_suppress_unrepresentable_panic(|| {
+            let speculative = catch_unwind(AssertUnwindSafe(|| {
+                runtime.with_suppress_unrepresentable_panic(|runtime| {
                     runtime
                         .raise_lowering_diagnostic(diagnostic.clone())
                         .resume_at_boundary();
                 });
-            })
+            }))
             .unwrap_err();
             assert!(speculative.is::<UnrepresentableDag>());
             assert_events(&observed, &[]);
-            let ordinary = catch_unwind(|| {
+            let ordinary = catch_unwind(AssertUnwindSafe(|| {
                 runtime
                     .raise_lowering_diagnostic(diagnostic.clone())
                     .resume_at_boundary();
-            })
+            }))
             .unwrap_err();
             assert_eq!(*ordinary.downcast::<LowerDiagnostic>().unwrap(), diagnostic);
             assert_events(&observed, &[hook("typed-rejection")]);
 
             // Nested acquisition shares the current native state rather than
             // allocating a fresh service or resetting its flags.
-            runtime.with_suppress_unrepresentable_panic(|| {
+            runtime.with_suppress_unrepresentable_panic(|runtime| {
                 let payload = catch_unwind(|| {
                     with_native_lowering_runtime(|nested| {
                         nested
@@ -533,34 +775,34 @@ mod tests {
                 })
                 .unwrap_err();
                 assert!(payload.is::<UnrepresentableDag>());
-                runtime.with_suppress_unrepresentable_panic(|| ());
-                let payload = catch_unwind(|| {
+                runtime.with_suppress_unrepresentable_panic(|_| ());
+                let payload = catch_unwind(AssertUnwindSafe(|| {
                     runtime
                         .raise_lowering_diagnostic(diagnostic.clone())
                         .resume_at_boundary();
-                })
+                }))
                 .unwrap_err();
                 assert_eq!(*payload.downcast::<LowerDiagnostic>().unwrap(), diagnostic);
             });
             assert_events(&observed, &[hook("typed-rejection")]);
 
-            runtime.with_suppress_unrepresentable_panic(|| {
-                let inner = catch_unwind(|| {
-                    runtime.with_suppress_unrepresentable_panic(|| panic_any("speculative"));
-                });
+            runtime.with_suppress_unrepresentable_panic(|runtime| {
+                let inner = catch_unwind(AssertUnwindSafe(|| {
+                    runtime.with_suppress_unrepresentable_panic(|_| panic_any("speculative"));
+                }));
                 assert!(inner.is_err());
-                let payload = catch_unwind(|| {
+                let payload = catch_unwind(AssertUnwindSafe(|| {
                     runtime
                         .raise_lowering_diagnostic(diagnostic.clone())
                         .resume_at_boundary();
-                })
+                }))
                 .unwrap_err();
                 assert!(payload.is::<LowerDiagnostic>());
             });
             assert_events(&observed, &[hook("typed-rejection")]);
 
             let unknown: Result<(), _> =
-                runtime.catch_lowering(|| panic_any(PayloadDrop(events.clone())));
+                runtime.catch_lowering(|_| panic_any(PayloadDrop(events.clone())));
             assert!(unknown.is_err());
             assert_events(&observed, &[Event::Drop("payload")]);
             assert!(catch_unwind(|| panic_any("after-payload")).is_err());
@@ -568,12 +810,12 @@ mod tests {
 
             // A live quiet scope on this thread cannot suppress another
             // thread's hook. Its own explicit runtime still catches quietly.
-            let quiet: Result<(), _> = runtime.catch_lowering(|| {
+            let quiet: Result<(), _> = runtime.catch_lowering(|_| {
                 std::thread::spawn(|| {
                     assert!(catch_unwind(|| panic_any("other-thread")).is_err());
                     with_native_lowering_runtime(|other| {
                         let rejected: Result<(), _> =
-                            other.catch_lowering(|| panic_any("other-quiet"));
+                            other.catch_lowering(|_| panic_any("other-quiet"));
                         assert_eq!(rejected.unwrap_err().message, "other-quiet");
                     });
                 })

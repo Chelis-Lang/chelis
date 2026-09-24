@@ -75,7 +75,7 @@
 //! fn replace_library(
 //!     checked: ContextCheckedCompilation<'_>,
 //!     other: &CheckedLibrary,
-//!     runtime: &LoweringRuntime,
+//!     runtime: &mut LoweringRuntime,
 //! ) {
 //!     let _ = checked.compose(other, runtime);
 //! }
