@@ -1636,10 +1636,10 @@ contract; it does not complete binding or runtime obligations.
 
 #### Final wire and binding contract handoff
 
-**Current integration state.** Execution version 3 and WireDag version 16 are
-the source contract for spec/10 §§3.2–3.5. The executed wire baseline contains
-97 distinct numeric leaves: 80 verified transports and 17 numeric operations,
-with zero exception rows. It includes the shape-dependency and opaque
+**Current integration state.** Execution version 3 and WireDag version 17 are
+the source contract for spec/10 §§3.2–3.5. Measured at WireDag version 16, the
+executed wire baseline contains 97 distinct numeric leaves: 80 verified
+transports and 17 numeric operations, with zero exception rows. It includes the shape-dependency and opaque
 local-ascription-identity transports plus the fixed literal-witness extent
 role, replaces the original 84-row legacy cohort and incorporates
 previously missed private codec/report leaves. The former execution scalar and

@@ -3,6 +3,8 @@ Random draws take their controls and their key as operands ([#2413](https://gith
 - compiled C validates `uniform_like` bounds under [05-OP-8] and traps an invalid bound before the draw, as eval does; an invalid literal `dropout` rate in compiled C now builds and traps at the draw, as eval does, where the entry lane used to refuse it at code generation;
 - a public C entry that draws with no `with seed` handler of its own is refused, at build time for a tensor entry and by an abort at the draw otherwise, where it used to draw at seed 0;
 - compiled C honors a helper's own `with seed` inside an active handler, where the enclosing handler's stream used to override it;
+- a draw in an unselected `if` arm takes no ordinal and does not validate its controls in any lane, where compiled C used to take an ordinal for it and shift every later draw ([#2410](https://github.com/Chelis-Lang/chelis/issues/2410));
+- `chelis eval` draws a `uniform_like` in a named-axis routed call from the active handler's stream and advances it, where the routed draw used seed 0 and left the stream unadvanced, so the next draw repeated ordinal 0;
 - `vmap` over a function that draws is refused in every lane ([#2409](https://github.com/Chelis-Lang/chelis/issues/2409));
 - `grad` through a `dropout` rate that a differentiated parameter reaches is rejected with `RandomSelectionParameter` ([#2421](https://github.com/Chelis-Lang/chelis/issues/2421));
 - a discarded `dropout` still takes its ordinal, but its data input is no longer a required entry input.
