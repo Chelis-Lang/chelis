@@ -297,13 +297,15 @@ lowering, and evaluation; observes `7` and a contextual `7 * 3 = 21`; and exerci
 layered composition, cancellation/reuse, and four concurrent invocations. These
 checks exercise the retained core, not the removed native linker implementation.
 
-Lowering now receives an explicit `&LoweringRuntime` from
-`chelis_ir::lowering_runtime::with_native_lowering_runtime`. The native adapter
+Lowering now receives an explicit `&mut LoweringRuntime` from
+`chelis_ir::lowering_runtime::with_native_lowering_runtime`, and lowering entries that
+reach DAG lowering also take the invocation's `&mut NativeServices`, so static folding
+inside lowering polls that token. The native adapter
 borrows one persistent per-thread service; nested acquisition neither resets nor
-copies it. `HostLoweringSession::new(program, runtime)` and `LowerCtx` carry that
-reference through DAG, host, staged, evaluation, and trace paths. Sessions holding
-the service are thread-bound. Checked programs, lowered libraries, and immutable
-subexpression contexts contain no runtime handle and keep their existing layouts.
+copies it. `HostLoweringSession::new(program)` owns only explicit session state; each
+operation borrows the runtime and native services through a single-level `HostCx`,
+which `LowerCtx` rebuilds for staged regions. Checked programs, lowered libraries,
+sessions, and immutable subexpression contexts contain no runtime handle.
 
 Canonical lowering APIs require the runtime as their final argument. Semantic
 completion and contextual composition also need it while computing DAG root
@@ -359,11 +361,11 @@ remain inputs with their existing seals; an invocation state must not mint them.
 | Former `OPACITY_CONTEXT` | `DiagnosticSink::opacity` and `OpacityScope` (implemented) | Restore the enclosing policy on return/unwind; keep diagnostics and witnesses in the same sink. Independent sessions never inherit another session's policy. |
 | Former `GROUP_CTX` | `DiagnosticSink::recursive`, `RecursiveInferenceScope`, and `RecursiveCallerScope` (implemented) | Generalization borrows explicit pins. Restore enclosing invocation/caller state on return or unwind; retain completed diagnostics and recorded caller evidence. Abort discards unfinished group evidence and releases pins. |
 | Former `LINKED_PROGRAM` | Immutable `ProgramOrigin` input, retained by `PreparedProgram` (implemented) | Only the trusted native linker asserts `Linked`. Each unit supplies its own origin; names, metadata, cached contexts, and other active invocations grant no authority. No mutable scope or restoration guard remains. |
-| Former `INLINING_STACK`, tensor-helper preflight stack, `ACTIVE_TYPE_SUBST` | `HostLoweringSession::invocation` and scoped guards (implemented) | Preserve scope order and the current specialization's bindings. Nested sessions do not share mutable frames. |
-| Former `MONO_SPECIALIZATIONS` and `MonoProbeGuard` | Host invocation state plus scoped probe snapshot (implemented) | Preserve entry initialization, completion order, and rollback of speculative definitions and in-progress entries. Rollback restores the outer snapshot; it does not clear it. |
-| Former lowering-module panic-suppression flags | Explicit borrowed `LoweringRuntime`; per-thread storage and hook bridge confined to `lowering_runtime` (implemented). Rejection returns `LowerResult` (implemented) | Preserve shared thread state, clear-to-false behavior, and explicit fatal re-enable. The hook observes each raise once before finalizers. Native hook/unwind primitives still require a wrapper relation. |
+| Former `INLINING_STACK`, tensor-helper preflight stack, `ACTIVE_TYPE_SUBST` | Plain `HostLoweringState` invocation fields reached through `HostCx`; `with_inlining`, `with_preflight(_if_uncovered)` and `with_type_subst` scope operations over the `scoped` primitive (implemented). Preflight facts are still keyed by expression address (explicit identity pending) | Preserve scope order and the current specialization's bindings; exit on return and native unwind. Nested sessions do not share mutable frames. |
+| Former `MONO_SPECIALIZATIONS` and `MonoProbeGuard` | Host invocation state plus `with_host_invocation` and `with_mono_probe` scope operations (implemented) | Preserve entry initialization, completion order, and rollback of speculative definitions and in-progress entries. Rollback restores the outer snapshot on return and native unwind; it does not clear it. |
+| Former lowering-module panic-suppression flags | `&mut LoweringRuntime`, a thread-bound handle whose primitives alone read or set the per-thread flags; hook bridge and unwinding confined to `lowering_runtime` (implemented). Rejection returns `LowerResult` (implemented) | Preserve shared thread state, clear-to-false behavior, and explicit fatal re-enable. The hook observes each raise once before finalizers. Native hook/unwind primitives still require a wrapper relation. |
 | Cancellation token identity and relaxed loads | `NativeServices::cancellation_observed` on the shell-supplied services (implemented) | Keep shared token identity and the original polling points; every poll is a fresh relaxed load. A frozen entry Boolean is not equivalent to cancellation arriving during a check. |
-| Atomic host-inference IDs, persistent thread counters, panic hook | Native runtime services | Preserve allocation/observation order and lifetime across invocations, including native ID wrapping or an explicit no-wrap bound. Resetting a global ID supply per run can invalidate identity comparisons. |
+| Atomic host-inference IDs, persistent thread counters, panic hook | `LoweringRuntime` primitives: process-global relaxed `fetch_add` inference ids and the saturating per-thread summary-probe count (implemented); panic hook remains native | Preserve allocation/observation order and lifetime across invocations, including native ID wrapping. Resetting a global ID supply per run can invalidate identity comparisons. |
 | Stack growth, depth guards, first stack-bail record | `NativeServices` stack primitives; first bail and check-unit scope depth in the `DiagnosticSink`'s `StackBailRecord` (implemented) | Preserve the first reported site/span and normal-versus-abort behavior. Frame exits are explicit; the outermost check-unit entry resets the bail and the frame depth, so a caught unwind cannot leak depth into the next check. Arbitrary Lean fuel is not a replacement for native stack availability. |
 
 Remaining runtime migration and verification:

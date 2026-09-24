@@ -20588,6 +20588,38 @@ mod fused_zero_tests {
         })
     }
 
+    /// Lowering-internal static folding polls the invocation's own services:
+    /// a token cancelled before lowering is observed exactly as a direct
+    /// evaluation with the same services observes it.
+    #[test]
+    fn static_size_fold_observes_the_invocation_cancellation_token() {
+        let size = parsed("(lit {type: (t-prim {} i64)} 5)");
+        let token = chelis_types::CancelToken::new();
+        token.cancel();
+        let direct = |native: &mut NativeServices| {
+            chelis_types::fold_static_int_expr(&size, |_| None, native)
+        };
+        let expected_cancelled = direct(&mut NativeServices::new(Some(token.clone())));
+        let expected_live = direct(&mut NativeServices::new(None));
+        assert_eq!(expected_live, Some(5));
+        crate::lowering_runtime::with_native_lowering_runtime(|runtime| {
+            for (mut native, expected) in [
+                (NativeServices::new(Some(token.clone())), expected_cancelled),
+                (NativeServices::new(None), expected_live),
+            ] {
+                let mut ctx = LowerCtx::new(
+                    BTreeMap::new(),
+                    BTreeMap::new(),
+                    BTreeMap::new(),
+                    LinearityInfo::default(),
+                    &mut *runtime,
+                    &mut native,
+                );
+                assert_eq!(ctx.fold_static_size(&size), expected);
+            }
+        });
+    }
+
     fn context(runtime: &mut LoweringRuntime) -> LowerCtx<'_> {
         LowerCtx::new(
             BTreeMap::new(),
