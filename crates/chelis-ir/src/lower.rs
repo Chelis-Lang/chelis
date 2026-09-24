@@ -18499,7 +18499,7 @@ impl<'program> LowerCtx<'program> {
     }
 
     /// Legacy sequential placeholder for `(par {} expr1 expr2 ...)`, retained
-    /// behind the chelis#2388 checker fence. No checked source program reaches
+    /// behind the chelis#2503 checker fence. No checked source program reaches
     /// this path until scheduler-independent cross-lane effects are complete.
     fn lower_par(&mut self, kids: &[Expr]) -> LoweredValue {
         let mut last: Option<LoweredValue> = None;
@@ -24687,7 +24687,7 @@ mod regression_tests {
 
     #[test]
     fn par_legacy_placeholder_is_sequential_at_lowering() {
-        // Internal placeholder behavior behind the chelis#2388 checker fence.
+        // Internal placeholder behavior behind the chelis#2503 checker fence.
         // All children are lowered in order; the par's value is the value of
         // the last child. The DAG carries every intermediate child as well so
         // any side-effecting node (e.g. realize) is preserved.

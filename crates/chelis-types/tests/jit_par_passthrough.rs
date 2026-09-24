@@ -38,7 +38,7 @@ fn jit_wrapping_a_value_type_checks_and_carries_inner_type() {
 
 // ── par ────────────────────────────────────────────────────────────────────
 
-/// Spec §2.3 + chelis#2388: `par` is fenced until every lane implements it.
+/// Spec §2.3 + chelis#2503: `par` is fenced until every lane implements it.
 #[test]
 fn par_is_rejected_with_the_typed_issue_fence() {
     let exprs = parse(
@@ -48,12 +48,12 @@ fn par_is_rejected_with_the_typed_issue_fence() {
     );
 
     let errors = check_ir_program(&exprs)
-        .expect_err("par must stay behind the chelis#2388 checker fence")
+        .expect_err("par must stay behind the chelis#2503 checker fence")
         .errors;
     let [error] = errors.as_slice() else {
         panic!("expected one par fence diagnostic, got {errors:?}");
     };
     assert_eq!(error.kind.diagnostic_name(), "unsupported_feature");
-    assert!(error.message.contains("unimplemented chelis#2388"));
+    assert!(error.message.contains("unimplemented chelis#2503"));
     assert!(error.message.contains("not fully implemented"));
 }

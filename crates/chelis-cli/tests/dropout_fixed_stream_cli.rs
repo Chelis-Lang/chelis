@@ -255,7 +255,7 @@ fn printed_root(stdout: &str, root: &str) -> Vec<f64> {
 /// data, so no lane can fold it. Rows reach the arm inline, through helpers,
 /// a `match` on an ADT and on an integer, `grad`, nested arms, both arms
 /// drawing, explicit `do` sequencing, and eval's named-axis route. `par` is
-/// fenced by chelis#2388 until its cross-lane effects are complete.
+/// fenced by chelis#2503 until its cross-lane effects are complete.
 ///
 /// Evidentiary status: REGRESSION TEST for the eval `grad_untaken`,
 /// `named_axis_untaken` and `named_axis_taken` rows: at dcc9256c4 eval

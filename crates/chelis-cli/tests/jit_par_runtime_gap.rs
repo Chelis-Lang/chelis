@@ -1,4 +1,4 @@
-//! Runtime-evaluator and C-backend coverage for `jit`, plus the chelis#2388
+//! Runtime-evaluator and C-backend coverage for `jit`, plus the chelis#2503
 //! checker fence for `par`.
 //!
 //! ## Background
@@ -21,7 +21,7 @@
 //! * §2.7 `jit` — compilation trigger, semantically a no-op at evaluation.
 //!   The runtime arm must return the value of the inner expression.
 //! * §2.3 `par` — scheduler-independent parallel evaluation. The construct is
-//!   currently rejected under chelis#2388.
+//!   currently rejected under chelis#2503.
 //!
 //! ## Fixtures
 //!
@@ -33,7 +33,7 @@
 //!   DAG-side regression.
 //! * `eval_jit_tensor_returns_inner_value` — `result = jit(to_tensor([..]))`
 //!   evals to the tensor (host runtime `jit` arm).
-//! * scalar and tensor `par` inputs both fail with the typed chelis#2388
+//! * scalar and tensor `par` inputs both fail with the typed chelis#2503
 //!   unsupported receipt before execution.
 //! * `build_c_jit_tensor_runs_and_prints_value` — generated C prints the
 //!   inner-tensor value (C-backend host-lane `jit` arm).
@@ -61,7 +61,7 @@ fn eval_file(path: &Path) -> (bool, String, String) {
 
 fn assert_par_fence(stderr: &str) {
     assert!(stderr.contains("unsupported: `par` expression"), "{stderr}");
-    assert!(stderr.contains("unimplemented chelis#2388"), "{stderr}");
+    assert!(stderr.contains("unimplemented chelis#2503"), "{stderr}");
     assert!(stderr.contains("not fully implemented"), "{stderr}");
 }
 
