@@ -1650,6 +1650,7 @@ pub fn try_lower_subexpr_program(
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn try_lower_subexpr_program_with_random_state(
     expr: &Expr,
     scoped_tensor_types: UnordMap<String, TensorType>,
@@ -1676,6 +1677,7 @@ pub fn try_lower_subexpr_program_with_random_state(
 /// Lower a subexpression while also returning the next unused Random stream
 /// ordinal. Host evaluators use this form when lowering a handled transform so
 /// random draws inside the transform advance the enclosing handler's stream.
+#[allow(clippy::too_many_arguments)]
 pub fn try_lower_subexpr_program_with_random_state_progress(
     expr: &Expr,
     scoped_tensor_types: UnordMap<String, TensorType>,
@@ -1768,6 +1770,7 @@ pub(crate) fn try_lower_subexpr_evaluation_plan_inner(
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn try_lower_subexpr_evaluation_with_ordered_inputs(
     expr: &Expr,
     scoped_types: Vec<(String, TensorType)>,
@@ -1797,6 +1800,7 @@ pub(crate) fn try_lower_subexpr_evaluation_with_ordered_inputs(
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn try_lower_tensor_helper_evaluation_with_ordered_inputs(
     expr: &Expr,
     scoped_types: Vec<(String, TensorType)>,
@@ -1826,6 +1830,7 @@ pub(crate) fn try_lower_tensor_helper_evaluation_with_ordered_inputs(
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn try_lower_subexpr_c_execution_with_ordered_inputs(
     expr: &Expr,
     scoped_types: Vec<(String, TensorType)>,
@@ -1855,6 +1860,7 @@ pub(crate) fn try_lower_subexpr_c_execution_with_ordered_inputs(
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn try_lower_tensor_helper_c_execution_with_ordered_inputs(
     expr: &Expr,
     scoped_types: Vec<(String, TensorType)>,
@@ -1885,6 +1891,7 @@ pub(crate) fn try_lower_tensor_helper_c_execution_with_ordered_inputs(
 }
 
 #[cfg(feature = "lowering-trace")]
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn try_lower_subexpr_c_execution_with_ordered_inputs_and_trace(
     expr: &Expr,
     scoped_types: Vec<(String, TensorType)>,
@@ -1924,6 +1931,7 @@ pub(crate) fn try_lower_subexpr_c_execution_with_ordered_inputs_and_trace(
 }
 
 #[cfg(feature = "lowering-trace")]
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn try_lower_tensor_helper_c_execution_with_ordered_inputs_and_trace(
     expr: &Expr,
     scoped_types: Vec<(String, TensorType)>,
@@ -2467,6 +2475,7 @@ pub(crate) fn try_lower_subexpr_program_with_context_and_random_state(
 /// Lower a helper with the input order assigned by its declaring signature.
 /// Input labels still map host arguments to slots; section 4.7 also observes
 /// those slots when more than one interface claim fails.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn try_lower_subexpr_program_with_ordered_inputs(
     expr: &Expr,
     scoped_bindings: Vec<(String, TensorType)>,
@@ -2496,6 +2505,7 @@ pub(crate) fn try_lower_subexpr_program_with_ordered_inputs(
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn try_lower_tensor_helper_program_with_ordered_inputs(
     expr: &Expr,
     scoped_bindings: Vec<(String, TensorType)>,
@@ -2526,6 +2536,7 @@ pub(crate) fn try_lower_tensor_helper_program_with_ordered_inputs(
 }
 
 #[cfg(feature = "lowering-trace")]
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn try_lower_subexpr_program_with_ordered_inputs_and_trace(
     expr: &Expr,
     scoped_bindings: Vec<(String, TensorType)>,
@@ -2557,6 +2568,7 @@ pub(crate) fn try_lower_subexpr_program_with_ordered_inputs_and_trace(
 }
 
 #[cfg(feature = "lowering-trace")]
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn try_lower_tensor_helper_program_with_ordered_inputs_and_trace(
     expr: &Expr,
     scoped_bindings: Vec<(String, TensorType)>,
@@ -2833,6 +2845,7 @@ enum LiteralResultClaimOwnership {
     AuthoredTensorHelper,
 }
 
+#[allow(clippy::too_many_arguments)]
 fn lower_subexpr_program_inner_impl(
     expr: &Expr,
     scoped_bindings: Vec<(String, TensorType)>,
