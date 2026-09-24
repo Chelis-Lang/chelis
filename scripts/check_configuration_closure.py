@@ -308,6 +308,20 @@ UNCOMPILED_EXCEPTIONS: tuple[UncompiledException, ...] = (
             "crates/chelis-types/tests/fixtures/runtime_extent_manifest/target_fixture.rs",
         ),
     ),
+    UncompiledException(
+        directory="crates/chelis-runtime-identity/fixtures/producer",
+        reason=(
+            "standalone crates copied into a temporary workspace and compiled "
+            "by the native producer contract"
+        ),
+        owning_gate="crates/chelis-runtime-identity/tests/producer_contract.rs",
+        sources=(
+            "crates/chelis-runtime-identity/fixtures/producer/bridge/src/lib.rs",
+            "crates/chelis-runtime-identity/fixtures/producer/input/build.rs",
+            "crates/chelis-runtime-identity/fixtures/producer/input/src/lib.rs",
+            "crates/chelis-runtime-identity/fixtures/producer/leaf/src/lib.rs",
+        ),
+    ),
 )
 
 
