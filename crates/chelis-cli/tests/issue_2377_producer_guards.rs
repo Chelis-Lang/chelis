@@ -179,7 +179,7 @@ fn assert_forwarded_insert_axis(native: bool) {
                             "{output}"
                         );
                     } else {
-                        let values = vec!["7.0"; 12].join(", ");
+                        let values = ["7.0"; 12].join(", ");
                         assert!(
                             output.contains(&format!(
                                 "out = tensor(shape=[{dims}], data=[{values}])"
