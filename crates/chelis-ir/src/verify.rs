@@ -801,117 +801,195 @@ fn verify_random_operands(dag: &Dag, node: &crate::dag::DagNode, errors: &mut Ve
     }
 }
 
-/// The key rules of `spec/design/randomness_counter_stream.md` §2. Every key
-/// is produced by a `DrawKey`, feeds at most one consuming random primitive
-/// whose controls, activation and dtype agree with the key's, and is otherwise
-/// read only by that primitive's AD replay nodes. A key reaching any other
-/// operation, a dependency list, or a root is rejected.
-fn verify_random_keys(dag: &Dag, errors: &mut Vec<String>) {
-    let key_slot = |op: &RiscOp| match op {
-        RiscOp::Dropout | RiscOp::DropoutReplay | RiscOp::UniformBoundAdjoint { .. } => Some(2),
-        RiscOp::UniformLike => Some(3),
-        _ => None,
-    };
-    let mut consumer = vec![None::<NodeId>; dag.len()];
-    for node in dag.nodes() {
-        let is_key = node.output_type.precision == Prim::Key;
-        if is_key != matches!(node.op, RiscOp::DrawKey { .. }) {
+/// A node's part in the key rules of [`verify_key_rules`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KeyRole {
+    /// A `DrawKey` for a `draw` of dtype `dtype`. A scoped handler's first
+    /// input is its seed; the draw's controls and optional activation follow.
+    DrawKey {
+        scoped: bool,
+        draw: crate::dag::RandomDraw,
+        dtype: Prim,
+    },
+    /// `Dropout`, which consumes the key at input 2.
+    Dropout,
+    /// `UniformLike`, which consumes the key at input 3.
+    UniformLike,
+    /// `DropoutReplay`, which reads its forward `Dropout`'s key at input 2.
+    DropoutReplay,
+    /// `UniformBoundAdjoint`, which reads its forward `UniformLike`'s key at
+    /// input 2.
+    UniformBoundAdjoint,
+    /// An operation that takes no key.
+    Other,
+}
+
+impl KeyRole {
+    fn key_slot(self) -> Option<usize> {
+        match self {
+            Self::Dropout | Self::DropoutReplay | Self::UniformBoundAdjoint => Some(2),
+            Self::UniformLike => Some(3),
+            Self::DrawKey { .. } | Self::Other => None,
+        }
+    }
+}
+
+/// The view of a graph that [`verify_key_rules`] reads. The IR [`Dag`]
+/// implements it, and so does the compiler API's decoded wire graph, so the
+/// key rules have one implementation on both sides of the codec. A node is
+/// named by its position; a position that names no node has no dtype.
+pub trait KeyGraph {
+    fn node_count(&self) -> usize;
+    fn role(&self, node: usize) -> KeyRole;
+    /// The dtype `node` produces, or `None` when no node or no known dtype.
+    fn dtype(&self, node: usize) -> Option<Prim>;
+    /// Whether two existing nodes produce the same tensor type.
+    fn same_type(&self, left: usize, right: usize) -> bool;
+    /// The node at `node`'s input `slot`, if the slot exists. Slots are
+    /// dense: the first missing slot ends the node's inputs.
+    fn input(&self, node: usize, slot: usize) -> Option<usize>;
+    /// The nodes `node` depends on without reading their values.
+    fn dependencies(&self, node: usize) -> impl Iterator<Item = usize> + '_;
+    fn roots(&self) -> impl Iterator<Item = usize> + '_;
+}
+
+impl KeyGraph for Dag {
+    fn node_count(&self) -> usize {
+        self.len()
+    }
+
+    fn role(&self, node: usize) -> KeyRole {
+        match self.get(NodeId(node)).map(|node| &node.op) {
+            Some(RiscOp::DrawKey {
+                handler,
+                draw,
+                dtype,
+            }) => KeyRole::DrawKey {
+                scoped: matches!(handler, crate::dag::RandomHandler::Scoped { .. }),
+                draw: *draw,
+                dtype: *dtype,
+            },
+            Some(RiscOp::Dropout) => KeyRole::Dropout,
+            Some(RiscOp::UniformLike) => KeyRole::UniformLike,
+            Some(RiscOp::DropoutReplay) => KeyRole::DropoutReplay,
+            Some(RiscOp::UniformBoundAdjoint { .. }) => KeyRole::UniformBoundAdjoint,
+            _ => KeyRole::Other,
+        }
+    }
+
+    fn dtype(&self, node: usize) -> Option<Prim> {
+        self.get(NodeId(node))
+            .map(|node| node.output_type.precision)
+    }
+
+    fn same_type(&self, left: usize, right: usize) -> bool {
+        match (self.get(NodeId(left)), self.get(NodeId(right))) {
+            (Some(left), Some(right)) => left.output_type == right.output_type,
+            _ => false,
+        }
+    }
+
+    fn input(&self, node: usize, slot: usize) -> Option<usize> {
+        Some(self.get(NodeId(node))?.inputs.get(slot)?.0)
+    }
+
+    fn dependencies(&self, node: usize) -> impl Iterator<Item = usize> + '_ {
+        self.get(NodeId(node))
+            .into_iter()
+            .flat_map(|node| node.shape_deps.iter().chain(&node.result_claim_deps))
+            .map(|dependency| dependency.0)
+    }
+
+    fn roots(&self) -> impl Iterator<Item = usize> + '_ {
+        Dag::roots(self).iter().map(|root| root.0)
+    }
+}
+
+/// The key rules of `spec/design/randomness_counter_stream.md` §2 and
+/// spec/10 §3.2. Every key is produced by a `DrawKey`, feeds at most one
+/// consuming random primitive whose controls, activation and dtype agree with
+/// the key's, and is otherwise read only by that primitive's AD replay nodes.
+/// A key reaching any other operation, a dependency list, or a root is
+/// rejected.
+pub fn verify_key_rules(graph: &impl KeyGraph, errors: &mut Vec<String>) {
+    let is_key = |node: usize| graph.dtype(node) == Some(Prim::Key);
+    let mut consumer = vec![None::<usize>; graph.node_count()];
+    for node in 0..graph.node_count() {
+        let role = graph.role(node);
+        if is_key(node) != matches!(role, KeyRole::DrawKey { .. }) {
             errors.push(format!(
-                "node {} {} a key, but only a draw key produces one",
-                node.id.0,
-                if is_key {
+                "node {node} {} a key, but only a draw key produces one",
+                if is_key(node) {
                     "produces"
                 } else {
                     "is a draw key that does not produce"
                 }
             ));
         }
-        for dependency in node.shape_deps.iter().chain(&node.result_claim_deps) {
-            if dag
-                .get(*dependency)
-                .is_some_and(|source| source.output_type.precision == Prim::Key)
-            {
+        for dependency in graph.dependencies(node) {
+            if is_key(dependency) {
                 errors.push(format!(
-                    "node {} takes key {} as a dependency",
-                    node.id.0, dependency.0
+                    "node {node} takes key {dependency} as a dependency"
                 ));
             }
         }
-        for (slot, input) in node.inputs.iter().enumerate() {
-            let Some(source) = dag.get(*input) else {
-                continue;
-            };
-            if source.output_type.precision != Prim::Key {
-                continue;
-            }
-            if key_slot(&node.op) != Some(slot) {
+        let inputs = (0..).map_while(|slot| graph.input(node, slot));
+        for (slot, input) in inputs.enumerate().filter(|(_, input)| is_key(*input)) {
+            if role.key_slot() != Some(slot) {
                 errors.push(format!(
-                    "key {} reaches {:?} at node {} input {slot}; only a random primitive consumes a key",
-                    input.0, node.op, node.id.0
+                    "key {input} reaches node {node} input {slot}; only a random primitive consumes a key"
                 ));
                 continue;
             }
-            if matches!(node.op, RiscOp::Dropout | RiscOp::UniformLike) {
-                if let Some(previous) = consumer[input.0].replace(node.id) {
+            if matches!(role, KeyRole::Dropout | KeyRole::UniformLike) {
+                if let Some(previous) = consumer[input].replace(node) {
                     errors.push(format!(
-                        "key {} is consumed twice, by nodes {} and {}",
-                        input.0, previous.0, node.id.0
+                        "key {input} is consumed twice, by nodes {previous} and {node}"
                     ));
                 }
-                verify_key_matches_consumer(source, node, errors);
+                verify_key_matches_consumer(graph, input, node, role, errors);
             }
         }
     }
-    for root in dag.roots() {
-        if dag
-            .get(*root)
-            .is_some_and(|node| node.output_type.precision == Prim::Key)
-        {
-            errors.push(format!("key {} is a graph root", root.0));
+    for root in graph.roots() {
+        if is_key(root) {
+            errors.push(format!("key {root} is a graph root"));
         }
     }
     // Replay reads: each must read a key whose one consumer is the matching
     // forward primitive, under the same rate or template type and activation.
-    for node in dag.nodes() {
-        let forward_kind = match node.op {
-            RiscOp::DropoutReplay => RiscOp::Dropout,
-            RiscOp::UniformBoundAdjoint { .. } => RiscOp::UniformLike,
+    for node in 0..graph.node_count() {
+        let forward_role = match graph.role(node) {
+            KeyRole::DropoutReplay => KeyRole::Dropout,
+            KeyRole::UniformBoundAdjoint => KeyRole::UniformLike,
             _ => continue,
         };
-        let Some(&key) = node.inputs.get(2) else {
+        let Some(key) = graph.input(node, 2) else {
             continue;
         };
-        let Some(forward) = consumer
-            .get(key.0)
-            .copied()
-            .flatten()
-            .and_then(|forward| dag.get(forward))
-        else {
+        let Some(forward) = consumer.get(key).copied().flatten() else {
             errors.push(format!(
-                "replay node {} reads key {} that no forward random primitive consumes",
-                node.id.0, key.0
+                "replay node {node} reads key {key} that no forward random primitive consumes"
             ));
             continue;
         };
-        let activation = |node: &crate::dag::DagNode, fixed: usize| node.inputs.get(fixed).copied();
-        let matches = forward.op == forward_kind
-            && match node.op {
-                RiscOp::DropoutReplay => {
-                    node.inputs.get(1) == forward.inputs.get(1)
-                        && node.output_type == forward.output_type
-                        && activation(node, 3) == activation(forward, 3)
+        let matches = graph.role(forward) == forward_role
+            && match forward_role {
+                KeyRole::Dropout => {
+                    graph.input(node, 1) == graph.input(forward, 1)
+                        && graph.same_type(node, forward)
+                        && graph.input(node, 3) == graph.input(forward, 3)
                 }
                 _ => {
-                    dag.get(node.inputs[0])
-                        .map(|template| &template.output_type)
-                        == Some(&forward.output_type)
-                        && activation(node, 3) == activation(forward, 4)
+                    graph
+                        .input(node, 0)
+                        .is_some_and(|template| graph.same_type(template, forward))
+                        && graph.input(node, 3) == graph.input(forward, 4)
                 }
             };
         if !matches {
             errors.push(format!(
-                "replay node {} changes its forward node {}'s mask contract",
-                node.id.0, forward.id.0
+                "replay node {node} changes its forward node {forward}'s mask contract"
             ));
         }
     }
@@ -920,36 +998,36 @@ fn verify_random_keys(dag: &Dag, errors: &mut Vec<String>) {
 /// A consumed key's `DrawKey` validates exactly the consumer's controls for
 /// the consumer's draw kind and dtype, under the consumer's activation.
 fn verify_key_matches_consumer(
-    key: &crate::dag::DagNode,
-    consumer: &crate::dag::DagNode,
+    graph: &impl KeyGraph,
+    key: usize,
+    consumer: usize,
+    consumer_role: KeyRole,
     errors: &mut Vec<String>,
 ) {
-    let RiscOp::DrawKey {
-        handler,
+    let KeyRole::DrawKey {
+        scoped,
         draw,
         dtype,
-    } = &key.op
+    } = graph.role(key)
     else {
         return;
     };
-    let (expected_draw, controls, fixed) = match consumer.op {
-        RiscOp::Dropout => (crate::dag::RandomDraw::Dropout, &consumer.inputs[1..2], 3),
-        _ => (
-            crate::dag::RandomDraw::UniformLike,
-            &consumer.inputs[1..3],
-            4,
-        ),
+    let (expected_draw, fixed) = match consumer_role {
+        KeyRole::Dropout => (crate::dag::RandomDraw::Dropout, 3),
+        _ => (crate::dag::RandomDraw::UniformLike, 4),
     };
-    let seed = usize::from(matches!(handler, crate::dag::RandomHandler::Scoped { .. }));
-    let key_controls = key.inputs.get(seed..seed + draw.control_count());
-    if *draw != expected_draw
-        || *dtype != consumer.output_type.precision
-        || key_controls != Some(controls)
-        || key.inputs.get(seed + draw.control_count()) != consumer.inputs.get(fixed)
+    let seed = usize::from(scoped);
+    let controls_match = (0..expected_draw.control_count()).all(|control| {
+        let expected = graph.input(consumer, 1 + control);
+        expected.is_some() && graph.input(key, seed + control) == expected
+    });
+    if draw != expected_draw
+        || graph.dtype(consumer) != Some(dtype)
+        || !controls_match
+        || graph.input(key, seed + draw.control_count()) != graph.input(consumer, fixed)
     {
         errors.push(format!(
-            "draw key {} does not validate the controls, dtype and activation of its consumer {}",
-            key.id.0, consumer.id.0
+            "draw key {key} does not validate the controls, dtype and activation of its consumer {consumer}"
         ));
     }
 }
@@ -3021,7 +3099,7 @@ fn verify_with_dangling_policy(dag: &Dag, reject_dangling: bool) -> Vec<String> 
         }
     }
 
-    verify_random_keys(dag, &mut errors);
+    verify_key_rules(dag, &mut errors);
 
     // chelis#1277 C4.1: every realized output axis has one checked extent
     // source. `verify` is one of the production paths this runs on, not the

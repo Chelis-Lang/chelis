@@ -3,6 +3,8 @@ use super::{
     WireDag, WireDagContractError, WireDagNode, WireDimExpr, WireDimInfo, WireExtentWitnessSite,
     WireFusedInput, WireRiscOp, WireRtAxis, WireRtDim, host_index, wire_dim_info_equal,
 };
+use chelis_ir::dag::RandomDraw;
+use chelis_ir::verify::{KeyGraph, KeyRole, verify_key_rules};
 use chelis_types::types::Prim;
 
 type Result<T> = std::result::Result<T, WireDagContractError>;
@@ -209,58 +211,92 @@ fn same_as_data_shape(template: &WireDagNode, cotangent: &WireDagNode) -> bool {
             .all(|(a, b)| wire_dim_info_equal(a, b))
 }
 
-/// spec/10 §3.2's key rules: every key is the output of a `DrawKey`, consumed
-/// by at most one `UniformLike` or `Dropout` and otherwise read only by that
-/// draw's adjoint replays, never by another operation, a shape dependency or
-/// the graph's roots.
-fn keys_are_consumed_once(dag: &WireDag) -> Result<()> {
-    let is_key = |id: &u64| {
-        usize::try_from(*id)
-            .ok()
-            .and_then(|index| dag.nodes.get(index))
-            .is_some_and(|source| source.output_type.precision == "key")
-    };
-    let mut consumed = std::collections::BTreeSet::new();
-    for node in &dag.nodes {
-        for (slot, id) in node.inputs.iter().enumerate() {
-            let index = usize::try_from(*id)
-                .map_err(|_| reject("input reference exceeds host capacity"))?;
-            let Some(source) = dag.nodes.get(index) else {
-                continue;
-            };
-            if source.output_type.precision != "key" {
-                continue;
-            }
-            let key_slot = match &node.op {
-                WireRiscOp::UniformLike {} => Some((3, true)),
-                WireRiscOp::Dropout {} => Some((2, true)),
-                WireRiscOp::DropoutReplay {} | WireRiscOp::UniformBoundAdjoint { .. } => {
-                    Some((2, false))
+/// spec/10 §3.2's key rules, applied by the IR verifier's own
+/// implementation over the decoded graph. Every reference has already been
+/// checked to name an earlier node, and every root a node of this graph.
+fn key_rules(dag: &WireDag) -> Result<()> {
+    let mut errors = Vec::new();
+    verify_key_rules(&DecodedKeys(dag), &mut errors);
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(reject(errors.join("; ")))
+    }
+}
+
+fn wire_position(id: u64) -> Option<usize> {
+    usize::try_from(id).ok()
+}
+
+/// The decoded graph as the key rules read it. A private view, so the rules
+/// add nothing to `WireDag`'s public surface.
+struct DecodedKeys<'a>(&'a WireDag);
+
+impl KeyGraph for DecodedKeys<'_> {
+    fn node_count(&self) -> usize {
+        self.0.nodes.len()
+    }
+
+    fn role(&self, node: usize) -> KeyRole {
+        match self.0.nodes.get(node).map(|node| &node.op) {
+            Some(WireRiscOp::DrawKey {
+                handler,
+                draw,
+                dtype,
+            }) => {
+                // `random_node` has already rejected a draw key whose dtype
+                // is not an active float. Were one to reach the rules, it
+                // would read as no draw key, and its key output would fail.
+                let Some(dtype) = Prim::parse_interchange_name(dtype) else {
+                    return KeyRole::Other;
+                };
+                KeyRole::DrawKey {
+                    scoped: matches!(handler, super::WireRandomHandler::Scoped { .. }),
+                    draw: match draw {
+                        super::WireRandomDraw::Dropout => RandomDraw::Dropout,
+                        super::WireRandomDraw::UniformLike => RandomDraw::UniformLike,
+                    },
+                    dtype,
                 }
-                _ => None,
-            };
-            match key_slot {
-                Some((expected, consumes)) if expected == slot => {
-                    if consumes && !consumed.insert(*id) {
-                        return Err(reject(
-                            "a key is consumed by more than one random operation",
-                        ));
-                    }
-                }
-                _ => return Err(reject("a key reaches an operation that does not take one")),
             }
-        }
-        if node.shape_deps.iter().any(is_key) {
-            return Err(reject("a key is never a shape dependency"));
-        }
-        if node.output_type.precision == "key" && !matches!(node.op, WireRiscOp::DrawKey { .. }) {
-            return Err(reject("only a draw key produces a key"));
+            Some(WireRiscOp::Dropout {}) => KeyRole::Dropout,
+            Some(WireRiscOp::UniformLike {}) => KeyRole::UniformLike,
+            Some(WireRiscOp::DropoutReplay {}) => KeyRole::DropoutReplay,
+            Some(WireRiscOp::UniformBoundAdjoint { .. }) => KeyRole::UniformBoundAdjoint,
+            _ => KeyRole::Other,
         }
     }
-    if dag.roots.iter().any(is_key) {
-        return Err(reject("a key is never a graph root"));
+
+    fn dtype(&self, node: usize) -> Option<Prim> {
+        Prim::parse_interchange_name(&self.0.nodes.get(node)?.output_type.precision)
     }
-    Ok(())
+
+    fn same_type(&self, left: usize, right: usize) -> bool {
+        match (self.0.nodes.get(left), self.0.nodes.get(right)) {
+            (Some(left), Some(right)) => {
+                left.output_type.precision == right.output_type.precision
+                    && same_as_data_shape(left, right)
+            }
+            _ => false,
+        }
+    }
+
+    fn input(&self, node: usize, slot: usize) -> Option<usize> {
+        wire_position(*self.0.nodes.get(node)?.inputs.get(slot)?)
+    }
+
+    fn dependencies(&self, node: usize) -> impl Iterator<Item = usize> + '_ {
+        self.0
+            .nodes
+            .get(node)
+            .into_iter()
+            .flat_map(|node| node.shape_deps.iter().copied())
+            .filter_map(wire_position)
+    }
+
+    fn roots(&self) -> impl Iterator<Item = usize> + '_ {
+        self.0.roots.iter().copied().filter_map(wire_position)
+    }
 }
 
 fn input_rank(dag: &WireDag, node: &WireDagNode, slot: usize) -> Option<usize> {
@@ -935,7 +971,6 @@ pub(super) fn validate(dag: &WireDag) -> Result<()> {
             _ => {}
         }
     }
-    keys_are_consumed_once(dag)?;
     if dag
         .roots
         .iter()
@@ -943,5 +978,5 @@ pub(super) fn validate(dag: &WireDag) -> Result<()> {
     {
         return Err(reject("root reference is outside the owning DAG"));
     }
-    Ok(())
+    key_rules(dag)
 }

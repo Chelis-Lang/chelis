@@ -148,7 +148,7 @@ fn a_key_is_consumed_once_and_only_by_a_random_primitive() {
     // A second primitive consuming the same key.
     let mut twice = dag.clone();
     twice["nodes"][uniform]["inputs"][3] = json!(dropout_key);
-    rejects_domain(&twice, "consumed by more than one");
+    rejects_domain(&twice, "is consumed twice");
 
     // A key read by an operation that takes none.
     let mut foreign = dag.clone();
@@ -159,7 +159,7 @@ fn a_key_is_consumed_once_and_only_by_a_random_primitive() {
         "op":{"kind":"neg"},"inputs":[dropout_key],
         "output_type":{"dims":[],"precision":"key"}}),
     );
-    rejects_domain(&foreign, "does not take one");
+    rejects_domain(&foreign, "only a random primitive consumes a key");
 
     // A key slot fed by something other than a draw key.
     let mut not_drawn = dag.clone();
@@ -189,22 +189,89 @@ fn a_key_is_drawn_and_never_a_root_or_a_dependency() {
         "op":{"kind":"load","name":"k"},"inputs":[],
         "output_type":{"dims":[],"precision":"key"}}),
     );
-    rejects_domain(&stray, "only a draw key produces a key");
+    rejects_domain(&stray, "only a draw key produces one");
 
     // The same stray key as a root.
     let mut stray_root = stray.clone();
     stray_root["roots"].as_array_mut().unwrap().push(json!(id));
-    rejects_domain(&stray_root, "only a draw key produces a key");
+    rejects_domain(&stray_root, "only a draw key produces one");
 
     // A consumed draw key as a root.
     let mut key_root = dag.clone();
     key_root["roots"].as_array_mut().unwrap().push(json!(key));
-    rejects_domain(&key_root, "a key is never a graph root");
+    rejects_domain(&key_root, "is a graph root");
 
     // A key as a shape dependency of its own consumer.
     let mut key_dependency = dag.clone();
     key_dependency["nodes"][dropout]["shape_deps"] = json!([key]);
-    rejects_domain(&key_dependency, "a key is never a shape dependency");
+    rejects_domain(&key_dependency, "as a dependency");
+}
+
+/// spec/10 §3.2: a key is read only by the draw that consumes it and that
+/// draw's replays, and a `DrawKey` carries its draw and that draw's controls.
+/// The codec applies the IR verifier's key rules, so it rejects each payload
+/// below exactly when `verify` would.
+///
+/// Evidentiary status: REGRESSION TEST. At 7d0b996ca `from_validated_json`
+/// accepted all five payloads.
+#[test]
+fn a_replay_reads_only_its_forward_draws_key_under_that_draws_controls() {
+    let source = concat!(
+        "def loss(x: tensor[4, f32]) -> f32 ! { Random } = tensor_to_scalar(sum(dropout(x, 0.5f32), 0i32))\n",
+        "def sample(x: tensor[4, f32]) -> (tensor[4, f32], tensor[4, f32]) = with seed(7i64) {\n",
+        "  dead = dropout(copy(x), 0.25f32)\n",
+        "  u = uniform_like(copy(x), 0.0f32, 1.0f32)\n",
+        "  g = grad(loss)(x)\n",
+        "  (g, u)\n",
+        "}\n"
+    );
+    let dag = lower(source, "sample");
+    accepts(&dag);
+    let replay = first(&dag, "dropout_replay");
+    let uniform = first(&dag, "uniform_like");
+    let forward_key = input(&dag, replay, 2);
+    let uniform_key = input(&dag, uniform, 3);
+    // The discarded dropout's key: scoped, and neither the replay's nor the
+    // uniform draw's.
+    let dead_key = dag["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .enumerate()
+        .position(|(id, node)| {
+            node["op"]["kind"] == "draw_key"
+                && node["op"]["handler"]["kind"] == "scoped"
+                && id != forward_key
+                && id != uniform_key
+        })
+        .expect("the discarded dropout keeps its scoped draw key");
+    let dead_rate = input(&dag, dead_key, 1);
+
+    let mut replay_reads_uniform_key = dag.clone();
+    replay_reads_uniform_key["nodes"][replay]["inputs"][2] = json!(uniform_key);
+    rejects_domain(&replay_reads_uniform_key, "changes its forward node");
+
+    let mut replay_changes_rate = dag.clone();
+    replay_changes_rate["nodes"][replay]["inputs"][1] = json!(dead_rate);
+    rejects_domain(&replay_changes_rate, "changes its forward node");
+
+    let mut key_validates_other_rate = dag.clone();
+    key_validates_other_rate["nodes"][forward_key]["inputs"][1] = json!(dead_rate);
+    rejects_domain(&key_validates_other_rate, "does not validate the controls");
+
+    let mut replay_reads_unconsumed_key = dag.clone();
+    replay_reads_unconsumed_key["nodes"][replay]["inputs"][2] = json!(dead_key);
+    rejects_domain(
+        &replay_reads_unconsumed_key,
+        "that no forward random primitive consumes",
+    );
+
+    let mut uniform_consumes_dropout_key = dag.clone();
+    uniform_consumes_dropout_key["nodes"][uniform]["inputs"][3] = json!(dead_key);
+    rejects_domain(
+        &uniform_consumes_dropout_key,
+        "does not validate the controls",
+    );
 }
 
 #[test]
