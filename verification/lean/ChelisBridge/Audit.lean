@@ -319,7 +319,8 @@ def accepted : List Name := [
   ``ChelisBridge.Numeric.artifactParts_unfold,
   ``ChelisBridge.Numeric.artifactRootsF_complete,
   ``ChelisBridge.Numeric.artifact_simulates,
-  ``ChelisBridge.Numeric.grad_observation
+  ``ChelisBridge.Numeric.grad_observation,
+  ``ChelisBridge.Numeric.compileGrad_real
 ]
 
 def allowedAxioms : List Name := [``propext, ``Classical.choice, ``Quot.sound]

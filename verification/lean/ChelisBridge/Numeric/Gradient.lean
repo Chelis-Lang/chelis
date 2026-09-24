@@ -257,4 +257,11 @@ theorem grad_observation {dt : DType} {source : Model.Dag} {entries : List Nat} 
     obtain ⟨d, hvd, hd⟩ := hq w _ hr
     exact ⟨d, hvd, by rw [hd, hprim]⟩
 
+/-- The realized Rust gradient, read in `ℝ`, is the real derivative of the source loss at the
+realized inputs: `fderiv ℝ p.eval (toReal ρq) dρ () = ⟨dρ, toReal (p.compileGrad.eval ρq)⟩`. -/
+theorem compileGrad_real {Γ : Context} (p : Program ℚ Γ []) (ρq : Values ℚ Γ) (dρ : Values ℝ Γ) :
+    fderiv ℝ p.eval (toReal ρq) dρ () = Values.dot dρ (toReal (p.compileGrad.eval ρq)) := by
+  rw [← circuit_eval_toReal]
+  exact p.compiledGrad_correct (toReal ρq) dρ
+
 end ChelisBridge.Numeric
