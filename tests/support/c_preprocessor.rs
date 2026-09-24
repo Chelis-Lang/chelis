@@ -166,6 +166,13 @@ pub fn preprocess_root(
             };
             continue;
         }
+        // Blank lines are the preprocessor's layout, not the header's content:
+        // Apple clang prints one after the final return-to-root linemarker and
+        // GCC does not (chelis#2326). Dropping them keeps the attributed text a
+        // function of the header rather than of the host preprocessor.
+        if line.trim().is_empty() {
+            continue;
+        }
         if let Some(name) = &current {
             let output = per_file.entry(name.clone()).or_default();
             output.push_str(line);
@@ -301,6 +308,24 @@ mod tests {
 
         assert_eq!(rows.get("root.h").map(String::as_str), Some(""));
         assert!(rows["detail/value.h"].contains("long long nested_value(void)"));
+    }
+
+    #[test]
+    fn preprocessor_blank_lines_are_not_attributed_content() {
+        // GCC and clang both keep a single blank source line, so this fails on
+        // either host preprocessor if blank lines reach the attribution.
+        let fixture = Fixture::new();
+        fixture.write(
+            "root.h",
+            "int first_value(void);\n\nint second_value(void);\n",
+        );
+
+        let rows = preprocess_root(&fixture.0, "root.h", &Environment::native_c()).unwrap();
+
+        assert_eq!(
+            rows.get("root.h").map(String::as_str),
+            Some("int first_value(void);\nint second_value(void);\n")
+        );
     }
 
     #[test]

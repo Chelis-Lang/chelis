@@ -925,7 +925,7 @@ class ListOutputTests(unittest.TestCase):
 
     def test_doctest_stage_is_in_the_local_subset(self):
         # The doctest stage costs well under a second and catches a broken
-        # oracles before push rather than in CI, so they belong in `--local`
+        # oracles before push rather than in CI, so they belong in `--validation`
         # too (chelis#875 and chelis#959).
         rendered = [gate.render(c) for c in gate.LOCAL_STATIC_COMMANDS]
         self.assertIn("cargo test -p chelis-types --doc", rendered)
@@ -1013,7 +1013,7 @@ class ListOutputTests(unittest.TestCase):
         # tests, which patch the command runners; the behavioral oracle never
         # reached a compiled binary. Hosted CI runs one `gate.py <stage>` per
         # job, so membership in a stage is what makes it continuous, and
-        # membership in the local subset is what makes it pre-push. Removing
+        # membership in the validation subset keeps it runnable locally. Removing
         # either turns the oracle dark silently, which is the exact failure
         # mode #1089 inventories -- hence an explicit lock.
         command = "<managed-python> scripts/unrepresentable_domain_oracle.py"
@@ -1064,7 +1064,7 @@ class ListOutputTests(unittest.TestCase):
         self.assertNotIn(
             command,
             [gate.render(entry) for entry in gate.LOCAL_STATIC_COMMANDS],
-            "the focused crate runs are CI-owned; --local already runs each changed crate",
+            "the focused crate runs are CI-owned; --validation already runs each changed crate",
         )
         script = REPO_ROOT / "scripts" / "compiler_front_end_performance.py"
         self.assertTrue(script.is_file())
@@ -1374,7 +1374,7 @@ class ListOutputTests(unittest.TestCase):
                 returncode=1,
                 launch_error=None,
                 duration=0.5,
-                stage_label="local",
+                stage_label="validation",
                 index=10,
                 total=10,
                 repo_root=Path("/w"),

@@ -5,7 +5,7 @@ Background (chelis#1568): every red-team brief in the 2026-09-02 fleet run
 asserted "the worktree is clean, the target is free" by transcribing the
 author's last status report. That is a claim about the past, and five
 collisions followed. In the worst one a reviewer entered a worktree where the
-author's `scripts/gate.py --local` had been running for five minutes, wrote a
+author's `scripts/gate.py` validation run had been going for five minutes, wrote a
 probe file, checked out an old revision over the working tree, and the gate
 run then failed at stage 6 of 24 on a compile error the reviewer had caused.
 
@@ -37,7 +37,7 @@ the checkout and must never print FREE.
 
 What this can and cannot prove
 ------------------------------
-A `--local` or full gate run is proven by the advisory lease, which is an
+A `--validation` or full gate run is proven by the advisory lease, which is an
 `fcntl.flock` the kernel releases only when the holder's last descriptor
 closes. That is authoritative. A `--fast` run and a `--no-lease` run take no
 lease, so they are caught instead by the process scan: `gate.py` spawns every

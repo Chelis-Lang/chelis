@@ -18498,11 +18498,9 @@ impl<'program> LowerCtx<'program> {
         LoweredValue::Tuple(kids.iter().map(|expr| self.lower_expr(expr)).collect())
     }
 
-    /// `(par {} expr1 expr2 ...)` -- v1 sequential composition per
-    /// `spec/03-deep-syntax.md` §2.3 ("Parallel evaluation (v1: sequential)").
-    /// Each child is lowered in order; the value of the last child is the
-    /// par's value. Intermediate children still contribute their nodes to the
-    /// DAG so any side-effecting operations (e.g. `realize`) are preserved.
+    /// Legacy sequential placeholder for `(par {} expr1 expr2 ...)`, retained
+    /// behind the chelis#2503 checker fence. No checked source program reaches
+    /// this path until scheduler-independent cross-lane effects are complete.
     fn lower_par(&mut self, kids: &[Expr]) -> LoweredValue {
         let mut last: Option<LoweredValue> = None;
         for expr in kids {
@@ -24688,8 +24686,8 @@ mod regression_tests {
     }
 
     #[test]
-    fn par_is_sequential_at_lowering() {
-        // Spec/03-deep-syntax.md §2.3: `par` v1 is sequential composition.
+    fn par_legacy_placeholder_is_sequential_at_lowering() {
+        // Internal placeholder behavior behind the chelis#2503 checker fence.
         // All children are lowered in order; the par's value is the value of
         // the last child. The DAG carries every intermediate child as well so
         // any side-effecting node (e.g. realize) is preserved.

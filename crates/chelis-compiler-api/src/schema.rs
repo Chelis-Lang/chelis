@@ -316,6 +316,13 @@ impl Diagnostic {
 impl Diagnostic {
     /// Project a check diagnostic onto the wire carrier.
     pub fn try_from_check_error(error: &chelis_types::errors::CheckError) -> Result<Self, String> {
+        if let chelis_types::errors::CheckErrorKind::UnsupportedFeature { unsupported } =
+            &error.kind
+        {
+            let mut diagnostic = Self::unsupported(unsupported.as_ref().clone());
+            diagnostic.suggestions = error.suggestions.clone();
+            return Ok(diagnostic);
+        }
         Ok(Self {
             kind: check_error_kind(&error.kind).as_str().to_owned(),
             message: error.message.clone(),
@@ -423,6 +430,7 @@ fn check_error_kind(kind: &chelis_types::errors::CheckErrorKind) -> DiagnosticKi
         K::BuiltinShadowing => DiagnosticKind::BuiltinShadowing,
         K::UnknownForm => DiagnosticKind::UnknownForm,
         K::MalformedForm => DiagnosticKind::MalformedForm,
+        K::UnsupportedFeature { .. } => DiagnosticKind::UnsupportedFeature,
         K::Other => DiagnosticKind::CheckOther,
     }
 }
@@ -4715,41 +4723,52 @@ mod diagnostic_projection_contract {
     use super::{Diagnostic, DiagnosticSpan, check_error_kind, effect_error_kind};
     use chelis_effects::EffectErrorKind as E;
     use chelis_types::errors::{CheckError, CheckErrorKind as K};
+    use chelis_types::unsupported::{Stage, Unsupported, UnsupportedKind};
 
     /// Every check kind, so the pin below covers the whole enum rather than
     /// the three a CLI fixture happens to provoke. Adding a variant does not
     /// compile until `check_error_kind` gains an arm, which lands the author
     /// here.
-    const ALL_CHECK_KINDS: [K; 24] = [
-        K::TypeMismatch,
-        K::PrecisionMismatch,
-        K::DimensionMismatch,
-        K::ArityMismatch,
-        K::UnboundVariable {
-            identifier: String::new(),
-        },
-        K::UnknownConstructor {
-            identifier: String::new(),
-        },
-        K::NotAFunction,
-        K::NonExhaustiveMatch,
-        K::OccursCheck,
-        K::CastNonTensor,
-        K::TupleIndexOutOfBounds,
-        K::UseAfterConsume,
-        K::UnconsumedLinear,
-        K::InvalidBorrow,
-        K::CycleDetected,
-        K::UnsupportedTensorPrecision,
-        K::DuplicateDefinition,
-        K::DuplicateModule,
-        K::OpaqueTypeViolation,
-        K::ReservedLinkerName,
-        K::BuiltinShadowing,
-        K::UnknownForm,
-        K::MalformedForm,
-        K::Other,
-    ];
+    fn all_check_kinds() -> Vec<K> {
+        vec![
+            K::TypeMismatch,
+            K::PrecisionMismatch,
+            K::DimensionMismatch,
+            K::ArityMismatch,
+            K::UnboundVariable {
+                identifier: String::new(),
+            },
+            K::UnknownConstructor {
+                identifier: String::new(),
+            },
+            K::NotAFunction,
+            K::NonExhaustiveMatch,
+            K::OccursCheck,
+            K::CastNonTensor,
+            K::TupleIndexOutOfBounds,
+            K::UseAfterConsume,
+            K::UnconsumedLinear,
+            K::InvalidBorrow,
+            K::CycleDetected,
+            K::UnsupportedTensorPrecision,
+            K::DuplicateDefinition,
+            K::DuplicateModule,
+            K::OpaqueTypeViolation,
+            K::ReservedLinkerName,
+            K::BuiltinShadowing,
+            K::UnknownForm,
+            K::MalformedForm,
+            K::UnsupportedFeature {
+                unsupported: Box::new(Unsupported::new(
+                    UnsupportedKind::Construct("test checker construct".to_string()),
+                    "the diagnostic projection contract",
+                    Stage::Checker,
+                    chelis_types::unimplemented_rejection!(2503, "test-only projection authority"),
+                )),
+            },
+            K::Other,
+        ]
+    }
 
     /// The published spellings, restated independently of the projection.
     ///
@@ -4782,6 +4801,7 @@ mod diagnostic_projection_contract {
             K::BuiltinShadowing => "BuiltinShadowing",
             K::UnknownForm => "UnknownForm",
             K::MalformedForm => "MalformedForm",
+            K::UnsupportedFeature { .. } => "unsupported_feature",
             K::Other => "Other",
         }
     }
@@ -4803,7 +4823,7 @@ mod diagnostic_projection_contract {
     /// vocabulary identity, at the spelling the report has always published.
     #[test]
     fn every_check_kind_projects_to_its_pinned_governed_spelling() {
-        for kind in &ALL_CHECK_KINDS {
+        for kind in &all_check_kinds() {
             assert_eq!(
                 check_error_kind(kind).as_str(),
                 expected_spelling(kind),
@@ -4821,7 +4841,7 @@ mod diagnostic_projection_contract {
     /// consumer reading both surfaces now sees two names for one kind.
     #[test]
     fn the_governed_identity_agrees_with_the_checkers_own_spelling() {
-        for kind in &ALL_CHECK_KINDS {
+        for kind in &all_check_kinds() {
             assert_eq!(
                 check_error_kind(kind).as_str(),
                 kind.diagnostic_name(),
@@ -4834,7 +4854,7 @@ mod diagnostic_projection_contract {
     /// wire, which is information loss a consumer cannot detect.
     #[test]
     fn the_projection_does_not_collapse_two_kinds_onto_one_identity() {
-        let mut identities: Vec<&str> = ALL_CHECK_KINDS
+        let mut identities: Vec<&str> = all_check_kinds()
             .iter()
             .map(|kind| check_error_kind(kind).as_str())
             .collect();

@@ -504,9 +504,6 @@ scrutinee type at all.
 > an unsuffixed float pattern against every float primitive, and §5.3's literal
 > default does not apply in pattern position.
 
-(Matching a float pattern at the scrutinee's width is not yet fully
-implemented: chelis#2438.)
-
 > **[04-PAT-2]** A `match` evaluates its scrutinee once and tries its arms in
 > declaration order. An arm is selected when its pattern matches the scrutinee
 > and its guard, if it has one, evaluates to `true`; the `match` evaluates to
@@ -800,6 +797,14 @@ Standard Algorithm W with extensions for tensor types. The flow:
 > precision variables remain polymorphic, independently declared rigid
 > dimensions remain distinct, and they unify only when an ordinary body
 > constraint requires equality.
+
+For a literal pattern against an unresolved flexible scrutinee, [04-PAT-1]
+is such an obligation. The lambda stays monomorphic until its first application
+determines the scrutinee type, and the pattern is then checked at that type.
+If no application determines it within the declaration, the declaration is a
+type error rather than a generalized literal-pattern function. An authored
+type binder is governed by [04-INF-6] and is checked at every admissible
+instantiation.
 
 An operation restriction on an inferred scalar-or-tensor operand constrains
 its numeric dtype; it does not turn a dtype-family bound into a family of
@@ -3409,6 +3414,13 @@ named operations if introduced. Behaviors are named operations, never modes.
 > validated descriptor is not a conforming substitute. A
 > boundary MAY reject a value outside the declared domain before crossing, but
 > it SHALL NOT narrow, clamp, wrap, or fabricate metadata to make it fit.
+> A compiled public entry SHALL compare the dtype tag of every tensor supplied
+> to it, including a tensor nested in a supplied value, with the declared dtype
+> before it reads that tensor's elements. A mismatch is a `Domain` trap in
+> `load` at the declared dtype under [04-NUM-9], accompanied by the input's
+> name and both dtypes; the supplied storage is never read at the declared
+> dtype. (Not fully implemented for a tensor nested in a supplied value,
+> chelis#2506, or for the HIP and Metal entries, chelis#2510.)
 
 > **[04-NUM-12]** A numeric trap's OCCURRENCE is deterministic within a
 > lane and is defined by that lane's documented evaluation order. For a

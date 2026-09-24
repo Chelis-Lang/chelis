@@ -2222,6 +2222,13 @@ impl CEmitter {
             self.line("abort();");
             self.indent -= 1;
             self.line("}");
+            for line in Self::entry_dtype_guard(
+                &format!("inputs[{slot}]"),
+                &format!("{func_name_fmt}: input `{label_fmt}`"),
+                ty,
+            ) {
+                self.line(&line);
+            }
             self.line(&format!(
                 "if (chelis_tensor_rank(inputs[{slot}]) != {}) {{",
                 Self::ndim(ty)
@@ -2431,6 +2438,56 @@ impl CEmitter {
             .runtime_dtype()
             .unwrap_or_else(|error| panic!("C backend does not support this tensor: {error}"))
             .c_macro()
+    }
+
+    /// [04-NUM-11]: an entry compares a supplied tensor's dtype tag with its
+    /// declared dtype before any element is read, and a mismatch traps
+    /// `Domain` in `load` at the declared dtype ([04-NUM-9]) after one context
+    /// line naming the input and both dtypes. The storage is never read at the
+    /// declared dtype. `input` is the sanitized context prefix that names the
+    /// input. The DAG entry and the host signature entry both render their
+    /// guard through this one function.
+    pub(crate) fn entry_dtype_guard(tensor: &str, input: &str, ty: &TensorType) -> [String; 5] {
+        let declared = ty.precision;
+        // The supplied tag has passed the runtime's own validation, so it is
+        // one of the runtime ABI's dtypes; each is spelled as its language
+        // dtype, the spelling the declared side uses.
+        let supplied = chelis_vocab::RuntimeDType::ALL
+            .iter()
+            .map(|dtype| {
+                let prim = Prim::ACTIVE_FLOATS
+                    .into_iter()
+                    .chain(Prim::ACTIVE_INTEGERS)
+                    .chain([Prim::Bool])
+                    .find(|prim| prim.runtime_dtype().is_ok_and(|mapped| mapped == *dtype))
+                    .expect("every runtime ABI dtype is a language dtype");
+                format!(
+                    "__chelis_supplied_dtype == {} ? \"{}\" : ",
+                    dtype.c_macro(),
+                    prim.name()
+                )
+            })
+            .collect::<String>();
+        let trap = NumericTrap::Domain {
+            op: "load",
+            prim: declared,
+        }
+        .to_string();
+        [
+            format!(
+                "if (chelis_tensor_read_view({tensor}).dtype != {}) {{",
+                Self::dtype_macro(ty)
+            ),
+            format!(
+                "    const chelis_dtype __chelis_supplied_dtype = chelis_tensor_read_view({tensor}).dtype;"
+            ),
+            format!(
+                "    fprintf(stderr, \"{input} expected dtype {}, got %s\\n\", {supplied}\"an unregistered dtype\");",
+                declared.name()
+            ),
+            format!("    chelis_numeric_trap({trap:?});"),
+            "}".to_string(),
+        ]
     }
 
     /// Returns the C element type for direct element access in generated loops.
@@ -9924,9 +9981,42 @@ mod tests {
             c.contains(&format!("int t{}_active = {gate};", key.0)),
             "{c}"
         );
-        assert!(c.contains("__chelis_scoped_counter_0++"), "{c}");
         assert!(!c.contains(&format!("((float*)t{}_data)[0] != 0.0f", activation.0)));
         assert!(!c.contains(&format!("((bool*)t{}_data)", activation.0)));
+        // An inactive draw neither takes the scoped counter's next ordinal
+        // nor reads its key (chelis#2410): both sit only inside their gates.
+        let counter = "__chelis_scoped_counter_0++";
+        assert_eq!(c.matches(counter).count(), 1, "{c}");
+        let key_gate = format!("if (t{}_active) {{", key.0);
+        assert!(guarded_block(&c, &key_gate).contains(counter), "{c}");
+        let sample = format!("chelis_uniform_sample_f32(t{}_key,", key.0);
+        assert_eq!(c.matches(&sample).count(), 1, "{c}");
+        let draw_gate = format!("if ({gate}) {{");
+        assert!(guarded_block(&c, &draw_gate).contains(&sample), "{c}");
+    }
+
+    /// The body of the one block `header` opens, up to its matching brace.
+    fn guarded_block<'a>(c: &'a str, header: &str) -> &'a str {
+        assert_eq!(
+            c.matches(header).count(),
+            1,
+            "{header} opens one block:\n{c}"
+        );
+        let start = c.find(header).unwrap() + header.len();
+        let mut depth = 1usize;
+        for (offset, byte) in c[start..].bytes().enumerate() {
+            match byte {
+                b'{' => depth += 1,
+                b'}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return &c[start..start + offset];
+                    }
+                }
+                _ => {}
+            }
+        }
+        panic!("{header} is never closed:\n{c}");
     }
 
     #[test]

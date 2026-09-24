@@ -52,6 +52,10 @@ def seal_compiled_artifacts(
             f"sealed cache publication artifact is a symlink: {destination}",
         )
         before = hashlib.sha256(source.read_bytes()).hexdigest()
+        # A Cargo output that Kache restored without reflinks is a hardlink
+        # to a read-only store blob, and copy2 carries that mode to the copy.
+        # Replace an earlier seal's copy instead of writing through it.
+        destination.unlink(missing_ok=True)
         shutil.copy2(source, destination)
         require(
             hashlib.sha256(destination.read_bytes()).hexdigest() == before,

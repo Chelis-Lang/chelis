@@ -4,6 +4,7 @@
 //! The extraction preserves control flow and diagnostic order.
 
 use super::*;
+use crate::unsupported::{SpanRef, Stage, Unsupported, UnsupportedKind};
 
 /// Exact ownership record for a root expression consumer that resolves its
 /// own `type:` metadata. `infer_let` uses this instead of inferring ownership
@@ -12,6 +13,40 @@ use super::*;
 pub(super) enum OwnedTypeMetadataResolution {
     Resolved(Type),
     Failed(ErrorWitness),
+}
+
+/// Keep the comparatively large typed rejection construction out of
+/// `infer_expr_with_type_metadata_ownership`'s recursive stack frame. The
+/// stack-depth guards are a hard checker boundary, so a fence that makes every
+/// unrelated recursive expression consume more stack would be a regression.
+fn report_par_fence(node: &DeepNode, source_span: &Span, errors: &mut DiagnosticSink<'_>) {
+    // Surf desugaring carries its authored location only as an opaque
+    // `span_id`; the structural Deep span remains the default 0/0. Do not
+    // publish that sentinel as a measured source range. Native Deep nodes do
+    // carry a non-empty structural range, which remains valid independently
+    // of any opaque identity attached to the node.
+    let (offset, len) = if source_span.len == 0 {
+        (None, None)
+    } else {
+        (Some(source_span.offset), Some(source_span.len))
+    };
+    let unsupported = Unsupported::new(
+        UnsupportedKind::Construct("`par` expression".to_string()),
+        "the Chelis execution surface while cross-lane `par` effects are incomplete",
+        Stage::Checker,
+        crate::unimplemented_rejection!(
+            2503,
+            "`par` is not fully implemented across evaluation and compiled lanes; \
+             use `do { ... }` when sequential evaluation is intended"
+        ),
+    )
+    .with_span(SpanRef {
+        offset,
+        len,
+        span_id: node_span_id(node).map(str::to_owned),
+    })
+    .with_supported_alternative("use `do { ... }` when sequential evaluation is intended");
+    errors.push(CheckError::from_unsupported(unsupported));
 }
 
 /// The whole of `copy`'s inference, in one place.
@@ -208,7 +243,7 @@ pub(super) fn infer_expr_with_type_metadata_ownership(
         deep::Expr::MetaExpr(meta, _) => {
             infer_expr(&meta.expr, env, vg, subst, adt_reg, errors, product)
         }
-        deep::Expr::Node(node, _) => {
+        deep::Expr::Node(node, source_span) => {
             // chelis#731 Phase 3 (checker_totality.md §C4.2): dispatch on
             // the typed closed vocabulary. A vocabulary node has the single
             // spelling `Expr::Node` whatever its ingress (chelis#1125). The
@@ -299,12 +334,16 @@ pub(super) fn infer_expr_with_type_metadata_ownership(
                     }
                 }
                 DeepTag::Par => {
-                    // par: evaluate all children, return type of last (v1: sequential)
+                    // chelis#2503: every source ingress is fenced until the
+                    // evaluator and compiled lanes preserve the same `par`
+                    // effects. Keep checking children so this fence does not
+                    // hide their independent diagnostics.
                     let kids = node.children_slice();
                     let mut last_ty = Type::Unit;
                     for kid in kids {
                         last_ty = infer_expr(kid, env, vg, subst, adt_reg, errors, product);
                     }
+                    report_par_fence(node, source_span, errors);
                     last_ty
                 }
                 DeepTag::Jit => {

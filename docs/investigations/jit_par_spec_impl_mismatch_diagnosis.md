@@ -4,6 +4,10 @@ Diagnosis pass for the bundled fix dispatched by
 `/home/jeff/.claude/plans/build-up-a-plan-mossy-meteor.md` (Agent 1 —
 D+E). Cross-references:
 
+Current status: chelis#2388 superseded the old `par` acceptance claim. The
+checker now fences the construct under chelis#2503 until its cross-lane effects
+are complete; the implementation record below remains historical.
+
 - Sweep findings: `docs/investigations/item2_sibling_sweep_findings.md`
   sections **G6** (`par`) and **G8** (`jit`).
 - Pinning tests: `crates/chelis-types/tests/jit_par_passthrough.rs`

@@ -254,7 +254,8 @@ fn printed_root(stdout: &str, root: &str) -> Vec<f64> {
 /// condition as its activation (chelis#2410). Every flag is computed from
 /// data, so no lane can fold it. Rows reach the arm inline, through helpers,
 /// a `match` on an ADT and on an integer, `grad`, nested arms, both arms
-/// drawing, `par`, and eval's named-axis route.
+/// drawing, explicit `do` sequencing, and eval's named-axis route. `par` is
+/// fenced by chelis#2503 until its cross-lane effects are complete.
 ///
 /// Evidentiary status: REGRESSION TEST for the eval `grad_untaken`,
 /// `named_axis_untaken` and `named_axis_taken` rows: at dcc9256c4 eval
@@ -394,11 +395,11 @@ fn a_dropout_in_an_unselected_runtime_arm_takes_no_ordinal_in_eval_or_c() {
             vec![reference_dropout(7, 0, 8, 0.25), mask(1)],
         ),
         (
-            "par_untaken",
+            "do_untaken",
             format!(
                 "{layer}{}",
                 handled(&format!(
-                    "    {not_training}\n    p = par {{ layer(copy(x), training); layer(copy(x), training) }}\n    z = dropout(x, 0.5f32)\n    (p, z)\n"
+                    "    {not_training}\n    p = do {{ layer(copy(x), training); layer(copy(x), training) }}\n    z = dropout(x, 0.5f32)\n    (p, z)\n"
                 ))
             ),
             vec![kept.clone(), mask(0)],

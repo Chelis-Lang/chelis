@@ -440,7 +440,7 @@ This file. All design forks resolved before implementation.
 
 - Python `scripts/unrepresentable_domain_oracle.py` (behavioral) - the
   authoritative oracle, run by `scripts/gate.py`'s `integration` stage
-  (`heavy-e2e.yml` nightly/manual `integration-support` worker) and its `--local` subset, and locked
+  (`heavy-e2e.yml` nightly/manual `integration-support` worker) and its `--validation` subset, and locked
   there by `scripts/test_gate.py`. Acceptance is exit 0 with a final
   `ORACLE: PASS` line.
 - Python `scripts/test_unrepresentable_domain_oracle.py` (unit tests).
@@ -497,7 +497,7 @@ top-level forms, and [03-PROG-2] states the rejection contract. Chapter
 top-level role restriction at all.
 
 **The oracle is `scripts/unrepresentable_domain_oracle.py`**, wired into
-`scripts/gate.py`'s `integration` stage and its `--local` pre-push subset.
+`scripts/gate.py`'s `integration` stage and its optional `--validation` subset.
 Hosted CI runs that stage in the `integration-support` matrix of
 `heavy-e2e.yml`, daily at 03:17 UTC and on manual dispatch. Ordinary PRs
 do not run this exhaustive oracle.

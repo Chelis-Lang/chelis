@@ -2355,8 +2355,8 @@ fn signature_entry_lines(
         ));
     }
     let mut lines = Vec::new();
-    // No extent read may obscure a malformed external input's rank/null
-    // diagnostic. These metadata checks dominate the ordered comparisons.
+    // No extent read may obscure a malformed external input's null, dtype or
+    // rank diagnostic. These metadata checks dominate the ordered comparisons.
     for (node, actual) in plan.observations().nodes().iter().zip(args) {
         let RiscOp::Load { name } = &node.op else {
             unreachable!("signature observation")
@@ -2364,6 +2364,11 @@ fn signature_entry_lines(
         let label = chelis_ir::span_sanitize::sanitize_for_format_string(name.as_str());
         let rank = node.output_type.dims.len();
         lines.push(format!("{indent}if ({actual} == NULL) {{ fprintf(stderr, \"input `{label}` is NULL\\n\"); abort(); }}"));
+        lines.extend(
+            CEmitter::entry_dtype_guard(actual, &format!("input `{label}`"), &node.output_type)
+                .into_iter()
+                .map(|line| format!("{indent}{line}")),
+        );
         lines.push(format!("{indent}if (chelis_tensor_rank({actual}) != {rank}) {{ fprintf(stderr, \"input `{label}` expected rank {rank}, got %d\\n\", chelis_tensor_rank({actual})); abort(); }}"));
     }
     let read = |(load, axis): (chelis_ir::NodeId, usize)| {
@@ -4066,58 +4071,84 @@ impl<'a> HostEmitter<'a> {
         Ok(())
     }
 
-    /// Emit one verified owner's scheduled terminal in a physical block.
+    /// Emit the terminals a site's verified schedule places in the entry block
+    /// of one of its control regions (an `if` or match arm, or a loop body),
+    /// at that entry, right after the region binds its payloads or loop item.
     ///
-    /// A nested source expression can move control to child blocks before the
-    /// parent site's completion jump.  Its parent-owned terminals still need
-    /// to run after that child expression on the selected path, even when the
-    /// completion block differs from the arm's entry block.
-    fn emit_expression_block_terminal_for_owner(
+    /// The schedule puts a terminal right after its owner's last use, so a
+    /// payload nothing reads, or a scrutinee whose last use is the payload
+    /// extraction, is released in the region's entry block. When the region's
+    /// body has control flow of its own, the region completes in a later block,
+    /// and the completion pass sees only that block: such a terminal was never
+    /// emitted in a match arm (chelis#2485, chelis#2458), and a loop emitted it
+    /// after the loop, outside the item's C scope. A region that completes in
+    /// its entry block is left to the completion pass, which emits the same
+    /// terminals after the body. Every region entry goes through here, including
+    /// those where lowering places no site action today (`if` arms, `None`
+    /// arms, the default ADT arm), so no entry can drop a terminal silently.
+    fn emit_region_entry_terminals(
         &mut self,
         site: &ProjectedHostSite<'a>,
-        block: VerifiedBlockId,
-        expected_owner: VerifiedOwnerId,
+        entry: VerifiedBlockId,
+        completion: VerifiedBlockId,
     ) -> Result<(), Unsupported> {
+        if entry == completion {
+            return Ok(());
+        }
         for action in &site.directives {
+            if !Self::action_is_in_block(action, entry) {
+                continue;
+            }
             match action {
+                // The region's own binders, bound by `bind_match_payload` and
+                // `bind_loop_item` before this runs.
+                VerifiedHostAction::Operation(VerifiedHostOperation::Apply {
+                    dest: Some(_),
+                    label,
+                    ..
+                }) if label.starts_with("option_payload") || label.starts_with("adt_payload") => {}
+                VerifiedHostAction::Operation(VerifiedHostOperation::LoopItem { .. }) => {}
                 VerifiedHostAction::Operation(VerifiedHostOperation::Drop {
                     operation,
-                    block: owner_block,
                     owner,
                     ..
-                }) if *owner_block == block
-                    && owner.owner().id() == expected_owner
-                    && !self.pre_emitted_terminals.contains(&(site.id, *operation)) =>
-                {
-                    self.emit_owner_drop(owner.owner())?;
-                    self.pre_emitted_terminals.insert((site.id, *operation));
+                }) => {
+                    if self.pre_emitted_terminals.insert((site.id, *operation)) {
+                        self.emit_owner_drop(owner.owner())?;
+                    }
                 }
                 VerifiedHostAction::Operation(VerifiedHostOperation::Discard {
-                    operation,
-                    block: owner_block,
-                    owner,
-                    ..
-                }) if *owner_block == block && owner.id() == expected_owner => {
+                    operation, ..
+                }) => {
                     self.pre_emitted_terminals.insert((site.id, *operation));
                 }
-                _ => {}
+                other => {
+                    return Err(invalid_abi_shape(
+                        format!(
+                            "verified control-region entry block {entry:?}, which completes in {completion:?}, carries an action the C emitter cannot place at the region entry: {other:?}"
+                        ),
+                        "verified C host ownership emission",
+                    ));
+                }
             }
         }
         Ok(())
     }
 
+    /// Bind the loop item and emit the terminals scheduled in the loop body's
+    /// entry block ([`Self::emit_region_entry_terminals`]).
     fn bind_loop_item(
         &mut self,
         site: &ProjectedHostSite<'a>,
         emitted_var: &str,
     ) -> Result<(), Unsupported> {
         let mut items = site.directives.iter().filter_map(|action| match action {
-            VerifiedHostAction::Operation(VerifiedHostOperation::LoopItem { dest, .. }) => {
-                Some(*dest)
-            }
+            VerifiedHostAction::Operation(VerifiedHostOperation::LoopItem {
+                dest, block, ..
+            }) => Some((*dest, *block)),
             _ => None,
         });
-        let Some(owner) = items.next() else {
+        let Some((owner, entry)) = items.next() else {
             return Err(invalid_abi_shape(
                 "verified list-loop site has no typed loop-item action".to_string(),
                 "verified C host ownership emission",
@@ -4130,7 +4161,8 @@ impl<'a> HostEmitter<'a> {
             ));
         }
         self.owner_vars.insert(owner.id(), emitted_var.to_string());
-        Ok(())
+        let (_, completion) = Self::loop_blocks(site)?;
+        self.emit_region_entry_terminals(site, entry, completion)
     }
 
     /// Bind a verified pattern-payload owner to the C variable that holds the
@@ -4773,6 +4805,7 @@ impl<'a> HostEmitter<'a> {
                 let nested_indent = format!("{}    ", self.indent);
                 let previous = std::mem::replace(&mut self.indent, nested_indent);
                 self.emit_edge_terminals(site.id, &then_edge)?;
+                self.emit_region_entry_terminals(site, then_edge.target(), then_block)?;
                 self.claim_on_spine = on_result_spine;
                 self.assign_expr(target, then_expr, ty)?;
                 self.emit_expression_block_actions(site, then_block, target)?;
@@ -4781,6 +4814,7 @@ impl<'a> HostEmitter<'a> {
                 let nested_indent = format!("{}    ", self.indent);
                 let previous = std::mem::replace(&mut self.indent, nested_indent);
                 self.emit_edge_terminals(site.id, &else_edge)?;
+                self.emit_region_entry_terminals(site, else_edge.target(), else_block)?;
                 self.claim_on_spine = on_result_spine;
                 self.assign_expr(target, else_expr, ty)?;
                 self.emit_expression_block_actions(site, else_block, target)?;
@@ -4796,17 +4830,14 @@ impl<'a> HostEmitter<'a> {
                 ty: expr_ty,
             } => {
                 require_same_abi_type(ty, expr_ty, "option match")?;
-                let (scrutinee_owner, some_edge, none_edge) = site
+                let (some_edge, none_edge) = site
                     .directives
                     .iter()
                     .find_map(|action| match action {
                         VerifiedHostAction::Terminator(VerifiedHostTerminator::Match {
-                            scrutinee,
                             arms,
                             ..
-                        }) if arms.len() == 2 => {
-                            Some((scrutinee.owner().id(), arms[0].clone(), arms[1].clone()))
-                        }
+                        }) if arms.len() == 2 => Some((arms[0].clone(), arms[1].clone())),
                         _ => None,
                     })
                     .ok_or_else(|| {
@@ -4878,13 +4909,9 @@ impl<'a> HostEmitter<'a> {
                 // keeps emitted C unchanged for every program that does not
                 // shadow: a reference to it dead-ends exactly as it does
                 // today.
+                self.emit_region_entry_terminals(site, some_edge.target(), arm_blocks.0)?;
                 self.claim_on_spine = on_result_spine;
                 self.assign_expr(target, some_expr, ty)?;
-                self.emit_expression_block_terminal_for_owner(
-                    site,
-                    some_edge.target(),
-                    scrutinee_owner,
-                )?;
                 self.emit_expression_block_actions(site, arm_blocks.0, target)?;
                 if shadowed_interface_global {
                     self.interface_reload_names.insert(bind_name.clone());
@@ -4894,13 +4921,9 @@ impl<'a> HostEmitter<'a> {
                 let nested_indent = format!("{}    ", self.indent);
                 let previous = std::mem::replace(&mut self.indent, nested_indent);
                 self.emit_edge_terminals(site.id, &none_edge)?;
+                self.emit_region_entry_terminals(site, none_edge.target(), arm_blocks.1)?;
                 self.claim_on_spine = on_result_spine;
                 self.assign_expr(target, none_expr, ty)?;
-                self.emit_expression_block_terminal_for_owner(
-                    site,
-                    none_edge.target(),
-                    scrutinee_owner,
-                )?;
                 self.emit_expression_block_actions(site, arm_blocks.1, target)?;
                 self.indent = previous;
                 self.lines.push(format!("{}}}", self.indent));
@@ -8228,6 +8251,7 @@ impl<'a> HostEmitter<'a> {
                     shadowed_interface_globals.push(binding.name.clone());
                 }
             }
+            self.emit_region_entry_terminals(site, arm_edges[index].target(), arm_blocks[index])?;
             self.claim_on_spine = on_result_spine;
             self.assign_expr(target, &arm.expr, expr_ty)?;
             self.emit_expression_block_actions(site, arm_blocks[index], target)?;
@@ -8241,6 +8265,11 @@ impl<'a> HostEmitter<'a> {
         let previous = std::mem::replace(&mut self.indent, nested_indent);
         if let Some(default_expr) = default_expr {
             self.emit_edge_terminals(site.id, &arm_edges[arms.len()])?;
+            self.emit_region_entry_terminals(
+                site,
+                arm_edges[arms.len()].target(),
+                arm_blocks[arms.len()],
+            )?;
             self.claim_on_spine = on_result_spine;
             self.assign_expr(target, default_expr, expr_ty)?;
             self.emit_expression_block_actions(site, arm_blocks[arms.len()], target)?;

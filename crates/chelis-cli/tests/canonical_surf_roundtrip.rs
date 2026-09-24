@@ -51,18 +51,10 @@ fn surf_command_reports_macro_expansion_failure() {
         .stderr(predicate::str::contains("macro expansion limit exceeded"));
 }
 
-#[test]
-fn macro_program_round_trips_after_expansion_modulo_derived_metadata() {
+fn assert_macro_roundtrip(source: &str) {
     let directory = tempdir().expect("tempdir");
     let authored = directory.path().join("authored.ch");
-    fs::write(
-        &authored,
-        concat!(
-            "macro bump(x) = add(x, 1)\n",
-            "def apply(x: i32) -> i32 = bump(x)\n",
-        ),
-    )
-    .expect("write fixture");
+    fs::write(&authored, source).expect("write fixture");
 
     let original_deep = Command::cargo_bin("chelis")
         .expect("binary")
@@ -110,6 +102,26 @@ fn macro_program_round_trips_after_expansion_modulo_derived_metadata() {
                 .expect("valid metadata for round-trip normalization"),
         )
     );
+}
+
+#[test]
+fn macro_program_round_trips_after_expansion_modulo_derived_metadata() {
+    assert_macro_roundtrip(concat!(
+        "macro bump(x) = add(x, 1)\n",
+        "def apply(x: i32) -> i32 = bump(x)\n",
+    ));
+}
+
+#[test]
+fn a_hygienized_typed_vocabulary_binder_round_trips_after_expansion() {
+    assert_macro_roundtrip(concat!(
+        "macro add_one(v) = (fn (record: f32) -> add(record, v))(1.0f32)\n",
+        "def run(record: f32) -> f32 = {\n",
+        "  result: f32 = add_one(record)\n",
+        "  result\n",
+        "}\n",
+        "out = run(10.0f32)\n",
+    ));
 }
 
 #[test]

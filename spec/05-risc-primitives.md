@@ -1003,7 +1003,8 @@ compile-time-only alias.
 > u_i` to `high`, with every primitive executed at `p`'s declared arithmetic
 > width and each scalar contribution combined by the canonical adjacent-pair
 > balanced tree. The sampled `u_i` values are the exact forward values at that
-> arithmetic width. It has no accumulator parameter.
+> arithmetic width. It has no accumulator parameter. The internal
+> `UniformBoundAdjoint` identity has this cotangent contract for each bound.
 
 > **[05-OP-37]** `dropout(input, rate) -> result` admits every active float
 > dtype `p`, requires `input: &tensor[D,p]` and a scalar `rate: p`, and returns
@@ -1036,7 +1037,8 @@ compile-time-only alias.
 > `stop_gradient` does not count), `grad` rejects with
 > `AdRejectionReason::RandomSelectionParameter`; otherwise the rate receives
 > the exact zero cotangent. The mask comparison itself has zero cotangent.
-> The operation has no accumulator parameter.
+> The operation has no accumulator parameter. The internal `DropoutReplay`
+> identity has this input cotangent contract.
 
 > **[05-RNG-1]** Every conforming evaluation of a `with seed(N)` program
 > produces byte-identical random results for the same seed, dynamic

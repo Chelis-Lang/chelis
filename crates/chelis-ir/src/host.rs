@@ -7937,16 +7937,15 @@ fn lower_host_expr_kind(
             )?
         }
         Expr::Node(list, _) if list.tag() == DeepTag::Par => {
-            // `spec/03-deep-syntax.md` §2.3: par v1 is sequential
-            // composition. Lower the children in order and bind the value
-            // of the last child as the par's value, mirroring `lower_par`
-            // in `crates/chelis-ir/src/lower.rs`. We do not currently
+            // Legacy sequential placeholder retained behind the chelis#2503
+            // checker fence. No checked source program reaches this path
+            // while cross-lane `par` effects remain incomplete. We do not
             // thread intermediate children through a sequence node; if
             // they have side effects (e.g. `print`, `realize`), those
             // primitives have their own host-lane arms and the emitted C
             // will reach them through whatever scope the par appears in.
-            // A future change can introduce a HostExpr::Sequence kind if
-            // par needs to preserve non-IO side effects across children.
+            // Removing the fence requires a representation that preserves
+            // every non-final child's effects, not this last-value fold.
             //
             // Without this arm par fell through to `HostExpr::Unit`, so
             // `result = par {..; to_tensor(..)}` emitted
@@ -9021,6 +9020,18 @@ fn lower_match_host_expr(
     } else {
         explicit
     };
+    // The decision below draws its scrutinee, payload and field names only
+    // now, and a match nested in an arm drew its own names from a separate
+    // supply that could not see these. A shared name lets the nested binder
+    // shadow this match's owner in C, so a release of this match's payload
+    // inside the nested arm named the nested value instead (chelis#2485's
+    // `option-nested-string`).
+    for arm in &arms {
+        names.avoid_lowered(&arm.body);
+        if let Some(guard) = &arm.guard {
+            names.avoid_lowered(guard);
+        }
+    }
     let scrutinee_name = names.fresh("__chelis_match_scrutinee");
     let scrutinee_var = HostExpr::new(HostExprKind::Var(
         scrutinee_name.clone(),
@@ -9475,6 +9486,131 @@ impl HostMatchNameSupply {
         self.avoid.insert(name.clone());
         name
     }
+
+    /// Avoid every name `expr` binds or reads, once it has lowered.
+    fn avoid_lowered(&mut self, expr: &HostExpr) {
+        collect_lowered_host_names(expr, &mut self.avoid);
+    }
+}
+
+/// Every name a lowered host expression binds or reads: the avoid-set feeder
+/// for names drawn after that expression lowered, as
+/// [`collect_occurring_names`] is for names drawn from source.
+fn collect_lowered_host_names(expr: &HostExpr, out: &mut UnordSet<String>) {
+    match &expr.kind {
+        HostExprKind::Var(name, _) => {
+            out.insert(name.clone());
+        }
+        HostExprKind::Int(_)
+        | HostExprKind::Float(_)
+        | HostExprKind::Bool(_)
+        | HostExprKind::String(_)
+        | HostExprKind::Unit => {}
+        HostExprKind::ResultClaimScope { body, .. } => collect_lowered_host_names(body, out),
+        HostExprKind::FormalIngress { value, .. } => collect_lowered_host_names(value, out),
+        HostExprKind::AdtFieldAccess { base, .. } => collect_lowered_host_names(base, out),
+        HostExprKind::SignatureEntry { args, .. }
+        | HostExprKind::List(args, _)
+        | HostExprKind::Tuple(args, _)
+        | HostExprKind::Call { args, .. }
+        | HostExprKind::Builtin { args, .. }
+        | HostExprKind::AdtConstruct { fields: args, .. }
+        | HostExprKind::TensorCall { args, .. } => {
+            for arg in args {
+                collect_lowered_host_names(arg, out);
+            }
+        }
+        HostExprKind::If {
+            cond,
+            then_expr,
+            else_expr,
+            ..
+        } => {
+            collect_lowered_host_names(cond, out);
+            collect_lowered_host_names(then_expr, out);
+            collect_lowered_host_names(else_expr, out);
+        }
+        HostExprKind::MatchOption {
+            scrutinee,
+            bind_name,
+            some_expr,
+            none_expr,
+            ..
+        } => {
+            out.insert(bind_name.clone());
+            collect_lowered_host_names(scrutinee, out);
+            collect_lowered_host_names(some_expr, out);
+            collect_lowered_host_names(none_expr, out);
+        }
+        HostExprKind::MatchAdt {
+            scrutinee,
+            arms,
+            default_expr,
+            ..
+        } => {
+            collect_lowered_host_names(scrutinee, out);
+            for arm in arms {
+                for binding in &arm.bindings {
+                    out.insert(binding.name.clone());
+                }
+                collect_lowered_host_names(&arm.expr, out);
+            }
+            if let Some(default_expr) = default_expr {
+                collect_lowered_host_names(default_expr, out);
+            }
+        }
+        HostExprKind::Let { bindings, body, .. }
+        | HostExprKind::RetainedInvocation { bindings, body, .. } => {
+            for binding in bindings {
+                out.insert(binding.name.clone());
+                collect_lowered_host_names(&binding.value, out);
+            }
+            collect_lowered_host_names(body, out);
+        }
+        HostExprKind::Map { callback, list, .. }
+        | HostExprKind::Filter { callback, list, .. }
+        | HostExprKind::Partition { callback, list, .. }
+        | HostExprKind::FlatMap { callback, list, .. } => {
+            collect_lowered_callback_names(callback, out);
+            collect_lowered_host_names(list, out);
+        }
+        HostExprKind::Fold {
+            callback,
+            init,
+            list,
+            ..
+        }
+        | HostExprKind::Scan {
+            callback,
+            init,
+            list,
+            ..
+        } => {
+            collect_lowered_callback_names(callback, out);
+            collect_lowered_host_names(init, out);
+            collect_lowered_host_names(list, out);
+        }
+        HostExprKind::WithSeed { seed, body, .. } => {
+            collect_lowered_host_names(seed, out);
+            collect_lowered_host_names(body, out);
+        }
+    }
+}
+
+fn collect_lowered_callback_names(callback: &HostCallback, out: &mut UnordSet<String>) {
+    match &callback.kind {
+        HostCallbackKind::Named { params, .. } => {
+            for param in params {
+                out.insert(param.name.clone());
+            }
+        }
+        HostCallbackKind::Inline { params, body } => {
+            for param in params {
+                out.insert(param.name.clone());
+            }
+            collect_lowered_host_names(body, out);
+        }
+    }
 }
 
 fn plan_host_pattern(
@@ -9886,6 +10022,18 @@ fn host_literal_expr(expr: &Expr, expected_ty: &HostTypeTerm) -> Option<HostExpr
     match (expr, expected_ty) {
         (Expr::Atom(Atom::Int(value), _), &HostTypeTerm::Int64) => {
             Some(HostExpr::new(HostExprKind::Int(*value)))
+        }
+        (
+            Expr::Atom(Atom::Float(value), _),
+            HostTypeTerm::Scalar(HostPrecisionTerm::Concrete(prim)),
+        ) if prim.is_float() && *prim != Prim::F64 => {
+            // A pattern's raw f64 atom denotes a literal at the scrutinee's
+            // width ([04-PAT-1]), just like a checked expression literal.
+            Some(HostExpr::new(HostExprKind::Builtin {
+                name: "cast".to_string(),
+                args: vec![HostExpr::new(HostExprKind::Float(*value))],
+                ty: expected_ty.clone(),
+            }))
         }
         (Expr::Atom(Atom::Float(value), _), &HostTypeTerm::Float64) => {
             Some(HostExpr::new(HostExprKind::Float(*value)))

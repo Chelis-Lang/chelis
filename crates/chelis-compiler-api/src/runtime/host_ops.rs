@@ -70,7 +70,10 @@ pub(super) fn pattern_matches_with_result_producer(
                 (RuntimeValue::Scalar(payload), Expr::Atom(Atom::Float(rhs), _))
                     if payload.dtype().is_float() =>
                 {
-                    payload.as_f64_lossy() == *rhs
+                    let pattern = scalar_from_f64("literal", payload.dtype(), *rhs)
+                        .map_err(|error| error.to_string())?;
+                    compare_scalars(CompareOp::Eq, payload.value(), pattern)
+                        .map_err(|error| error.to_string())?
                 }
                 (RuntimeValue::Bool(lhs), Expr::Atom(Atom::Bool(rhs), _)) => lhs == rhs,
                 (RuntimeValue::String(lhs), Expr::Atom(Atom::Str(rhs), _)) => lhs == rhs,

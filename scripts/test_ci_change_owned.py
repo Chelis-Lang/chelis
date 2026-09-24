@@ -476,7 +476,7 @@ class SchemaTests(unittest.TestCase):
             owned.Identity("chelis-types", "issue_1294_standard_lowerings"),
         } <= set(config.standing_targets))
         self.assertEqual(len(config.target_exclusions), 4)
-        self.assertEqual(len(config.test_exclusions), 14)
+        self.assertEqual(len(config.test_exclusions), 6)
         self.assertEqual(
             set(config.manual_only_targets),
             {
@@ -523,46 +523,17 @@ class SchemaTests(unittest.TestCase):
             manual_owner.cadence,
             "pull_request and exact-candidate workflow_dispatch when directly modified",
         )
-        observer_debt = {
-            identity: owner
-            for identity, owner in config.test_exclusions.items()
-            if owner.tracking_issue == "chelis#2201"
-        }
-        self.assertEqual(
-            {identity.test for identity in observer_debt},
-            {
-                "authored_observer_spellings_do_not_collide_with_private_support_or_wrappers",
-                "feature_on_ordinary_public_call_emits_no_observation",
-                "host_source_identity_qualifies_nested_and_following_helper_occurrences",
-                "nested_host_and_fixed_frames_record_actual_forward_replay_and_restoration",
-                "repeated_direct_callees_keep_linked_identity_and_restore_the_call_stack",
-                "repeated_observed_calls_restart_sequence_and_keep_invocation_identity",
-                "sink_error_is_not_silent_success",
-                "unsupported_argument_effects_cannot_certify_descendant_calls",
-            },
-        )
         for owner in (
             *(
                 owner
                 for owner in config.target_exclusions.values()
                 if owner.tracking_issue == "chelis#1824"
             ),
-            *(
-                owner
-                for owner in config.test_exclusions.values()
-                if owner.tracking_issue != "chelis#2201"
-            ),
+            *config.test_exclusions.values(),
         ):
             self.assertEqual(owner.workflow, "heavy-e2e.yml")
             self.assertEqual(owner.job, "full-workspace")
             self.assertEqual(owner.cadence, "daily 03:17 UTC and workflow_dispatch")
-        for owner in observer_debt.values():
-            self.assertEqual(owner.workflow, "heavy-e2e.yml")
-            self.assertEqual(owner.job, "native-random-observer-debt")
-            self.assertEqual(
-                owner.cadence,
-                "daily 03:17 UTC and workflow_dispatch",
-            )
         self.assertEqual(
             sum(
                 owner.tracking_issue == "chelis#1824"
@@ -622,9 +593,6 @@ class SchemaTests(unittest.TestCase):
         root = Path(__file__).resolve().parents[1]
         heavy = (root / ".github/workflows/heavy-e2e.yml").read_text()
         self.assertIn("\n  full-workspace:\n", heavy)
-        self.assertIn("\n  native-random-observer-debt:\n", heavy)
-        for identity in observer_debt:
-            self.assertIn(f"test(/^{identity.test}$/)", heavy)
         self.assertIn('cron: "17 3 * * *"', heavy)
         heavy_rule = next(
             rule
@@ -4979,6 +4947,174 @@ class ChangedPathClassificationTests(unittest.TestCase):
             self.assertEqual(
                 owned.working_tree_changed_paths(root, base="base"), []
             )
+
+    def _behind_branch(self, root: Path) -> None:
+        """A `feature` branch forked from `main`, which then moved on.
+
+        After the fork, `main` modifies `shared.txt` and adds `main_new.txt`,
+        neither of which the branch touches. `feature` is checked out with one
+        committed change of its own, `feature.txt`. This is chelis#2480's
+        shape: #2475 landed on `main` after #2473's branch forked.
+        """
+        _git_repo(root)
+        (root / "shared.txt").write_text("fork")
+        (root / "wip.txt").write_text("fork")
+        _git_commit(root, "fork point")
+        subprocess.run(
+            ["git", "-C", str(root), "switch", "--quiet", "-c", "feature"],
+            check=True,
+            capture_output=True,
+        )
+        (root / "feature.txt").write_text("branch")
+        _git_commit(root, "branch work")
+        subprocess.run(
+            ["git", "-C", str(root), "switch", "--quiet", "main"],
+            check=True,
+            capture_output=True,
+        )
+        (root / "shared.txt").write_text("main moved on")
+        (root / "main_new.txt").write_text("main only")
+        _git_commit(root, "main moves on")
+        subprocess.run(
+            ["git", "-C", str(root), "switch", "--quiet", "feature"],
+            check=True,
+            capture_output=True,
+        )
+
+    def test_a_branch_behind_main_is_not_charged_with_mains_later_paths(
+        self,
+    ) -> None:
+        """chelis#2480: the set is the branch's diff from its merge base.
+
+        Diffing the base tip against HEAD reports every path `main` changed
+        since the fork as the branch's own, so a branch behind `main` went red
+        on a file it never touched. CI diffs a synthetic merge against its
+        first parent, which already contains `main`'s later work.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self._behind_branch(root)
+            paths = owned.working_tree_changed_paths(root, base="main")
+        self.assertEqual(paths, ["feature.txt"])
+
+    def test_a_behind_branch_keeps_its_uncommitted_and_renamed_work(
+        self,
+    ) -> None:
+        """The merge base replaces the base tip; the working tree stays in.
+
+        Unstaged edits and a rename made on the branch reach the candidate
+        once committed, so they are classified now, both sides of the move
+        included.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self._behind_branch(root)
+            (root / "wip.txt").write_text("uncommitted")
+            subprocess.run(
+                ["git", "-C", str(root), "mv", "feature.txt", "moved.txt"],
+                check=True,
+                capture_output=True,
+            )
+            paths = owned.working_tree_changed_paths(root, base="main")
+        self.assertEqual(paths, ["feature.txt", "moved.txt", "wip.txt"])
+
+    def test_a_path_both_sides_changed_is_still_the_branchs_change(
+        self,
+    ) -> None:
+        """Only `main`'s later work is dropped, not a path `main` also touched.
+
+        Subtracting `main`'s changed paths would hide the branch's own edit to
+        a file `main` has since edited too; the merge-base diff keeps it.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self._behind_branch(root)
+            (root / "shared.txt").write_text("branch edit")
+            _git_commit(root, "branch edits shared")
+            paths = owned.working_tree_changed_paths(root, base="main")
+        self.assertEqual(paths, ["feature.txt", "shared.txt"])
+
+    def test_a_retirement_main_repeated_is_judged_at_the_merge_base(
+        self,
+    ) -> None:
+        """The deletion exemption reads the tree the diff was taken from.
+
+        The branch deletes an unrouted file that `main` has also deleted since
+        the fork. The merge-base diff names it, and the synthetic merge CI
+        plans does not. Judging its base membership against `main`'s tip,
+        where it no longer exists, would refuse a retirement CI accepts.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _git_repo(root)
+            (root / "retired.json").write_text("{}")
+            _git_commit(root, "fork point")
+            subprocess.run(
+                ["git", "-C", str(root), "switch", "--quiet", "-c", "feature"],
+                check=True,
+                capture_output=True,
+            )
+            (root / "retired.json").unlink()
+            _git_commit(root, "branch retires it")
+            subprocess.run(
+                ["git", "-C", str(root), "switch", "--quiet", "main"],
+                check=True,
+                capture_output=True,
+            )
+            (root / "retired.json").unlink()
+            (root / "main_new.json").write_text("{}")
+            _git_commit(root, "main retires it too")
+            subprocess.run(
+                ["git", "-C", str(root), "switch", "--quiet", "feature"],
+                check=True,
+                capture_output=True,
+            )
+            paths = owned.working_tree_changed_paths(root, base="main")
+            refused = owned.classify_changed_paths(
+                paths, repo=root, base="main", config=self.config, packages=()
+            )
+        self.assertEqual(paths, ["retired.json"])
+        self.assertEqual(refused, [])
+
+    def test_unrelated_histories_fail_loudly(self) -> None:
+        """No merge base means no branch diff, and no silent fallback to one."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _git_repo(root)
+            (root / "a.txt").write_text("x")
+            _git_commit(root, "main root")
+            subprocess.run(
+                ["git", "-C", str(root), "switch", "--quiet", "--orphan", "other"],
+                check=True,
+                capture_output=True,
+            )
+            (root / "b.txt").write_text("y")
+            _git_commit(root, "unrelated root")
+            for call in (
+                lambda: owned.working_tree_changed_paths(root, base="main"),
+                lambda: owned.classify_changed_paths(
+                    ["b.txt"],
+                    repo=root,
+                    base="main",
+                    config=self.config,
+                    packages=(),
+                ),
+            ):
+                with self.assertRaises(ValueError) as raised:
+                    call()
+                self.assertIn("no merge base", str(raised.exception))
+
+    def test_a_missing_base_ref_fails_loudly(self) -> None:
+        """A clone without `origin/main` gets a named refusal, not a traceback."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _git_repo(root)
+            (root / "a.txt").write_text("x")
+            _git_commit(root, "only commit")
+            with self.assertRaises(ValueError) as raised:
+                owned.working_tree_changed_paths(root, base="origin/main")
+        self.assertIn("origin/main", str(raised.exception))
+        self.assertIn("fetch", str(raised.exception))
 
     def test_an_empty_change_set_does_not_pay_for_cargo_metadata(self) -> None:
         with mock.patch.object(

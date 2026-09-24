@@ -18,7 +18,7 @@
 //
 // Beside each rejection sit the controls that must stay legal: a pattern
 // every member admits, the generic comparison the repairs are built from, a
-// concrete scrutinee, and a flexible scrutinee, which is not a binder.
+// concrete scrutinee, and a flexible scrutinee resolved by local application.
 
 use assert_cmd::Command;
 use serde_json::Value;
@@ -453,8 +453,8 @@ fn legal_controls_check_and_evaluate() {
             &["r0 = 1"],
         ),
         (
-            "a flexible scrutinee, which is not a binder",
-            "def pick(y) -> i32 =\n  match y with {\n    | 300 => 1\n    | _ => 0\n  }\n\
+            "a flexible scrutinee resolved by local application",
+            "def pick(x: i32) -> i32 = {\n  k = fn (y) -> match y with {\n    | 300 => 1\n    | _ => 0\n  }\n  k(x)\n}\n\
              r0 = pick(300i32)\n",
             &["r0 = 1"],
         ),

@@ -6,6 +6,8 @@ from pathlib import Path
 import unittest
 import tempfile
 import shutil
+import os
+import stat
 
 from capacity_census_cache_publication import (
     COMPILE_CASES,
@@ -43,6 +45,27 @@ class CachePublicationSelection(unittest.TestCase):
 
             original.write_bytes(b"later legitimate cargo build")
             self.assertEqual(sealed_path.read_bytes(), b"compiled witness")
+
+    def test_resealing_a_read_only_cached_artifact_replaces_the_earlier_copy(self):
+        # Without reflinks Kache restores Cargo outputs as hardlinks to its
+        # read-only store blobs, and copy2 carries that mode to the sealed copy.
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            blob = root / "kache/store/blob"
+            blob.parent.mkdir(parents=True)
+            blob.write_bytes(b"compiled witness")
+            blob.chmod(0o444)
+            restored = root / "target/debug/deps/libbincode-example.rlib"
+            restored.parent.mkdir(parents=True)
+            os.link(blob, restored)
+
+            publication = root / "target/cache-publication"
+            seal_compiled_artifacts(publication, {"bincode": str(restored)})
+            sealed = seal_compiled_artifacts(publication, {"bincode": str(restored)})
+
+            self.assertEqual(Path(sealed["bincode"]).read_bytes(), b"compiled witness")
+            self.assertEqual(blob.read_bytes(), b"compiled witness")
+            self.assertEqual(stat.S_IMODE(blob.stat().st_mode) & 0o222, 0)
 
     def test_compiled_artifact_seal_rejects_ambiguous_filenames(self):
         with tempfile.TemporaryDirectory() as temporary:
