@@ -68,10 +68,8 @@ fn unary_param(stage: &Expr) -> Option<&str> {
 ///
 /// `None` when no `app` node admits the synthesized application. A pipe stage
 /// is an inference-bypass child, so a hand-built `Pipe` node can carry a bare
-/// name there. A stage whose own metadata is bound to its tag cannot lend it
-/// to an `app` either, and valid Surf reaches that case:
-/// `x |> grad(f, wrt=v)` copies `grad`'s `wrt` (chelis#2430). The pipe then
-/// stays unfolded for the consumers' fail-closed pipe rejection.
+/// name there. Metadata bound to the stage's own tag remains on that stage;
+/// the synthesized `app` gets its location from the stage's span.
 fn fold_stage(stage: &Expr, acc: Expr) -> Option<Expr> {
     if let Some(param) = unary_param(stage)
         && let Some((_, _, stage_kids)) = stamped(stage)
@@ -111,14 +109,11 @@ fn fold_stage(stage: &Expr, acc: Expr) -> Option<Expr> {
         }
         _ => stage.clone(),
     };
-    // The synthesized application carries the STAGE's span and metadata, so
-    // a diagnostic about it points at the stage the user wrote, and any key
-    // a later pass mints from the span lands on the node it expects.
-    let (meta, span) = match stamped(&stage) {
-        Some((_, meta, _)) => (meta.clone(), stage.span()),
-        None => (Metadata::default(), stage.span()),
-    };
-    crate::node::Node::try_new(DeepTag::App, meta, vec![stage, acc])
+    // A diagnostic about the application points at the stage the user wrote.
+    // The stage retains tag-bound keys such as `grad`'s `wrt`; copying them
+    // onto `app` would violate the node gate and leave a valid pipe unfolded.
+    let span = stage.span();
+    crate::node::Node::try_new(DeepTag::App, Metadata::default(), vec![stage, acc])
         .ok()
         .map(|node| Expr::Node(Box::new(node), span))
 }
@@ -378,6 +373,17 @@ mod tests {
         assert!(
             folded.contains("to_tensor") && !folded.contains("pipe"),
             "{folded}"
+        );
+    }
+
+    /// [02 §0.1, 03-META-1/2]: the application created for a pipe stage
+    /// owns the location, while a selector belongs to its `grad` callee.
+    #[test]
+    fn a_stage_selector_stays_on_its_callee() {
+        let folded = fold_source("(pipe {} (var {} x) (grad {wrt: (var {} v)} (var {} sq)))");
+        assert_eq!(
+            folded.trim_end(),
+            "(app {} (grad {wrt: (var {} v)} (var {} sq)) (var {} x))"
         );
     }
 
