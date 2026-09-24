@@ -245,6 +245,22 @@ def exact_compiler(environment, workspace, arguments):
     return str(compiler)
 
 
+def toolchain_loader_path(environment, compiler):
+    """Return LD_LIBRARY_PATH with `compiler`'s toolchain libraries first, or None.
+
+    rustup's proxy puts a toolchain's own libraries first for every tool it
+    runs; this driver runs the exact compiler, and Cargo plugins, without the
+    proxy. A test's loader path otherwise resolves librustc_driver from the
+    sysroot's target library directory, where rustc-dev ships a copy that
+    cannot find libLLVM, and a toolchain binary a test runs directly, such as
+    clippy-driver, cannot load libLLVM at all. Only Linux needs this.
+    """
+    library = Path(compiler).parent.parent / "lib"
+    if not (sys.platform.startswith("linux") and library.is_dir()):
+        return None
+    return os.pathsep.join(filter(None, (str(library), environment.get("LD_LIBRARY_PATH"))))
+
+
 def run(cargo, arguments):
     environment = dict(os.environ)
     leave_enclosing_session(environment)
@@ -260,6 +276,13 @@ def run(cargo, arguments):
             # the managed driver rather than bypass observation.
             if arguments[0] != command:
                 raise observer.ObservationError("place Cargo plugin options after the plugin name")
+            if sys.platform.startswith("linux"):
+                # A plugin such as cargo-nextest runs tests itself, outside any
+                # managed session. A nested Cargo restores the caller's path.
+                loader = toolchain_loader_path(environment, exact_compiler(environment, Path.cwd(), arguments))
+                if loader is not None:
+                    environment[SESSION_CHANGES] = json.dumps({"LD_LIBRARY_PATH": [environment.get("LD_LIBRARY_PATH"), loader]})
+                    environment["LD_LIBRARY_PATH"] = loader
             with tempfile.TemporaryDirectory(prefix="chelis-cargo-plugin-") as directory:
                 launcher = install_cargo_launcher(directory, real_cargo=cargo, python=sys.executable)
                 environment.update({"CARGO": str(launcher), "CHELIS_IDENTITY_REAL_CARGO": cargo,
@@ -294,14 +317,9 @@ def run(cargo, arguments):
     bootstrap_env["CARGO_ENCODED_RUSTFLAGS"] = ""
     compiler = exact_compiler(environment, workspace, arguments)
     environment["RUSTC"] = bootstrap_env["RUSTC"] = compiler
-    library = Path(compiler).parent.parent / "lib"
-    if sys.platform.startswith("linux") and library.is_dir():
-        # rustup's proxy puts a toolchain's own libraries first for every tool
-        # it runs; this driver runs the exact compiler without the proxy. A
-        # test's loader path otherwise resolves librustc_driver from the
-        # sysroot's target library directory, where rustc-dev ships a copy
-        # that cannot find libLLVM. The driver's own probes need it too.
-        loader = os.pathsep.join(filter(None, (str(library), environment.get("LD_LIBRARY_PATH"))))
+    loader = toolchain_loader_path(environment, compiler)
+    if loader is not None:
+        # The driver's own probes and the build's tests need it too.
         environment["LD_LIBRARY_PATH"] = bootstrap_env["LD_LIBRARY_PATH"] = os.environ["LD_LIBRARY_PATH"] = loader
     # Documentation units read the metadata this exact compiler writes.
     rustdoc = Path(compiler).with_name("rustdoc")

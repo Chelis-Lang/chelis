@@ -450,6 +450,37 @@ class ObservationFailureTests(unittest.TestCase):
         self.assertNotIn(driver.SESSION_CHANGES, seen)
         self.assertEqual(seen["CARGO_TARGET_DIR"], "/nested-target")
 
+    def test_cargo_plugin_tests_get_the_toolchain_libraries_first(self):
+        # rustup's proxy puts a toolchain's own libraries first for every tool
+        # it runs. A plugin the driver runs directly, such as cargo-nextest,
+        # bypasses it, and its tests then cannot load a toolchain binary run
+        # directly, such as clippy-driver, on Linux.
+        sysroot = self.root / "toolchain"
+        (sysroot / "bin").mkdir(parents=True)
+        (sysroot / "lib").mkdir()
+        rustc = sysroot / "bin" / "rustc"
+        rustc.write_text(f'#!/bin/sh\necho "{sysroot}"\n')
+        rustc.chmod(0o755)
+        tools = self.root / "tools"
+        tools.mkdir()
+        (tools / "rustc").symlink_to(rustc)
+        record = self.root / "plugin-environment"
+        plugin = tools / "cargo-probe"
+        plugin.write_text('#!/bin/sh\nenv > "$CHELIS_TEST_ENVIRONMENT"\n')
+        plugin.chmod(0o755)
+        cargo = self.root / "real-cargo"
+        cargo.write_text("#!/bin/sh\nexit 97\n")
+        cargo.chmod(0o755)
+        os.environ.update({"PATH": str(tools) + os.pathsep + os.environ["PATH"], "CHELIS_IDENTITY_REAL_CARGO": str(cargo),
+                           "CHELIS_TEST_ENVIRONMENT": str(record), "LD_LIBRARY_PATH": "/caller/lib"})
+        with patch.object(driver.sys, "platform", "linux"):
+            self.assertEqual(driver.main(["probe", "run"]), 0)
+        seen = dict(line.split("=", 1) for line in record.read_text().splitlines() if "=" in line)
+        self.assertEqual(seen.get("LD_LIBRARY_PATH"), os.pathsep.join((str(sysroot / "lib"), "/caller/lib")))
+        # A nested Cargo the plugin starts restores the caller's loader path.
+        driver.leave_enclosing_session(seen)
+        self.assertEqual(seen.get("LD_LIBRARY_PATH"), "/caller/lib")
+
     def test_observed_build_script_runs_unchanged_without_managed_protocol(self):
         real = self.root / "build_script_build.identity-real"
         real.write_text('#!/bin/sh\necho "real $*"\n')
