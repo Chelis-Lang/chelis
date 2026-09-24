@@ -2201,6 +2201,13 @@ impl CEmitter {
             self.line("abort();");
             self.indent -= 1;
             self.line("}");
+            for line in Self::entry_dtype_guard(
+                &format!("inputs[{slot}]"),
+                &format!("{func_name_fmt}: input `{label_fmt}`"),
+                ty,
+            ) {
+                self.line(&line);
+            }
             self.line(&format!(
                 "if (chelis_tensor_rank(inputs[{slot}]) != {}) {{",
                 Self::ndim(ty)
@@ -2410,6 +2417,56 @@ impl CEmitter {
             .runtime_dtype()
             .unwrap_or_else(|error| panic!("C backend does not support this tensor: {error}"))
             .c_macro()
+    }
+
+    /// [04-NUM-11]: an entry compares a supplied tensor's dtype tag with its
+    /// declared dtype before any element is read, and a mismatch traps
+    /// `Domain` in `load` at the declared dtype ([04-NUM-9]) after one context
+    /// line naming the input and both dtypes. The storage is never read at the
+    /// declared dtype. `input` is the sanitized context prefix that names the
+    /// input. The DAG entry and the host signature entry both render their
+    /// guard through this one function.
+    pub(crate) fn entry_dtype_guard(tensor: &str, input: &str, ty: &TensorType) -> [String; 5] {
+        let declared = ty.precision;
+        // The supplied tag has passed the runtime's own validation, so it is
+        // one of the runtime ABI's dtypes; each is spelled as its language
+        // dtype, the spelling the declared side uses.
+        let supplied = chelis_vocab::RuntimeDType::ALL
+            .iter()
+            .map(|dtype| {
+                let prim = Prim::ACTIVE_FLOATS
+                    .into_iter()
+                    .chain(Prim::ACTIVE_INTEGERS)
+                    .chain([Prim::Bool])
+                    .find(|prim| prim.runtime_dtype().is_ok_and(|mapped| mapped == *dtype))
+                    .expect("every runtime ABI dtype is a language dtype");
+                format!(
+                    "__chelis_supplied_dtype == {} ? \"{}\" : ",
+                    dtype.c_macro(),
+                    prim.name()
+                )
+            })
+            .collect::<String>();
+        let trap = NumericTrap::Domain {
+            op: "load",
+            prim: declared,
+        }
+        .to_string();
+        [
+            format!(
+                "if (chelis_tensor_read_view({tensor}).dtype != {}) {{",
+                Self::dtype_macro(ty)
+            ),
+            format!(
+                "    const chelis_dtype __chelis_supplied_dtype = chelis_tensor_read_view({tensor}).dtype;"
+            ),
+            format!(
+                "    fprintf(stderr, \"{input} expected dtype {}, got %s\\n\", {supplied}\"an unregistered dtype\");",
+                declared.name()
+            ),
+            format!("    chelis_numeric_trap({trap:?});"),
+            "}".to_string(),
+        ]
     }
 
     /// Returns the C element type for direct element access in generated loops.
