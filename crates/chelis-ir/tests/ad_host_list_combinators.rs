@@ -57,7 +57,14 @@ fn eval_out(src: &str) -> TensorValue {
         .map(|(name, ty)| (name.clone(), ty.clone()))
         .collect();
     let dag = chelis_ir::lowering_runtime::with_native_lowering_runtime(|runtime| {
-        lower_subexpr_program(&out_expr, UnordMap::new(), type_env, defs, runtime)
+        lower_subexpr_program(
+            &out_expr,
+            UnordMap::new(),
+            type_env,
+            defs,
+            runtime,
+            &mut chelis_types::NativeServices::new(None),
+        )
     });
     let roots = dag.roots().to_vec();
     assert_eq!(roots.len(), 1, "out subexpression should have one root");

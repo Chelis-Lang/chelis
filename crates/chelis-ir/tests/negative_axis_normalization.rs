@@ -61,7 +61,13 @@ fn lower_deep(src: &str) -> Result<chelis_ir::dag::Dag, String> {
         chelis_types::check_linearity(&checked, &mut chelis_types::NativeServices::new(None))
             .map_err(|e| format!("linearity: {e:?}"))?;
     Ok(chelis_ir::lowering_runtime::with_native_lowering_runtime(
-        |runtime| lower_program(&checked, runtime),
+        |runtime| {
+            lower_program(
+                &checked,
+                runtime,
+                &mut chelis_types::NativeServices::new(None),
+            )
+        },
     ))
 }
 
@@ -288,7 +294,14 @@ fn lowering_rejects_out_of_range_axis_without_panicking() {
     // softmax axis must take that path -- it must not unwind through
     // `require_dim`.
     let result = chelis_ir::lowering_runtime::with_native_lowering_runtime(|runtime| {
-        try_lower_subexpr_program(&expr, scoped, UnordMap::new(), UnordMap::new(), runtime)
+        try_lower_subexpr_program(
+            &expr,
+            scoped,
+            UnordMap::new(),
+            UnordMap::new(),
+            runtime,
+            &mut chelis_types::NativeServices::new(None),
+        )
     });
     let diagnostic = result.expect_err("out-of-range softmax axis must be a lowering diagnostic");
     let rendered = diagnostic.to_string();

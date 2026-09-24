@@ -75,7 +75,7 @@
 //! fn replace_library(
 //!     checked: ContextCheckedCompilation<'_>,
 //!     other: &CheckedLibrary,
-//!     runtime: &LoweringRuntime,
+//!     runtime: &mut LoweringRuntime,
 //! ) {
 //!     let _ = checked.compose(other, runtime);
 //! }
@@ -367,7 +367,11 @@ mod tests {
     fn assert_isolated_lowering_rejects(checked: &CheckedCompilation) {
         assert!(matches!(
             chelis_ir::lowering_runtime::with_native_lowering_runtime(|runtime| {
-                lower_checked_for_evaluation(checked, runtime)
+                lower_checked_for_evaluation(
+                    checked,
+                    runtime,
+                    &mut chelis_types::NativeServices::new(None),
+                )
             }),
             Err(CoreLowerError::ContextRequired)
         ));
@@ -381,13 +385,20 @@ mod tests {
                 chelis_ir::lowering_runtime::with_native_lowering_runtime(|runtime| lower_checked(
                     checked.clone(),
                     mode,
-                    runtime
+                    runtime,
+                    &mut chelis_types::NativeServices::new(None),
                 )),
                 Err(CoreLowerError::ContextRequired)
             ));
             assert!(matches!(
                 chelis_ir::lowering_runtime::with_native_lowering_runtime(|runtime| {
-                    lower_checked_for_c_execution(checked.clone(), &manifest, mode, runtime)
+                    lower_checked_for_c_execution(
+                        checked.clone(),
+                        &manifest,
+                        mode,
+                        runtime,
+                        &mut chelis_types::NativeServices::new(None),
+                    )
                 }),
                 Err(CoreLowerError::ContextRequired)
             ));
@@ -399,6 +410,7 @@ mod tests {
                         &manifest,
                         mode,
                         runtime,
+                        &mut chelis_types::NativeServices::new(None),
                     )
                 }),
                 Err(CoreLowerError::ContextRequired)
@@ -476,7 +488,11 @@ mod tests {
         .unwrap();
         let lowered_library =
             chelis_ir::lowering_runtime::with_native_lowering_runtime(|runtime| {
-                lower_library(&library, runtime)
+                lower_library(
+                    &library,
+                    runtime,
+                    &mut chelis_types::NativeServices::new(None),
+                )
             })
             .unwrap();
         let lowered = chelis_ir::lowering_runtime::with_native_lowering_runtime(|runtime| {
@@ -485,6 +501,7 @@ mod tests {
                 &lowered_library,
                 LoweringMode::Strict,
                 runtime,
+                &mut chelis_types::NativeServices::new(None),
             )
         })
         .unwrap();
@@ -509,6 +526,7 @@ mod tests {
                 chelis_ir::lower::try_lower_program_to_evaluation_library(
                     library.program(),
                     runtime,
+                    &mut chelis_types::NativeServices::new(None),
                 )
             })
             .unwrap();
@@ -518,6 +536,7 @@ mod tests {
                     &context_checked(&library),
                     &evaluation_library,
                     runtime,
+                    &mut chelis_types::NativeServices::new(None),
                 )
             })
             .unwrap(),
@@ -530,14 +549,23 @@ mod tests {
         for checked in [composed, isolated] {
             assert_sealed_evaluation_result(
                 chelis_ir::lowering_runtime::with_native_lowering_runtime(|runtime| {
-                    lower_checked_for_evaluation(&checked, runtime)
+                    lower_checked_for_evaluation(
+                        &checked,
+                        runtime,
+                        &mut chelis_types::NativeServices::new(None),
+                    )
                 })
                 .unwrap(),
             );
             let manifest = manifest(&checked);
             assert_sealed_dag_result(
                 &chelis_ir::lowering_runtime::with_native_lowering_runtime(|runtime| {
-                    lower_checked(checked.clone(), LoweringMode::Strict, runtime)
+                    lower_checked(
+                        checked.clone(),
+                        LoweringMode::Strict,
+                        runtime,
+                        &mut chelis_types::NativeServices::new(None),
+                    )
                 })
                 .unwrap(),
             );
@@ -548,6 +576,7 @@ mod tests {
                         &manifest,
                         LoweringMode::Strict,
                         runtime,
+                        &mut chelis_types::NativeServices::new(None),
                     )
                 })
                 .unwrap();
@@ -561,6 +590,7 @@ mod tests {
                             &manifest,
                             LoweringMode::Strict,
                             runtime,
+                            &mut chelis_types::NativeServices::new(None),
                         )
                     })
                     .unwrap();
@@ -609,7 +639,11 @@ mod tests {
         )
         .unwrap();
         let lowered = chelis_ir::lowering_runtime::with_native_lowering_runtime(|runtime| {
-            lower_library(&composed, runtime)
+            lower_library(
+                &composed,
+                runtime,
+                &mut chelis_types::NativeServices::new(None),
+            )
         })
         .unwrap();
         let values = chelis_ir::eval::eval_tensor_roots_with_strict(
@@ -635,7 +669,11 @@ mod tests {
         .unwrap();
         let lowered_library =
             chelis_ir::lowering_runtime::with_native_lowering_runtime(|runtime| {
-                lower_library(&library, runtime)
+                lower_library(
+                    &library,
+                    runtime,
+                    &mut chelis_types::NativeServices::new(None),
+                )
             })
             .unwrap();
         let analysis = analyze_prepared_with_library(
@@ -660,6 +698,7 @@ mod tests {
                 &lowered_library,
                 LoweringMode::Strict,
                 runtime,
+                &mut chelis_types::NativeServices::new(None),
             )
         })
         .unwrap();
@@ -718,16 +757,29 @@ mod tests {
         );
         let replacement_dag =
             chelis_ir::lowering_runtime::with_native_lowering_runtime(|runtime| {
-                lower_library(&replacement, runtime)
+                lower_library(
+                    &replacement,
+                    runtime,
+                    &mut chelis_types::NativeServices::new(None),
+                )
             })
             .expect("the replacement library must lower");
         let first_evaluation =
             chelis_ir::lowering_runtime::with_native_lowering_runtime(|runtime| {
-                chelis_ir::lower::try_lower_program_to_evaluation_library(first.program(), runtime)
+                chelis_ir::lower::try_lower_program_to_evaluation_library(
+                    first.program(),
+                    runtime,
+                    &mut chelis_types::NativeServices::new(None),
+                )
             })
             .unwrap();
         chelis_ir::lowering_runtime::with_native_lowering_runtime(|runtime| {
-            lower_checked_with_evaluation_context(&checked, &first_evaluation, runtime)
+            lower_checked_with_evaluation_context(
+                &checked,
+                &first_evaluation,
+                runtime,
+                &mut chelis_types::NativeServices::new(None),
+            )
         })
         .expect("the opaque evaluation library matches the sealed context");
         let replacement_evaluation =
@@ -735,18 +787,30 @@ mod tests {
                 chelis_ir::lower::try_lower_program_to_evaluation_library(
                     replacement.program(),
                     runtime,
+                    &mut chelis_types::NativeServices::new(None),
                 )
             })
             .unwrap();
         assert!(matches!(
             chelis_ir::lowering_runtime::with_native_lowering_runtime(|runtime| {
-                lower_checked_with_evaluation_context(&checked, &replacement_evaluation, runtime)
+                lower_checked_with_evaluation_context(
+                    &checked,
+                    &replacement_evaluation,
+                    runtime,
+                    &mut chelis_types::NativeServices::new(None),
+                )
             }),
             Err(CoreLowerError::Lower(_))
         ));
         assert!(matches!(
             chelis_ir::lowering_runtime::with_native_lowering_runtime(|runtime| {
-                lower_checked_with_context(checked, &replacement_dag, LoweringMode::Strict, runtime)
+                lower_checked_with_context(
+                    checked,
+                    &replacement_dag,
+                    LoweringMode::Strict,
+                    runtime,
+                    &mut chelis_types::NativeServices::new(None),
+                )
             }),
             Err(CoreLowerError::Lower(_))
         ));
@@ -821,6 +885,7 @@ mod tests {
                 checked(include_str!("../tests/fixtures/pair.dp")),
                 LoweringMode::Strict,
                 runtime,
+                &mut chelis_types::NativeServices::new(None),
             )
         })
         .expect("the tuple must lower");
@@ -845,6 +910,7 @@ mod tests {
                 checked(include_str!("../tests/fixtures/lookup.dp")),
                 LoweringMode::Strict,
                 runtime,
+                &mut chelis_types::NativeServices::new(None),
             )
         })
         .expect("the function must lower");
@@ -863,6 +929,7 @@ mod tests {
                 checked(include_str!("../tests/fixtures/host.dp")),
                 LoweringMode::AllowHostOnly,
                 runtime,
+                &mut chelis_types::NativeServices::new(None),
             )
         })
         .expect("the host-only value must lower without tensor roots");
@@ -914,6 +981,7 @@ mod tests {
                 checked(include_str!("../tests/fixtures/lower_rejection.dp")),
                 LoweringMode::Strict,
                 runtime,
+                &mut chelis_types::NativeServices::new(None),
             )),
             Err(CoreLowerError::Lower(_))
         ));

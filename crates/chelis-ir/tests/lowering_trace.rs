@@ -52,11 +52,19 @@ fn execution_trace_captures_the_actual_ad_call_without_replaying_seed_controls()
         "fixtures/core/tests/lowering_trace/execution_trace_captures_the_actual_ad_call_without_replaying_seed_controls_1.dp"
     ));
     let ordinary = chelis_ir::lowering_runtime::with_native_lowering_runtime(|runtime| {
-        try_lower_program_to_evaluation_library(&program, runtime)
+        try_lower_program_to_evaluation_library(
+            &program,
+            runtime,
+            &mut chelis_types::NativeServices::new(None),
+        )
     })
     .unwrap();
     let (observed, trace) = chelis_ir::lowering_runtime::with_native_lowering_runtime(|runtime| {
-        try_lower_program_to_evaluation_library_with_trace(&program, runtime)
+        try_lower_program_to_evaluation_library_with_trace(
+            &program,
+            runtime,
+            &mut chelis_types::NativeServices::new(None),
+        )
     })
     .unwrap();
     assert_eq!(
@@ -147,7 +155,11 @@ fn selected_source_census_keeps_draw_free_dependencies_and_excludes_siblings() {
         "fixtures/core/tests/lowering_trace/selected_source_census_keeps_draw_free_dependencies_and_excludes_siblings_2.dp"
     ));
     let library = chelis_ir::lowering_runtime::with_native_lowering_runtime(|runtime| {
-        chelis_ir::lower::try_lower_program_to_evaluation_library(&program, runtime)
+        chelis_ir::lower::try_lower_program_to_evaluation_library(
+            &program,
+            runtime,
+            &mut chelis_types::NativeServices::new(None),
+        )
     })
     .unwrap();
     let selected = chelis_ir::lowering_runtime::with_native_lowering_runtime(|runtime| {
@@ -194,7 +206,11 @@ fn selecting_a_draw_free_region_retains_controls_without_changing_dispatch() {
         "fixtures/core/tests/lowering_trace/selecting_a_draw_free_region_retains_controls_without_changing_dispatch_3.dp"
     ));
     let library = chelis_ir::lowering_runtime::with_native_lowering_runtime(|runtime| {
-        chelis_ir::lower::try_lower_program_to_evaluation_library(&program, runtime)
+        chelis_ir::lower::try_lower_program_to_evaluation_library(
+            &program,
+            runtime,
+            &mut chelis_types::NativeServices::new(None),
+        )
     })
     .unwrap();
     let names = ["selected".into()];
@@ -248,7 +264,11 @@ fn selecting_a_draw_free_region_retains_controls_without_changing_dispatch() {
         "fixtures/core/tests/lowering_trace/selecting_a_draw_free_region_retains_controls_without_changing_dispatch_4.dp"
     ));
     let library = chelis_ir::lowering_runtime::with_native_lowering_runtime(|runtime| {
-        chelis_ir::lower::try_lower_program_to_evaluation_library(&excluded, runtime)
+        chelis_ir::lower::try_lower_program_to_evaluation_library(
+            &excluded,
+            runtime,
+            &mut chelis_types::NativeServices::new(None),
+        )
     })
     .unwrap();
     assert!(!library.library_for_inspection().lowered_names()["choose"]);
@@ -275,7 +295,11 @@ fn context_composition_retains_declared_controls_without_confusing_local_aliases
     )
     .unwrap();
     let library = chelis_ir::lowering_runtime::with_native_lowering_runtime(|runtime| {
-        chelis_ir::lower::try_lower_program_to_evaluation_library(&checked(source), runtime)
+        chelis_ir::lower::try_lower_program_to_evaluation_library(
+            &checked(source),
+            runtime,
+            &mut chelis_types::NativeServices::new(None),
+        )
     })
     .unwrap();
     let original = bincode::serialize(library.library_for_inspection()).unwrap();
@@ -308,7 +332,12 @@ fn context_composition_retains_declared_controls_without_confusing_local_aliases
             chelis_types::check_linearity(&program, &mut chelis_types::NativeServices::new(None))
                 .unwrap();
         let composed = chelis_ir::lowering_runtime::with_native_lowering_runtime(|runtime| {
-            chelis_ir::lower::try_lower_program_with_evaluation_context(&library, &program, runtime)
+            chelis_ir::lower::try_lower_program_with_evaluation_context(
+                &library,
+                &program,
+                runtime,
+                &mut chelis_types::NativeServices::new(None),
+            )
         })
         .unwrap();
         let selected = chelis_ir::lowering_runtime::with_native_lowering_runtime(|runtime| {
@@ -359,11 +388,19 @@ fn trace_preserves_the_ordinary_library_and_actual_normalization() {
         "fixtures/core/tests/lowering_trace/trace_preserves_the_ordinary_library_and_actual_normalization.dp"
     ));
     let ordinary = chelis_ir::lowering_runtime::with_native_lowering_runtime(|runtime| {
-        try_lower_program_to_library(&program, runtime)
+        try_lower_program_to_library(
+            &program,
+            runtime,
+            &mut chelis_types::NativeServices::new(None),
+        )
     })
     .unwrap();
     let (observed, trace) = chelis_ir::lowering_runtime::with_native_lowering_runtime(|runtime| {
-        try_lower_program_to_library_with_trace(&program, runtime)
+        try_lower_program_to_library_with_trace(
+            &program,
+            runtime,
+            &mut chelis_types::NativeServices::new(None),
+        )
     })
     .unwrap();
     assert_eq!(
@@ -411,7 +448,11 @@ fn trace_preserves_the_ordinary_library_and_actual_normalization() {
 #[test]
 fn trace_captures_actual_ad_ports_roots_and_ordered_wrt() {
     let (_, trace) = chelis_ir::lowering_runtime::with_native_lowering_runtime(|runtime| {
-        try_lower_program_to_library_with_trace(&checked(SQUARE), runtime)
+        try_lower_program_to_library_with_trace(
+            &checked(SQUARE),
+            runtime,
+            &mut chelis_types::NativeServices::new(None),
+        )
     })
     .unwrap();
     assert_eq!(trace.gradients.len(), 1);
@@ -483,11 +524,19 @@ fn empty_and_repeated_invocations_do_not_leak_capture_state() {
         let program = checked(source);
         let (library, trace) =
             chelis_ir::lowering_runtime::with_native_lowering_runtime(|runtime| {
-                try_lower_program_to_library_with_trace(&program, runtime)
+                try_lower_program_to_library_with_trace(
+                    &program,
+                    runtime,
+                    &mut chelis_types::NativeServices::new(None),
+                )
             })
             .unwrap();
         let ordinary = chelis_ir::lowering_runtime::with_native_lowering_runtime(|runtime| {
-            try_lower_program_to_library(&program, runtime)
+            try_lower_program_to_library(
+                &program,
+                runtime,
+                &mut chelis_types::NativeServices::new(None),
+            )
         })
         .unwrap();
         same_dag(library.dag(), ordinary.dag());
@@ -506,17 +555,29 @@ fn rejected_ad_keeps_its_diagnostic_instead_of_returning_a_trace() {
     );
     let program = checked(source);
     let ordinary = chelis_ir::lowering_runtime::with_native_lowering_runtime(|runtime| {
-        try_lower_program_to_library(&program, runtime)
+        try_lower_program_to_library(
+            &program,
+            runtime,
+            &mut chelis_types::NativeServices::new(None),
+        )
     })
     .unwrap_err();
     let observed = chelis_ir::lowering_runtime::with_native_lowering_runtime(|runtime| {
-        try_lower_program_to_library_with_trace(&program, runtime)
+        try_lower_program_to_library_with_trace(
+            &program,
+            runtime,
+            &mut chelis_types::NativeServices::new(None),
+        )
     })
     .unwrap_err();
     assert_eq!(ordinary, observed);
     assert!(ordinary.to_string().contains("floor"));
     let (_, next) = chelis_ir::lowering_runtime::with_native_lowering_runtime(|runtime| {
-        try_lower_program_to_library_with_trace(&checked(SQUARE), runtime)
+        try_lower_program_to_library_with_trace(
+            &checked(SQUARE),
+            runtime,
+            &mut chelis_types::NativeServices::new(None),
+        )
     })
     .unwrap();
     assert_eq!(next.gradients.len(), 1);
@@ -530,7 +591,11 @@ fn multiple_wrt_inputs_keep_their_forward_order_and_distinct_results() {
         "fixtures/core/tests/lowering_trace/multiple_wrt_inputs_keep_their_forward_order_and_distinct_results_10.dp"
     );
     let (_, trace) = chelis_ir::lowering_runtime::with_native_lowering_runtime(|runtime| {
-        try_lower_program_to_library_with_trace(&checked(source), runtime)
+        try_lower_program_to_library_with_trace(
+            &checked(source),
+            runtime,
+            &mut chelis_types::NativeServices::new(None),
+        )
     })
     .unwrap();
     let grad = &trace.gradients[0];
@@ -568,7 +633,11 @@ fn nested_gradients_have_distinct_contexts_and_actual_parent_links() {
         "fixtures/core/tests/lowering_trace/nested_gradients_have_distinct_contexts_and_actual_parent_links.dp"
     );
     let (_, trace) = chelis_ir::lowering_runtime::with_native_lowering_runtime(|runtime| {
-        try_lower_program_to_library_with_trace(&checked(source), runtime)
+        try_lower_program_to_library_with_trace(
+            &checked(source),
+            runtime,
+            &mut chelis_types::NativeServices::new(None),
+        )
     })
     .unwrap();
     assert_eq!(trace.gradients.len(), 4);
@@ -597,7 +666,11 @@ fn shaped_zero_materialization_is_not_fabricated_in_the_raw_ad_result() {
         "fixtures/core/tests/lowering_trace/shaped_zero_materialization_is_not_fabricated_in_the_raw_ad_result_12.dp"
     );
     let (library, trace) = chelis_ir::lowering_runtime::with_native_lowering_runtime(|runtime| {
-        try_lower_program_to_library_with_trace(&checked(source), runtime)
+        try_lower_program_to_library_with_trace(
+            &checked(source),
+            runtime,
+            &mut chelis_types::NativeServices::new(None),
+        )
     })
     .unwrap();
     let grad = &trace.gradients[0];
@@ -633,7 +706,11 @@ fn host_only_definitions_do_not_fabricate_graph_observations() {
         "fixtures/core/tests/lowering_trace/host_only_definitions_do_not_fabricate_graph_observations_13.dp"
     );
     let (library, trace) = chelis_ir::lowering_runtime::with_native_lowering_runtime(|runtime| {
-        try_lower_program_to_library_with_trace(&checked(source), runtime)
+        try_lower_program_to_library_with_trace(
+            &checked(source),
+            runtime,
+            &mut chelis_types::NativeServices::new(None),
+        )
     })
     .unwrap();
     assert!(library.dag().nodes().is_empty());
@@ -651,13 +728,21 @@ fn application_preserves_formal_names_when_caller_names_differ() {
     );
     let program = checked(source);
     let (library, trace) = chelis_ir::lowering_runtime::with_native_lowering_runtime(|runtime| {
-        try_lower_program_to_library_with_trace(&program, runtime)
+        try_lower_program_to_library_with_trace(
+            &program,
+            runtime,
+            &mut chelis_types::NativeServices::new(None),
+        )
     })
     .unwrap();
     same_dag(
         library.dag(),
         chelis_ir::lowering_runtime::with_native_lowering_runtime(|runtime| {
-            try_lower_program_to_library(&program, runtime)
+            try_lower_program_to_library(
+                &program,
+                runtime,
+                &mut chelis_types::NativeServices::new(None),
+            )
         })
         .unwrap()
         .dag(),
@@ -688,13 +773,21 @@ fn host_structured_results_are_not_reported_as_observed_applications() {
     );
     let program = checked(source);
     let (library, trace) = chelis_ir::lowering_runtime::with_native_lowering_runtime(|runtime| {
-        try_lower_program_to_library_with_trace(&program, runtime)
+        try_lower_program_to_library_with_trace(
+            &program,
+            runtime,
+            &mut chelis_types::NativeServices::new(None),
+        )
     })
     .unwrap();
     same_dag(
         library.dag(),
         chelis_ir::lowering_runtime::with_native_lowering_runtime(|runtime| {
-            try_lower_program_to_library(&program, runtime)
+            try_lower_program_to_library(
+                &program,
+                runtime,
+                &mut chelis_types::NativeServices::new(None),
+            )
         })
         .unwrap()
         .dag(),
@@ -716,7 +809,11 @@ fn specialization_records_both_named_and_actual_dimension_types() {
         "fixtures/core/tests/lowering_trace/specialization_records_both_named_and_actual_dimension_types_16.dp"
     );
     let (_, trace) = chelis_ir::lowering_runtime::with_native_lowering_runtime(|runtime| {
-        try_lower_program_to_library_with_trace(&checked(source), runtime)
+        try_lower_program_to_library_with_trace(
+            &checked(source),
+            runtime,
+            &mut chelis_types::NativeServices::new(None),
+        )
     })
     .unwrap();
     assert_eq!(trace.gradients.len(), 1);
@@ -747,7 +844,11 @@ fn selected_wrt_does_not_drop_the_other_argument_binding() {
         "fixtures/core/tests/lowering_trace/selected_wrt_does_not_drop_the_other_argument_binding_17.dp"
     );
     let (_, trace) = chelis_ir::lowering_runtime::with_native_lowering_runtime(|runtime| {
-        try_lower_program_to_library_with_trace(&checked(source), runtime)
+        try_lower_program_to_library_with_trace(
+            &checked(source),
+            runtime,
+            &mut chelis_types::NativeServices::new(None),
+        )
     })
     .unwrap();
     let grad = &trace.gradients[0];
@@ -770,7 +871,11 @@ fn selected_wrt_does_not_drop_the_other_argument_binding() {
 #[test]
 fn completed_application_snapshots_do_not_alias_later_mutations() {
     let (_, mut trace) = chelis_ir::lowering_runtime::with_native_lowering_runtime(|runtime| {
-        try_lower_program_to_library_with_trace(&checked(SQUARE), runtime)
+        try_lower_program_to_library_with_trace(
+            &checked(SQUARE),
+            runtime,
+            &mut chelis_types::NativeServices::new(None),
+        )
     })
     .unwrap();
     let grad = &mut trace.gradients[0];
@@ -815,7 +920,11 @@ fn full_integer_constants_keep_bits_beyond_the_f64_exact_range() {
         "fixtures/core/tests/lowering_trace/full_integer_constants_keep_bits_beyond_the_f64_exact_range_18.dp"
     );
     let (library, trace) = chelis_ir::lowering_runtime::with_native_lowering_runtime(|runtime| {
-        try_lower_program_to_library_with_trace(&checked(source), runtime)
+        try_lower_program_to_library_with_trace(
+            &checked(source),
+            runtime,
+            &mut chelis_types::NativeServices::new(None),
+        )
     })
     .unwrap();
     for dag in [
@@ -861,7 +970,11 @@ fn unresolved_and_vectorized_gradients_are_explicit_boundaries() {
         "fixtures/core/tests/lowering_trace/unresolved_and_vectorized_gradients_are_explicit_boundaries_19.dp"
     );
     let (library, trace) = chelis_ir::lowering_runtime::with_native_lowering_runtime(|runtime| {
-        try_lower_program_to_library_with_trace(&checked(source), runtime)
+        try_lower_program_to_library_with_trace(
+            &checked(source),
+            runtime,
+            &mut chelis_types::NativeServices::new(None),
+        )
     })
     .unwrap();
     assert!(library.rootless_defs().contains("unknown"));
@@ -927,13 +1040,21 @@ fn unresolved_and_vectorized_gradients_are_explicit_boundaries() {
         let program = checked(&source);
         let (library, trace) =
             chelis_ir::lowering_runtime::with_native_lowering_runtime(|runtime| {
-                try_lower_program_to_library_with_trace(&program, runtime)
+                try_lower_program_to_library_with_trace(
+                    &program,
+                    runtime,
+                    &mut chelis_types::NativeServices::new(None),
+                )
             })
             .unwrap();
         same_dag(
             library.dag(),
             chelis_ir::lowering_runtime::with_native_lowering_runtime(|runtime| {
-                try_lower_program_to_library(&program, runtime)
+                try_lower_program_to_library(
+                    &program,
+                    runtime,
+                    &mut chelis_types::NativeServices::new(None),
+                )
             })
             .unwrap()
             .dag(),

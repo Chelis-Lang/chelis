@@ -82,6 +82,7 @@ fn lower_with_x_bound() -> chelis_ir::dag::Dag {
             UnordMap::new(),
             UnordMap::new(),
             runtime,
+            &mut chelis_types::NativeServices::new(None),
         )
     })
 }

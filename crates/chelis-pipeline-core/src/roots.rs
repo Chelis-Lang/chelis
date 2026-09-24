@@ -9,7 +9,7 @@ use crate::{AllRootNames, IrName, RootMetadata, TensorRootNames};
 pub(crate) fn root_metadata(
     program: &CheckedProgram,
     lowered_names: Option<&BTreeMap<String, bool>>,
-    runtime: &LoweringRuntime,
+    runtime: &mut LoweringRuntime,
 ) -> RootMetadata {
     let all_names = AllRootNames(root_names_from_checked_exprs(
         program.exprs(),

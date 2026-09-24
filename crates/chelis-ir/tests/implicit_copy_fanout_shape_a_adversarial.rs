@@ -30,7 +30,11 @@ fn fixture_to_dag(source: &str) -> Result<Dag, String> {
     let checked = check_linearity(&checked, &mut chelis_types::NativeServices::new(None))
         .map_err(|errs| format!("linearity failed: {errs:?}"))?;
     chelis_ir::lowering_runtime::with_native_lowering_runtime(|runtime| {
-        try_lower_program(&checked, runtime)
+        try_lower_program(
+            &checked,
+            runtime,
+            &mut chelis_types::NativeServices::new(None),
+        )
     })
     .map_err(|diag| format!("lowering failed: {diag:?}"))
 }

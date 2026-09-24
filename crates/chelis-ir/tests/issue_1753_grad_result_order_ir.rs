@@ -45,6 +45,7 @@ fn pair_roots(selection: &str, batched: bool) -> Vec<Vec<f64>> {
             UnordMap::new(),
             UnordMap::new(),
             runtime,
+            &mut chelis_types::NativeServices::new(None),
         )
     })
     .expect("valid direct grad lowers");

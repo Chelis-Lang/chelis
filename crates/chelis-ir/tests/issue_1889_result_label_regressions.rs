@@ -41,6 +41,7 @@ fn named_entry(source: &str, name: &str) -> chelis_ir::Dag {
             &checked_deep(source, ProgramOrigin::Unlinked),
             name,
             runtime,
+            &mut chelis_types::NativeServices::new(None),
         )
     })
     .expect("named tensor entry lowers")
@@ -48,7 +49,11 @@ fn named_entry(source: &str, name: &str) -> chelis_ir::Dag {
 
 fn compiled_dags(source: &str, origin: ProgramOrigin) -> Vec<chelis_ir::Dag> {
     let compiled = chelis_ir::lowering_runtime::with_native_lowering_runtime(|runtime| {
-        chelis_ir::host::try_lower_compiled_program(&checked_deep(source, origin), runtime)
+        chelis_ir::host::try_lower_compiled_program(
+            &checked_deep(source, origin),
+            runtime,
+            &mut chelis_types::NativeServices::new(None),
+        )
     })
     .expect("compiled host program lowers");
     let mut dags = compiled.dag.into_iter().collect::<Vec<_>>();

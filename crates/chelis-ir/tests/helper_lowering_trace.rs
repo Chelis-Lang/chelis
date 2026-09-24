@@ -57,11 +57,19 @@ fn traced_helper_is_the_ordinary_retained_helper_and_projects_with_its_function(
         "fixtures/core/tests/helper_lowering_trace/traced_helper_is_the_ordinary_retained_helper_and_projects_with_its_function.json"
     ));
     let (_, ordinary) = chelis_ir::lowering_runtime::with_native_lowering_runtime(|runtime| {
-        try_lower_manifested_execution_program(&program, runtime)
+        try_lower_manifested_execution_program(
+            &program,
+            runtime,
+            &mut chelis_types::NativeServices::new(None),
+        )
     })
     .unwrap();
     let (_, traced) = chelis_ir::lowering_runtime::with_native_lowering_runtime(|runtime| {
-        try_lower_manifested_execution_program_with_trace(&program, runtime)
+        try_lower_manifested_execution_program_with_trace(
+            &program,
+            runtime,
+            &mut chelis_types::NativeServices::new(None),
+        )
     })
     .unwrap();
     let ordinary = ordinary.expect("ordinary host plan");
@@ -118,7 +126,11 @@ fn traced_helper_is_the_ordinary_retained_helper_and_projects_with_its_function(
     assert!(projected.into_ordinary().is_err());
 
     let (_, traced) = chelis_ir::lowering_runtime::with_native_lowering_runtime(|runtime| {
-        try_lower_manifested_execution_program_with_trace(&program, runtime)
+        try_lower_manifested_execution_program_with_trace(
+            &program,
+            runtime,
+            &mut chelis_types::NativeServices::new(None),
+        )
     })
     .unwrap();
     let ordinary = traced
@@ -140,7 +152,11 @@ fn helper_trace_retains_actual_ad_and_ordered_duplicate_root_packing() {
         "fixtures/core/tests/helper_lowering_trace/helper_trace_retains_actual_ad_and_ordered_duplicate_root_packing.json"
     ));
     let (_, plan) = chelis_ir::lowering_runtime::with_native_lowering_runtime(|runtime| {
-        try_lower_manifested_execution_program_with_trace(&program, runtime)
+        try_lower_manifested_execution_program_with_trace(
+            &program,
+            runtime,
+            &mut chelis_types::NativeServices::new(None),
+        )
     })
     .unwrap();
     let plan = plan.expect("host execution plan");
@@ -207,7 +223,11 @@ fn named_axis_helper_records_the_retained_dimension_rebinding_output() {
         "fixtures/core/tests/helper_lowering_trace/named_axis_helper_records_the_retained_dimension_rebinding_output.json"
     ));
     let (_, plan) = chelis_ir::lowering_runtime::with_native_lowering_runtime(|runtime| {
-        try_lower_manifested_execution_program_with_trace(&program, runtime)
+        try_lower_manifested_execution_program_with_trace(
+            &program,
+            runtime,
+            &mut chelis_types::NativeServices::new(None),
+        )
     })
     .unwrap();
     let plan = plan.expect("host execution plan");
@@ -235,7 +255,11 @@ fn fixed_control_helper_trace_captures_actual_pre_and_post_ad_execution() {
         "fixtures/core/tests/helper_lowering_trace/fixed_control_helper_trace_captures_actual_pre_and_post_ad_execution.json"
     ));
     let (_, plan) = chelis_ir::lowering_runtime::with_native_lowering_runtime(|runtime| {
-        try_lower_manifested_execution_program_with_trace(&program, runtime)
+        try_lower_manifested_execution_program_with_trace(
+            &program,
+            runtime,
+            &mut chelis_types::NativeServices::new(None),
+        )
     })
     .unwrap();
     let plan = plan.expect("host execution plan");
@@ -306,7 +330,11 @@ fn resource_requirement_survives_actual_ad_splice() {
         "fixtures/core/tests/helper_lowering_trace/resource_requirement_survives_actual_ad_splice.json"
     ));
     let (_, plan) = chelis_ir::lowering_runtime::with_native_lowering_runtime(|runtime| {
-        try_lower_manifested_execution_program_with_trace(&program, runtime)
+        try_lower_manifested_execution_program_with_trace(
+            &program,
+            runtime,
+            &mut chelis_types::NativeServices::new(None),
+        )
     })
     .unwrap();
     let plan = plan.expect("C execution host plan");
@@ -410,7 +438,11 @@ fn failed_helper_attempt_returns_no_trace_and_cannot_pollute_the_next_compilatio
         "fixtures/core/tests/helper_lowering_trace/failed_helper_attempt_returns_no_trace_and_cannot_pollute_the_next_compilation.json"
     ));
     let error = chelis_ir::lowering_runtime::with_native_lowering_runtime(|runtime| {
-        try_lower_manifested_execution_program_with_trace(&rejected, runtime)
+        try_lower_manifested_execution_program_with_trace(
+            &rejected,
+            runtime,
+            &mut chelis_types::NativeServices::new(None),
+        )
     })
     .expect_err("the actual AD pass rejects floor");
     assert!(error.to_string().contains("floor"));
@@ -419,7 +451,11 @@ fn failed_helper_attempt_returns_no_trace_and_cannot_pollute_the_next_compilatio
         "fixtures/core/tests/helper_lowering_trace/failed_helper_attempt_returns_no_trace_and_cannot_pollute_the_next_compilation_2.json"
     ));
     let (_, plan) = chelis_ir::lowering_runtime::with_native_lowering_runtime(|runtime| {
-        try_lower_manifested_execution_program_with_trace(&accepted, runtime)
+        try_lower_manifested_execution_program_with_trace(
+            &accepted,
+            runtime,
+            &mut chelis_types::NativeServices::new(None),
+        )
     })
     .unwrap();
     let plan = plan.expect("successful host plan");

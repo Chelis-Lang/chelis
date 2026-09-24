@@ -37,7 +37,13 @@ fn lower_deep(src: &str) -> Result<chelis_ir::dag::Dag, String> {
         chelis_types::check_linearity(&checked, &mut chelis_types::NativeServices::new(None))
             .expect("fixture linearity");
     Ok(chelis_ir::lowering_runtime::with_native_lowering_runtime(
-        |runtime| lower_program(&checked, runtime),
+        |runtime| {
+            lower_program(
+                &checked,
+                runtime,
+                &mut chelis_types::NativeServices::new(None),
+            )
+        },
     ))
 }
 

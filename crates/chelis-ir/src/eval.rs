@@ -5162,7 +5162,11 @@ mod tests {
             chelis_types::check_linearity(&checked, &mut chelis_types::NativeServices::new(None))
                 .unwrap_or_else(|errors| panic!("linearity check failed: {errors:?}"));
         crate::lowering_runtime::with_native_lowering_runtime(|runtime| {
-            lower_program_to_library(&checked, runtime)
+            lower_program_to_library(
+                &checked,
+                runtime,
+                &mut chelis_types::NativeServices::new(None),
+            )
         })
     }
 

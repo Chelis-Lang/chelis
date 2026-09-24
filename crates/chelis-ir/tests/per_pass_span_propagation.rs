@@ -1093,7 +1093,11 @@ fn s3_oracle_lowering_then_optimization_passes() {
 
     // Stage 1: lowering (which already runs DCE inside lower_program_to_library).
     let mut dag = chelis_ir::lowering_runtime::with_native_lowering_runtime(|runtime| {
-        lower_program(&checked, runtime)
+        lower_program(
+            &checked,
+            runtime,
+            &mut chelis_types::NativeServices::new(None),
+        )
     });
 
     // Stage 2: constant fold + CSE + a redundant DCE (all pure on already-DCE'd input).

@@ -5,15 +5,13 @@
 //! intentionally defines no serialization format. See the trace contract in
 //! `spec/design/chelis_hull_design_spec.md` for the remaining evidence obligations.
 
-use std::cell::RefCell;
 use std::collections::BTreeMap;
-use std::rc::Rc;
 
 use crate::dag::{Dag, NodeId, TensorType};
 use crate::grad::GradResult;
 use crate::lower::{LowerDiagnostic, LoweredLibrary};
 use crate::lowering_runtime::LoweringRuntime;
-use chelis_types::CheckedProgram;
+use chelis_types::{CheckedProgram, NativeServices};
 use chelis_unord::UnordMap;
 
 /// A trace-local lowering context identity, not a node or cross-run identity.
@@ -258,22 +256,29 @@ impl HelperLoweringTrace {
 
 pub fn try_lower_program_to_evaluation_library_with_trace(
     program: &CheckedProgram,
-    runtime: &LoweringRuntime,
+    runtime: &mut LoweringRuntime,
+    native: &mut NativeServices,
 ) -> Result<(crate::lower::EvaluationLibrary, EvaluationLoweringTrace), LowerDiagnostic> {
-    crate::lower::try_lower_program_to_evaluation_library_with_trace(program, runtime)
+    crate::lower::try_lower_program_to_evaluation_library_with_trace(program, runtime, native)
 }
 
 /// Run the ordinary library lowering with explicit snapshot collection.
 /// Failure returns the ordinary diagnostic, never a partial successful trace.
 pub fn try_lower_program_to_library_with_trace(
     program: &CheckedProgram,
-    runtime: &LoweringRuntime,
+    runtime: &mut LoweringRuntime,
+    native: &mut NativeServices,
 ) -> Result<(LoweredLibrary, LoweringTrace), LowerDiagnostic> {
-    crate::lower::try_lower_program_to_library_with_trace(program, runtime)
+    crate::lower::try_lower_program_to_library_with_trace(program, runtime, native)
 }
 
+/// Every observation of one traced lowering attempt, owned by the entry that
+/// starts it. Lowering contexts borrow it (`&mut`) together with their own
+/// [`ContextId`]; a child context registers itself here and records with its
+/// id while the parent's borrow is suspended, so observations keep their
+/// order. Never global or thread-local.
 #[derive(Default)]
-struct State {
+pub(crate) struct Collector {
     contexts: Vec<Context>,
     gradients: Vec<Gradient>,
     boundaries: Vec<Boundary>,
@@ -285,13 +290,6 @@ struct State {
     helper_result: Option<(Vec<NodeId>, Value)>,
 }
 
-/// Explicitly inherited by child contexts; never global or thread-local.
-#[derive(Clone)]
-pub(crate) struct Collector {
-    state: Rc<RefCell<State>>,
-    context: ContextId,
-}
-
 pub(crate) fn ordered(remap: &UnordMap<NodeId, NodeId>) -> BTreeMap<NodeId, NodeId> {
     remap
         .to_sorted()
@@ -301,35 +299,34 @@ pub(crate) fn ordered(remap: &UnordMap<NodeId, NodeId>) -> BTreeMap<NodeId, Node
 }
 
 impl Collector {
+    /// The root context every collector starts with.
+    pub(crate) const ROOT: ContextId = ContextId(0);
+
     pub(crate) fn new() -> Self {
-        let state = State {
+        Self {
             contexts: vec![Context {
                 parent: None,
                 kind: ContextKind::Library,
             }],
-            ..State::default()
-        };
-        Self {
-            state: Rc::new(RefCell::new(state)),
-            context: ContextId(0),
+            ..Self::default()
         }
     }
 
     pub(crate) fn new_execution() -> Self {
-        let collector = Self::new();
-        collector.state.borrow_mut().capture_execution = true;
+        let mut collector = Self::new();
+        collector.capture_execution = true;
         collector
     }
 
     pub(crate) fn new_helper() -> Self {
-        let collector = Self::new();
-        collector.state.borrow_mut().contexts[0].kind = ContextKind::Helper;
+        let mut collector = Self::new();
+        collector.contexts[0].kind = ContextKind::Helper;
         collector
     }
 
     pub(crate) fn new_execution_helper() -> Self {
-        let collector = Self::new_execution();
-        collector.state.borrow_mut().contexts[0].kind = ContextKind::Helper;
+        let mut collector = Self::new_execution();
+        collector.contexts[0].kind = ContextKind::Helper;
         collector
     }
 
@@ -355,41 +352,37 @@ impl Collector {
         dag: &Dag,
         execution: &crate::evaluation::ExecutionMetadata,
     ) -> Option<crate::evaluation::EvaluationPlan> {
-        self.state
-            .borrow()
-            .capture_execution
+        self.capture_execution
             .then(|| crate::evaluation::EvaluationPlan::snapshot(dag, execution))
     }
 
     pub(crate) fn execution_after_ad(
-        &self,
+        &mut self,
         gradient: usize,
         forward: crate::evaluation::EvaluationPlan,
         dag: &Dag,
         execution: &crate::evaluation::ExecutionMetadata,
     ) {
-        self.state.borrow_mut().executions.push(ExecutionGradient {
+        self.executions.push(ExecutionGradient {
             gradient,
             forward,
             backward: crate::evaluation::EvaluationPlan::snapshot(dag, execution),
         });
     }
 
-    pub(crate) fn finish_execution(self) -> EvaluationLoweringTrace {
-        let executions = std::mem::take(&mut self.state.borrow_mut().executions);
+    pub(crate) fn finish_execution(mut self) -> EvaluationLoweringTrace {
+        let executions = std::mem::take(&mut self.executions);
         EvaluationLoweringTrace {
             lowering: self.finish(),
             executions,
         }
     }
 
-    pub(crate) fn finish_helper(self) -> HelperLoweringTrace {
-        let executions = std::mem::take(&mut self.state.borrow_mut().executions);
-        let applications = std::mem::take(&mut self.state.borrow_mut().execution_applications);
-        let normalization = self.state.borrow_mut().execution_normalization.take();
+    pub(crate) fn finish_helper(mut self) -> HelperLoweringTrace {
+        let executions = std::mem::take(&mut self.executions);
+        let applications = std::mem::take(&mut self.execution_applications);
+        let normalization = self.execution_normalization.take();
         let (packed_roots, packed_result) = self
-            .state
-            .borrow_mut()
             .helper_result
             .take()
             .expect("successful helper lowering records its packed result");
@@ -404,43 +397,36 @@ impl Collector {
         }
     }
 
-    pub(crate) fn helper_result(&self, roots: &[NodeId], result: Value) {
-        let mut state = self.state.borrow_mut();
-        assert!(state.helper_result.is_none());
-        state.helper_result = Some((roots.to_vec(), result));
+    pub(crate) fn helper_result(&mut self, roots: &[NodeId], result: Value) {
+        assert!(self.helper_result.is_none());
+        self.helper_result = Some((roots.to_vec(), result));
     }
 
-    pub(crate) fn child(&self, kind: ContextKind) -> Self {
-        let mut state = self.state.borrow_mut();
-        let context = ContextId(state.contexts.len());
-        state.contexts.push(Context {
-            parent: Some(self.context),
+    /// Register a child of `parent` and return the child's own id.
+    pub(crate) fn child(&mut self, parent: ContextId, kind: ContextKind) -> ContextId {
+        let context = ContextId(self.contexts.len());
+        self.contexts.push(Context {
+            parent: Some(parent),
             kind,
         });
-        Self {
-            state: self.state.clone(),
-            context,
-        }
+        context
     }
 
-    pub(crate) fn boundary(&self, kind: BoundaryKind) {
-        self.state.borrow_mut().boundaries.push(Boundary {
-            context: self.context,
-            kind,
-        });
+    pub(crate) fn boundary(&mut self, context: ContextId, kind: BoundaryKind) {
+        self.boundaries.push(Boundary { context, kind });
     }
 
     pub(crate) fn gradient(
-        &self,
+        &mut self,
+        context: ContextId,
         forward: &Dag,
         output: NodeId,
         wrt: &[NodeId],
         result: &GradResult,
     ) -> usize {
-        let mut state = self.state.borrow_mut();
-        let index = state.gradients.len();
-        state.gradients.push(Gradient {
-            context: self.context,
+        let index = self.gradients.len();
+        self.gradients.push(Gradient {
+            context,
             forward: forward.clone(),
             output,
             wrt: wrt.to_vec(),
@@ -452,23 +438,24 @@ impl Collector {
         index
     }
 
-    pub(crate) fn application(&self, gradient: usize, application: Application) {
-        let mut state = self.state.borrow_mut();
-        let gradient = &mut state.gradients[gradient];
-        assert_eq!(gradient.context, self.context);
+    pub(crate) fn application(
+        &mut self,
+        context: ContextId,
+        gradient: usize,
+        application: Application,
+    ) {
+        let gradient = &mut self.gradients[gradient];
+        assert_eq!(gradient.context, context);
         assert!(gradient.application.is_none());
         gradient.application = Some(application);
     }
 
-    pub(crate) fn execution_application(&self, application: ExecutionApplication) {
-        self.state
-            .borrow_mut()
-            .execution_applications
-            .push(application);
+    pub(crate) fn execution_application(&mut self, application: ExecutionApplication) {
+        self.execution_applications.push(application);
     }
 
     pub(crate) fn normalization(
-        &self,
+        &mut self,
         before_dce: &Dag,
         after_dce: &Dag,
         after_copies: Dag,
@@ -476,7 +463,7 @@ impl Collector {
         dce_remap: &UnordMap<NodeId, NodeId>,
         copy_remap: &UnordMap<NodeId, NodeId>,
     ) {
-        self.state.borrow_mut().normalization = Some(Normalization {
+        self.normalization = Some(Normalization {
             before_dce: before_dce.clone(),
             after_dce: after_dce.clone(),
             after_copies,
@@ -487,15 +474,14 @@ impl Collector {
     }
 
     pub(crate) fn execution_normalization(
-        &self,
+        &mut self,
         before_dce: ExecutionObservation,
         after_dce: ExecutionObservation,
         after_copies: ExecutionObservation,
         after_drops: ExecutionObservation,
     ) {
-        let mut state = self.state.borrow_mut();
-        assert!(state.execution_normalization.is_none());
-        state.execution_normalization = Some(ExecutionNormalization {
+        assert!(self.execution_normalization.is_none());
+        self.execution_normalization = Some(ExecutionNormalization {
             before_dce,
             after_dce,
             after_copies,
@@ -503,13 +489,12 @@ impl Collector {
         });
     }
 
-    pub(crate) fn finish(self) -> LoweringTrace {
-        let mut state = self.state.borrow_mut();
+    pub(crate) fn finish(mut self) -> LoweringTrace {
         LoweringTrace {
-            contexts: std::mem::take(&mut state.contexts),
-            gradients: std::mem::take(&mut state.gradients),
-            boundaries: std::mem::take(&mut state.boundaries),
-            normalization: state
+            contexts: std::mem::take(&mut self.contexts),
+            gradients: std::mem::take(&mut self.gradients),
+            boundaries: std::mem::take(&mut self.boundaries),
+            normalization: self
                 .normalization
                 .take()
                 .expect("successful library lowering records normalization"),
@@ -558,9 +543,9 @@ mod tests {
         dag.node_mut(output).unwrap().merged_spans = vec!["merged-span".into()];
         dag.add_root(output);
         let result = crate::grad::grad_dag_checked(&dag, output, &[input]).unwrap();
-        let collector = Collector::new();
-        collector.gradient(&dag, output, &[input], &result);
-        let captured = &collector.state.borrow().gradients[0];
+        let mut collector = Collector::new();
+        collector.gradient(Collector::ROOT, &dag, output, &[input], &result);
+        let captured = &collector.gradients[0];
         let before = bincode::serialize(&dag).unwrap();
         assert_eq!(bincode::serialize(&captured.forward).unwrap(), before);
         assert_eq!(

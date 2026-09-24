@@ -180,7 +180,7 @@ impl Profile<'_> {
         caller_depth: usize,
         body_depth: usize,
         caller: &Environment,
-        runtime: &LoweringRuntime,
+        runtime: &mut LoweringRuntime,
     ) -> LowerResult<()> {
         use crate::evaluation::LegacyEvaluationReason as Reason;
         for arg in args {
@@ -260,7 +260,7 @@ impl Profile<'_> {
         expr: &Expr,
         depth: usize,
         env: &Environment,
-        runtime: &LoweringRuntime,
+        runtime: &mut LoweringRuntime,
     ) -> LowerResult<()> {
         use crate::evaluation::LegacyEvaluationReason as Reason;
         let Some((tag, metadata, kids)) = stamped_parts(expr) else {
@@ -421,7 +421,7 @@ pub(super) fn profile(
     defs: &BTreeMap<String, Expr>,
     inputs: &[(String, TensorType)],
     resource_policy: crate::evaluation::ResourcePolicy,
-    runtime: &LoweringRuntime,
+    runtime: &mut LoweringRuntime,
 ) -> LowerResult<crate::evaluation::EvaluationProfile> {
     use crate::evaluation::{EvaluationProfile, LegacyEvaluationReason};
     let mut profile = Profile {
