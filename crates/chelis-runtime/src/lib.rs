@@ -2842,6 +2842,14 @@ pub unsafe extern "C" fn chelis_tensor_write_literal(
 ) {
     let op = "const";
     let tensor = lock_live_write_guard(guard, op);
+    if tensor.metadata.dtype() == RuntimeDType::Key {
+        // [05-OP-31]: a key has no literal carrier, so no literal writes a
+        // key tensor, an empty one included, whose loop below checks nothing.
+        affine_result::<()>(
+            Err(MetadataError::Domain("a key tensor has no literal".into())),
+            op,
+        );
+    }
     let count = affine_scalar(count, op);
     if count != tensor.metadata.elements().get() || (count > 0 && values.is_null()) {
         affine_result::<()>(
@@ -5583,7 +5591,8 @@ pub unsafe extern "C" fn chelis_tensor_from_values(
 
 #[no_mangle]
 pub unsafe extern "C" fn chelis_tensor_elements(tensor: *const chelis_tensor) -> *mut chelis_list {
-    let dtype = tensor_dtype(tensor, "chelis_tensor_elements input");
+    // Checked at entry, not per element, so an empty key tensor is rejected.
+    let [dtype] = validate_tensor_inputs([(tensor, "chelis_tensor_elements input")]);
     let count = metadata_or_fail(
         (*tensor).metadata.elements().scratch_len::<chelis_value>(),
         "tensor elements output",
@@ -7273,7 +7282,8 @@ unsafe fn tensor_elem_to_string(t: *const chelis_tensor, dtype: RuntimeDType, i:
 const TENSOR_RENDER_LIMIT: usize = 32;
 
 unsafe fn tensor_to_string(t: *const chelis_tensor) -> String {
-    let dtype = tensor_dtype(t, "tensor formatting");
+    // Checked at entry, not per element, so an empty key tensor is rejected.
+    let [dtype] = validate_tensor_inputs([(t, "tensor formatting")]);
     // [05-OBS-4]: a rank-0 tensor renders as its single element, bare -
     // the `tensor(shape=[], data=[..])` wrapper is not an exit form.
     if (*t).rank() == 0 {
