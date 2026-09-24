@@ -296,7 +296,8 @@ key. A key has at most one use: one `UniformLike`, `Dropout`, `FoldIn` or
 It is otherwise read only by its draw's replays, and a `DrawKey`'s key is used
 only by a draw. Two draws may consume one key only when each carries an activation
 and, for every pair, one activation's `And` conjuncts include a node `X` and
-the other's include `Not(X)`. A key reaching any other operation or a shape
+the other's include `Not(X)`, or either's include the `bool` constant `false`,
+whose draw never runs. A key reaching any other operation or a shape
 dependency is a decode error.
 
 `KeyFromSeed.inputs` is one `int64` tensor, and its output is the `key` tensor

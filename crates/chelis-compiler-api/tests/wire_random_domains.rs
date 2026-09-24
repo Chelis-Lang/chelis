@@ -574,6 +574,53 @@ fn the_codec_admits_exclusive_arms_and_rejects_overlapping_ones() {
     rejects_domain(&arms(false), "whose activations are not exclusive");
 }
 
+/// Rule V3 on the wire after constant folding: an activation that is the
+/// `bool` constant `false` never draws, so it is exclusive with any other
+/// activation; two `true` constants are not.
+#[test]
+fn the_codec_admits_a_constant_false_arm_and_rejects_two_true_ones() {
+    let arms = |first: bool, second: bool| {
+        let mut graph = key_chain();
+        let mut constant = |value: bool| {
+            push(
+                &mut graph,
+                json!({"kind":"const","value":{"dtype":"bool","value":value}}),
+                &[],
+                &[],
+                "bool",
+            )
+        };
+        let (first, second) = (constant(first), constant(second));
+        let x = push(
+            &mut graph,
+            json!({"kind":"load","name":"y"}),
+            &[],
+            &[4],
+            "f32",
+        );
+        let a = push(
+            &mut graph,
+            json!({"kind":"dropout"}),
+            &[x, 8, 11, first],
+            &[4],
+            "f32",
+        );
+        let b = push(
+            &mut graph,
+            json!({"kind":"dropout"}),
+            &[x, 8, 11, second],
+            &[4],
+            "f32",
+        );
+        graph["roots"] = json!([9, a, b]);
+        graph
+    };
+    accepts(&arms(true, false));
+    accepts(&arms(false, true));
+    accepts(&arms(false, false));
+    rejects_domain(&arms(true, true), "whose activations are not exclusive");
+}
+
 /// spec/10 §3.2: a key is read only by the draw that consumes it and that
 /// draw's replays, and a `DrawKey` carries its draw and that draw's controls.
 /// The codec applies the IR verifier's key rules, so it rejects each payload

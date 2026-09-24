@@ -956,6 +956,9 @@ pub enum KeyRole {
     And,
     /// A `Not`, read by the activation exclusivity rule.
     Not,
+    /// The rank-0 Bool constant `false`, read by the activation exclusivity
+    /// rule.
+    ConstFalse,
     /// An operation that takes no key.
     Other,
 }
@@ -971,6 +974,7 @@ impl KeyRole {
             | Self::Load
             | Self::And
             | Self::Not
+            | Self::ConstFalse
             | Self::Other => None,
         }
     }
@@ -1046,6 +1050,7 @@ impl KeyGraph for Dag {
             Some(RiscOp::UniformBoundAdjoint { .. }) => KeyRole::UniformBoundAdjoint,
             Some(RiscOp::Logical(crate::dag::LogicalKind::And)) => KeyRole::And,
             Some(RiscOp::Logical(crate::dag::LogicalKind::Not)) => KeyRole::Not,
+            Some(RiscOp::Const { value }) if is_const_false(value) => KeyRole::ConstFalse,
             _ => KeyRole::Other,
         }
     }
@@ -1102,11 +1107,19 @@ fn activation_conjuncts(graph: &impl KeyGraph, activation: usize) -> Vec<usize> 
     seen
 }
 
+/// Whether a scalar is the Bool constant `false`, the literal that makes an
+/// activation implying it exclusive with every other.
+pub fn is_const_false(value: &chelis_types::ScalarValue) -> bool {
+    value.prim() == Prim::Bool && value.as_bool_exact() == Some(false)
+}
+
 /// Rule V3: two activations are structurally exclusive when one implies a
-/// node `X` and the other implies `Not(X)`. That covers `lower_if`'s arms,
-/// `And(P, X)` against `And(P, Not X)`, and any arm nested inside one of
-/// them; activations that are merely never both true at run time do not
-/// count.
+/// node `X` and the other implies `Not(X)`, or when either implies the
+/// constant `false`, whose draw never runs. That covers `lower_if`'s arms,
+/// `And(P, X)` against `And(P, Not X)`, any arm nested inside one of them,
+/// and what constant folding leaves of such a pair when `X` is a constant:
+/// one of `X` and `Not(X)` folds to `false`. Activations that are merely
+/// never both true at run time do not count.
 fn activations_exclusive(graph: &impl KeyGraph, left: usize, right: usize) -> bool {
     let left = activation_conjuncts(graph, left);
     let right = activation_conjuncts(graph, right);
@@ -1114,7 +1127,11 @@ fn activations_exclusive(graph: &impl KeyGraph, left: usize, right: usize) -> bo
         graph.role(node) == KeyRole::Not && graph.input(node, 0) == Some(other)
     };
     left.iter()
-        .any(|a| right.iter().any(|b| negates(*a, *b) || negates(*b, *a)))
+        .chain(&right)
+        .any(|node| graph.role(*node) == KeyRole::ConstFalse)
+        || left
+            .iter()
+            .any(|a| right.iter().any(|b| negates(*a, *b) || negates(*b, *a)))
 }
 
 /// The key rules of spec/10 §3.2 (`spec/design/randomness_explicit_keys.md`
@@ -1127,7 +1144,8 @@ fn activations_exclusive(graph: &impl KeyGraph, left: usize, right: usize) -> bo
 ///   parameter is one key. A `DrawKey`'s key has one use, a draw, and
 ///   validates exactly that draw's controls, dtype and activation.
 /// - V3: two draws may consume one key only when each carries an activation
-///   and every pair of their activations is structurally exclusive.
+///   and every pair of their activations is structurally exclusive: one
+///   implies `X` and the other `Not(X)`, or either implies `false`.
 /// - V4: a key reaching any other operation or a dependency list is
 ///   rejected; replays read their forward draw's key without consuming it.
 pub fn verify_key_rules(graph: &impl KeyGraph, errors: &mut Vec<String>) {

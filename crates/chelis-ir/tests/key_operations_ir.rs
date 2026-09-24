@@ -1345,6 +1345,115 @@ fn rule_v3_admits_exclusive_arms_and_rejects_overlapping_ones() {
     assert_rejected(&dag, "is consumed twice");
 }
 
+fn bool_const(dag: &mut Dag, value: bool) -> NodeId {
+    node(
+        dag,
+        RiscOp::Const {
+            value: scalar_from_i64("test", Prim::Bool, i64::from(value)).unwrap(),
+        },
+        vec![],
+        &[],
+        Prim::Bool,
+    )
+}
+
+/// Every root's stored bits, with `x` loaded as `[1, 2, 3, 4]` and the
+/// parent condition `p` as true.
+fn eval_roots(dag: &Dag) -> Vec<Vec<u64>> {
+    let inputs = UnordMap::from_iter([
+        ("x", floats(Prim::F32, vec![4], vec![1.0, 2.0, 3.0, 4.0])),
+        (
+            "p",
+            TensorValue::from_storage(
+                vec![],
+                finalize_tensor("test", Prim::Bool, RawTensor::Int(vec![1])).unwrap(),
+            ),
+        ),
+    ]);
+    let out = eval_tensor_roots_with_frame(dag, dag.roots(), &mut RandomFrame::unhandled(), |n| {
+        inputs.get(n).cloned()
+    })
+    .unwrap();
+    dag.roots()
+        .iter()
+        .map(|root| stored_bits(&out[root]))
+        .collect()
+}
+
+/// Rule V3 holds after constant folding. When the arms' condition `X` is a
+/// constant, one of `X` and `Not(X)` folds to `false`, whose draw never
+/// runs, so the folded pair stays exclusive and draws what it drew before.
+#[test]
+fn rule_v3_holds_after_folding_a_constant_condition() {
+    for condition in [true, false] {
+        for nested in [false, true] {
+            let mut dag = Dag::new();
+            let key = root_key(&mut dag);
+            let x = bool_const(&mut dag, condition);
+            let not = node(
+                &mut dag,
+                RiscOp::Logical(LogicalKind::Not),
+                vec![x],
+                &[],
+                Prim::Bool,
+            );
+            let (then_arm, else_arm) = if nested {
+                let parent = load(&mut dag, "p", &[], Prim::Bool);
+                let mut and = |arm| {
+                    node(
+                        &mut dag,
+                        RiscOp::Logical(LogicalKind::And),
+                        vec![parent, arm],
+                        &[],
+                        Prim::Bool,
+                    )
+                };
+                (and(x), and(not))
+            } else {
+                (x, not)
+            };
+            let a = draw(&mut dag, key, Some(then_arm));
+            let b = draw(&mut dag, key, Some(else_arm));
+            dag.add_root(a);
+            dag.add_root(b);
+            let case = format!("condition={condition} nested={nested}");
+            assert_eq!(verify(&dag), Vec::<String>::new(), "{case}");
+            let before = eval_roots(&dag);
+            constant_fold(&mut dag);
+            assert!(
+                matches!(dag.get(not).unwrap().op, RiscOp::Const { .. }),
+                "{case}: Not(X) folds"
+            );
+            assert_eq!(verify(&dag), Vec::<String>::new(), "{case} after folding");
+            assert_eq!(eval_roots(&dag), before, "{case}");
+            // The arm whose condition is false never draws.
+            let zeros = vec![0u64; 4];
+            assert_eq!(before[usize::from(condition)], zeros, "{case}");
+            assert_ne!(before[usize::from(!condition)], zeros, "{case}");
+        }
+    }
+
+    // Two true constants are not exclusive, and a false one does not excuse
+    // a draw that carries no activation.
+    let mut dag = Dag::new();
+    let key = root_key(&mut dag);
+    let first = bool_const(&mut dag, true);
+    let second = bool_const(&mut dag, true);
+    let a = draw(&mut dag, key, Some(first));
+    let b = draw(&mut dag, key, Some(second));
+    dag.add_root(a);
+    dag.add_root(b);
+    assert_rejected(&dag, "whose activations are not exclusive");
+    let mut dag = Dag::new();
+    let key = root_key(&mut dag);
+    let off = bool_const(&mut dag, false);
+    let a = draw(&mut dag, key, Some(off));
+    let b = draw(&mut dag, key, None);
+    dag.add_root(a);
+    dag.add_root(b);
+    assert_rejected(&dag, "is consumed twice");
+}
+
 #[test]
 fn key_operation_operands_and_batched_shapes_are_checked() {
     // A key op fed an integer where a key belongs, and a seed of the wrong

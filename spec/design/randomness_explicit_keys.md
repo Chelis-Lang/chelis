@@ -41,7 +41,7 @@ Backward-pass replay reads are the only exception. Reuse is therefore a type err
 
 **A closure may not capture a key or a key holder.** Function types record no captures, and a closure that consumed a captured key would use it once per call. Capturing one is a type error; keys are passed as parameters. Affine closures would be a separate feature.
 
-**Keys under a where-lowered `if` or `match` (rule V3).** Inside a kernel both arms of a runtime branch are lowered, each draw carrying its arm's activation. Consumption is counted per selected arm: two consumers may share a key only when their activations are structurally exclusive, `And(P, X)` against `And(P, Not X)` or any conjunct chain containing such a pair. Refusing keys inside arms instead would fence ordinary programs such as `if c then dropout(k, x, r) else x`.
+**Keys under a where-lowered `if` or `match` (rule V3).** Inside a kernel both arms of a runtime branch are lowered, each draw carrying its arm's activation. Consumption is counted per selected arm: two consumers may share a key only when their activations are structurally exclusive, `And(P, X)` against `And(P, Not X)` or any conjunct chain containing such a pair, or a chain containing the constant `false`. The last case is what constant folding leaves of such a pair when `X` is a constant, so folding preserves the rule. Refusing keys inside arms instead would fence ordinary programs such as `if c then dropout(k, x, r) else x`.
 
 The JAX idiom of repeated `fold_in(k, step)` on one retained key is written `split_keys(k, n)` instead: consuming `k` once yields `n` keys.
 

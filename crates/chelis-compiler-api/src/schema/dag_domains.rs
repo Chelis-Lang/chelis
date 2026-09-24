@@ -5,7 +5,7 @@ use super::{
     wire_dim_info_equal,
 };
 use chelis_ir::dag::{KeyBranch, RandomDraw};
-use chelis_ir::verify::{KeyGraph, KeyRole, verify_key_rules};
+use chelis_ir::verify::{KeyGraph, KeyRole, is_const_false, verify_key_rules};
 use chelis_types::types::Prim;
 
 type Result<T> = std::result::Result<T, WireDagContractError>;
@@ -398,6 +398,7 @@ impl KeyGraph for DecodedKeys<'_> {
             Some(WireRiscOp::Logical {
                 logical: WireLogicalKind::Not,
             }) => KeyRole::Not,
+            Some(WireRiscOp::Const { value }) if is_const_false(value) => KeyRole::ConstFalse,
             _ => KeyRole::Other,
         }
     }
