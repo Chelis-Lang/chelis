@@ -1584,10 +1584,17 @@ adds `CHELIS_DTYPE_KEY = 9` as a tensor-only tag that no `chelis_scalar`
 carries. The two element owners enter as transition debt, not as final forms
 beside `Bool8`'s, because the final-form list is oracle configuration this
 change does not edit; promoting them is a classification for the #893 owner.
-No classifier, final-form list, source-universe rule, deletion phase or frozen
-mutation changes. The existing incomplete-dtype, incomplete-arithmetic and
-element-binding mutations remain the negative witnesses: a dtype or storage
-marker without its complete registration still fails.
+No classifier, final-form list, source-universe rule or deletion phase changes.
+One frozen mutation is reimplemented: `phase0.mutate_incomplete_dtype` anchored
+on the text of the last variant, `I16 = 8`, which appending `Key` removed, so
+the witness could no longer run. It now anchors on the `RuntimeDType`
+declaration and inserts its unregistered variant before the closing brace, so
+it still follows the last variant and no longer drifts when a dtype is
+appended. Its path, seam kind, owners, failure and command are unchanged; its
+implementation digest and the freeze digest move. The incomplete-dtype,
+incomplete-arithmetic and element-binding mutations remain the negative
+witnesses: a dtype or storage marker without its complete registration still
+fails.
 
 ## B2. Invariants at every phase boundary
 
