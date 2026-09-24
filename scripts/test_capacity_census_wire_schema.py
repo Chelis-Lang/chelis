@@ -466,6 +466,21 @@ class SchemaCases(unittest.TestCase):
             self.assertTrue(any(case.expected is not None for case in selected))
             self.assertTrue(any(case.expected is None for case in selected))
 
+    def test_a_key_tensor_has_no_execution_value_spelling(self):
+        # spec/10 section 3.2: the stored `key` dtype gets only rejected
+        # TensorValue spellings, and adds nothing to the numeric subset.
+        from capacity_census_wire_schema import schema_cases
+
+        keyed = VOCABULARY + [{"name": "key", "width": 8, "kind": "key"}]
+        plain = schema_cases(VOCABULARY, ORDER)
+        cases = schema_cases(keyed, ORDER)
+        keys = [case for case in cases if case.dtype == "key"]
+        self.assertEqual([case for case in cases if case.dtype != "key"], plain)
+        self.assertEqual({case.carrier for case in keys}, {"TensorValue"})
+        self.assertEqual({case.codec for case in keys}, {"json", "construct"})
+        self.assertEqual(len(keys), 4)
+        self.assertTrue(all(case.expected is None for case in keys))
+
     def test_runtime_reference_owner_matrix_covers_all_admission_entry_points(self):
         from capacity_census_wire_envelopes import dag_cases
 
