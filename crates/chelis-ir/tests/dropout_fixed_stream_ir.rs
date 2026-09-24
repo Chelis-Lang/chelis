@@ -434,9 +434,8 @@ fn source_ad_replays_a_mask_with_no_extra_draw_and_preserves_dead_forward_calls(
 /// condition lowers only its taken arm, with no activation.
 ///
 /// Evidentiary status: REGRESSION TEST. At dcc9256c4 lowering refused every
-/// `dropout` row with a #2410 rejection, and the `uniform_like` rows drew
-/// with no activation: the unselected arm took an ordinal and trapped on
-/// its invalid bound.
+/// `dropout` row with a #2410 rejection and lowered every `uniform_like`
+/// row's draw key and primitive with no activation.
 #[test]
 fn a_draw_in_a_runtime_arm_is_activated_by_its_arm_path() {
     let scalar = |precision| TensorType {

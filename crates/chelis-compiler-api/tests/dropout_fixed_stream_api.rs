@@ -1837,10 +1837,10 @@ fn grad_of_a_captured_drawing_closure_still_sees_its_draw() {
 /// ordinal changes the result. Flags come from data, so lowering cannot fold
 /// them.
 ///
-/// Evidentiary status: REGRESSION TEST for the `uniform_like` rows with a
-/// later draw and for the `dropout` rows under `grad`: at dcc9256c4 the former
-/// took ordinal 1 for the later draw and the latter were refused with the
-/// #2410 rejection. The invalid-bound row passed there.
+/// Evidentiary status: REGRESSION TEST for the row taking `grad` through an
+/// unselected drawing arm, which dcc9256c4 refused with the #2410 rejection.
+/// The other rows passed there and lock this lane's stream beside the
+/// lowering change.
 #[test]
 fn a_draw_in_an_unselected_arm_takes_no_ordinal_in_the_dag_evaluator() {
     let sum = "tensor_to_scalar(sum(copy(x), 0i32))";

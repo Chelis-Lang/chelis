@@ -620,9 +620,10 @@ enum Root {
 ///
 /// Evidentiary status: REGRESSION TEST. At dcc9256c4 compiled C trapped on
 /// `helper_invalid_bounds` and shifted the later draw of
-/// `helper_valid_bounds`, `ascribed_helper` and `issue_2410` by one ordinal,
-/// and eval trapped on `routed_invalid_bounds` and shifted the later draw of
-/// `routed_valid_bounds` and `routed_literal`. The other rows passed there.
+/// `helper_valid_bounds`, `ascribed_helper`, `nested_arm` and `issue_2410` by
+/// one ordinal, and eval trapped on `routed_invalid_bounds` and shifted the
+/// later draw of `routed_valid_bounds` and `routed_literal`. The other rows
+/// passed there.
 #[test]
 fn a_uniform_like_in_an_unselected_arm_takes_no_ordinal_in_eval_or_c() {
     assert!(

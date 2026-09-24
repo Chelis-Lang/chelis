@@ -168,9 +168,9 @@ fn a_key_is_consumed_once_and_only_by_a_random_primitive() {
     rejects_domain(&not_drawn, "produced by a draw key");
 }
 
-/// spec/10 §3.2: every key is the output of a `DrawKey`, read only by its
-/// one consuming draw and that draw's replays. The IR verifier rejects each
-/// payload below; the codec admitted all three roots and the stray producer.
+/// spec/10 §3.2: every key is the output of a `DrawKey`, read only by the
+/// draw that consumes it, if any, and that draw's replays. The IR verifier
+/// rejects each payload below, and so does the codec.
 ///
 /// Evidentiary status: REGRESSION TEST. At dcc9256c4 `from_validated_json`
 /// accepted the key-precision load, that load as a root, the rooted draw key
