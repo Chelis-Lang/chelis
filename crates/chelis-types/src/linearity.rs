@@ -1,9 +1,7 @@
 use chelis_deep::role::{AritySpec, ChildStampRole, arity_contract, child_stamp_role};
 use chelis_deep::{DeepTag, ExprCarrier};
 use chelis_unord::{UnordMap, UnordSet};
-use std::cell::Cell;
 use std::collections::BTreeMap;
-use std::rc::Rc;
 
 use chelis_deep::Span;
 use chelis_deep::ast::{Atom, Expr, List};
@@ -184,26 +182,38 @@ struct LinearScope {
     /// site mean" and nothing else; every consumption mark, alias link,
     /// and component mark lives on the id-keyed record it resolved to.
     visible: UnordMap<String, Vec<BindingId>>,
-    /// Generation counter. Shared (`Rc`) across clones so branch and
-    /// closure scopes forked from one root cannot mint colliding ids;
-    /// `Default` mints a fresh zero counter, which is what makes each
-    /// check invocation pure (`check_linearity_with_context` purity
-    /// contract). One root scope is built per check invocation, and
-    /// every other scope must be a clone of it: a second
-    /// `LinearScope::default()` mid-check would fork the counter.
-    next: Rc<Cell<u32>>,
+}
+
+/// Generation counter for one check invocation.
+///
+/// Owned by the [`Checker`] and passed by `&mut` to every
+/// [`LinearScope::declare`], so branch and closure scopes cloned from the
+/// root all draw from this single supply and cannot mint colliding ids.
+/// Each check invocation builds a fresh `Checker` and therefore starts at
+/// zero, which is what makes each invocation pure
+/// (`check_linearity_with_context` purity contract).
+#[derive(Debug, Default)]
+struct BindingIdSupply {
+    next: u32,
+}
+
+impl BindingIdSupply {
+    fn mint(&mut self) -> BindingId {
+        let id = BindingId(self.next);
+        self.next = id.0 + 1;
+        id
+    }
 }
 
 impl LinearScope {
-    fn mint(&self) -> BindingId {
-        let id = BindingId(self.next.get());
-        self.next.set(id.0 + 1);
-        id
-    }
-
-    fn declare<S: Into<String>>(&mut self, name: S, ty: Option<Expr>) -> BindingId {
+    fn declare<S: Into<String>>(
+        &mut self,
+        name: S,
+        ty: Option<Expr>,
+        ids: &mut BindingIdSupply,
+    ) -> BindingId {
         let name = name.into();
-        let id = self.mint();
+        let id = ids.mint();
         // The origin starts blank: a re-`let` of `name` shadows any
         // prior alias link and component mark because the new generation
         // begins unmarked. Callers that establish either follow with
@@ -458,6 +468,8 @@ struct Checker {
     /// chelis#229 sibling-sweep gap.
     signature_inference: SignatureInferenceMetadata,
     type_headers: crate::deep_type::TypeResolutionEnv,
+    /// The single [`BindingId`] supply shared by every scope of this check.
+    binding_ids: BindingIdSupply,
 }
 
 impl Checker {
@@ -479,22 +491,28 @@ fn pre_declare_top_level_defs(
     exprs: &[Expr],
     type_env: &BTreeMap<String, Expr>,
     scope: &mut LinearScope,
+    ids: &mut BindingIdSupply,
 ) {
     for expr in exprs {
-        pre_declare_one(expr, type_env, scope);
+        pre_declare_one(expr, type_env, scope, ids);
     }
 }
 
-fn pre_declare_one(expr: &Expr, type_env: &BTreeMap<String, Expr>, scope: &mut LinearScope) {
+fn pre_declare_one(
+    expr: &Expr,
+    type_env: &BTreeMap<String, Expr>,
+    scope: &mut LinearScope,
+    ids: &mut BindingIdSupply,
+) {
     match expr.carrier() {
         ExprCarrier::DecodedNode(DeepTag::Module, _, children) => {
             for child in children.iter().skip(1) {
-                pre_declare_one(child, type_env, scope);
+                pre_declare_one(child, type_env, scope, ids);
             }
         }
         ExprCarrier::DecodedNode(DeepTag::Def, _, children) => {
             if let Some(name) = children.first().and_then(symbol_name) {
-                scope.declare(name, type_env.get(name).cloned());
+                scope.declare(name, type_env.get(name).cloned(), ids);
             }
         }
         ExprCarrier::DecodedNode(_, _, _)
@@ -516,10 +534,16 @@ pub fn check_linearity(program: &CheckedProgram) -> Result<CheckedProgram, Vec<C
         tensor_carrying_adts,
         signature_inference: program.signature_inference().clone(),
         type_headers: program.type_headers().clone(),
+        binding_ids: BindingIdSupply::default(),
     };
     let mut scope = LinearScope::default();
 
-    pre_declare_top_level_defs(program.annotated_exprs(), program.type_env(), &mut scope);
+    pre_declare_top_level_defs(
+        program.annotated_exprs(),
+        program.type_env(),
+        &mut scope,
+        &mut checker.binding_ids,
+    );
 
     // chelis#930: cooperative cancellation at top-level-declaration
     // granularity — the same grain as the type checker's own schedule, and
@@ -645,6 +669,7 @@ pub fn check_linearity_with_context(
         tensor_carrying_adts,
         signature_inference: merged_signature_inference,
         type_headers: merged_type_headers,
+        binding_ids: BindingIdSupply::default(),
     };
 
     let mut scope = LinearScope::default();
@@ -660,6 +685,7 @@ pub fn check_linearity_with_context(
         library_program.annotated_exprs(),
         new_program.type_env(),
         &mut scope,
+        &mut checker.binding_ids,
     );
 
     // Pre-declare new-code def names. New-code shadows library on
@@ -668,6 +694,7 @@ pub fn check_linearity_with_context(
         new_program.annotated_exprs(),
         new_program.type_env(),
         &mut scope,
+        &mut checker.binding_ids,
     );
 
     // Walk ONLY new-code bodies. Library bodies are never re-walked,
@@ -1182,7 +1209,11 @@ impl Checker {
                 } else {
                     self.check_expr(value, scope);
                 }
-                let id = scope.declare(name, self.expr_type(value, scope).cloned());
+                let id = scope.declare(
+                    name,
+                    self.expr_type(value, scope).cloned(),
+                    &mut self.binding_ids,
+                );
                 if let Some(source_id) = alias_source_id {
                     scope.record_alias(id, source_id);
                 }
@@ -1317,7 +1348,11 @@ impl Checker {
                         },
                     );
                 }
-                inner_scope.declare(name.clone(), outer_scope.ty(&name).cloned());
+                inner_scope.declare(
+                    name.clone(),
+                    outer_scope.ty(&name).cloned(),
+                    &mut self.binding_ids,
+                );
             } else {
                 // Borrow capture: error if the outer is already
                 // consumed (read_or_error covers that), then record a
@@ -1328,7 +1363,11 @@ impl Checker {
                 // the outer binding state.
                 self.read_or_error(name.as_str(), expr, outer_scope);
                 outer_scope.borrow(name.as_str(), borrow_site(expr));
-                inner_scope.declare(name.clone(), outer_scope.ty(&name).cloned());
+                inner_scope.declare(
+                    name.clone(),
+                    outer_scope.ty(&name).cloned(),
+                    &mut self.binding_ids,
+                );
             }
         }
 
@@ -1336,14 +1375,14 @@ impl Checker {
         if let Some(params) = tagged_children(&children[0], DeepTag::Params) {
             for param in params {
                 if let Some((name, ty)) = param_name_and_type(param) {
-                    let id = inner_scope.declare(name, ty.cloned());
+                    let id = inner_scope.declare(name, ty.cloned(), &mut self.binding_ids);
                     pushed.push((name.to_string(), id));
                 }
             }
         }
         for param in params {
             if !pushed.iter().any(|(name, _)| name == &param) {
-                let id = inner_scope.declare(param.clone(), None);
+                let id = inner_scope.declare(param.clone(), None, &mut self.binding_ids);
                 pushed.push((param, id));
             }
         }
@@ -1408,7 +1447,11 @@ impl Checker {
             let pattern_bindings = pattern_named_types(&arm_kids[0]);
             let mut pattern_ids = Vec::new();
             for (name, ty) in &pattern_bindings {
-                pattern_ids.push(arm_scope.declare(name.clone(), ty.clone()));
+                pattern_ids.push(arm_scope.declare(
+                    name.clone(),
+                    ty.clone(),
+                    &mut self.binding_ids,
+                ));
             }
             // The empty list in an arm's guard slot is the grammar's
             // explicit "no guard" sentinel, not a runtime expression.
