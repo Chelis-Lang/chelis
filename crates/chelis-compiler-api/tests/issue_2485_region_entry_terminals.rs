@@ -13,6 +13,13 @@
 //! `None`-first `Option` match: the `None` test extracts a payload that only
 //! the rest of the match follows, and the rest of the match branches.
 //!
+//! Emitting those releases also exposed a naming defect from the same planner.
+//! A match draws its scrutinee and payload names after its arms have lowered,
+//! and a match nested in an arm drew the same names from its own supply. In C
+//! the nested binder then shadows the enclosing payload, so a release of the
+//! enclosing payload inside the nested arm named the nested value: a type
+//! error in C, or, when the types agree, a release of the wrong object.
+//!
 //! Oracle: the compiled program runs against the `ownership-ledger` runtime,
 //! every allocation must be finalized with no live owner left, and stdout must
 //! equal what `chelis eval` prints for the same program.
@@ -163,5 +170,57 @@ fn a_branching_fold_body_releases_an_unread_item_inside_the_loop() {
          a = tally(true)\n\
          b = tally(false)\n",
         "a = 2\nb = 0\n",
+    );
+}
+
+/// REGRESSION TEST, the oracle's `option-nested-string` shape. On `7c7b58c7f`
+/// the generated C did not compile: the release of the outer payload, inside
+/// the inner match's arm, named the inner match's `string` payload.
+#[test]
+fn a_match_nested_in_an_arm_releases_the_enclosing_payload() {
+    assert_balanced(
+        "nested_on_binding",
+        "def option_length(text: string) -> i64 = {\n  \
+         value: Option[Option[string]] = Some(Some(string_concat(text, \"def\")))\n  \
+         match value with {\n    | None => 0i64\n    \
+         | Some(inner) => match inner with {\n      | None => 0i64\n      \
+         | Some(s) => string_len(s)\n    }\n  }\n}\n\
+         out = option_length(\"abc\")\n",
+        "out = 6\n",
+    );
+}
+
+/// REGRESSION TEST. When the enclosing and nested payloads have the same type
+/// the shadowed release compiles and names the wrong object: on `7c7b58c7f`
+/// the ledger ended with 3 live owners, and with only the region-entry fix
+/// applied the run aborted with a heap kind mismatch.
+#[test]
+fn a_nested_option_match_releases_its_own_payload_not_the_enclosing_one() {
+    assert_balanced(
+        "nested_same_type_option",
+        "def pick(a: Option[string], b: Option[string]) -> i64 =\n  \
+         match a with {\n    | None => 0i64\n    \
+         | Some(x) => match b with {\n      | None => string_len(x)\n      \
+         | Some(y) => add(string_len(x), string_len(y))\n    }\n  }\n\
+         a = pick(Some(string_concat(\"abc\", \"def\")), Some(string_concat(\"gh\", \"i\")))\n\
+         b = pick(Some(string_concat(\"abc\", \"def\")), None)\n\
+         c = pick(None, Some(\"z\"))\n",
+        "a = 9\nb = 6\nc = 0\n",
+    );
+}
+
+/// REGRESSION TEST. On `7c7b58c7f` the run aborted with a heap kind mismatch:
+/// a release of the outer field named the inner match's field.
+#[test]
+fn a_nested_adt_match_releases_its_own_field_not_the_enclosing_one() {
+    assert_balanced(
+        "nested_same_type_adt",
+        "type Named =\n  | Named(string)\n  | Anon\n\
+         def pick(a: Named, b: Named) -> i64 =\n  match a with {\n    | Anon => 0i64\n    \
+         | Named(x) => match b with {\n      | Anon => string_len(x)\n      \
+         | Named(y) => add(string_len(x), string_len(y))\n    }\n  }\n\
+         a = pick(Named(string_concat(\"abc\", \"def\")), Named(string_concat(\"gh\", \"i\")))\n\
+         b = pick(Named(string_concat(\"abc\", \"def\")), Anon)\n",
+        "a = 9\nb = 6\n",
     );
 }
