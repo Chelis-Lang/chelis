@@ -23,7 +23,7 @@
 //! produced the defect, and one that stayed would hide the day the first
 //! stopped agreeing with it.
 
-use crate::annotations::{Metadata, MetadataKey};
+use crate::annotations::{Metadata, MetadataKey, MetadataValue};
 use crate::ast::{Atom, Expr};
 use crate::tag::DeepTag;
 
@@ -68,10 +68,8 @@ fn unary_param(stage: &Expr) -> Option<&str> {
 ///
 /// `None` when no `app` node admits the synthesized application. A pipe stage
 /// is an inference-bypass child, so a hand-built `Pipe` node can carry a bare
-/// name there. A stage whose own metadata is bound to its tag cannot lend it
-/// to an `app` either, and valid Surf reaches that case:
-/// `x |> grad(f, wrt=v)` copies `grad`'s `wrt` (chelis#2430). The pipe then
-/// stays unfolded for the consumers' fail-closed pipe rejection.
+/// name there. Metadata bound to the stage's own tag remains on that stage;
+/// the synthesized `app` gets its location from the stage's span metadata.
 fn fold_stage(stage: &Expr, acc: Expr) -> Option<Expr> {
     if let Some(param) = unary_param(stage)
         && let Some((_, _, stage_kids)) = stamped(stage)
@@ -111,14 +109,15 @@ fn fold_stage(stage: &Expr, acc: Expr) -> Option<Expr> {
         }
         _ => stage.clone(),
     };
-    // The synthesized application carries the STAGE's span and metadata, so
-    // a diagnostic about it points at the stage the user wrote, and any key
-    // a later pass mints from the span lands on the node it expects.
-    let (meta, span) = match stamped(&stage) {
-        Some((_, meta, _)) => (meta.clone(), stage.span()),
-        None => (Metadata::default(), stage.span()),
-    };
-    crate::node::Node::try_new(DeepTag::App, meta, vec![stage, acc])
+    // A diagnostic about the application points at the stage the user wrote.
+    // The stage retains tag-bound keys such as `grad`'s `wrt`; copying them
+    // onto `app` would violate the node gate and leave a valid pipe unfolded.
+    // The source span is valid on either tag and must travel to the app too.
+    let span = stage.span();
+    let app_meta = stamped(&stage)
+        .and_then(|(_, meta, _)| meta.span_id().cloned())
+        .map_or_else(Metadata::default, |span| MetadataValue::Span(span).into());
+    crate::node::Node::try_new(DeepTag::App, app_meta, vec![stage, acc])
         .ok()
         .map(|node| Expr::Node(Box::new(node), span))
 }
@@ -316,7 +315,7 @@ fn rebuild(expr: &Expr, tag: DeepTag, meta: &Metadata, children: Vec<Expr>) -> E
 
 /// Fold one already-child-folded `Pipe` expression.
 fn fold_one(pipe: &Expr) -> Option<Expr> {
-    let (tag, _, kids) = stamped(pipe)?;
+    let (tag, owner_meta, kids) = stamped(pipe)?;
     if tag != DeepTag::Pipe {
         return None;
     }
@@ -325,7 +324,47 @@ fn fold_one(pipe: &Expr) -> Option<Expr> {
     for stage in stages {
         acc = fold_stage(stage, acc)?;
     }
-    Some(acc)
+    inherit_pipe_value_annotations(acc, owner_meta)
+}
+
+/// A pipe is surface sugar, but a type written on the pipe expression still
+/// constrains its result. Keep that obligation and its binding-origin marker
+/// on the folded value. Two ascriptions can independently constrain a folded
+/// stage; a one-expression block preserves both instead of overwriting one.
+fn inherit_pipe_value_annotations(mut result: Expr, owner_meta: &Metadata) -> Option<Expr> {
+    let annotations = owner_meta
+        .values()
+        .filter(|value| {
+            matches!(
+                value,
+                MetadataValue::Type(_) | MetadataValue::SurfBindingType(_)
+            )
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    if annotations.is_empty() {
+        return Some(result);
+    }
+    if let Expr::Node(node, _) = &mut result {
+        let mut meta = node.meta().clone();
+        let conflict = annotations.iter().any(|value| match value {
+            MetadataValue::Type(_) => meta.ty().is_some(),
+            MetadataValue::SurfBindingType(_) => meta.surf_binding_type().is_some(),
+            _ => unreachable!("only pipe value annotations were collected"),
+        });
+        if !conflict {
+            for value in annotations {
+                meta.insert(value).ok()?;
+            }
+            node.try_replace_meta(meta).ok()?;
+            return Some(result);
+        }
+    }
+    let meta = Metadata::try_from_values(annotations).ok()?;
+    let span = result.span();
+    crate::node::Node::try_new(DeepTag::Block, meta, vec![result])
+        .ok()
+        .map(|node| Expr::Node(Box::new(node), span))
 }
 
 /// Fold every `Pipe` in a whole program.
@@ -378,6 +417,40 @@ mod tests {
         assert!(
             folded.contains("to_tensor") && !folded.contains("pipe"),
             "{folded}"
+        );
+    }
+
+    /// [02 §0.1, 03-META-1/2]: the application created for a pipe stage
+    /// owns the location, while a selector belongs to its `grad` callee.
+    #[test]
+    fn a_stage_selector_stays_on_its_callee() {
+        let folded = fold_source("(pipe {} (var {} x) (grad {wrt: (var {} v)} (var {} sq)))");
+        assert_eq!(
+            folded.trim_end(),
+            "(app {} (grad {wrt: (var {} v)} (var {} sq)) (var {} x))"
+        );
+    }
+
+    #[test]
+    fn a_stage_span_is_kept_on_the_synthesized_application() {
+        let folded = fold_source(r#"(pipe {} (var {} x) (var {span: "stage"} f))"#);
+        assert_eq!(
+            folded.trim_end(),
+            r#"(app {span: "stage"} (var {span: "stage"} f) (var {} x))"#
+        );
+    }
+
+    #[test]
+    fn independent_ascriptions_on_a_pipe_and_its_stage_are_both_kept() {
+        let folded = fold_source(
+            "(pipe {type: (t-prim {} i32)} (var {} x) \
+             (fn {} (params {} p) \
+             (app {type: (t-prim {} f32)} (var {} f) (var {} p))))",
+        );
+        assert_eq!(
+            folded.trim_end(),
+            "(block {type: (t-prim {} i32)} \
+             (app {type: (t-prim {} f32)} (var {} f) (var {} x)))"
         );
     }
 

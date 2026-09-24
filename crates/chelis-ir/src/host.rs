@@ -9887,6 +9887,18 @@ fn host_literal_expr(expr: &Expr, expected_ty: &HostTypeTerm) -> Option<HostExpr
         (Expr::Atom(Atom::Int(value), _), &HostTypeTerm::Int64) => {
             Some(HostExpr::new(HostExprKind::Int(*value)))
         }
+        (
+            Expr::Atom(Atom::Float(value), _),
+            HostTypeTerm::Scalar(HostPrecisionTerm::Concrete(prim)),
+        ) if prim.is_float() && *prim != Prim::F64 => {
+            // A pattern's raw f64 atom denotes a literal at the scrutinee's
+            // width ([04-PAT-1]), just like a checked expression literal.
+            Some(HostExpr::new(HostExprKind::Builtin {
+                name: "cast".to_string(),
+                args: vec![HostExpr::new(HostExprKind::Float(*value))],
+                ty: expected_ty.clone(),
+            }))
+        }
         (Expr::Atom(Atom::Float(value), _), &HostTypeTerm::Float64) => {
             Some(HostExpr::new(HostExprKind::Float(*value)))
         }

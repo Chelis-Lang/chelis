@@ -295,6 +295,7 @@ fn sweep_recursive_collection_contracts(
                 deferred_bindings.push(binding);
             }
             scratch.finish_deferred_shape_checks(Some(name), var_gen, subst, adt_reg, errors);
+            scratch.finish_deferred_literal_patterns(Some(name), env, subst, adt_reg, errors);
             scratch.finish_root(subst, errors);
             validate_deferred_borrow_vars(subst, adt_reg, env.active_declared_type_names(), errors);
             validate_deferred_tensor_operands(subst, env.active_declared_type_names(), errors);
@@ -624,6 +625,7 @@ pub(super) fn infer_program_with_product_in_session(
                 deferred_bindings.push(binding);
             }
             product.finish_deferred_shape_checks(decl_name, &mut vg, &mut subst, &adt_reg, errors);
+            product.finish_deferred_literal_patterns(decl_name, &env, &subst, &adt_reg, errors);
             product.finish_root(&subst, errors);
             // Issue #256 round 2: re-check each deferred borrow against the
             // now-complete substitution (see `validate_deferred_borrow_vars`).
@@ -1696,6 +1698,13 @@ pub(super) fn infer_ir_program_with_state(
                 top_level_decl_name(expr),
                 &mut state.var_gen,
                 &mut state.subst,
+                &state.adt_reg,
+                errors,
+            );
+            product.finish_deferred_literal_patterns(
+                top_level_decl_name(expr),
+                &state.env,
+                &state.subst,
                 &state.adt_reg,
                 errors,
             );

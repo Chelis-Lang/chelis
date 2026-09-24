@@ -17,7 +17,8 @@
 //! What is claimed is the forms below: a scrutinee that an authored binder of
 //! the enclosing declaration resolves to when the pattern is checked, directly,
 //! through a block alias, and nested in tuple and constructor patterns. A
-//! flexible inference variable is not a binder and still defers.
+//! flexible inference variable is not a binder; its separate declaration
+//! obligation is covered by issue #2448.
 
 use chelis_deep::Expr;
 use chelis_macros::{ExpansionOptions, expand_program};
@@ -383,11 +384,11 @@ fn a_concrete_scrutinee_is_unchanged() {
     );
 }
 
-/// A flexible inference variable is not a binder, so it still defers: an
-/// unannotated parameter with no signature is generalized over every type and
-/// decides nothing here. This locks the scope of the change, not a claim that
-/// a flexible scrutinee should never be decided.
+/// A flexible inference variable is not a binder. Its pattern is decided
+/// after the local lambda's first application under [04-INF-1].
 #[test]
-fn a_flexible_scrutinee_still_defers() {
-    accepts("def pick(y) -> i32 =\n  match y with {\n    | 300 => 1\n    | _ => 0\n  }\n");
+fn a_flexible_scrutinee_is_decided_by_its_first_application() {
+    accepts(
+        "def pick(x: i32) -> i32 = {\n  k = fn (y) -> match y with {\n    | 300 => 1\n    | _ => 0\n  }\n  k(x)\n}\n",
+    );
 }

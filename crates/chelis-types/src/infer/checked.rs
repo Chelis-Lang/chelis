@@ -48,6 +48,9 @@ pub(super) struct InferenceProduct {
     deferred_type_derivations: Vec<DeferredTypeDerivation>,
     next_deferred_shape_id: u64,
     deferred_shape_checks: Vec<DeferredShapeCheck>,
+    /// [04-PAT-1]: a literal pattern first seen against a flexible type must
+    /// be decided after its enclosing declaration has supplied the type.
+    deferred_literal_patterns: Vec<DeferredLiteralPattern>,
     /// Newly authored parameter holes and call operand/result requirements,
     /// not contracts transported by function values. These retain their
     /// original variables until the declaration boundary.
@@ -197,6 +200,12 @@ pub(super) struct DeferredShapeCheck {
     result_ty: Type,
 }
 
+struct DeferredLiteralPattern {
+    pattern: deep::Expr,
+    scrutinee_ty: Type,
+    scrutinee_name: Option<String>,
+}
+
 #[derive(Clone)]
 enum DeferredTypeDerivation {
     TupleProjection {
@@ -337,6 +346,61 @@ impl InferenceProduct {
 
     pub(super) fn deferred_shape_checkpoint(&self) -> u64 {
         self.next_deferred_shape_id
+    }
+
+    pub(super) fn deferred_literal_pattern_checkpoint(&self) -> usize {
+        self.deferred_literal_patterns.len()
+    }
+
+    pub(super) fn defer_literal_pattern(
+        &mut self,
+        pattern: &deep::Expr,
+        scrutinee_ty: &Type,
+        site: PatternSite<'_>,
+    ) {
+        let scrutinee_name = match site {
+            PatternSite::ArmOfVariable(name) => Some(name.to_string()),
+            PatternSite::Other => None,
+        };
+        self.deferred_literal_patterns.push(DeferredLiteralPattern {
+            pattern: pattern.clone(),
+            scrutinee_ty: scrutinee_ty.clone(),
+            scrutinee_name,
+        });
+    }
+
+    /// The same unresolved obligation that must reject at the declaration
+    /// boundary must also prevent a local lambda from generalizing first.
+    pub(super) fn has_pending_literal_pattern_since(
+        &self,
+        checkpoint: usize,
+        subst: &Subst,
+    ) -> bool {
+        self.deferred_literal_patterns[checkpoint..]
+            .iter()
+            .any(|check| matches!(subst.apply(&check.scrutinee_ty), Type::Var(_)))
+    }
+
+    pub(super) fn finish_deferred_literal_patterns(
+        &mut self,
+        declaration: Option<&str>,
+        env: &Env,
+        subst: &Subst,
+        adt_reg: &AdtRegistry,
+        errors: &mut DiagnosticSink<'_>,
+    ) {
+        for check in self.deferred_literal_patterns.drain(..) {
+            super::expr_pattern::validate_deferred_literal_pattern(
+                &check.pattern,
+                &check.scrutinee_ty,
+                check.scrutinee_name.as_deref(),
+                declaration,
+                env,
+                subst,
+                adt_reg,
+                errors,
+            );
+        }
     }
 
     /// Snapshot before body inference: operation and callee constraints may

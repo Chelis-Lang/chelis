@@ -466,6 +466,7 @@ pub(super) fn infer_let(
                 let rhs_expr = &bind_children[i + 1];
                 let rhs_level = subst.enter_level(vg);
                 let shape_checkpoint = product.deferred_shape_checkpoint();
+                let literal_pattern_checkpoint = product.deferred_literal_pattern_checkpoint();
                 let contract_checkpoint = product.admission_contract_checkpoint();
                 let mut rhs_type_metadata_resolution = stamped_parts(rhs_expr)
                     .and_then(|(_, meta, _)| {
@@ -611,11 +612,12 @@ pub(super) fn infer_let(
                 subst.leave_level(rhs_level, vg);
 
                 let scheme = if product.has_pending_shape_check_since(shape_checkpoint)
+                    || product.has_pending_literal_pattern_since(literal_pattern_checkpoint, subst)
                     || product.has_pending_admission_contract_since(contract_checkpoint, subst)
                 {
-                    // Bind-on-first-use (PP1): semantic shape obligations
-                    // retain the exact inference variables captured by this
-                    // lambda until its first application supplies types.
+                    // [04-INF-1]: semantic shape or literal-pattern
+                    // obligations retain the exact inference variables
+                    // captured by this lambda until its first application.
                     subst.lower_type_to_current(&final_ty);
                     Scheme::mono(subst.apply(&final_ty))
                 } else {

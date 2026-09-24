@@ -59,6 +59,90 @@ def run(y: f32) -> f32 = add_one_to(y)
     );
 }
 
+/// A macro invocation is an expression in its caller's binding position.
+/// Replacing it must retain the caller's explicit type obligation and Surf
+/// origin marker on the expansion root.
+#[test]
+fn macro_expansion_retains_caller_binding_ascription() {
+    let text = expand_surf(
+        r#"
+macro twice(v) = add(v, v)
+def run(x: f32) -> f32 = {
+  t: i32 = twice(x)
+  cast(t, f32)
+}
+"#,
+    );
+    assert!(
+        text.contains("surf_binding_type: \"explicit\""),
+        "the expanded binding value must retain the caller's origin marker:\n{text}"
+    );
+    assert!(
+        text.contains("type: (t-prim {} i32)"),
+        "the expanded binding value must retain its authored ascription:\n{text}"
+    );
+}
+
+#[test]
+fn caller_and_template_type_metadata_remain_separate() {
+    let text = expand_surf(
+        r#"
+macro one() = 1.0f32
+def run() -> f32 = {
+  t: i32 = one()
+  cast(t, f32)
+}
+"#,
+    );
+    let flat = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    assert!(
+        flat.contains("(block {source: (one),")
+            && flat.contains("surf_binding_type: \"explicit\"")
+            && flat.contains("type: (t-prim {} i32)")
+            && flat.contains("type: (t-prim {} f32)"),
+        "caller and template annotations require independent owners:\n{text}"
+    );
+}
+
+#[test]
+fn template_type_metadata_survives_parameter_substitution() {
+    let text = expand_surf(
+        r#"
+macro as_i32(v) = v : i32
+def run(x: f32) -> f32 = cast(as_i32(x), f32)
+"#,
+    );
+    assert!(
+        text.contains("type: (t-prim {} i32)"),
+        "the template's ascription must constrain the substituted argument:\n{text}"
+    );
+}
+
+/// A typed vocabulary-named parameter uses a prefix metadata wrapper. It is
+/// still a binder, with the same hygiene and provenance as a typed ordinary
+/// name represented by a structural two-element list.
+#[test]
+fn vocabulary_named_typed_parameter_is_hygienized_and_carries_source() {
+    let text = expand_surf(
+        r#"
+macro bump(v) = (fn (record: f32) -> add(record, v))(1.0f32)
+def run(record: f32) -> f32 = bump(record)
+"#,
+    );
+    assert!(
+        text.contains("record_macro_0"),
+        "the macro-introduced parameter must be renamed:\n{text}"
+    );
+    assert!(
+        text.contains("span: \"surf:97..103\"} record)"),
+        "the caller's argument must retain its free reference:\n{text}"
+    );
+    assert!(
+        !text.contains("(t-prim {source:"),
+        "provenance belongs to the parameter, not its type syntax:\n{text}"
+    );
+}
+
 #[test]
 fn parsed_deep_internal_macro_expands_from_raw_form_boundary() {
     let deep = chelis_deep::parser::parse_str(
