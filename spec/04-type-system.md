@@ -1721,9 +1721,10 @@ A runtime extent guard is the check that a declared, named, or otherwise
 claimed extent agrees with the value actually observed, or that a runtime
 extent is non-negative. Each guard is evaluated exactly once, after every
 value it compares is available and before the first allocation or element
-access whose shape depends on the guarded extent. A guard whose operands are
-all interface values (an input tensor's axis, a scalar parameter, or a
-literal) is evaluated at function entry, in declared signature order, before
+access whose shape depends on the guarded extent. An interface guard enforces
+a declared signature claim on an input tensor's axis or scalar parameter and
+compares only interface values (including literals). It is evaluated at
+function entry, in declared signature order, before
 any other operation of the function runs. An entry that declares no signature
 orders those guards by its ABI input-slot order instead: the order in which
 the caller supplies that entry's inputs. Whatever rule assigns the slots, the
@@ -1734,6 +1735,14 @@ extent an operation computes) is evaluated after its producers and takes the
 source position of the operation that introduces the guarded extent: an
 independent effect or trap that precedes that operation in source order is
 observed first, and one that follows it is observed only if the guard passes.
+A declared-result guard on an axis produced by a body operation belongs to
+that operation, even when the axis's size can be calculated entirely from
+interface values before the operation executes. Entry placement applies to
+claims on the interface witnesses themselves; the ability to calculate a
+later result's extent early does not turn its result claim into an entry
+guard. For `insert(x, axis, shape(y, k))` returned under an independent
+declared extent, an earlier independent body trap occurs before the result
+guard, and a failing result guard names `insert`.
 A `cast` takes the placement of the value it casts. Guards ready at the same
 source position are evaluated in declaration order. These constraints are the
 complete observable contract; a guard and an operation related by neither data
@@ -1744,7 +1753,7 @@ A runtime extent guard is a typed operation-precondition guard under
 [04-NUM-9] and is therefore itself the trap-producing primitive. A failing
 equality guard and a failing non-negativity guard both raise a `Domain` trap.
 Its `<op>` slot is the canonical name of the operation that introduces the
-guarded extent: for a guard whose operands are all interface values, the
+guarded extent: for an interface guard, the
 `load` primitive of the later witness in signature order
 (spec/05-risc-primitives.md §2.5); for a non-negativity guard, the owning
 movement operation; for a declared-result guard, the primitive that produced
