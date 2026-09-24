@@ -281,19 +281,17 @@ pub(super) fn pattern_bindings(
                     SlotShape::LiteralValue,
                     literal_pattern_atom,
                     errors,
+                ) && !check_literal_pattern(
+                    pat,
+                    atom,
+                    site,
+                    scrutinee_ty,
+                    env,
+                    subst,
+                    adt_reg,
+                    errors,
                 ) {
-                    if !check_literal_pattern(
-                        pat,
-                        atom,
-                        site,
-                        scrutinee_ty,
-                        env,
-                        subst,
-                        adt_reg,
-                        errors,
-                    ) {
-                        product.defer_literal_pattern(pat, scrutinee_ty, site);
-                    }
+                    product.defer_literal_pattern(pat, scrutinee_ty, site);
                 }
             }
             DeepTag::PatCtor => {
