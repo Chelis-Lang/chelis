@@ -1493,6 +1493,17 @@ impl CEmitter {
                 draw,
                 dtype,
             } => self.emit_draw_key(node, *handler, *draw, *dtype, dag)?,
+            RiscOp::KeyFromSeed | RiscOp::Split { .. } | RiscOp::FoldIn | RiscOp::SplitN { .. } => {
+                return Err(Unsupported::new(
+                    UnsupportedKind::Op(chelis_ir::grad::risc_op_name(&node.op).to_string()),
+                    "a key operation in the C DAG emitter",
+                    Stage::Codegen("c"),
+                    chelis_types::unimplemented_rejection!(
+                        1192,
+                        "compiled key operations are not emitted by this lane yet"
+                    ),
+                ));
+            }
             RiscOp::Dropout => self.emit_keyed_dropout(node, dag),
             RiscOp::DropoutReplay => {
                 #[cfg(feature = "native-random-observer")]

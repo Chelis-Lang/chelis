@@ -684,6 +684,18 @@ fn classify_nodes(
                 // A key is one word that the emitter keeps in a local, never
                 // tensor storage with a slot and a lifetime.
                 RiscOp::DrawKey { .. } => StoragePlacement::Skipped,
+                // A derived key is an ordinary key tensor on the C lane. The
+                // HIP lane computes rank-0 derivations while it emits, as it
+                // does a scoped draw key, so they take no device storage.
+                RiscOp::KeyFromSeed
+                | RiscOp::Split { .. }
+                | RiscOp::FoldIn
+                | RiscOp::SplitN { .. } => match lane {
+                    StorageLaneKind::C => StoragePlacement::OwnedSlot {
+                        slot: StorageSlotId::UNASSIGNED,
+                    },
+                    StorageLaneKind::Hip => StoragePlacement::Skipped,
+                },
                 RiscOp::Drop => StoragePlacement::TerminalDrop {
                     source: node.inputs[0],
                 },

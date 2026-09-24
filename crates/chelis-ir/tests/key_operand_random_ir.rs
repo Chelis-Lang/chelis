@@ -678,11 +678,16 @@ fn the_verifier_rejects_a_key_fed_to_another_operation() {
     let added = dag.add_node(RiscOp::Add, vec![key, key], scalar(Prim::Key), None);
     dag.add_root(out);
     dag.add_root(added);
-    assert_rejected(&dag, "only a random primitive consumes a key");
+    assert_rejected(
+        &dag,
+        "only a key operation or a random primitive consumes a key",
+    );
+    // chelis#2413 step 1, rule V1: a key may be a graph root. Reading it as
+    // a root is not a second consumption.
     let (mut dag, _, _, key, out) = dropout_graph();
     dag.add_root(out);
     dag.add_root(key);
-    assert_rejected(&dag, "is a graph root");
+    assert_eq!(verify(&dag), Vec::<String>::new());
 }
 
 #[test]
@@ -726,11 +731,20 @@ fn the_verifier_rejects_a_replay_of_an_unconsumed_key() {
 }
 
 #[test]
-fn the_verifier_rejects_keys_from_anything_but_a_draw_key_and_mismatched_controls() {
+fn the_verifier_rejects_a_constant_key_and_mismatched_controls() {
+    // Rule V1: a key comes from a key operation, a draw key, or a Load; a
+    // key constant would be literal bits, which no carrier admits.
     let mut dag = Dag::new();
     let x = load(&mut dag, "x", tensor(Prim::F32, 4));
     let rate = constant(&mut dag, Prim::F32, 0.5);
-    let forged = load(&mut dag, "k", scalar(Prim::Key));
+    let forged = dag.add_node(
+        RiscOp::Const {
+            value: chelis_types::ScalarValue::from_key(chelis_types::RandomKey::from_counter(7, 0)),
+        },
+        vec![],
+        scalar(Prim::Key),
+        None,
+    );
     let out = dag.add_node(
         RiscOp::Dropout,
         vec![x, rate, forged],
@@ -738,7 +752,10 @@ fn the_verifier_rejects_keys_from_anything_but_a_draw_key_and_mismatched_control
         None,
     );
     dag.add_root(out);
-    assert_rejected(&dag, "only a draw key produces one");
+    assert_rejected(
+        &dag,
+        "only a key operation, a draw key or a Load produces one",
+    );
 
     // The key validates a different rate than its consumer uses.
     let mut dag = Dag::new();

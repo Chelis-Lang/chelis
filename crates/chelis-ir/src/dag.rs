@@ -501,6 +501,26 @@ pub enum RandomHandler {
     Scoped { instance: u32 },
 }
 
+/// Which half of `[05-OP-70]`'s pair a [`RiscOp::Split`] produces: `Left` is
+/// `derive(k, 0)` and `Right` is `derive(k, 1)` of `[05-RNG-2]`. `split_key`
+/// is two nodes because an IR node has one output (LaCaDiLE's
+/// `KeyPath.left/right`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum KeyBranch {
+    Left,
+    Right,
+}
+
+impl KeyBranch {
+    /// The kernel half this branch computes.
+    pub const fn half(self) -> chelis_types::dtype_semantics::KeyHalf {
+        match self {
+            Self::Left => chelis_types::dtype_semantics::KeyHalf::Left,
+            Self::Right => chelis_types::dtype_semantics::KeyHalf::Right,
+        }
+    }
+}
+
 /// The random primitive whose controls a [`RiscOp::DrawKey`] validates before
 /// it advances its handler.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -747,6 +767,28 @@ pub enum RiscOp {
         handler: RandomHandler,
         draw: RandomDraw,
         dtype: Prim,
+    },
+    /// `[05-OP-69]` `key_from_seed`: input `[seed: tensor[D, i64]]`, output
+    /// the `tensor[D, key]` of each seed's two's-complement bits. Pure and
+    /// never constant-folded, so an exported key stays symbolic.
+    KeyFromSeed,
+    /// One half of `[05-OP-70]` `split_key`: input `[k: tensor[D, key]]`,
+    /// output the `tensor[D, key]` of `derive(k, 0)` (`Left`) or
+    /// `derive(k, 1)` (`Right`). A parent feeds at most one `Split` of each
+    /// branch, and nothing else.
+    Split {
+        branch: KeyBranch,
+    },
+    /// `[05-OP-72]` `fold_in`: inputs `[k: tensor[D, key], n: tensor[D, i64]]`
+    /// of exactly equal shape, output `derive(derive(k, 2), n)` element-wise.
+    FoldIn,
+    /// `[05-OP-71]` `split_keys`: input `[k: tensor[D, key]]`, then the
+    /// rank-0 exact i64 count node when `count` is `RtDim::Node(1)`. The
+    /// output is `tensor[D ++ [count], key]`, the new axis last; row `j` is
+    /// `derive(derive(k, 2), j)`. A negative runtime count traps before
+    /// allocation, as a negative movement bound does.
+    SplitN {
+        count: RtDim,
     },
 
     // --- Reduction ---
@@ -1126,6 +1168,10 @@ pub enum RiscAtomIdentity {
     Dropout,
     DropoutReplay,
     UniformBoundAdjoint,
+    KeyFromSeed,
+    SplitKey,
+    SplitKeys,
+    FoldIn,
     Sum,
     MaxReduce,
     MinReduce,
@@ -1197,6 +1243,10 @@ impl RiscAtomIdentity {
         Self::Dropout,
         Self::DropoutReplay,
         Self::UniformBoundAdjoint,
+        Self::KeyFromSeed,
+        Self::SplitKey,
+        Self::SplitKeys,
+        Self::FoldIn,
         Self::Sum,
         Self::MaxReduce,
         Self::MinReduce,
@@ -1268,6 +1318,10 @@ impl RiscAtomIdentity {
             Self::Dropout => "dropout",
             Self::DropoutReplay => "DropoutReplay",
             Self::UniformBoundAdjoint => "UniformBoundAdjoint",
+            Self::KeyFromSeed => "key_from_seed",
+            Self::SplitKey => "split_key",
+            Self::SplitKeys => "split_keys",
+            Self::FoldIn => "fold_in",
             Self::Sum => "sum",
             Self::MaxReduce => "max_reduce",
             Self::MinReduce => "min_reduce",
@@ -1374,6 +1428,11 @@ impl RiscOp {
             // The counter-stream bridge supplies a key; it is not a Table-A
             // operation and the explicit-key switch deletes it.
             Self::DrawKey { .. } => Structural,
+            Self::KeyFromSeed => Semantic(Id::KeyFromSeed),
+            // Both halves are one identity: [05-OP-70] returns the pair.
+            Self::Split { .. } => Semantic(Id::SplitKey),
+            Self::SplitN { .. } => Semantic(Id::SplitKeys),
+            Self::FoldIn => Semantic(Id::FoldIn),
             Self::Sum { .. } => Semantic(Id::Sum),
             Self::MaxReduce { .. } => Semantic(Id::MaxReduce),
             Self::MinReduce { .. } => Semantic(Id::MinReduce),
@@ -1736,6 +1795,11 @@ impl RiscOp {
             | RiscOp::DropoutReplay
             | RiscOp::UniformBoundAdjoint { .. }
             | RiscOp::DrawKey { .. } => false,
+
+            // Key derivations produce opaque keys, not a numeric envelope.
+            RiscOp::KeyFromSeed | RiscOp::Split { .. } | RiscOp::FoldIn | RiscOp::SplitN { .. } => {
+                false
+            }
 
             // Argmax/argmin return discrete indices, not a numeric
             // envelope over the reals; outside the forward-bound story.
@@ -2301,6 +2365,15 @@ fn op_declared_output_axes(dag: &Dag, node: &DagNode) -> Vec<(String, usize)> {
             }
             _ => Vec::new(),
         },
+        // A key split's node-valued count computes its appended last axis.
+        RiscOp::SplitN {
+            count: RtDim::Node(_),
+        } => match node.output_type.dims.last() {
+            Some(DimInfo::Named(symbol, None)) if !is_anon(symbol) => {
+                vec![(symbol.clone(), node.output_type.dims.len() - 1)]
+            }
+            _ => Vec::new(),
+        },
         _ => Vec::new(),
     }
 }
@@ -2331,6 +2404,15 @@ pub(crate) fn op_declarable_axes(dag: &Dag, node: &DagNode) -> Vec<usize> {
             size: RtDim::Node(_) | RtDim::InputAxis { .. },
         } => vec![*axis],
         RiscOp::Expand { .. } => Vec::new(),
+        RiscOp::SplitN {
+            count: RtDim::Node(_),
+        } => node
+            .output_type
+            .dims
+            .len()
+            .checked_sub(1)
+            .into_iter()
+            .collect(),
         _ => Vec::new(),
     }
 }
@@ -2517,7 +2599,20 @@ fn shape_source_for_axis(dag: &Dag, id: NodeId, axis: usize) -> Option<(String, 
         | RiscOp::Drop
         | RiscOp::Realize
         | RiscOp::Cast { .. }
-        | RiscOp::CastTrunc { .. } => shape_source_for_axis(dag, *node.inputs.first()?, axis),
+        | RiscOp::CastTrunc { .. }
+        | RiscOp::KeyFromSeed
+        | RiscOp::Split { .. }
+        | RiscOp::FoldIn => shape_source_for_axis(dag, *node.inputs.first()?, axis),
+        // [05-OP-71]: the key's axes pass through; the appended count axis
+        // comes from the count, not from the key.
+        RiscOp::SplitN { .. } => {
+            let key = *node.inputs.first()?;
+            if axis < dag.get(key)?.output_type.dims.len() {
+                shape_source_for_axis(dag, key, axis)
+            } else {
+                None
+            }
+        }
         // chelis#384/#397: an Expand INSERTS a new axis (rank+1) or SETS an
         // existing size-1 axis (rank unchanged) at `expand_axis`. The newly
         // inserted/set axis's extent comes from the Expand's `size`, NOT from
@@ -3502,6 +3597,14 @@ mod tests {
                 draw: RandomDraw::Dropout,
                 dtype: Prim::F32,
             },
+            RiscOp::KeyFromSeed,
+            RiscOp::Split {
+                branch: KeyBranch::Left,
+            },
+            RiscOp::FoldIn,
+            RiscOp::SplitN {
+                count: RtDim::Lit(3),
+            },
             RiscOp::Sum {
                 axis: 0,
                 accumulator: Prim::F32,
@@ -3585,8 +3688,8 @@ mod tests {
         // identities so they cannot inherit a verifier disposition.
         assert_eq!(
             all.len(),
-            62,
-            "one_of_every_risc_op must list all 62 classified samples"
+            66,
+            "one_of_every_risc_op must list all 66 classified samples"
         );
 
         // The classifier returns a definite bool for every variant (no
@@ -3610,13 +3713,14 @@ mod tests {
         // output envelope, and relaxing it to its fallback's envelope would
         // drop the trap. The chelis#2413 key-operand IR replaces the two
         // baked draws with the two key-operand draws and adds their two
-        // AD replays and the draw key (+3 = 28).
+        // AD replays and the draw key (+3 = 28). The four explicit key
+        // derivations produce opaque keys, not numeric envelopes (+4 = 32).
         assert_eq!(
             targetable, 34,
             "targetable op count drifted from the pinned WI-2 subset"
         );
         assert_eq!(
-            excluded, 28,
+            excluded, 32,
             "excluded op count drifted from the pinned WI-2 subset"
         );
 

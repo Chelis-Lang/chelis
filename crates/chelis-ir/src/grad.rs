@@ -252,7 +252,13 @@ fn grad_dag_checked_impl(
                         live[cotangent.0] = true;
                     }
                 }
-                RiscOp::DrawKey { .. } => {}
+                // A key and its i64 seed or index are discrete: nothing a
+                // key operation reads is on the gradient path.
+                RiscOp::DrawKey { .. }
+                | RiscOp::KeyFromSeed
+                | RiscOp::Split { .. }
+                | RiscOp::FoldIn
+                | RiscOp::SplitN { .. } => {}
                 // chelis#1464 / [05-OP-68]: input 0 is the guard's firing
                 // predicate, a control edge, and input 1 is the value the
                 // result carries. Only the fallback is on the gradient path.
@@ -518,6 +524,10 @@ pub fn risc_op_name(op: &RiscOp) -> &'static str {
         RiscOp::DropoutReplay => "dropout_replay",
         RiscOp::UniformBoundAdjoint { .. } => "uniform_bound_adjoint",
         RiscOp::DrawKey { .. } => "draw_key",
+        RiscOp::KeyFromSeed => "key_from_seed",
+        RiscOp::Split { .. } => "split_key",
+        RiscOp::FoldIn => "fold_in",
+        RiscOp::SplitN { .. } => "split_keys",
         RiscOp::Sum { .. } => "sum",
         RiscOp::Count { .. } => "count",
         RiscOp::MaxReduce { .. } => "max_reduce",
@@ -1298,16 +1308,18 @@ fn compute_adjoints(
             ] {
                 let mut inputs = vec![template, g, node.inputs[3]];
                 inputs.extend(node.inputs.get(4).copied());
+                let bound_ty = forward.get(node.inputs[slot]).unwrap().output_type.clone();
+                // The adjoint has its bound's shape: rank 0, or one value per
+                // key row when a batched draw's rows have their own bounds.
                 let adjoint = dag.add_node(
                     RiscOp::UniformBoundAdjoint { bound },
                     inputs,
                     TensorType {
-                        dims: vec![],
+                        dims: bound_ty.dims.clone(),
                         precision: node.output_type.precision,
                     },
                     None,
                 );
-                let bound_ty = forward.get(node.inputs[slot]).unwrap().output_type.clone();
                 let adjoint = if bound_ty.precision == node.output_type.precision {
                     adjoint
                 } else {
@@ -1326,8 +1338,13 @@ fn compute_adjoints(
         }
         // No higher-order adjoint is defined for the bound adjoint yet.
         RiscOp::UniformBoundAdjoint { .. } => None,
-        // A key receives no cotangent, so no contribution ever reaches it.
-        RiscOp::DrawKey { .. } => Some(Vec::new()),
+        // A key receives no cotangent, so no contribution ever reaches it,
+        // and a key operation's i64 seed or index receives none either.
+        RiscOp::DrawKey { .. }
+        | RiscOp::KeyFromSeed
+        | RiscOp::Split { .. }
+        | RiscOp::FoldIn
+        | RiscOp::SplitN { .. } => Some(Vec::new()),
         // --- Reduction ---
         RiscOp::Sum { axis, .. } => {
             // d/dx sum(x, axis) = expand(g, axis, original_size)

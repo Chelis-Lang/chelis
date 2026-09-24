@@ -6902,6 +6902,12 @@ fn wire_op(op: &RiscOp) -> WireResult<WireRiscOp> {
                 chelis_ir::dag::UniformBound::High => crate::schema::WireUniformBound::High,
             },
         },
+        RiscOp::KeyFromSeed | RiscOp::Split { .. } | RiscOp::FoldIn | RiscOp::SplitN { .. } => {
+            return Err(format!(
+                "{} has no WireDag schema 17 form",
+                chelis_ir::grad::risc_op_name(op)
+            ));
+        }
         RiscOp::DrawKey {
             handler,
             draw,

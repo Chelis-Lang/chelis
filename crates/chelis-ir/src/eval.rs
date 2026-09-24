@@ -32,7 +32,10 @@ use chelis_types::dtype_semantics::{
     integer_is_exactly_representable, reduce_tensor_groups, reduce_window_grad_tensor_groups,
     tensor_from_scalars,
 };
-use chelis_types::dtype_semantics::{DropoutParameters, PreparedDropout, UniformLikeParameters};
+use chelis_types::dtype_semantics::{
+    DropoutParameters, PreparedDropout, UniformLikeParameters, fold_in_storage,
+    key_from_seed_storage, split_key_storage, split_keys_storage, uniform_like_bound_adjoint_rows,
+};
 use chelis_types::types::Prim;
 use chelis_types::{PreparedUniformLike, RandomKey, uniform_like_bound_adjoint};
 
@@ -256,6 +259,11 @@ fn ingress_to_declared(
     declared: Prim,
     value: &TensorValue,
 ) -> Result<TensorValue, String> {
+    if value.raw_f64_ingress && declared == Prim::Key {
+        return Err(format!(
+            "input `{name}` declares key, which has no raw numeric ingress; provide key storage"
+        ));
+    }
     if value.raw_f64_ingress {
         let storage = finalize_tensor("load", declared, value.storage().to_raw())
             .map_err(|trap| format!("input `{name}`: {trap}"))?;
@@ -487,41 +495,302 @@ fn eval_draw_key(
     frame.draw(*handler, scoped_seed).map(Some)
 }
 
-/// A key-operand random primitive's key, or `None` when its draw is inactive.
-/// An inactive key under an active primitive is a malformed graph.
-fn random_operand_key(
+/// The keys a key-operand random primitive draws with
+/// (`spec/10-serialization.md` §3.2).
+enum DrawKeys<'a> {
+    /// A rank-0 activation is false: the primitive validates and draws
+    /// nothing and produces positive zeros.
+    Inactive,
+    /// A rank-0 key.
+    Scalar(RandomKey),
+    /// A rank-1 key batch: row `b` of the data draws with `keys[b]`, and
+    /// only when `active` is absent or its element `b` is true.
+    Rows {
+        keys: &'a [RandomKey],
+        active: Option<&'a TensorValue>,
+    },
+}
+
+impl DrawKeys<'_> {
+    fn row_active(&self, row: usize) -> bool {
+        match self {
+            Self::Rows {
+                active: Some(active),
+                ..
+            } => active.storage().scalar_at(row).as_bool_exact() == Some(true),
+            _ => true,
+        }
+    }
+}
+
+/// A key-operand random primitive's keys. A key an inactive `DrawKey`
+/// withheld has no value, so reading one under an active primitive is a
+/// malformed graph.
+fn draw_keys<'a>(
     node: &DagNode,
     key_slot: usize,
-    values: &UnordMap<NodeId, TensorValue>,
-    keys: &UnordMap<NodeId, Option<RandomKey>>,
-) -> Result<Option<RandomKey>, String> {
-    let active = match node.inputs.get(key_slot + 1) {
-        Some(activation) => rank0_bool(
+    values: &'a UnordMap<NodeId, TensorValue>,
+) -> Result<DrawKeys<'a>, String> {
+    let activation = match node.inputs.get(key_slot + 1) {
+        Some(activation) => Some(
             values
                 .get(activation)
                 .ok_or("random primitive activation is not available")?,
-            "random primitive activation",
-        )?,
-        None => true,
+        ),
+        None => None,
     };
-    let key = *node
+    if let Some(activation) = activation
+        && activation.shape.is_empty()
+        && !rank0_bool(activation, "random primitive activation")?
+    {
+        return Ok(DrawKeys::Inactive);
+    }
+    let key = node
         .inputs
         .get(key_slot)
-        .and_then(|key| keys.get(key))
+        .and_then(|key| values.get(key))
         .ok_or_else(|| {
             format!(
-                "random primitive at node {} has no evaluated key",
+                "random primitive at node {} is active but its key's draw was not",
                 node.id.0
             )
         })?;
-    match (active, key) {
-        (false, _) => Ok(None),
-        (true, Some(key)) => Ok(Some(key)),
-        (true, None) => Err(format!(
-            "random primitive at node {} is active but its key's draw was not",
+    let keys = key
+        .storage()
+        .keys()
+        .ok_or_else(|| format!("random primitive at node {} has a non-key key", node.id.0))?;
+    match key.shape.as_slice() {
+        [] => Ok(DrawKeys::Scalar(keys[0])),
+        [rows] => {
+            let active = activation.filter(|activation| !activation.shape.is_empty());
+            if active.is_some_and(|active| active.shape != [*rows]) {
+                return Err(format!(
+                    "random primitive at node {}: a batched activation must match its {rows} keys",
+                    node.id.0
+                ));
+            }
+            Ok(DrawKeys::Rows { keys, active })
+        }
+        _ => Err(format!(
+            "random primitive at node {} takes a rank-0 key or a rank-1 key batch",
             node.id.0
         )),
     }
+}
+
+/// Row `row` of a batched draw's control: the one scalar of a rank-0
+/// control, or element `row` of a rank-1 control over the `rows` keys.
+fn row_control(
+    value: &TensorValue,
+    row: usize,
+    rows: usize,
+    what: &str,
+) -> Result<chelis_types::ScalarValue, String> {
+    match value.shape.as_slice() {
+        [] => rank0_scalar(value, what),
+        [extent] if *extent == rows => Ok(value.storage().scalar_at(row)),
+        _ => Err(format!("{what} must be rank 0 or one value per key row")),
+    }
+}
+
+/// The element count of each of `rows` equal rows of `data`, which a
+/// batched draw splits by its leading axis.
+fn batched_row_len(data: &TensorValue, rows: usize, node: &DagNode) -> Result<usize, String> {
+    if data.shape.first() != Some(&rows) {
+        return Err(format!(
+            "random primitive at node {}: its {rows} keys must match its data's leading axis",
+            node.id.0
+        ));
+    }
+    Ok(data.shape[1..].iter().product())
+}
+
+fn row_of(storage: &TensorStorage, row: usize, row_len: usize) -> TensorStorage {
+    let indices = (row * row_len..(row + 1) * row_len).collect::<Vec<_>>();
+    storage.reuse_gather(&indices)
+}
+
+/// Positive zeros at `prim`, the value of an inactive draw or row.
+fn zero_storage(prim: Prim, len: usize) -> Result<TensorStorage, String> {
+    finalize_tensor("random", prim, RawTensor::Float(vec![0.0; len]))
+        .map_err(|trap| trap.to_string())
+}
+
+/// Concatenate row results into one buffer in row order.
+fn concat_rows(prim: Prim, rows: &[TensorStorage]) -> TensorStorage {
+    let scalars = rows
+        .iter()
+        .flat_map(|row| (0..row.len()).map(|index| row.scalar_at(index)))
+        .collect::<Vec<_>>();
+    tensor_from_scalars(prim, &scalars)
+}
+
+/// `[05-OP-37]`'s dropout (or its replay, on the cotangent) under `keys`.
+fn eval_dropout(
+    node: &DagNode,
+    data: &TensorValue,
+    rate: &TensorValue,
+    keys: DrawKeys<'_>,
+) -> Result<TensorValue, String> {
+    let prim = data.prim();
+    let storage = match keys {
+        DrawKeys::Inactive => zero_storage(prim, data.len())?,
+        DrawKeys::Scalar(key) => {
+            let rate = rank0_scalar(rate, "dropout rate")?;
+            PreparedDropout::new(data.storage(), rate)
+                .and_then(|prepared| prepared.apply(key))
+                .map_err(|error| error.to_string())?
+        }
+        DrawKeys::Rows { keys: rows, active } => {
+            let row_len = batched_row_len(data, rows.len(), node)?;
+            if active.is_none() && rate.shape.is_empty() {
+                let rate = rank0_scalar(rate, "dropout rate")?;
+                PreparedDropout::new(data.storage(), rate)
+                    .and_then(|prepared| prepared.apply_rows(rows))
+                    .map_err(|error| error.to_string())?
+            } else {
+                let keys = DrawKeys::Rows { keys: rows, active };
+                let mut out = Vec::with_capacity(rows.len());
+                for (row, key) in rows.iter().enumerate() {
+                    if !keys.row_active(row) {
+                        out.push(zero_storage(prim, row_len)?);
+                        continue;
+                    }
+                    let input = row_of(data.storage(), row, row_len);
+                    let rate = row_control(rate, row, rows.len(), "dropout rate")?;
+                    out.push(
+                        PreparedDropout::new(&input, rate)
+                            .and_then(|prepared| prepared.apply(*key))
+                            .map_err(|error| error.to_string())?,
+                    );
+                }
+                concat_rows(prim, &out)
+            }
+        }
+    };
+    Ok(TensorValue::from_storage(data.shape.clone(), storage))
+}
+
+/// `[05-OP-8]`'s sampler for a template of `shape` under `keys`.
+fn eval_uniform_like(
+    node: &DagNode,
+    template: &TensorValue,
+    low: &TensorValue,
+    high: &TensorValue,
+    prim: Prim,
+    keys: DrawKeys<'_>,
+) -> Result<TensorValue, String> {
+    let shape = template.shape.clone();
+    let storage = match keys {
+        DrawKeys::Inactive => zero_storage(prim, numel(&shape))?,
+        DrawKeys::Scalar(key) => {
+            let low = rank0_scalar(low, "uniform_like low bound")?;
+            let high = rank0_scalar(high, "uniform_like high bound")?;
+            PreparedUniformLike::new(prim, numel(&shape), low, high)
+                .and_then(|prepared| prepared.apply(key))
+                .map_err(|error| error.to_string())?
+        }
+        DrawKeys::Rows { keys: rows, active } => {
+            let row_len = batched_row_len(template, rows.len(), node)?;
+            if active.is_none() && low.shape.is_empty() && high.shape.is_empty() {
+                let low = rank0_scalar(low, "uniform_like low bound")?;
+                let high = rank0_scalar(high, "uniform_like high bound")?;
+                PreparedUniformLike::new(prim, numel(&shape), low, high)
+                    .and_then(|prepared| prepared.apply_rows(rows))
+                    .map_err(|error| error.to_string())?
+            } else {
+                let keys = DrawKeys::Rows { keys: rows, active };
+                let mut out = Vec::with_capacity(rows.len());
+                for (row, key) in rows.iter().enumerate() {
+                    if !keys.row_active(row) {
+                        out.push(zero_storage(prim, row_len)?);
+                        continue;
+                    }
+                    let low = row_control(low, row, rows.len(), "uniform_like low bound")?;
+                    let high = row_control(high, row, rows.len(), "uniform_like high bound")?;
+                    out.push(
+                        PreparedUniformLike::new(prim, row_len, low, high)
+                            .and_then(|prepared| prepared.apply(*key))
+                            .map_err(|error| error.to_string())?,
+                    );
+                }
+                concat_rows(prim, &out)
+            }
+        }
+    };
+    Ok(TensorValue::from_storage(shape, storage))
+}
+
+/// `[05-OP-8]`'s bound adjoint of the cotangent `g` under `keys`. A batched
+/// draw's adjoint is rank 0 when its rows share the bound, one balanced tree
+/// over every row's contributions in row-major order, and rank 1 when each
+/// row has its own bound.
+fn eval_uniform_bound_adjoint(
+    node: &DagNode,
+    g: &TensorValue,
+    bound: crate::dag::UniformBound,
+    prim: Prim,
+    keys: DrawKeys<'_>,
+) -> Result<TensorValue, String> {
+    let bound = match bound {
+        crate::dag::UniformBound::Low => chelis_types::UniformBound::Low,
+        crate::dag::UniformBound::High => chelis_types::UniformBound::High,
+    };
+    let per_row = !node.output_type.dims.is_empty();
+    match keys {
+        DrawKeys::Inactive => zero_tensor(&concrete_shape(&node.output_type)?, prim),
+        DrawKeys::Scalar(key) => {
+            let value = uniform_like_bound_adjoint(g.storage(), key, bound)
+                .map_err(|error| error.to_string())?;
+            Ok(TensorValue::from_storage(
+                Vec::new(),
+                tensor_from_scalars(prim, &[value]),
+            ))
+        }
+        DrawKeys::Rows { keys: rows, active } => {
+            let row_len = batched_row_len(g, rows.len(), node)?;
+            let keys = DrawKeys::Rows { keys: rows, active };
+            let masked = (0..rows.len())
+                .map(|row| {
+                    if keys.row_active(row) {
+                        Ok(row_of(g.storage(), row, row_len))
+                    } else {
+                        zero_storage(prim, row_len)
+                    }
+                })
+                .collect::<Result<Vec<_>, String>>()?;
+            if per_row {
+                let values = masked
+                    .iter()
+                    .zip(rows)
+                    .map(|(row, key)| {
+                        uniform_like_bound_adjoint(row, *key, bound)
+                            .map_err(|error| error.to_string())
+                    })
+                    .collect::<Result<Vec<_>, String>>()?;
+                Ok(TensorValue::from_storage(
+                    vec![rows.len()],
+                    tensor_from_scalars(prim, &values),
+                ))
+            } else {
+                let value =
+                    uniform_like_bound_adjoint_rows(&concat_rows(prim, &masked), rows, bound)
+                        .map_err(|error| error.to_string())?;
+                Ok(TensorValue::from_storage(
+                    Vec::new(),
+                    tensor_from_scalars(prim, &[value]),
+                ))
+            }
+        }
+    }
+}
+
+fn key_value(
+    value: &TensorValue,
+    storage: Result<TensorStorage, chelis_types::NumericKernelError>,
+) -> Result<TensorValue, String> {
+    let storage = storage.map_err(|error| error.to_string())?;
+    Ok(TensorValue::from_storage(value.shape.clone(), storage))
 }
 
 fn zero_tensor(shape: &[usize], prim: Prim) -> Result<TensorValue, String> {
@@ -2905,9 +3174,6 @@ where
     };
 
     let mut values: UnordMap<NodeId, TensorValue> = UnordMap::new();
-    // A draw's key is a word, never a tensor value: it lives beside `values`
-    // and is read only by the key slot of a random primitive.
-    let mut keys: UnordMap<NodeId, Option<RandomKey>> = UnordMap::new();
     // chelis#828's receipt, sampled once per executed node. `live_elements`
     // is maintained incrementally so the sample costs two comparisons rather
     // than a walk of the map.
@@ -3007,8 +3273,15 @@ where
             return Err(failure);
         }
         if matches!(node.op, RiscOp::DrawKey { .. }) {
-            let key = eval_draw_key(node, &values, random_frame)?;
-            keys.insert(node.id, key);
+            // A key is an ordinary rank-0 key value. An inactive draw key
+            // takes no ordinal and has no value, so an active primitive that
+            // reads it is caught by `draw_keys`.
+            if let Some(key) = eval_draw_key(node, &values, random_frame)? {
+                let value =
+                    TensorValue::from_storage(Vec::new(), TensorStorage::from_keys(vec![key]));
+                live_elements += value.len();
+                values.insert(node.id, value);
+            }
             if let Some(schedule) = &free_schedule {
                 for dead in &schedule[index] {
                     if let Some(freed) = values.remove(dead) {
@@ -3426,57 +3699,57 @@ where
             // backend's `rintf` under the default rounding mode. NOT
             // `f64::round`, which rounds half away from zero.
             RiscOp::Round => unary_elementwise(ElementwiseUnOp::Round, &values[&node.inputs[0]])?,
-            RiscOp::Dropout | RiscOp::DropoutReplay => {
-                let data = &values[&node.inputs[0]];
-                match random_operand_key(node, 2, &values, &keys)? {
-                    None => zero_tensor(&data.shape, data.prim())?,
-                    Some(key) => {
-                        let rate = rank0_scalar(&values[&node.inputs[1]], "dropout rate")?;
-                        let storage = PreparedDropout::new(data.storage(), rate)
-                            .and_then(|prepared| prepared.apply(key))
-                            .map_err(|error| error.to_string())?;
-                        TensorValue::from_storage(data.shape.clone(), storage)
-                    }
-                }
-            }
-            RiscOp::UniformLike => {
-                let shape = values[&node.inputs[0]].shape.clone();
-                match random_operand_key(node, 3, &values, &keys)? {
-                    None => zero_tensor(&shape, out_prim)?,
-                    Some(key) => {
-                        let low = rank0_scalar(&values[&node.inputs[1]], "uniform_like low bound")?;
-                        let high =
-                            rank0_scalar(&values[&node.inputs[2]], "uniform_like high bound")?;
-                        let storage = PreparedUniformLike::new(out_prim, numel(&shape), low, high)
-                            .and_then(|prepared| prepared.apply(key))
-                            .map_err(|error| error.to_string())?;
-                        TensorValue::from_storage(shape, storage)
-                    }
-                }
-            }
-            RiscOp::UniformBoundAdjoint { bound } => {
-                match random_operand_key(node, 2, &values, &keys)? {
-                    None => zero_tensor(&[], out_prim)?,
-                    Some(key) => {
-                        let bound = match bound {
-                            crate::dag::UniformBound::Low => chelis_types::UniformBound::Low,
-                            crate::dag::UniformBound::High => chelis_types::UniformBound::High,
-                        };
-                        let value = uniform_like_bound_adjoint(
-                            values[&node.inputs[1]].storage(),
-                            key,
-                            bound,
-                        )
-                        .map_err(|error| error.to_string())?;
-                        TensorValue::from_storage(
-                            Vec::new(),
-                            tensor_from_scalars(out_prim, &[value]),
-                        )
-                    }
-                }
-            }
+            RiscOp::Dropout | RiscOp::DropoutReplay => eval_dropout(
+                node,
+                &values[&node.inputs[0]],
+                &values[&node.inputs[1]],
+                draw_keys(node, 2, &values)?,
+            )?,
+            RiscOp::UniformLike => eval_uniform_like(
+                node,
+                &values[&node.inputs[0]],
+                &values[&node.inputs[1]],
+                &values[&node.inputs[2]],
+                out_prim,
+                draw_keys(node, 3, &values)?,
+            )?,
+            RiscOp::UniformBoundAdjoint { bound } => eval_uniform_bound_adjoint(
+                node,
+                &values[&node.inputs[1]],
+                *bound,
+                out_prim,
+                draw_keys(node, 2, &values)?,
+            )?,
             RiscOp::DrawKey { .. } => {
                 unreachable!("draw keys are evaluated before the value match")
+            }
+            RiscOp::KeyFromSeed => {
+                let seeds = &values[&node.inputs[0]];
+                key_value(seeds, key_from_seed_storage(seeds.storage()))?
+            }
+            RiscOp::Split { branch } => {
+                let keys = &values[&node.inputs[0]];
+                key_value(keys, split_key_storage(keys.storage(), branch.half()))?
+            }
+            RiscOp::FoldIn => {
+                let keys = &values[&node.inputs[0]];
+                let ns = &values[&node.inputs[1]];
+                if keys.shape != ns.shape {
+                    return Err(format!(
+                        "fold_in at node {}: key shape {:?} and count shape {:?} must be equal",
+                        node.id.0, keys.shape, ns.shape
+                    ));
+                }
+                key_value(keys, fold_in_storage(keys.storage(), ns.storage()))?
+            }
+            RiscOp::SplitN { count } => {
+                let keys = &values[&node.inputs[0]];
+                let count = resolve_eval_bound(count, node, &values, 0)?;
+                let storage =
+                    split_keys_storage(keys.storage(), count).map_err(|error| error.to_string())?;
+                let mut shape = keys.shape.clone();
+                shape.push(count);
+                TensorValue::from_storage(shape, storage)
             }
             RiscOp::MaxElem => binary_elementwise(
                 ElementwiseBinOp::Max,

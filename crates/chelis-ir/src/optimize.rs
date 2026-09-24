@@ -578,6 +578,14 @@ pub fn common_subexpr_eliminate(dag: &Dag) -> Dag {
                     | RiscOp::CheckedUnitAxis { .. }
             )
             && !matches!(node.op, RiscOp::DrawKey { .. })
+            // Two key operations with equal inputs produce equal bits, but
+            // merging them would hand one key to both consumers, which the
+            // key rules reject: a key is consumed once in the graph, not
+            // merely once per value.
+            && !matches!(
+                node.op,
+                RiscOp::KeyFromSeed | RiscOp::Split { .. } | RiscOp::FoldIn | RiscOp::SplitN { .. }
+            )
             && let Some(&existing) = seen.get(&cse_key)
         {
             // Duplicate: its full provenance (canonical + merged) folds
