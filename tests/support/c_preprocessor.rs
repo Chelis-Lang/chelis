@@ -315,7 +315,10 @@ mod tests {
         // GCC and clang both keep a single blank source line, so this fails on
         // either host preprocessor if blank lines reach the attribution.
         let fixture = Fixture::new();
-        fixture.write("root.h", "int first_value(void);\n\nint second_value(void);\n");
+        fixture.write(
+            "root.h",
+            "int first_value(void);\n\nint second_value(void);\n",
+        );
 
         let rows = preprocess_root(&fixture.0, "root.h", &Environment::native_c()).unwrap();
 
