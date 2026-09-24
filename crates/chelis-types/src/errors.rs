@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 pub use crate::session::DiagnosticSink;
 use crate::types::Type;
 use crate::unify::{TypeError, TypeErrorKind};
+use crate::unsupported::Unsupported;
 
 /// Zero-sized witness that a `Type::Error` was minted HONESTLY: either a
 /// diagnostic reached the error vector (via [`report`]) or an existing
@@ -301,6 +302,12 @@ pub enum CheckErrorKind {
     /// failure to a later stage (the runtime catching it) is not a
     /// disposition.
     MalformedForm,
+    /// A recognized language construct whose implementation is not complete
+    /// enough to admit. The typed payload retains the rejection's stage,
+    /// issue authority, location, and supported alternative.
+    UnsupportedFeature {
+        unsupported: Box<Unsupported>,
+    },
     Other,
 }
 
@@ -339,6 +346,7 @@ impl CheckErrorKind {
             CheckErrorKind::BuiltinShadowing => "BuiltinShadowing",
             CheckErrorKind::UnknownForm => "UnknownForm",
             CheckErrorKind::MalformedForm => "MalformedForm",
+            CheckErrorKind::UnsupportedFeature { .. } => "unsupported_feature",
             CheckErrorKind::Other => "Other",
         }
     }
@@ -381,6 +389,7 @@ impl CheckErrorKind {
             // class. The invariant that governs is that any pushed error
             // forces score < 1.0, which §C4.4's corpus locks independently.
             CheckErrorKind::UnknownForm | CheckErrorKind::MalformedForm => 0.5,
+            CheckErrorKind::UnsupportedFeature { .. } => 1.0,
             CheckErrorKind::Other => 0.5,
         }
     }
@@ -399,6 +408,35 @@ impl CheckError {
             got: None,
             span_offset: None,
             span_id: None,
+        }
+    }
+
+    /// Preserve one typed unsupported rejection through the checker error
+    /// channel. Human and machine fields derive from the same payload.
+    pub fn from_unsupported(unsupported: Unsupported) -> Self {
+        let message = unsupported.to_string();
+        let suggestions = unsupported
+            .supported_alternative
+            .as_deref()
+            .map(str::to_owned)
+            .into_iter()
+            .collect();
+        let span_offset = unsupported.span.as_deref().and_then(|span| span.offset);
+        let span_id = unsupported
+            .span
+            .as_deref()
+            .and_then(|span| span.span_id.clone());
+        Self {
+            kind: CheckErrorKind::UnsupportedFeature {
+                unsupported: Box::new(unsupported),
+            },
+            message,
+            suggestions,
+            severity: 1.0,
+            expected: None,
+            got: None,
+            span_offset,
+            span_id,
         }
     }
 

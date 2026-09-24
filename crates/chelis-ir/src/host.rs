@@ -7937,16 +7937,15 @@ fn lower_host_expr_kind(
             )?
         }
         Expr::Node(list, _) if list.tag() == DeepTag::Par => {
-            // `spec/03-deep-syntax.md` §2.3: par v1 is sequential
-            // composition. Lower the children in order and bind the value
-            // of the last child as the par's value, mirroring `lower_par`
-            // in `crates/chelis-ir/src/lower.rs`. We do not currently
+            // Legacy sequential placeholder retained behind the chelis#2388
+            // checker fence. No checked source program reaches this path
+            // while cross-lane `par` effects remain incomplete. We do not
             // thread intermediate children through a sequence node; if
             // they have side effects (e.g. `print`, `realize`), those
             // primitives have their own host-lane arms and the emitted C
             // will reach them through whatever scope the par appears in.
-            // A future change can introduce a HostExpr::Sequence kind if
-            // par needs to preserve non-IO side effects across children.
+            // Removing the fence requires a representation that preserves
+            // every non-final child's effects, not this last-value fold.
             //
             // Without this arm par fell through to `HostExpr::Unit`, so
             // `result = par {..; to_tensor(..)}` emitted
