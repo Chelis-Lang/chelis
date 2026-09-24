@@ -5450,6 +5450,59 @@ fn build_hip_rejects_pad_host_fallback() {
 }
 
 #[test]
+fn build_hip_ignores_unselected_movement_helpers() {
+    let dir = tempdir().expect("tempdir");
+    for (name, helper) in [
+        (
+            "pad",
+            "def padder(x: tensor[4, f32]) -> tensor[6, f32] = pad(&x, [[1i64, 1i64]], 0.0)\n",
+        ),
+        (
+            "shrink",
+            "def shrinker(x: tensor[6, f32]) -> tensor[4, f32] = shrink(&x, [[1i64, 5i64]])\n",
+        ),
+    ] {
+        let surf_path = dir.path().join(format!("unselected_{name}.ch"));
+        let deep_path = dir.path().join(format!("unselected_{name}.dp"));
+        write_file(
+            &surf_path,
+            &format!("{helper}def main(x: tensor[4, f32]) -> tensor[4, f32] = mul(x, x)\n"),
+        );
+        let deep = Command::cargo_bin("chelis")
+            .expect("binary")
+            .env("CHELIS_STYLE_GATE_DISABLE", "1")
+            .args(["deep", surf_path.to_str().unwrap()])
+            .assert()
+            .success()
+            .get_output()
+            .stdout
+            .clone();
+        fs::write(&deep_path, deep).expect("write desugared Deep control");
+
+        for (label, path) in [("surf", &surf_path), ("deep", &deep_path)] {
+            let out_dir = dir.path().join(format!("unselected_{name}_{label}_hip"));
+            Command::cargo_bin("chelis")
+                .expect("binary")
+                .env("CHELIS_STYLE_GATE_DISABLE", "1")
+                .args([
+                    "build",
+                    path.to_str().unwrap(),
+                    "--target",
+                    "hip",
+                    "--output",
+                    out_dir.to_str().unwrap(),
+                ])
+                .assert()
+                .success();
+            let source = fs::read_to_string(out_dir.join(format!("unselected_{name}_hip.cpp")))
+                .expect("HIP source");
+            assert!(!source.contains("kernel_pad"));
+            assert!(!source.contains("kernel_shrink"));
+        }
+    }
+}
+
+#[test]
 fn build_hip_rejects_shrink_host_fallback() {
     let dir = tempdir().expect("tempdir");
     let path = dir.path().join("shrink.ch");
