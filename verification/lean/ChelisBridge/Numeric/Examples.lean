@@ -1,6 +1,7 @@
 import ChelisBridge.Examples
 import ChelisBridge.Numeric.Primal
 import ChelisBridge.Numeric.Decode
+import ChelisBridge.Numeric.Loop
 
 /-!
 # Executable checks for the numeric bridge
@@ -63,5 +64,17 @@ def sumDagValue : Option (Option ℚ) :=
   | _ => none
 
 #guard sumDagValue == some (some 1)
+
+-- The flat node loop on `sum₀ (x * x)` with `x = [1, 2, 3]` (binary64): the root is `14`.
+def squareRoot : Option (Option ℚ) :=
+  (specRun .f64 (fun l => if l = "x" then some [f64 1, f64 2, f64 3] else none) (fun _ => true)
+      square.nodes.val (fun _ => none)).map fun vals =>
+    (vals 2).bind fun v => v.data.head?.bind realize
+
+#guard squareRoot == some (some 14)
+
+-- The loop and the IEEE reference agree on the pairwise order of `sum [1e16, -1e16, 1]`.
+#guard ((specRun .f64 (fun _ => none) (fun _ => true) sumDag.nodes.val (fun _ => none)).map
+  fun vals => (vals 1).bind fun v => v.data.head?.bind realize) == some (some 1)
 
 end ChelisBridge.Numeric.Examples

@@ -14,6 +14,8 @@ import ChelisBridge.Numeric
 import ChelisBridge.Numeric.Flat
 import ChelisBridge.Numeric.Decode
 import ChelisBridge.Numeric.Primal
+import ChelisBridge.Numeric.Bindings
+import ChelisBridge.Numeric.Loop
 import ChelisBridge.Numeric.Examples
 import Lean.Util.CollectAxioms
 
@@ -277,7 +279,36 @@ def accepted : List Name := [
   ``ChelisBridge.Numeric.progCircuit_eval,
   ``ChelisBridge.Numeric.selectRoot_eval,
   ``ChelisBridge.Numeric.primalCheck_sound,
-  ``ChelisBridge.Numeric.acceptPrimal_sound
+  ``ChelisBridge.Numeric.acceptPrimal_sound,
+  ``ChelisBridge.Numeric.opEval_rename,
+  ``ChelisBridge.Numeric.prefixEval_embedding,
+  ``ChelisBridge.Numeric.get_embedding_ieee,
+  ``ChelisBridge.Numeric.bindings_ieee,
+  ``ChelisBridge.Numeric.prefix_length_le,
+  ``ChelisBridge.Numeric.embedding_offset,
+  ``ChelisBridge.Numeric.rename_encode,
+  ``ChelisBridge.Numeric.bindings_decode,
+  ``ChelisBridge.Numeric.arg_value,
+  ``ChelisBridge.Numeric.mapM_offsets_one,
+  ``ChelisBridge.Numeric.mapM_offsets_two,
+  ``ChelisBridge.Numeric.classify_copy,
+  ``ChelisBridge.Numeric.classify_sum,
+  ``ChelisBridge.Numeric.shape_split,
+  ``ChelisBridge.Numeric.kernel_correct,
+  ``ChelisBridge.Numeric.guard_prop,
+  ``ChelisBridge.Numeric.step_load,
+  ``ChelisBridge.Numeric.step_nonload,
+  ``ChelisBridge.Numeric.liftStep_nonload,
+  ``ChelisBridge.Numeric.runF_prefix,
+  ``ChelisBridge.Numeric.var_decode_of_getElem?,
+  ``ChelisBridge.Numeric.Inv.update_dead,
+  ``ChelisBridge.Numeric.Inv.update_live,
+  ``ChelisBridge.Numeric.runF_simulates,
+  ``ChelisBridge.Numeric.Inv.init,
+  ``ChelisBridge.Numeric.runF_len,
+  ``ChelisBridge.Numeric.specRun_simulates,
+  ``ChelisBridge.Numeric.decodeTensor_of_ofList,
+  ``ChelisBridge.Numeric.specRun_realize
 ]
 
 def allowedAxioms : List Name := [``propext, ``Classical.choice, ``Quot.sound]
