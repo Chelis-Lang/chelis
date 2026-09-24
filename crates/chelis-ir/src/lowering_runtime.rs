@@ -459,6 +459,20 @@ impl LoweringRuntime {
         NATIVE_LOWERING_STATE.with(|state| state.summary_probe_builds.set(0));
     }
 
+    /// Primitive. Allocate a tensor-helper preflight frame id from this
+    /// thread's supply. The supply is never reset, so an id is never
+    /// reissued on this thread: neither a sibling frame pushed after a frame
+    /// pops nor a frame of a nested session can carry a live frame's id.
+    ///
+    /// Model: next element of this thread's frame-id allocation schedule.
+    pub(crate) fn fresh_preflight_frame(&mut self) -> u64 {
+        NATIVE_LOWERING_STATE.with(|state| {
+            let id = state.next_preflight_frame.get();
+            state.next_preflight_frame.set(id.wrapping_add(1));
+            id
+        })
+    }
+
     /// Primitive. Start the detailed library-lowering profile. When
     /// `CHELIS_PROFILE_COMPILE_CONTEXT_DETAIL=1` this reads the clock and
     /// returns a nonzero mark; otherwise it returns `0` and reads nothing.
@@ -541,6 +555,8 @@ struct NativeLoweringState {
     suppress_output: Cell<bool>,
     /// Persistent kernel-decision summary-probe count (chelis#1829).
     summary_probe_builds: Cell<u64>,
+    /// Next tensor-helper preflight frame id.
+    next_preflight_frame: Cell<u64>,
 }
 
 thread_local! {
@@ -549,6 +565,7 @@ thread_local! {
             suppress_unrepresentable: Cell::new(false),
             suppress_output: Cell::new(false),
             summary_probe_builds: Cell::new(0),
+            next_preflight_frame: Cell::new(0),
         }
     };
 }
