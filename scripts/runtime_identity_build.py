@@ -27,6 +27,28 @@ import runtime_identity_observer as observer
 MANAGED_COMMANDS = frozenset({"build", "b", "check", "c", "test", "t", "run", "r", "rustc", "bench", "doc", "d", "rustdoc"})
 # Documentation units run rustdoc, never rustc, and retain no producer record.
 DOCUMENTATION_COMMANDS = frozenset({"doc", "d", "rustdoc"})
+# Names every variable a managed session changed for its Cargo: [before, after].
+SESSION_CHANGES = "CHELIS_IDENTITY_SESSION_CHANGES"
+
+
+def leave_enclosing_session(environment):
+    """Undo what an enclosing managed build leaked into this environment.
+
+    Cargo passes its environment to tests, `cargo run` programs and build
+    scripts, so a nested Cargo would otherwise reuse the enclosing session's
+    wrapper, metadata and observation state. A variable changed since that
+    session set it is the caller's choice and stays.
+    """
+    changes = environment.pop(SESSION_CHANGES, None)
+    if changes is None:
+        return
+    for name, (before, after) in json.loads(changes).items():
+        if environment.get(name) != after:
+            continue
+        if before is None:
+            environment.pop(name, None)
+        else:
+            environment[name] = before
 
 
 def install_cargo_launcher(directory, *, real_cargo, python):
@@ -196,6 +218,8 @@ def exact_compiler(environment, workspace, arguments):
 
 def run(cargo, arguments):
     environment = dict(os.environ)
+    leave_enclosing_session(environment)
+    baseline = dict(environment)
     # Cargo help, metadata, fmt, clean, version and external workspaces retain the
     # original behavior; declaring a managed producer still requires this driver.
     command = cargo_command(arguments)
@@ -223,8 +247,7 @@ def run(cargo, arguments):
     if not any(package["name"] == "chelis-runtime" for package in metadata["packages"]):
         return subprocess.call([cargo, *arguments], env=environment, close_fds=False)
     explicit_root = environment.get("CHELIS_IDENTITY_WORKSPACE")
-    inherited_root = environment.get("CHELIS_IDENTITY_OBSERVED_WORKSPACE")
-    if explicit_root and explicit_root != inherited_root and (not Path(explicit_root).is_dir() or Path(explicit_root).resolve() != workspace.resolve()):
+    if explicit_root and (not Path(explicit_root).is_dir() or Path(explicit_root).resolve() != workspace.resolve()):
         raise observer.ObservationError("explicit CHELIS_IDENTITY_WORKSPACE is missing or differs from Cargo's actual workspace root")
     source = Path(__file__).resolve().parents[1]
     state = Path(environment.get("CHELIS_IDENTITY_STATE", str(Path(metadata["target_directory"]) / "runtime-identity-observations"))).absolute()
@@ -237,6 +260,15 @@ def run(cargo, arguments):
     bootstrap_env["CARGO_ENCODED_RUSTFLAGS"] = ""
     compiler = exact_compiler(environment, workspace, arguments)
     environment["RUSTC"] = bootstrap_env["RUSTC"] = compiler
+    library = Path(compiler).parent.parent / "lib"
+    if sys.platform.startswith("linux") and library.is_dir():
+        # rustup's proxy puts a toolchain's own libraries first for every tool
+        # it runs; this driver runs the exact compiler without the proxy. A
+        # test's loader path otherwise resolves librustc_driver from the
+        # sysroot's target library directory, where rustc-dev ships a copy
+        # that cannot find libLLVM. The driver's own probes need it too.
+        loader = os.pathsep.join(filter(None, (str(library), environment.get("LD_LIBRARY_PATH"))))
+        environment["LD_LIBRARY_PATH"] = bootstrap_env["LD_LIBRARY_PATH"] = os.environ["LD_LIBRARY_PATH"] = loader
     # Documentation units read the metadata this exact compiler writes.
     rustdoc = Path(compiler).with_name("rustdoc")
     if not (environment.get("RUSTDOC") or environment.get("CARGO_BUILD_RUSTDOC")) and rustdoc.is_absolute() and rustdoc.is_file():
@@ -265,15 +297,20 @@ def run(cargo, arguments):
     if environment.get("RUSTC_WRAPPER") and environment["RUSTC_WRAPPER"] != environment.get("CHELIS_IDENTITY_HELPER"):
         environment["CHELIS_IDENTITY_INNER_WRAPPER"] = observer.transparent_wrapper(environment["RUSTC_WRAPPER"])
     environment.update({"RUSTC_WRAPPER": str(helper), "CHELIS_IDENTITY_HELPER": str(helper), "CHELIS_IDENTITY_PROTOCOL": "1", "CHELIS_IDENTITY_BACKEND": "cargo", "CHELIS_IDENTITY_WORKSPACE": str(workspace), "CHELIS_IDENTITY_STATE": str(state)})
-    environment["CHELIS_IDENTITY_OBSERVED_WORKSPACE"] = str(workspace)
     if environment.get("CHELIS_IDENTITY_PROVENANCE") not in {"source-worktree", "sealed-distribution"}:
         raise observer.ObservationError("CHELIS_IDENTITY_PROVENANCE must explicitly select source-worktree or sealed-distribution")
+    # An analysis tool may compile exactly one crate through its own rustc
+    # driver; the observer publishes nothing for it and observes every other unit.
+    analysis_crate = environment.get("CHELIS_IDENTITY_ANALYSIS_CRATE")
+    analysis_driver = environment.get("CHELIS_IDENTITY_ANALYSIS_DRIVER")
+    if bool(analysis_crate) != bool(analysis_driver) or (analysis_driver and not os.access(analysis_driver, os.X_OK)):
+        raise observer.ObservationError("CHELIS_IDENTITY_ANALYSIS_DRIVER must name an executable driver together with CHELIS_IDENTITY_ANALYSIS_CRATE")
     # A session-specific metadata file avoids cross-invocation metadata races.
     fd, metadata_path = tempfile.mkstemp(prefix="cargo-metadata-", suffix=".json", dir=state)
     with os.fdopen(fd, "w", encoding="utf-8") as stream:
         json.dump(metadata, stream)
     environment_path = metadata_path + ".environment"
-    observer.atomic(environment_path, {name: observer.digest(os.fsencode(value)) for name, value in os.environ.items()})
+    observer.atomic(environment_path, {name: observer.digest(os.fsencode(value)) for name, value in baseline.items()})
     environment["CHELIS_IDENTITY_INVOCATION_ENVIRONMENT"] = environment_path
     environment["CHELIS_IDENTITY_METADATA"] = metadata_path
     environment["CHELIS_IDENTITY_SESSION"] = Path(metadata_path).stem
@@ -290,6 +327,14 @@ def run(cargo, arguments):
         raise observer.ObservationError("managed builds support Cargo JSON or default rendered diagnostics")
     failures = []
     producers = {}
+    # Rustc's dep-info covers only the files it read; each local unit's stamp
+    # covers the rest of its identity inventory for this build's freshness.
+    observer.refresh_inventory_stamps(state)
+    environment[SESSION_CHANGES] = json.dumps({
+        name: [baseline.get(name), environment.get(name)]
+        for name in sorted(baseline.keys() | environment.keys())
+        if baseline.get(name) != environment.get(name)
+    })
     proc = subprocess.Popen([cargo, *command_args], env=environment, stdout=subprocess.PIPE, close_fds=False)
     assert proc.stdout is not None
     try:
@@ -310,6 +355,9 @@ def run(cargo, arguments):
                 sys.stdout.buffer.write(raw); sys.stdout.buffer.flush()
             try:
                 if event.get("reason") == "compiler-artifact":
+                    if analysis_crate and event["target"]["name"].replace("-", "_") == analysis_crate:
+                        # The declared analysis-only compilation publishes nothing.
+                        continue
                     # Publish independently of receipt validity. Only the
                     # runtime closure interprets dependency observation errors.
                     for filename in event["filenames"]:
@@ -398,6 +446,9 @@ def run(cargo, arguments):
             proc.terminate(); proc.wait()
         os.unlink(metadata_path)
         os.unlink(environment_path)
+        # Launchers and Cargo events serve only this invocation's processes.
+        for category in ("launchers", "events", "build-events"):
+            shutil.rmtree(state / category / environment["CHELIS_IDENTITY_SESSION"], ignore_errors=True)
 
 
 def main(arguments=None):

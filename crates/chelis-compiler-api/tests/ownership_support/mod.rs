@@ -112,7 +112,9 @@ impl fmt::Display for GeneratedProgram {
 fn runtime() -> &'static Path {
     static ARCHIVE: OnceLock<PathBuf> = OnceLock::new();
     ARCHIVE.get_or_init(|| {
-        let output = Command::new(env!("CARGO"))
+        // A managed build puts its observed Cargo launcher first on PATH;
+        // env!("CARGO") names the real binary, which cannot build a producer.
+        let output = Command::new("cargo")
             .current_dir(root())
             .env(
                 "CARGO_TARGET_DIR",

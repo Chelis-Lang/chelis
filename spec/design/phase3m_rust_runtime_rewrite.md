@@ -191,18 +191,37 @@ Producer build scripts declare their role but never invoke Cargo.
 
 The Cargo entrypoint observes actual rustc units and build-script executions,
 binds exact Cargo artifacts to compiler-output bytes, and checks cached inputs
-and output digests. Compiler dependency metadata for each local unit lists its
-selected package inputs and every directory that contains or leads to one, so
-adding, removing or changing a selected input rebuilds that unit; a build
-script's own unit covers only what its compiler reads. Only producer units
-retain the owning workspace's manifest, toolchain file and Cargo configuration,
-and their metadata lists those files too; other units record the declarations'
-effect in their observed compiler invocation. A cached input that still changes
-without a rebuild, such as a mutated custom sysroot, fails the build with the
-stale package's name, and `cargo clean -p <package>` followed by a managed build
-recovers. An unmanaged or stale target must be rebuilt under the managed
-driver; there is no fallback descriptor and no automatic deletion of a user's
-target directory.
+and output digests. Observed compilations withhold the compiler's artifact
+notices, including notices a compiler cache replays, so Cargo starts a
+dependent only after the unit's receipt exists.
+Rustc's dependency metadata keeps exactly the files rustc read. The observer
+adds only its own state: the unit's receipt, bindings and digest index, so a
+pruned or partial observation store rebuilds the unit instead of failing its
+dependents, and, for a local unit, one inventory stamp. Before each build the
+driver advances the stamp of every local unit whose selected inputs changed or
+whose directories that contain or lead to one gained or lost an entry; files
+elsewhere, such as under `tests/`, do not rebuild it. An input that changes
+while the observer captures it leaves the stamp newer than that compilation,
+so the next build recompiles the unit. A build script's own unit covers only
+what its compiler reads. Only producer units retain the owning workspace's
+manifest, toolchain file and Cargo configuration, and their stamps cover those
+files too; other units record the declarations' effect in their observed
+compiler invocation. A cached input that still changes without a rebuild, such
+as a mutated custom sysroot, fails the build with the stale package's name, and
+`cargo clean -p <package>` followed by a managed build recovers. A unit that an
+unmanaged Cargo built has no observation, so its target must be rebuilt under
+the managed driver; there is no fallback descriptor and no automatic deletion
+of a user's target directory.
+A Cargo started inside a managed build, by a test, a `cargo run` program or a
+build script, first restores the variables the enclosing session changed,
+unless its caller changed them since, and then observes into its own target's
+state. On Linux the driver puts the exact compiler's toolchain libraries first
+on the loader path, as rustup's proxy does; a test's loader path can otherwise
+load the rustc-dev copy of the compiler driver. An analysis tool may compile
+exactly one declared crate through its own rustc driver
+(`CHELIS_IDENTITY_ANALYSIS_DRIVER` and `CHELIS_IDENTITY_ANALYSIS_CRATE`). That
+compilation sees the same inputs, including retained producer records, but
+publishes no receipt; every other unit is observed as usual.
 Commands and explicit provenance requirements are in `README.md` and
 `docs/manual_gates.md`.
 

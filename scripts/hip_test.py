@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import os
 import shlex
+import subprocess
 import sys
 from pathlib import Path
 
@@ -155,9 +156,8 @@ def main() -> int:
 
     argv_full = ["cargo", cargo_subcommand, *cargo_args]
     print(f"+ {shlex.join(argv_full)}", file=sys.stderr)
-    os.execvpe("cargo", argv_full, env)
-    # execvpe does not return on success.
-    return 1
+    # A child, not exec: the observed Cargo launcher must outlive the build.
+    return subprocess.call(argv_full, env=env)
 
 
 if __name__ == "__main__":

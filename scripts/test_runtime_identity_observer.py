@@ -27,7 +27,9 @@ class ObservationFailureTests(unittest.TestCase):
         self.temporary = tempfile.TemporaryDirectory()
         self.addCleanup(self.temporary.cleanup)
         self.root = Path(self.temporary.name)
-        self.environment = patch.dict(os.environ, {"CHELIS_IDENTITY_PROTOCOL": "1", "CHELIS_IDENTITY_STATE": str(self.root / "state"), "CHELIS_IDENTITY_BACKEND": "nix"}, clear=True)
+        # Keep PATH: bin units probe the default linker, which the host
+        # provides under different directories on Linux and macOS.
+        self.environment = patch.dict(os.environ, {"PATH": os.environ.get("PATH", os.defpath), "CHELIS_IDENTITY_PROTOCOL": "1", "CHELIS_IDENTITY_STATE": str(self.root / "state"), "CHELIS_IDENTITY_BACKEND": "nix"}, clear=True)
         self.environment.start()
         self.addCleanup(self.environment.stop)
         (self.root / "state").mkdir()
@@ -382,6 +384,27 @@ class ObservationFailureTests(unittest.TestCase):
                 self.assertEqual(driver.main(arguments), 0)
                 self.assertEqual(record.read_text().splitlines(), forwarded)
 
+    def test_nested_cargo_leaves_the_enclosing_managed_session(self):
+        # Cargo passes a managed session's environment to tests and build
+        # scripts; a nested Cargo must not reuse its wrapper, state or metadata.
+        record = self.root / "environment"
+        cargo = self.root / "real-cargo"
+        cargo.write_text("#!/bin/sh\nenv > \"$CHELIS_TEST_ENVIRONMENT\"\n")
+        cargo.chmod(0o755)
+        session = {"RUSTC_WRAPPER": ["/opt/kache", "/state/helper"], "CHELIS_IDENTITY_STATE": [None, "/state"],
+                   "CARGO_TARGET_DIR": [None, "/target"]}
+        os.environ.update({"CHELIS_IDENTITY_REAL_CARGO": str(cargo), "CHELIS_TEST_ENVIRONMENT": str(record),
+                           "RUSTC_WRAPPER": "/state/helper", "CHELIS_IDENTITY_STATE": "/state",
+                           # The nested caller chose its own target directory.
+                           "CARGO_TARGET_DIR": "/nested-target",
+                           driver.SESSION_CHANGES: json.dumps(session)})
+        self.assertEqual(driver.main(["--version"]), 0)
+        seen = dict(line.split("=", 1) for line in record.read_text().splitlines() if "=" in line)
+        self.assertEqual(seen.get("RUSTC_WRAPPER"), "/opt/kache")
+        self.assertNotIn("CHELIS_IDENTITY_STATE", seen)
+        self.assertNotIn(driver.SESSION_CHANGES, seen)
+        self.assertEqual(seen["CARGO_TARGET_DIR"], "/nested-target")
+
     def test_observed_build_script_runs_unchanged_without_managed_protocol(self):
         real = self.root / "build_script_build.identity-real"
         real.write_text('#!/bin/sh\necho "real $*"\n')
@@ -656,12 +679,57 @@ class ObservationFailureTests(unittest.TestCase):
         with self.assertRaisesRegex(observer.ObservationError, "stale source/input inventory"):
             observer.check_receipt(receipt)
 
-    def test_local_unit_dependency_metadata_tracks_selected_inputs_and_membership(self):
+    def test_observed_compiles_withhold_only_artifact_notices(self):
+        # Cargo starts a dependent when it reads an .rmeta notice, before the
+        # wrapper publishes the receipt that dependent reads. Kache replays
+        # stored notices even when rustc was not asked for any.
+        compiler = self.root / "compiler"
+        compiler.write_text(
+            "#!/bin/sh\n"
+            "echo '{\"$message_type\":\"diagnostic\",\"message\":\"kept\"}' >&2\n"
+            "echo '{\"$message_type\":\"artifact\",\"artifact\":\"/t/libx.rmeta\",\"emit\":\"metadata\"}' >&2\n"
+            "echo '{\"artifact\":\"/t/libx.rlib\",\"emit\":\"link\"}' >&2\n"
+            "echo 'plain text' >&2\n"
+            "exit 3\n")
+        compiler.chmod(0o755)
+        run = subprocess.run([sys.executable, "-c",
+                              "import sys; sys.path.insert(0, sys.argv[1]); import runtime_identity_observer as o; "
+                              "sys.exit(o.compile_without_pipelining([sys.argv[2]]))", _SCRIPTS_DIR, str(compiler)],
+                             capture_output=True, text=True, check=False)
+        self.assertEqual(run.returncode, 3)
+        self.assertEqual(run.stderr.splitlines(), ['{"$message_type":"diagnostic","message":"kept"}', "plain text"])
+
+    @unittest.skipUnless(HELPER and RUSTC, "requires compiled adapter and native rustc")
+    def test_declared_analysis_crate_runs_its_driver_and_publishes_nothing(self):
+        # The capacity census compiles one crate through its own rustc driver,
+        # which stops after analysis; no receipt may claim that compilation.
+        package = self.root / "package"
+        package.mkdir()
+        (package / "Cargo.toml").write_text('[package]\nname = "probed"\nversion = "0.0.0"\nedition = "2021"\n[workspace]\n')
+        source = package / "lib.rs"
+        source.write_text("pub fn value() -> u8 { 1 }\n")
+        record = self.root / "argv"
+        analysis = self.root / "analysis-driver"
+        analysis.write_text('#!/bin/sh\nprintf "%s\\n" "$@" > "$CHELIS_TEST_ARGV"\nexit 4\n')
+        analysis.chmod(0o755)
+        os.environ.update({"CARGO_MANIFEST_DIR": str(package), "CARGO_PKG_NAME": "probed", "CARGO_PKG_VERSION": "0.0.0",
+                           "CHELIS_IDENTITY_PACKAGE_SOURCE": "path:.", "CHELIS_IDENTITY_WORKSPACE": str(package),
+                           "CHELIS_IDENTITY_ANALYSIS_DRIVER": str(analysis), "CHELIS_IDENTITY_ANALYSIS_CRATE": "probed",
+                           "CHELIS_TEST_ARGV": str(record)})
+        arguments = [str(source), "--crate-name", "probed", "--crate-type", "lib", "--emit=dep-info,metadata",
+                     "--out-dir", str(self.root / "out")]
+        self.assertEqual(observer.observe_rustc(RUSTC, arguments), 4)
+        self.assertEqual(record.read_text().splitlines(), [RUSTC, *arguments])
+        self.assertFalse((self.root / "state" / "receipts").exists())
+        self.assertFalse((self.root / "state" / "bindings").exists())
+
+    def test_local_unit_stamp_follows_its_identity_inventory_not_compiler_dep_info(self):
         package = self.root / "package"
         for directory in ("src/nested", "tests", "docs"):
             (package / directory).mkdir(parents=True)
         for name in ("Cargo.toml", "src/lib.rs", "src/nested/mod.rs", "tests/case.rs", "docs/guide.md"):
             (package / name).write_text("")
+        (self.root / "Cargo.toml").write_text("[workspace]\n")
         selected = ("Cargo.toml", "src/lib.rs", "src/nested/mod.rs")
         declarations = {"physical": str(self.root), "fixed": True, "inventory": {
             "logical_prefix": "workspace", "files": ["Cargo.toml"], "explicitly_required": ["Cargo.toml"], "class": "build"}}
@@ -672,19 +740,57 @@ class ObservationFailureTests(unittest.TestCase):
         receipt = {"roots": [observer.inventory(package, "package", ["Cargo.toml"]), declarations, toolchain, generated],
                    "required_inputs": [{"logical_path": "package/" + name} for name in selected]
                    + [{"logical_path": path} for path in ("workspace/Cargo.toml", "toolchain/libstd.rlib", "package/generated/bindings.rs")]}
+        output = self.root / "libunit.rlib"
+        output.write_bytes(b"unit")
         dep_info = self.root / "unit.d"
-        dep_info.write_text(f"{self.root}/libunit.rlib: src/lib.rs\n\nsrc/lib.rs:\n\n# env-dep:CARGO_PKG_NAME=unit\n")
-        observer.track_inventory(receipt, dep_info)
+        compiled = f"{output}: src/lib.rs\n\nsrc/lib.rs:\n\n# env-dep:CARGO_PKG_NAME=unit\n"
+
+        def compile(reference=2**62):
+            # The observer's step once rustc wrote its dep-info. The default
+            # reference follows every edit, as a later capture's would.
+            dep_info.write_text(compiled)
+            snapshot = observer.inventory_snapshot(receipt, reference)
+            observer.extend_dep_info(dep_info, [observer.watch_inventory(snapshot, reference, output)])
+
+        compile()
+        stamp = self.root / "state" / "inventory-stamps" / (observer.key(output) + ".stamp")
         rule, *rest = dep_info.read_text().split("\n")
-        # Cargo rebuilds when a listed file or directory changes: selected inputs,
-        # the directories where one can be added or removed, and a retained
-        # declaration file, never tests, toolchain or generated inputs.
-        self.assertEqual(
-            set(rule.split(": ", 1)[1].split()),
-            {"src/lib.rs", str(self.root / "Cargo.toml"),
-             *(str(package / name) for name in ("", "src", "src/nested", *selected))},
-        )
+        # Repository tools read rustc's own sources from dep-info; the unit
+        # gains one stamp instead of sources rustc never compiled.
+        self.assertEqual(rule, f"{output}: src/lib.rs {stamp}")
         self.assertEqual(rest, ["", "src/lib.rs:", "", "# env-dep:CARGO_PKG_NAME=unit", ""])
+
+        def rebuilds(change):
+            change()
+            observer.refresh_inventory_stamps(self.root / "state")
+            stale = stamp.stat().st_mtime_ns > observer.SETTLED_STAMP_NS
+            compile()
+            return stale
+
+        self.assertFalse(rebuilds(lambda: None))
+        # Tests and documentation are never identity inputs.
+        for name in ("tests/case.rs", "docs/guide.md"):
+            self.assertFalse(rebuilds(lambda: (package / name).write_text("// edited\n")), name)
+        # A selected input rustc never read, a retained declaration, membership.
+        for change in (
+            lambda: (package / "src/nested/mod.rs").write_text("pub const N: u8 = 1;\n"),
+            lambda: (self.root / "Cargo.toml").write_text("[workspace]\n# edited\n"),
+            lambda: (package / "src/nested/added.rs").write_text(""),
+            lambda: (package / "src/nested/added.rs").unlink(),
+        ):
+            self.assertTrue(rebuilds(change))
+        # An edit during the capture leaves the stamp newer than Cargo's
+        # reference for that compilation, although the snapshot now matches.
+        reference = observer.filesystem_time()
+        (package / "src/nested/mod.rs").write_text("pub const N: u8 = 2;\n")
+        compile(reference)
+        observer.refresh_inventory_stamps(self.root / "state")
+        self.assertGreater(stamp.stat().st_mtime_ns, reference)
+        # A cleaned unit's watch is dropped rather than checked on every build.
+        output.unlink()
+        observer.refresh_inventory_stamps(self.root / "state")
+        self.assertFalse(stamp.exists())
+        self.assertEqual(list((self.root / "state" / "inventory-watch").iterdir()), [])
 
     @unittest.skipUnless(HELPER and RUSTC, "requires compiled adapter and native rustc")
     def test_only_producers_retain_workspace_declarations(self):

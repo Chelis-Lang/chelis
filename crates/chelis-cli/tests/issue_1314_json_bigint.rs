@@ -294,7 +294,9 @@ ordered = to_json(parse_json("{\"b\":2,\"a\":1}"))
 "#,
     );
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-    let build = Process::new(env!("CARGO"))
+    // A managed build puts its observed Cargo launcher first on PATH;
+    // env!("CARGO") names the real binary, which cannot build a producer.
+    let build = Process::new("cargo")
         .current_dir(&root)
         .args([
             "build",

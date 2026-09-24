@@ -832,7 +832,10 @@ def collect_library(root: Path, target: Path, driver: Path, *, rustc_args=(), sc
                 "CARGO_BUILD_JOBS": "1",
                 "PYO3_PYTHON": sys.executable,
                 "VIRTUAL_ENV": sys.prefix,
-                "RUSTC_WRAPPER": str(driver),
+                # The managed observer compiles only the selected crate through
+                # the driver, bypassing compiler caches, and observes the rest.
+                "CHELIS_IDENTITY_ANALYSIS_DRIVER": str(driver),
+                "CHELIS_IDENTITY_ANALYSIS_CRATE": "chelis_python" if scope else "chelis_compiler_api",
                 "WIRE_CALL_CRATE": "chelis_python" if scope else "chelis_compiler_api",
                 "WIRE_CALL_SCOPE": scope or "",
                 "WIRE_CALL_REPORT": str(output),
@@ -871,7 +874,10 @@ def collect_library(root: Path, target: Path, driver: Path, *, rustc_args=(), sc
         if evidence.raw["format"] != expected_format:
             raise ValueError("compiler evidence does not match the requested scope")
         for source in evidence.raw["inputs"]:
-            if source["path"] is not None:
+            # This invocation's own build products, such as retained runtime
+            # identity records, are bound by the managed build; rustc also
+            # hashes a non-UTF-8 `include_bytes!` input as empty text.
+            if source["path"] is not None and not (root / source["path"]).is_relative_to(invocation_target):
                 path = root / source["path"]
                 if (
                     source["hash"]

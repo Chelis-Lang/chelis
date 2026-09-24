@@ -189,9 +189,8 @@ def main() -> int:
 
     argv_full = ["cargo", *shlex.split(cargo_subcommand), *cargo_args]
     print(f"+ {shlex.join(argv_full)}", file=sys.stderr)
-    os.execvpe("cargo", argv_full, env)
-    # execvpe does not return on success.
-    return 1
+    # A child, not exec: the observed Cargo launcher must outlive the build.
+    return subprocess.call(argv_full, env=env)
 
 
 if __name__ == "__main__":

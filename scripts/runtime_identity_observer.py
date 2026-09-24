@@ -158,6 +158,30 @@ def workspace_compiler_applies():
     return matches[0]["id"] in set(metadata["workspace_members"])
 
 
+def compile_without_pipelining(command) -> int:
+    """Run the compiler and withhold its artifact notices from Cargo.
+
+    Cargo starts a dependent as soon as it reads an ``.rmeta`` notice, before
+    this wrapper publishes the unit's receipt. A compiler cache replays stored
+    notices even when rustc was not asked for any, so dropping the flag is not
+    enough. Without notices Cargo starts dependents once the wrapper exits, and
+    no compiler waits inside a Cargo job for another's receipt.
+    """
+    proc = subprocess.Popen(command, stderr=subprocess.PIPE, close_fds=False)
+    assert proc.stderr is not None
+    for line in proc.stderr:
+        if line.startswith(b"{"):
+            try:
+                message = json.loads(line)
+            except ValueError:
+                message = None
+            if isinstance(message, dict) and "artifact" in message:
+                continue
+        sys.stderr.buffer.write(line)
+        sys.stderr.buffer.flush()
+    return proc.wait()
+
+
 def rustc_command(real_rustc, args):
     """Compose the original cache/workspace wrappers in Cargo's order."""
     inner = transparent_wrapper(os.environ.get("CHELIS_IDENTITY_INNER_WRAPPER"))
@@ -889,18 +913,32 @@ def dep_info_path(args):
     return None
 
 
-def track_inventory(receipt, dep_info):
-    """Add a local unit's selected inputs to rustc's dependency metadata.
+def filesystem_time() -> int:
+    """Return the current time as the state filesystem records it.
 
-    Cargo reuses a local unit until a path in its dep-info changes, and rustc
-    lists only the files it read. An added, removed or unread selected input
-    would leave the receipt stale instead of rebuilding the unit. List every
-    selected source and declaration input and, for an enumerated inventory,
-    each directory that contains one or leads to one, so membership changes
-    rebuild the unit too. Toolchain and generated inputs have their own owners.
+    Cargo takes its freshness reference the same way, so coarse or cached
+    kernel clocks order this reference like the input timestamps it bounds.
+    """
+    fd, temporary = tempfile.mkstemp(prefix=".reference-", dir=state())
+    try:
+        return os.fstat(fd).st_mtime_ns
+    finally:
+        os.close(fd)
+        os.unlink(temporary)
+
+
+def inventory_snapshot(receipt, reference):
+    """Record a local unit's identity inventory as its receipt captured it.
+
+    Files are the selected package and declaration inputs. Directories contain
+    or lead to a selected package input, so their listings change when one is
+    added or removed. Toolchain and generated inputs have their own owners.
+    The snapshot is settled only when nothing changed at or after
+    ``reference``, a time taken before the receipt captured its inputs.
     """
     planned = {entry["logical_path"] for entry in receipt["required_inputs"]}
-    tracked = set()
+    files, directories = {}, set()
+    settled = True
     for root in receipt["roots"]:
         if root["inventory"]["class"] == "toolchain" or root.get("generated"):
             continue
@@ -910,21 +948,95 @@ def track_inventory(receipt, dep_info):
             if (prefix + "/" + name if prefix else name) not in planned:
                 continue
             path = physical / name
-            tracked.add(path)
+            try:
+                status = path.stat()
+            except OSError:
+                # Removed since the capture: the receipt is already stale.
+                settled = False
+                continue
+            settled &= status.st_mtime_ns < reference
+            files[str(path)] = [status.st_size, status.st_mtime_ns]
             while not root.get("fixed") and path != physical:
                 path = path.parent
-                tracked.add(path)
+                directories.add(path)
+    listings = {}
+    for path in sorted(directories):
+        try:
+            listings[str(path)] = sorted(os.listdir(path))
+            # After the listing, so an entry added while it was read is seen.
+            settled &= path.stat().st_mtime_ns < reference
+        except OSError:
+            settled = False
+    return {"files": files, "directories": listings, "settled": settled}
+
+
+def inventory_current(snapshot) -> bool:
+    """Whether every snapshot file and directory listing is unchanged."""
+    try:
+        for name, recorded in snapshot["files"].items():
+            status = os.stat(name)
+            if recorded != [status.st_size, status.st_mtime_ns]:
+                return False
+        return all(sorted(os.listdir(name)) == listing for name, listing in snapshot["directories"].items())
+    except OSError:
+        return False
+
+
+# Older than every compilation, so a settled path never makes its unit stale.
+SETTLED_STAMP_NS = 1_000_000_000
+
+
+def watch_inventory(snapshot, reference, output) -> Path:
+    """Return a stamp that changes once a local unit's inventory changes.
+
+    The managed driver advances the stamp before each build when a snapshot
+    file or listing changed. An unsettled capture dates it after
+    ``reference``, which follows Cargo's own reference for this compilation,
+    so the next build rebuilds the unit.
+    """
+    stamp = state() / "inventory-stamps" / (key(output) + ".stamp")
+    stamp.parent.mkdir(parents=True, exist_ok=True)
+    stamp.touch()
+    # One second past the reference also outlasts coarse timestamp granularity.
+    moment = SETTLED_STAMP_NS if snapshot["settled"] else reference + 1_000_000_000
+    os.utime(stamp, ns=(moment, moment))
+    atomic(state() / "inventory-watch" / (key(output) + ".json"), {"output": str(output), **snapshot})
+    return stamp
+
+
+def extend_dep_info(dep_info, paths):
+    """Make Cargo's freshness for one unit also depend on observer state.
+
+    Rustc's dep-info names only files it read, and repository tools rely on
+    that, so only observer paths are added, never sources.
+    """
     lines = dep_info.read_text(encoding="utf-8").split("\n")
     rule = next((index for index, line in enumerate(lines) if ": " in line and not line.startswith("#")), None)
     if rule is None:
         raise ObservationError(f"rustc dep-info has no dependency rule: {dep_info}")
-    lines[rule] += "".join(" " + str(path).replace(" ", "\\ ") for path in sorted(tracked))
+    lines[rule] += "".join(" " + str(path).replace(" ", "\\ ") for path in paths)
     fd, temporary = tempfile.mkstemp(prefix=dep_info.name + ".", dir=dep_info.parent)
     with os.fdopen(fd, "w", encoding="utf-8") as stream:
         stream.write("\n".join(lines))
     # Replace rather than rewrite: a cache wrapper may have restored the file as
     # a link to its shared store entry.
     os.replace(temporary, dep_info)
+
+
+def refresh_inventory_stamps(state_directory):
+    """Advance the stamp of every watched unit whose inventory changed.
+
+    The managed driver calls this before Cargo decides freshness. A watch
+    whose output is gone belongs to a cleaned unit and is dropped.
+    """
+    for watch in sorted(Path(state_directory, "inventory-watch").glob("*.json")):
+        stamp = Path(state_directory, "inventory-stamps", watch.stem + ".stamp")
+        snapshot = load(watch)
+        if not Path(snapshot["output"]).exists():
+            watch.unlink(missing_ok=True)
+            stamp.unlink(missing_ok=True)
+        elif not inventory_current(snapshot) and stamp.exists():
+            os.utime(stamp)
 
 
 def build_script_launcher(helper, real):
@@ -946,6 +1058,8 @@ def observe_rustc(real_rustc, args):
     import_dependencies()
     outputs = output_paths(real_rustc, args)
     errors = []
+    snapshot = None
+    reference = filesystem_time()
     try:
         receipt = collect_unit(real_rustc, args, workspace_wrapper)
     except (OSError, KeyError, ValueError, ObservationError) as error:
@@ -975,6 +1089,8 @@ def observe_rustc(real_rustc, args):
                 receipt["dependencies"].append({"name": name, "observation": str(receipt_for(artifact))})
             except (OSError, KeyError, IndexError, ObservationError):
                 pass
+    if os.environ.get("CHELIS_IDENTITY_BACKEND") == "cargo" and not errors and receipt["unit"]["package"]["source"].startswith("path:"):
+        snapshot = inventory_snapshot(receipt, reference)
     out = unit_out_dir(one(args, "--crate-name"))
     if receipt.get("errors"):
         # Observation failure stays attached to the unit, but standard links
@@ -1011,15 +1127,15 @@ def observe_rustc(real_rustc, args):
             symbols = ["EXPECTED_RUNTIME_RECORD", "CHELIS_BUILD_PROVENANCE_" + role.upper()]
             for symbol in symbols:
                 command.extend(["-C", "link-arg=-Wl,-u,_" + symbol if "apple" in triple else "link-arg=-Wl,--undefined=" + symbol])
-    code = subprocess.call(command, close_fds=False)
+    if os.environ.get("CHELIS_IDENTITY_ANALYSIS_DRIVER") and one(args, "--crate-name") == os.environ["CHELIS_IDENTITY_ANALYSIS_CRATE"]:
+        # A declared analysis-only compilation sees the same inputs, including
+        # retained producer records, but publishes nothing: its evidence is the
+        # driver's own report, and no unit consumes its outputs. The driver
+        # takes the compiler first, as a Cargo compiler wrapper does.
+        return subprocess.call([os.environ["CHELIS_IDENTITY_ANALYSIS_DRIVER"], real_rustc, *args], close_fds=False)
+    code = compile_without_pipelining(command)
     if code:
         return code
-    # Rustc lists only the files it read. Cargo must also rebuild a local unit
-    # whose selected inputs or their membership changed, not reuse it stale.
-    dep_info = dep_info_path(args)
-    if (dep_info and os.environ.get("CHELIS_IDENTITY_BACKEND") == "cargo" and receipt.get("roots")
-            and receipt["unit"]["package"]["source"].startswith("path:")):
-        track_inventory(receipt, dep_info)
     if role:
         graph_recipe(receipt if role == "runtime" else find_runtime(receipt))
         for output in outputs:
@@ -1037,9 +1153,22 @@ def observe_rustc(real_rustc, args):
         outputs.append(str(real))
     receipt["outputs"] = [{"path": output, "digest": digest(Path(output).read_bytes())} for output in outputs]
     atomic(path, receipt)
+    published = [path]
     for output in receipt["outputs"]:
-        atomic(binding(output["path"]), {"artifact": output["path"], "observation": str(path)})
-        atomic(state() / "output-digests" / output["digest"] / (key(path) + ".json"), {"observation": str(path)})
+        published.append(binding(output["path"]))
+        atomic(published[-1], {"artifact": output["path"], "observation": str(path)})
+        published.append(state() / "output-digests" / output["digest"] / (key(path) + ".json"))
+        atomic(published[-1], {"observation": str(path)})
+    dep_info = dep_info_path(args)
+    # Without dep-info Cargo never reuses the unit, so nothing can go stale.
+    if dep_info and dep_info.is_file() and os.environ.get("CHELIS_IDENTITY_BACKEND") == "cargo":
+        # Cargo reuses this unit only while the observation its dependents read
+        # exists, so a pruned or partial state rebuilds rather than fails.
+        for published_path in published:
+            os.utime(published_path, ns=(SETTLED_STAMP_NS, SETTLED_STAMP_NS))
+        if snapshot is not None:
+            published.append(watch_inventory(snapshot, reference, outputs[0]))
+        extend_dep_info(dep_info, published)
     return 0
 
 

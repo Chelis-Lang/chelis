@@ -87,7 +87,9 @@ fn runtime_lib_path() -> PathBuf {
         newest_runtime_archive(&debug.join("deps"))
             .expect("scan runtime archives")
             .or_else(|| {
-                let status = Command::new(env!("CARGO"))
+                // A managed build puts its observed Cargo launcher first on PATH;
+                // env!("CARGO") names the real binary, which cannot build a producer.
+                let status = Command::new("cargo")
                     .args(["build", "-p", "chelis-runtime", "--lib"])
                     .status()
                     .expect("build chelis-runtime");

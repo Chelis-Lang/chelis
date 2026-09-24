@@ -1956,7 +1956,9 @@ fn ensure_runtime_static_lib(canonical: &Path) -> std::io::Result<()> {
     let hashed = match hashed {
         Some(path) => path,
         None => {
-            std::process::Command::new(env!("CARGO"))
+            // A managed build puts its observed Cargo launcher first on PATH;
+            // env!("CARGO") names the real binary, which cannot build a producer.
+            std::process::Command::new("cargo")
                 .args(["build", "-p", "chelis-runtime", "--lib"])
                 .status()
                 .map_err(|e| std::io::Error::other(format!("cargo build chelis-runtime: {e}")))?;
