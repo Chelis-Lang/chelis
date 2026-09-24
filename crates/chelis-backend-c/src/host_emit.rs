@@ -2350,8 +2350,8 @@ fn signature_entry_lines(
         ));
     }
     let mut lines = Vec::new();
-    // No extent read may obscure a malformed external input's rank/null
-    // diagnostic. These metadata checks dominate the ordered comparisons.
+    // No extent read may obscure a malformed external input's null, dtype or
+    // rank diagnostic. These metadata checks dominate the ordered comparisons.
     for (node, actual) in plan.observations().nodes().iter().zip(args) {
         let RiscOp::Load { name } = &node.op else {
             unreachable!("signature observation")
@@ -2359,6 +2359,11 @@ fn signature_entry_lines(
         let label = chelis_ir::span_sanitize::sanitize_for_format_string(name.as_str());
         let rank = node.output_type.dims.len();
         lines.push(format!("{indent}if ({actual} == NULL) {{ fprintf(stderr, \"input `{label}` is NULL\\n\"); abort(); }}"));
+        lines.extend(
+            CEmitter::entry_dtype_guard(actual, &format!("input `{label}`"), &node.output_type)
+                .into_iter()
+                .map(|line| format!("{indent}{line}")),
+        );
         lines.push(format!("{indent}if (chelis_tensor_rank({actual}) != {rank}) {{ fprintf(stderr, \"input `{label}` expected rank {rank}, got %d\\n\", chelis_tensor_rank({actual})); abort(); }}"));
     }
     let read = |(load, axis): (chelis_ir::NodeId, usize)| {

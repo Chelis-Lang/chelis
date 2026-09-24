@@ -3401,6 +3401,13 @@ named operations if introduced. Behaviors are named operations, never modes.
 > validated descriptor is not a conforming substitute. A
 > boundary MAY reject a value outside the declared domain before crossing, but
 > it SHALL NOT narrow, clamp, wrap, or fabricate metadata to make it fit.
+> A compiled public entry SHALL compare the dtype tag of every tensor supplied
+> to it, including a tensor nested in a supplied value, with the declared dtype
+> before it reads that tensor's elements. A mismatch is a `Domain` trap in
+> `load` at the declared dtype under [04-NUM-9], accompanied by the input's
+> name and both dtypes; the supplied storage is never read at the declared
+> dtype. (Not fully implemented for a tensor nested in a supplied value; see
+> chelis#2490.)
 
 > **[04-NUM-12]** A numeric trap's OCCURRENCE is deterministic within a
 > lane and is defined by that lane's documented evaluation order. For a
