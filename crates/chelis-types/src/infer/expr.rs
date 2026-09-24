@@ -20,6 +20,16 @@ pub(super) enum OwnedTypeMetadataResolution {
 /// stack-depth guards are a hard checker boundary, so a fence that makes every
 /// unrelated recursive expression consume more stack would be a regression.
 fn report_par_fence(node: &DeepNode, source_span: &Span, errors: &mut DiagnosticSink<'_>) {
+    // Surf desugaring carries its authored location only as an opaque
+    // `span_id`; the structural Deep span remains the default 0/0. Do not
+    // publish that sentinel as a measured source range. Native Deep nodes do
+    // carry a non-empty structural range, which remains valid independently
+    // of any opaque identity attached to the node.
+    let (offset, len) = if source_span.len == 0 {
+        (None, None)
+    } else {
+        (Some(source_span.offset), Some(source_span.len))
+    };
     let unsupported = Unsupported::new(
         UnsupportedKind::Construct("`par` expression".to_string()),
         "the Chelis execution surface while cross-lane `par` effects are incomplete",
@@ -31,8 +41,8 @@ fn report_par_fence(node: &DeepNode, source_span: &Span, errors: &mut Diagnostic
         ),
     )
     .with_span(SpanRef {
-        offset: Some(source_span.offset),
-        len: Some(source_span.len),
+        offset,
+        len,
         span_id: node_span_id(node).map(str::to_owned),
     })
     .with_supported_alternative("use `do { ... }` when sequential evaluation is intended");

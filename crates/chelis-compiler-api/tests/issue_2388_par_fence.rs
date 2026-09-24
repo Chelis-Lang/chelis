@@ -3,7 +3,9 @@
 
 use chelis_compiler_api::{
     compiler::{check, compile, eval},
-    schema::{CheckRequest, CompileRequest, CompileTarget, EvalRequest, SourceKind},
+    schema::{
+        CheckRequest, CompileRequest, CompileTarget, DiagnosticSpan, EvalRequest, SourceKind,
+    },
 };
 use chelis_types::unsupported::{RejectionAuthorityKind, Stage, UnsupportedKind};
 use chelis_vocab::DiagnosticKind;
@@ -11,15 +13,18 @@ use chelis_vocab::DiagnosticKind;
 const SURF_PAR: &str = "def loss(x: f32) -> f32 = par { fail(\"par boom\"); add(x, 1.0f32) }\n\
                          out = loss(3.0f32)\n";
 
-const DEEP_PAR: &str = "(def {} out\n\
-  (par {}\n\
-    (lit {type: (t-prim {} f32)} 1.0)\n\
-    (lit {type: (t-prim {} f32)} 2.0)))\n";
+const DEEP_PAR: &str = "(def {} out (par {span: \"probe-par\"} (app {} (var {} fail) \
+  (lit {type: (t-prim {} string)} \"never execute\")) \
+  (lit {type: (t-prim {} f32)} 7.0)))";
 
 const SEQUENTIAL_CONTROL: &str = "def loss(x: f32) -> f32 = do { add(x, 1.0f32); add(x, 2.0f32) }\n\
      out = loss(3.0f32)\n";
 
-fn assert_par_fence(diagnostic: &chelis_compiler_api::schema::Diagnostic) {
+fn assert_par_fence(
+    diagnostic: &chelis_compiler_api::schema::Diagnostic,
+    expected_span: Option<DiagnosticSpan>,
+    expected_span_id: &str,
+) {
     assert_eq!(diagnostic.kind(), DiagnosticKind::UnsupportedFeature);
     assert!(
         diagnostic.message.contains("not fully implemented"),
@@ -53,15 +58,38 @@ fn assert_par_fence(diagnostic: &chelis_compiler_api::schema::Diagnostic) {
         identity.payload.supported_alternative.as_deref(),
         Some("use `do { ... }` when sequential evaluation is intended")
     );
-    assert!(
-        identity.payload.span.is_some(),
-        "the par source span is known"
+    assert_eq!(diagnostic.span, expected_span);
+    assert_eq!(diagnostic.span_id.as_deref(), Some(expected_span_id));
+    let source = identity
+        .payload
+        .span
+        .as_deref()
+        .expect("the par source identity is known");
+    assert_eq!(source.span_id.as_deref(), Some(expected_span_id));
+    assert_eq!(
+        source.offset,
+        expected_span.map(|span| span.offset() as usize)
+    );
+    assert_eq!(
+        source.len,
+        expected_span.and_then(|span| span.extent().map(|len| len as usize))
     );
 }
 
 #[test]
 fn surf_and_deep_par_are_rejected_by_check() {
-    for (source_kind, source) in [(SourceKind::Surf, SURF_PAR), (SourceKind::Deep, DEEP_PAR)] {
+    for (source_kind, source, expected_span, expected_span_id) in [
+        (SourceKind::Surf, SURF_PAR, None, "surf:26..66"),
+        (
+            SourceKind::Deep,
+            DEEP_PAR,
+            Some(DiagnosticSpan::Range {
+                offset: 12,
+                len: 131,
+            }),
+            "probe-par",
+        ),
+    ] {
         let result = check(CheckRequest {
             source_kind,
             source: source.into(),
@@ -70,7 +98,7 @@ fn surf_and_deep_par_are_rejected_by_check() {
         let [diagnostic] = result.errors.as_slice() else {
             panic!("expected one par fence diagnostic, got {:?}", result.errors);
         };
-        assert_par_fence(diagnostic);
+        assert_par_fence(diagnostic, expected_span, expected_span_id);
         assert!(result.score.get() < 1.0);
     }
 }
@@ -87,7 +115,7 @@ fn eval_and_c_build_stop_at_the_same_par_fence() {
     let [eval_diagnostic] = eval_error.errors.as_slice() else {
         panic!("expected one eval fence diagnostic: {eval_error:?}");
     };
-    assert_par_fence(eval_diagnostic);
+    assert_par_fence(eval_diagnostic, None, "surf:26..66");
 
     let build_error = compile(CompileRequest {
         source_kind: SourceKind::Surf,
@@ -100,7 +128,7 @@ fn eval_and_c_build_stop_at_the_same_par_fence() {
     let [build_diagnostic] = build_error.errors.as_slice() else {
         panic!("expected one build fence diagnostic: {build_error:?}");
     };
-    assert_par_fence(build_diagnostic);
+    assert_par_fence(build_diagnostic, None, "surf:26..66");
 }
 
 #[test]
