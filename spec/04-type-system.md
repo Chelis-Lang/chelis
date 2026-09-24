@@ -3406,8 +3406,8 @@ named operations if introduced. Behaviors are named operations, never modes.
 > before it reads that tensor's elements. A mismatch is a `Domain` trap in
 > `load` at the declared dtype under [04-NUM-9], accompanied by the input's
 > name and both dtypes; the supplied storage is never read at the declared
-> dtype. (Not fully implemented for a tensor nested in a supplied value; see
-> chelis#2506.)
+> dtype. (Not fully implemented for a tensor nested in a supplied value,
+> chelis#2506, or for the HIP and Metal entries, chelis#2510.)
 
 > **[04-NUM-12]** A numeric trap's OCCURRENCE is deterministic within a
 > lane and is defined by that lane's documented evaluation order. For a
