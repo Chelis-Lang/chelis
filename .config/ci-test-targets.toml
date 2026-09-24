@@ -2360,6 +2360,42 @@ cadence = "pull_request and push"
 reason = "the local gate's stage selection and tool resolution run in script-unit"
 tracking_issue = "chelis#1824"
 
+[[path_rule]]
+prefix = "scripts/test_gate_detach.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "the detached-run launcher, handle and --status verdict contract run in script-unit"
+tracking_issue = "chelis#1568"
+
+[[path_rule]]
+prefix = "scripts/test_gate_diagnostics.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "the gate's failure transcript, replay and rerun diagnostics run in script-unit"
+tracking_issue = "chelis#1824"
+
+[[path_rule]]
+prefix = "scripts/worktree_status.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "the worktree busy-signal probe is exercised by its own suite in script-unit"
+tracking_issue = "chelis#1568"
+
+[[path_rule]]
+prefix = "scripts/test_worktree_status.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "the worktree busy-signal verdicts, lease and process evidence run in script-unit"
+tracking_issue = "chelis#1568"
+
 # The rows below own the opaque-invariants corpus, whose only CI consumer
 # runs nightly: `chelis-cli::opaque_corpus_gate` runs each committed program
 # against the live binary, and it is not a standing_target, so it reaches CI
