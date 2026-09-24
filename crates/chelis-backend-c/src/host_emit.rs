@@ -781,8 +781,9 @@ fn function_specializations(program: &HostProgram) -> UnordMap<String, HostFunct
 }
 
 /// The `[05-RNG-1]` stream and `[05-OP-8]` samplers, byte-identical to the
-/// block `CEmitter` prepends to a standalone kernel (chelis#2408), then the
-/// host frame that supplies a draw key at run time.
+/// block `CEmitter` prepends to a standalone kernel (chelis#2408), then
+/// `[05-RNG-2]`'s key derivation, which a kernel carries only when it derives
+/// keys, then the host frame that supplies a draw key at run time.
 fn append_uniform_sample_helper(out: &mut Vec<String>) {
     for line in [
         "static inline uint64_t chelis_random_mix(uint64_t value) {",
@@ -805,6 +806,10 @@ fn append_uniform_sample_helper(out: &mut Vec<String>) {
         "}",
         "static inline double chelis_uniform_sample_f64(uint64_t key, uint64_t index, double low, double high) {",
         "    return fma(high - low, chelis_random_unit(key, index), low);",
+        "}",
+        "static inline uint64_t chelis_key_derive(uint64_t key, uint64_t index) {",
+        "    uint64_t mixed = chelis_random_mix(index);",
+        "    return chelis_random_mix(key ^ ((mixed << 29) | (mixed >> 35)));",
         "}",
     ] {
         out.push(line.to_string());

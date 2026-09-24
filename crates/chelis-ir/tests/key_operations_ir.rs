@@ -577,8 +577,9 @@ fn a_negative_runtime_split_count_traps_and_zero_is_empty() {
                 ))
             });
         match ok {
-            false => assert!(
-                result.unwrap_err().contains("non-negative"),
+            false => assert_eq!(
+                result.unwrap_err(),
+                "numeric trap: domain in split_keys at i64",
                 "count {count}"
             ),
             true => {

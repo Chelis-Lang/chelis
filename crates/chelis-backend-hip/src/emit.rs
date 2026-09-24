@@ -126,8 +126,9 @@ pub struct HipEmitter {
     /// node order as each of its draw keys is emitted. One entry point's walk
     /// is one activation, so [`Self::begin_activation`] resets it per entry.
     scoped_draws: BTreeMap<u32, u64>,
-    /// The emission-time key of each emitted draw key, by node.
-    draw_keys: BTreeMap<NodeId, u64>,
+    /// The emission-time key of each emitted draw key and rank-0 key
+    /// derivation, by node.
+    draw_keys: BTreeMap<NodeId, chelis_types::RandomKey>,
 }
 
 #[derive(Debug, Clone)]
@@ -333,6 +334,7 @@ impl HipEmitter {
         let dag = storage_plan.emission();
         Self::reject_integer_abs(dag)?;
         Self::validate_count_nodes(dag)?;
+        Self::reject_key_results(dag)?;
         // Device input ownership proves its admitted strides, not a row-major
         // layout. Only a planned, emitter-materialized slot authorizes GEMM.
         // Production preparation inserts Realize before ownership is verified.
@@ -2333,13 +2335,13 @@ impl HipEmitter {
                 let (low, high, key) = self.keyed_uniform_like_parameters(node, dag)?;
                 self.emit_uniform_like_launch(id, low, high, key, &node.output_type)?
             }
+            RiscOp::KeyFromSeed | RiscOp::Split { .. } | RiscOp::FoldIn => {
+                self.record_derived_key(node, dag)?
+            }
             RiscOp::Dropout
             | RiscOp::DropoutReplay
             | RiscOp::UniformBoundAdjoint { .. }
             | RiscOp::DrawKey { .. }
-            | RiscOp::KeyFromSeed
-            | RiscOp::Split { .. }
-            | RiscOp::FoldIn
             | RiscOp::SplitN { .. } => {
                 return Err(Unsupported::new(
                     UnsupportedKind::Op(chelis_ir::grad::risc_op_name(&node.op).to_string()),
@@ -3107,8 +3109,94 @@ impl HipEmitter {
         chelis_types::dtype_semantics::UniformLikeParameters::new(dtype, low, high)
             .map_err(|error| bridge(&format!("whose literal bounds trap: {error}")))?;
         let ordinal = self.scoped_draws.entry(instance).or_insert(0);
-        let key = chelis_types::RandomKey::from_counter(seed as u64, *ordinal).bits();
+        let key = chelis_types::RandomKey::from_counter(seed as u64, *ordinal);
         *ordinal += 1;
+        self.draw_keys.insert(node.id, key);
+        Ok(())
+    }
+
+    /// A key the HIP lane computes at emission has no device value, so no
+    /// key can be a graph result on this lane.
+    fn reject_key_results(dag: VerifiedDagView<'_>) -> Result<(), Unsupported> {
+        for root in dag.roots() {
+            let Some(node) = dag.get(*root) else {
+                continue;
+            };
+            if node.output_type.precision == Prim::Key {
+                return Err(Unsupported::new(
+                    UnsupportedKind::Op(chelis_ir::grad::risc_op_name(&node.op).to_string()),
+                    "a key result in the HIP DAG emitter",
+                    Stage::Codegen("hip"),
+                    chelis_types::unimplemented_rejection!(
+                        1192,
+                        "the HIP lane computes keys at emission, so a key has no device value \
+                         to return; compiled randomness on every target is phase 6 of chelis#2413"
+                    ),
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    /// A rank-0 key operation ([05-OP-69], [05-OP-70], [05-OP-72]) whose
+    /// operands are literals or emission-time keys: the HIP lane computes its
+    /// key while it emits, as it does a scoped draw key, since a device kernel
+    /// receives keys only as launch arguments.
+    fn record_derived_key(
+        &mut self,
+        node: &DagNode,
+        dag: VerifiedDagView<'_>,
+    ) -> Result<(), Unsupported> {
+        let name = chelis_ir::grad::risc_op_name(&node.op);
+        let refuse = |reason: &str| {
+            Unsupported::new(
+                UnsupportedKind::Op(name.to_string()),
+                format!("a HIP {name} {reason}"),
+                Stage::Codegen("hip"),
+                chelis_types::unimplemented_rejection!(
+                    1192,
+                    "the HIP lane derives a key only at emission, from literal seeds and \
+                     indices and rank-0 keys; compiled randomness on every target is phase 6 \
+                     of chelis#2413"
+                ),
+            )
+        };
+        if !node.output_type.dims.is_empty() {
+            return Err(refuse("over a key tensor"));
+        }
+        let literal = |input: NodeId| match dag.get(input).map(|node| &node.op) {
+            Some(RiscOp::Const { value }) => Some(*value),
+            _ => None,
+        };
+        let parent = |this: &Self| {
+            this.draw_keys
+                .get(&node.inputs[0])
+                .copied()
+                .ok_or_else(|| refuse("whose key is not an emission-time key"))
+        };
+        let key = match &node.op {
+            RiscOp::KeyFromSeed => {
+                let seed = literal(node.inputs[0]).ok_or_else(|| refuse("with a runtime seed"))?;
+                chelis_types::RandomKey::from_seed(seed)
+                    .map_err(|error| refuse(&format!("whose seed is not an i64: {error}")))?
+            }
+            RiscOp::Split { branch } => {
+                let (left, right) = parent(self)?.split();
+                match branch {
+                    chelis_ir::dag::KeyBranch::Left => left,
+                    chelis_ir::dag::KeyBranch::Right => right,
+                }
+            }
+            RiscOp::FoldIn => {
+                let parent = parent(self)?;
+                let index =
+                    literal(node.inputs[1]).ok_or_else(|| refuse("with a runtime index"))?;
+                parent
+                    .fold_in(index)
+                    .map_err(|error| refuse(&format!("whose index is not an i64: {error}")))?
+            }
+            _ => unreachable!("record_derived_key records only rank-0 key derivations"),
+        };
         self.draw_keys.insert(node.id, key);
         Ok(())
     }
@@ -3145,8 +3233,29 @@ impl HipEmitter {
             .get(&node.inputs[3])
             .copied()
             .ok_or_else(unsupported)?;
+        // A counter-stream draw key validated these bounds before it took
+        // its ordinal; a derived key validates nothing, so the draw does.
+        let derived = !matches!(
+            dag.get(node.inputs[3]).map(|key| &key.op),
+            Some(RiscOp::DrawKey { .. })
+        );
+        if derived {
+            let literal = |input: NodeId| match dag.get(input).map(|node| &node.op) {
+                Some(RiscOp::Const { value }) => Some(*value),
+                _ => None,
+            };
+            let (Some(low), Some(high)) = (literal(node.inputs[1]), literal(node.inputs[2])) else {
+                return Err(unsupported());
+            };
+            chelis_types::dtype_semantics::UniformLikeParameters::new(
+                node.output_type.precision,
+                low,
+                high,
+            )
+            .map_err(|_| unsupported())?;
+        }
         match (bound(node.inputs[1]), bound(node.inputs[2])) {
-            (Some(low), Some(high)) => Ok((low, high, key)),
+            (Some(low), Some(high)) => Ok((low, high, key.bits())),
             _ => Err(unsupported()),
         }
     }
@@ -6036,6 +6145,238 @@ mod tests {
             error
                 .context
                 .contains("a HIP draw key under a runtime activation"),
+            "{error}"
+        );
+    }
+
+    /// `uniform_like(0, 1)` of `ty` keyed by the chain `fold_in(split(
+    /// key_from_seed(seed)).1, index)`, every operand a literal.
+    fn derived_uniform(dag: &mut Dag, ty: TensorType, seed: i64, index: i64) -> NodeId {
+        let rank0 = |precision| TensorType {
+            dims: vec![],
+            precision,
+        };
+        let i64_const = |dag: &mut Dag, value: i64| {
+            dag.add_node(
+                RiscOp::Const {
+                    value: chelis_types::scalar_from_i64("test", Prim::Int64, value).unwrap(),
+                },
+                vec![],
+                rank0(Prim::Int64),
+                None,
+            )
+        };
+        let like = dag.add_node(
+            RiscOp::Load {
+                name: "like".into(),
+            },
+            vec![],
+            ty.clone(),
+            None,
+        );
+        let seed = i64_const(dag, seed);
+        let root = dag.add_node(RiscOp::KeyFromSeed, vec![seed], rank0(Prim::Key), None);
+        let right = dag.add_node(
+            RiscOp::Split {
+                branch: chelis_ir::dag::KeyBranch::Right,
+            },
+            vec![root],
+            rank0(Prim::Key),
+            None,
+        );
+        let left = dag.add_node(
+            RiscOp::Split {
+                branch: chelis_ir::dag::KeyBranch::Left,
+            },
+            vec![root],
+            rank0(Prim::Key),
+            None,
+        );
+        let index = i64_const(dag, index);
+        let folded = dag.add_node(RiscOp::FoldIn, vec![right, index], rank0(Prim::Key), None);
+        let low = dag.add_node(
+            RiscOp::synth_const(Prim::F32, 0.0),
+            vec![],
+            rank0(Prim::F32),
+            None,
+        );
+        let high = dag.add_node(
+            RiscOp::synth_const(Prim::F32, 1.0),
+            vec![],
+            rank0(Prim::F32),
+            None,
+        );
+        let draw = dag.add_node(RiscOp::UniformLike, vec![like, low, high, folded], ty, None);
+        // The left half is unused: an affine key may be dropped.
+        let _ = left;
+        draw
+    }
+
+    /// chelis#2413 step 1, oracle (b) on the HIP host path: the lane computes
+    /// a rank-0 key chain at emission and launches the draw with its bits.
+    /// The expected key is `key_ref_ext.py`'s G = fold_in(split(key(-3)).1,
+    /// 9), transcribed from [05-RNG-2], never from `RandomKey`.
+    #[test]
+    fn a_derived_rank0_key_chain_launches_with_the_reference_key() {
+        const G_KEY: u64 = 0x2334_cf03_8b09_85b4;
+        for ty in [vec_f32(8), vec_f64(8)] {
+            let mut dag = Dag::new();
+            let draw = derived_uniform(&mut dag, ty, -3, 9);
+            dag.add_root(draw);
+            let (hip, _) = emit_test_dag(&dag, "test_fn").unwrap();
+            // Pruning the unused left half renumbers the draw, so match the
+            // key launch argument by its value.
+            let needle = format!("_key = {G_KEY}ULL;");
+            assert!(hip.contains(&needle), "expected `{needle}` in:\n{hip}");
+        }
+    }
+
+    /// The HIP lane derives keys only at emission: a key tensor, a runtime
+    /// seed, and a derived draw with bounds that trap are refused with the
+    /// typed #1192 rejection rather than emitted.
+    #[test]
+    fn key_tensors_runtime_seeds_and_trapping_bounds_are_refused_on_the_device() {
+        let rank0 = |precision| TensorType {
+            dims: vec![],
+            precision,
+        };
+        // A key split produces a key tensor.
+        let mut dag = Dag::new();
+        let seed = dag.add_node(
+            RiscOp::Const {
+                value: chelis_types::scalar_from_i64("test", Prim::Int64, 7).unwrap(),
+            },
+            vec![],
+            rank0(Prim::Int64),
+            None,
+        );
+        let root = dag.add_node(RiscOp::KeyFromSeed, vec![seed], rank0(Prim::Key), None);
+        let rows = dag.add_node(
+            RiscOp::SplitN {
+                count: RtDim::Lit(3),
+            },
+            vec![root],
+            TensorType {
+                dims: vec![DimInfo::Lit(3)],
+                precision: Prim::Key,
+            },
+            None,
+        );
+        let like = dag.add_node(
+            RiscOp::Load {
+                name: "like".into(),
+            },
+            vec![],
+            TensorType {
+                dims: vec![DimInfo::Lit(3), DimInfo::Lit(2)],
+                precision: Prim::F32,
+            },
+            None,
+        );
+        let low = dag.add_node(
+            RiscOp::synth_const(Prim::F32, 0.0),
+            vec![],
+            rank0(Prim::F32),
+            None,
+        );
+        let high = dag.add_node(
+            RiscOp::synth_const(Prim::F32, 1.0),
+            vec![],
+            rank0(Prim::F32),
+            None,
+        );
+        let draw = dag.add_node(
+            RiscOp::UniformLike,
+            vec![like, low, high, rows],
+            TensorType {
+                dims: vec![DimInfo::Lit(3), DimInfo::Lit(2)],
+                precision: Prim::F32,
+            },
+            None,
+        );
+        dag.add_root(draw);
+        let Err(error) = emit_test_dag(&dag, "test_fn") else {
+            panic!("the HIP lane emitted a key split");
+        };
+        assert_eq!(
+            *error.what,
+            UnsupportedKind::Op("split_keys".to_string()),
+            "{error}"
+        );
+        // A runtime seed.
+        let mut dag = Dag::new();
+        let seed = dag.add_node(
+            RiscOp::Load {
+                name: "seed".into(),
+            },
+            vec![],
+            rank0(Prim::Int64),
+            None,
+        );
+        let root = dag.add_node(RiscOp::KeyFromSeed, vec![seed], rank0(Prim::Key), None);
+        let like = dag.add_node(
+            RiscOp::Load {
+                name: "like".into(),
+            },
+            vec![],
+            vec_f32(8),
+            None,
+        );
+        let low = dag.add_node(
+            RiscOp::synth_const(Prim::F32, 0.0),
+            vec![],
+            rank0(Prim::F32),
+            None,
+        );
+        let high = dag.add_node(
+            RiscOp::synth_const(Prim::F32, 1.0),
+            vec![],
+            rank0(Prim::F32),
+            None,
+        );
+        let draw = dag.add_node(
+            RiscOp::UniformLike,
+            vec![like, low, high, root],
+            vec_f32(8),
+            None,
+        );
+        dag.add_root(draw);
+        let Err(error) = emit_test_dag(&dag, "test_fn") else {
+            panic!("the HIP lane derived a key from a runtime seed");
+        };
+        assert!(error.context.contains("with a runtime seed"), "{error}");
+        // A key result has no device value.
+        let mut dag = Dag::new();
+        let seed = dag.add_node(
+            RiscOp::Const {
+                value: chelis_types::scalar_from_i64("test", Prim::Int64, 7).unwrap(),
+            },
+            vec![],
+            rank0(Prim::Int64),
+            None,
+        );
+        let root = dag.add_node(RiscOp::KeyFromSeed, vec![seed], rank0(Prim::Key), None);
+        dag.add_root(root);
+        let Err(error) = emit_test_dag(&dag, "test_fn") else {
+            panic!("the HIP lane returned a key");
+        };
+        assert!(error.context.contains("a key result"), "{error}");
+        // Bounds that trap under a derived key: the draw validates them.
+        let mut dag = Dag::new();
+        let draw = derived_uniform(&mut dag, vec_f32(8), -3, 9);
+        let (low, high) = (
+            dag.get(draw).unwrap().inputs[1],
+            dag.get(draw).unwrap().inputs[2],
+        );
+        dag.node_mut(low).unwrap().op = RiscOp::synth_const(Prim::F32, 2.0);
+        dag.node_mut(high).unwrap().op = RiscOp::synth_const(Prim::F32, 1.0);
+        dag.add_root(draw);
+        let Err(error) = emit_test_dag(&dag, "test_fn") else {
+            panic!("the HIP lane launched a derived draw whose bounds trap");
+        };
+        assert_eq!(
+            *error.what,
+            UnsupportedKind::Op("UniformLike".to_string()),
             "{error}"
         );
     }

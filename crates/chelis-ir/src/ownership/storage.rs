@@ -602,8 +602,9 @@ fn build_storage_plan(
 }
 
 /// The constants the HIP emitter reads only as literals while it emits a draw:
-/// a draw key's seed and controls, and a `uniform_like`'s bounds, which the
-/// emitter folds into the key it computes and the kernel's arguments. Such a
+/// a draw key's seed and controls, a key derivation's seed or index, and a
+/// `uniform_like`'s bounds, which the emitter folds into the key it computes
+/// and the kernel's arguments. Such a
 /// constant has no device value, so it takes no slot and no lifetime. A
 /// constant any other operation, dependency or root reads keeps its storage.
 fn hip_emission_literals(dag: VerifiedDagView<'_>) -> Vec<NodeId> {
@@ -617,7 +618,8 @@ fn hip_emission_literals(dag: VerifiedDagView<'_>) -> Vec<NodeId> {
     for node in dag.nodes() {
         for (slot, input) in node.inputs.iter().enumerate() {
             let literal = match node.op {
-                RiscOp::DrawKey { .. } => true,
+                RiscOp::DrawKey { .. } | RiscOp::KeyFromSeed => true,
+                RiscOp::FoldIn => slot == 1,
                 RiscOp::UniformLike => matches!(slot, 1 | 2),
                 _ => false,
             };

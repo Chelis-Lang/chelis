@@ -3744,6 +3744,20 @@ where
             }
             RiscOp::SplitN { count } => {
                 let keys = &values[&node.inputs[0]];
+                // [05-OP-71]: a negative runtime count traps before
+                // allocation, with the C lane's `Domain` trap.
+                if let RtDim::Node(slot) = count
+                    && let Some(value) = node.inputs.get(*slot).and_then(|input| values.get(input))
+                    && rank0_scalar(value, "split_keys count")?
+                        .as_i64_exact()
+                        .is_some_and(|count| count < 0)
+                {
+                    return Err(NumericTrap::Domain {
+                        op: "split_keys",
+                        prim: Prim::Int64,
+                    }
+                    .to_string());
+                }
                 let count = resolve_eval_bound(count, node, &values, 0)?;
                 let storage =
                     split_keys_storage(keys.storage(), count).map_err(|error| error.to_string())?;
