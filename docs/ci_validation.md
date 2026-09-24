@@ -219,27 +219,21 @@ chelis#1864 merged: a `PRIu64` whose `<inttypes.h>` arrived only through the
 Accelerate framework that `chelis_math.h` includes on Apple, and an unbraced
 `if` followed by a second statement on its line, which GCC's `-Wall` warns about
 and `-Werror` makes an error. A local run, `gate.py --validation` included, is
-therefore no portability evidence on macOS. The Linux GCC evidence before merge is the existing selection and
-nothing wider. An added or directly modified fixture target runs in the required
-change-owned lane with its Cargo `required-features` activated, so
-`chelis-compiler-api::native_random_observer` runs every row with
-`native-random-observer`. A change to a shared fixture helper, such as
-`crates/chelis-compiler-api/tests/ownership_support/`, reaches its dependents
-only through the package-expansion dispatch that precedes merge. Each fixture's
-own flags decide what fails it; one that must reject GCC warnings opts into
-`-std=c11 -Wall -Wextra -Werror`. The standing
+therefore no portability evidence on macOS. Before merge a fixture reaches Linux
+only through the existing selection and nothing wider. An added or directly
+modified fixture target runs in the required change-owned lane with its Cargo
+`required-features` activated, so `chelis-compiler-api::native_random_observer`
+runs every row with `native-random-observer`. A change to a shared fixture
+helper, such as `crates/chelis-compiler-api/tests/ownership_support/`, reaches
+its dependents only through the package-expansion dispatch that precedes merge.
+Each fixture's own compiler choice and flags decide what fails it; one that must
+reject GCC warnings opts into `-std=c11 -Wall -Wextra -Werror`. The standing
 `chelis-runtime::c_fixture_portability` target checks the toolchain it runs on:
 on Linux it fails unless `cc` is GCC and those flags reject both chelis#1864
-shapes while accepting their repaired twins. Standing targets run only in
-`ci-fast`, which pull requests and `main` pushes route to the self-hosted Devenv
-toolchain that the nightly jobs on `main` also use. The hosted lanes that run
-fixture targets for a pull request, the change-owned shards and package
-expansion, reuse that result rather than run the target. Their GCC is
-`/usr/bin/cc` from the `ubuntu-latest` image, which nothing checks, and package
-expansion exports `CC=clang` to the fixtures that honour `$CC`. Making every
-fixture target standing would be the whole-workspace pull-request suite whose
-cost chelis#1824 weighs; generated-source portability as a class stays with
-chelis#2063.
+shapes while accepting their repaired twins. A lane that does not run it gets no
+evidence from it. Making every fixture target standing would be the
+whole-workspace pull-request suite whose cost chelis#1824 weighs;
+generated-source portability as a class stays with chelis#2063.
 
 The Linux workspace worker executes as four shards of one
 `--partition hash:${{ matrix.shard }}/4` selection rather than as a single run.

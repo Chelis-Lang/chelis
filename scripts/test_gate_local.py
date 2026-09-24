@@ -508,6 +508,16 @@ class LocalMainTests(unittest.TestCase):
         with redirect_stderr(err), self.assertRaises(SystemExit):
             gate.main(["--fast", "--validation"])
 
+    def test_the_retired_local_spelling_is_rejected(self):
+        # `--local` read as the default local command although `--fast` is
+        # the pre-push gate. It must not return as an alias or as an argparse
+        # prefix of some later `--local-*` option.
+        err = io.StringIO()
+        with redirect_stderr(err), self.assertRaises(SystemExit) as raised:
+            gate.parse_args(["--local"])
+        self.assertEqual(raised.exception.code, 2)
+        self.assertIn("unrecognized arguments: --local", err.getvalue())
+
 
 if __name__ == "__main__":
     unittest.main()

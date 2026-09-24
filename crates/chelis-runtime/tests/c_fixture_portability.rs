@@ -5,8 +5,8 @@
 //! followed by a second statement on its line. A Mac run of a fixture is
 //! therefore no portability evidence. On Linux these controls prove that the
 //! toolchain running them compiles with GCC and that the strict fixture flags
-//! reject both shapes; as a standing target, that is the self-hosted `ci-fast`
-//! toolchain. The repaired twins compile on every platform.
+//! reject both shapes; they prove nothing about a lane that does not run them.
+//! The repaired twins compile on every platform.
 
 use std::{
     fs,
