@@ -4176,8 +4176,8 @@ fn contains_computed_callable_application(expr: &Expr) -> bool {
     }
 }
 
-/// Lexical scopes retain constructor scrutinees (chelis#520 D1) and direct
-/// concat input facts. Neither class evaluates arbitrary tensor expressions.
+/// Lexical scopes retain constructor scrutinees (chelis#520 D1) and checked
+/// concat producer facts. Neither class evaluates arbitrary tensor expressions.
 struct UncarriableWalk<'a> {
     defs: &'a BTreeMap<String, Expr>,
     active: UnordSet<String>,
@@ -4200,20 +4200,23 @@ struct AdmissionBinding {
     concat: ConcatInputFact,
 }
 
-/// Only direct input forwarding, lexical aliases, and literal List spines.
-/// An unknown computed tensor is not evidence that its DAG cannot be built.
+/// The checker supplies tensor geometry; literal List spines additionally
+/// preserve the order and individual facts of their elements. A checked List
+/// with no visible spine cannot prove static concatenation.
 #[derive(Clone, Default, PartialEq, Eq)]
 enum ConcatInputFact {
     #[default]
     Unknown,
     Tensor(TensorType),
     List(Vec<ConcatInputFact>),
+    OpaqueTensorList,
 }
 
 impl ConcatInputFact {
     fn from_type(ty: &HostTypeTerm) -> Self {
         match ty {
             HostTypeTerm::Tensor(tensor) => Self::Tensor(tensor.clone()),
+            HostTypeTerm::List(_) => Self::OpaqueTensorList,
             _ => Self::Unknown,
         }
     }
@@ -4246,29 +4249,66 @@ impl UncarriableWalk<'_> {
                     .collect(),
             );
         }
-        ConcatInputFact::Unknown
+        // The result metadata is a checked producer fact, including for
+        // `copy`, elementwise arithmetic and calls. Looking only at the
+        // syntax of the expression loses their runtime axis geometry.
+        expr_type(expr)
+            .as_ref()
+            .map(ConcatInputFact::from_type)
+            .unwrap_or(ConcatInputFact::Unknown)
     }
 
     fn concat_requires_host(&self, list: &Expr, axis: &Expr) -> bool {
         let Some(axis) = crate::lower::extract_int_axis(axis) else {
-            return false;
+            // A checked runtime axis is legal, but the static Pad+Add DAG
+            // requires a fixed axis before lowering starts.
+            return true;
         };
-        let ConcatInputFact::List(elements) = self.concat_input_fact(list) else {
-            return false;
+        let elements = match self.concat_input_fact(list) {
+            ConcatInputFact::List(elements) => elements,
+            ConcatInputFact::OpaqueTensorList => {
+                // A checked List whose spine is unavailable cannot prove
+                // static concatenation.
+                return true;
+            }
+            ConcatInputFact::Unknown | ConcatInputFact::Tensor(_) => {
+                // No checked List fact exists. This is not permission to
+                // treat an untyped structural probe as a valid Host call.
+                return false;
+            }
         };
+        let mut first: Option<&TensorType> = None;
         elements.iter().any(|element| {
             let ConcatInputFact::Tensor(tensor) = element else {
-                return false;
+                return true;
             };
             let normalized = if axis < 0 {
                 axis + tensor.dims.len() as i64
             } else {
                 axis
             };
-            usize::try_from(normalized)
+            let Some(selected) = usize::try_from(normalized)
                 .ok()
-                .and_then(|axis| tensor.dims.get(axis))
-                .is_some_and(|dim| crate::lower::concrete_dim_len(dim).is_none())
+                .filter(|selected| *selected < tensor.dims.len())
+            else {
+                return true;
+            };
+            if let Some(first) = first {
+                if first.dims.len() != tensor.dims.len()
+                    || first.precision != tensor.precision
+                    || first
+                        .dims
+                        .iter()
+                        .zip(&tensor.dims)
+                        .enumerate()
+                        .any(|(index, (left, right))| index != selected && left != right)
+                {
+                    return true;
+                }
+            } else {
+                first = Some(tensor);
+            }
+            crate::lower::concrete_dim_len(&tensor.dims[selected]).is_none()
         })
     }
 
@@ -4353,7 +4393,7 @@ impl UncarriableWalk<'_> {
                         && kids.len() == 3
                         && self.concat_requires_host(&kids[1], &kids[2])
                     {
-                        return Some("tensor concat over a directly forwarded runtime input extent (chelis#1906)".to_string());
+                        return Some("tensor concat whose checked producer geometry has no static representation (chelis#2373)".to_string());
                     }
                     if name.starts_with("reduce_window_")
                         && kids[1..]
@@ -20404,6 +20444,37 @@ mod tests {
                 )
                 .expect("the same known extent is representable by static concat");
             }
+        }
+    }
+
+    #[test]
+    fn concat_admission_uses_checked_copy_and_add_producers() {
+        for (width, producer, host) in [
+            ("2", "copy(x)", false),
+            ("2", "add(x, x)", false),
+            ("s", "copy(x)", true),
+            ("s", "add(x, x)", true),
+        ] {
+            let source = format!(
+                "def join[s](x: tensor[s, {width}, f32]) = concat([{producer}, {producer}], 1i32)\n"
+            );
+            let checked = surf_check(&source);
+            let session = HostLoweringSession::new(&checked);
+            let defs = cached_program_defs(&session);
+            let (_, _, fn_kids) = stamped_parts(&defs["join"]).unwrap();
+            let (_, _, binders) = stamped_parts(&fn_kids[0]).unwrap();
+            let params = binders
+                .iter()
+                .map(|binder| HostParam {
+                    name: param_name(binder).unwrap(),
+                    ty: param_host_type(binder).unwrap(),
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(
+                body_form_the_dag_cannot_carry(&session, &fn_kids[1], &params, false).is_some(),
+                host,
+                "{source}"
+            );
         }
     }
 

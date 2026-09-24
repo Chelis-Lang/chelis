@@ -1,0 +1,1 @@
+Computed tensor inputs such as `copy(x)` and `add(x, x)` now route runtime-width tensor concatenation to host execution before static lowering. The reported Eval programs execute with their concat extent guards intact. See [#2373](https://github.com/Chelis-Lang/chelis/issues/2373).
