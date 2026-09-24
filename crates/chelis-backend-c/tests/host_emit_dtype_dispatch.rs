@@ -70,6 +70,7 @@ fn make_binary_program(op_name: &str, prim: Prim) -> HostProgram {
             summary_rejections: Vec::new(),
         }],
         summary_rejections: Vec::new(),
+        adt_layouts: Vec::new(),
     }
 }
 
@@ -101,6 +102,7 @@ fn make_unary_program(op_name: &str, prim: Prim) -> HostProgram {
             summary_rejections: Vec::new(),
         }],
         summary_rejections: Vec::new(),
+        adt_layouts: Vec::new(),
     }
 }
 
@@ -135,6 +137,7 @@ fn make_tensor_to_scalar_program(prim: Prim, scalar_ty: HostType) -> HostProgram
             summary_rejections: Vec::new(),
         }],
         summary_rejections: Vec::new(),
+        adt_layouts: Vec::new(),
     }
 }
 
@@ -169,6 +172,7 @@ fn make_scalar_to_tensor_program() -> HostProgram {
             summary_rejections: Vec::new(),
         }],
         summary_rejections: Vec::new(),
+        adt_layouts: Vec::new(),
     }
 }
 
@@ -267,6 +271,7 @@ fn make_checked_tensor_cast_program(source: Prim, target: Prim) -> HostProgram {
             summary_rejections: Vec::new(),
         }],
         summary_rejections: Vec::new(),
+        adt_layouts: Vec::new(),
     }
 }
 
@@ -689,6 +694,7 @@ fn make_tensor_call_with_scalar_arg(scalar_ty: HostType, scalar_val: HostExpr) -
         global_tensor_helpers: vec![helper],
         functions: Vec::new(),
         summary_rejections: Vec::new(),
+        adt_layouts: Vec::new(),
     }
 }
 
@@ -719,6 +725,7 @@ fn to_tensor_list_ingress_uses_only_the_exact_registered_constructor() {
         global_tensor_helpers: Vec::new(),
         functions: Vec::new(),
         summary_rejections: Vec::new(),
+        adt_layouts: Vec::new(),
     };
 
     let source = emit_host_program(&program, "exact_list_ingress").unwrap();

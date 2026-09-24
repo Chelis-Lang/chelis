@@ -6,9 +6,14 @@
 //! completion, reading the supplied storage at the declared dtype.
 //!
 //! One program carries every host entry kind that takes a tensor: a tensor
-//! result, a tuple result, a record result, and a tensor nested in a tuple
-//! parameter. The direct four-argument DAG entry is covered beside the other
-//! direct-entry guards in `chelis-backend-c/tests/exec_compile.rs`.
+//! result, a tuple result, a record result, and a tensor nested in a tuple,
+//! record, data-type or list parameter. The direct four-argument DAG entry is
+//! covered beside the other direct-entry guards in
+//! `chelis-backend-c/tests/exec_compile.rs`.
+//!
+//! chelis#2506: a nested tensor gets the null, dtype, rank and extent checks a
+//! tensor parameter gets, before the body reads it, and each names the
+//! parameter path (`p.1`, `r.square`, `c.Ints.0`, `xs[1]`).
 //!
 //! A kernel the entry calls carries its own guard, prefixed with the kernel's
 //! name, so an entry that reaches a kernel would still trap without the host
@@ -32,7 +37,13 @@ def int_record(x: tensor[3, i64]) -> IntRecord = IntRecord { twice: x + x, squar
 def nested(p: (tensor[3, i64], tensor[3, i64])) -> tensor[3, i64] = p.0 + p.1\n\
 def pass_through(x: tensor[3, i64]) -> tensor[3, i64] = x\n\
 def shown(x: tensor[3, i64]) -> tensor[3, i64] ! {IO} = debug(x)\n\
-def pass_pair(x: tensor[3, i64]) -> (tensor[3, i64], tensor[3, i64]) = (x, x)\n";
+def pass_pair(x: tensor[3, i64]) -> (tensor[3, i64], tensor[3, i64]) = (x, x)\n\
+def mixed(p: (tensor[3, i64], tensor[3, i64])) -> tensor[3, i64] ! {IO} = debug(p.0) + p.1\n\
+def record_sum(r: IntRecord) -> tensor[3, i64] = r.twice + r.square\n\
+type Choice =\n  | Ints(tensor[3, i64])\n  | Floats(tensor[2, f64])\n\
+def choice_total(c: Choice) -> i64 = match c with {\n  | Ints(t) => tensor_to_scalar(sum(t, 0))\n  | Floats(u) => cast(0, i64)\n}\n\
+def named_pair[n](p: (tensor[n, i64], tensor[n, i64])) -> tensor[n, i64] = p.0 + p.1\n\
+def list_count(xs: List[tensor[3, i64]]) -> i64 = len(xs)\n";
 
 /// How the harness hands one supplied tensor to one entry and releases the
 /// result. The C local `x` is the supplied tensor.
@@ -149,8 +160,13 @@ fn mismatched_dtypes_trap_at_every_host_entry_kind() {
         let actual = supplied.to_lowercase();
         let (succeeded, output) = run(&out, name, entry, supplied);
         let host_line = format!("input `x` expected dtype {declared}, got {actual}");
-        let names_parameter = matches!(entry, Entry::NestedInTuple(_))
-            || output.lines().any(|line| line == host_line);
+        // chelis#2506: the nested row now names its parameter path.
+        let host_line = if matches!(entry, Entry::NestedInTuple(_)) {
+            format!("input `p.0` expected dtype {declared}, got {actual}")
+        } else {
+            host_line
+        };
+        let names_parameter = output.lines().any(|line| line == host_line);
         if succeeded
             || output.contains("completed")
             || !output.contains(&format!("expected dtype {declared}, got {actual}"))
@@ -185,5 +201,210 @@ fn matching_dtypes_complete_at_every_host_entry_kind() {
         assert!(succeeded, "{name}: {output}");
         assert!(output.contains("completed"), "{name}: {output}");
         assert!(!output.contains("numeric trap"), "{name}: {output}");
+    }
+}
+
+/// How a harness hands a parameter carrying one supplied tensor, beside
+/// well-formed `tensor[3, i64]` siblings, to an entry.
+#[derive(Clone, Copy)]
+enum Carrier {
+    /// `mixed(p)` with `p = (good, supplied)`: path `p.1`.
+    Tuple,
+    /// `record_sum(r)` with `r = IntRecord { twice: good, square: supplied }`.
+    Record,
+    /// `choice_total(c)` with `c = Ints(supplied)`.
+    DataType,
+    /// `list_count(xs)` with `xs = [good, supplied]`.
+    List,
+    /// `named_pair(p)` with `p = (good, supplied)`, whose axes share `n`.
+    NamedPair,
+}
+
+impl Carrier {
+    fn path(self) -> &'static str {
+        match self {
+            Carrier::Tuple | Carrier::NamedPair => "p.1",
+            Carrier::Record => "r.square",
+            Carrier::DataType => "c.Ints.0",
+            Carrier::List => "xs[1]",
+        }
+    }
+
+    /// C that builds the parameter from `good` and `supplied`, calls the
+    /// entry, and releases everything.
+    fn call(self) -> String {
+        let pair = "chelis_value items[2] = { chelis_value_take_tensor(good), chelis_value_take_tensor(supplied) };\n";
+        let release_pair = "chelis_value_release(items[0]); chelis_value_release(items[1]);\n";
+        match self {
+            Carrier::Tuple | Carrier::NamedPair => {
+                let name = if matches!(self, Carrier::Tuple) {
+                    "mixed"
+                } else {
+                    "named_pair"
+                };
+                format!(
+                    "{pair}chelis_tuple *p = chelis_tuple_from_values(items, 2);\n{release_pair}\
+                     chelis_tensor *result = {}(p);\n\
+                     chelis_tensor_release(result); chelis_tuple_release(p);",
+                    authored_c_symbol(name)
+                )
+            }
+            Carrier::Record => format!(
+                "{pair}chelis_string ctor = chelis_string_from_cstr(\"IntRecord\");\n\
+                 chelis_adt *r = chelis_adt_construct(ctor, items, 2);\n\
+                 chelis_string_release(ctor);\n{release_pair}\
+                 chelis_tensor *result = {}(r);\n\
+                 chelis_tensor_release(result); chelis_adt_release(r);",
+                authored_c_symbol("record_sum")
+            ),
+            Carrier::DataType => format!(
+                "chelis_tensor_release(good);\n\
+                 chelis_value field = chelis_value_take_tensor(supplied);\n\
+                 chelis_string ctor = chelis_string_from_cstr(\"Ints\");\n\
+                 chelis_adt *c = chelis_adt_construct(ctor, &field, 1);\n\
+                 chelis_string_release(ctor); chelis_value_release(field);\n\
+                 printf(\"total %lld\\n\", (long long){}(c));\n\
+                 chelis_adt_release(c);",
+                authored_c_symbol("choice_total")
+            ),
+            Carrier::List => format!(
+                "{pair}chelis_list *xs = chelis_list_from_values(items, 2);\n{release_pair}\
+                 printf(\"count %lld\\n\", (long long){}(xs));\n\
+                 chelis_list_release(xs);",
+                authored_c_symbol("list_count")
+            ),
+        }
+    }
+}
+
+/// Link a harness that supplies a zero-filled tensor of dtype
+/// `CHELIS_DTYPE_{dtype}` and `shape` inside `carrier`, and return (exit
+/// success, stdout plus stderr).
+fn run_nested(
+    out: &Path,
+    name: &str,
+    carrier: Carrier,
+    dtype: &str,
+    shape: &[i64],
+) -> (bool, String) {
+    let extents = shape
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join(", ");
+    let harness = format!(
+        "#define main generated_main\n#include \"entry.c\"\n#undef main\n\
+         int main(void) {{\n\
+         chelis_tensor *good = chelis_alloc(1, (int64_t[]){{3}}, CHELIS_DTYPE_I64);\n\
+         chelis_tensor *supplied = chelis_alloc({}, (int64_t[]){{{extents}}}, CHELIS_DTYPE_{dtype});\n\
+         {}\n\
+         puts(\"completed\"); return 0;\n}}\n",
+        shape.len(),
+        carrier.call()
+    );
+    let file = format!("{name}.c");
+    fs::write(out.join(&file), harness).expect("harness");
+    assert!(link_generated(out, &file, name).success(), "{name} link");
+    let run = std::process::Command::new(out.join(name))
+        .output()
+        .expect("run");
+    (
+        run.status.success(),
+        format!(
+            "{}{}",
+            String::from_utf8_lossy(&run.stdout),
+            String::from_utf8_lossy(&run.stderr)
+        ),
+    )
+}
+
+/// chelis#2506 REGRESSION TEST: at the pre-fix tree a tensor nested in a
+/// tuple, record, data-type or list parameter was validated only if it later
+/// reached a kernel entry, which named `__host_tensor_arg_N`; the rows below
+/// that reach no kernel ran to completion on a wrong dtype, rank or extent.
+/// Every row now stops at the host entry with the parameter path.
+#[test]
+fn a_mismatched_nested_tensor_stops_at_the_entry_with_its_parameter_path() {
+    if !gcc_available() {
+        return;
+    }
+    let dir = tempfile::tempdir().expect("tempdir");
+    let out = build(dir.path());
+    let mut failures = Vec::new();
+    for carrier in [
+        Carrier::Tuple,
+        Carrier::Record,
+        Carrier::DataType,
+        Carrier::List,
+    ] {
+        let path = carrier.path();
+        for (kind, dtype, shape, expected) in [
+            (
+                "dtype",
+                "F64",
+                &[3i64][..],
+                format!(
+                    "input `{path}` expected dtype i64, got f64\nnumeric trap: domain in load at i64\n"
+                ),
+            ),
+            (
+                "rank",
+                "I64",
+                &[3, 1][..],
+                format!("input `{path}` expected rank 1, got 2\n"),
+            ),
+            (
+                "extent",
+                "I64",
+                &[4][..],
+                format!(
+                    "input `{path}` axis 0 expected 3, got 4\nnumeric trap: domain in load at i64\n"
+                ),
+            ),
+        ] {
+            let name = format!("nested_{}_{kind}", path.replace(['.', '[', ']'], "_"));
+            let (succeeded, output) = run_nested(&out, &name, carrier, dtype, shape);
+            if succeeded || output.contains("completed") || !output.contains(&expected) {
+                failures.push(format!("{path} {kind}: exit success {succeeded}: {output}"));
+            }
+        }
+    }
+    let (succeeded, output) =
+        run_nested(&out, "nested_named_extent", Carrier::NamedPair, "I64", &[4]);
+    if succeeded
+        || output.contains("completed")
+        || !output.contains(
+            "extent `n`: p.0 axis 0 = 3, p.1 axis 0 = 4\nnumeric trap: domain in load at i64\n",
+        )
+    {
+        failures.push(format!(
+            "p.1 named extent: exit success {succeeded}: {output}"
+        ));
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+#[test]
+fn a_matching_nested_tensor_runs_at_every_carrier() {
+    if !gcc_available() {
+        return;
+    }
+    let dir = tempfile::tempdir().expect("tempdir");
+    let out = build(dir.path());
+    for (name, carrier, result) in [
+        ("tuple", Carrier::Tuple, None),
+        ("record", Carrier::Record, None),
+        ("data_type", Carrier::DataType, Some("total 0")),
+        ("list", Carrier::List, Some("count 2")),
+        ("named_pair", Carrier::NamedPair, None),
+    ] {
+        let (succeeded, output) =
+            run_nested(&out, &format!("matching_{name}"), carrier, "I64", &[3]);
+        assert!(succeeded, "{name}: {output}");
+        assert!(output.contains("completed"), "{name}: {output}");
+        assert!(!output.contains("numeric trap"), "{name}: {output}");
+        if let Some(result) = result {
+            assert!(output.contains(result), "{name}: {output}");
+        }
     }
 }

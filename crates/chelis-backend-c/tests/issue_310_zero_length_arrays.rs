@@ -51,6 +51,7 @@ fn program_with_body(ret_ty: HostType, body: HostExpr) -> HostProgram {
             summary_rejections: Vec::new(),
         }],
         summary_rejections: Vec::new(),
+        adt_layouts: Vec::new(),
     }
 }
 

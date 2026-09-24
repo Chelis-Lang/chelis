@@ -3,6 +3,8 @@ use chelis_ir::host::{
     HostTensorSpecialization,
 };
 mod entry;
+mod entry_walk;
+use entry_walk::function_entry_plan;
 
 /// Sparse-op kind discriminator for the C summary-derived emission path.
 /// Mirrors the three `HostTensorSpecialization` / `HostFunctionSpecialization`
@@ -370,6 +372,16 @@ pub(crate) fn emit_host_abi_program(
             .is_none_or(|reachable| reachable.contains(name))
     };
 
+    // chelis#2506: every function's nested-value entry work, and the walkers
+    // it calls, before any body that calls one.
+    let mut entry_walkers = entry_walk::EntryWalkers::new(program)?;
+    let entry_work = program
+        .functions
+        .iter()
+        .map(|function| entry_walkers.function_work(function))
+        .collect::<Result<Vec<_>, _>>()?;
+    entry_walkers.render(&mut body);
+
     let mut stubbed_functions: UnordSet<String> = UnordSet::new();
     let mut function_bodies: Vec<String> = Vec::new();
     for (function_index, function) in program.functions.iter().enumerate() {
@@ -405,6 +417,7 @@ pub(crate) fn emit_host_abi_program(
             &verified_helpers,
             external_helpers,
             &captured_globals,
+            &entry_work[function_index],
             #[cfg(feature = "native-random-observer")]
             &source_sites
                 .iter()
@@ -2323,48 +2336,64 @@ static void __chelis_check_host_result_claims(const __chelis_host_result_claim *
 "#.to_string());
 }
 
-/// The complete signature owns entry order; helper partitioning does not.
-fn function_entry_plan(function: &HostFunction) -> chelis_ir::host::SignatureEntryPlan {
-    chelis_ir::host::SignatureEntryPlan::new(function.params.iter().filter_map(|param| {
-        let HostAbiType::Tensor(ty) = &param.ty else {
-            return None;
-        };
-        Some(chelis_ir::host::HostTensorInput {
-            name: param.name.clone(),
-            ty: ty.clone(),
-        })
-    }))
-}
-
+/// A signature entry's checks, in signature order: every observation's null,
+/// dtype and rank checks, then the ordered extent comparisons.
+///
+/// `work` carries a function entry's nested values (chelis#2506): the reads
+/// that fetch them run with their parameter's metadata checks, a walked
+/// value's metadata pass runs after its parameter's observations, and its
+/// literal-extent pass runs before the first comparison a later parameter
+/// owes. An inlined invocation's entry has no `work`; each observation is its
+/// own parameter.
 fn signature_entry_lines(
     plan: &chelis_ir::host::SignatureEntryPlan,
     args: &[String],
     indent: &str,
     delegated: &[chelis_ir::axis_sources::EntryExtentGuard],
+    work: Option<&entry_walk::FunctionEntryWork>,
 ) -> Result<Vec<String>, Unsupported> {
     use chelis_ir::axis_sources::EntryExtentGuard;
-    if args.len() != plan.observations().nodes().len() {
+    if args.len() != plan.observations().nodes().len()
+        || work.is_some_and(|work| work.owners.len() != args.len())
+    {
         return Err(invalid_abi_shape(
             "signature entry lost an input observation".into(),
             "signature entry",
         ));
     }
-    let mut lines = Vec::new();
-    // No extent read may obscure a malformed external input's null, dtype or
-    // rank diagnostic. These metadata checks dominate the ordered comparisons.
-    for (node, actual) in plan.observations().nodes().iter().zip(args) {
+    let owners = work.map_or_else(|| (0..args.len()).collect(), |work| work.owners.clone());
+    let params = work.map_or(&[][..], |work| work.params.as_slice());
+    let param_count = params.len().max(owners.last().map_or(0, |last| last + 1));
+    let label_of = |node: &chelis_ir::dag::DagNode| {
         let RiscOp::Load { name } = &node.op else {
             unreachable!("signature observation")
         };
-        let label = chelis_ir::span_sanitize::sanitize_for_format_string(name.as_str());
-        let rank = node.output_type.dims.len();
-        lines.push(format!("{indent}if ({actual} == NULL) {{ fprintf(stderr, \"input `{label}` is NULL\\n\"); abort(); }}"));
-        lines.extend(
-            CEmitter::entry_dtype_guard(actual, &format!("input `{label}`"), &node.output_type)
-                .into_iter()
-                .map(|line| format!("{indent}{line}")),
-        );
-        lines.push(format!("{indent}if (chelis_tensor_rank({actual}) != {rank}) {{ fprintf(stderr, \"input `{label}` expected rank {rank}, got %d\\n\", chelis_tensor_rank({actual})); abort(); }}"));
+        entry_walk::TensorLabel::fixed(name.as_str())
+    };
+    let mut lines = Vec::new();
+    // No extent read may obscure a malformed external input's null, dtype or
+    // rank diagnostic. These metadata checks dominate the ordered comparisons.
+    for param in 0..param_count {
+        if let Some(work) = params.get(param) {
+            lines.extend(work.fetch.iter().cloned());
+        }
+        for ((node, actual), _) in plan
+            .observations()
+            .nodes()
+            .iter()
+            .zip(args)
+            .zip(&owners)
+            .filter(|(_, owner)| **owner == param)
+        {
+            lines.extend(entry_walk::tensor_metadata_checks(
+                actual,
+                &label_of(node),
+                &node.output_type,
+            ));
+        }
+        if let Some(work) = params.get(param) {
+            lines.extend(work.metadata.iter().cloned());
+        }
     }
     let read = |(load, axis): (chelis_ir::NodeId, usize)| {
         let node = plan.observations().get(load).expect("signature witness");
@@ -2378,12 +2407,19 @@ fn signature_entry_lines(
             axis,
         )
     };
+    let mut walked = 0;
     for guard in plan
         .guards()
         .iter()
         .filter(|guard| !delegated.contains(guard))
     {
-        let (left, right, context) = match guard {
+        let (EntryExtentGuard::Named { observed, .. } | EntryExtentGuard::Literal { observed, .. }) =
+            guard;
+        while walked < owners[observed.0.0].min(params.len()) {
+            lines.extend(params[walked].extents.iter().cloned());
+            walked += 1;
+        }
+        match guard {
             EntryExtentGuard::Named {
                 claim,
                 canonical,
@@ -2392,27 +2428,39 @@ fn signature_entry_lines(
                 let (left, first, first_axis) = read(*canonical);
                 let (right, later, later_axis) = read(*observed);
                 let claim = chelis_ir::span_sanitize::sanitize_for_format_string(claim);
-                let context = format!(
-                    "fprintf(stderr, \"extent `{claim}`: {first} axis {first_axis} = %lld, {later} axis {later_axis} = %lld\\n\", (long long)({left}), (long long)({right}));"
+                lines.push(format!("if ({right} != {left}) {{"));
+                lines.push(format!(
+                    "    fprintf(stderr, \"extent `{claim}`: {first} axis {first_axis} = %lld, {later} axis {later_axis} = %lld\\n\", (long long)({left}), (long long)({right}));"
+                ));
+                lines.push(
+                    "    chelis_numeric_trap(\"numeric trap: domain in load at i64\");".into(),
                 );
-                (left, right, context)
+                lines.push("}".into());
             }
             EntryExtentGuard::Literal { required, observed } => {
-                let (right, label, axis) = read(*observed);
-                let context = format!(
-                    "fprintf(stderr, \"input `{label}` axis {axis} expected {required}, got %lld\\n\", (long long)({right}));"
-                );
-                (required.to_string(), right, context)
+                let node = plan
+                    .observations()
+                    .get(observed.0)
+                    .expect("signature witness");
+                lines.extend(entry_walk::literal_extent_check(
+                    &args[observed.0.0],
+                    &label_of(node),
+                    observed.1,
+                    *required,
+                ));
             }
-        };
-        lines.push(format!("{indent}if ({right} != {left}) {{"));
-        lines.push(format!("{indent}    {context}"));
-        lines.push(format!(
-            "{indent}    chelis_numeric_trap(\"numeric trap: domain in load at i64\");"
-        ));
-        lines.push(format!("{indent}}}"));
+        }
     }
-    Ok(lines)
+    for work in &params[walked..] {
+        lines.extend(work.extents.iter().cloned());
+    }
+    if let Some(work) = work {
+        lines.extend(work.release.iter().cloned());
+    }
+    Ok(lines
+        .into_iter()
+        .map(|line| format!("{indent}{line}"))
+        .collect())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2429,6 +2477,7 @@ fn emit_function(
     verified_helpers: &[VerifiedHostTensorHelperView<'_>],
     external_helpers: &UnordSet<String>,
     captured_globals: &[String],
+    entry_work: &entry_walk::FunctionEntryWork,
     #[cfg(feature = "native-random-observer")]
     source_sites: &[crate::random_observer::SourceSite<'_>],
 ) -> Result<(), Unsupported> {
@@ -2531,18 +2580,13 @@ fn emit_function(
             )
         })?;
     let entry_plan = function_entry_plan(function);
-    let entry_args = function
-        .params
-        .iter()
-        .filter(|param| matches!(param.ty, HostAbiType::Tensor(_)))
-        .map(|param| c_ident(&param.name).into_owned())
-        .collect::<Vec<_>>();
     let delegated_entry_guards = entry::delegated_function_guards(function, verified_helpers);
     emitter.lines.extend(signature_entry_lines(
         &entry_plan,
-        &entry_args,
+        &entry_work.args,
         &emitter.indent,
         &delegated_entry_guards,
+        Some(entry_work),
     )?);
     // Entry guards still read parameters the body does not use. Their
     // verified entry drops run only after those witness reads finish.
@@ -5212,8 +5256,13 @@ impl<'a> HostEmitter<'a> {
                     self.emit_expr_to_var(arg, &temp, &host_type(arg))?;
                     actuals.push(temp);
                 }
-                self.lines
-                    .extend(signature_entry_lines(plan, &actuals, &self.indent, &[])?);
+                self.lines.extend(signature_entry_lines(
+                    plan,
+                    &actuals,
+                    &self.indent,
+                    &[],
+                    None,
+                )?);
                 self.lines.push(format!("{}{target} = 0;", self.indent));
             }
             HostExprKind::Unit => {

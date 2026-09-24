@@ -571,6 +571,7 @@ fn checked_blas_batches_scratch_and_empty_domains_execute_under_sanitizers() {
                 globals: vec![],
                 global_tensor_helpers: vec![],
                 summary_rejections: vec![],
+                adt_layouts: Vec::new(),
                 functions: vec![HostFunction {
                     helper_result_claim_axes: Vec::new(),
                     name: "host_blas".into(),
@@ -944,6 +945,7 @@ int main(void) {{
                     globals: vec![],
                     global_tensor_helpers: vec![],
                     summary_rejections: vec![],
+                    adt_layouts: Vec::new(),
                     functions: vec![HostFunction {
                         helper_result_claim_axes: Vec::new(),
                         name: "host_sparse_add".into(),
@@ -6497,6 +6499,7 @@ fn host_binary_program(builtin: &str, lhs: Vec<usize>, rhs: Vec<usize>) -> HostP
             summary_rejections: Vec::new(),
         }],
         summary_rejections: Vec::new(),
+        adt_layouts: Vec::new(),
     }
 }
 
@@ -7343,6 +7346,7 @@ fn host_scalar_relu_program(ty: HostType) -> HostProgram {
             summary_rejections: Vec::new(),
         }],
         summary_rejections: Vec::new(),
+        adt_layouts: Vec::new(),
     }
 }
 
@@ -9247,6 +9251,7 @@ fn host_diagonal_program(operand: Vec<usize>, declared: usize) -> HostProgram {
             summary_rejections: Vec::new(),
         }],
         summary_rejections: Vec::new(),
+        adt_layouts: Vec::new(),
     }
 }
 
@@ -9745,7 +9750,10 @@ fn restamped_binding_run(neg_first: bool, x: &[f32], z: &[f32]) -> std::process:
     } else {
         let loaded_z = load(&mut dag, "z", "m");
         let x = load(&mut dag, "x", "n");
-        (dag.add_node(RiscOp::Neg, vec![x], named("m"), None), loaded_z)
+        (
+            dag.add_node(RiscOp::Neg, vec![x], named("m"), None),
+            loaded_z,
+        )
     };
     let sum = dag.add_node(RiscOp::Add, vec![negated, loaded_z], named("m"), None);
     dag.add_root(sum);
@@ -9804,10 +9812,30 @@ int main(void) {{
 fn an_input_axis_a_name_sizes_is_checked_against_that_names_binding() {
     let mut failures = Vec::new();
     for (neg_first, x, z, context) in [
-        (true, &[1.0f32, 2.0][..], &[1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0][..], "extent `m`: x axis 0 = 2, z axis 0 = 6"),
-        (true, &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0][..], &[1.0, 2.0][..], "extent `m`: x axis 0 = 6, z axis 0 = 2"),
-        (false, &[1.0, 2.0][..], &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0][..], "extent `m`: z axis 0 = 6, x axis 0 = 2"),
-        (false, &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0][..], &[1.0, 2.0][..], "extent `m`: z axis 0 = 2, x axis 0 = 6"),
+        (
+            true,
+            &[1.0f32, 2.0][..],
+            &[1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0][..],
+            "extent `m`: x axis 0 = 2, z axis 0 = 6",
+        ),
+        (
+            true,
+            &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0][..],
+            &[1.0, 2.0][..],
+            "extent `m`: x axis 0 = 6, z axis 0 = 2",
+        ),
+        (
+            false,
+            &[1.0, 2.0][..],
+            &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0][..],
+            "extent `m`: z axis 0 = 6, x axis 0 = 2",
+        ),
+        (
+            false,
+            &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0][..],
+            &[1.0, 2.0][..],
+            "extent `m`: z axis 0 = 2, x axis 0 = 6",
+        ),
     ] {
         let run = restamped_binding_run(neg_first, x, z);
         let output = format!(
@@ -9819,7 +9847,11 @@ fn an_input_axis_a_name_sizes_is_checked_against_that_names_binding() {
             || output.contains("completed")
             || !output.contains(&format!("{context}\nnumeric trap: domain in load at i64"))
         {
-            failures.push(format!("neg first {neg_first}, x {}, z {}: {output}", x.len(), z.len()));
+            failures.push(format!(
+                "neg first {neg_first}, x {}, z {}: {output}",
+                x.len(),
+                z.len()
+            ));
         }
     }
     assert!(failures.is_empty(), "{}", failures.join("\n"));
