@@ -9,6 +9,7 @@ fn program(producer: &str) -> String {
         "direct" => "scores = x",
         "copy" => "scores = copy(x)",
         "add" => "scores = add(x, x)",
+        "mul" => "scores = mul(x, x)",
         _ => panic!("unknown producer"),
     };
     format!(
@@ -18,7 +19,7 @@ fn program(producer: &str) -> String {
 
 #[test]
 fn direct_copy_and_arithmetic_producers_keep_full_result() {
-    for producer in ["direct", "copy", "add"] {
+    for producer in ["direct", "copy", "add", "mul"] {
         let source = program(producer);
         let checked = check(CheckRequest {
             source_kind: SourceKind::Surf,
@@ -45,6 +46,8 @@ fn direct_copy_and_arithmetic_producers_keep_full_result() {
         assert_eq!(serde_json::to_value(&value.data).unwrap()["dtype"], "f32");
         let input = if producer == "add" {
             [[0.0_f64, 2.0], [4.0, 0.0]]
+        } else if producer == "mul" {
+            [[0.0_f64, 1.0], [4.0, 0.0]]
         } else {
             [[0.0_f64, 1.0], [2.0, 0.0]]
         };

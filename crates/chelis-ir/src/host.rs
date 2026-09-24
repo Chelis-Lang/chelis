@@ -4200,9 +4200,9 @@ struct AdmissionBinding {
     concat: ConcatInputFact,
 }
 
-/// The checker supplies tensor geometry; literal List spines additionally
-/// preserve the order and individual facts of their elements. A checked List
-/// with no visible spine cannot prove static concatenation.
+/// Checked tensor geometry is retained only when its producer relationship
+/// proves the ordered axes. Literal List spines preserve each element's fact;
+/// a checked List with no visible spine cannot prove static concatenation.
 #[derive(Clone, Default, PartialEq, Eq)]
 enum ConcatInputFact {
     #[default]
@@ -4249,13 +4249,75 @@ impl UncarriableWalk<'_> {
                     .collect(),
             );
         }
-        // The result metadata is a checked producer fact, including for
-        // `copy`, elementwise arithmetic and calls. Looking only at the
-        // syntax of the expression loses their runtime axis geometry.
-        expr_type(expr)
-            .as_ref()
-            .map(ConcatInputFact::from_type)
-            .unwrap_or(ConcatInputFact::Unknown)
+        let Some((tag, _, kids)) = stamped_parts(expr) else {
+            return ConcatInputFact::Unknown;
+        };
+        if tag == DeepTag::Copy {
+            let (Some(input), Some(checked)) = (kids.first(), expr_type(expr)) else {
+                return ConcatInputFact::Unknown;
+            };
+            let fact = self.concat_input_fact(input);
+            return match (&fact, checked) {
+                (ConcatInputFact::Tensor(input), HostTypeTerm::Tensor(output))
+                    if input.dims.len() == output.dims.len()
+                        && input.precision == output.precision =>
+                {
+                    fact
+                }
+                (
+                    ConcatInputFact::List(_) | ConcatInputFact::OpaqueTensorList,
+                    HostTypeTerm::List(_),
+                ) => fact,
+                _ => ConcatInputFact::Unknown,
+            };
+        }
+        if tag != DeepTag::App {
+            return ConcatInputFact::Unknown;
+        }
+        let Some(name) = kids
+            .first()
+            .and_then(stamped_parts)
+            .and_then(|(tag, _, callee)| {
+                (tag == DeepTag::Var)
+                    .then(|| callee.first().and_then(symbol_name))
+                    .flatten()
+            })
+        else {
+            return ConcatInputFact::Unknown;
+        };
+        if self.bound(name).is_some()
+            || self.defs.contains_key(name)
+            || !matches!(
+                chelis_types::builtin_decl(name).map(|decl| decl.shape_class),
+                Some(chelis_types::ShapeClass::Identity)
+            )
+            || chelis_types::shape_class(name) != chelis_types::ShapeClass::Identity
+        {
+            return ConcatInputFact::Unknown;
+        }
+        let Some(HostTypeTerm::Tensor(output)) = expr_type(expr) else {
+            return ConcatInputFact::Unknown;
+        };
+        // Shape-identity is an operation contract, but its source geometry
+        // is usable only when every tensor operand already has a proved fact.
+        // A checked result type by itself could hide an earlier failing
+        // reshape or insert (#1922). The checker may rename a symbolic axis
+        // on the result, so retain the operand's actual axis source.
+        let mut inputs = kids[1..].iter().map(|arg| self.concat_input_fact(arg));
+        let Some(ConcatInputFact::Tensor(first)) = inputs.next() else {
+            return ConcatInputFact::Unknown;
+        };
+        if first.dims.len() != output.dims.len()
+            || inputs.any(|fact| {
+                !matches!(fact, ConcatInputFact::Tensor(tensor) if tensor.dims == first.dims)
+            })
+        {
+            return ConcatInputFact::Unknown;
+        }
+        ConcatInputFact::Tensor(TensorType {
+            dims: first.dims,
+            precision: output.precision,
+        })
     }
 
     fn concat_requires_host(&self, list: &Expr, axis: &Expr) -> bool {
@@ -4277,10 +4339,19 @@ impl UncarriableWalk<'_> {
                 return false;
             }
         };
+        if elements
+            .iter()
+            .any(|element| !matches!(element, ConcatInputFact::Tensor(_)))
+        {
+            // No route proof is available for a List containing an unknown
+            // producer. In particular, do not hide its own fatal lowering
+            // diagnostic behind a later Host concat (#1922).
+            return false;
+        }
         let mut first: Option<&TensorType> = None;
         elements.iter().any(|element| {
             let ConcatInputFact::Tensor(tensor) = element else {
-                return true;
+                unreachable!("checked above")
             };
             let normalized = if axis < 0 {
                 axis + tensor.dims.len() as i64
@@ -20452,8 +20523,10 @@ mod tests {
         for (width, producer, host) in [
             ("2", "copy(x)", false),
             ("2", "add(x, x)", false),
+            ("2", "mul(x, x)", false),
             ("s", "copy(x)", true),
             ("s", "add(x, x)", true),
+            ("s", "mul(x, x)", true),
         ] {
             let source = format!(
                 "def join[s](x: tensor[s, {width}, f32]) = concat([{producer}, {producer}], 1i32)\n"
@@ -20476,6 +20549,51 @@ mod tests {
                 "{source}"
             );
         }
+    }
+
+    #[test]
+    fn concat_admission_does_not_treat_shadowed_callee_as_builtin_identity() {
+        let checked = surf_check(
+            "def run[s](x: tensor[s, s, f32]) = {\n z = mul(x, x)\n concat([z, z], 1i32)\n}\n",
+        );
+        let session = HostLoweringSession::new(&checked);
+        let defs = cached_program_defs(&session);
+        let (_, _, run) = stamped_parts(&defs["run"]).unwrap();
+        let (_, _, body) = stamped_parts(&run[1]).unwrap();
+        let (_, _, bindings) = stamped_parts(&body[0]).unwrap();
+        let producer = &bindings[1];
+        let tensor = TensorType {
+            dims: vec![DimInfo::Named("s".to_string(), None); 2],
+            precision: Prim::F32,
+        };
+        let scope = UnordMap::from([(
+            "x".to_string(),
+            AdmissionBinding {
+                constructor: false,
+                concat: ConcatInputFact::Tensor(tensor),
+            },
+        )]);
+        let mut walk = UncarriableWalk {
+            defs: &defs,
+            active: UnordSet::new(),
+            completed: UnordMap::new(),
+            cycle_cutoff: false,
+            def_visits: 0,
+            admit_dropout: false,
+            scopes: vec![scope],
+        };
+        assert!(matches!(
+            walk.concat_input_fact(producer),
+            ConcatInputFact::Tensor(_)
+        ));
+        walk.scopes
+            .last_mut()
+            .unwrap()
+            .insert("mul".to_string(), AdmissionBinding::default());
+        assert!(matches!(
+            walk.concat_input_fact(producer),
+            ConcatInputFact::Unknown
+        ));
     }
 
     #[test]

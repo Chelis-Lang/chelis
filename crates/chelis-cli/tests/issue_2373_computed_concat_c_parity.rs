@@ -13,6 +13,7 @@ fn program(producer: &str) -> String {
         "direct" => "scores = x",
         "copy" => "scores = copy(x)",
         "add" => "scores = add(x, x)",
+        "mul" => "scores = mul(x, x)",
         _ => panic!("unknown producer"),
     };
     format!(
@@ -21,9 +22,9 @@ fn program(producer: &str) -> String {
 }
 
 #[test]
-fn direct_copy_and_add_linked_c_values() {
+fn direct_copy_and_arithmetic_linked_c_values() {
     assert!(gcc_available(), "this oracle requires a linked C binary");
-    for producer in ["direct", "copy", "add"] {
+    for producer in ["direct", "copy", "add", "mul"] {
         let stdout = build_and_run(&program(producer), &format!("computed_concat_{producer}"));
         let line = stdout
             .lines()
@@ -33,6 +34,8 @@ fn direct_copy_and_add_linked_c_values() {
         let actual = parse_tensor_data(&stdout, "output");
         let input = if producer == "add" {
             [[0.0_f64, 2.0], [4.0, 0.0]]
+        } else if producer == "mul" {
+            [[0.0_f64, 1.0], [4.0, 0.0]]
         } else {
             [[0.0_f64, 1.0], [2.0, 0.0]]
         };
