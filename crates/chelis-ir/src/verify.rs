@@ -653,6 +653,385 @@ pub(crate) fn verify_mapped_gradient_closure(
     Ok(())
 }
 
+fn is_rank0(ty: &crate::dag::TensorType, prim: Prim) -> bool {
+    ty.dims.is_empty() && ty.precision == prim
+}
+
+/// Operand shape of one key-operand random node: arity, the data and control
+/// dtypes, the key slot, and the optional activation.
+fn verify_random_operands(dag: &Dag, node: &crate::dag::DagNode, errors: &mut Vec<String>) {
+    let id = node.id.0;
+    let input = |slot: usize| node.inputs.get(slot).and_then(|input| dag.get(*input));
+    let (fixed, key_slot) = match &node.op {
+        RiscOp::Dropout | RiscOp::DropoutReplay => (3, Some(2)),
+        RiscOp::UniformLike => (4, Some(3)),
+        RiscOp::UniformBoundAdjoint { .. } => (3, Some(2)),
+        RiscOp::DrawKey { handler, draw, .. } => {
+            let seed = usize::from(matches!(handler, crate::dag::RandomHandler::Scoped { .. }));
+            (seed + draw.control_count(), None)
+        }
+        _ => unreachable!("verify_random_operands is called only for key-operand random ops"),
+    };
+    let arity = node.inputs.len();
+    if arity != fixed && arity != fixed + 1 {
+        errors.push(format!(
+            "{:?} at node {id} expects {fixed} inputs and an optional activation, got {arity}",
+            node.op
+        ));
+        return;
+    }
+    if arity == fixed + 1
+        && !input(fixed).is_some_and(|active| is_rank0(&active.output_type, Prim::Bool))
+    {
+        errors.push(format!(
+            "{:?} at node {id} requires a rank-0 Bool activation",
+            node.op
+        ));
+    }
+    if let Some(slot) = key_slot
+        && !input(slot).is_some_and(|key| is_rank0(&key.output_type, Prim::Key))
+    {
+        errors.push(format!(
+            "{:?} at node {id} requires a rank-0 key at input {slot}",
+            node.op
+        ));
+    }
+    let float_control = |slot: usize, expected: &[Prim]| {
+        input(slot).is_some_and(|control| {
+            control.output_type.dims.is_empty() && expected.contains(&control.output_type.precision)
+        })
+    };
+    match &node.op {
+        RiscOp::Dropout | RiscOp::DropoutReplay => {
+            let Some(data) = input(0) else {
+                return;
+            };
+            let prim = data.output_type.precision;
+            if !prim.is_float() || node.output_type != data.output_type {
+                errors.push(format!(
+                    "{:?} at node {id} must preserve the exact float type of its data input",
+                    node.op
+                ));
+            }
+            if !float_control(1, &[prim]) {
+                errors.push(format!(
+                    "{:?} at node {id} requires a rank-0 rate of its data dtype",
+                    node.op
+                ));
+            }
+        }
+        RiscOp::UniformLike => {
+            let Some(template) = input(0) else {
+                return;
+            };
+            let prim = template.output_type.precision;
+            if !prim.is_float()
+                || node.output_type.precision != prim
+                || node.output_type.dims.len() != template.output_type.dims.len()
+            {
+                errors.push(format!(
+                    "uniform_like at node {id} must preserve its template's float dtype and rank"
+                ));
+            }
+            let bounds = [prim, Prim::F32];
+            let low = input(1).map(|low| low.output_type.precision);
+            if !float_control(1, &bounds)
+                || !float_control(2, &bounds)
+                || low != input(2).map(|high| high.output_type.precision)
+            {
+                errors.push(format!(
+                    "uniform_like at node {id} requires rank-0 bounds of one dtype, its template's or f32"
+                ));
+            }
+        }
+        RiscOp::UniformBoundAdjoint { .. } => {
+            let (Some(template), Some(cotangent)) = (input(0), input(1)) else {
+                return;
+            };
+            let prim = template.output_type.precision;
+            if !prim.is_float()
+                || cotangent.output_type.precision != prim
+                || cotangent.output_type.dims.len() != template.output_type.dims.len()
+                || !is_rank0(&node.output_type, prim)
+            {
+                errors.push(format!(
+                    "uniform bound adjoint at node {id} requires a float template, a cotangent of its type, and a rank-0 result of its dtype"
+                ));
+            }
+        }
+        RiscOp::DrawKey {
+            handler,
+            draw,
+            dtype,
+        } => {
+            if !is_rank0(&node.output_type, Prim::Key) || !dtype.is_float() {
+                errors.push(format!(
+                    "draw key at node {id} must produce a rank-0 key for an active float draw"
+                ));
+            }
+            let seed = usize::from(matches!(handler, crate::dag::RandomHandler::Scoped { .. }));
+            if seed == 1
+                && !input(0).is_some_and(|seed| {
+                    matches!(seed.op, RiscOp::Const { .. })
+                        && is_rank0(&seed.output_type, Prim::Int64)
+                })
+            {
+                errors.push(format!(
+                    "draw key at node {id} requires its scoped handler's literal i64 seed"
+                ));
+            }
+            let controls_ok = match draw {
+                crate::dag::RandomDraw::Dropout => float_control(seed, &[*dtype]),
+                crate::dag::RandomDraw::UniformLike => {
+                    let bounds = [*dtype, Prim::F32];
+                    float_control(seed, &bounds)
+                        && float_control(seed + 1, &bounds)
+                        && input(seed).map(|low| low.output_type.precision)
+                            == input(seed + 1).map(|high| high.output_type.precision)
+                }
+            };
+            if !controls_ok {
+                errors.push(format!(
+                    "draw key at node {id} requires {draw:?} controls for a {} draw",
+                    dtype.name()
+                ));
+            }
+        }
+        _ => {}
+    }
+}
+
+/// A node's part in the key rules of [`verify_key_rules`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KeyRole {
+    /// A `DrawKey` for a `draw` of dtype `dtype`. A scoped handler's first
+    /// input is its seed; the draw's controls and optional activation follow.
+    DrawKey {
+        scoped: bool,
+        draw: crate::dag::RandomDraw,
+        dtype: Prim,
+    },
+    /// `Dropout`, which consumes the key at input 2.
+    Dropout,
+    /// `UniformLike`, which consumes the key at input 3.
+    UniformLike,
+    /// `DropoutReplay`, which reads its forward `Dropout`'s key at input 2.
+    DropoutReplay,
+    /// `UniformBoundAdjoint`, which reads its forward `UniformLike`'s key at
+    /// input 2.
+    UniformBoundAdjoint,
+    /// An operation that takes no key.
+    Other,
+}
+
+impl KeyRole {
+    fn key_slot(self) -> Option<usize> {
+        match self {
+            Self::Dropout | Self::DropoutReplay | Self::UniformBoundAdjoint => Some(2),
+            Self::UniformLike => Some(3),
+            Self::DrawKey { .. } | Self::Other => None,
+        }
+    }
+}
+
+/// The view of a graph that [`verify_key_rules`] reads. The IR [`Dag`]
+/// implements it, and so does the compiler API's decoded wire graph, so the
+/// key rules have one implementation on both sides of the codec. A node is
+/// named by its position; a position that names no node has no dtype.
+pub trait KeyGraph {
+    fn node_count(&self) -> usize;
+    fn role(&self, node: usize) -> KeyRole;
+    /// The dtype `node` produces, or `None` when no node or no known dtype.
+    fn dtype(&self, node: usize) -> Option<Prim>;
+    /// Whether two existing nodes produce the same tensor type.
+    fn same_type(&self, left: usize, right: usize) -> bool;
+    /// The node at `node`'s input `slot`, if the slot exists. Slots are
+    /// dense: the first missing slot ends the node's inputs.
+    fn input(&self, node: usize, slot: usize) -> Option<usize>;
+    /// The nodes `node` depends on without reading their values.
+    fn dependencies(&self, node: usize) -> impl Iterator<Item = usize> + '_;
+    fn roots(&self) -> impl Iterator<Item = usize> + '_;
+}
+
+impl KeyGraph for Dag {
+    fn node_count(&self) -> usize {
+        self.len()
+    }
+
+    fn role(&self, node: usize) -> KeyRole {
+        match self.get(NodeId(node)).map(|node| &node.op) {
+            Some(RiscOp::DrawKey {
+                handler,
+                draw,
+                dtype,
+            }) => KeyRole::DrawKey {
+                scoped: matches!(handler, crate::dag::RandomHandler::Scoped { .. }),
+                draw: *draw,
+                dtype: *dtype,
+            },
+            Some(RiscOp::Dropout) => KeyRole::Dropout,
+            Some(RiscOp::UniformLike) => KeyRole::UniformLike,
+            Some(RiscOp::DropoutReplay) => KeyRole::DropoutReplay,
+            Some(RiscOp::UniformBoundAdjoint { .. }) => KeyRole::UniformBoundAdjoint,
+            _ => KeyRole::Other,
+        }
+    }
+
+    fn dtype(&self, node: usize) -> Option<Prim> {
+        self.get(NodeId(node))
+            .map(|node| node.output_type.precision)
+    }
+
+    fn same_type(&self, left: usize, right: usize) -> bool {
+        match (self.get(NodeId(left)), self.get(NodeId(right))) {
+            (Some(left), Some(right)) => left.output_type == right.output_type,
+            _ => false,
+        }
+    }
+
+    fn input(&self, node: usize, slot: usize) -> Option<usize> {
+        Some(self.get(NodeId(node))?.inputs.get(slot)?.0)
+    }
+
+    fn dependencies(&self, node: usize) -> impl Iterator<Item = usize> + '_ {
+        self.get(NodeId(node))
+            .into_iter()
+            .flat_map(|node| node.shape_deps.iter().chain(&node.result_claim_deps))
+            .map(|dependency| dependency.0)
+    }
+
+    fn roots(&self) -> impl Iterator<Item = usize> + '_ {
+        Dag::roots(self).iter().map(|root| root.0)
+    }
+}
+
+/// The key rules of `spec/design/randomness_counter_stream.md` §2 and
+/// spec/10 §3.2. Every key is produced by a `DrawKey`, feeds at most one
+/// consuming random primitive whose controls, activation and dtype agree with
+/// the key's, and is otherwise read only by that primitive's AD replay nodes.
+/// A key reaching any other operation, a dependency list, or a root is
+/// rejected.
+pub fn verify_key_rules(graph: &impl KeyGraph, errors: &mut Vec<String>) {
+    let is_key = |node: usize| graph.dtype(node) == Some(Prim::Key);
+    let mut consumer = vec![None::<usize>; graph.node_count()];
+    for node in 0..graph.node_count() {
+        let role = graph.role(node);
+        if is_key(node) != matches!(role, KeyRole::DrawKey { .. }) {
+            errors.push(format!(
+                "node {node} {} a key, but only a draw key produces one",
+                if is_key(node) {
+                    "produces"
+                } else {
+                    "is a draw key that does not produce"
+                }
+            ));
+        }
+        for dependency in graph.dependencies(node) {
+            if is_key(dependency) {
+                errors.push(format!(
+                    "node {node} takes key {dependency} as a dependency"
+                ));
+            }
+        }
+        let inputs = (0..).map_while(|slot| graph.input(node, slot));
+        for (slot, input) in inputs.enumerate().filter(|(_, input)| is_key(*input)) {
+            if role.key_slot() != Some(slot) {
+                errors.push(format!(
+                    "key {input} reaches node {node} input {slot}; only a random primitive consumes a key"
+                ));
+                continue;
+            }
+            if matches!(role, KeyRole::Dropout | KeyRole::UniformLike) {
+                if let Some(previous) = consumer[input].replace(node) {
+                    errors.push(format!(
+                        "key {input} is consumed twice, by nodes {previous} and {node}"
+                    ));
+                }
+                verify_key_matches_consumer(graph, input, node, role, errors);
+            }
+        }
+    }
+    for root in graph.roots() {
+        if is_key(root) {
+            errors.push(format!("key {root} is a graph root"));
+        }
+    }
+    // Replay reads: each must read a key whose one consumer is the matching
+    // forward primitive, under the same rate or template type and activation.
+    for node in 0..graph.node_count() {
+        let forward_role = match graph.role(node) {
+            KeyRole::DropoutReplay => KeyRole::Dropout,
+            KeyRole::UniformBoundAdjoint => KeyRole::UniformLike,
+            _ => continue,
+        };
+        let Some(key) = graph.input(node, 2) else {
+            continue;
+        };
+        let Some(forward) = consumer.get(key).copied().flatten() else {
+            errors.push(format!(
+                "replay node {node} reads key {key} that no forward random primitive consumes"
+            ));
+            continue;
+        };
+        let matches = graph.role(forward) == forward_role
+            && match forward_role {
+                KeyRole::Dropout => {
+                    graph.input(node, 1) == graph.input(forward, 1)
+                        && graph.same_type(node, forward)
+                        && graph.input(node, 3) == graph.input(forward, 3)
+                }
+                _ => {
+                    graph
+                        .input(node, 0)
+                        .is_some_and(|template| graph.same_type(template, forward))
+                        && graph.input(node, 3) == graph.input(forward, 4)
+                }
+            };
+        if !matches {
+            errors.push(format!(
+                "replay node {node} changes its forward node {forward}'s mask contract"
+            ));
+        }
+    }
+}
+
+/// A consumed key's `DrawKey` validates exactly the consumer's controls for
+/// the consumer's draw kind and dtype, under the consumer's activation.
+fn verify_key_matches_consumer(
+    graph: &impl KeyGraph,
+    key: usize,
+    consumer: usize,
+    consumer_role: KeyRole,
+    errors: &mut Vec<String>,
+) {
+    let KeyRole::DrawKey {
+        scoped,
+        draw,
+        dtype,
+    } = graph.role(key)
+    else {
+        return;
+    };
+    let (expected_draw, fixed) = match consumer_role {
+        KeyRole::Dropout => (crate::dag::RandomDraw::Dropout, 3),
+        _ => (crate::dag::RandomDraw::UniformLike, 4),
+    };
+    let seed = usize::from(scoped);
+    let controls_match = (0..expected_draw.control_count()).all(|control| {
+        let expected = graph.input(consumer, 1 + control);
+        expected.is_some() && graph.input(key, seed + control) == expected
+    });
+    if draw != expected_draw
+        || graph.dtype(consumer) != Some(dtype)
+        || !controls_match
+        || graph.input(key, seed + draw.control_count()) != graph.input(consumer, fixed)
+    {
+        errors.push(format!(
+            "draw key {key} does not validate the controls, dtype and activation of its consumer {consumer}"
+        ));
+    }
+}
+
 #[allow(clippy::collapsible_match)]
 fn verify_with_dangling_policy(dag: &Dag, reject_dangling: bool) -> Vec<String> {
     let mut errors = Vec::new();
@@ -1325,7 +1704,6 @@ fn verify_with_dangling_policy(dag: &Dag, reject_dangling: bool) -> Vec<String> 
             | RiscOp::Floor
             | RiscOp::Ceil
             | RiscOp::Round
-            | RiscOp::Dropout { .. }
             | RiscOp::Copy
             | RiscOp::Drop
             | RiscOp::Realize
@@ -1396,24 +1774,11 @@ fn verify_with_dangling_policy(dag: &Dag, reject_dangling: bool) -> Vec<String> 
                     ));
                 }
             }
-            RiscOp::UniformLike { .. } => {
-                if !matches!(arity, 1 | 2) {
-                    errors.push(format!(
-                        "op {:?} at node {} expects 1 or 2 inputs, got {}",
-                        node.op, node.id.0, arity
-                    ));
-                }
-                if arity == 2
-                    && let Some(activation) = dag.get(node.inputs[1])
-                    && (activation.output_type.precision != Prim::Bool
-                        || !activation.output_type.dims.is_empty())
-                {
-                    errors.push(format!(
-                        "uniform_like at node {} requires a scalar Bool path activation, got {:?}",
-                        node.id.0, activation.output_type
-                    ));
-                }
-            }
+            RiscOp::UniformLike
+            | RiscOp::Dropout
+            | RiscOp::DropoutReplay
+            | RiscOp::UniformBoundAdjoint { .. }
+            | RiscOp::DrawKey { .. } => verify_random_operands(dag, node, &mut errors),
             // chelis#616: movement ops (and `Reshape`, whose runtime target
             // extents work the same way) carry a tensor at `inputs[0]` plus zero
             // or more rank-0 integer bound scalars at `inputs[1..]` (node-valued
@@ -2091,26 +2456,6 @@ fn verify_with_dangling_policy(dag: &Dag, reject_dangling: bool) -> Vec<String> 
                     ));
                 }
             }
-            RiscOp::UniformLike { .. } => {
-                if matches!(arity, 1 | 2)
-                    && let Some(input) = dag.get(node.inputs[0])
-                {
-                    if !input.output_type.precision.is_float() {
-                        errors.push(format!(
-                            "uniform_like at node {} requires a float template, got {:?}",
-                            node.id.0, input.output_type.precision
-                        ));
-                    }
-                    if node.output_type.precision != input.output_type.precision {
-                        errors.push(format!(
-                            "uniform_like at node {} output precision {:?} must match template precision {:?}",
-                            node.id.0,
-                            node.output_type.precision,
-                            input.output_type.precision
-                        ));
-                    }
-                }
-            }
             _ => {}
         }
 
@@ -2736,10 +3081,15 @@ fn verify_with_dangling_policy(dag: &Dag, reject_dangling: bool) -> Vec<String> 
             // `Drop` as an effect node. Its result may legitimately have no
             // consumer — the abort is the point — so requiring one would
             // force it back into the value graph, which is exactly the
-            // reachability criterion that let DCE sweep it.
+            // reachability criterion that let DCE sweep it. A draw key is an
+            // effect for the same reason: an unused draw still advances its
+            // handler.
             && !matches!(
                 node.op,
-                RiscOp::Store { .. } | RiscOp::Drop | RiscOp::GuardedFail { .. }
+                RiscOp::Store { .. }
+                    | RiscOp::Drop
+                    | RiscOp::GuardedFail { .. }
+                    | RiscOp::DrawKey { .. }
             )
         {
             errors.push(format!(
@@ -2748,6 +3098,8 @@ fn verify_with_dangling_policy(dag: &Dag, reject_dangling: bool) -> Vec<String> 
             ));
         }
     }
+
+    verify_key_rules(dag, &mut errors);
 
     // chelis#1277 C4.1: every realized output axis has one checked extent
     // source. `verify` is one of the production paths this runs on, not the
@@ -4418,6 +4770,46 @@ mod tests {
         );
     }
 
+    /// A key-operand `UniformLike` over `template` with an inherited draw
+    /// key and optional `activation`.
+    fn keyed_uniform(dag: &mut Dag, template: NodeId, activation: Option<NodeId>) {
+        let ty = dag.get(template).unwrap().output_type.clone();
+        let low = dag.add_node(
+            RiscOp::synth_const(Prim::F32, 0.0),
+            vec![],
+            TensorType::scalar_f32(),
+            None,
+        );
+        let high = dag.add_node(
+            RiscOp::synth_const(Prim::F32, 1.0),
+            vec![],
+            TensorType::scalar_f32(),
+            None,
+        );
+        let key = dag.add_node(
+            RiscOp::DrawKey {
+                handler: crate::dag::RandomHandler::Inherited,
+                draw: crate::dag::RandomDraw::UniformLike,
+                dtype: ty.precision,
+            },
+            [low, high].into_iter().chain(activation).collect(),
+            TensorType {
+                dims: vec![],
+                precision: Prim::Key,
+            },
+            None,
+        );
+        dag.add_node(
+            RiscOp::UniformLike,
+            [template, low, high, key]
+                .into_iter()
+                .chain(activation)
+                .collect(),
+            ty,
+            None,
+        );
+    }
+
     #[test]
     fn uniform_like_rejects_non_float_template() {
         let mut dag = Dag::new();
@@ -4430,23 +4822,14 @@ mod tests {
                 name: "template".into(),
             },
             vec![],
-            ty.clone(),
-            None,
-        );
-        dag.add_node(
-            RiscOp::UniformLike {
-                low: 0.0,
-                high: 1.0,
-                seed: 7,
-            },
-            vec![template],
             ty,
             None,
         );
+        keyed_uniform(&mut dag, template, None);
         assert!(
             verify(&dag)
                 .iter()
-                .any(|error| error.contains("requires a float template"))
+                .any(|error| error.contains("must preserve its template's float dtype and rank"))
         );
     }
 
@@ -4462,7 +4845,7 @@ mod tests {
                 name: "template".into(),
             },
             vec![],
-            ty.clone(),
+            ty,
             None,
         );
         let wrong_activation = dag.add_node(
@@ -4473,20 +4856,11 @@ mod tests {
             TensorType::scalar_f32(),
             None,
         );
-        dag.add_node(
-            RiscOp::UniformLike {
-                low: 0.0,
-                high: 1.0,
-                seed: 7,
-            },
-            vec![template, wrong_activation],
-            ty,
-            None,
-        );
+        keyed_uniform(&mut dag, template, Some(wrong_activation));
         assert!(
             verify(&dag)
                 .iter()
-                .any(|error| error.contains("requires a scalar Bool path activation"))
+                .any(|error| error.contains("requires a rank-0 Bool activation"))
         );
     }
 

@@ -818,93 +818,6 @@ fn issue_1829_interpreter_entry_bounds_kernel_decision_probes() {
     );
 }
 
-/// chelis#2059 (residual chelis#1921): the interpreter's execution-profile
-/// admission runs on every closure application. Before this fix it re-cloned
-/// every top-level definition twice per call to classify the applied body, so
-/// a `chelis test` run over a package with many defs was O(defs x
-/// applications) and the dependency-free Monte-Carlo repro that took 1.2s at
-/// 0.18.6 took tens of seconds at 0.18.9.
-///
-/// The def set is fixed for an `EvalContext`'s lifetime, so the sort-and-clone
-/// is now a program-scoped snapshot built once and reused. This is a counted
-/// receipt in the shape of chelis#1835's `host_summary_probe_builds`: however
-/// many times a closure is applied over however many definitions, the snapshot
-/// is built exactly once per evaluation context.
-///
-/// Evidentiary status: REGRESSION TEST. The fixture folds one closure over a
-/// list of `APPLICATIONS` elements in a program carrying `HELPERS` unused
-/// definitions. Before the fix the admission cloned all definitions on each of
-/// the `APPLICATIONS` applications; the per-call clone is what this receipt
-/// pins out. The `snapshots >= 1` guard keeps the receipt from passing while
-/// measuring nothing, mirroring the #1829 tensor row's own guard.
-///
-/// chelis#2405 retired the per-closure admission. The ask that remains per
-/// application is the applied top-level definition's own profile, so each
-/// application now calls `step`, and a second receipt holds that profile to
-/// one derivation however many times `step` is applied.
-#[test]
-fn issue_2059_execution_profile_defs_snapshot_is_program_scoped() {
-    const HELPERS: usize = 40;
-    const APPLICATIONS: usize = 200;
-
-    let mut source = String::new();
-    // Unused helpers: they inflate the per-application clone cost the fix
-    // removes, without being reached by the fold body's classification.
-    for level in 0..HELPERS {
-        source.push_str(&format!("def helper{level}(x: i64) -> i64 = add(x, x)\n"));
-    }
-    source.push_str("def step(acc: i64, x: i64) -> i64 = add(acc, x)\n");
-    // One closure, applied once per list element by `fold`. Each application
-    // applies the top-level `step`, which asks for its profile. `result` is a
-    // top-level value binding so the interpreter evaluates it rather than
-    // binding the fold's callable as a thunk.
-    source.push_str(&format!(
-        "result = fold(fn (acc: i64, x: i64) -> step(acc, x), \
-         cast(0, i64), range(cast(0, i64), cast({APPLICATIONS}, i64)))\n"
-    ));
-
-    let checked = checked_surf(&source);
-    let empty_tensors: UnordMap<String, RuntimeTensorValue> = UnordMap::new();
-    let inputs = HostEvaluationInputs {
-        roots: &empty_tensors,
-        bindings: None,
-    };
-    super::eval::reset_execution_profile_defs_snapshots();
-    super::program_scope::take_def_profile_derivations();
-    let outcome =
-        evaluate_host_program_with_library_and_types(&checked, None, None, inputs, None, None)
-            .expect("#2059 fixture evaluates");
-    let snapshots = super::eval::execution_profile_defs_snapshots();
-    let derivations = super::program_scope::take_def_profile_derivations();
-
-    let result = outcome
-        .host_bindings
-        .get("result")
-        .map(render_value)
-        .expect("#2059 fixture binds `result`");
-    // sum(0..200) = 199 * 200 / 2 = 19900.
-    assert_eq!(
-        result, "19900",
-        "#2059 fixture must still compute the right answer"
-    );
-    assert!(
-        snapshots >= 1,
-        "#2059: the fixture must actually reach the execution-profile admission, or this \
-         receipt would pass without measuring anything"
-    );
-    assert_eq!(
-        snapshots, 1,
-        "#2059: the program-def snapshot must be built once per evaluation context and reused \
-         across all {APPLICATIONS} closure applications; {snapshots} builds means the per-call \
-         clone regressed"
-    );
-    assert_eq!(
-        derivations, 1,
-        "#2405: `step`'s own profile must be derived once and reused across all \
-         {APPLICATIONS} applications; {derivations} derivations means it is asked per call"
-    );
-}
-
 /// Evaluate `source` and return its `result` binding with the number of
 /// definition kernel plannings performed.
 fn def_kernel_plannings(source: &str) -> (String, u64) {
@@ -930,14 +843,15 @@ fn def_kernel_plannings(source: &str) -> (String, u64) {
 /// chelis#2392: a recursive program applies its helpers many times.
 /// `def_kernel` used to skip its memo beneath a recursive caller and re-plan
 /// every applied helper per application. A helper that draws no Random is
-/// planned once however many times the recursion applies it, while a drawing
-/// helper, whose kernel depends on the stream position, is still planned per
-/// application. chelis#2405 retired the inherited execution exclusion this
-/// counted beneath, so the receipt now counts every planning.
+/// planned once however many times the recursion applies it. chelis#2413
+/// gives a drawing helper the same memo: its draw keys read the frame it is
+/// evaluated with, so its kernel no longer depends on the stream position.
+/// chelis#2405 retired the inherited execution exclusion this counted
+/// beneath, so the receipt now counts every planning.
 ///
 /// Evidentiary status: REGRESSION TEST for the non-drawing row (it fails on
-/// the #2392 base, where the count grows with the depth) and DISPOSITION LOCK
-/// for the drawing row (unchanged behaviour the memo must not break).
+/// the #2392 base, where the count grows with the depth) and for the drawing
+/// row (it fails on the #2413 base, which re-planned per application).
 #[test]
 fn issue_2392_kernel_under_recursion_is_planned_once_per_helper() {
     let program = |depth: i64| {
@@ -970,60 +884,9 @@ fn issue_2392_kernel_under_recursion_is_planned_once_per_helper() {
     let (_, shallow_draws) = def_kernel_plannings(&drawing(4));
     let (_, deep_draws) = def_kernel_plannings(&drawing(12));
     assert_eq!(
-        deep_draws - shallow_draws,
-        8,
-        "a Random-drawing kernel is re-planned on every application"
-    );
-}
-
-/// Evaluate `source` and return its `result` binding with the number of
-/// classification definition tables built.
-fn evaluation_definition_builds(source: &str) -> (String, u64) {
-    let checked = checked_surf(source);
-    let empty_tensors: UnordMap<String, RuntimeTensorValue> = UnordMap::new();
-    let inputs = HostEvaluationInputs {
-        roots: &empty_tensors,
-        bindings: None,
-    };
-    chelis_ir::lower::reset_evaluation_definition_builds();
-    let outcome =
-        evaluate_host_program_with_library_and_types(&checked, None, None, inputs, None, None)
-            .expect("#2405 transform fixture evaluates");
-    let builds = chelis_ir::lower::evaluation_definition_builds();
-    let result = outcome
-        .host_bindings
-        .get("result")
-        .map(render_value)
-        .expect("#2405 transform fixture binds `result`");
-    (result, builds)
-}
-
-/// chelis#2405 round 2: a `grad` applied beneath recursion classifies its
-/// application against the scope's one definition snapshot. The retired
-/// exclusion used to skip that classification; before this receipt each
-/// application copied the whole table and derived its draw reachability
-/// again, so the count grew with the recursion depth.
-///
-/// Evidentiary status: REGRESSION TEST (the count is `depth + 1` when the
-/// transform classifies against a per-application copy).
-#[test]
-fn issue_2405_recursive_grad_builds_one_definition_snapshot() {
-    let program = |depth: i64| {
-        format!(
-            "def loss(x: tensor[4, f32]) -> tensor[f32] = sum(mul(copy(x), x), 0i32)\n\
-             def descend(n: i64, x: tensor[4, f32]) -> tensor[4, f32] = if eq(n, 0i64) then x else descend(sub(n, 1i64), sub(copy(x), grad(loss)(x)))\n\
-             result = tensor_to_scalar(sum(descend({depth}i64, to_tensor([1.0f32, 2.0f32, 3.0f32, 4.0f32])), 0i32))\n"
-        )
-    };
-    // Each step maps x to x - 2x = -x.
-    let (shallow, shallow_builds) = evaluation_definition_builds(&program(4));
-    let (deep, deep_builds) = evaluation_definition_builds(&program(13));
-    assert_eq!(shallow, "10.0");
-    assert_eq!(deep, "-10.0");
-    assert_eq!(
-        (shallow_builds, deep_builds),
-        (1, 1),
-        "one program-scoped definition snapshot, however many `grad` applications"
+        shallow_draws, deep_draws,
+        "a Random-drawing kernel takes its keys from the evaluation frame, so it is \
+         planned once like any other kernel"
     );
 }
 
@@ -1108,8 +971,8 @@ fn issue_2393_terminal_index_resolves_like_the_scan() {
 /// bindings the callback never mentions. A `fold` was quadratic in whatever
 /// happened to be in scope.
 ///
-/// Counted receipt in the shape of chelis#2059's
-/// `EXECUTION_PROFILE_DEFS_SNAPSHOTS`: `frame_value_copies` counts binding
+/// Counted receipt in the shape of chelis#1835's
+/// `host_summary_probe_builds`: `frame_value_copies` counts binding
 /// entries deep-copied by frame clones. The fixture binds one unused list and
 /// folds one closure over `applications` elements; the asymptotic promise is
 /// that the copies do not grow with the application count, asserted as a

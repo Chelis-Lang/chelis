@@ -254,6 +254,15 @@
       "kind": "wire-schema-numeric-field"
     },
     {
+      "authority": "TaggedTransport",
+      "contract": "random-handler-instance",
+      "flags": [
+        "numeric-field"
+      ],
+      "id": "chelis_compiler_api::schema::WireRandomHandler::Scoped.instance: u32",
+      "kind": "wire-schema-numeric-field"
+    },
+    {
       "authority": "NumericOperation",
       "contract": "[05-OP-15]",
       "flags": [
@@ -278,15 +287,6 @@
         "numeric-field"
       ],
       "id": "chelis_compiler_api::schema::WireRiscOp::Count.axes: i32",
-      "kind": "wire-schema-numeric-field"
-    },
-    {
-      "authority": "NumericOperation",
-      "contract": "[05-OP-37]",
-      "flags": [
-        "numeric-field"
-      ],
-      "id": "chelis_compiler_api::schema::WireRiscOp::Dropout.seed: u64",
       "kind": "wire-schema-numeric-field"
     },
     {
@@ -386,15 +386,6 @@
         "numeric-field"
       ],
       "id": "chelis_compiler_api::schema::WireRiscOp::Sum.axis: i32",
-      "kind": "wire-schema-numeric-field"
-    },
-    {
-      "authority": "NumericOperation",
-      "contract": "[05-OP-8]",
-      "flags": [
-        "numeric-field"
-      ],
-      "id": "chelis_compiler_api::schema::WireRiscOp::UniformLike.seed: u64",
       "kind": "wire-schema-numeric-field"
     },
     {

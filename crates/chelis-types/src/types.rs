@@ -163,6 +163,12 @@ pub enum Prim {
     Int64,
     Bool,
     String,
+    /// The key of one random draw (`spec/design/randomness_counter_stream.md`
+    /// §2): a structurally non-numeric IR element dtype with no arithmetic,
+    /// comparison, cast, storage, or literal carrier. Every key value is
+    /// produced by a graph node. It has no source spelling; its interchange
+    /// spelling is `key`.
+    Key,
 }
 
 // Canonical identity order for order-free collection indices. This is byte
@@ -219,6 +225,7 @@ impl Prim {
             Prim::Int64 => "i64",
             Prim::Bool => "bool",
             Prim::String => "string",
+            Prim::Key => "key",
         }
     }
 
@@ -240,6 +247,7 @@ impl Prim {
     /// formats. Language and Deep ingress must use [`Self::parse_name`].
     pub fn parse_interchange_name(s: &str) -> Option<Prim> {
         match s {
+            "key" => Some(Prim::Key),
             "int8" => Some(Prim::Int8),
             "int16" => Some(Prim::Int16),
             "int32" => Some(Prim::Int32),
@@ -263,7 +271,7 @@ impl Prim {
             Prim::Int32 => Ok(RuntimeDType::I32),
             Prim::Int64 => Ok(RuntimeDType::I64),
             Prim::Bool => Ok(RuntimeDType::Bool),
-            Prim::F8e4m3 | Prim::String => Err(RuntimeDTypeMappingError { prim: self }),
+            Prim::F8e4m3 | Prim::String | Prim::Key => Err(RuntimeDTypeMappingError { prim: self }),
         }
     }
 
@@ -276,9 +284,9 @@ impl Prim {
 
     /// True for any numeric precision in the active set, including `f8e4m3`
     /// (so deferred-dtype rejection sites can still treat it as numeric for
-    /// surface diagnostics). `Bool` and `String` are not numeric.
+    /// surface diagnostics). `Bool`, `String` and `Key` are not numeric.
     pub fn is_numeric(&self) -> bool {
-        !matches!(self, Prim::Bool | Prim::String)
+        !matches!(self, Prim::Bool | Prim::String | Prim::Key)
     }
 
     /// True for all signed integer dtypes in the active set per §1.1.
@@ -400,6 +408,9 @@ impl Prim {
             }
             Prim::String => {
                 return Err("reduce_sum is not defined for string operands".to_string());
+            }
+            Prim::Key => {
+                return Err("reduce_sum is not defined for random key operands".to_string());
             }
         })
     }
@@ -958,6 +969,7 @@ mod prim_classification_tests {
         Prim::Int64,
         Prim::Bool,
         Prim::String,
+        Prim::Key,
     ];
 
     #[test]
@@ -988,7 +1000,7 @@ mod prim_classification_tests {
     #[test]
     fn is_numeric_excludes_bool_and_string() {
         for prim in ALL_PRIMS {
-            let expected = !matches!(prim, Prim::Bool | Prim::String);
+            let expected = !matches!(prim, Prim::Bool | Prim::String | Prim::Key);
             assert_eq!(
                 prim.is_numeric(),
                 expected,
@@ -1066,7 +1078,7 @@ mod prim_classification_tests {
 
     #[test]
     fn parse_name_round_trips_through_name() {
-        for prim in ALL_PRIMS {
+        for prim in ALL_PRIMS.iter().filter(|prim| **prim != Prim::Key) {
             let name = prim.name();
             assert_eq!(
                 Prim::parse_name(name),
@@ -1074,6 +1086,20 @@ mod prim_classification_tests {
                 "parse_name({name:?}) must round-trip {prim:?}"
             );
         }
+    }
+
+    // chelis#2413: a random key is an IR and interchange dtype only. No
+    // source or Deep spelling reaches it, and it is not numeric.
+    #[test]
+    fn a_random_key_has_an_interchange_spelling_and_no_source_spelling() {
+        assert_eq!(Prim::parse_name("key"), None);
+        assert_eq!(Prim::parse_interchange_name("key"), Some(Prim::Key));
+        assert_eq!(Prim::Key.interchange_name(), "key");
+        assert!(!Prim::Key.is_numeric());
+        assert!(!Prim::Key.is_float());
+        assert!(!Prim::Key.is_valid_tensor_precision());
+        assert!(!Prim::Key.is_valid_scalar_cast_target());
+        assert!(Prim::Key.runtime_dtype().is_err());
     }
 
     #[test]
@@ -1195,7 +1221,7 @@ mod dtype_family_bound_tests {
 
     use super::*;
 
-    const EVERY_PRIM: [Prim; 11] = [
+    const EVERY_PRIM: [Prim; 12] = [
         Prim::F32,
         Prim::F64,
         Prim::F16,
@@ -1207,6 +1233,7 @@ mod dtype_family_bound_tests {
         Prim::Int64,
         Prim::Bool,
         Prim::String,
+        Prim::Key,
     ];
 
     fn admitted(restriction: TypeVarRestriction) -> Vec<Prim> {
@@ -1251,7 +1278,7 @@ mod dtype_family_bound_tests {
             TypeVarRestriction::ActiveInt,
             TypeVarRestriction::ActiveNumeric,
         ] {
-            for prim in [Prim::Bool, Prim::String, Prim::F8e4m3] {
+            for prim in [Prim::Bool, Prim::String, Prim::Key, Prim::F8e4m3] {
                 assert!(
                     !restriction.admits(prim),
                     "{} must not admit {prim:?}",

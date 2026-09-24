@@ -1714,6 +1714,7 @@ fn execution_host_requires_host_backend(
 
 type CliLoweredBuildProgram = (
     chelis_ir::Dag,
+    chelis_ir::lower::RandomRegionOwners,
     Option<chelis_ir::host::ConcreteHostProgram>,
     Option<chelis_ir::host::HostExecutionPlan>,
 );
@@ -1770,17 +1771,19 @@ fn lower_build_program_for_cli(
                 })
             })
             .transpose()?;
-        Ok((lowered.into_dag(), ordinary_host, plan))
+        let random_regions = lowered.random_regions().clone();
+        Ok((lowered.into_dag(), random_regions, ordinary_host, plan))
     } else {
         let mut compiled =
             chelis_ir::host::try_lower_compiled_program_with_manifest(checked.program(), manifest)
                 .map_err(compiled_host_lowering_error_for_cli)?;
         emit_summary_rejections(compiled.host.as_ref());
-        let dag = lower_checked_for_cli(checked.clone(), compiled.host.as_ref())?;
+        let lowered = lower_checked_compilation_for_cli(checked.clone(), compiled.host.as_ref())?;
         if let Some(host) = compiled.host.as_mut() {
             apply_manifest_display_roots(host, manifest, target)?;
         }
-        Ok((dag, compiled.host, None))
+        let random_regions = lowered.random_regions().clone();
+        Ok((lowered.into_dag(), random_regions, compiled.host, None))
     }
 }
 
@@ -4012,7 +4015,7 @@ fn cmd_build(
             checked, target,
         ),
     )?;
-    let (mut dag, mut compiled_host, mut execution_host) =
+    let (mut dag, random_regions, mut compiled_host, mut execution_host) =
         lower_build_program_for_cli(&checked_compilation, &root_manifest, target)?;
     let tensor_root_names = checked_compilation.root_metadata().tensor_names().clone();
     let entry_root_names = lowered_root_names_from_decls(
@@ -4031,10 +4034,13 @@ fn cmd_build(
             }
         })
         .collect::<Vec<_>>();
-    if !entry_root_names.is_empty() {
+    let entered = if entry_root_names.is_empty() {
+        random_regions.entered_by(tensor_root_names.iter().map(|name| name.as_str()))
+    } else {
         dag.set_roots(selected);
-    }
-    dag = chelis_ir::optimize::dead_code_eliminate(&dag);
+        random_regions.entered_by(entry_root_names.iter().map(String::as_str))
+    };
+    dag = chelis_ir::optimize::project_program_roots(&dag, &entered);
     let func_name = file
         .file_stem()
         .and_then(|s| s.to_str())
@@ -4371,7 +4377,7 @@ fn cmd_build_deep(
             checked, target,
         ),
     )?;
-    let (mut dag, mut compiled_host, mut execution_host) =
+    let (mut dag, random_regions, mut compiled_host, mut execution_host) =
         lower_build_program_for_cli(&checked_compilation, &root_manifest, target)?;
     let tensor_root_names = checked_compilation.root_metadata().tensor_names().clone();
     let entry_root_names = lowered_root_names_from_exprs(&deep_exprs, checked.type_env());
@@ -4386,10 +4392,13 @@ fn cmd_build_deep(
             }
         })
         .collect::<Vec<_>>();
-    if !entry_root_names.is_empty() {
+    let entered = if entry_root_names.is_empty() {
+        random_regions.entered_by(tensor_root_names.iter().map(|name| name.as_str()))
+    } else {
         dag.set_roots(selected);
-    }
-    dag = chelis_ir::optimize::dead_code_eliminate(&dag);
+        random_regions.entered_by(entry_root_names.iter().map(String::as_str))
+    };
+    dag = chelis_ir::optimize::project_program_roots(&dag, &entered);
     let func_name = file
         .file_stem()
         .and_then(|s| s.to_str())
@@ -11274,6 +11283,14 @@ fn lower_checked_for_cli(
     checked: chelis_compiler_api::pipeline::CheckedCompilation,
     host_program: Option<&chelis_ir::host::ConcreteHostProgram>,
 ) -> Result<chelis_ir::Dag, Box<dyn std::error::Error>> {
+    lower_checked_compilation_for_cli(checked, host_program)
+        .map(chelis_compiler_api::pipeline::LoweredCompilation::into_dag)
+}
+
+fn lower_checked_compilation_for_cli(
+    checked: chelis_compiler_api::pipeline::CheckedCompilation,
+    host_program: Option<&chelis_ir::host::ConcreteHostProgram>,
+) -> Result<chelis_compiler_api::pipeline::LoweredCompilation, Box<dyn std::error::Error>> {
     let mode = if host_program
         .map(chelis_ir::host::host_program_requires_host_backend)
         .unwrap_or(false)
@@ -11283,7 +11300,6 @@ fn lower_checked_for_cli(
         chelis_compiler_api::pipeline::LoweringMode::Strict
     };
     chelis_compiler_api::pipeline::lower_checked(checked, mode)
-        .map(chelis_compiler_api::pipeline::LoweredCompilation::into_dag)
         .map_err(|rejection| boxed_string_error(rejection.to_string()))
 }
 

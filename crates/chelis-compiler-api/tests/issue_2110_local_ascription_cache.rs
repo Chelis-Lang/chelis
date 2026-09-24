@@ -28,15 +28,10 @@ fn assert_one_checked_obligation(program: &CheckedProgram) {
 fn assert_one_lowered_site(program: &CheckedProgram) {
     assert_one_checked_obligation(program);
     let session = chelis_ir::host::HostLoweringSession::new(program);
-    let execution =
-        chelis_ir::evaluation::RandomExecutionContext::new(chelis_ir::host::RandomLoweringState {
-            seed: None,
-            counter: 0,
-        });
-    let plan = chelis_ir::host::host_def_evaluation_plan(&session, "entry", &execution)
+    let kernel = chelis_ir::host::host_def_kernel(&session, "entry")
         .expect("cached composition lowers")
         .expect("entry is a tensor kernel");
-    let dag = &plan.kernel_for_inspection().dag;
+    let dag = &kernel.dag;
     assert_eq!(
         dag.nodes()
             .iter()

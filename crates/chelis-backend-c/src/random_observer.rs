@@ -142,14 +142,38 @@ fn straight_line(expr: &chelis_ir::host::ConcreteHostExpr) -> bool {
     }
 }
 
-/// The only constructor uses sealed source cursors and their own helper plans.
-/// Local/full joins compare complete kinds, not arithmetic offsets or C labels.
+/// The observed identity of each draw key in a verified helper graph, in node
+/// order: its draw index, and its handler scope (0 for the inherited stream,
+/// `instance + 1` for a `with seed` region lowered inside the helper). The
+/// emitter and the source table both read this one function, so a recorded
+/// event and its retained source entry cannot disagree about either.
+pub(crate) fn draw_key_identities(
+    dag: chelis_ir::ownership::VerifiedDagView<'_>,
+) -> std::collections::BTreeMap<chelis_ir::dag::NodeId, (usize, usize)> {
+    dag.nodes()
+        .iter()
+        .filter_map(|node| match node.op {
+            chelis_ir::dag::RiscOp::DrawKey { handler, .. } => Some((node.id, handler)),
+            _ => None,
+        })
+        .enumerate()
+        .map(|(draw, (node, handler))| {
+            let scope = match handler {
+                chelis_ir::dag::RandomHandler::Inherited => 0,
+                chelis_ir::dag::RandomHandler::Scoped { instance } => instance as usize + 1,
+            };
+            (node, (draw, scope))
+        })
+        .collect()
+}
+
+/// The only constructor uses sealed source cursors and their own helper
+/// graphs. A helper's retained events are its draw keys, one forward event
+/// each; the draw index is also the event's occurrence and full-source word.
 pub(crate) fn source_sites(
     emission: chelis_ir::ownership::VerifiedHostEmission<'_>,
 ) -> Vec<SourceSite<'_>> {
-    use chelis_ir::execution_spine::{Control, SourceKind};
     use chelis_ir::host::ConcreteHostExprKind as E;
-    use chelis_ir::lowering_trace::FullSourceKind as F;
     emission
         .source_expressions()
         .into_iter()
@@ -193,47 +217,10 @@ pub(crate) fn source_sites(
                     site.kind = 3;
                     site.target = *helper;
                     site.supported &= args.iter().all(value_only);
-                    if let Some(execution) = function
-                        .and_then(|f| f.tensor_helper(*helper))
-                        .and_then(|h| h.execution())
-                    {
-                        site.inherited_scope = execution.inherited_scope().index();
-                        let full = execution.full_source();
-                        let random: Vec<_> = full
-                            .source
-                            .iter()
-                            .filter(|e| !matches!(e.kind, F::Requirement(_)))
-                            .collect();
-                        site.supported &= random.len() == execution.source().len();
-                        for (legacy, full) in execution.source().iter().zip(random) {
-                            let (kind, expected, draw, scope) = match legacy.kind {
-                                SourceKind::Forward { node, draw, scope } => (
-                                    "__CHELIS_RANDOM_OBSERVER_FORWARD",
-                                    F::Forward { node, draw, scope },
-                                    Some(draw.index()),
-                                    scope.index(),
-                                ),
-                                SourceKind::Control(control) => match control {
-                                    Control::Enter { scope, .. } => (
-                                        "__CHELIS_RANDOM_OBSERVER_FIXED_ENTER",
-                                        F::Control(control),
-                                        None,
-                                        scope.index(),
-                                    ),
-                                    Control::Leave { scope } => (
-                                        "__CHELIS_RANDOM_OBSERVER_FIXED_LEAVE",
-                                        F::Control(control),
-                                        None,
-                                        scope.index(),
-                                    ),
-                                },
-                            };
-                            site.supported &= expected == full.kind;
-                            let (has_draw, draw) = optional_u64(draw);
+                    if let Some(helper) = function.and_then(|f| f.tensor_helper(*helper)) {
+                        for (draw, scope) in draw_key_identities(helper.dag()).into_values() {
                             site.events.push(format!(
-                                "{{{kind}, {{{}ULL}}, {has_draw}, {{{draw}}}, {{{scope}ULL}}, {{{}ULL}}}}",
-                                legacy.id.index(),
-                                full.id.0
+                                "{{__CHELIS_RANDOM_OBSERVER_FORWARD, {{{draw}ULL}}, 1, {{{draw}ULL}}, {{{scope}ULL}}, {{{draw}ULL}}}}"
                             ));
                         }
                     }
@@ -376,8 +363,6 @@ typedef enum {
     __CHELIS_RANDOM_OBSERVER_INVOCATION_INIT,
     __CHELIS_RANDOM_OBSERVER_HOST_INSTALL,
     __CHELIS_RANDOM_OBSERVER_HOST_RESTORE,
-    __CHELIS_RANDOM_OBSERVER_FIXED_ENTER,
-    __CHELIS_RANDOM_OBSERVER_FIXED_LEAVE,
     __CHELIS_RANDOM_OBSERVER_FORWARD,
     __CHELIS_RANDOM_OBSERVER_REPLAY
 } __chelis_random_observer_event_kind;

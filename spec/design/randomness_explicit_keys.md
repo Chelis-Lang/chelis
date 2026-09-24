@@ -115,9 +115,8 @@ The bridge exists to give the IR rewrite a bit-identical oracle. Phase 3 states 
 
 **Shells** (a minor release; every shell bumps). The affected set is derived at switch time, not listed here. Search every Chelis-Lang repository and spec document for `with seed`, `Random`, and each random builtin and helper. That search already includes hello-chelis, the spec registry, and the canonical reference's randomness paragraphs. Hull moves in lockstep with the compiler, because it differential-tests it.
 
-**Superseded issues.** #2409 (`vmap` ordinals) and #2410 (unselected-arm ordinals) close when the switch lands, because keys remove ordinals. Until then:
+**Superseded issues.** #2409 (`vmap` ordinals) closes when the switch lands, because keys remove ordinals. #2410 (unselected-arm ordinals) closes in phase 3, where every draw under a runtime branch carries its path condition as its activation. Until the switch:
 - phase 3 refuses `vmap` over a function that draws, because eval's bits would otherwise change to a different non-conforming value;
-- C's unselected-arm count stays as today, out of spec and tracked;
 - anything silently wrong in a new way must be fenced.
 
 ## 6. LaCaDiLE

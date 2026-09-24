@@ -30,10 +30,6 @@ use crate::discharge::{GoalShape, IntervalBox, OutputRange};
 const SINGLE_OUTPUT_SOURCE: &str = "x = (x : tensor[f32])\n\
                                     out = (mul(x, x) : tensor[f32])\n";
 
-fn typed_f32(value: f64) -> chelis_types::ScalarValue {
-    chelis_types::scalar_from_f64("graph-test", chelis_types::types::Prim::F32, value).unwrap()
-}
-
 fn output_range(name: &str, lo: f64, hi: f64) -> OutputRange {
     OutputRange {
         output: name.to_string(),
@@ -553,8 +549,6 @@ fn single_op_dag(op: WireRiscOp) -> WireDag {
         WireRiscOp::Const { value } => value.prim(),
         WireRiscOp::ConstTensor { data } => data.prim(),
         WireRiscOp::Pad { fill, .. } => fill.prim(),
-        WireRiscOp::UniformLike { low, .. } => low.prim(),
-        WireRiscOp::Dropout { rate, .. } => rate.prim(),
         _ => chelis_types::types::Prim::F32,
     };
     let size = match &op {
@@ -568,10 +562,7 @@ fn single_op_dag(op: WireRiscOp) -> WireDag {
         precision: precision.interchange_name().into(),
     };
     let mut nodes = Vec::new();
-    let inputs = if matches!(
-        op,
-        WireRiscOp::UniformLike { .. } | WireRiscOp::Dropout { .. } | WireRiscOp::Pad { .. }
-    ) {
+    let inputs = if matches!(op, WireRiscOp::Pad { .. }) {
         nodes.push(WireDagNode {
             shape_deps: vec![],
             span_id: None,
@@ -704,29 +695,6 @@ fn every_embedded_numeric_field_is_guarded() {
     // rejects invalid Random parameters earlier in WireDag admission.
     let cases: Vec<(WireRiscOp, &str)> = vec![
         (
-            WireRiscOp::UniformLike {
-                low: typed_f32(f64::NAN),
-                high: typed_f32(1.0),
-                seed: 0,
-            },
-            "low",
-        ),
-        (
-            WireRiscOp::UniformLike {
-                low: typed_f32(0.0),
-                high: typed_f32(f64::INFINITY),
-                seed: 0,
-            },
-            "high",
-        ),
-        (
-            WireRiscOp::Dropout {
-                rate: typed_f32(f64::NEG_INFINITY),
-                seed: 0,
-            },
-            "rate",
-        ),
-        (
             WireRiscOp::Pad {
                 padding: vec![(
                     WireRtDim::Lit {
@@ -768,11 +736,7 @@ fn every_embedded_numeric_field_is_guarded() {
     ];
 
     // Pin the field set so an existing payload cannot silently disappear.
-    assert_eq!(
-        cases.len(),
-        6,
-        "UniformLike.low/high, Dropout.rate, Pad.fill, Const.value and ConstTensor.data"
-    );
+    assert_eq!(cases.len(), 3, "Pad.fill, Const.value and ConstTensor.data");
 
     for (op, expected_field) in cases {
         let dag = single_op_dag(op.clone());
@@ -788,21 +752,10 @@ fn every_embedded_numeric_field_is_guarded() {
             other => panic!("expected NonFiniteValue naming `{expected_field}`, got {other:?}"),
         }
         let error = extract_single_op(op.clone()).expect_err("public proof boundary");
-        if matches!(
-            op,
-            WireRiscOp::UniformLike { .. } | WireRiscOp::Dropout { .. }
-        ) {
-            assert!(
-                matches!(error, GraphExtractError::WireContractRejected(_)),
-                "{error}"
-            );
-            assert!(error.to_string().contains("finite"), "{error}");
-        } else {
-            assert!(
-                matches!(error, GraphExtractError::NonFiniteValue { .. }),
-                "{error}"
-            );
-        }
+        assert!(
+            matches!(error, GraphExtractError::NonFiniteValue { .. }),
+            "{error}"
+        );
     }
 }
 
@@ -812,15 +765,6 @@ fn finite_numeric_payloads_pass_the_proof_boundary() {
     // guard (they are rejected later only if some other check fails, but the
     // finite guard itself must not reject them).
     let finite_ops = [
-        WireRiscOp::UniformLike {
-            low: typed_f32(-1.0),
-            high: typed_f32(1.0),
-            seed: 0,
-        },
-        WireRiscOp::Dropout {
-            rate: typed_f32(0.5),
-            seed: 0,
-        },
         WireRiscOp::Pad {
             padding: vec![(
                 WireRtDim::Lit {

@@ -16,7 +16,7 @@ fn request(source: &str, entry: &str) -> CompileRequest {
 }
 
 #[test]
-fn direct_fixed_entry_pairs_actual_helper_normalization_and_complete_artifact() {
+fn direct_drawing_entry_pairs_actual_helper_normalization_and_complete_artifact() {
     let source =
         "def main(x: tensor[4,f32]) -> tensor[4,f32] = with seed(42i64) { dropout(x,0.5f32) }";
     let ordinary = compile_for_execution(request(source, "main")).unwrap();
@@ -27,8 +27,13 @@ fn direct_fixed_entry_pairs_actual_helper_normalization_and_complete_artifact() 
         let SelectedEmission::Dag { unfused, selected } = observation.emission.selected else {
             panic!("actual direct entry emission");
         };
+        // The entry lane emits the captured lowering after its dead-code pass,
+        // as it emits every tensor entry.
         assert_eq!(
-            bincode::serialize(&trace.lowering.normalization.after_drops).unwrap(),
+            bincode::serialize(&chelis_ir::optimize::dead_code_eliminate(
+                &trace.lowering.normalization.after_drops
+            ))
+            .unwrap(),
             bincode::serialize(unfused).unwrap()
         );
         assert_eq!(
@@ -36,13 +41,20 @@ fn direct_fixed_entry_pairs_actual_helper_normalization_and_complete_artifact() 
             bincode::serialize(selected.nodes()).unwrap()
         );
         assert!(
-            !trace
+            trace
+                .lowering
                 .normalization
-                .as_ref()
-                .unwrap()
                 .after_drops
-                .source
-                .is_empty()
+                .nodes()
+                .iter()
+                .any(|node| matches!(
+                    node.op,
+                    chelis_ir::dag::RiscOp::DrawKey {
+                        handler: chelis_ir::dag::RandomHandler::Scoped { .. },
+                        ..
+                    }
+                )),
+            "the captured lowering carries the entry's draw key"
         );
         selected.roots().len()
     })
@@ -96,11 +108,14 @@ def derivative(x: tensor[4,f32], y: tensor[4,f32]) -> (tensor[4,f32],tensor[4,f3
                         bincode::serialize(&(helper.dag().nodes(), helper.dag().roots())).unwrap(),
                         "the complete selected graph includes ordered roots, not just nodes"
                     );
-                    gradients += trace.executions.len();
-                    assert_eq!(trace.executions.len(), trace.applications.len());
-                    for execution in &trace.executions {
+                    gradients += trace.lowering.gradients.len();
+                    for gradient in &trace.lowering.gradients {
+                        assert!(
+                            gradient.application.is_some(),
+                            "each captured gradient records its actual splice"
+                        );
                         assert_eq!(
-                            trace.lowering.gradients[execution.gradient].wrt.len(),
+                            gradient.wrt.len(),
                             input_count,
                             "the selected capture retains every ordered differentiated input"
                         );
@@ -148,8 +163,6 @@ fn ordinary_compilation_keeps_its_lane_and_explicitly_missing_capture() {
 
 #[test]
 fn main_selected_cpu_resource_trace_excludes_an_unused_gpu_sibling() {
-    use chelis_ir::lowering_trace::FullSourceKind;
-
     let source = r#"
 def loss(x: tensor[4,f32]) -> f32 = with device("cpu") {
   with seed(42i64) { tensor_to_scalar(sum(dropout(x,0.5f32),0)) }
@@ -164,12 +177,9 @@ def main(x: tensor[4,f32], flag: bool) -> (tensor[4,f32], bool) = (derivative(x)
             panic!("selected host trace");
         };
         let mut requirements = Vec::new();
-        for (_, helpers) in traces.full_function_spines() {
-            for spine in helpers.iter().flatten() {
-                requirements.extend(spine.source.iter().filter_map(|event| match &event.kind {
-                    FullSourceKind::Requirement(device) => Some(device.clone()),
-                    _ => None,
-                }));
+        for (_, helpers) in traces.functions() {
+            for trace in helpers.iter().flatten() {
+                requirements.extend(trace.requirements.iter().cloned());
             }
         }
         requirements

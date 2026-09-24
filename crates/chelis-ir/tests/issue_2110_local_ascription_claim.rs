@@ -399,19 +399,14 @@ fn host_evaluation_kernel_carries_the_same_local_ascription_site() {
     let source = direct_source("y: tensor[2, f32] = pad(x, [[0i64, 0i64]], 0.0f32)\n  y");
     let checked = checked(&source);
     let session = chelis_ir::host::HostLoweringSession::new(&checked);
-    let execution =
-        chelis_ir::evaluation::RandomExecutionContext::new(chelis_ir::host::RandomLoweringState {
-            seed: None,
-            counter: 0,
-        });
-    let plan = chelis_ir::host::host_def_evaluation_plan(&session, "f", &execution)
+    let kernel = chelis_ir::host::host_def_kernel(&session, "f")
         .expect("kernel decision")
         .expect("tensor kernel");
     assert_eq!(
-        local_claims(&plan.kernel_for_inspection().dag).len(),
+        local_claims(&kernel.dag).len(),
         1,
         "the actual Eval kernel must retain the checker-owned site: {:?}",
-        plan.kernel_for_inspection().dag
+        kernel.dag
     );
 }
 
@@ -423,23 +418,18 @@ fn staged_host_partition_retains_the_local_ascription_site() {
                   }\n";
     let checked = checked(source);
     let session = chelis_ir::host::HostLoweringSession::new(&checked);
-    let execution =
-        chelis_ir::evaluation::RandomExecutionContext::new(chelis_ir::host::RandomLoweringState {
-            seed: None,
-            counter: 0,
-        });
-    let plan = chelis_ir::host::host_def_evaluation_plan(&session, "f", &execution)
+    let kernel = chelis_ir::host::host_def_kernel(&session, "f")
         .expect("kernel decision")
         .expect("tensor kernel");
     assert!(
-        plan.kernel_for_inspection().staged.is_some(),
+        kernel.staged.is_some(),
         "numel-fed reshape must exercise the staged host partition"
     );
     assert_eq!(
-        local_claims(&plan.kernel_for_inspection().dag).len(),
+        local_claims(&kernel.dag).len(),
         1,
         "the partitioned kernel must retain the checker-owned local site: {:?}",
-        plan.kernel_for_inspection().dag
+        kernel.dag
     );
 }
 

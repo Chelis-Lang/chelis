@@ -102,8 +102,8 @@ pub use artifacts::{
 #[cfg(feature = "lowering-trace")]
 pub use lower::lower_checked_for_c_execution_with_trace;
 pub use lower::{
-    LoweredLibrary, lower_checked, lower_checked_for_c_execution, lower_checked_for_evaluation,
-    lower_checked_with_context, lower_checked_with_evaluation_context, lower_library,
+    LoweredLibrary, lower_checked, lower_checked_for_c_execution, lower_checked_with_context,
+    lower_library,
 };
 pub use semantic::{
     adopt_authenticated_library, analyze_prepared, analyze_prepared_library,
@@ -181,16 +181,6 @@ mod tests {
         );
         let replacement_dag =
             lower_library(&replacement).expect("the replacement library must lower");
-        let first_evaluation =
-            chelis_ir::lower::try_lower_program_to_evaluation_library(first.program()).unwrap();
-        lower_checked_with_evaluation_context(&checked, &first_evaluation)
-            .expect("the opaque evaluation library matches the sealed context");
-        let replacement_evaluation =
-            chelis_ir::lower::try_lower_program_to_evaluation_library(replacement.program())
-                .unwrap();
-        let error = lower_checked_with_evaluation_context(&checked, &replacement_evaluation)
-            .expect_err("plan lowering must reject a different checked library too");
-        assert!(error.to_string().contains("does not match"));
         let error = lower_checked_with_context(checked, &replacement_dag, LoweringMode::Strict)
             .expect_err("contextual lowering must reject another library DAG");
         assert!(error.to_string().contains("does not match"));

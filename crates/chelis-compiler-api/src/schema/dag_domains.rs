@@ -3,7 +3,9 @@ use super::{
     WireDag, WireDagContractError, WireDagNode, WireDimExpr, WireDimInfo, WireExtentWitnessSite,
     WireFusedInput, WireRiscOp, WireRtAxis, WireRtDim, host_index, wire_dim_info_equal,
 };
-use chelis_types::{ScalarValue, types::Prim};
+use chelis_ir::dag::RandomDraw;
+use chelis_ir::verify::{KeyGraph, KeyRole, verify_key_rules};
+use chelis_types::types::Prim;
 
 type Result<T> = std::result::Result<T, WireDagContractError>;
 fn reject(message: impl Into<String>) -> WireDagContractError {
@@ -54,17 +56,247 @@ fn bound(value: &WireRtDim) -> Result<()> {
     }
     Ok(())
 }
-fn float(value: ScalarValue, dtype: Prim) -> Result<f64> {
-    if value.prim() != dtype || !matches!(dtype, Prim::F16 | Prim::Bf16 | Prim::F32 | Prim::F64) {
-        return Err(reject(
-            "random parameter must have the exact active float dtype",
-        ));
+fn input_at<'a>(dag: &'a WireDag, node: &WireDagNode, slot: usize) -> Result<&'a WireDagNode> {
+    let id = node
+        .inputs
+        .get(slot)
+        .ok_or_else(|| reject("random operation is missing an input"))?;
+    let index =
+        usize::try_from(*id).map_err(|_| reject("input reference exceeds host capacity"))?;
+    dag.nodes
+        .get(index)
+        .ok_or_else(|| reject("input reference is outside the owning DAG"))
+}
+
+fn is_rank_zero(node: &WireDagNode, precision: &str) -> bool {
+    node.output_type.dims.is_empty() && node.output_type.precision == precision
+}
+
+/// A random node's operand layout (spec/10 §3.2, v17): the data or template,
+/// the controls, the key and one optional rank-zero Bool activation for the
+/// primitives and their adjoints; the optional literal seed, the controls and
+/// the optional activation for a draw key. Control values are checked at
+/// execution under [05-OP-8]/[05-OP-37], never here.
+fn random_node(dag: &WireDag, node: &WireDagNode, dtype: Prim) -> Result<()> {
+    let float = |prim: Prim| matches!(prim, Prim::F16 | Prim::Bf16 | Prim::F32 | Prim::F64);
+    let control = |slot: usize, draw_dtype: Prim, uniform: bool| -> Result<()> {
+        let value = input_at(dag, node, slot)?;
+        let admitted = value.output_type.dims.is_empty()
+            && Prim::parse_interchange_name(&value.output_type.precision)
+                .is_some_and(|prim| prim == draw_dtype || (uniform && prim == Prim::F32));
+        if admitted {
+            Ok(())
+        } else {
+            Err(reject(
+                "random control must be a rank-zero value of the draw's dtype (f32 bounds admitted)",
+            ))
+        }
+    };
+    let activation = |slot: usize| -> Result<()> {
+        match node.inputs.len() {
+            count if count == slot => Ok(()),
+            count if count == slot + 1 && is_rank_zero(input_at(dag, node, slot)?, "bool") => {
+                Ok(())
+            }
+            _ => Err(reject(
+                "random operation may end with exactly one rank-zero Bool activation",
+            )),
+        }
+    };
+    let key = |slot: usize| -> Result<()> {
+        let key = input_at(dag, node, slot)?;
+        if is_rank_zero(key, "key") && matches!(key.op, WireRiscOp::DrawKey { .. }) {
+            Ok(())
+        } else {
+            Err(reject(
+                "random operation requires a key produced by a draw key",
+            ))
+        }
+    };
+    let same_as_data = |data: &WireDagNode| {
+        data.output_type.precision == node.output_type.precision
+            && data.output_type.dims.len() == node.output_type.dims.len()
+            && data
+                .output_type
+                .dims
+                .iter()
+                .zip(&node.output_type.dims)
+                .all(|(a, b)| wire_dim_info_equal(a, b))
+    };
+    match &node.op {
+        WireRiscOp::UniformLike {} => {
+            if !float(dtype) || !same_as_data(input_at(dag, node, 0)?) {
+                return Err(reject(
+                    "uniform_like must preserve its float template's exact shape and dtype",
+                ));
+            }
+            control(1, dtype, true)?;
+            control(2, dtype, true)?;
+            if input_at(dag, node, 1)?.output_type.precision
+                != input_at(dag, node, 2)?.output_type.precision
+            {
+                return Err(reject("uniform_like bounds must share one dtype"));
+            }
+            key(3)?;
+            activation(4)
+        }
+        WireRiscOp::Dropout {} | WireRiscOp::DropoutReplay {} => {
+            if !float(dtype) || !same_as_data(input_at(dag, node, 0)?) {
+                return Err(reject(
+                    "dropout must preserve its float data input's exact shape and dtype",
+                ));
+            }
+            control(1, dtype, false)?;
+            key(2)?;
+            activation(3)
+        }
+        WireRiscOp::UniformBoundAdjoint { .. } => {
+            let template = input_at(dag, node, 0)?;
+            if !float(dtype)
+                || !node.output_type.dims.is_empty()
+                || template.output_type.precision != node.output_type.precision
+                || !same_as_data_shape(template, input_at(dag, node, 1)?)
+            {
+                return Err(reject(
+                    "a uniform bound adjoint is a rank-zero value of its template's dtype over a same-shaped cotangent",
+                ));
+            }
+            key(2)?;
+            activation(3)
+        }
+        WireRiscOp::DrawKey {
+            handler,
+            draw,
+            dtype: draw_dtype,
+        } => {
+            let draw_dtype = Prim::parse_interchange_name(draw_dtype)
+                .filter(|prim| float(*prim))
+                .ok_or_else(|| reject("draw key requires an active float draw dtype"))?;
+            if !is_rank_zero(node, "key") {
+                return Err(reject("draw key produces one rank-zero key"));
+            }
+            let seed_slots = match handler {
+                super::WireRandomHandler::Inherited => 0,
+                super::WireRandomHandler::Scoped { .. } => {
+                    let seed = input_at(dag, node, 0)?;
+                    if !is_rank_zero(seed, "int64") || !matches!(seed.op, WireRiscOp::Const { .. })
+                    {
+                        return Err(reject(
+                            "a scoped draw key's first input is its rank-zero int64 literal seed",
+                        ));
+                    }
+                    1
+                }
+            };
+            let (controls, uniform) = match draw {
+                super::WireRandomDraw::Dropout => (1, false),
+                super::WireRandomDraw::UniformLike => (2, true),
+            };
+            for slot in seed_slots..seed_slots + controls {
+                control(slot, draw_dtype, uniform)?;
+            }
+            activation(seed_slots + controls)
+        }
+        _ => unreachable!("random_node validates only random operations"),
     }
-    let number = value.as_f64_lossy(); // Every admitted float widens exactly here.
-    if !number.is_finite() {
-        return Err(reject("random parameter must be finite"));
+}
+
+fn same_as_data_shape(template: &WireDagNode, cotangent: &WireDagNode) -> bool {
+    template.output_type.dims.len() == cotangent.output_type.dims.len()
+        && template
+            .output_type
+            .dims
+            .iter()
+            .zip(&cotangent.output_type.dims)
+            .all(|(a, b)| wire_dim_info_equal(a, b))
+}
+
+/// spec/10 §3.2's key rules, applied by the IR verifier's own
+/// implementation over the decoded graph. Every reference has already been
+/// checked to name an earlier node, and every root a node of this graph.
+fn key_rules(dag: &WireDag) -> Result<()> {
+    let mut errors = Vec::new();
+    verify_key_rules(&DecodedKeys(dag), &mut errors);
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(reject(errors.join("; ")))
     }
-    Ok(number)
+}
+
+fn wire_position(id: u64) -> Option<usize> {
+    usize::try_from(id).ok()
+}
+
+/// The decoded graph as the key rules read it. A private view, so the rules
+/// add nothing to `WireDag`'s public surface.
+struct DecodedKeys<'a>(&'a WireDag);
+
+impl KeyGraph for DecodedKeys<'_> {
+    fn node_count(&self) -> usize {
+        self.0.nodes.len()
+    }
+
+    fn role(&self, node: usize) -> KeyRole {
+        match self.0.nodes.get(node).map(|node| &node.op) {
+            Some(WireRiscOp::DrawKey {
+                handler,
+                draw,
+                dtype,
+            }) => {
+                // `random_node` has already rejected a draw key whose dtype
+                // is not an active float. Were one to reach the rules, it
+                // would read as no draw key, and its key output would fail.
+                let Some(dtype) = Prim::parse_interchange_name(dtype) else {
+                    return KeyRole::Other;
+                };
+                KeyRole::DrawKey {
+                    scoped: matches!(handler, super::WireRandomHandler::Scoped { .. }),
+                    draw: match draw {
+                        super::WireRandomDraw::Dropout => RandomDraw::Dropout,
+                        super::WireRandomDraw::UniformLike => RandomDraw::UniformLike,
+                    },
+                    dtype,
+                }
+            }
+            Some(WireRiscOp::Dropout {}) => KeyRole::Dropout,
+            Some(WireRiscOp::UniformLike {}) => KeyRole::UniformLike,
+            Some(WireRiscOp::DropoutReplay {}) => KeyRole::DropoutReplay,
+            Some(WireRiscOp::UniformBoundAdjoint { .. }) => KeyRole::UniformBoundAdjoint,
+            _ => KeyRole::Other,
+        }
+    }
+
+    fn dtype(&self, node: usize) -> Option<Prim> {
+        Prim::parse_interchange_name(&self.0.nodes.get(node)?.output_type.precision)
+    }
+
+    fn same_type(&self, left: usize, right: usize) -> bool {
+        match (self.0.nodes.get(left), self.0.nodes.get(right)) {
+            (Some(left), Some(right)) => {
+                left.output_type.precision == right.output_type.precision
+                    && same_as_data_shape(left, right)
+            }
+            _ => false,
+        }
+    }
+
+    fn input(&self, node: usize, slot: usize) -> Option<usize> {
+        wire_position(*self.0.nodes.get(node)?.inputs.get(slot)?)
+    }
+
+    fn dependencies(&self, node: usize) -> impl Iterator<Item = usize> + '_ {
+        self.0
+            .nodes
+            .get(node)
+            .into_iter()
+            .flat_map(|node| node.shape_deps.iter().copied())
+            .filter_map(wire_position)
+    }
+
+    fn roots(&self) -> impl Iterator<Item = usize> + '_ {
+        self.0.roots.iter().copied().filter_map(wire_position)
+    }
 }
 
 fn input_rank(dag: &WireDag, node: &WireDagNode, slot: usize) -> Option<usize> {
@@ -113,8 +345,9 @@ fn is_same_shape_result_op(op: &WireRiscOp) -> bool {
             | WireRiscOp::Floor
             | WireRiscOp::Ceil
             | WireRiscOp::Round
-            | WireRiscOp::UniformLike { .. }
-            | WireRiscOp::Dropout { .. }
+            | WireRiscOp::UniformLike {}
+            | WireRiscOp::Dropout {}
+            | WireRiscOp::DropoutReplay {}
             | WireRiscOp::Cast { .. }
             | WireRiscOp::CastTrunc { .. }
             | WireRiscOp::FusedElem { .. }
@@ -730,64 +963,11 @@ pub(super) fn validate(dag: &WireDag) -> Result<()> {
                     expression(value)?;
                 }
             }
-            WireRiscOp::UniformLike { low, .. } | WireRiscOp::Dropout { rate: low, seed: _ } => {
-                let template = input(dag, node)?;
-                if matches!(&node.op, WireRiscOp::UniformLike { .. }) {
-                    if !matches!(node.inputs.len(), 1 | 2) {
-                        return Err(reject(
-                            "uniform_like expects one template and at most one activation",
-                        ));
-                    }
-                    if let [_, activation] = node.inputs.as_slice() {
-                        let index = usize::try_from(*activation)
-                            .map_err(|_| reject("input reference exceeds host capacity"))?;
-                        let activation = dag
-                            .nodes
-                            .get(index)
-                            .ok_or_else(|| reject("input reference is outside the owning DAG"))?;
-                        // The IR's path-sensitive Random form adds a scalar
-                        // Bool activation after the template (spec/10 §3.2).
-                        if activation.output_type.precision != "bool"
-                            || !activation.output_type.dims.is_empty()
-                        {
-                            return Err(reject(
-                                "uniform_like requires a scalar Bool path activation",
-                            ));
-                        }
-                    }
-                } else if node.inputs.len() != 1 {
-                    return Err(reject("dropout expects exactly one data input"));
-                }
-                if template.output_type.precision != node.output_type.precision
-                    || template.output_type.dims.len() != node.output_type.dims.len()
-                    || template
-                        .output_type
-                        .dims
-                        .iter()
-                        .zip(&node.output_type.dims)
-                        .any(|(a, b)| !wire_dim_info_equal(a, b))
-                {
-                    return Err(reject(
-                        "random operation must preserve its data input's exact shape and dtype",
-                    ));
-                }
-                let low = float(*low, dtype)?;
-                if let WireRiscOp::UniformLike { high, .. } = &node.op {
-                    let high = float(*high, dtype)?;
-                    let finite_difference = if dtype == Prim::F64 {
-                        (high - low).is_finite()
-                    } else {
-                        ((high as f32) - (low as f32)).is_finite()
-                    };
-                    if low > high || !finite_difference {
-                        return Err(reject(
-                            "uniform bounds must be ordered with finite difference at the arithmetic width",
-                        ));
-                    }
-                } else if !(0.0..1.0).contains(&low) {
-                    return Err(reject("dropout rate must satisfy 0 <= rate < 1"));
-                }
-            }
+            WireRiscOp::UniformLike {}
+            | WireRiscOp::Dropout {}
+            | WireRiscOp::DropoutReplay {}
+            | WireRiscOp::UniformBoundAdjoint { .. }
+            | WireRiscOp::DrawKey { .. } => random_node(dag, node, dtype)?,
             _ => {}
         }
     }
@@ -798,5 +978,5 @@ pub(super) fn validate(dag: &WireDag) -> Result<()> {
     {
         return Err(reject("root reference is outside the owning DAG"));
     }
-    Ok(())
+    key_rules(dag)
 }

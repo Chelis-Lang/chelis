@@ -9262,26 +9262,17 @@ fn build_c_with_seed_uniform_like_succeeds() {
         c_src.contains(&format!("{seed} = 7;"))
             && c_src.contains(&format!("*__chelis_rng = {frame};"))
     });
-    // Baked operands are ordinal 0's [05-RNG-1] draw key,
-    // `seed ^ rotl64(splitmix64(0), 17)` with `splitmix64(0)` the standard
-    // SplitMix64 constant 0xe220a8397b1dcdaf: seed 7's when the handler is
-    // baked, and the seed-0 placeholder that the active host handler
-    // replaces when the helper is lowered outside it.
-    let ordinal_zero_key = |seed: u64| seed ^ 0xe220_a839_7b1d_cdaf_u64.rotate_left(17);
+    // A draw key reads either a `with seed(7)` region lowered inside the
+    // kernel, whose literal seed it carries, or the installed seed-7 host
+    // handler's next ordinal.
+    let scoped_seed_seven =
+        c_src.contains("chelis_random_key(UINT64_C(0x0000000000000007), __chelis_scoped_counter_");
     let active_host_seed = installs_seed_seven
-        && c_src.contains(
-            "#define CHELIS_EFFECTIVE_UNIFORM_KEY(key) chelis_effective_uniform_key(__chelis_rng, key)",
-        )
-        && c_src.contains(&format!(
-            "CHELIS_EFFECTIVE_UNIFORM_KEY({}ULL",
-            ordinal_zero_key(0)
-        ));
+        && c_src.contains("chelis_random_key(__chelis_rng->seed, __chelis_rng->counter++)");
     assert!(
-        c_src.contains(&format!(
-            "CHELIS_EFFECTIVE_UNIFORM_KEY({}ULL",
-            ordinal_zero_key(7)
-        )) || active_host_seed,
-        "expected baked seed 7's draw key or an installed seed-7 host handler at the effective key wrapper; got:\n{c_src}"
+        scoped_seed_seven || active_host_seed,
+        "expected a draw key of the literal seed-7 region or of an installed seed-7 host \
+         handler; got:\n{c_src}"
     );
     assert!(
         !c_src.contains("chelis_uniform_sample_f32(0ULL"),
@@ -9666,8 +9657,10 @@ fn concrete_static_rate_local_helper_executes_eval_and_native_c() {
     );
     assert_eq!(String::from_utf8(result.stdout).unwrap(), expected);
 
-    // The public unresolved-rate entry is still a compile rejection. This
-    // program has no export list, so every top-level def is public (§2 Surf).
+    // [05-OP-37]: a runtime rate is an ordinary operand (chelis#2411). This
+    // program has no export list, so every top-level def is public (§2 Surf),
+    // and a public tensor entry owns no Random handler: its inherited draw is
+    // refused at build time instead of drawing seed zero.
     write_file(
         &source,
         "def keep(x: tensor[4, f32], rate: f32) -> tensor[4, f32] = dropout(x, rate)\n",
@@ -9678,15 +9671,20 @@ fn concrete_static_rate_local_helper_executes_eval_and_native_c() {
         .arg(&source)
         .assert()
         .success();
-    Command::cargo_bin("chelis")
+    let runtime_rate = dir.path().join("runtime_rate");
+    let refused = Command::cargo_bin("chelis")
         .unwrap()
         .arg("build")
         .arg(&source)
         .arg("--output")
-        .arg(dir.path().join("unresolved"))
+        .arg(&runtime_rate)
         .assert()
-        .failure()
-        .stderr(predicate::str::contains("statically-resolvable rate"));
+        .failure();
+    let stderr = String::from_utf8_lossy(&refused.get_output().stderr).into_owned();
+    assert!(
+        stderr.contains("public tensor entry cannot receive inherited Random"),
+        "{stderr}"
+    );
 }
 
 /// [05-OP-37]/[05-RNG-1]: a concrete call of a dtype-generic static-rate

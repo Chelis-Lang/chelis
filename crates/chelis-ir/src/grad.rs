@@ -58,6 +58,12 @@ pub enum AdRejectionReason {
     /// adjoint is `Gather`) when an accumulating semantic is
     /// acceptable.
     NonDeterministicAtDuplicateIndices,
+    /// A differentiated parameter reaches a `dropout` rate through operand
+    /// slots that all have an adjoint contract. The rate selects which
+    /// elements the mask keeps, and the language does not differentiate that
+    /// selection ([05-OP-37], chelis#2421). `stop_gradient(rate)` treats such
+    /// a rate as a constant.
+    RandomSelectionParameter,
     /// The forward DAG was empty or the output node did not exist.
     EmptyOrMissingOutput,
     /// The output node's type is not a scalar float — reverse-mode AD
@@ -132,6 +138,14 @@ impl fmt::Display for AdError {
                      adjoint); use scatter_add (whose adjoint is gather) or wrap \
                      {op} in a stop-gradient"
                 ),
+                AdRejectionReason::RandomSelectionParameter => write!(
+                    f,
+                    "grad: a differentiated parameter reaches the rate of {op}, which selects \
+                     the kept elements and is not differentiable ([05-OP-37]); the spec's \
+                     escape hatch is stop_gradient(rate), which treats the rate as a constant \
+                     but is not implemented yet (chelis#1312), so compute the rate from values \
+                     that are not differentiated"
+                ),
                 AdRejectionReason::EmptyOrMissingOutput => write!(
                     f,
                     "grad: cannot differentiate ({op}: empty DAG or missing output node)"
@@ -159,23 +173,13 @@ pub fn grad_dag_checked(
     output: NodeId,
     wrt: &[NodeId],
 ) -> Result<GradResult, AdError> {
-    grad_dag_checked_impl(forward, output, wrt, None)
-}
-
-pub(crate) fn grad_dag_checked_with_execution(
-    forward: &Dag,
-    output: NodeId,
-    wrt: &[NodeId],
-    execution: &mut crate::evaluation::ExecutionMetadata,
-) -> Result<GradResult, AdError> {
-    grad_dag_checked_impl(forward, output, wrt, Some(execution))
+    grad_dag_checked_impl(forward, output, wrt)
 }
 
 fn grad_dag_checked_impl(
     forward: &Dag,
     output: NodeId,
     wrt: &[NodeId],
-    execution: Option<&mut crate::evaluation::ExecutionMetadata>,
 ) -> Result<GradResult, AdError> {
     if forward.is_empty() {
         return Err(AdError::NotSupported {
@@ -228,16 +232,27 @@ fn grad_dag_checked_impl(
                         live[updates.0] = true;
                     }
                 }
-                // UniformLike's optional second input is the scalar Bool
-                // activation for path-sensitive handled Random execution.
-                // Its adjoint routes zero only to the numeric template, so
-                // the control edge must not pull logical predicate producers
-                // into structural rejection analysis.
-                RiscOp::UniformLike { .. } => {
-                    if let Some(template) = node.inputs.first() {
-                        live[template.0] = true;
+                // Key-operand draws: the key and activation are discrete
+                // controls, and a dropout rate is a selection whose only
+                // question is the rejection below. A uniform draw's template
+                // stays live, and its bounds carry their reparameterisation
+                // adjoints.
+                RiscOp::Dropout | RiscOp::DropoutReplay => {
+                    if let Some(data) = node.inputs.first() {
+                        live[data.0] = true;
                     }
                 }
+                RiscOp::UniformLike => {
+                    for bound in node.inputs.iter().take(3) {
+                        live[bound.0] = true;
+                    }
+                }
+                RiscOp::UniformBoundAdjoint { .. } => {
+                    if let Some(cotangent) = node.inputs.get(1) {
+                        live[cotangent.0] = true;
+                    }
+                }
+                RiscOp::DrawKey { .. } => {}
                 // chelis#1464 / [05-OP-68]: input 0 is the guard's firing
                 // predicate, a control edge, and input 1 is the value the
                 // result carries. Only the fallback is on the gradient path.
@@ -264,6 +279,7 @@ fn grad_dag_checked_impl(
             }
         }
     }
+    reject_random_selection_parameters(forward, &live, wrt)?;
     for node in forward.nodes() {
         if !live[node.id.0] {
             continue;
@@ -391,10 +407,76 @@ fn grad_dag_checked_impl(
         }
     }
 
-    grad_dag_result(forward, output, wrt, execution).map_err(|why| AdError::NotSupported {
+    grad_dag_result(forward, output, wrt).map_err(|why| AdError::NotSupported {
         op: "<unknown>",
         reason: AdRejectionReason::Other(format!("failed to construct backward DAG ({why})")),
     })
+}
+
+/// [05-OP-37]'s rate rejection. A parameter reaches a node when the node is
+/// the parameter, or the node has a float output and one of its operand
+/// slots that carries an adjoint contract reads a reached node. Zero-cotangent
+/// slots (a uniform template, the random controls, a comparison operand) and
+/// non-float values break the path, as a `stop_gradient` barrier would. A
+/// live dropout, or dropout replay, whose rate is reached is rejected.
+fn reject_random_selection_parameters(
+    forward: &Dag,
+    live: &[bool],
+    wrt: &[NodeId],
+) -> Result<(), AdError> {
+    if !forward
+        .nodes()
+        .iter()
+        .any(|node| matches!(node.op, RiscOp::Dropout | RiscOp::DropoutReplay))
+    {
+        return Ok(());
+    }
+    let mut reached = vec![false; forward.len()];
+    for parameter in wrt {
+        if let Some(slot) = reached.get_mut(parameter.0) {
+            *slot = true;
+        }
+    }
+    for node in forward.nodes() {
+        if reached[node.id.0] || !node.output_type.precision.is_float() {
+            continue;
+        }
+        let carrying: &[NodeId] = match &node.op {
+            RiscOp::Shrink { .. }
+            | RiscOp::Stride { .. }
+            | RiscOp::Pad { .. }
+            | RiscOp::Reshape { .. }
+            | RiscOp::Gather { .. }
+            | RiscOp::Dropout
+            | RiscOp::DropoutReplay => &node.inputs[..node.inputs.len().min(1)],
+            RiscOp::ScatterAdd { .. } => {
+                reached[node.id.0] = [0, 2]
+                    .iter()
+                    .filter_map(|slot| node.inputs.get(*slot))
+                    .any(|input| reached[input.0]);
+                continue;
+            }
+            RiscOp::UniformLike => &node.inputs[1..3],
+            RiscOp::UniformBoundAdjoint { .. } => &node.inputs[1..2],
+            RiscOp::GuardedFail { .. } => &node.inputs[1..2],
+            RiscOp::Where => &node.inputs[1..],
+            RiscOp::Compare(_) | RiscOp::Shape { .. } | RiscOp::DrawKey { .. } => &[],
+            _ => &node.inputs,
+        };
+        reached[node.id.0] = carrying.iter().any(|input| reached[input.0]);
+    }
+    for node in forward.nodes() {
+        if live[node.id.0]
+            && matches!(node.op, RiscOp::Dropout | RiscOp::DropoutReplay)
+            && node.inputs.get(1).is_some_and(|rate| reached[rate.0])
+        {
+            return Err(AdError::NotSupported {
+                op: risc_op_name(&node.op),
+                reason: AdRejectionReason::RandomSelectionParameter,
+            });
+        }
+    }
+    Ok(())
 }
 
 /// Canonical snake-case name for a `RiscOp` for use in `AdError`'s
@@ -431,8 +513,11 @@ pub fn risc_op_name(op: &RiscOp) -> &'static str {
         RiscOp::Floor => "floor",
         RiscOp::Ceil => "ceil",
         RiscOp::Round => "round",
-        RiscOp::UniformLike { .. } => "uniform_like",
-        RiscOp::Dropout { .. } => "dropout",
+        RiscOp::UniformLike => "uniform_like",
+        RiscOp::Dropout => "dropout",
+        RiscOp::DropoutReplay => "dropout_replay",
+        RiscOp::UniformBoundAdjoint { .. } => "uniform_bound_adjoint",
+        RiscOp::DrawKey { .. } => "draw_key",
         RiscOp::Sum { .. } => "sum",
         RiscOp::Count { .. } => "count",
         RiscOp::MaxReduce { .. } => "max_reduce",
@@ -510,7 +595,7 @@ fn stamp_grad_marker(dag: &mut Dag, dag_size_before: usize, forward_node: &DagNo
 ///
 /// Returns `None` if the forward DAG is empty or the output node doesn't exist.
 pub fn grad_dag(forward: &Dag, output: NodeId, wrt: &[NodeId]) -> Option<GradResult> {
-    grad_dag_result(forward, output, wrt, None).ok()
+    grad_dag_result(forward, output, wrt).ok()
 }
 
 /// Like [`grad_dag`] but returns a structured failure string instead of
@@ -520,12 +605,7 @@ pub fn grad_dag(forward: &Dag, output: NodeId, wrt: &[NodeId]) -> Option<GradRes
 /// (`grad_dag_checked` and its user-facing lowering error) can report
 /// *why* the backward DAG could not be built rather than the legacy
 /// opaque "unsupported op or verification failure".
-fn grad_dag_result(
-    forward: &Dag,
-    output: NodeId,
-    wrt: &[NodeId],
-    mut execution: Option<&mut crate::evaluation::ExecutionMetadata>,
-) -> Result<GradResult, String> {
+fn grad_dag_result(forward: &Dag, output: NodeId, wrt: &[NodeId]) -> Result<GradResult, String> {
     if forward.is_empty() {
         return Err("grad: forward DAG is empty".to_string());
     }
@@ -594,14 +674,13 @@ fn grad_dag_result(
         let node = forward.get(node_id).unwrap().clone();
         let dag_size_before = dag.len();
         let input_grads =
-            compute_adjoints(&node, grad_out, forward, &mut dag, execution.as_deref_mut())
-                .ok_or_else(|| {
-                    format!(
-                        "grad: no reverse-mode adjoint is defined for `{}` (node {})",
-                        risc_op_name(&node.op),
-                        node.id.0
-                    )
-                })?;
+            compute_adjoints(&node, grad_out, forward, &mut dag).ok_or_else(|| {
+                format!(
+                    "grad: no reverse-mode adjoint is defined for `{}` (node {})",
+                    risc_op_name(&node.op),
+                    node.id.0
+                )
+            })?;
         // Every node added inside compute_adjoints is a backward
         // (adjoint) node for `node`. Stamp the grad marker + the
         // forward span onto each.
@@ -642,50 +721,9 @@ fn grad_dag_result(
     // the pruning below keeps each declarer and its bound-scalar chain.
     crate::dag::record_runtime_dim_shape_deps(&mut dag);
 
-    let retained = if execution.is_some() {
-        forward
-            .nodes()
-            .iter()
-            .filter(|node| !matches!(node.op, RiscOp::Load { .. }))
-            .map(|node| node.id)
-            .collect::<Vec<_>>()
-    } else {
-        Vec::new()
-    };
-    let (dag, output_node, grad_nodes, remap) =
-        prune_to_requested_outputs(&dag, output, &grad_nodes, &retained);
+    let (dag, output_node, grad_nodes) = prune_to_requested_outputs(&dag, output, &grad_nodes);
 
-    if let Some(execution) = execution {
-        // An unrequested backward cotangent may disappear. Forward entry
-        // sites and source-order obligations may not. Only this AD pruning
-        // boundary is allowed to remove a generated, unused replay.
-        execution.sites = execution
-            .sites
-            .to_sorted()
-            .into_iter()
-            .filter(|(node, site)| {
-                !matches!(site, crate::evaluation::RandomSite::Replay { .. })
-                    || remap.contains_key(node)
-            })
-            .map(|(node, site)| (*node, *site))
-            .collect();
-        execution.remap(&remap)?;
-        execution.complete(&dag)?;
-    }
-
-    // Retained source computations are execution roots, not returned values.
-    // Verify exactly those additional roots without weakening any structural
-    // check or changing the public GradResult's value-root interface.
-    let mut verification_dag = dag.clone();
-    for node in retained {
-        let mapped = remap[&node];
-        // A source Drop remains in the retained graph and is verified as
-        // a terminal instruction, never as an additional value root.
-        if !matches!(verification_dag.get(mapped).unwrap().op, RiscOp::Drop) {
-            verification_dag.add_root(mapped);
-        }
-    }
-    let verify_errors = crate::verify::verify(&verification_dag);
+    let verify_errors = crate::verify::verify(&dag);
     if !verify_errors.is_empty() {
         return Err(format!(
             "grad: constructed backward DAG failed verification: {}",
@@ -750,21 +788,12 @@ fn prune_to_requested_outputs(
     dag: &Dag,
     output: NodeId,
     grad_nodes: &UnordMap<NodeId, NodeId>,
-    retained: &[NodeId],
-) -> (
-    Dag,
-    NodeId,
-    UnordMap<NodeId, NodeId>,
-    UnordMap<NodeId, NodeId>,
-) {
+) -> (Dag, NodeId, UnordMap<NodeId, NodeId>) {
     if dag.is_empty() {
-        return (Dag::new(), NodeId(0), UnordMap::new(), UnordMap::new());
+        return (Dag::new(), NodeId(0), UnordMap::new());
     }
 
     let mut live = vec![false; dag.len()];
-    for id in retained {
-        live[id.0] = true;
-    }
     for &root in dag.roots() {
         live[root.0] = true;
     }
@@ -772,8 +801,11 @@ fn prune_to_requested_outputs(
         // chelis#2368: `Store` and every unconditional effect. grad has its
         // own pruner, separate from `optimize::dead_code_eliminate`, so the
         // seed has to be repeated here — the definition is shared even where
-        // the loop is not.
-        if matches!(node.op, RiscOp::Store { .. }) || node.op.is_unconditional_effect() {
+        // the loop is not. A forward draw key advances its handler whether or
+        // not the pruned gradient reads its key.
+        if matches!(node.op, RiscOp::Store { .. } | RiscOp::DrawKey { .. })
+            || node.op.is_unconditional_effect()
+        {
             live[node.id.0] = true;
         }
     }
@@ -868,13 +900,7 @@ fn prune_to_requested_outputs(
     let new_output = *id_map
         .get(&output.0)
         .unwrap_or_else(|| panic!("output node {output:?} missing after grad pruning"));
-
-    let remap = id_map
-        .into_sorted()
-        .into_iter()
-        .map(|(old, new)| (NodeId(old), new))
-        .collect();
-    (new_dag, new_output, new_grad_nodes, remap)
+    (new_dag, new_output, new_grad_nodes)
 }
 
 /// Compute adjoint contributions for each input of the given node.
@@ -884,7 +910,6 @@ fn compute_adjoints(
     g: NodeId,
     forward: &Dag,
     dag: &mut Dag,
-    execution: Option<&mut crate::evaluation::ExecutionMetadata>,
 ) -> Option<Vec<(NodeId, NodeId)>> {
     match &node.op {
         // --- Binary elementwise ---
@@ -1237,41 +1262,72 @@ fn compute_adjoints(
             let zb = dag.add_node(RiscOp::synth_const(ty_b.precision, 0.0), vec![], ty_b, None);
             Some(vec![(a, za), (b, zb)])
         }
-        RiscOp::UniformLike { .. } => {
-            let x = node.inputs[0];
-            let ty = forward.get(x).unwrap().output_type.clone();
-            let zero = dag.add_node(RiscOp::synth_const(ty.precision, 0.0), vec![], ty, None);
-            Some(vec![(x, zero)])
-        }
-        RiscOp::Dropout { rate, seed } => {
-            let x = node.inputs[0];
-            // Replay owns the forward mask's exact layout. A checked reshape
-            // can retain a computed input axis while dropout's result carries
-            // its proven literal claim; substituting that input type here
-            // would change the replay contract despite identical shapes.
-            let ty = node.output_type.clone();
-            let dx = dag.add_node(
-                RiscOp::Dropout {
-                    rate: *rate,
-                    seed: *seed,
-                },
-                vec![g],
-                ty,
+        // [05-OP-37]: the input's pathwise adjoint replays the forward mask
+        // through the key edge. The key and activation are discrete and the
+        // rate's exact zero cotangent is omitted, as `GuardedFail` omits its
+        // predicate: queuing a zero would walk the rate's producers.
+        RiscOp::Dropout | RiscOp::DropoutReplay => {
+            let data = node.inputs[0];
+            let mut inputs = vec![g, node.inputs[1], node.inputs[2]];
+            inputs.extend(node.inputs.get(3).copied());
+            let replay = dag.add_node(
+                RiscOp::DropoutReplay,
+                inputs,
+                node.output_type.clone(),
                 None,
             );
-            if let Some(execution) = execution {
-                let crate::evaluation::RandomSite::Forward { draw, .. } =
-                    *execution.sites.get(&node.id)?
-                else {
-                    return None;
-                };
-                execution
-                    .sites
-                    .insert(dx, crate::evaluation::RandomSite::Replay { draw });
-            }
-            Some(vec![(x, dx)])
+            Some(vec![(data, replay)])
         }
-
+        // [05-OP-8]: zero to the template and the reparameterisation adjoint
+        // to each bound, read from the forward key. A bound stored at f32
+        // under a narrower or wider template (chelis#1295) takes the checked
+        // cast of the template-dtype adjoint.
+        RiscOp::UniformLike => {
+            let template = node.inputs[0];
+            let template_ty = forward.get(template).unwrap().output_type.clone();
+            let zero = dag.add_node(
+                RiscOp::synth_const(template_ty.precision, 0.0),
+                vec![],
+                template_ty,
+                None,
+            );
+            let mut contributions = vec![(template, zero)];
+            for (slot, bound) in [
+                (1, crate::dag::UniformBound::Low),
+                (2, crate::dag::UniformBound::High),
+            ] {
+                let mut inputs = vec![template, g, node.inputs[3]];
+                inputs.extend(node.inputs.get(4).copied());
+                let adjoint = dag.add_node(
+                    RiscOp::UniformBoundAdjoint { bound },
+                    inputs,
+                    TensorType {
+                        dims: vec![],
+                        precision: node.output_type.precision,
+                    },
+                    None,
+                );
+                let bound_ty = forward.get(node.inputs[slot]).unwrap().output_type.clone();
+                let adjoint = if bound_ty.precision == node.output_type.precision {
+                    adjoint
+                } else {
+                    dag.add_node(
+                        RiscOp::Cast {
+                            new_precision: bound_ty.precision,
+                        },
+                        vec![adjoint],
+                        bound_ty,
+                        None,
+                    )
+                };
+                contributions.push((node.inputs[slot], adjoint));
+            }
+            Some(contributions)
+        }
+        // No higher-order adjoint is defined for the bound adjoint yet.
+        RiscOp::UniformBoundAdjoint { .. } => None,
+        // A key receives no cotangent, so no contribution ever reaches it.
+        RiscOp::DrawKey { .. } => Some(Vec::new()),
         // --- Reduction ---
         RiscOp::Sum { axis, .. } => {
             // d/dx sum(x, axis) = expand(g, axis, original_size)

@@ -106,14 +106,19 @@ fn wire_dag_operation_vocabulary_is_pinned_to_its_schema_version() {
         // Version 16 (chelis#1464): the guarded abort that keeps a
         // transformed `fail(...)` branch from becoming a placeholder value.
         "guarded_fail",
+        // Version 17 (chelis#2413): key-operand random nodes, their adjoint
+        // replays, and the counter-stream draw key.
+        "dropout_replay",
+        "uniform_bound_adjoint",
+        "draw_key",
     ];
     actual.sort();
     expected.sort();
     assert_eq!(
-        WIRE_DAG_SCHEMA_VERSION, 16,
+        WIRE_DAG_SCHEMA_VERSION, 17,
         "review vocabulary and migration history with every version change"
     );
-    assert_eq!(actual.len(), 66);
+    assert_eq!(actual.len(), 69);
     assert_eq!(
         actual, expected,
         "operation changes require a schema-version and migration-history review"

@@ -1460,11 +1460,7 @@ fn strict_entry_decline_error(reason: EntryLaneDecline) -> CompilerError {
 /// The entry lane's claim/decline decision for one compilation.
 enum EntryLaneOutcome<'a> {
     /// The lane claims the compilation: emit `dag` scoped to `entry`.
-    Claim {
-        entry: &'a str,
-        dag: Dag,
-        execution: Option<chelis_ir::evaluation::EvaluationPlan>,
-    },
+    Claim { entry: &'a str, dag: Dag },
     /// The lane declines; the host lane owns the compilation.
     Decline(EntryLaneDecline),
 }
@@ -1529,8 +1525,9 @@ fn entry_lane_decision<'a>(
     {
         return Ok(Decline(EntryLaneDecline::HasGlobals));
     }
-    // A newly admitted fixed-control callable must not inherit the legacy
-    // host default of silently choosing the last tensor def.
+    // A callable the C execution lane selected for its dropout must not
+    // inherit the legacy host default of silently choosing the last tensor
+    // def.
     let legacy_host_selection =
         host_only && !(allow_execution && strictness == EntryStrictness::Strict);
     let Some(entry) =
@@ -1548,28 +1545,17 @@ fn entry_lane_decision<'a>(
             entry: entry.to_string(),
         }));
     }
-    let execution = if allow_execution {
-        lower_selected_execution_plan(
-            checked,
-            entry,
-            #[cfg(feature = "compilation-trace")]
-            trace_out,
-        )?
-    } else {
-        None
+    let Some(dag) = lower_selected_entry_dag(
+        checked,
+        entry,
+        #[cfg(feature = "compilation-trace")]
+        trace_out,
+    ) else {
+        return Ok(Decline(EntryLaneDecline::LoweringFailed {
+            entry: entry.to_string(),
+        }));
     };
-    let dag = if let Some(plan) = &execution {
-        // Inspection for ABI metadata after the sealed plan is consumed. This
-        // clone is never emitted or paired with substitute execution metadata.
-        plan.dag_for_inspection().clone()
-    } else {
-        let Some(dag) = chelis_ir::host::lower_named_tensor_entry_dag(checked, entry) else {
-            return Ok(Decline(EntryLaneDecline::LoweringFailed {
-                entry: entry.to_string(),
-            }));
-        };
-        chelis_ir::optimize::dead_code_eliminate(&dag)
-    };
+    let dag = chelis_ir::optimize::dead_code_eliminate(&dag);
     if dag.roots().is_empty() {
         return Ok(Decline(EntryLaneDecline::EmptyAfterDce {
             entry: entry.to_string(),
@@ -1596,11 +1582,7 @@ fn entry_lane_decision<'a>(
             extra,
         }));
     }
-    Ok(EntryLaneOutcome::Claim {
-        entry,
-        dag,
-        execution,
-    })
+    Ok(EntryLaneOutcome::Claim { entry, dag })
 }
 
 /// Compile to a callable execution artifact: the CALLABLE surface
@@ -1615,26 +1597,81 @@ pub fn compile_for_execution(request: CompileRequest) -> Result<CompiledExecutio
     compile_for_execution_impl(request, EntryStrictness::Strict)
 }
 
-fn lower_selected_execution_plan(
+/// Whether a lowered graph draws `dropout`.
+fn dag_draws_dropout(dag: &Dag) -> bool {
+    dag.nodes().iter().any(|node| {
+        matches!(
+            node.op,
+            RiscOp::DrawKey {
+                draw: chelis_ir::dag::RandomDraw::Dropout,
+                ..
+            }
+        )
+    })
+}
+
+/// The entry-scoped graph of a resolved entry. An entry whose projection of
+/// the program graph draws `dropout` is lowered again from its own checked
+/// source, as the host lane's entry decision lowers it, so the emitted graph
+/// and any trace capture come from one lowering; every other entry keeps its
+/// projection.
+fn entry_dag_from_source(
+    checked: &CheckedProgram,
+    entry: &str,
+    ordinary: Dag,
+    #[cfg(feature = "compilation-trace")] trace_out: Option<
+        &mut Option<chelis_ir::lowering_trace::HelperLoweringTrace>,
+    >,
+) -> Result<Dag> {
+    if !dag_draws_dropout(&ordinary) {
+        return Ok(ordinary);
+    }
+    let dag = lower_selected_entry_dag(
+        checked,
+        entry,
+        #[cfg(feature = "compilation-trace")]
+        trace_out,
+    )
+    .ok_or_else(|| {
+        stage_error(
+            "compile",
+            format!("tensor entry `{entry}` draws `dropout` but its own source did not lower"),
+            GeneralKind::CompileError,
+        )
+    })?;
+    Ok(chelis_ir::optimize::dead_code_eliminate(&dag))
+}
+
+/// Lower the selected tensor entry. Under `compilation-trace` the capture is
+/// the same lowering's trace, kept only for an entry that draws `dropout`, the
+/// entry whose lowering the trace contract observes; every other entry's
+/// capture stays explicitly unavailable.
+fn lower_selected_entry_dag(
     checked: &CheckedProgram,
     entry: &str,
     #[cfg(feature = "compilation-trace")] trace_out: Option<
         &mut Option<chelis_ir::lowering_trace::HelperLoweringTrace>,
     >,
-) -> Result<Option<chelis_ir::evaluation::EvaluationPlan>> {
+) -> Option<Dag> {
     #[cfg(feature = "compilation-trace")]
     if let Some(trace_out) = trace_out {
-        return chelis_ir::host::lower_named_tensor_entry_execution_plan_with_trace(checked, entry)
-            .map(|result| {
-                result.map(|(plan, trace)| {
-                    *trace_out = Some(trace);
-                    plan
-                })
-            })
-            .map_err(lower_diagnostic_to_compiler_error);
+        let (dag, trace) =
+            chelis_ir::host::lower_named_tensor_entry_dag_with_trace(checked, entry)?;
+        let draws_dropout = dag.nodes().iter().any(|node| {
+            matches!(
+                node.op,
+                RiscOp::DrawKey {
+                    draw: chelis_ir::dag::RandomDraw::Dropout,
+                    ..
+                }
+            )
+        });
+        if draws_dropout {
+            *trace_out = Some(trace);
+        }
+        return Some(dag);
     }
-    chelis_ir::host::lower_named_tensor_entry_execution_plan(checked, entry)
-        .map_err(lower_diagnostic_to_compiler_error)
+    chelis_ir::host::lower_named_tensor_entry_dag(checked, entry)
 }
 
 /// Opt-in observation of the same strict compilation as [`compile_for_execution`].
@@ -1865,7 +1902,10 @@ fn resolve_in_context_entry<'a>(
     })?;
     let mut scoped = compiled.dag.clone();
     scoped.set_roots(vec![root]);
-    let scoped = chelis_ir::optimize::dead_code_eliminate(&scoped);
+    let scoped = chelis_ir::optimize::project_program_roots(
+        &scoped,
+        &compiled.random_regions.entered_by([selected.as_str()]),
+    );
     Ok(Some((selected.as_str(), scoped)))
 }
 
@@ -2093,20 +2133,14 @@ fn execution_artifact_from_compiled_observed(
                                     GeneralKind::CompileError,
                                 )
                             })?;
-                        // Plan from checked source even when DCE removed a
-                        // draw's value. Only NoDropout keeps the ordinary DAG;
-                        // unsupported source execution is a fatal diagnostic.
-                        let execution = lower_selected_execution_plan(
+                        let dag = entry_dag_from_source(
                             &checked,
                             entry,
+                            ordinary,
                             #[cfg(feature = "compilation-trace")]
                             collect_trace.then_some(&mut entry_trace),
                         )?;
-                        let dag = execution
-                            .as_ref()
-                            .map(|plan| plan.dag_for_inspection().clone())
-                            .unwrap_or(ordinary);
-                        Some((entry, dag, execution))
+                        Some((entry, dag))
                     }
                     None => None,
                 }
@@ -2121,22 +2155,14 @@ fn execution_artifact_from_compiled_observed(
                     #[cfg(feature = "compilation-trace")]
                     collect_trace.then_some(&mut entry_trace),
                 )? {
-                    EntryLaneOutcome::Claim {
-                        entry,
-                        dag,
-                        execution,
-                    } => Some((entry, dag, execution)),
+                    EntryLaneOutcome::Claim { entry, dag } => Some((entry, dag)),
                     EntryLaneOutcome::Decline(reason) => {
                         entry_lane_decline = Some(reason);
                         None
                     }
                 }
             } else if !chelis_ir::host::program_has_top_level_value_bindings(compiled.checked())
-                && compiled
-                    .dag
-                    .nodes()
-                    .iter()
-                    .any(|node| matches!(node.op, RiscOp::Dropout { .. }))
+                && dag_draws_dropout(&compiled.dag)
                 && !(strictness == EntryStrictness::Legacy
                     && (entry_name.is_some_and(|name| {
                         !compiled
@@ -2150,23 +2176,20 @@ fn execution_artifact_from_compiled_observed(
                             .iter()
                             .any(|root| root.as_str() == "main"))))
             {
-                // A tensor-only def can be absent from the host program. Its
-                // raw value DAG cannot carry the execution seal: resolve the
-                // exact source entry, then lower its source-owned plan. Keep
-                // legacy file-stem/whole-program selection out of this lane.
+                // A tensor-only def can be absent from the host program:
+                // resolve the exact source entry, then lower that entry from
+                // its own source. Keep legacy file-stem/whole-program
+                // selection out of this lane.
                 match resolve_in_context_entry(&compiled, entry_name)? {
                     Some((entry, ordinary)) => {
-                        let execution = lower_selected_execution_plan(
+                        let dag = entry_dag_from_source(
                             compiled.checked(),
                             entry,
+                            ordinary,
                             #[cfg(feature = "compilation-trace")]
                             collect_trace.then_some(&mut entry_trace),
                         )?;
-                        let dag = execution
-                            .as_ref()
-                            .map(|plan| plan.dag_for_inspection().clone())
-                            .unwrap_or(ordinary);
-                        Some((entry, dag, execution))
+                        Some((entry, dag))
                     }
                     None => None,
                 }
@@ -2174,52 +2197,15 @@ fn execution_artifact_from_compiled_observed(
                 None
             };
 
-            if let Some((entry, entry_dag, execution)) = scoped_entry {
+            if let Some((entry, entry_dag)) = scoped_entry {
                 validate_compiled_resource_target(&compiled, build_target, Some(entry))?;
                 // Fix 2: the entry-scoped symbol is the fixed, collision-free
                 // `chelis_main` so a def named `main`/`free`/`chelis_*` links.
                 let entry_symbol = EXECUTION_ENTRY_C_SYMBOL;
-                if execution.is_none() {
-                    reject_unsupported_effect_ops(&entry_dag, BuildTarget::C)?;
-                }
+                reject_unsupported_effect_ops(&entry_dag, BuildTarget::C)?;
                 reject_symbolic_windowed_reduce(&entry_dag, BuildTarget::C)?;
                 reject_unsupported_reduce_window_precision(&entry_dag, BuildTarget::C)?;
                 reject_unsized_named_dims(&entry_dag, "c")?;
-                if let Some(plan) = execution {
-                    let verified = plan.verify_ownership().map_err(|error| {
-                        stage_error("ownership", error.to_string(), GeneralKind::CompileError)
-                    })?;
-                    #[cfg(feature = "emission-observer")]
-                    crate::emission_observer::observe(
-                        &mut observer,
-                        &compiled.program,
-                        observed_host.as_ref(),
-                        crate::emission_observer::SelectedEmission::Dag {
-                            unfused: &entry_dag,
-                            selected: verified.emission(),
-                        },
-                        #[cfg(feature = "compilation-trace")]
-                        entry_trace.as_ref().map_or(
-                            crate::compilation_trace::SelectedLowering::Unavailable,
-                            crate::compilation_trace::SelectedLowering::Dag,
-                        ),
-                    );
-                    let result = chelis_backend_c::codegen_evaluation_with_options(
-                        verified,
-                        entry_symbol,
-                        chelis_backend_c::CodegenOptions::default(),
-                    )
-                    .map_err(unsupported_stage_error)?;
-                    return Ok(compiled_execution_artifact(
-                        entry_symbol,
-                        None,
-                        compile_result_c(target, entry_symbol, &result),
-                        manifest_result(&compiled.program),
-                        execution_input_specs(&entry_dag, &result.input_labels)?,
-                        execution_output_specs(&entry_dag, &result.output_labels)?,
-                        result.symbolic_dims,
-                    ));
-                }
                 let specialized =
                     chelis_ir::specialize::specialize_for_exact_arithmetic(&entry_dag);
                 let fused = chelis_ir::fuse::fuse(&specialized);
@@ -2246,7 +2232,10 @@ fn execution_artifact_from_compiled_observed(
                         selected: verified.emission(),
                     },
                     #[cfg(feature = "compilation-trace")]
-                    crate::compilation_trace::SelectedLowering::Unavailable,
+                    entry_trace.as_ref().map_or(
+                        crate::compilation_trace::SelectedLowering::Unavailable,
+                        crate::compilation_trace::SelectedLowering::Dag,
+                    ),
                 );
                 let result =
                     chelis_backend_c::codegen_with_options(verified, entry_symbol, options)
@@ -2841,17 +2830,6 @@ fn compile_rewritten_decls_in_context(
         .map_err(|error| cancelled_or("effects", error))?;
     bail_if_cancelled("linearity")?;
     bail_if_cancelled("lower")?;
-    let evaluation_program = if target == Target::Eval {
-        let evaluation_library = context.evaluation_library().map_err(|error| {
-            pipeline_rejection_to_compiler_error(crate::pipeline::PipelineRejection::Lower(error))
-        })?;
-        Some(
-            crate::pipeline::lower_checked_with_evaluation_context(&checked, evaluation_library)
-                .map_err(|error| pipeline_rejection_to_compiler_error(error.into()))?,
-        )
-    } else {
-        None
-    };
     let lowered = crate::pipeline::lower_checked_with_context(
         checked,
         &context.library_dag,
@@ -2889,10 +2867,10 @@ fn compile_rewritten_decls_in_context(
         host_execution: None,
         host_ordinary: None,
         dag: lowered_parts.dag,
-        evaluation_program,
         tensor_root_names: new_tensor_root_names,
         named_roots: lowered_parts.named_roots,
         forward_node_index: lowered_parts.forward_node_index,
+        random_regions: lowered_parts.random_regions,
         library_runtime: Some(library_runtime),
     })
 }
@@ -3123,44 +3101,14 @@ fn eval_compiled(
             })
         })
         .collect::<Result<Vec<_>>>()?;
-    // Eligibility is selected before execution. Metadata/selection failures
-    // inside the fixed-control profile are errors, never legacy recovery.
-    let execution = if let Some(program) = &compiled.evaluation_program {
-        let names = tensor_entries
-            .iter()
-            .map(|entry| entry.name.clone())
-            .collect::<Vec<_>>();
-        match program
-            .profile_for_roots(&names)
-            .map_err(eval_stage_error)?
-        {
-            chelis_ir::evaluation::EvaluationProfile::FixedControl => {
-                Some(program.select_roots(&names).map_err(eval_stage_error)?)
-            }
-            chelis_ir::evaluation::EvaluationProfile::Legacy(_) => None,
-            _ => return Err(eval_stage_error("unknown evaluation profile".into())),
-        }
-    } else {
-        None
-    };
-    let active_dag = execution.as_ref().map_or(&compiled.dag, |selected| {
-        selected.plan().dag_for_inspection()
-    });
+    let active_dag = &compiled.dag;
     let tensor_values = if roots.is_empty() {
         UnordMap::new()
-    } else if let Some(selected) = &execution {
-        let mut context = chelis_ir::evaluation::RandomExecutionContext::new(
-            chelis_ir::host::RandomLoweringState {
-                seed: None,
-                counter: 0,
-            },
-        );
-        eval::eval_tensor_plan_with_strict(selected.plan(), &mut context, |name| {
-            bindings.get(name).cloned()
-        })
-        .map_err(eval_stage_error)?
     } else {
-        eval::eval_tensor_roots_with_strict(&compiled.dag, &roots, |name| {
+        let entered = compiled
+            .random_regions
+            .entered_by(tensor_entries.iter().map(|entry| entry.def_name.as_str()));
+        eval::eval_program_roots_with_strict(&compiled.dag, &roots, &entered, |name| {
             bindings.get(name).cloned()
         })
         .map_err(eval_stage_error)?
@@ -3169,18 +3117,12 @@ fn eval_compiled(
     let mut tensor_values_by_name = UnordMap::<String, RuntimeTensorValue>::new();
     for entry in &tensor_entries {
         let name = crate::pipeline::IrName::new(entry.name.as_str());
-        let node_id = execution
-            .as_ref()
-            .map_or_else(
-                || compiled.named_roots.get(&name),
-                |selected| selected.roots().get(entry.name.as_str()),
+        let node_id = compiled.named_roots.get(&name).ok_or_else(|| {
+            unavailable_root_error(
+                entry,
+                "the Tensor-lane root is absent from the lowered named-root map",
             )
-            .ok_or_else(|| {
-                unavailable_root_error(
-                    entry,
-                    "the Tensor-lane root is absent from the lowered named-root map",
-                )
-            })?;
+        })?;
         let value = tensor_values.get(node_id).ok_or_else(|| {
             unavailable_root_error(
                 entry,
@@ -3576,13 +3518,16 @@ struct CompiledSource {
     host_execution: Option<chelis_ir::host::HostExecutionPlan>,
     host_ordinary: Option<chelis_ir::host::ConcreteHostProgram>,
     dag: Dag,
-    evaluation_program: Option<chelis_ir::lower::EvaluationProgram>,
     // Callable function-entry selection is a separate surface from value-root
     // observation. Keep the pipeline's typed set for that API; eval/build
     // observation below consumes `program.manifest` exclusively.
     tensor_root_names: crate::pipeline::TensorRootNames,
     named_roots: crate::pipeline::NamedRoots,
     forward_node_index: crate::pipeline::ForwardNodeIndex,
+    /// The `with seed` regions each definition's activation enters. `dag`
+    /// holds every definition's activation, so evaluating or projecting
+    /// selected roots keeps exactly the regions their activations enter.
+    random_regions: chelis_ir::lower::RandomRegionOwners,
     /// Phase G' — optional library context payload threaded into the
     /// host evaluator so library `def` names resolve at runtime when
     /// new code calls them. `None` on the monolithic `compile_source`
@@ -3795,54 +3740,6 @@ fn manifested_program_for_eval<'a>(
     }
 
     route_tensor_inputs_from_dag(&mut manifest, &compiled.dag, &compiled.named_roots);
-    if let Some(program) = &compiled.evaluation_program {
-        let mut roots_by_def = BTreeMap::<String, Vec<String>>::new();
-        for entry in &manifest.entries {
-            if entry.lane == Lane::Tensor {
-                roots_by_def
-                    .entry(entry.def_name.clone())
-                    .or_default()
-                    .push(entry.name.clone());
-            }
-        }
-        for (def, names) in roots_by_def {
-            if names.iter().any(|name| {
-                compiled
-                    .named_roots
-                    .get(&crate::pipeline::IrName::new(name.as_str()))
-                    .is_none()
-            }) {
-                // Missing owed roots retain the existing manifest-authority
-                // error at observation, after selected-root filtering. This
-                // is not recovery from missing execution metadata.
-                continue;
-            }
-            if program
-                .profile_for_roots(&names)
-                .map_err(eval_stage_error)?
-                == chelis_ir::evaluation::EvaluationProfile::FixedControl
-            {
-                let selected = program.select_roots(&names).map_err(eval_stage_error)?;
-                let required = selected
-                    .plan()
-                    .dag_for_inspection()
-                    .nodes()
-                    .iter()
-                    .filter_map(|node| match &node.op {
-                        RiscOp::Load { name } => Some(name.as_str().to_owned()),
-                        _ => None,
-                    })
-                    .collect::<BTreeSet<_>>();
-                for entry in manifest
-                    .entries
-                    .iter_mut()
-                    .filter(|entry| entry.def_name == def)
-                {
-                    entry.required_inputs.clone_from(&required);
-                }
-            }
-        }
-    }
     let declaration_order = checked_def_order(compiled.checked());
     manifest.entries.sort_by_key(|entry| {
         declaration_order
@@ -3881,14 +3778,9 @@ fn selected_host_input_demand(
         compiled.checked()
     };
     let session = chelis_ir::host::HostLoweringSession::new(checked);
-    let context =
-        chelis_ir::evaluation::RandomExecutionContext::new(chelis_ir::host::RandomLoweringState {
-            seed: None,
-            counter: 0,
-        });
-    chelis_ir::host::host_def_evaluation_plan(&session, name, &context).map(|plan| {
-        plan.map(|plan| {
-            plan.kernel_for_inspection()
+    chelis_ir::host::host_def_kernel(&session, name).map(|kernel| {
+        kernel.map(|kernel| {
+            kernel
                 .inputs
                 .iter()
                 .filter(|input| parameters.contains(&input.name))
@@ -4153,14 +4045,6 @@ fn compile_source_scoped_mode(
         checked_program,
         &realizability_result,
     );
-    let evaluation_program = if target == Target::Eval {
-        Some(
-            crate::pipeline::lower_checked_for_evaluation(lowered.checked())
-                .map_err(|error| pipeline_rejection_to_compiler_error(error.into()))?,
-        )
-    } else {
-        None
-    };
     let lowered_parts = lowered.into_parts();
     let (_, _, checked, root_metadata) = lowered_parts.checked.into_parts();
     route_tensor_inputs_from_dag(
@@ -4174,10 +4058,10 @@ fn compile_source_scoped_mode(
         host_execution,
         host_ordinary,
         dag: lowered_parts.dag,
-        evaluation_program,
         tensor_root_names: root_metadata.tensor_names().clone(),
         named_roots: lowered_parts.named_roots,
         forward_node_index: lowered_parts.forward_node_index,
+        random_regions: lowered_parts.random_regions,
         library_runtime: None,
     })
 }
@@ -5173,7 +5057,9 @@ pub fn reject_unsupported_effect_ops(
     target: BuildTarget,
 ) -> std::result::Result<(), CompilerError> {
     for node in dag.nodes() {
-        if matches!(&node.op, RiscOp::Dropout { .. }) {
+        // The C lane emits a key-operand dropout from its draw key; a device
+        // target has no port of the kernel yet.
+        if target != BuildTarget::C && matches!(&node.op, RiscOp::Dropout | RiscOp::DropoutReplay) {
             return Err(unsupported_gate_error(
                 format!("compiled `dropout` op at lowered node {}", node.id.0),
                 target.as_str(),
@@ -5211,17 +5097,13 @@ pub fn reject_unsupported_effect_ops_in_host_program(
     for_each_host_helper_dag(program, |dag| reject_unsupported_effect_ops(dag, target))
 }
 
-/// Only the C execution carrier may admit fixed-control helpers. Raw host/DAG
-/// entry points and device targets retain their independent rejection policy.
+/// The C execution carrier's helpers take the same effect gate as every other
+/// host program.
 pub fn reject_unsupported_effect_ops_in_host_execution_plan(
     plan: &chelis_ir::host::HostExecutionPlan,
     target: BuildTarget,
 ) -> std::result::Result<(), CompilerError> {
-    if target == BuildTarget::C && !plan.has_unplanned_dropout_helper() {
-        Ok(())
-    } else {
-        reject_unsupported_effect_ops_in_host_program(plan.program(), target)
-    }
+    reject_unsupported_effect_ops_in_host_program(plan.program(), target)
 }
 
 /// Apply both C windowed-reduction gates to every tensor-helper DAG emitted
@@ -6042,6 +5924,22 @@ pub fn reject_unsupported_hip_ops(dag: &Dag) -> std::result::Result<(), Compiler
         })
         .collect();
 
+    // A draw key has no device storage. The emitter computes a `DrawKey`'s
+    // key at emission time and passes it to the draw that consumes it, so
+    // only that node carries the `key` precision here.
+    let key_admissible: UnordSet<NodeId> = dag
+        .nodes()
+        .iter()
+        .filter(|node| matches!(node.op, RiscOp::DrawKey { .. }))
+        .filter(|node| {
+            dag.nodes().iter().any(|consumer| {
+                matches!(consumer.op, RiscOp::Dropout | RiscOp::UniformLike)
+                    && consumer.inputs.contains(&node.id)
+            })
+        })
+        .map(|node| node.id)
+        .collect();
+
     for node in dag.nodes() {
         match node.output_type.precision {
             chelis_types::types::Prim::F32
@@ -6051,6 +5949,7 @@ pub fn reject_unsupported_hip_ops(dag: &Dag) -> std::result::Result<(), Compiler
             | chelis_types::types::Prim::Int16
             | chelis_types::types::Prim::Int32
             | chelis_types::types::Prim::Int64 => {}
+            chelis_types::types::Prim::Key if key_admissible.contains(&node.id) => {}
             chelis_types::types::Prim::Bf16 | chelis_types::types::Prim::F16 => {
                 if !narrow_float_admissible.contains(&node.id) {
                     return Err(unsupported_gate_error(
@@ -6834,22 +6733,6 @@ fn wire_axis(value: usize) -> WireResult<i32> {
     i32::try_from(value).map_err(|_| "wire axis exceeds i32".to_string())
 }
 
-fn wire_float_parameter(value: f64, precision: Prim) -> WireResult<chelis_types::ScalarValue> {
-    if !value.is_finite() || !matches!(precision, Prim::F16 | Prim::Bf16 | Prim::F32 | Prim::F64) {
-        return Err(
-            "wire random parameter requires a finite value at the active float dtype".to_string(),
-        );
-    }
-    let scalar = chelis_types::scalar_from_f64("wire_parameter", precision, value)
-        .map_err(|error| error.to_string())?;
-    if scalar.as_f64_lossy().to_bits() != value.to_bits() {
-        return Err(
-            "IR random parameter is not an exact stored value of its active dtype".to_string(),
-        );
-    }
-    Ok(scalar)
-}
-
 fn wire_dag(dag: &Dag) -> WireResult<WireDag> {
     let wire = WireDag {
         schema_version: crate::schema::WIRE_DAG_SCHEMA_VERSION,
@@ -6880,7 +6763,7 @@ fn wire_dag_node(node: &chelis_ir::dag::DagNode) -> WireResult<WireDagNode> {
         span_id: node.span_id.clone(),
         merged_spans: node.merged_spans.clone(),
         id: crate::schema::host_index(node.id.0),
-        op: wire_op(&node.op, node.output_type.precision)?,
+        op: wire_op(&node.op)?,
         inputs: node
             .inputs
             .iter()
@@ -6948,7 +6831,7 @@ fn wire_bound(b: &RtDim) -> WireResult<WireRtDim> {
     })
 }
 
-fn wire_op(op: &RiscOp, precision: Prim) -> WireResult<WireRiscOp> {
+fn wire_op(op: &RiscOp) -> WireResult<WireRiscOp> {
     Ok(match op {
         RiscOp::Add => WireRiscOp::Add,
         RiscOp::Sub => WireRiscOp::Sub,
@@ -7010,14 +6893,37 @@ fn wire_op(op: &RiscOp, precision: Prim) -> WireResult<WireRiscOp> {
         RiscOp::Floor => WireRiscOp::Floor,
         RiscOp::Ceil => WireRiscOp::Ceil,
         RiscOp::Round => WireRiscOp::Round,
-        RiscOp::UniformLike { low, high, seed } => WireRiscOp::UniformLike {
-            low: wire_float_parameter(*low, precision)?,
-            high: wire_float_parameter(*high, precision)?,
-            seed: *seed,
+        RiscOp::UniformLike => WireRiscOp::UniformLike {},
+        RiscOp::Dropout => WireRiscOp::Dropout {},
+        RiscOp::DropoutReplay => WireRiscOp::DropoutReplay {},
+        RiscOp::UniformBoundAdjoint { bound } => WireRiscOp::UniformBoundAdjoint {
+            bound: match bound {
+                chelis_ir::dag::UniformBound::Low => crate::schema::WireUniformBound::Low,
+                chelis_ir::dag::UniformBound::High => crate::schema::WireUniformBound::High,
+            },
         },
-        RiscOp::Dropout { rate, seed } => WireRiscOp::Dropout {
-            rate: wire_float_parameter(*rate, precision)?,
-            seed: *seed,
+        RiscOp::DrawKey {
+            handler,
+            draw,
+            dtype,
+        } => WireRiscOp::DrawKey {
+            handler: match handler {
+                chelis_ir::dag::RandomHandler::Inherited => {
+                    crate::schema::WireRandomHandler::Inherited
+                }
+                chelis_ir::dag::RandomHandler::Scoped { instance } => {
+                    crate::schema::WireRandomHandler::Scoped {
+                        instance: *instance,
+                    }
+                }
+            },
+            draw: match draw {
+                chelis_ir::dag::RandomDraw::Dropout => crate::schema::WireRandomDraw::Dropout,
+                chelis_ir::dag::RandomDraw::UniformLike => {
+                    crate::schema::WireRandomDraw::UniformLike
+                }
+            },
+            dtype: dtype.interchange_name().to_string(),
         },
         RiscOp::Sum { axis, accumulator } => WireRiscOp::Sum {
             axis: wire_axis(*axis)?,
@@ -7670,10 +7576,6 @@ mod tests {
 
     #[test]
     fn wire_producer_rejects_numeric_narrowing_instead_of_repairing_ir() {
-        assert!(wire_float_parameter(f64::from(0.1_f32), Prim::F32).is_ok());
-        assert!(wire_float_parameter(0.1_f64, Prim::F32).is_err());
-        assert!(wire_float_parameter(f64::NAN, Prim::F64).is_err());
-        assert!(wire_float_parameter(1.0, Prim::Int64).is_err());
         assert_eq!(wire_axis(0).unwrap(), 0);
         assert!(wire_axis(usize::MAX).is_err());
         assert_eq!(wire_extent(0).unwrap().get(), 0);

@@ -304,53 +304,6 @@ pub fn codegen_with_options(
     })
 }
 
-/// Emit an unfused source execution plan with its exact ownership payload.
-/// Public entries retain the four-argument tensor ABI; inherited Random must
-/// therefore be handled in the submitted source, not supplied by a hidden
-/// global or a baked lowering context.
-///
-/// ```compile_fail
-/// fn bypass(dag: chelis_ir::ownership::VerifiedDagProgram) {
-///     let _ = chelis_backend_c::codegen_evaluation_with_options(dag, "sample", Default::default());
-/// }
-/// ```
-///
-/// ```compile_fail
-/// fn substitute(plan: chelis_ir::evaluation::VerifiedEvaluationPlan,
-///               ownership: chelis_ir::ownership::VerifiedDagProgram) {
-///     let _ = chelis_ir::evaluation::VerifiedEvaluationPlan { ownership, ..plan };
-/// }
-/// ```
-pub fn codegen_evaluation_with_options(
-    plan: chelis_ir::evaluation::VerifiedEvaluationPlan,
-    func_name: &str,
-    options: CodegenOptions,
-) -> Result<CodegenResult, chelis_types::unsupported::Unsupported> {
-    plan.with_emission(|dag, execution| {
-        let emission = dag.emission();
-        let input_labels = emit::CEmitter::input_labels(emission);
-        let output_labels = emit::CEmitter::output_labels(emission);
-        let symbolic_dims = emission.symbolic_params();
-        let c_source = emit::CEmitter::emit_evaluation(dag, execution, func_name, options)?;
-        let h_header = generated_header::render_declaration(
-            func_name,
-            func_name,
-            &format!("void {func_name}(chelis_tensor **inputs, int n_in, chelis_tensor **outputs, int n_out);"),
-        );
-        let (c_source, h_header) = if options.static_entry {
-            (c_source, String::new())
-        } else {
-            seal_generated_artifact(func_name, &c_source, &h_header)?
-        };
-        Ok(CodegenResult {
-            c_source,
-            h_header,
-            requirements: toolchain::CodegenRequirements { wants_openmp: true, needs_blas: false },
-            input_labels, output_labels, symbolic_dims,
-        })
-    })
-}
-
 fn seal_generated_artifact(
     program_identity: &str,
     source: &str,
@@ -400,9 +353,9 @@ pub fn prepare_host_program_for_codegen(
     Ok(program)
 }
 
-/// Select the exact nested C helper DAGs while retaining their lowering-owned
-/// fixed-control schedules. Rewrites are admitted only when every schedule
-/// still validates against the rewritten helper graph.
+/// Check the nested C helper DAGs of a program the C execution lane selected
+/// because a helper draws `dropout`. The helper graphs are emitted exactly as
+/// lowered, without the payload rewrites of the ordinary host lane.
 pub fn prepare_host_execution_plan_for_codegen(
     plan: chelis_ir::host::HostExecutionPlan,
 ) -> Result<chelis_ir::host::HostExecutionPlan, chelis_types::unsupported::Unsupported> {

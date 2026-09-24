@@ -2090,7 +2090,14 @@ pub struct WireRecordPatternField {
 ///   entry here: a version-15 graph is rejected, and a version-16 graph
 ///   containing the operation has no version-15 spelling, because no
 ///   placeholder preserves the abort.
-pub const WIRE_DAG_SCHEMA_VERSION: u32 = 16;
+/// - `17`: random primitives take their controls and a key as operands
+///   (chelis#2413). `UniformLike` and `Dropout` carry no fields; their inputs
+///   are the data or template, the controls, the key and an optional Bool
+///   activation. `DrawKey` produces each key, `DropoutReplay` and
+///   `UniformBoundAdjoint` read a forward draw's key, and `key` is a
+///   structural precision with no literal carrier. A version-16 random node's
+///   baked controls and seed have no version-17 spelling.
+pub const WIRE_DAG_SCHEMA_VERSION: u32 = 17;
 
 /// A typed failure from validating a serialized [`WireDag`] against the
 /// supported schema version (WI-2). This is deliberately its own error
@@ -3265,8 +3272,9 @@ fn wire_axis_origin(
         | WireRiscOp::Floor
         | WireRiscOp::Ceil
         | WireRiscOp::Round
-        | WireRiscOp::UniformLike { .. }
-        | WireRiscOp::Dropout { .. }
+        | WireRiscOp::UniformLike {}
+        | WireRiscOp::Dropout {}
+        | WireRiscOp::DropoutReplay {}
         | WireRiscOp::Store { .. }
         | WireRiscOp::Copy
         | WireRiscOp::Drop
@@ -3359,6 +3367,8 @@ fn wire_axis_origin(
                 .flatten()
             }),
         WireRiscOp::Shape { .. }
+        | WireRiscOp::UniformBoundAdjoint { .. }
+        | WireRiscOp::DrawKey { .. }
         | WireRiscOp::ExtentWitness { .. }
         | WireRiscOp::CheckedReshapeExtent { .. }
         | WireRiscOp::Sum { .. }
@@ -3625,6 +3635,32 @@ pub enum WireFusedInput {
     PreviousStep { index: u64 },
 }
 
+/// Which `[05-OP-8]` bound a `UniformBoundAdjoint` materializes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WireUniformBound {
+    Low,
+    High,
+}
+
+/// The handler whose stream a `DrawKey` reads: the stream the graph's caller
+/// holds, or a `with seed` region lowered inside the graph. `instance` is an
+/// opaque region identity, not a count or a numeric value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum WireRandomHandler {
+    Inherited,
+    Scoped { instance: u32 },
+}
+
+/// The random primitive whose controls a `DrawKey` validates.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WireRandomDraw {
+    Dropout,
+    UniformLike,
+}
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum WireExtremaKind {
@@ -3754,14 +3790,30 @@ pub enum WireRiscOp {
     Floor,
     Ceil,
     Round,
-    UniformLike {
-        low: ScalarValue,
-        high: ScalarValue,
-        seed: u64,
+    /// `[05-OP-8]`. Inputs are `[template, low, high, key]`, optionally
+    /// followed by one rank-zero Bool activation.
+    UniformLike {},
+    /// `[05-OP-37]`. Inputs are `[x, rate, key]`, optionally followed by one
+    /// rank-zero Bool activation.
+    Dropout {},
+    /// The `[05-OP-37]` pathwise adjoint. Inputs are `[g, rate, key]`,
+    /// optionally followed by the forward draw's activation; it reads its
+    /// forward `Dropout`'s key without consuming it.
+    DropoutReplay {},
+    /// A `[05-OP-8]` bound adjoint. Inputs are `[template, g, key]`,
+    /// optionally followed by the forward draw's activation; it reads its
+    /// forward `UniformLike`'s key without consuming it.
+    UniformBoundAdjoint {
+        bound: WireUniformBound,
     },
-    Dropout {
-        rate: ScalarValue,
-        seed: u64,
+    /// The counter-stream bridge: the key of `handler`'s next `[05-RNG-1]`
+    /// ordinal for a `draw` of dtype `dtype`. Inputs are the rank-zero `int64`
+    /// literal seed when the handler is scoped, then the draw's controls,
+    /// then optionally one rank-zero Bool activation.
+    DrawKey {
+        handler: WireRandomHandler,
+        draw: WireRandomDraw,
+        dtype: String,
     },
     Sum {
         axis: i32,

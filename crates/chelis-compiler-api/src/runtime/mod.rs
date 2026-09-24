@@ -1075,11 +1075,10 @@ struct EvalContext<'a> {
     /// source units with equal names and byte offsets cannot cross-own a
     /// runtime obligation.
     active_declaration_names: Vec<String>,
-    /// Per-def kernel decision: `None` is the host lane, `Some` a kernel whose
-    /// DAG draws no Random and is reused across applications. A Random-drawing
-    /// kernel is re-lowered per application and never cached (see
-    /// `EvalContext::def_kernel`).
-    def_kernels: UnordMap<String, Option<std::sync::Arc<chelis_ir::host::HostDefEvaluationPlan>>>,
+    /// Per-def kernel decision: `None` is the host lane, `Some` a kernel
+    /// reused across applications; its draws take their keys from each
+    /// application's frame (see `EvalContext::def_kernel`).
+    def_kernels: UnordMap<String, Option<std::sync::Arc<chelis_ir::host::HostDefKernel>>>,
     transcript: Vec<String>,
     transcript_capture: Option<crate::TranscriptCapture>,
     resolving_top_levels: Vec<String>,

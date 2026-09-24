@@ -196,11 +196,6 @@ fn check_finite_floats(wire_dag: &WireDag) -> Result<(), GraphExtractError> {
     for (id, n) in wire_dag.nodes.iter().enumerate() {
         match &n.op {
             // Check every numeric payload against the proof support boundary.
-            WireRiscOp::UniformLike { low, high, .. } => {
-                reject_if_non_finite(id, "low", *low)?;
-                reject_if_non_finite(id, "high", *high)?;
-            }
-            WireRiscOp::Dropout { rate, .. } => reject_if_non_finite(id, "rate", *rate)?,
             WireRiscOp::Pad { fill, .. } => reject_if_non_finite(id, "fill", *fill)?,
             WireRiscOp::Const { value } => reject_if_non_finite(id, "value", *value)?,
             WireRiscOp::ConstTensor { data } => {
@@ -240,6 +235,11 @@ fn check_finite_floats(wire_dag: &WireDag) -> Result<(), GraphExtractError> {
             | WireRiscOp::Floor
             | WireRiscOp::Ceil
             | WireRiscOp::Round
+            | WireRiscOp::UniformLike {}
+            | WireRiscOp::Dropout {}
+            | WireRiscOp::DropoutReplay {}
+            | WireRiscOp::UniformBoundAdjoint { .. }
+            | WireRiscOp::DrawKey { .. }
             | WireRiscOp::Sum { .. }
             | WireRiscOp::Count { .. }
             | WireRiscOp::MaxReduce { .. }
@@ -573,7 +573,11 @@ const _: () = {
     // no-numeric-payload group above rather than given a transformer: an
     // abort is a control effect, and relaxing it to its fallback's envelope
     // would drop the trap the identity exists to preserve.
-    assert!(WIRE_DAG_SCHEMA_VERSION == 16);
+    // Version 17 (chelis#2413) moves random controls and keys into operands.
+    // The random operations carry no numeric payload, and their key inputs
+    // are the structural `key` precision; they stay outside float-envelope
+    // extraction in the no-numeric-payload group above.
+    assert!(WIRE_DAG_SCHEMA_VERSION == 17);
 };
 
 #[cfg(test)]

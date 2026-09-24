@@ -19,9 +19,9 @@ pub enum SelectedLowering<'a> {
 }
 
 /// This callback still runs before fallible emission. The enclosing API returns
-/// its projection only after final success. The host snapshot's additive full
-/// spine exposes selected Resource requirements; native invocation state is
-/// not supplied by these helper-local pass captures.
+/// its projection only after final success. Each helper trace's
+/// `requirements` exposes the selected Resource requirements; native
+/// invocation state is not supplied by these helper-local pass captures.
 pub struct CompilationObservation<'a> {
     pub emission: EmissionObservation<'a>,
     pub lowering: SelectedLowering<'a>,
@@ -34,11 +34,6 @@ pub struct CompilationObservation<'a> {
 pub struct HostLoweringTrace {
     globals: Vec<Option<HelperLoweringTrace>>,
     functions: Vec<(String, Vec<Option<HelperLoweringTrace>>)>,
-    full_globals: Vec<Option<chelis_ir::lowering_trace::FullSpineObservation>>,
-    full_functions: Vec<(
-        String,
-        Vec<Option<chelis_ir::lowering_trace::FullSpineObservation>>,
-    )>,
 }
 
 impl HostLoweringTrace {
@@ -52,23 +47,6 @@ impl HostLoweringTrace {
             .map(|(name, traces)| (name.as_str(), traces.as_slice()))
     }
 
-    pub fn full_global_spines(&self) -> &[Option<chelis_ir::lowering_trace::FullSpineObservation>] {
-        &self.full_globals
-    }
-
-    pub fn full_function_spines(
-        &self,
-    ) -> impl Iterator<
-        Item = (
-            &str,
-            &[Option<chelis_ir::lowering_trace::FullSpineObservation>],
-        ),
-    > {
-        self.full_functions
-            .iter()
-            .map(|(name, traces)| (name.as_str(), traces.as_slice()))
-    }
-
     pub(crate) fn snapshot(plan: &chelis_ir::host::HostExecutionPlan) -> Result<Self> {
         let error = |message| stage_error("observation", message, GeneralKind::CompileError);
         let globals = (0..plan.program().global_tensor_helpers.len())
@@ -77,9 +55,6 @@ impl HostLoweringTrace {
                     .map(|trace| trace.cloned())
                     .map_err(error)
             })
-            .collect::<Result<_>>()?;
-        let full_globals = (0..plan.program().global_tensor_helpers.len())
-            .map(|index| plan.global_helper_full_spine(index).map_err(error))
             .collect::<Result<_>>()?;
         let functions = plan
             .program()
@@ -96,26 +71,7 @@ impl HostLoweringTrace {
                 Ok((function.name.clone(), traces))
             })
             .collect::<Result<_>>()?;
-        let full_functions = plan
-            .program()
-            .functions
-            .iter()
-            .map(|function| {
-                let traces = (0..function.tensor_helpers.len())
-                    .map(|index| {
-                        plan.function_helper_full_spine(&function.name, index)
-                            .map_err(error)
-                    })
-                    .collect::<Result<_>>()?;
-                Ok((function.name.clone(), traces))
-            })
-            .collect::<Result<_>>()?;
-        Ok(Self {
-            globals,
-            functions,
-            full_globals,
-            full_functions,
-        })
+        Ok(Self { globals, functions })
     }
 }
 

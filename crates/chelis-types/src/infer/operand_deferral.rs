@@ -345,7 +345,6 @@ pub(super) fn replay_dtype_admissibility(
     }
     if reject_inadmissible_operand_dtypes(
         node,
-        kids,
         Some(func_name),
         arg_tys,
         env,

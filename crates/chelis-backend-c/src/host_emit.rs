@@ -243,10 +243,6 @@ pub(crate) fn emit_host_abi_program(
     body.push(String::new());
     append_uniform_sample_helper(&mut body);
     body.push(String::new());
-    // Fixed-control dropout helpers are known to be needed only after the
-    // function bodies are emitted; they go here, after the random stream
-    // they are built on.
-    let fixed_dropout_helpers_at = body.len();
     #[cfg(feature = "native-random-observer")]
     {
         crate::random_observer::append_support(&mut body);
@@ -473,16 +469,6 @@ pub(crate) fn emit_host_abi_program(
     }
 
     body.extend(function_bodies);
-
-    if helper_requirements.needs_fixed_dropout_helpers {
-        let mut fixed_helpers = Vec::new();
-        append_fixed_dropout_helpers(&mut fixed_helpers);
-        fixed_helpers.push(String::new());
-        body.splice(
-            fixed_dropout_helpers_at..fixed_dropout_helpers_at,
-            fixed_helpers,
-        );
-    }
 
     if !program.globals.is_empty() {
         let hoisted: UnordSet<&str> = captured_globals.iter().map(String::as_str).collect();
@@ -826,31 +812,6 @@ fn append_uniform_sample_helper(out: &mut Vec<String>) {
     out.push(
         "typedef struct { uint64_t seed; uint64_t counter; int active; } chelis_rng_state;"
             .to_string(),
-    );
-    out.push(
-        "static inline uint64_t chelis_effective_uniform_key(chelis_rng_state *state, uint64_t baked_key) {".to_string(),
-    );
-    // Advance a frame value and commit it as a whole. The private pointer
-    // transports invocation state; it is not an element-storage view.
-    out.push("    chelis_rng_state current = *state;".to_string());
-    out.push("    if (!current.active) {".to_string());
-    out.push("        return baked_key;".to_string());
-    out.push("    }".to_string());
-    out.push("    uint64_t counter = current.counter++;".to_string());
-    out.push("    *state = current;".to_string());
-    out.push("    return chelis_random_key(current.seed, counter);".to_string());
-    out.push("}".to_string());
-    out.push(
-        "#define CHELIS_EFFECTIVE_UNIFORM_KEY(key) chelis_effective_uniform_key(__chelis_rng, key)"
-            .to_string(),
-    );
-}
-
-fn append_fixed_dropout_helpers(out: &mut Vec<String>) {
-    out.extend(
-        crate::emit::FIXED_DROPOUT_HELPERS
-            .iter()
-            .map(|line| line.to_string()),
     );
 }
 
@@ -1330,7 +1291,8 @@ pub(crate) fn checked_cast_c_expr(plan: CheckedCastPlan, value: &str) -> String 
             | Prim::Int32
             | Prim::Int64
             | Prim::Bool
-            | Prim::String => unreachable!("ExactToFloat plan has a float target"),
+            | Prim::String
+            | Prim::Key => unreachable!("ExactToFloat plan has a float target"),
         },
         CheckedCastKind::FloatToFloat => match target {
             Prim::F64 => cast_float_as_double(plan.source(), value),
@@ -1349,7 +1311,8 @@ pub(crate) fn checked_cast_c_expr(plan: CheckedCastPlan, value: &str) -> String 
             | Prim::Int32
             | Prim::Int64
             | Prim::Bool
-            | Prim::String => unreachable!("FloatToFloat plan has a float target"),
+            | Prim::String
+            | Prim::Key => unreachable!("FloatToFloat plan has a float target"),
         },
         CheckedCastKind::ExactToBool => {
             let domain = NumericTrap::Domain {
@@ -1458,7 +1421,8 @@ fn cast_float_as_double(source: Prim, value: &str) -> String {
         | Prim::Int32
         | Prim::Int64
         | Prim::Bool
-        | Prim::String => unreachable!("float checked-cast action has a float source"),
+        | Prim::String
+        | Prim::Key => unreachable!("float checked-cast action has a float source"),
     }
 }
 
@@ -1474,7 +1438,8 @@ fn cast_integer_width(target: Prim) -> i64 {
         | Prim::Bf16
         | Prim::F8e4m3
         | Prim::Bool
-        | Prim::String => unreachable!("integer checked-cast action has an integer target"),
+        | Prim::String
+        | Prim::Key => unreachable!("integer checked-cast action has an integer target"),
     }
 }
 
@@ -1490,7 +1455,8 @@ fn cast_integer_bounds(target: Prim) -> (&'static str, &'static str) {
         | Prim::Bf16
         | Prim::F8e4m3
         | Prim::Bool
-        | Prim::String => unreachable!("integer checked-cast action has an integer target"),
+        | Prim::String
+        | Prim::Key => unreachable!("integer checked-cast action has an integer target"),
     }
 }
 
@@ -1504,7 +1470,7 @@ fn cast_prim_c_type(prim: Prim) -> &'static str {
         Prim::Int32 => "int32_t",
         Prim::Int64 => "int64_t",
         Prim::Bool => "bool",
-        Prim::F8e4m3 | Prim::String => {
+        Prim::F8e4m3 | Prim::String | Prim::Key => {
             unreachable!("unsupported Prim cannot enter checked C cast emission")
         }
     }
@@ -1726,14 +1692,12 @@ fn emit_host_declarations(
 struct HelperRequirements {
     needs_blas_header: bool,
     needs_math_header: bool,
-    needs_fixed_dropout_helpers: bool,
 }
 
 impl HelperRequirements {
     fn merge(&mut self, other: Self) {
         self.needs_blas_header |= other.needs_blas_header;
         self.needs_math_header |= other.needs_math_header;
-        self.needs_fixed_dropout_helpers |= other.needs_fixed_dropout_helpers;
     }
 }
 
@@ -1748,10 +1712,7 @@ fn append_helper(
     entry_coverage: &[chelis_ir::axis_sources::EntryExtentGuard],
 ) -> Result<HelperRequirements, Unsupported> {
     let helper_name = random_helper_name(helper_name);
-    if verified.execution().is_none()
-        && let Some((_input_name, _input_ty)) =
-            verified_identity_helper_input(helper, verified.dag())
-    {
+    if let Some((_input_name, _input_ty)) = verified_identity_helper_input(helper, verified.dag()) {
         out.push(format!(
             "static void {}({}) {{",
             helper_name,
@@ -1776,29 +1737,29 @@ fn append_helper(
     // ensures the kernel function itself gets `static` linkage so that when
     // compiled with `-shared -fPIC` the symbol is not exported via PLT.
     let dag = verified.dag();
-    let uses_blas = verified.execution().is_none()
-        && dag
-            .nodes()
-            .iter()
-            .any(|node| matches!(node.op, RiscOp::BlasMatmul { .. }));
+    let uses_blas = dag
+        .nodes()
+        .iter()
+        .any(|node| matches!(node.op, RiscOp::BlasMatmul { .. }));
     let options = crate::CodegenOptions {
         use_blas: uses_blas,
         static_entry: true,
         ..crate::CodegenOptions::default()
     };
-    let helper_src = if let Some(execution) = verified.execution() {
-        CEmitter::emit_verified_evaluation_with_options(
-            dag,
-            execution,
-            &helper_name,
-            options,
-            entry_coverage,
-            #[cfg(feature = "native-random-observer")]
-            verified.source_location(),
-        )?
-    } else {
-        CEmitter::emit_verified_dag_with_options(dag, &helper_name, options, entry_coverage)?
-    };
+    #[cfg(feature = "native-random-observer")]
+    let source_location = dag
+        .nodes()
+        .iter()
+        .any(|node| matches!(node.op, RiscOp::DrawKey { .. }))
+        .then(|| verified.source_location());
+    let helper_src = CEmitter::emit_verified_dag_with_options(
+        dag,
+        &helper_name,
+        options,
+        entry_coverage,
+        #[cfg(feature = "native-random-observer")]
+        source_location,
+    )?;
     // The CEmitter prepends dtype-specific uniform sampling helpers to
     // every DAG it emits so that a standalone-emitted kernel
     // stays self-contained. When multiple helpers get concatenated into a
@@ -1806,10 +1767,7 @@ fn append_helper(
     // redefinition. We filter the prelude out here and rely on
     // `emit_host_program` to emit exactly one copy at file scope.
     let mut skipping_helper_prelude = false;
-    let mut requirements = HelperRequirements {
-        needs_fixed_dropout_helpers: verified.execution().is_some(),
-        ..HelperRequirements::default()
-    };
+    let mut requirements = HelperRequirements::default();
     for line in helper_src.lines() {
         if line.starts_with("#include ") {
             if line.contains("\"chelis_blas.h\"") {
@@ -1820,18 +1778,12 @@ fn append_helper(
             }
             continue;
         }
-        if matches!(
-            line,
-            "/* CHELIS_UNIFORM_HELPERS_BEGIN */" | "/* CHELIS_DROPOUT_HELPERS_BEGIN */"
-        ) {
+        if line == "/* CHELIS_UNIFORM_HELPERS_BEGIN */" {
             skipping_helper_prelude = true;
             continue;
         }
         if skipping_helper_prelude {
-            if matches!(
-                line,
-                "/* CHELIS_UNIFORM_HELPERS_END */" | "/* CHELIS_DROPOUT_HELPERS_END */"
-            ) {
+            if line == "/* CHELIS_UNIFORM_HELPERS_END */" {
                 skipping_helper_prelude = false;
             }
             continue;
@@ -3486,24 +3438,23 @@ impl<'a> HostEmitter<'a> {
     /// chelis#2120: fill a freshly allocated tensor with a `[05-OP-8]`
     /// uniform draw in the C HOST lane.
     ///
-    /// The tensor-DAG lane has its own arm (`emit::emit_uniform_like`) and
-    /// bakes the draw key into the kernel. The host lane cannot: its
-    /// seed lives in `__chelis_rng`, installed by `HostExprKind::WithSeed`,
-    /// and the draw ordinal is consumed at run time by
-    /// `chelis_effective_uniform_key`. This is the FIRST host-lane ordinal
-    /// consumer, so the two rules below are what keep it in step with
-    /// `chelis eval` (`chelis-compiler-api` `runtime/eval.rs` `"uniform_like"`):
+    /// The tensor-DAG lane takes its key from a `DrawKey` node
+    /// (`emit::emit_draw_key`). The host lane's seed lives in `__chelis_rng`,
+    /// installed by `HostExprKind::WithSeed`, and the draw ordinal is
+    /// consumed at run time from it, so the two rules below are what keep it
+    /// in step with `chelis eval` (`chelis-compiler-api` `runtime/eval.rs`
+    /// `"uniform_like"`):
     ///
     /// 1. **Exactly one ordinal per application, read after the arguments.**
     ///    `arg_vars` are already emitted when this runs, matching the
     ///    evaluator's left-to-right argument evaluation followed by its
-    ///    `random_counter` read. `CHELIS_EFFECTIVE_UNIFORM_KEY` is invoked
-    ///    once, into a temporary, and never inside the element loop.
-    /// 2. **Bounds are re-folded from the structural `args`, not read from
-    ///    `arg_vars`.** The checker already guarantees static literal bounds
-    ///    (`infer::app_operand_dtype`, the chelis#776 gate), and this bakes
-    ///    the same exact bit pattern the DAG lane bakes, so a template that
-    ///    folds and one that does not sample identically.
+    ///    `random_counter` read. The key is taken once, into a temporary, and
+    ///    never inside the element loop.
+    /// 2. **A foldable bound is re-folded from the structural `args`, not
+    ///    read from `arg_vars`.** This stamps the same exact bit pattern the
+    ///    evaluator computes, so a template that folds and one that does not
+    ///    sample identically; any other bound is the host scalar the
+    ///    arguments computed.
     ///
     ///    This fold honours every rounding in a bound's cast chain, so a
     ///    bound spelled `cast(cast(x, f16), f32)` bakes the value `eval`
@@ -3551,40 +3502,19 @@ impl<'a> HostEmitter<'a> {
                 ));
             }
         };
-        let low = static_float_bound(args.get(1)).ok_or_else(|| unresolved_uniform_bound("low"))?;
-        let high =
-            static_float_bound(args.get(2)).ok_or_else(|| unresolved_uniform_bound("high"))?;
+        // [05-OP-8]: each bound is an f32 scalar operand. A bound the emitter
+        // can fold is stamped as its exact f32 image, as the DAG lane folds
+        // it; any other bound is the host scalar the arguments computed.
+        let low_f32_expr = uniform_bound_f32_expr(args.get(1), arg_vars.get(1), "low")?;
+        let high_f32_expr = uniform_bound_f32_expr(args.get(2), arg_vars.get(2), "high")?;
+        let low_f64_expr = format!("((double)({low_f32_expr}))");
+        let high_f64_expr = format!("((double)({high_f32_expr}))");
 
-        // [05-OP-8] / chelis#248: the sampler sees the byte-identical f32
-        // narrowing of each source bound, not a decimal round-trip. The f64
-        // arm widens those SAME truncated images, exactly as
-        // `emit::emit_uniform_like` and `host_ops::uniform_like_value` do.
-        let low_f32 = low as f32;
-        let high_f32 = high as f32;
-        let low_f32_expr = format!(
-            "chelis_f32_from_bits(UINT32_C(0x{:08x}))",
-            low_f32.to_bits()
-        );
-        let high_f32_expr = format!(
-            "chelis_f32_from_bits(UINT32_C(0x{:08x}))",
-            high_f32.to_bits()
-        );
-        let low_f64_expr = format!(
-            "chelis_f64_from_bits(UINT64_C(0x{:016x}))",
-            f64::from(low_f32).to_bits()
-        );
-        let high_f64_expr = format!(
-            "chelis_f64_from_bits(UINT64_C(0x{:016x}))",
-            f64::from(high_f32).to_bits()
-        );
-
-        // An inactive scope is reachable, not an internal desync: a
-        // top-level binding with an unhandled `Random` is a hard check error,
-        // but an exported `def` carrying one is not, and its generated
-        // wrapper initializes `__chelis_rng` inactive. Abort there rather
-        // than let `chelis_effective_uniform_key` silently return the baked
-        // operand without advancing the counter, which would both return the
-        // wrong value and desync every later draw in the scope.
+        // A draw outside an active scope is reachable, not an internal
+        // desync: a top-level binding with an unhandled `Random` is a hard
+        // check error, but an exported `def` carrying one is not, and its
+        // generated wrapper initializes `__chelis_rng` inactive. Abort there
+        // rather than draw from a stream no handler owns.
         let key = self.next_temp("uniform_key");
         self.lines.push(format!(
             "{}if (__chelis_rng == NULL || !__chelis_rng->active) {{",
@@ -3596,8 +3526,48 @@ impl<'a> HostEmitter<'a> {
         ));
         self.lines.push(format!("{}    abort();", self.indent));
         self.lines.push(format!("{}}}", self.indent));
+        // [05-OP-8] validates finite bounds, `low <= high` and a finite
+        // difference at the draw's arithmetic width before it consumes an
+        // ordinal: f64 subtracts the widened bounds, every other float dtype
+        // subtracts in f32.
+        let low = self.next_temp("uniform_low");
+        let high = self.next_temp("uniform_high");
+        let dtype = self.next_temp("uniform_dtype");
+        let ind = self.indent.clone();
         self.lines.push(format!(
-            "{}uint64_t {key} = CHELIS_EFFECTIVE_UNIFORM_KEY(0ULL);",
+            "{ind}float {low} = {low_f32_expr}, {high} = {high_f32_expr};"
+        ));
+        self.lines.push(format!(
+            "{ind}int {dtype} = (int)chelis_host_tensor_dtype({template});"
+        ));
+        self.lines.push(format!(
+            "{ind}if (!(isfinite({low}) && isfinite({high}) && {low} <= {high} && ({dtype} == {f64} ? isfinite((double){high} - (double){low}) : isfinite({high} - {low})))) {{",
+            f64 = chelis_vocab::RuntimeDType::F64.c_macro(),
+        ));
+        self.lines.push(format!("{ind}    switch ({dtype}) {{"));
+        for (runtime, prim) in [
+            (chelis_vocab::RuntimeDType::F32, Prim::F32),
+            (chelis_vocab::RuntimeDType::F64, Prim::F64),
+            (chelis_vocab::RuntimeDType::F16, Prim::F16),
+            (chelis_vocab::RuntimeDType::Bf16, Prim::Bf16),
+        ] {
+            let trap = chelis_types::NumericTrap::Domain {
+                op: "uniform_like",
+                prim,
+            }
+            .to_string();
+            self.lines.push(format!(
+                "{ind}    case {}: chelis_numeric_trap({trap:?}); break;",
+                runtime.c_macro()
+            ));
+        }
+        self.lines.push(format!(
+            "{ind}    default: fprintf(stderr, \"uniform_like unsupported dtype %d\\n\", {dtype}); abort();"
+        ));
+        self.lines.push(format!("{ind}    }}"));
+        self.lines.push(format!("{ind}}}"));
+        self.lines.push(format!(
+            "{}uint64_t {key} = chelis_random_key(__chelis_rng->seed, __chelis_rng->counter++);",
             self.indent
         ));
 
@@ -10261,8 +10231,8 @@ impl BinaryElementwiseFunc {
 /// defaulted — silently substituting `[0, 1)` for an unreadable bound is the
 /// exact chelis#776 failure this must not reintroduce.
 ///
-/// chelis#2316: the value is staged exactly as `chelis-ir`'s
-/// `static_controls::scalar` stages it — an integer leaf stays EXACT through
+/// chelis#2316: the value is staged exactly as the IR lanes evaluate the
+/// bound's operand graph — an integer leaf stays EXACT through
 /// i64 and a float leaf stays at its source dtype until a cast finalizes it —
 /// and every transition goes through the shared `chelis_types` cast
 /// primitives. Both lanes therefore apply the same roundings in the same
@@ -10355,23 +10325,37 @@ fn static_float_bound(expr: Option<&HostExpr>) -> Option<f64> {
         .map(|value| value.as_f64_lossy())
 }
 
-/// The loud terminal for a `uniform_like` bound this emitter cannot fold.
-fn unresolved_uniform_bound(which: &str) -> Unsupported {
-    Unsupported::new(
-        UnsupportedKind::Builtin("uniform_like".to_string()),
-        "`chelis build` host emission",
-        Stage::Codegen("c"),
-        chelis_types::deliberate_rejection!(
-            "[04-TOT-2]",
-            "uniform_like's bounds must be static literals the emitter can narrow to f32 \
-             exactly; the checker already rejects a runtime-computed bound, so an \
-             unreadable one here is an internal desync"
-        ),
-    )
-    .with_supported_alternative(match which {
-        "low" => "give `uniform_like` a literal low bound",
-        _ => "give `uniform_like` a literal high bound",
-    })
+/// The C `float` expression of one `[05-OP-8]` bound: the exact f32 image of
+/// a bound the emitter folds, else the f32 host scalar the arguments computed.
+fn uniform_bound_f32_expr(
+    expr: Option<&HostExpr>,
+    var: Option<&(String, HostType)>,
+    which: &str,
+) -> Result<String, Unsupported> {
+    if let Some(bound) = static_float_bound(expr) {
+        let bits = (bound as f32).to_bits();
+        return Ok(format!("chelis_f32_from_bits(UINT32_C(0x{bits:08x}))"));
+    }
+    match var {
+        Some((name, HostType::Float32)) => {
+            Ok(format!("(({})({name}))", cast_prim_c_type(Prim::F32)))
+        }
+        _ => Err(Unsupported::new(
+            UnsupportedKind::Builtin("uniform_like".to_string()),
+            "`chelis build` host emission",
+            Stage::Codegen("c"),
+            chelis_types::deliberate_rejection!(
+                "[04-TOT-2]",
+                "uniform_like's bounds are f32 scalars; the checker types them so, so a \
+                 bound that is neither a foldable literal nor an f32 host scalar here is \
+                 an internal desync"
+            ),
+        )
+        .with_supported_alternative(match which {
+            "low" => "give `uniform_like` an f32 low bound",
+            _ => "give `uniform_like` an f32 high bound",
+        })),
+    }
 }
 
 /// One arm of the runtime-dtype dispatch emitted by the elementwise
@@ -10490,13 +10474,39 @@ mod expression_dispatch_tests {
             ty.clone(),
             None,
         );
-        let draw = dag.add_node(
-            chelis_ir::dag::RiscOp::UniformLike {
-                low: 0.0,
-                high: 1.0,
-                seed: 7,
+        let rank0 = |precision| TensorType {
+            dims: vec![],
+            precision,
+        };
+        let bound = |dag: &mut chelis_ir::dag::Dag, value| {
+            dag.add_node(
+                chelis_ir::dag::RiscOp::synth_const(Prim::F32, value),
+                vec![],
+                rank0(Prim::F32),
+                None,
+            )
+        };
+        let low = bound(&mut dag, 0.0);
+        let high = bound(&mut dag, 1.0);
+        let seed = dag.add_node(
+            chelis_ir::dag::RiscOp::synth_const(Prim::Int64, 7.0),
+            vec![],
+            rank0(Prim::Int64),
+            None,
+        );
+        let key = dag.add_node(
+            chelis_ir::dag::RiscOp::DrawKey {
+                handler: chelis_ir::dag::RandomHandler::Scoped { instance: 0 },
+                draw: chelis_ir::dag::RandomDraw::UniformLike,
+                dtype: Prim::F32,
             },
-            vec![template],
+            vec![seed, low, high],
+            rank0(Prim::Key),
+            None,
+        );
+        let draw = dag.add_node(
+            chelis_ir::dag::RiscOp::UniformLike,
+            vec![template, low, high, key],
             ty,
             None,
         );

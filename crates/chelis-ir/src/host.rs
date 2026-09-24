@@ -271,9 +271,10 @@ struct DefLaneFacts {
     program_defs: RefCell<Option<Arc<BTreeMap<String, Expr>>>>,
     /// Program-wide: the checker's effect row per definition.
     def_effect_rows: RefCell<Option<Arc<BTreeMap<String, chelis_types::types::EffectSet>>>>,
-    /// Program-wide: the subexpression lowering context the evaluation
-    /// profile and the C execution plan both read.
+    /// Program-wide: the subexpression lowering context kernel lowering reads.
     subexpr_lowering_context: RefCell<Option<crate::lower::SubexprLoweringContext>>,
+    /// Program-wide: which definitions reach `dropout`.
+    dropout_reaching_defs: RefCell<Option<Arc<UnordSet<String>>>>,
     /// Program-wide: which definitions reach a runtime-shaped `to_tensor`.
     dynamic_to_tensor_def_summaries: RefCell<Option<Arc<BTreeMap<String, bool>>>>,
 }
@@ -616,15 +617,8 @@ pub struct HostExecutionPlan {
     functions: Vec<Vec<HelperExecutionProduct>>,
 }
 
-pub(crate) type HostExecutionAssociations = (
-    Vec<Option<crate::evaluation::ExecutionMetadata>>,
-    Vec<Vec<Option<crate::evaluation::ExecutionMetadata>>>,
-);
-type HostExecutionParts = (ConcreteHostProgram, HostExecutionAssociations);
-
 #[derive(Debug, Clone)]
 struct HelperExecutionProduct {
-    execution: Option<crate::evaluation::ExecutionMetadata>,
     #[cfg(feature = "lowering-trace")]
     trace: Option<crate::lowering_trace::HelperLoweringTrace>,
 }
@@ -634,24 +628,44 @@ impl HostExecutionPlan {
         &self.program
     }
 
-    /// Recover the ordinary public host payload only when no execution
-    /// association would be discarded.
+    /// Recover the ordinary public host payload only when no helper trace
+    /// would be discarded.
     pub fn into_ordinary(self) -> Result<ConcreteHostProgram, String> {
-        let retains_private_metadata = self.has_execution_helpers() || {
-            #[cfg(feature = "lowering-trace")]
-            {
-                self.has_helper_traces()
-            }
-            #[cfg(not(feature = "lowering-trace"))]
-            {
-                false
-            }
-        };
+        #[cfg(feature = "lowering-trace")]
+        let retains_private_metadata = self.has_helper_traces();
+        #[cfg(not(feature = "lowering-trace"))]
+        let retains_private_metadata = false;
         if retains_private_metadata {
-            Err("cannot discard retained host execution or trace metadata".into())
+            Err("cannot discard retained host trace metadata".into())
         } else {
             Ok(self.program)
         }
+    }
+
+    /// Whether a tensor helper of this program draws `dropout`. The C
+    /// execution lane selects the host program for such a program, so a
+    /// public entry that draws keeps the host ABI whether or not its dropout
+    /// result is read: the draw key stays in the helper when the value does
+    /// not (`spec/design/randomness_counter_stream.md` section 2).
+    pub fn has_dropout_helpers(&self) -> bool {
+        fn draws_dropout(helper: &HostTensorHelper) -> bool {
+            helper.dag.nodes().iter().any(|node| {
+                matches!(
+                    node.op,
+                    crate::dag::RiscOp::DrawKey {
+                        draw: crate::dag::RandomDraw::Dropout,
+                        ..
+                    }
+                )
+            })
+        }
+        self.program.global_tensor_helpers.iter().any(draws_dropout)
+            || self
+                .program
+                .functions
+                .iter()
+                .flat_map(|function| &function.tensor_helpers)
+                .any(draws_dropout)
     }
 
     /// Apply a manifest-owned rewrite to global observation metadata. Tensor
@@ -711,50 +725,6 @@ impl HostExecutionPlan {
         Ok(projected)
     }
 
-    /// Dropout requires a source-owned execution association. Ordinary
-    /// UniformLike helpers retain their existing C host admission and stream
-    /// advancement; their presence must not invalidate a planned sibling.
-    pub fn has_unplanned_dropout_helper(&self) -> bool {
-        fn dropout(helper: &HostTensorHelper) -> bool {
-            helper
-                .dag
-                .nodes()
-                .iter()
-                .any(|node| matches!(node.op, crate::dag::RiscOp::Dropout { .. }))
-        }
-        self.program
-            .global_tensor_helpers
-            .iter()
-            .zip(&self.global)
-            .any(|(helper, product)| dropout(helper) && product.execution.is_none())
-            || self
-                .program
-                .functions
-                .iter()
-                .zip(&self.functions)
-                .any(|(function, executions)| {
-                    function
-                        .tensor_helpers
-                        .iter()
-                        .zip(executions)
-                        .any(|(helper, product)| dropout(helper) && product.execution.is_none())
-                })
-    }
-
-    /// Whether lowering retained at least one source-owned helper execution
-    /// schedule. Callers use this to distinguish the additive C ingress from
-    /// an ordinary host program whose metadata slots are all empty.
-    pub fn has_execution_helpers(&self) -> bool {
-        self.global
-            .iter()
-            .any(|product| product.execution.is_some())
-            || self
-                .functions
-                .iter()
-                .flatten()
-                .any(|product| product.execution.is_some())
-    }
-
     #[cfg(feature = "lowering-trace")]
     pub fn has_helper_traces(&self) -> bool {
         self.global.iter().any(|product| product.trace.is_some())
@@ -792,22 +762,6 @@ impl HostExecutionPlan {
     }
 
     #[cfg(feature = "lowering-trace")]
-    pub fn global_helper_full_spine(
-        &self,
-        helper: usize,
-    ) -> Result<Option<crate::lowering_trace::FullSpineObservation>, String> {
-        self.global
-            .get(helper)
-            .map(|product| {
-                product
-                    .execution
-                    .as_ref()
-                    .map(|execution| execution.spine.full_observation())
-            })
-            .ok_or_else(|| format!("global helper {helper} has no execution-plan origin"))
-    }
-
-    #[cfg(feature = "lowering-trace")]
     pub fn function_helper_trace(
         &self,
         function: &str,
@@ -827,75 +781,23 @@ impl HostExecutionPlan {
             })
     }
 
-    #[cfg(feature = "lowering-trace")]
-    pub fn function_helper_full_spine(
-        &self,
-        function: &str,
-        helper: usize,
-    ) -> Result<Option<crate::lowering_trace::FullSpineObservation>, String> {
-        let index = self
-            .program
-            .functions
-            .iter()
-            .position(|candidate| candidate.name == function)
-            .ok_or_else(|| format!("function `{function}` has no execution-plan origin"))?;
-        self.functions[index]
-            .get(helper)
-            .map(|product| {
-                product
-                    .execution
-                    .as_ref()
-                    .map(|execution| execution.spine.full_observation())
-            })
-            .ok_or_else(|| {
-                format!("function `{function}` helper {helper} has no execution-plan origin")
-            })
-    }
-
     fn validate(&self) -> Result<(), String> {
         if self.global.len() != self.program.global_tensor_helpers.len()
             || self.functions.len() != self.program.functions.len()
+            || self
+                .functions
+                .iter()
+                .zip(&self.program.functions)
+                .any(|(products, function)| products.len() != function.tensor_helpers.len())
         {
-            return Err("host execution metadata does not match helper topology".into());
-        }
-        for (helper, product) in self.program.global_tensor_helpers.iter().zip(&self.global) {
-            if let Some(execution) = &product.execution {
-                execution.validate_for_dag(&helper.dag)?;
-            }
-        }
-        for (function, executions) in self.program.functions.iter().zip(&self.functions) {
-            if executions.len() != function.tensor_helpers.len() {
-                return Err(format!(
-                    "function `{}` execution metadata does not match helper topology",
-                    function.name
-                ));
-            }
-            for (helper, product) in function.tensor_helpers.iter().zip(executions) {
-                if let Some(execution) = &product.execution {
-                    execution.validate_for_dag(&helper.dag)?;
-                }
-            }
+            return Err("host helper products do not match helper topology".into());
         }
         Ok(())
     }
 
-    pub(crate) fn into_parts(self) -> HostExecutionParts {
-        let global = self
-            .global
-            .into_iter()
-            .map(|product| product.execution)
-            .collect();
-        let functions = self
-            .functions
-            .into_iter()
-            .map(|products| {
-                products
-                    .into_iter()
-                    .map(|product| product.execution)
-                    .collect()
-            })
-            .collect();
-        (self.program, (global, functions))
+    /// The host payload, once the caller has taken any helper traces.
+    pub(crate) fn into_program(self) -> ConcreteHostProgram {
+        self.program
     }
 }
 
@@ -913,7 +815,6 @@ struct TensorHelperSink {
     /// actuals are prepared before a frame is pushed, and nested invocations
     /// restore the enclosing frame on every ordinary Result path.
     tensor_specializations: Vec<crate::lower::TensorCallsiteSpecialization>,
-    collect_execution: bool,
     collect_trace: bool,
 }
 
@@ -924,24 +825,19 @@ struct LoweredHostFunction {
 }
 
 impl TensorHelperSink {
-    fn new(collect_execution: bool, collect_trace: bool) -> Self {
+    fn new(collect_trace: bool) -> Self {
         Self {
             transferred_result_claim_axes: Vec::new(),
             helpers: Vec::new(),
             products: Vec::new(),
             declaration_name: None,
             tensor_specializations: Vec::new(),
-            collect_execution,
             collect_trace,
         }
     }
 
-    fn for_declaration(
-        collect_execution: bool,
-        collect_trace: bool,
-        declaration_name: impl Into<String>,
-    ) -> Self {
-        let mut sink = Self::new(collect_execution, collect_trace);
+    fn for_declaration(collect_trace: bool, declaration_name: impl Into<String>) -> Self {
+        let mut sink = Self::new(collect_trace);
         sink.declaration_name = Some(declaration_name.into());
         sink
     }
@@ -949,14 +845,12 @@ impl TensorHelperSink {
     fn push_helper(
         &mut self,
         helper: HostTensorHelper,
-        execution: Option<crate::evaluation::ExecutionMetadata>,
         #[cfg(feature = "lowering-trace")] trace: Option<
             crate::lowering_trace::HelperLoweringTrace,
         >,
     ) {
         self.helpers.push(helper);
         self.products.push(HelperExecutionProduct {
-            execution,
             #[cfg(feature = "lowering-trace")]
             trace,
         });
@@ -2341,7 +2235,7 @@ struct HostExecutionMetadata {
 fn try_lower_compiled_program_with_lane_overrides(
     program: &CheckedProgram,
     manifest: Option<&chelis_types::manifest::RootManifest>,
-    collect_execution: bool,
+    c_execution_lane: bool,
     collect_trace: bool,
 ) -> Result<(CompiledProgram, HostExecutionMetadata), crate::lower::LowerDiagnostic> {
     // The whole-program lowering owns its session. Every function below reads
@@ -2372,7 +2266,7 @@ fn try_lower_compiled_program_with_lane_overrides(
         Err(_) => None,
     };
     let (host_terms, execution) = crate::lower::catch_lowering_external(|| {
-        lower_host_program_with_execution(program, &lowered_names, collect_execution, collect_trace)
+        lower_host_program_with_execution(program, &lowered_names, c_execution_lane, collect_trace)
     })??;
     let host = resolve_host_program(host_terms).map_err(|error| {
         crate::lower::LowerDiagnostic::new(
@@ -2533,78 +2427,31 @@ pub fn lower_named_tensor_entry_dag(program: &CheckedProgram, name: &str) -> Opt
     // A whole-program entry owns its session, so nothing outside this crate
     // has to know one exists (chelis#1835).
     let session = HostLoweringSession::new(program);
-    let program = &session;
-    let (body_expr, scope, result_claim, defs) = named_tensor_entry_lowering_inputs(program, name)?;
-    // Issue #197: a fatal lowering diagnostic (AD-rejection) must
-    // propagate as a panic so the outer `catch_lowering_external`
-    // surfaces it to the user. Silently absorbing it with `.ok()`
-    // would let the host fallback emit an undefined-symbol call to
-    // the grad function.
-    let context = crate::lower::prepare_checked_subexpr_lowering_context(
-        program,
-        defs.clone(),
-        Arc::new(crate::lower::collect_top_level_sigs(program.exprs())),
-    );
-    match crate::lower::try_lower_subexpr_program_with_ordered_inputs(
-        &body_expr,
-        scope,
-        &context,
-        result_claim.as_ref(),
-        None,
-        0,
-        // `scope` is this def's own declared parameter list.
-        true,
-    ) {
-        Ok((dag, _)) => Some(dag),
-        Err(diagnostic) if diagnostic.fatal => {
-            crate::lower::raise_fatal_lowering_diagnostic(diagnostic)
-        }
-        Err(_) => None,
-    }
-}
-
-/// Lower one named tensor entry with source-owned fixed-control execution.
-///
-/// `Ok(None)` means the entry has no Dropout and the legacy DAG path remains
-/// authoritative. A Dropout entry is either returned as one sealed unfused
-/// plan or rejected; callers must not retry it through raw DAG lowering.
-pub fn lower_named_tensor_entry_execution_plan(
-    program: &CheckedProgram,
-    name: &str,
-) -> Result<Option<crate::evaluation::EvaluationPlan>, crate::lower::LowerDiagnostic> {
-    // A whole-program entry owns its session, so nothing outside this crate
-    // has to know one exists (chelis#1835).
-    let session = HostLoweringSession::new(program);
-    let program = &session;
-    lower_named_tensor_entry_execution_with(
-        program,
-        name,
-        crate::lower::try_lower_subexpr_c_execution_with_ordered_inputs,
-    )
-}
-
-#[cfg(feature = "lowering-trace")]
-pub fn lower_named_tensor_entry_execution_plan_with_trace(
-    program: &CheckedProgram,
-    name: &str,
-) -> Result<
-    Option<(
-        crate::evaluation::EvaluationPlan,
-        crate::lowering_trace::HelperLoweringTrace,
-    )>,
-    crate::lower::LowerDiagnostic,
-> {
-    let session = HostLoweringSession::new(program);
-    lower_named_tensor_entry_execution_with(
+    lower_named_tensor_entry_with(
         &session,
         name,
-        crate::lower::try_lower_subexpr_c_execution_with_ordered_inputs_and_trace,
+        crate::lower::try_lower_subexpr_program_with_ordered_inputs,
     )
 }
 
-// Observation must not duplicate the admission policy, source scope or initial
-// Random frame. Only the actual lowerer's optional return product differs.
-fn lower_named_tensor_entry_execution_with<T>(
+/// [`lower_named_tensor_entry_dag`] with the lowering trace of the same
+/// lowering, draw keys included, for the `compilation-trace` capture.
+#[cfg(feature = "lowering-trace")]
+pub fn lower_named_tensor_entry_dag_with_trace(
+    program: &CheckedProgram,
+    name: &str,
+) -> Option<(crate::Dag, crate::lowering_trace::HelperLoweringTrace)> {
+    let session = HostLoweringSession::new(program);
+    lower_named_tensor_entry_with(
+        &session,
+        name,
+        crate::lower::try_lower_subexpr_program_with_ordered_inputs_and_trace,
+    )
+}
+
+// Observation must not duplicate the entry's source scope or result claim.
+// Only the actual lowerer's optional return product differs.
+fn lower_named_tensor_entry_with<T>(
     program: &HostLoweringSession<'_>,
     name: &str,
     lower: impl FnOnce(
@@ -2613,49 +2460,27 @@ fn lower_named_tensor_entry_execution_with<T>(
         &crate::lower::SubexprLoweringContext,
         Option<&TensorType>,
         bool,
-        &crate::evaluation::RandomExecutionContext,
     ) -> Result<T, crate::lower::LowerDiagnostic>,
-) -> Result<Option<T>, crate::lower::LowerDiagnostic> {
-    let Some((body_expr, scope, result_claim, defs)) =
-        named_tensor_entry_lowering_inputs(program, name)
-    else {
-        return Ok(None);
-    };
+) -> Option<T> {
+    let (body_expr, scope, result_claim, defs) = named_tensor_entry_lowering_inputs(program, name)?;
+    // Issue #197: a fatal lowering diagnostic (AD-rejection) must
+    // propagate as a panic so the outer `catch_lowering_external`
+    // surfaces it to the user. Silently absorbing it with `.ok()`
+    // would let the host fallback emit an undefined-symbol call to
+    // the grad function.
     let context = crate::lower::prepare_checked_subexpr_lowering_context(
         program,
         defs,
         Arc::new(crate::lower::collect_top_level_sigs(program.exprs())),
     );
-    let profile = context.c_execution_profile(&body_expr, &scope);
-    match profile {
-        crate::evaluation::EvaluationProfile::Legacy(
-            crate::evaluation::LegacyEvaluationReason::NoDropout,
-        ) => return Ok(None),
-        crate::evaluation::EvaluationProfile::Legacy(reason) => {
-            return Err(crate::lower::LowerDiagnostic::new(
-                format!(
-                    "tensor entry `{name}` has Dropout execution that is not fixed-control: {reason:?}"
-                ),
-                None,
-                None,
-            )
-            .fatal());
+    // `scope` is this def's own declared parameter list.
+    match lower(&body_expr, scope, &context, result_claim.as_ref(), true) {
+        Ok(lowered) => Some(lowered),
+        Err(diagnostic) if diagnostic.fatal => {
+            crate::lower::raise_fatal_lowering_diagnostic(diagnostic)
         }
-        crate::evaluation::EvaluationProfile::FixedControl => {}
+        Err(_) => None,
     }
-    let planning = crate::evaluation::RandomExecutionContext::new(RandomLoweringState {
-        seed: None,
-        counter: 0,
-    });
-    lower(
-        &body_expr,
-        scope,
-        &context,
-        result_claim.as_ref(),
-        true,
-        &planning,
-    )
-    .map(Some)
 }
 
 /// Does the named top-level def have a pure tensor signature — every
@@ -2747,7 +2572,7 @@ fn lower_host_program(
 fn lower_host_program_with_execution(
     program: &HostLoweringSession<'_>,
     lowered_names: &BTreeMap<String, bool>,
-    collect_execution: bool,
+    c_execution_lane: bool,
     collect_trace: bool,
 ) -> Result<(HostProgram, HostExecutionMetadata), crate::lower::LowerDiagnostic> {
     // chelis#1158: specialization state is per-invocation; a fresh program
@@ -2755,7 +2580,7 @@ fn lower_host_program_with_execution(
     // failed run's partial memo).
     MONO_SPECIALIZATIONS.with(|state| *state.borrow_mut() = MonoSpecializationState::default());
     let mut host = HostProgram::default();
-    let mut global_tensor_helpers = TensorHelperSink::new(collect_execution, collect_trace);
+    let mut global_tensor_helpers = TensorHelperSink::new(collect_trace);
     let mut function_execution = Vec::new();
     let mut global_scope = UnordMap::new();
     // Count pure-tensor `fn`-body top-level defs in the program. When there
@@ -2967,28 +2792,24 @@ fn lower_host_program_with_execution(
                 params.iter().all(ty_is_scalar_or_callable_scalar)
                     && ty_is_scalar_or_callable_scalar(&ret)
             });
-        // #1872: a source-fixed tensor entry needs its sealed execution
-        // helper even when no sibling happens to select the host lane.
-        // Classify the original checked body with its declared input scope;
-        // the raw-DAG effect gate remains authoritative for ordinary lowering.
-        // FixedControl can inherit Random. Only an inferred closed body may
-        // introduce this standalone wrapper, whose public ABI has no RNG frame.
-        let has_fixed_execution = collect_execution
+        // #1872: a tensor entry that reaches `dropout` gets its own host
+        // wrapper on the C execution lane even when no sibling happens to
+        // select the host lane, so its public entry keeps the host ABI. Only
+        // an inferred closed body may introduce this standalone wrapper,
+        // whose public ABI has no RNG frame; a body that inherits Random
+        // keeps its ordinary lane.
+        let closed_dropout_entry = c_execution_lane
             && is_fn_body
             && !has_callable_params
             && cached_def_effect_rows(program)
                 .get(name)
                 .is_some_and(|row| !row.contains(&chelis_types::types::Effect::Random))
-            && named_tensor_entry_lowering_inputs(program, name).is_some_and(
-                |(body, scope, _, _)| {
-                    cached_subexpr_lowering_context(program).c_execution_profile(&body, &scope)
-                        == crate::evaluation::EvaluationProfile::FixedControl
-                },
-            );
+            && cached_dropout_reaching_defs(program).contains(name)
+            && named_tensor_entry_lowering_inputs(program, name).is_some();
         let needs_host_wrapper = is_fn_body
             && (has_non_dag_tensor
                 || scalar_only_callable_signature
-                || has_fixed_execution
+                || closed_dropout_entry
                 || (!has_callable_params && (has_any_host_lane_def || lowered_fn_def_count > 1)));
         // Issue #378: a non-`fn` value binding (a `(def name (lit ...))`)
         // that a host-lane function captures must reach `host.globals` so
@@ -3031,14 +2852,9 @@ fn lower_host_program_with_execution(
         // says so); otherwise we have no good lowering and must drop the
         // def — at least the caller will get `implicit declaration` rather
         // than `call(…)` undefined-symbol.
-        if let Some(lowered) = lower_host_function(
-            name,
-            body,
-            ty_expr.as_ref(),
-            program,
-            collect_execution,
-            collect_trace,
-        )? {
+        if let Some(lowered) =
+            lower_host_function(name, body, ty_expr.as_ref(), program, collect_trace)?
+        {
             let mut function = lowered.function;
             // N→1 lowering collapse per `spec/design/chelis_span_survival.md`
             // §2.3 host-side table, rule "Lowering. Top-level def collapses
@@ -3989,17 +3805,6 @@ fn host_body_has_call_matching<T>(
     }
 }
 
-/// Random-stream state a host evaluator threads into a kernel lowering so the
-/// draws inside the kernel advance the enclosing handler's stream, the same
-/// contract the transforms use through
-/// `try_lower_subexpr_program_with_random_state_progress`. The C lowering
-/// passes `None`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct RandomLoweringState {
-    pub seed: Option<u64>,
-    pub counter: u64,
-}
-
 /// The kernel the C host program emits for a def whose body
 /// `lower_host_function` decides to lower through the tensor DAG, in the form
 /// an evaluator can run directly.
@@ -4025,33 +3830,6 @@ pub struct HostDefKernel {
     /// `inputs` by name and the unreferenced ones are dropped, as the C
     /// wrapper drops them.
     pub params: Vec<HostParam>,
-    /// The next unused Random ordinal when a `RandomLoweringState` was given.
-    pub next_random_counter: Option<u64>,
-}
-
-/// Evaluator-only transport; the public/serialized legacy kernel is not
-/// extended with fields whose loss could change Random execution.
-#[derive(Debug, Clone)]
-pub struct HostDefEvaluationPlan {
-    kernel: HostDefKernel,
-    plan: Option<crate::evaluation::EvaluationPlan>,
-    profile: crate::evaluation::EvaluationProfile,
-    staged_plan: Option<Box<crate::evaluation::StagedEvaluationPlan>>,
-}
-
-impl HostDefEvaluationPlan {
-    pub fn kernel_for_inspection(&self) -> &HostDefKernel {
-        &self.kernel
-    }
-    pub fn plan(&self) -> Option<&crate::evaluation::EvaluationPlan> {
-        self.plan.as_ref()
-    }
-    pub fn profile(&self) -> crate::evaluation::EvaluationProfile {
-        self.profile
-    }
-    pub fn staged_plan(&self) -> Option<&crate::evaluation::StagedEvaluationPlan> {
-        self.staged_plan.as_deref()
-    }
 }
 
 /// What `lower_host_function` and [`host_def_kernel`] both start from.
@@ -4094,7 +3872,7 @@ enum DefBodyDecision {
 /// fn bypass(program: &CheckedProgram) {
 ///     // No session: `&CheckedProgram` is not `&HostLoweringSession`, and
 ///     // `Deref` runs the other way.
-///     let _ = chelis_ir::host::host_def_kernel(program, "f", None);
+///     let _ = chelis_ir::host::host_def_kernel(program, "f");
 /// }
 /// ```
 ///
@@ -4105,57 +3883,13 @@ enum DefBodyDecision {
 /// # use chelis_types::CheckedProgram;
 /// fn decide(program: &CheckedProgram) {
 ///     let session = HostLoweringSession::new(program);
-///     let _ = chelis_ir::host::host_def_kernel(&session, "f", None);
+///     let _ = chelis_ir::host::host_def_kernel(&session, "f");
 /// }
 /// ```
 pub fn host_def_kernel(
     program: &HostLoweringSession<'_>,
     name: &str,
-    random: Option<RandomLoweringState>,
 ) -> Result<Option<HostDefKernel>, crate::lower::LowerDiagnostic> {
-    host_def_kernel_product(program, name, random, None)
-        .map(|product| product.map(|product| product.kernel))
-}
-
-/// The evaluator's counterpart to [`host_def_kernel`], carrying the execution
-/// plan beside the kernel. It requires a session for the same reason and with
-/// the same force: a caller holding only a checked program cannot reach it.
-///
-/// ```compile_fail
-/// # use chelis_ir::evaluation::RandomExecutionContext;
-/// # use chelis_ir::host::RandomLoweringState;
-/// # use chelis_types::CheckedProgram;
-/// fn bypass(program: &CheckedProgram) {
-///     let context = RandomExecutionContext::new(RandomLoweringState { seed: None, counter: 0 });
-///     let _ = chelis_ir::host::host_def_evaluation_plan(program, "f", &context);
-/// }
-/// ```
-///
-/// ```no_run
-/// # use chelis_ir::evaluation::RandomExecutionContext;
-/// # use chelis_ir::host::RandomLoweringState;
-/// # use chelis_ir::host::HostLoweringSession;
-/// # use chelis_types::CheckedProgram;
-/// fn plan(program: &CheckedProgram) {
-///     let session = HostLoweringSession::new(program);
-///     let context = RandomExecutionContext::new(RandomLoweringState { seed: None, counter: 0 });
-///     let _ = chelis_ir::host::host_def_evaluation_plan(&session, "f", &context);
-/// }
-/// ```
-pub fn host_def_evaluation_plan(
-    program: &HostLoweringSession<'_>,
-    name: &str,
-    context: &crate::evaluation::RandomExecutionContext,
-) -> Result<Option<HostDefEvaluationPlan>, crate::lower::LowerDiagnostic> {
-    host_def_kernel_product(program, name, Some(context.state()), Some(context))
-}
-
-fn host_def_kernel_product(
-    program: &HostLoweringSession<'_>,
-    name: &str,
-    random: Option<RandomLoweringState>,
-    execution: Option<&crate::evaluation::RandomExecutionContext>,
-) -> Result<Option<HostDefEvaluationPlan>, crate::lower::LowerDiagnostic> {
     // The declaration's own name is the key for every per-def fact (the
     // effect row, the call graph); a caller may hand in a shorter spelling
     // that `find_top_level_def_named` resolves.
@@ -4183,95 +3917,24 @@ fn host_def_kernel_product(
         return Ok(None);
     };
     let _preflight_guard = TensorHelperPreflightGuard::begin(&signature.body_expr, program);
-    // Classify lexical controls before host signature preparation substitutes
-    // local callable aliases: that rewrite does not carry closure captures.
-    let profile_body = as_node(body)
-        .filter(|node| node.tag() == DeepTag::Fn)
-        .and_then(|node| node.children_slice().get(1))
-        .unwrap_or(&signature.body_expr);
-    let profile = match execution {
-        Some(_) => cached_subexpr_lowering_context(program).evaluation_profile(
-            profile_body,
-            &kernel_scope_types(&signature.scope, Some(&signature.params)),
-        ),
-        None => crate::evaluation::EvaluationProfile::Legacy(
-            crate::evaluation::LegacyEvaluationReason::LegacyApi,
-        ),
-    };
-    // Claims are constructed before partitioning, while the evaluator keeps
-    // the source-owned Random associations across those same stage cuts.
-    let mut staged_plan = None;
-    {
-        let execution_out = (profile == crate::evaluation::EvaluationProfile::FixedControl)
-            .then_some(&mut staged_plan);
-        match staged_def_kernel_product(program, &signature, random, execution_out)? {
-            staged::StagingAttempt::Ready(kernel) => {
-                return Ok(Some(HostDefEvaluationPlan {
-                    kernel,
-                    plan: None,
-                    profile,
-                    staged_plan: staged_plan.map(Box::new),
-                }));
-            }
-            staged::StagingAttempt::HostControlBoundary => return Ok(None),
-            staged::StagingAttempt::NotApplicable => {}
-        }
+    match staged_def_kernel(program, &signature)? {
+        staged::StagingAttempt::Ready(kernel) => return Ok(Some(kernel)),
+        staged::StagingAttempt::HostControlBoundary => return Ok(None),
+        staged::StagingAttempt::NotApplicable => {}
     }
-    let expected = match def_body_decision_impl(
-        program,
-        &signature,
-        profile == crate::evaluation::EvaluationProfile::FixedControl,
-    )? {
+    let expected = match def_body_decision(program, &signature)? {
         DefBodyDecision::Kernel(expected) => expected,
         DefBodyDecision::Host => return Ok(None),
         DefBodyDecision::TensorVar(..) => return Ok(None),
     };
-    let plan = if profile == crate::evaluation::EvaluationProfile::FixedControl {
-        let context = cached_subexpr_lowering_context(program);
-        let scoped = kernel_scope_types(&signature.scope, Some(&signature.params));
-        let execution = execution.expect("fixed profile is only selected by the evaluator");
-        let plan = if transfer_literal_result_claims {
-            crate::lower::try_lower_tensor_helper_evaluation_with_ordered_inputs(
-                &signature.body_expr,
-                scoped,
-                &context,
-                Some(&expected),
-                true,
-                execution,
-            )?
-        } else {
-            crate::lower::try_lower_subexpr_evaluation_with_ordered_inputs(
-                &signature.body_expr,
-                scoped,
-                &context,
-                Some(&expected),
-                true,
-                execution,
-            )?
-        };
-        let rebound =
-            remap_tensor_helper_dim_symbols(plan.dag_for_inspection(), &signature.scope, &expected);
-        Some(
-            plan.rebind_dimensions(rebound).map_err(|message| {
-                crate::lower::LowerDiagnostic::new(message, None, None).fatal()
-            })?,
-        )
-    } else {
-        None
-    };
-    let (dag, next_random_counter) = if let Some(plan) = &plan {
-        (plan.dag_for_inspection().clone(), None)
-    } else {
-        lower_kernel_dag(
-            &signature.body_expr,
-            program,
-            &signature.scope,
-            Some(&signature.params),
-            &expected,
-            random,
-            transfer_literal_result_claims,
-        )?
-    };
+    let dag = lower_kernel_dag(
+        &signature.body_expr,
+        program,
+        &signature.scope,
+        Some(&signature.params),
+        &expected,
+        transfer_literal_result_claims,
+    )?;
     if let Some(builtin) = kernel_dag_loads_builtin(&dag, &signature.scope) {
         return Err(crate::lower::LowerDiagnostic::new(
             format!(
@@ -4289,34 +3952,18 @@ fn host_def_kernel_product(
         .and_then(|id| dag.get(*id))
         .map(|node| node.output_type.clone())
         .unwrap_or_else(|| expected.clone());
-    Ok(Some(HostDefEvaluationPlan {
-        kernel: HostDefKernel {
-            dag,
-            staged: None,
-            inputs,
-            output,
-            params: signature.params,
-            next_random_counter,
-        },
-        plan,
-        profile,
-        staged_plan: None,
+    Ok(Some(HostDefKernel {
+        dag,
+        staged: None,
+        inputs,
+        output,
+        params: signature.params,
     }))
 }
 
 fn staged_def_kernel(
     program: &HostLoweringSession<'_>,
     signature: &HostDefSignature,
-    random: Option<RandomLoweringState>,
-) -> Result<staged::StagingAttempt<HostDefKernel>, crate::lower::LowerDiagnostic> {
-    staged_def_kernel_product(program, signature, random, None)
-}
-
-fn staged_def_kernel_product(
-    program: &HostLoweringSession<'_>,
-    signature: &HostDefSignature,
-    random: Option<RandomLoweringState>,
-    execution_out: Option<&mut Option<crate::evaluation::StagedEvaluationPlan>>,
 ) -> Result<staged::StagingAttempt<HostDefKernel>, crate::lower::LowerDiagnostic> {
     use staged::StagingAttempt;
     let HostTypeTerm::Tensor(expected) = &signature.ret_ty else {
@@ -4386,10 +4033,8 @@ fn staged_def_kernel_product(
         &context,
         expected,
         crate::lower::StagedHostRegionLoweringOptions::for_declaration(
-            random,
             top_level_fn_transfers_literal_result_claims(program, &signature.name),
         ),
-        execution_out,
     );
     let lowered = match lowered {
         Ok(lowered) => lowered,
@@ -4411,7 +4056,6 @@ fn staged_def_kernel_product(
         dag,
         staged: Some(plan),
         params: signature.params.clone(),
-        next_random_counter: None,
     }))
 }
 
@@ -4454,11 +4098,16 @@ fn cached_def_effect_rows(
 /// `Some(reason)` keeps the def in host code on both lanes; on C that is the
 /// lane the non-fatal fall-through (chelis#1515) already chose, so the emitted
 /// program is unchanged, which the corpus capture proves rather than assumes.
+///
+/// `admit_dropout` lets a kernel carry `dropout`. A runtime `if` lowers into a
+/// kernel as a `where` that computes both arms, and each draw there carries
+/// its arm's path as its activation, so an unselected arm neither validates
+/// nor takes an ordinal (chelis#2410).
 pub(crate) fn body_form_the_dag_cannot_carry(
     program: &HostLoweringSession<'_>,
     body: &Expr,
     params: &[HostParam],
-    evaluation_dropout: bool,
+    admit_dropout: bool,
 ) -> Option<String> {
     let defs = cached_program_defs(program);
     let mut walk = UncarriableWalk {
@@ -4468,7 +4117,7 @@ pub(crate) fn body_form_the_dag_cannot_carry(
         cycle_cutoff: false,
         #[cfg(test)]
         def_visits: 0,
-        evaluation_dropout,
+        admit_dropout,
         scopes: vec![
             params
                 .iter()
@@ -4536,7 +4185,7 @@ struct UncarriableWalk<'a> {
     cycle_cutoff: bool,
     #[cfg(test)]
     def_visits: usize,
-    evaluation_dropout: bool,
+    admit_dropout: bool,
     scopes: Vec<UnordMap<String, AdmissionBinding>>,
 }
 
@@ -4643,7 +4292,7 @@ impl UncarriableWalk<'_> {
                 let name = kids.first().and_then(symbol_name)?;
                 if self.bound(name).is_some()
                     || BUILTIN_NAMES.contains(&name)
-                    || (self.evaluation_dropout && name == "dropout")
+                    || (self.admit_dropout && name == "dropout")
                     || name.chars().next().is_some_and(char::is_uppercase)
                 {
                     return None;
@@ -4731,9 +4380,7 @@ impl UncarriableWalk<'_> {
                     // the checker has already bound every value name. A callee
                     // that is neither a builtin nor a definition is walked as a
                     // name and reported as unresolvable.
-                    if BUILTIN_NAMES.contains(&name)
-                        || (self.evaluation_dropout && name == "dropout")
-                    {
+                    if BUILTIN_NAMES.contains(&name) || (self.admit_dropout && name == "dropout") {
                         return kids
                             .iter()
                             .skip(1)
@@ -5157,18 +4804,6 @@ fn def_body_decision(
     program: &HostLoweringSession<'_>,
     signature: &HostDefSignature,
 ) -> Result<DefBodyDecision, crate::lower::LowerDiagnostic> {
-    let fixed_dropout = cached_subexpr_lowering_context(program).c_execution_profile(
-        &signature.body_expr,
-        &kernel_scope_types(&signature.scope, Some(&signature.params)),
-    ) == crate::evaluation::EvaluationProfile::FixedControl;
-    def_body_decision_impl(program, signature, fixed_dropout)
-}
-
-fn def_body_decision_impl(
-    program: &HostLoweringSession<'_>,
-    signature: &HostDefSignature,
-    evaluation_dropout: bool,
-) -> Result<DefBodyDecision, crate::lower::LowerDiagnostic> {
     let body_expr = &signature.body_expr;
     // Skip the tensor-helper path when any param is callable: the DAG
     // helper has no representation for fn-pointer inputs and would otherwise
@@ -5202,9 +4837,7 @@ fn def_body_decision_impl(
     // A form the kernel lowering cannot carry keeps the def in host code on
     // both lanes, decided here rather than discovered by a failed lowering
     // (chelis#1277 B2h; the classes the byte-identity corpus found).
-    if body_form_the_dag_cannot_carry(program, body_expr, &signature.params, evaluation_dropout)
-        .is_some()
-    {
+    if body_form_the_dag_cannot_carry(program, body_expr, &signature.params, true).is_some() {
         return Ok(DefBodyDecision::Host);
     }
     // The callee summary probe is asked LAST of the host-lane predicates, and
@@ -5271,7 +4904,7 @@ fn lower_def_body_kernel(
     }
     let transfer_literal_result_claims =
         top_level_fn_transfers_literal_result_claims(program, &signature.name);
-    match staged_def_kernel(program, signature, None)? {
+    match staged_def_kernel(program, signature)? {
         staged::StagingAttempt::Ready(kernel) => {
             return lower_staged_host_plan(
                 kernel.staged.as_ref().expect("staged kernel"),
@@ -5297,138 +4930,28 @@ fn lower_def_body_kernel(
         }
         DefBodyDecision::Kernel(expected) => expected,
     };
-    if tensor_helpers.collect_execution {
-        let context = cached_subexpr_lowering_context(program);
-        let scoped = kernel_scope_types(&signature.scope, Some(&signature.params));
-        if context.c_execution_profile(&signature.body_expr, &scoped)
-            == crate::evaluation::EvaluationProfile::FixedControl
-        {
-            let planning = crate::evaluation::RandomExecutionContext::new(RandomLoweringState {
-                seed: None,
-                counter: 0,
-            });
-            #[cfg(feature = "lowering-trace")]
-            let (plan, trace) = if tensor_helpers.collect_trace && transfer_literal_result_claims {
-                let (plan, trace) =
-                    crate::lower::try_lower_tensor_helper_c_execution_with_ordered_inputs_and_trace(
-                        &signature.body_expr,
-                        scoped,
-                        &context,
-                        Some(&expected),
-                        true,
-                        &planning,
-                    )?;
-                (plan, Some(trace))
-            } else if tensor_helpers.collect_trace {
-                let (plan, trace) =
-                    crate::lower::try_lower_subexpr_c_execution_with_ordered_inputs_and_trace(
-                        &signature.body_expr,
-                        scoped,
-                        &context,
-                        Some(&expected),
-                        true,
-                        &planning,
-                    )?;
-                (plan, Some(trace))
-            } else if transfer_literal_result_claims {
-                (
-                    crate::lower::try_lower_tensor_helper_c_execution_with_ordered_inputs(
-                        &signature.body_expr,
-                        scoped,
-                        &context,
-                        Some(&expected),
-                        true,
-                        &planning,
-                    )?,
-                    None,
-                )
-            } else {
-                (
-                    crate::lower::try_lower_subexpr_c_execution_with_ordered_inputs(
-                        &signature.body_expr,
-                        scoped,
-                        &context,
-                        Some(&expected),
-                        true,
-                        &planning,
-                    )?,
-                    None,
-                )
-            };
-            #[cfg(not(feature = "lowering-trace"))]
-            let plan = if transfer_literal_result_claims {
-                crate::lower::try_lower_tensor_helper_c_execution_with_ordered_inputs(
-                    &signature.body_expr,
-                    scoped,
-                    &context,
-                    Some(&expected),
-                    true,
-                    &planning,
-                )?
-            } else {
-                crate::lower::try_lower_subexpr_c_execution_with_ordered_inputs(
-                    &signature.body_expr,
-                    scoped,
-                    &context,
-                    Some(&expected),
-                    true,
-                    &planning,
-                )?
-            };
-            let rebound = remap_tensor_helper_dim_symbols(
-                plan.dag_for_inspection(),
-                &signature.scope,
-                &expected,
-            );
-            let plan = plan.rebind_dimensions(rebound).map_err(|message| {
-                crate::lower::LowerDiagnostic::new(message, None, None).fatal()
-            })?;
-            #[cfg(feature = "lowering-trace")]
-            let mut trace = trace;
-            #[cfg(feature = "lowering-trace")]
-            if let Some(trace) = &mut trace {
-                trace.record_dimension_rebinding(plan.dag_for_inspection());
-            }
-            let (dag, execution) = plan.into_parts();
-            record_literal_result_transfer(signature, tensor_helpers);
-            return Ok(Some(finish_tensor_helper_product(
-                dag,
-                Some(execution),
-                #[cfg(feature = "lowering-trace")]
-                trace,
-                &signature.scope,
-                tensor_helpers,
-                expected,
-            )));
-        }
-    }
     #[cfg(feature = "lowering-trace")]
-    let lowered = if tensor_helpers.collect_trace && transfer_literal_result_claims {
+    let lowered = if tensor_helpers.collect_trace {
         let context = cached_subexpr_lowering_context(program);
         let scoped = kernel_scope_types(&signature.scope, Some(&signature.params));
-        crate::lower::try_lower_tensor_helper_program_with_ordered_inputs_and_trace(
-            &signature.body_expr,
-            scoped,
-            &context,
-            Some(&expected),
-            None,
-            0,
-            true,
-        )
-        .map(|(dag, _, trace)| ((dag, None), Some(trace)))
-    } else if tensor_helpers.collect_trace {
-        let context = cached_subexpr_lowering_context(program);
-        let scoped = kernel_scope_types(&signature.scope, Some(&signature.params));
-        crate::lower::try_lower_subexpr_program_with_ordered_inputs_and_trace(
-            &signature.body_expr,
-            scoped,
-            &context,
-            Some(&expected),
-            None,
-            0,
-            true,
-        )
-        .map(|(dag, _, trace)| ((dag, None), Some(trace)))
+        let traced = if transfer_literal_result_claims {
+            crate::lower::try_lower_tensor_helper_program_with_ordered_inputs_and_trace(
+                &signature.body_expr,
+                scoped,
+                &context,
+                Some(&expected),
+                true,
+            )
+        } else {
+            crate::lower::try_lower_subexpr_program_with_ordered_inputs_and_trace(
+                &signature.body_expr,
+                scoped,
+                &context,
+                Some(&expected),
+                true,
+            )
+        };
+        traced.map(|(dag, trace)| (dag, Some(trace)))
     } else {
         lower_kernel_dag(
             &signature.body_expr,
@@ -5436,10 +4959,9 @@ fn lower_def_body_kernel(
             &signature.scope,
             Some(&signature.params),
             &expected,
-            None,
             transfer_literal_result_claims,
         )
-        .map(|lowered| (lowered, None))
+        .map(|dag| (dag, None))
     };
     #[cfg(not(feature = "lowering-trace"))]
     let lowered = lower_kernel_dag(
@@ -5448,12 +4970,11 @@ fn lower_def_body_kernel(
         &signature.scope,
         Some(&signature.params),
         &expected,
-        None,
         transfer_literal_result_claims,
     );
     let (dag, _trace) = match lowered {
         #[cfg(feature = "lowering-trace")]
-        Ok(((dag, _), trace)) => {
+        Ok((dag, trace)) => {
             let dag = remap_tensor_helper_dim_symbols(&dag, &signature.scope, &expected);
             let mut trace = trace;
             if let Some(trace) = &mut trace {
@@ -5462,7 +4983,7 @@ fn lower_def_body_kernel(
             (dag, trace)
         }
         #[cfg(not(feature = "lowering-trace"))]
-        Ok((dag, _)) => (dag, ()),
+        Ok(dag) => (dag, ()),
         Err(diagnostic) if diagnostic.fatal => {
             crate::lower::raise_fatal_lowering_diagnostic(diagnostic)
         }
@@ -5485,7 +5006,6 @@ fn lower_def_body_kernel(
     record_literal_result_transfer(signature, tensor_helpers);
     Ok(Some(finish_tensor_helper_product(
         dag,
-        None,
         #[cfg(feature = "lowering-trace")]
         _trace,
         &signature.scope,
@@ -5536,65 +5056,28 @@ fn lower_kernel_dag(
     scope: &UnordMap<String, HostTypeTerm>,
     declaring_params: Option<&[HostParam]>,
     expected: &TensorType,
-    random: Option<RandomLoweringState>,
     transfer_literal_result_claims: bool,
-) -> Result<(crate::Dag, Option<u64>), crate::lower::LowerDiagnostic> {
+) -> Result<crate::Dag, crate::lower::LowerDiagnostic> {
     let context = cached_subexpr_lowering_context(program);
     let scope_types = kernel_scope_types(scope, declaring_params);
-    let (dag, next_random_counter) = match random {
-        None => {
-            let lowered = if transfer_literal_result_claims {
-                crate::lower::try_lower_tensor_helper_program_with_ordered_inputs(
-                    expr,
-                    scope_types,
-                    &context,
-                    declaring_params.is_some().then_some(expected),
-                    None,
-                    0,
-                    declaring_params.is_some(),
-                )?
-            } else {
-                crate::lower::try_lower_subexpr_program_with_ordered_inputs(
-                    expr,
-                    scope_types,
-                    &context,
-                    declaring_params.is_some().then_some(expected),
-                    None,
-                    0,
-                    declaring_params.is_some(),
-                )?
-            };
-            (lowered.0, None)
-        }
-        Some(state) => {
-            let (dag, counter) = if transfer_literal_result_claims {
-                crate::lower::try_lower_tensor_helper_program_with_ordered_inputs(
-                    expr,
-                    scope_types,
-                    &context,
-                    declaring_params.is_some().then_some(expected),
-                    state.seed,
-                    state.counter,
-                    declaring_params.is_some(),
-                )?
-            } else {
-                crate::lower::try_lower_subexpr_program_with_ordered_inputs(
-                    expr,
-                    scope_types,
-                    &context,
-                    declaring_params.is_some().then_some(expected),
-                    state.seed,
-                    state.counter,
-                    declaring_params.is_some(),
-                )?
-            };
-            (dag, Some(counter))
-        }
+    let dag = if transfer_literal_result_claims {
+        crate::lower::try_lower_tensor_helper_program_with_ordered_inputs(
+            expr,
+            scope_types,
+            &context,
+            declaring_params.is_some().then_some(expected),
+            declaring_params.is_some(),
+        )?
+    } else {
+        crate::lower::try_lower_subexpr_program_with_ordered_inputs(
+            expr,
+            scope_types,
+            &context,
+            declaring_params.is_some().then_some(expected),
+            declaring_params.is_some(),
+        )?
     };
-    Ok((
-        remap_tensor_helper_dim_symbols(&dag, scope, expected),
-        next_random_counter,
-    ))
+    Ok(remap_tensor_helper_dim_symbols(&dag, scope, expected))
 }
 
 fn kernel_scope_types(
@@ -5719,14 +5202,12 @@ fn lower_host_function(
     body: &Expr,
     ty_expr: Option<&Expr>,
     program: &HostLoweringSession<'_>,
-    collect_execution: bool,
     collect_trace: bool,
 ) -> Result<Option<LoweredHostFunction>, crate::lower::LowerDiagnostic> {
     let Some(signature) = host_def_signature(name, body, ty_expr, program) else {
         return Ok(None);
     };
-    let mut tensor_helpers =
-        TensorHelperSink::for_declaration(collect_execution, collect_trace, name);
+    let mut tensor_helpers = TensorHelperSink::for_declaration(collect_trace, name);
     // The preflight facts are keyed by the body expression's address, so the
     // guard opens on the signature's own copy, which is not moved until the
     // body has been lowered.
@@ -5910,7 +5391,6 @@ fn try_lower_tensor_helper_call_inner(
         program,
         scope,
         &expected,
-        tensor_helpers.collect_execution,
         tensor_helpers.collect_trace,
         specialized_context.as_ref().or(lowering_context),
     ) else {
@@ -5944,7 +5424,6 @@ fn try_lower_tensor_helper_call_inner(
     record_host_work(|profile| profile.tensor_helper_successes += 1);
     Some(finish_tensor_helper_product(
         product.dag,
-        product.execution,
         #[cfg(feature = "lowering-trace")]
         product.trace,
         scope,
@@ -6430,13 +5909,11 @@ fn lower_tensor_helper_dag(
     context: &crate::lower::SubexprLoweringContext,
 ) -> Option<crate::Dag> {
     lower_tensor_helper_with(expr, program, || {
-        let (dag, _) = crate::lower::try_lower_tensor_helper_program_with_ordered_inputs(
+        let dag = crate::lower::try_lower_tensor_helper_program_with_ordered_inputs(
             expr,
             collect_tensor_scope(scope).into_sorted(),
             context,
             None,
-            None,
-            0,
             false,
         )?;
         Ok(remap_tensor_helper_dim_symbols(&dag, scope, expected))
@@ -6445,7 +5922,6 @@ fn lower_tensor_helper_dag(
 
 struct LoweredTensorHelper {
     dag: crate::Dag,
-    execution: Option<crate::evaluation::ExecutionMetadata>,
     #[cfg(feature = "lowering-trace")]
     trace: Option<crate::lowering_trace::HelperLoweringTrace>,
 }
@@ -6455,16 +5931,13 @@ fn lower_tensor_helper_product(
     program: &HostLoweringSession<'_>,
     scope: &UnordMap<String, HostTypeTerm>,
     expected: &TensorType,
-    collect_execution: bool,
     collect_trace: bool,
     lowering_context: Option<&crate::lower::SubexprLoweringContext>,
 ) -> Option<LoweredTensorHelper> {
     #[cfg(not(feature = "lowering-trace"))]
     let _ = collect_trace;
-    // The fixed-control execution branch below lowers directly rather than
-    // passing through `lower_tensor_helper_with`. Keep the #1951 fence at
-    // this common entry so neither route can beta-reduce a returned callable
-    // and erase its application.
+    // Keep the #1951 fence at this common entry so no route can beta-reduce a
+    // returned callable and erase its application.
     if contains_computed_callable_application(expr) {
         record_host_work(|profile| profile.tensor_helper_dag_rejections += 1);
         return None;
@@ -6472,90 +5945,19 @@ fn lower_tensor_helper_product(
     let context = lowering_context
         .cloned()
         .unwrap_or_else(|| cached_subexpr_lowering_context(program));
-    if collect_execution {
-        let scoped = collect_tensor_scope(scope).into_sorted();
-        if context.c_execution_profile(expr, &scoped)
-            == crate::evaluation::EvaluationProfile::FixedControl
-        {
-            let planning = crate::evaluation::RandomExecutionContext::new(RandomLoweringState {
-                seed: None,
-                counter: 0,
-            });
-            #[cfg(feature = "lowering-trace")]
-            let lowered = if collect_trace {
-                crate::lower::try_lower_tensor_helper_c_execution_with_ordered_inputs_and_trace(
-                    expr,
-                    scoped,
-                    &context,
-                    Some(expected),
-                    false,
-                    &planning,
-                )
-                .map(|(plan, trace)| (plan, Some(trace)))
-            } else {
-                crate::lower::try_lower_tensor_helper_c_execution_with_ordered_inputs(
-                    expr,
-                    scoped,
-                    &context,
-                    Some(expected),
-                    false,
-                    &planning,
-                )
-                .map(|plan| (plan, None))
-            };
-            #[cfg(not(feature = "lowering-trace"))]
-            let lowered = crate::lower::try_lower_tensor_helper_c_execution_with_ordered_inputs(
-                expr,
-                scoped,
-                &context,
-                Some(expected),
-                false,
-                &planning,
-            )
-            .map(|plan| (plan, ()));
-            let (plan, _trace) = match lowered {
-                Ok(lowered) => lowered,
-                Err(diagnostic) if diagnostic.fatal => {
-                    crate::lower::raise_fatal_lowering_diagnostic(diagnostic)
-                }
-                Err(_diagnostic) => return None,
-            };
-            let rebound =
-                remap_tensor_helper_dim_symbols(plan.dag_for_inspection(), scope, expected);
-            let plan = plan.rebind_dimensions(rebound).unwrap_or_else(|message| {
-                crate::lower::raise_fatal_lowering_diagnostic(
-                    crate::lower::LowerDiagnostic::new(message, None, None).fatal(),
-                )
-            });
-            #[cfg(feature = "lowering-trace")]
-            let mut trace = _trace;
-            #[cfg(feature = "lowering-trace")]
-            if let Some(trace) = &mut trace {
-                trace.record_dimension_rebinding(plan.dag_for_inspection());
-            }
-            let (dag, metadata) = plan.into_parts();
-            return Some(LoweredTensorHelper {
-                dag,
-                execution: Some(metadata),
-                #[cfg(feature = "lowering-trace")]
-                trace,
-            });
-        }
-    }
     #[cfg(feature = "lowering-trace")]
     if collect_trace {
         return lower_tensor_helper_with(expr, program, || {
             let scoped = collect_tensor_scope(scope).into_sorted();
-            let (dag, _, trace) =
+            let (dag, trace) =
                 crate::lower::try_lower_tensor_helper_program_with_ordered_inputs_and_trace(
-                    expr, scoped, &context, None, None, 0, false,
+                    expr, scoped, &context, None, false,
                 )?;
             let dag = remap_tensor_helper_dim_symbols(&dag, scope, expected);
             let mut trace = trace;
             trace.record_dimension_rebinding(&dag);
             Ok(LoweredTensorHelper {
                 dag,
-                execution: None,
                 trace: Some(trace),
             })
         });
@@ -6563,7 +5965,6 @@ fn lower_tensor_helper_product(
     lower_tensor_helper_dag(expr, program, scope, expected, &context).map(|dag| {
         LoweredTensorHelper {
             dag,
-            execution: None,
             #[cfg(feature = "lowering-trace")]
             trace: None,
         }
@@ -6608,7 +6009,6 @@ fn finish_tensor_helper_call(
 ) -> HostExpr {
     finish_tensor_helper_product(
         dag,
-        None,
         #[cfg(feature = "lowering-trace")]
         None,
         scope,
@@ -6619,7 +6019,6 @@ fn finish_tensor_helper_call(
 
 fn finish_tensor_helper_product(
     dag: crate::Dag,
-    execution: Option<crate::evaluation::ExecutionMetadata>,
     #[cfg(feature = "lowering-trace")] trace: Option<crate::lowering_trace::HelperLoweringTrace>,
     scope: &UnordMap<String, HostTypeTerm>,
     tensor_helpers: &mut TensorHelperSink,
@@ -6704,7 +6103,6 @@ fn finish_tensor_helper_product(
             specialization,
             summary_rejection,
         },
-        execution,
         #[cfg(feature = "lowering-trace")]
         trace,
     );
@@ -12408,7 +11806,7 @@ fn lower_app_host_expr(
         && let Some(signature) = host_def_signature(canonical, body, None, program)
     {
         !matches!(
-            staged_def_kernel(program, &signature, None)?,
+            staged_def_kernel(program, &signature)?,
             staged::StagingAttempt::NotApplicable
         )
     } else {
@@ -14327,7 +13725,6 @@ fn ensure_mono_specialization(
         fn_expr: body,
         program,
         spec_scope: &spec_scope,
-        collect_execution: tensor_helpers.collect_execution,
         collect_trace: tensor_helpers.collect_trace,
     });
     MONO_SPECIALIZATIONS.with(|state| {
@@ -14347,7 +13744,6 @@ struct MonoSpecializedFunctionInput<'a> {
     fn_expr: &'a Expr,
     program: &'a HostLoweringSession<'a>,
     spec_scope: &'a UnordMap<String, HostTypeTerm>,
-    collect_execution: bool,
     collect_trace: bool,
 }
 
@@ -14363,12 +13759,10 @@ fn lower_mono_specialized_function(
         fn_expr,
         program,
         spec_scope,
-        collect_execution,
         collect_trace,
     } = input;
     let body_expr = inline_local_callable_lets(body_expr);
-    let mut fn_tensor_helpers =
-        TensorHelperSink::for_declaration(collect_execution, collect_trace, declaration_name);
+    let mut fn_tensor_helpers = TensorHelperSink::for_declaration(collect_trace, declaration_name);
     // chelis#1201: pin this specialization's type variables for the body.
     // The body's checked types are the generic ones the checker recorded, so
     // without this a generic ADT constructed inside the body (coral#26's
@@ -15280,16 +14674,6 @@ fn top_level_fn_helper_summary_rejects(
     let Some(body) = program.def_named(name).map(|(_, body)| body) else {
         return Ok(false);
     };
-    // Like a type-polymorphic declaration, an unresolved source-rate
-    // template has no standalone helper summary. Its actual call is
-    // classified and lowered with the caller's static controls (#1764).
-    if cached_subexpr_lowering_context(program).evaluation_profile(body, &[])
-        == crate::evaluation::EvaluationProfile::Legacy(
-            crate::evaluation::LegacyEvaluationReason::RuntimeRate,
-        )
-    {
-        return Ok(false);
-    }
     if !matches!(body, Expr::Node(list, _) if list.tag() == DeepTag::Fn) {
         return Ok(false);
     }
@@ -15313,7 +14697,7 @@ fn top_level_fn_helper_summary_rejects(
     // (harden-bounded-monomorphization D1).
     let probe_guard = MonoProbeGuard::begin();
     let lowered = crate::lower::catch_lowering_external(|| {
-        lower_host_function(name, body, None, program, false, false)
+        lower_host_function(name, body, None, program, false)
     });
     drop(probe_guard);
     if pushed {
@@ -16075,7 +15459,7 @@ fn remap_tensor_helper_dim_symbols(
                         output
                     })
                     .unwrap_or_else(|| expected_output.clone()),
-                crate::dag::RiscOp::UniformLike { .. } | crate::dag::RiscOp::Dropout { .. } => root
+                crate::dag::RiscOp::UniformLike | crate::dag::RiscOp::Dropout => root
                     .inputs
                     .first()
                     .and_then(|id| dag.get(*id))
@@ -16626,8 +16010,8 @@ fn actualize_tensor_helper_types(
             | crate::dag::RiscOp::Ceil
             | crate::dag::RiscOp::Round
             | crate::dag::RiscOp::Recip
-            | crate::dag::RiscOp::UniformLike { .. }
-            | crate::dag::RiscOp::Dropout { .. }
+            | crate::dag::RiscOp::UniformLike
+            | crate::dag::RiscOp::Dropout
             | crate::dag::RiscOp::Copy
             | crate::dag::RiscOp::Drop
             | crate::dag::RiscOp::Realize
@@ -16957,6 +16341,42 @@ fn cached_program_defs(program: &HostLoweringSession<'_>) -> Arc<BTreeMap<String
     let defs = Arc::new(collect_program_defs(program.exprs()));
     *program.facts.program_defs.borrow_mut() = Some(defs.clone());
     defs
+}
+
+/// The definitions that reach `dropout` by naming it, or by naming a
+/// definition that does. Computed once per program.
+fn cached_dropout_reaching_defs(program: &HostLoweringSession<'_>) -> Arc<UnordSet<String>> {
+    if let Some(cached) = program.facts.dropout_reaching_defs.borrow().clone() {
+        return cached;
+    }
+    let defs = cached_program_defs(program);
+    let mut callers = BTreeMap::<&str, Vec<&str>>::new();
+    let mut pending = Vec::new();
+    for (name, body) in defs.iter() {
+        let mut mentioned = UnordSet::new();
+        collect_deep_var_names(body, &mut mentioned);
+        for mentioned in mentioned.into_sorted() {
+            if mentioned == "dropout" {
+                pending.push(name.as_str());
+            } else if let Some((callee, _)) = defs.get_key_value(&mentioned) {
+                callers
+                    .entry(callee.as_str())
+                    .or_default()
+                    .push(name.as_str());
+            }
+        }
+    }
+    let mut reaching = UnordSet::new();
+    while let Some(name) = pending.pop() {
+        if reaching.insert(name.to_string())
+            && let Some(names) = callers.get(name)
+        {
+            pending.extend(names.iter().copied());
+        }
+    }
+    let reaching = Arc::new(reaching);
+    *program.facts.dropout_reaching_defs.borrow_mut() = Some(reaching.clone());
+    reaching
 }
 
 fn cached_subexpr_lowering_context(
@@ -20817,7 +20237,7 @@ mod tests {
                 completed: UnordMap::new(),
                 cycle_cutoff: false,
                 def_visits: 0,
-                evaluation_dropout: false,
+                admit_dropout: false,
                 scopes: vec![UnordMap::from([(
                     "x".to_string(),
                     AdmissionBinding {
@@ -20853,7 +20273,7 @@ mod tests {
             completed: UnordMap::new(),
             cycle_cutoff: false,
             def_visits: 0,
-            evaluation_dropout: false,
+            admit_dropout: false,
             scopes: vec![UnordMap::from([(
                 "xs".to_string(),
                 AdmissionBinding {
@@ -20909,7 +20329,7 @@ mod tests {
             completed: UnordMap::new(),
             cycle_cutoff: false,
             def_visits: 0,
-            evaluation_dropout: false,
+            admit_dropout: false,
             scopes: Vec::new(),
         }
     }
@@ -21287,7 +20707,6 @@ def bad[b](box: Box[b]) -> bool =
             None,
             &HostLoweringSession::new(&checked),
             false,
-            false,
         )
         .expect_err("real lowering must report the genuine bad call");
         assert_eq!(
@@ -21376,44 +20795,59 @@ def bad[b](box: Box[b]) -> bool =
         }
     }
 
+    fn draw_keys(dag: &crate::Dag) -> Vec<crate::dag::RandomHandler> {
+        dag.nodes()
+            .iter()
+            .filter_map(|node| match node.op {
+                crate::dag::RiscOp::DrawKey {
+                    handler,
+                    draw: crate::dag::RandomDraw::Dropout,
+                    ..
+                } => Some(handler),
+                _ => None,
+            })
+            .collect()
+    }
+
     #[test]
-    fn named_tensor_entry_exposes_only_source_fixed_execution() {
-        let fixed = surf_check(
+    fn named_tensor_entry_lowers_its_dropout_to_a_scoped_draw_key() {
+        let scoped = surf_check(
             r#"
 def main(x: tensor[4, f32]) -> tensor[4, f32] = with seed(0i64) {
   dropout(x, 0.5f32)
 }
 "#,
         );
-        let plan = lower_named_tensor_entry_execution_plan(&fixed, "main")
-            .expect("fixed entry lowers")
-            .expect("fixed entry retains its execution plan");
-        plan.verify_ownership()
-            .expect("entry plan validates and seals against its DAG");
-
-        let ordinary = surf_check("def main(x: tensor[4, f32]) -> tensor[4, f32] = add(x, x)");
+        let dag = lower_named_tensor_entry_dag(&scoped, "main").expect("scoped entry lowers");
+        assert!(matches!(
+            draw_keys(&dag).as_slice(),
+            [crate::dag::RandomHandler::Scoped { .. }]
+        ));
         assert!(
-            lower_named_tensor_entry_execution_plan(&ordinary, "main")
-                .expect("ordinary entry classification")
-                .is_none(),
-            "a no-Dropout entry stays on the legacy DAG path"
+            dag.nodes()
+                .iter()
+                .any(|node| matches!(node.op, crate::dag::RiscOp::Dropout)),
+            "the key-operand dropout consumes the draw key"
         );
 
-        // chelis#2405: runtime control that reaches no draw has no Dropout
-        // execution to reject.
+        let ordinary = surf_check("def main(x: tensor[4, f32]) -> tensor[4, f32] = add(x, x)");
+        let dag = lower_named_tensor_entry_dag(&ordinary, "main").expect("ordinary entry lowers");
+        assert!(
+            draw_keys(&dag).is_empty(),
+            "a no-Dropout entry takes no key"
+        );
+
+        // chelis#2405: runtime control that reaches no draw lowers as before.
         let control = surf_check(
             "def main(x: tensor[4, f32], c: bool) -> tensor[4, f32] = if c then x else neg(x)",
         );
-        assert!(
-            lower_named_tensor_entry_execution_plan(&control, "main")
-                .expect("draw-free control is not a Dropout rejection")
-                .is_none(),
-            "a draw-free entry with runtime control stays on the legacy DAG path"
-        );
+        let dag = lower_named_tensor_entry_dag(&control, "main")
+            .expect("a draw-free entry with runtime control lowers");
+        assert!(draw_keys(&dag).is_empty());
     }
 
     #[test]
-    fn named_execution_plan_keeps_authored_unused_interface_obligations() {
+    fn named_entry_lowering_keeps_authored_unused_interface_obligations() {
         let checked = surf_check(
             r#"
 def main[n](x: tensor[n, f32], unused: tensor[n, f32]) -> tensor[n, f32] = with seed(0i64) {
@@ -21421,11 +20855,8 @@ def main[n](x: tensor[n, f32], unused: tensor[n, f32]) -> tensor[n, f32] = with 
 }
 "#,
         );
-        let plan = lower_named_tensor_entry_execution_plan(&checked, "main")
-            .expect("fixed entry lowers")
-            .expect("fixed entry retains its execution plan");
-        let loads = plan
-            .dag_for_inspection()
+        let dag = lower_named_tensor_entry_dag(&checked, "main").expect("scoped entry lowers");
+        let loads = dag
             .nodes()
             .iter()
             .filter_map(|node| match &node.op {
@@ -21438,22 +20869,15 @@ def main[n](x: tensor[n, f32], unused: tensor[n, f32]) -> tensor[n, f32] = with 
             vec!["x", "unused"],
             "an authored repeated-dimension obligation keeps an unread parameter"
         );
-        assert!(
-            plan.dag_for_inspection()
-                .nodes()
-                .iter()
-                .any(|node| matches!(
-                    &node.op,
-                    crate::dag::RiscOp::ExtentWitness { parameter, claims, .. }
-                        if parameter == "unused" && !claims.is_empty()
-                ))
-        );
-        plan.verify_ownership()
-            .expect("authored interface plan remains sealed");
+        assert!(dag.nodes().iter().any(|node| matches!(
+            &node.op,
+            crate::dag::RiscOp::ExtentWitness { parameter, claims, .. }
+                if parameter == "unused" && !claims.is_empty()
+        )));
     }
 
     #[test]
-    fn named_tensor_entry_rejects_runtime_dropout_control() {
+    fn named_tensor_entry_lowers_a_runtime_dropout_rate_as_an_operand() {
         let checked = surf_check(
             r#"
 def main(x: tensor[4, f32], rate: f32) -> tensor[4, f32] = with seed(0i64) {
@@ -21461,10 +20885,17 @@ def main(x: tensor[4, f32], rate: f32) -> tensor[4, f32] = with seed(0i64) {
 }
 "#,
         );
-        let diagnostic = lower_named_tensor_entry_execution_plan(&checked, "main")
-            .expect_err("runtime rate has no fixed execution plan");
-        assert!(diagnostic.fatal, "unsupported Dropout control stays loud");
-        assert!(diagnostic.message.contains("not fixed-control"));
+        let dag =
+            lower_named_tensor_entry_dag(&checked, "main").expect("a runtime rate is an operand");
+        let dropout = dag
+            .nodes()
+            .iter()
+            .find(|node| matches!(node.op, crate::dag::RiscOp::Dropout))
+            .expect("the entry draws");
+        assert!(matches!(
+            &dag.get(dropout.inputs[1]).expect("rate operand").op,
+            crate::dag::RiscOp::Load { name } if name.as_str() == "rate"
+        ));
     }
 
     fn synthetic_tensor_function(name: &str, origin: HostFunctionOrigin) -> ConcreteHostFunction {
@@ -21635,7 +21066,7 @@ def main(x: tensor[4, f32], rate: f32) -> tensor[4, f32] = with seed(0i64) {
                 {
                     let session = HostLoweringSession::new(&checked);
                     for name in &names {
-                        host_def_kernel(&session, name, None)
+                        host_def_kernel(&session, name)
                             .expect("#1829 fixture reaches a kernel decision");
                     }
                 }
@@ -21839,7 +21270,7 @@ def main(x: tensor[4, f32], rate: f32) -> tensor[4, f32] = with seed(0i64) {
                     let first_answers = names
                         .iter()
                         .map(|name| {
-                            host_def_kernel(&session, name, None)
+                            host_def_kernel(&session, name)
                                 .expect("#1835 fixture reaches a kernel decision")
                                 .is_some()
                         })
@@ -21848,7 +21279,7 @@ def main(x: tensor[4, f32], rate: f32) -> tensor[4, f32] = with seed(0i64) {
                     let second_answers = names
                         .iter()
                         .map(|name| {
-                            host_def_kernel(&session, name, None)
+                            host_def_kernel(&session, name)
                                 .expect("#1835 fixture reaches a kernel decision")
                                 .is_some()
                         })
@@ -21918,7 +21349,7 @@ def main(x: tensor[4, f32], rate: f32) -> tensor[4, f32] = with seed(0i64) {
         let mixed_answers = mixed_names
             .iter()
             .map(|name| {
-                host_def_kernel(&mixed_session, name, None)
+                host_def_kernel(&mixed_session, name)
                     .expect("#1835 mixed fixture reaches a kernel decision")
                     .is_some()
             })
@@ -24797,7 +24228,7 @@ def from_column[n, a](column: Column[n, a]) -> Frame[n, a] =
 
     fn lower_against(program: &CheckedProgram, source: &str) -> Result<HostExpr, String> {
         let program = &HostLoweringSession::new(program);
-        let mut helpers = TensorHelperSink::new(false, false);
+        let mut helpers = TensorHelperSink::new(false);
         lower_host_expr(&deep_expr(source), program, &UnordMap::new(), &mut helpers)
             .map_err(|diagnostic| diagnostic.message)
     }

@@ -440,7 +440,7 @@ const BASELINE: &[Entry] = &[
     (
         Pat::UnwrapOrNumericLiteral,
         "crates/chelis-ir/src/lower.rs",
-        10,
+        8,
         "structural at the P1 baseline: recursion-depth counter and \
          desync-guarded rank/extent reads. The uniform-ConstTensor \
          first-element read LEFT this census at chelis#856 (13 -> 12, per \
@@ -452,12 +452,11 @@ const BASELINE: &[Entry] = &[
          diagnostic, so no numeric default survives the site. Chelis#1299 \
          removed both convolution metadata defaults (12 -> 10): canonical \
          conv requires exact per-axis metadata, with no absent-argument \
-         fallback. FLAGGED, not proven: the with-seed defaults, whose \
-         effects-checker cover the \
-         chelis#793 red team pierced (a negative .dp i64 seed extracts \
-         to None and falls to seed 0) - that .dp repro is now rejected at \
-         CHECK time by chelis#793's negative-seed checker case, so the \
-         sites are checker-guarded pending their census rows",
+         fallback. The two with-seed seed-0 defaults LEFT this census at \
+         chelis#2413 (10 -> 8): the legacy lowering-time draw keys and \
+         their seed mixing are gone, every draw reads its handler through \
+         a draw key, and an unhandled draw is an execution error rather \
+         than a seed-0 draw",
     ),
     (
         Pat::UnwrapOrNumericLiteral,
@@ -511,16 +510,18 @@ const BASELINE: &[Entry] = &[
     (
         Pat::UnwrapOrNumericLiteral,
         "crates/chelis-compiler-api/src/runtime/eval.rs",
-        2,
-        "with-seed default (mirrors lower.rs; the chelis#793 negative-seed \
-         repro is now checker-rejected); plus the `map_or(-1_i64, ...)` \
+        1,
+        "the `map_or(-1_i64, ...)` \
          process-exit-code default (proven-structural: a signal-killed \
          child has no exit code, and -1 is the conventional sentinel, not \
          a chelis#703 value substitution) newly counted by the rt791 F6 \
          widening. The former scalarization first-element read was FIXED \
          by chelis#729 Phase 1 (tensor_to_scalar reads the sealed storage \
-         and errors loudly on an empty buffer), shrinking this row per B1; \
-         P1-frozen for the Phase 2 lint audit",
+         and errors loudly on an empty buffer), shrinking this row per B1. \
+         The interpreter's with-seed default was FIXED by chelis#2413 \
+         phase 3 (a draw outside every handler is an internal error, never \
+         seed 0), shrinking this row again per B1; P1-frozen for the Phase \
+         2 lint audit",
     ),
     (
         Pat::UnwrapOrNumericLiteral,

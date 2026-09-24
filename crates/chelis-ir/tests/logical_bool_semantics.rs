@@ -1466,13 +1466,41 @@ fn logical_random_activation_is_control_only_during_grad() {
         scalar_f64.clone(),
         None,
     );
-    let output = dag.add_node(
-        RiscOp::UniformLike {
-            low: -1.0,
-            high: 1.0,
-            seed: 17,
+    let scalar = |precision| TensorType {
+        dims: vec![],
+        precision,
+    };
+    let low = dag.add_node(
+        RiscOp::synth_const(Prim::F32, -1.0),
+        vec![],
+        scalar(Prim::F32),
+        None,
+    );
+    let high = dag.add_node(
+        RiscOp::synth_const(Prim::F32, 1.0),
+        vec![],
+        scalar(Prim::F32),
+        None,
+    );
+    let seed = dag.add_node(
+        RiscOp::synth_const(Prim::Int64, 17.0),
+        vec![],
+        scalar(Prim::Int64),
+        None,
+    );
+    let key = dag.add_node(
+        RiscOp::DrawKey {
+            handler: chelis_ir::dag::RandomHandler::Scoped { instance: 0 },
+            draw: chelis_ir::dag::RandomDraw::UniformLike,
+            dtype: Prim::F64,
         },
-        vec![template, activation],
+        vec![seed, low, high, activation],
+        scalar(Prim::Key),
+        None,
+    );
+    let output = dag.add_node(
+        RiscOp::UniformLike,
+        vec![template, low, high, key, activation],
         scalar_f64,
         None,
     );

@@ -1,8 +1,9 @@
 //! [05-RNG-1] and [05-OP-8]: straight-line `uniform_like` draws produce the
 //! spec's words and sampler arithmetic, bit for bit, in `chelis eval`, in
 //! compiled C, and in the DAG evaluator (whole-program lowering and
-//! fixed-control plans). The programs take no `vmap` or unselected arm, whose
-//! ordinals are chelis#2409's and chelis#2410's.
+//! fixed-control plans). The stream programs take no `vmap`, whose ordinals
+//! are chelis#2409's; a draw in an unselected arm takes no ordinal and
+//! validates nothing (chelis#2410).
 //!
 //! The reference below transcribes the two atoms from the spec text. It never
 //! calls an evaluator, a lowering, or a `chelis_types` sampler, so a lane that
@@ -273,11 +274,11 @@ fn sample_body(checked: &chelis_types::CheckedProgram) -> chelis_deep::Expr {
 }
 
 /// The two DAG evaluator lanes for `sample` under `seed`:
-/// - "DAG": the legacy lowering, whose draws carry a key fixed at lowering
-///   time from the lowering context's seed and counter;
+/// - "DAG": the key-operand lowering, whose draw keys take their ordinals
+///   from the evaluation's inherited frame;
 /// - "plan": a fixed-control evaluation plan, whose draws take their key from
 ///   the executing frame's `(seed, ordinal)`.
-fn dag_lanes(source: &str, prim: Prim, len: u64, seed: i64) -> [(&'static str, Vec<u64>); 2] {
+fn dag_lane(source: &str, prim: Prim, len: u64, seed: i64) -> (&'static str, Vec<u64>) {
     let checked = checked_program(source);
     let body = sample_body(&checked);
     let inputs: UnordMap<String, chelis_ir::dag::TensorType> = [(
@@ -300,46 +301,22 @@ fn dag_lanes(source: &str, prim: Prim, len: u64, seed: i64) -> [(&'static str, V
             .map(|value| stored_bits(prim, value))
             .collect::<Vec<_>>()
     };
-    let (legacy, next) = chelis_ir::lower::try_lower_subexpr_program_with_random_state_progress(
-        &body,
-        inputs.clone(),
-        UnordMap::new(),
-        UnordMap::new(),
-        Some(seed as u64),
-        0,
-    )
-    .unwrap();
-    assert!(next > 0, "the legacy lowering consumed no ordinal");
-    let values = chelis_ir::eval::eval_tensor(
-        &legacy,
-        &[("x".to_string(), template.clone())].into_iter().collect(),
-    )
-    .unwrap();
-    let legacy_bits = bits(&values[&legacy.roots()[0]]);
-    let mut context =
-        chelis_ir::evaluation::RandomExecutionContext::new(chelis_ir::host::RandomLoweringState {
-            seed: Some(seed as u64),
-            counter: 0,
-        });
-    let plan = chelis_ir::lower::try_lower_subexpr_evaluation_plan(
+    let dag = chelis_ir::lower::try_lower_subexpr_program(
         &body,
         inputs,
         UnordMap::new(),
         UnordMap::new(),
-        &context,
     )
     .unwrap();
-    let values = chelis_ir::eval::eval_tensor_plan_with_strict(&plan, &mut context, |_| {
-        Some(template.clone())
-    })
-    .unwrap();
-    assert_eq!(
-        context.state().counter,
-        next,
-        "the plan and the lowering agree on ordinals"
-    );
-    let plan_bits = bits(&values[&plan.dag_for_inspection().roots()[0]]);
-    [("DAG", legacy_bits), ("plan", plan_bits)]
+    let mut frame = chelis_ir::eval::RandomFrame::inherited(seed as u64, 0);
+    let values =
+        chelis_ir::eval::eval_tensor_roots_with_frame(&dag, dag.roots(), &mut frame, |_| {
+            Some(template.clone())
+        })
+        .unwrap();
+    let next = frame.inherited_counter().expect("an inherited frame");
+    assert!(next > 0, "the draw keys consumed no ordinal");
+    ("DAG", bits(&values[&dag.roots()[0]]))
 }
 
 fn hex(bits: &[u64]) -> Vec<String> {
@@ -401,13 +378,8 @@ fn uniform_like_draws_the_spec_stream_in_eval_c_and_the_dag_evaluator() {
     for (row, (name, dtype, prim, seed)) in cells.iter().enumerate() {
         let (prim, seed) = (*prim, *seed);
         let expected = expected_draws(prim, seed);
-        let [dag, plan] = dag_lanes(&sample_source(dtype, LEN, &draws), prim, LEN, seed);
-        for (lane, actual) in [
-            ("eval", &eval[row]),
-            ("C", &compiled[row]),
-            (dag.0, &dag.1),
-            (plan.0, &plan.1),
-        ] {
+        let dag = dag_lane(&sample_source(dtype, LEN, &draws), prim, LEN, seed);
+        for (lane, actual) in [("eval", &eval[row]), ("C", &compiled[row]), (dag.0, &dag.1)] {
             if *actual != expected {
                 failures.push(format!(
                     "{lane} {name} (seed {seed}):\n  actual   {:?}\n  expected {:?}",
@@ -436,7 +408,7 @@ fn draw_c_element_i_is_not_draw_i_element_c() {
     );
     const ROWS: usize = 4;
     let names = [("square".to_string(), Prim::F64)];
-    let [dag, plan] = dag_lanes(
+    let dag = dag_lane(
         &sample_source("f64", ROWS as u64, &[("0.0f32", "1.0f32"); ROWS]),
         Prim::F64,
         ROWS as u64,
@@ -449,7 +421,6 @@ fn draw_c_element_i_is_not_draw_i_element_c() {
         ),
         ("C", c_lane(SYMMETRY_PROGRAM, &names).remove(0)),
         dag,
-        plan,
     ];
     for (lane, row) in lanes {
         let square = row
@@ -488,4 +459,416 @@ fn draw_c_element_i_is_not_draw_i_element_c() {
             }
         }
     }
+}
+
+/// [05-RNG-1]'s draw key for ordinal `c` of a handler seeded `seed`: the
+/// word's seed-and-ordinal half, which the HIP lane passes to its kernel.
+fn spec_key(seed: i64, c: u64) -> u64 {
+    (seed as u64) ^ splitmix64(c).rotate_left(17)
+}
+
+/// The HIP lane computes a `with seed` region's draw key at emission and
+/// passes it to its device kernel. A tensor entry whose own handler draws
+/// takes the HIP DAG path, and both generated entry points, the host entry
+/// and its device twin, pass the key of the region's ordinal 0. The build
+/// emits source only, so no GPU or HIP compiler is needed. The per-entry
+/// ordinal reset for a region with several draws is the HIP emitter's
+/// `each_entry_point_keys_its_scoped_draws_from_ordinal_zero`.
+///
+/// Evidentiary status: REGRESSION TEST. At 3b5f029d8 the build refused every
+/// draw ("DAG path does not support tensor precision `key`").
+#[test]
+fn a_hip_tensor_entry_passes_its_handlers_draw_key_to_both_entry_points() {
+    let dir = tempdir().unwrap();
+    let source = dir.path().join("noisy.ch");
+    std::fs::write(
+        &source,
+        "def noisy(x: tensor[8, f32]) -> tensor[8, f32] = with seed(7i64) { add(x, uniform_like(copy(x), 0.0f32, 1.0f32)) }\n",
+    )
+    .unwrap();
+    let out = dir.path().join("out");
+    succeeded(
+        cli(&[
+            "build",
+            source.to_str().unwrap(),
+            "--target",
+            "hip",
+            "--output",
+            out.to_str().unwrap(),
+        ]),
+        "HIP build",
+    );
+    let emitted = std::fs::read_to_string(out.join("noisy_hip.cpp")).unwrap();
+    let entry_keys = |signature: &str| {
+        let body = emitted
+            .split_once(signature)
+            .unwrap_or_else(|| panic!("no `{signature}` in:\n{emitted}"))
+            .1;
+        let body = body.split("\nextern \"C\"").next().unwrap();
+        body.lines()
+            .filter_map(|line| {
+                let (name, value) = line.trim().split_once(" = ")?;
+                name.strip_prefix("unsigned long long t")?
+                    .strip_suffix("_key")?;
+                value.strip_suffix("ULL;")?.parse::<u64>().ok()
+            })
+            .collect::<Vec<_>>()
+    };
+    let expected = vec![spec_key(7, 0)];
+    assert_eq!(
+        entry_keys("extern \"C\" void noisy("),
+        expected,
+        "host entry"
+    );
+    assert_eq!(
+        entry_keys("extern \"C\" void noisy_device("),
+        expected,
+        "device entry"
+    );
+}
+
+/// [05-OP-8] in compiled C: bounds that are not finite, reversed, or whose
+/// width overflows at the arithmetic dtype trap Domain as `uniform_like`
+/// before the draw produces a value. The non-finite bounds come from run-time
+/// arithmetic, so no literal gate can catch them first.
+///
+/// Evidentiary status: COVERAGE LOCK, not a regression test: compiled C traps
+/// these at 3b5f029d8 too. Removing the emitted bound check makes every row
+/// return a value instead.
+#[test]
+fn compiled_c_traps_invalid_run_time_uniform_bounds_before_the_draw() {
+    assert!(
+        common::gcc_available(),
+        "C toolchain required; no lane may skip"
+    );
+    let setup = "x = to_tensor([1.0f32, 1.0f32, 1.0f32, 1.0f32])\n    s = tensor_to_scalar(sum(copy(x), 0i32))";
+    let rows = [
+        (
+            "infinite_high",
+            "hi = div(1.0f32, sub(s, s))\n    uniform_like(x, 0.0f32, hi)",
+        ),
+        (
+            "nan_high",
+            "hi = div(sub(s, s), sub(s, s))\n    uniform_like(x, 0.0f32, hi)",
+        ),
+        ("reversed", "uniform_like(x, s, 1.0f32)"),
+        (
+            "overflowing_width",
+            "uniform_like(x, mul(s, -7.5e37f32), mul(s, 7.5e37f32))",
+        ),
+    ];
+    for (name, body) in rows {
+        let dir = tempdir().unwrap();
+        let source = dir.path().join(format!("{name}.ch"));
+        std::fs::write(
+            &source,
+            format!("def main() =\n  with seed(7i64) {{\n    {setup}\n    {body}\n  }}\n"),
+        )
+        .unwrap();
+        let out = dir.path().join("out");
+        succeeded(
+            cli(&[
+                "build",
+                source.to_str().unwrap(),
+                "--target",
+                "c",
+                "--output",
+                out.to_str().unwrap(),
+            ]),
+            name,
+        );
+        assert!(common::link_generated(&out, &format!("{name}.c"), name).success());
+        let run = std::process::Command::new(out.join(name)).output().unwrap();
+        let stderr = String::from_utf8_lossy(&run.stderr);
+        assert!(!run.status.success(), "{name} returned a value");
+        assert!(
+            stderr.contains("numeric trap: domain in uniform_like at f32"),
+            "{name}: {stderr}"
+        );
+        assert!(run.stdout.is_empty(), "{name} printed a draw");
+    }
+}
+
+/// A printed root's values: a tensor's data, or a scalar as one value.
+fn printed_root(stdout: &str, root: &str) -> Vec<f64> {
+    let prefix = format!("{root} = ");
+    let line = stdout
+        .lines()
+        .find_map(|line| line.strip_prefix(&prefix))
+        .unwrap_or_else(|| panic!("no `{root}` in:\n{stdout}"));
+    if line.starts_with("tensor(") {
+        return common::parse_tensor_data(stdout, root);
+    }
+    vec![line.trim().parse().expect("a numeric scalar")]
+}
+
+/// One expected root: exact binary32 values, or a binary32 reduction whose
+/// summation order the reference does not model.
+enum Root {
+    Exact(Vec<f64>),
+    Sum(f64),
+}
+
+/// [05-RNG-1] enters only the selected arm of a runtime `if` or `match`, so a
+/// `uniform_like` in an unselected arm neither validates its bounds nor
+/// takes an ordinal (chelis#2410). A kernel `where` computes both arms, so
+/// each draw there carries its arm's path condition as its activation. The
+/// flags are computed from data, so no lane can fold them. Rows cover run-time
+/// bounds that would trap if validated, eval's named-axis route, a local
+/// ascription, a nested arm, a `match` arm, `grad` through an unselected arm,
+/// and chelis#2410's own reproducer.
+///
+/// Evidentiary status: REGRESSION TEST. At dcc9256c4 compiled C trapped on
+/// `helper_invalid_bounds` and shifted the later draw of
+/// `helper_valid_bounds`, `ascribed_helper`, `nested_arm` and `issue_2410` by
+/// one ordinal, and eval trapped on `routed_invalid_bounds` and shifted the
+/// later draw of `routed_valid_bounds` and `routed_literal`. The other rows
+/// passed there.
+#[test]
+fn a_uniform_like_in_an_unselected_arm_takes_no_ordinal_in_eval_or_c() {
+    assert!(
+        common::gcc_available(),
+        "C toolchain required; no lane may skip"
+    );
+    let unit = |c: u64, len: u64| {
+        (0..len)
+            .map(|i| {
+                f64::from(f32::from_bits(
+                    spec_bits(Prim::F32, 7, c, i, 0.0, 1.0) as u32
+                ))
+            })
+            .collect::<Vec<_>>()
+    };
+    let ones = |len| vec![1.0; len];
+    let x8 = "x = to_tensor([1.0f32, 1.0f32, 1.0f32, 1.0f32, 1.0f32, 1.0f32, 1.0f32, 1.0f32])";
+    let sum = "tensor_to_scalar(sum(copy(x), 0i32))";
+    let handled =
+        |body: &str| format!("def main() =\n  with seed(7i64) {{\n    {x8}\n{body}  }}\n");
+    let noisy_helper = "def layer(x: tensor[8, f32], noisy: bool, eps: f32) -> tensor[8, f32] ! { Random } = if noisy then add(copy(x), uniform_like(x, neg(eps), eps)) else x\n";
+    let routed = |bounds: &str| {
+        format!(
+            "def layer(x: tensor[seq, f32], noisy: bool, eps: f32) -> f32 ! {{ Random }} = tensor_to_scalar(sum(if noisy then uniform_like(x, {bounds}) else x, seq))\n"
+        )
+    };
+    let routed_body = |comparison: &str, eps: &str| {
+        format!(
+            "    s = {sum}\n    noisy = {comparison}(s, 0.0f32)\n    y = layer(copy(x), noisy, {eps})\n    z = uniform_like(x, 0.0f32, 1.0f32)\n    (y, z)\n"
+        )
+    };
+    let pick = "def pick(x: tensor[8, f32], flag: bool) -> tensor[8, f32] ! { Random } = if flag then uniform_like(x, 0.0f32, 1.0f32) else x\n";
+    let rows = [
+        (
+            "helper_invalid_bounds",
+            format!(
+                "{noisy_helper}{}",
+                handled(&format!(
+                    "    s = {sum}\n    layer(x, lt(s, 0.0f32), sub(0.0f32, s))\n"
+                ))
+            ),
+            vec![("main", Root::Exact(ones(8)))],
+        ),
+        (
+            "inline_invalid_bounds",
+            handled(&format!(
+                "    s = {sum}\n    eps = sub(0.0f32, s)\n    if lt(s, 0.0f32) then uniform_like(x, neg(eps), eps) else x\n"
+            )),
+            vec![("main", Root::Exact(ones(8)))],
+        ),
+        (
+            "helper_valid_bounds",
+            format!(
+                "{noisy_helper}{}",
+                handled(&format!(
+                    "    s = {sum}\n    y = layer(copy(x), lt(s, 0.0f32), s)\n    z = uniform_like(x, 0.0f32, 1.0f32)\n    (y, z)\n"
+                ))
+            ),
+            vec![
+                ("main.0", Root::Exact(ones(8))),
+                ("main.1", Root::Exact(unit(0, 8))),
+            ],
+        ),
+        (
+            "routed_invalid_bounds",
+            format!(
+                "{}{}",
+                routed("neg(eps), eps"),
+                handled(&routed_body("lt", "sub(0.0f32, s)"))
+            ),
+            vec![
+                ("main.0", Root::Exact(vec![8.0])),
+                ("main.1", Root::Exact(unit(0, 8))),
+            ],
+        ),
+        (
+            "routed_valid_bounds",
+            format!(
+                "{}{}",
+                routed("neg(eps), eps"),
+                handled(&routed_body("lt", "s"))
+            ),
+            vec![
+                ("main.0", Root::Exact(vec![8.0])),
+                ("main.1", Root::Exact(unit(0, 8))),
+            ],
+        ),
+        (
+            "routed_literal",
+            format!(
+                "{}{}",
+                routed("0.0f32, 1.0f32"),
+                handled(&routed_body("lt", "s"))
+            ),
+            vec![
+                ("main.0", Root::Exact(vec![8.0])),
+                ("main.1", Root::Exact(unit(0, 8))),
+            ],
+        ),
+        (
+            "routed_literal_taken",
+            format!(
+                "{}{}",
+                routed("0.0f32, 1.0f32"),
+                handled(&routed_body("gt", "s"))
+            ),
+            vec![
+                ("main.0", Root::Sum(unit(0, 8).iter().sum())),
+                ("main.1", Root::Exact(unit(1, 8))),
+            ],
+        ),
+        (
+            "ascribed_inline",
+            handled(&format!(
+                "    noisy = lt({sum}, 0.0f32)\n    y: tensor[8, f32] = if noisy then uniform_like(copy(x), 0.0f32, 1.0f32) else copy(x)\n    z = uniform_like(x, 0.0f32, 1.0f32)\n    (y, z)\n"
+            )),
+            vec![
+                ("main.0", Root::Exact(ones(8))),
+                ("main.1", Root::Exact(unit(0, 8))),
+            ],
+        ),
+        (
+            "ascribed_helper",
+            format!(
+                "{pick}{}",
+                handled(&format!(
+                    "    y: tensor[8, f32] = pick(copy(x), lt({sum}, 0.0f32))\n    z = uniform_like(x, 0.0f32, 1.0f32)\n    (y, z)\n"
+                ))
+            ),
+            vec![
+                ("main.0", Root::Exact(ones(8))),
+                ("main.1", Root::Exact(unit(0, 8))),
+            ],
+        ),
+        (
+            "issue_2410",
+            format!(
+                "{pick}{}",
+                handled(&format!(
+                    "    flag = gt({sum}, 0.0f32)\n    a = pick(copy(x), flag)\n    b = pick(copy(x), not(flag))\n    unused = uniform_like(copy(x), 0.0f32, 1.0f32)\n    c = uniform_like(x, 0.0f32, 1.0f32)\n    (a, b, c)\n"
+                ))
+            ),
+            vec![
+                ("main.0", Root::Exact(unit(0, 8))),
+                ("main.1", Root::Exact(ones(8))),
+                ("main.2", Root::Exact(unit(2, 8))),
+            ],
+        ),
+        (
+            "nested_arm",
+            format!(
+                "def pick(x: tensor[8, f32], a: bool, b: bool) -> tensor[8, f32] ! {{ Random }} = if a then if b then uniform_like(x, 0.0f32, 1.0f32) else x else x\n{}",
+                handled(&format!(
+                    "    s = {sum}\n    y = pick(copy(x), gt(s, 0.0f32), lt(s, 0.0f32))\n    z = uniform_like(x, 0.0f32, 1.0f32)\n    (y, z)\n"
+                ))
+            ),
+            vec![
+                ("main.0", Root::Exact(ones(8))),
+                ("main.1", Root::Exact(unit(0, 8))),
+            ],
+        ),
+        (
+            "match_arm",
+            format!(
+                "type Mode =\n  | Train\n  | Infer\ndef apply_mode(x: tensor[8, f32], m: Mode) -> tensor[8, f32] ! {{ Random }} =\n  match m with {{\n    | Train => uniform_like(x, 0.0f32, 1.0f32)\n    | Infer => x\n  }}\n{}",
+                handled(&format!(
+                    "    m = if gt({sum}, 100.0f32) then Train else Infer\n    y = apply_mode(copy(x), m)\n    z = uniform_like(x, 0.0f32, 1.0f32)\n    (y, z)\n"
+                ))
+            ),
+            vec![
+                ("main.0", Root::Exact(ones(8))),
+                ("main.1", Root::Exact(unit(0, 8))),
+            ],
+        ),
+        (
+            "grad_untaken_invalid_bounds",
+            format!(
+                "def loss(x: tensor[8, f32]) -> tensor[f32] ! {{ Random }} = {{\n  s = {sum}\n  if lt(s, 0.0f32) then sum(add(copy(x), uniform_like(x, s, neg(s))), 0i32) else sum(x, 0i32)\n}}\n{}",
+                handled(
+                    "    g = grad(loss)(copy(x))\n    after = uniform_like(x, 0.0f32, 1.0f32)\n    (g, after)\n"
+                )
+            ),
+            vec![
+                ("main.0", Root::Exact(ones(8))),
+                ("main.1", Root::Exact(unit(0, 8))),
+            ],
+        ),
+    ];
+    assert_ne!(unit(0, 8), unit(1, 8));
+    let bits = |values: &[f64]| {
+        values
+            .iter()
+            .map(|value| (*value as f32).to_bits())
+            .collect::<Vec<_>>()
+    };
+    let mut failures = Vec::new();
+    for (name, source, expected) in rows {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join(format!("{name}.ch"));
+        common::write_file(&path, &source);
+        let eval = cli(&["eval", "--file", path.to_str().unwrap()]);
+        if !eval.status.success() {
+            failures.push(format!(
+                "{name} eval: {}",
+                String::from_utf8_lossy(&eval.stderr)
+            ));
+            continue;
+        }
+        let eval = String::from_utf8(eval.stdout).unwrap();
+        let out_dir = dir.path().join("out");
+        succeeded(
+            cli(&[
+                "build",
+                path.to_str().unwrap(),
+                "--target",
+                "c",
+                "--output",
+                out_dir.to_str().unwrap(),
+            ]),
+            name,
+        );
+        assert!(common::link_generated(&out_dir, &format!("{name}.c"), name).success());
+        let run = std::process::Command::new(out_dir.join(name))
+            .output()
+            .unwrap();
+        if !run.status.success() {
+            failures.push(format!(
+                "{name} C: {}",
+                String::from_utf8_lossy(&run.stderr)
+            ));
+            continue;
+        }
+        let compiled = String::from_utf8(run.stdout).unwrap();
+        for (root, expected) in &expected {
+            for (lane, stdout) in [("eval", &eval), ("C", &compiled)] {
+                let actual = printed_root(stdout, root);
+                let matches = match expected {
+                    Root::Exact(values) => bits(&actual) == bits(values),
+                    Root::Sum(total) => actual.len() == 1 && (actual[0] - total).abs() < 1e-4,
+                };
+                if !matches {
+                    failures.push(format!("{name} {lane} {root}: {actual:?}"));
+                }
+            }
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
 }

@@ -209,7 +209,6 @@ impl<'a> EvalContext<'a> {
         def_expr: &Expr,
         kids: &[Expr],
         args: &[RuntimeValue],
-        retain_source_controls: bool,
     ) -> Result<Option<RuntimeValue>, String> {
         let span = Span::new(0, 0);
         let mut scoped: UnordMap<String, TensorType> = UnordMap::new();
@@ -244,25 +243,7 @@ impl<'a> EvalContext<'a> {
                 }
                 _ => return Ok(None),
             };
-            // A fixed source call proves its control expressions before any
-            // arguments are evaluated. Keep only scalar expressions needed
-            // for that proof; data operands still cross this boundary once.
-            let argument = make_var_with_type(&placeholder, &tensor_ty, span);
-            let argument = if retain_source_controls && matches!(value, RuntimeValue::Scalar(_)) {
-                let mut trial = kids.to_vec();
-                trial[index + 1] = argument.clone();
-                let trial = Expr::node(DeepTag::App, Metadata::default(), trial, span);
-                if self.program_evaluation_profile(&trial)
-                    == chelis_ir::evaluation::EvaluationProfile::FixedControl
-                {
-                    argument
-                } else {
-                    kids[index + 1].clone()
-                }
-            } else {
-                argument
-            };
-            app_children.push(argument);
+            app_children.push(make_var_with_type(&placeholder, &tensor_ty, span));
             scoped.insert(placeholder.clone(), tensor_ty);
             staged.insert(placeholder, tensor_value);
         }
@@ -311,52 +292,25 @@ impl<'a> EvalContext<'a> {
                  (spec/05-risc-primitives.md SS3.6)"
             )));
         }
-        let profile = self.program_evaluation_profile(routed_expr);
         // The lowering universe of a routed reduction is the program's own
         // type environment and definition table, both fixed for this
-        // evaluation context. Both branches below used to hand those two
-        // tables to a free `try_lower_*` entry, which sorted them, deep-cloned
-        // them and folded the pipes in every definition -- all of `chelis-std`
+        // evaluation context. Lowering used to hand those two tables to a
+        // free `try_lower_*` entry, which sorted them, deep-cloned them and
+        // folded the pipes in every definition -- all of `chelis-std`
         // included -- once per routed reduction (chelis#2207). The scope
         // prepares that context once; cloning it here is four `Arc` bumps and
         // releases the borrow on `self` that the input provider below needs.
         let lowering_context = self.program.routing_lowering_context();
-        let mut execution_plan = None;
-        let lowered = if profile == chelis_ir::evaluation::EvaluationProfile::FixedControl {
-            let context = chelis_ir::evaluation::RandomExecutionContext::new(
-                chelis_ir::host::RandomLoweringState {
-                    seed: self.random_seed,
-                    counter: self.random_counter,
-                },
-            );
-            chelis_ir::lower::try_lower_subexpr_evaluation_plan_with_context(
-                routed_expr,
-                scoped_types,
-                &lowering_context,
-                &context,
-            )
-            .map(|plan| {
-                let dag = plan.dag_for_inspection().clone();
-                execution_plan = Some(plan);
-                dag
-            })
-        } else {
-            chelis_ir::lower::try_lower_subexpr_program_with_context(
-                routed_expr,
-                scoped_types,
-                &lowering_context,
-            )
-        };
-        let dag = lowered.map_err(|diagnostic| {
-            let message = format!(
+        let dag = chelis_ir::lower::try_lower_subexpr_program_with_context(
+            routed_expr,
+            scoped_types,
+            &lowering_context,
+        )
+        .map_err(|diagnostic| {
+            NamedAxisRouteError::NotLowerable(format!(
                 "host runtime could not lower the named-axis `{context_label}` call for \
                  evaluation (chelis#338): {diagnostic}"
-            );
-            if profile == chelis_ir::evaluation::EvaluationProfile::FixedControl {
-                NamedAxisRouteError::Fatal(message)
-            } else {
-                NamedAxisRouteError::NotLowerable(message)
-            }
+            ))
         })?;
         let roots: Vec<NodeId> = dag.roots().to_vec();
         if roots.is_empty() {
@@ -364,53 +318,32 @@ impl<'a> EvalContext<'a> {
                 "host runtime: named-axis `{context_label}` lowering produced no roots"
             )));
         }
-        let preparation_context = chelis_ir::evaluation::RandomExecutionContext::new(
-            chelis_ir::host::RandomLoweringState {
-                seed: self.random_seed,
-                counter: self.random_counter,
-            },
-        );
         let mut provider_failed = false;
         let prepare = |name: &str, demand| {
             self.prepare_named_axis_input(name, demand, &staged_inputs)
                 .inspect_err(|_| provider_failed = true)
         };
-        let prepared = if let Some(plan) = &execution_plan {
-            chelis_ir::eval::prepare_tensor_plan_inputs_with_demand(
-                plan,
-                &preparation_context,
-                prepare,
-            )
-        } else {
+        let prepared =
             chelis_ir::eval::prepare_tensor_roots_inputs_with_demand(&dag, &roots, prepare)
-        }
-        .map_err(|err| {
-            if provider_failed || execution_plan.is_some() {
-                NamedAxisRouteError::Fatal(err)
-            } else {
-                NamedAxisRouteError::Fatal(format!(
-                    "host runtime named-axis `{context_label}` evaluation failed: {err}"
-                ))
-            }
-        })?;
+                .map_err(|err| {
+                    if provider_failed {
+                        NamedAxisRouteError::Fatal(err)
+                    } else {
+                        NamedAxisRouteError::Fatal(format!(
+                            "host runtime named-axis `{context_label}` evaluation failed: {err}"
+                        ))
+                    }
+                })?;
         let load = |name: &str| prepared.get(name).cloned();
-        let result = if let Some(plan) = &execution_plan {
-            // Preparation may enter a fallible initializer. Execute the original
-            // plan using the resulting host state, not its pre-preparation copy.
-            let mut context = chelis_ir::evaluation::RandomExecutionContext::new(
-                chelis_ir::host::RandomLoweringState {
-                    seed: self.random_seed,
-                    counter: self.random_counter,
-                },
-            );
-            let result = chelis_ir::eval::eval_tensor_plan_with_strict(plan, &mut context, load);
-            self.random_counter = context.state().counter;
-            result
-        } else {
-            chelis_ir::eval::eval_tensor_roots_with_strict(&dag, &roots, load)
-        };
+        // Preparation may enter a fallible initializer that draws, so the
+        // frame is taken from the host state after it.
+        let mut frame = self.random_frame();
+        let result = chelis_ir::eval::eval_tensor_roots_with_frame(&dag, &roots, &mut frame, load);
+        self.commit_random_frame(&frame);
         let values = result.map_err(|err| {
-            if execution_plan.is_some() {
+            // [04-NUM-9]: a numeric trap renders byte-identically on every
+            // surface, so it takes no prefix.
+            if err.starts_with(chelis_types::NUMERIC_TRAP_PREFIX) {
                 return NamedAxisRouteError::Fatal(err);
             }
             NamedAxisRouteError::Fatal(format!(

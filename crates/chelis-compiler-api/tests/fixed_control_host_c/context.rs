@@ -219,16 +219,23 @@ fn context_source_selection_preserves_siblings_and_ordinary_fallback() {
 }
 
 #[test]
-fn context_rejects_unbound_names_runtime_controls_and_rootless_entries() {
+fn context_rejects_unbound_names_and_rootless_entries() {
     let original = context();
     let decoded = CompiledContext::decode(&original.encode().unwrap()).unwrap();
     let cases = [
         (source("keep(x, missing)", "4"), "unbound variable"),
-        (source("keep(x, 0.5f32)", "4").replace("import Probe.Draw (keep, loss, matrix, empty, single)\n", ""), "unbound variable"),
-        (source("rate = tensor_to_scalar(sum(x, 0i32))\n keep(x, rate)", "4"), "no callable tensor-kernel form"),
-        (source("rate = tensor_to_scalar(sum(x, 0i32))\n dead = keep(x, rate)\n _ = drop(dead)\n x", "4"), "no callable tensor-kernel form"),
-        (source("keep(x, 0.5f32)", "4").replace("with seed(42i64) { keep(x, 0.5f32) }", "keep(x, 0.5f32)"), "Random"),
-        ("module Probe.Client\nimport Probe.Draw (keep)\ndef main(x: tensor[4, f32], rate: f32) -> tensor[4, f32] = with seed(42i64) { keep(x, rate) }\n".into(), "no callable tensor-kernel form"),
+        (
+            source("keep(x, 0.5f32)", "4").replace(
+                "import Probe.Draw (keep, loss, matrix, empty, single)\n",
+                "",
+            ),
+            "unbound variable",
+        ),
+        (
+            source("keep(x, 0.5f32)", "4")
+                .replace("with seed(42i64) { keep(x, 0.5f32) }", "keep(x, 0.5f32)"),
+            "Random",
+        ),
     ];
     for context in [&original, &decoded] {
         for (source, reason) in &cases {

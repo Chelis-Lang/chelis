@@ -4,11 +4,8 @@ use std::fs;
 
 use chelis_deep::ast::{Atom, Expr, ExprCarrier};
 use chelis_ir::dag::{Dag, DimInfo, NodeId, RiscOp, TensorType};
-use chelis_ir::eval::TensorValue as IrTensorValue;
-use chelis_ir::evaluation::RandomExecutionContext;
-use chelis_ir::host::{
-    HostDefEvaluationPlan, HostDefKernel, RandomLoweringState, host_def_evaluation_plan,
-};
+use chelis_ir::eval::{RandomFrame, TensorValue as IrTensorValue};
+use chelis_ir::host::{HostDefKernel, host_def_kernel};
 use chelis_ir::tier2;
 use chelis_types::{
     CompareOp, ElementRef, FloatBinOp, FloatUnOp, IntBinOp, IntUnOp, StorageView, types::Prim,
@@ -30,38 +27,6 @@ pub(super) fn tensor_result_producer(dag: &Dag, root: NodeId) -> Option<ResultPr
         .iter()
         .all(|site| site.operation() == operation)
         .then(|| ResultProducer::tensor(operation))
-}
-
-thread_local! {
-    /// Counts how many times an [`EvalContext`] cloned the whole program's
-    /// top-level defs to classify an execution profile (chelis#2059). The
-    /// admission ran on every closure application and re-cloned every
-    /// definition twice per call, so a `chelis test` run over a package with
-    /// many defs was O(defs x applications). The snapshot is now program-scoped
-    /// and this counter, a counted receipt in the shape of chelis#1835's
-    /// `host_summary_probe_builds`, stays at one build per context however many
-    /// times the classification is asked.
-    static EXECUTION_PROFILE_DEFS_SNAPSHOTS: std::cell::Cell<u64> =
-        const { std::cell::Cell::new(0) };
-}
-
-/// Program-def snapshot builds on this thread since the last reset. Bounded by
-/// the number of `EvalContext`s created, never by the number of host asks.
-#[cfg(test)]
-pub(crate) fn execution_profile_defs_snapshots() -> u64 {
-    EXECUTION_PROFILE_DEFS_SNAPSHOTS.with(std::cell::Cell::get)
-}
-
-/// Record one snapshot build. `ProgramScope` owns the snapshot itself; the
-/// counter stays here beside the classifier it is a receipt for.
-pub(super) fn record_defs_snapshot_build() {
-    EXECUTION_PROFILE_DEFS_SNAPSHOTS.with(|builds| builds.set(builds.get() + 1));
-}
-
-/// Reset [`execution_profile_defs_snapshots`] for this thread.
-#[cfg(test)]
-pub(crate) fn reset_execution_profile_defs_snapshots() {
-    EXECUTION_PROFILE_DEFS_SNAPSHOTS.with(|builds| builds.set(0));
 }
 
 thread_local! {
@@ -670,65 +635,24 @@ impl<'a> EvalNode<'a> {
     }
 }
 
-fn rebuild_eval_node(node: EvalNode<'_>, metadata: Metadata, children: Vec<Expr>) -> Expr {
-    match node.expr {
-        Expr::Node(_, span) => Expr::node(node.tag, metadata, children, *span),
-        _ => unreachable!("decoded EvalNode must retain a decoded carrier"),
-    }
-}
-
-fn attach_missing_checked_type(argument: &Expr, ty: &Expr) -> Expr {
-    let node = match argument.carrier() {
-        ExprCarrier::DecodedNode(tag, metadata, children) => {
-            EvalNode::new(argument, tag, metadata, children)
-        }
-        ExprCarrier::StructuralList(_)
-        | ExprCarrier::UndecodableHead(_, _, _)
-        | ExprCarrier::Atom(_)
-        | ExprCarrier::MetadataMap(_)
-        | ExprCarrier::MetadataExpression(_) => return argument.clone(),
-    };
-    if node.metadata.ty().is_some() {
-        return argument.clone();
-    }
-    let Ok(ty) = chelis_deep::annotations::TypeSyntax::try_new(ty.clone()) else {
-        return argument.clone();
-    };
-    let mut metadata = node.metadata.clone();
-    metadata.replace(chelis_deep::annotations::MetadataValue::Type(ty));
-    rebuild_eval_node(node, metadata, node.children.to_vec())
-}
-
-fn source_call_with_checked_argument_types(node: EvalNode<'_>, types: &[Option<Expr>]) -> Expr {
-    let mut children = node.children.to_vec();
-    for (argument, ty) in children.iter_mut().skip(1).zip(types) {
-        if let Some(ty) = ty {
-            *argument = attach_missing_checked_type(argument, ty);
-        }
-    }
-    rebuild_eval_node(node, node.metadata.clone(), children)
-}
-
 impl<'a> EvalContext<'a> {
-    /// The classification of `expr` against the program's own definitions.
-    ///
-    /// `chelis_ir::lower::evaluation_profile` sorts and deep-clones the whole
-    /// definition table it is handed, so asking it per call costs a program
-    /// copy per ask. Every caller that classifies against the unmodified
-    /// program reads the program-scoped snapshot instead (chelis#2059,
-    /// chelis#2207). A caller whose definition universe differs from the
-    /// program's, as a transform's captured closures do, classifies against
-    /// that universe itself.
-    ///
-    /// Each site decides from the expression it is about to run, never from
-    /// an enclosing caller's classification (chelis#2405): a definition whose
-    /// own body is fixed-control gets its plan beneath a recursive or
-    /// dynamic caller, as the C lane decides each definition by its own body.
-    pub(super) fn program_evaluation_profile(
-        &self,
-        expr: &Expr,
-    ) -> chelis_ir::evaluation::EvaluationProfile {
-        chelis_ir::lower::evaluation_profile_sorted(expr, &self.program.sorted_defs())
+    /// The Random frame a graph evaluation takes its draw keys from: the
+    /// interpreter's handler at its next ordinal, or no inherited handler
+    /// (`spec/design/randomness_counter_stream.md` §2). An inherited draw
+    /// under no handler is an evaluation error, never a seed-zero draw.
+    pub(super) fn random_frame(&self) -> RandomFrame {
+        match self.random_seed {
+            Some(seed) => RandomFrame::inherited(seed, self.random_counter),
+            None => RandomFrame::unhandled(),
+        }
+    }
+
+    /// Publish the ordinals a graph evaluation took from
+    /// [`Self::random_frame`], including those taken before an error.
+    pub(super) fn commit_random_frame(&mut self, frame: &RandomFrame) {
+        if let Some(counter) = frame.inherited_counter() {
+            self.random_counter = counter;
+        }
     }
 
     /// Resolve a builtin only when ordinary lexical lookup did not select a
@@ -790,17 +714,12 @@ impl<'a> EvalContext<'a> {
     /// chelis#1277 B2h: the kernel the C lane emits for def `name`, or `None`
     /// for the host lane. The decision is `chelis_ir::host::host_def_kernel`,
     /// the function `lower_host_function` itself uses, so the two lanes cannot
-    /// disagree about which defs are kernels. A context-bound evaluation plan
-    /// or a kernel whose DAG draws Random is re-lowered on every application
-    /// so its inherited seed and ordinals start at the current stream position,
-    /// as the transforms re-lower per application. A kernel decision whose
-    /// lowering fails is the evaluation's error, never a fall-through to the
-    /// interpreter (the C lane's fall-through is chelis#1515 and is not
-    /// inherited here).
-    pub(super) fn def_kernel(
-        &mut self,
-        name: &str,
-    ) -> Result<Option<Arc<HostDefEvaluationPlan>>, String> {
+    /// disagree about which defs are kernels. A kernel's draws take their keys
+    /// from the frame it is evaluated with, so one lowering serves every
+    /// application. A kernel decision whose lowering fails is the evaluation's
+    /// error, never a fall-through to the interpreter (the C lane's
+    /// fall-through is chelis#1515 and is not inherited here).
+    pub(super) fn def_kernel(&mut self, name: &str) -> Result<Option<Arc<HostDefKernel>>, String> {
         if let Some(cached) = self.def_kernels.get(name) {
             return Ok(cached.clone());
         }
@@ -808,27 +727,12 @@ impl<'a> EvalContext<'a> {
             return Ok(None);
         };
         record_def_kernel_planning();
-        let random = RandomLoweringState {
-            seed: self.random_seed,
-            counter: self.random_counter,
-        };
-        // The decision reads `name`'s own body and profile, whatever called
-        // it: a fixed-control body is planned beneath a recursive or dynamic
-        // caller, and a body that cannot be planned is walked by the host
-        // interpreter (chelis#2405).
-        let kernel = host_def_evaluation_plan(session, name, &RandomExecutionContext::new(random))
+        // The decision reads `name`'s own body, whatever called it: a body a
+        // kernel cannot carry is walked by the host interpreter (chelis#2405).
+        let kernel = host_def_kernel(session, name)
             .map_err(|diagnostic| diagnostic.to_string())?
             .map(Arc::new);
-        let context_bound = kernel
-            .as_ref()
-            .is_some_and(|kernel| kernel.plan().is_some() || kernel.staged_plan().is_some());
-        if !context_bound
-            && !kernel
-                .as_ref()
-                .is_some_and(|kernel| kernel_draws_random(kernel.kernel_for_inspection()))
-        {
-            self.def_kernels.insert(name.to_string(), kernel.clone());
-        }
+        self.def_kernels.insert(name.to_string(), kernel.clone());
         Ok(kernel)
     }
 
@@ -842,16 +746,13 @@ impl<'a> EvalContext<'a> {
     fn apply_def_kernel(
         &mut self,
         name: &str,
-        kernel: &HostDefEvaluationPlan,
+        kernel: &HostDefKernel,
         params: &[String],
         args: Vec<RuntimeValue>,
         inherited_claims: &[DeclaredResultClaim],
     ) -> Result<RuntimeValue, String> {
-        let execution_plan = kernel.plan();
-        let staged_execution = kernel.staged_plan();
-        let kernel = kernel.kernel_for_inspection();
         if let Some(plan) = &kernel.staged {
-            return self.apply_staged_host_plan(name, plan, staged_execution, params, args);
+            return self.apply_staged_host_plan(name, plan, params, args);
         }
         if params.len() != args.len() {
             return Err(format!(
@@ -926,43 +827,13 @@ impl<'a> EvalContext<'a> {
                 })
             })
             .collect::<Result<Vec<_>, String>>()?;
-        let draws_random = kernel_draws_random(kernel);
-        let path_sensitive_random =
-            kernel.dag.nodes().iter().any(|node| {
-                matches!(node.op, RiscOp::UniformLike { .. }) && node.inputs.len() == 2
-            });
-        let starting_counter = self.random_counter;
         let tensor_bindings = self.tensor_bindings;
         let host_bindings = &self.declaration_values;
-        if let Some(plan) = execution_plan {
-            let mut context = RandomExecutionContext::new(RandomLoweringState {
-                seed: self.random_seed,
-                counter: self.random_counter,
-            });
-            let result = chelis_ir::eval::eval_tensor_plan_with_result_claims(
-                plan,
-                &mut context,
-                &result_claims,
-                |load| {
-                    staged
-                        .get(load)
-                        .cloned()
-                        .or_else(|| tensor_bindings.get(load).map(|t| t.value.clone()))
-                        .or_else(|| match host_bindings.get(load) {
-                            Some(RuntimeValue::Tensor(t)) => Some(t.value.clone()),
-                            _ => None,
-                        })
-                },
-            );
-            self.random_counter = context.state().counter;
-            let value = pack_dag_roots(&kernel.dag, &roots, &result?, name)?;
-            self.result_producer = result_producer;
-            return Ok(value);
-        }
-        let (values, executed_counter) = chelis_ir::eval::eval_tensor_roots_with_result_claims(
+        let mut frame = self.random_frame();
+        let result = chelis_ir::eval::eval_tensor_roots_with_frame_and_result_claims(
             &kernel.dag,
             &roots,
-            starting_counter,
+            &mut frame,
             &result_claims,
             |load| {
                 staged
@@ -974,14 +845,9 @@ impl<'a> EvalContext<'a> {
                         _ => None,
                     })
             },
-        )?;
-        if draws_random {
-            self.random_counter = if path_sensitive_random {
-                executed_counter
-            } else {
-                kernel.next_random_counter.unwrap_or(executed_counter)
-            };
-        }
+        );
+        self.commit_random_frame(&frame);
+        let values = result?;
         let value = pack_dag_roots(&kernel.dag, &roots, &values, name)?;
         self.result_producer = result_producer;
         Ok(value)
@@ -991,7 +857,6 @@ impl<'a> EvalContext<'a> {
         &mut self,
         name: &str,
         plan: &chelis_ir::host::staged::HostStagedPlan,
-        execution: Option<&chelis_ir::evaluation::StagedEvaluationPlan>,
         params: &[String],
         args: Vec<RuntimeValue>,
     ) -> Result<RuntimeValue, String> {
@@ -1002,11 +867,6 @@ impl<'a> EvalContext<'a> {
         }
         let mut values: UnordMap<String, RuntimeValue> = params.iter().cloned().zip(args).collect();
         let mut result_producers: UnordMap<String, ResultProducer> = UnordMap::new();
-        let mut context = RandomExecutionContext::new(RandomLoweringState {
-            seed: self.random_seed,
-            counter: self.random_counter,
-        });
-        let mut execution = execution.map(|plan| plan.frame(&mut context)).transpose()?;
         for stage in plan.stages() {
             match stage {
                 HostStage::Source {
@@ -1045,19 +905,7 @@ impl<'a> EvalContext<'a> {
                             producer,
                         );
                     }
-                    let result = if let Some(frame) = &mut execution {
-                        frame.with_context(|context| {
-                            self.random_counter = context.state().counter;
-                            let result = self.eval_expr(expression);
-                            *context = RandomExecutionContext::new(RandomLoweringState {
-                                seed: self.random_seed,
-                                counter: self.random_counter,
-                            });
-                            result
-                        })
-                    } else {
-                        self.eval_expr(expression)
-                    };
+                    let result = self.eval_expr(expression);
                     self.bindings = saved;
                     self.binding_types = saved_types;
                     let value = result?;
@@ -1095,29 +943,17 @@ impl<'a> EvalContext<'a> {
                             );
                         }
                     }
-                    let computed = if let Some(frame) = &mut execution {
-                        // Resolving a captured top-level input can itself
-                        // advance the host stream before this kernel starts.
-                        frame.with_context(|context| {
-                            *context = RandomExecutionContext::new(RandomLoweringState {
-                                seed: self.random_seed,
-                                counter: self.random_counter,
-                            });
-                        });
-                        let result = frame.eval_next_kernel(|input| inputs.get(input).cloned());
-                        frame.with_context(|context| self.random_counter = context.state().counter);
-                        result?
-                    } else {
-                        let (computed, counter) =
-                            chelis_ir::eval::eval_tensor_roots_with_strict_random_progress(
-                                dag,
-                                dag.roots(),
-                                self.random_counter,
-                                |input| inputs.get(input).cloned(),
-                            )?;
-                        self.random_counter = counter;
-                        computed
-                    };
+                    // Resolving a captured top-level input can itself advance
+                    // the host stream, so the frame is taken after it.
+                    let mut frame = self.random_frame();
+                    let computed = chelis_ir::eval::eval_tensor_roots_with_frame(
+                        dag,
+                        dag.roots(),
+                        &mut frame,
+                        |input| inputs.get(input).cloned(),
+                    );
+                    self.commit_random_frame(&frame);
+                    let computed = computed?;
                     for (output, root) in outputs.iter().zip(dag.roots()) {
                         let value = computed
                             .get(root)
@@ -1712,17 +1548,20 @@ impl<'a> EvalContext<'a> {
             .first()
             .ok_or_else(|| "app missing function".to_string())?;
 
-        // Fixed-rate dropout is not in the legacy host builtin table. Admit
-        // only its named fixed-control source profile, stage the operand once,
-        // and use the same lowering/plan core as named-axis primitives. A
-        // runtime-rate call keeps its previous dispatch unchanged. The call's
-        // own profile decides, whatever its callers' control flow.
-        if var_name(func) == Some("dropout")
-            && self.active_builtin_symbol("dropout")
-            && self.program_evaluation_profile(node.expr)
-                == chelis_ir::evaluation::EvaluationProfile::FixedControl
-        {
-            return self.eval_named_axis_reduction_app("dropout", kids);
+        // `dropout` is not in the host builtin table: every dropout the host
+        // walk reaches draws here from the interpreter's handler.
+        if var_name(func) == Some("dropout") && self.active_builtin_symbol("dropout") {
+            let mut args = Vec::with_capacity(kids.len().saturating_sub(1));
+            for arg in &kids[1..] {
+                args.push(self.eval_expr(arg)?);
+            }
+            let value = self.eval_dropout_builtin(&args)?;
+            // Its result is a tensor it produced, as every tensor builtin's is.
+            self.result_producer = Some(ResultProducer::tensor("dropout"));
+            for claim in claims {
+                claim.verdict(&value, "dropout")?;
+            }
+            return Ok(value);
         }
 
         // chelis#338 site A: a reduction whose axis argument is a bare
@@ -1764,49 +1603,6 @@ impl<'a> EvalContext<'a> {
         for arg in &kids[1..] {
             args.push(self.eval_expr(arg)?);
             arg_producers.push(self.result_producer.take());
-        }
-
-        // #1764: a checked tensor call may specialize a dropout rate that
-        // its standalone declaration cannot, including a generic cast.
-        // Route before the callee frame forgets those source actuals; the
-        // existing planner resolves precision from checked argument types.
-        // The declaration's own profile is read by key, so this ask costs no
-        // body clone or scan on the ordinary application path.
-        if let Some(callee) = var_name(func)
-            && self
-                .program
-                .resolve_def_key(callee)
-                .and_then(|key| self.program.def_evaluation_profile(key))
-                == Some(chelis_ir::evaluation::EvaluationProfile::Legacy(
-                    chelis_ir::evaluation::LegacyEvaluationReason::RuntimeRate,
-                ))
-            && let Some((resolved, def_expr)) = self.lookup_top_level_def(callee)
-            && self.bindings.get(callee).is_none_or(|value| {
-                matches!(value,
-                RuntimeValue::Closure { def_name: Some(name), .. } if name == &resolved)
-            })
-            && let Some(signature) = self.program.type_env().get(&resolved)
-            && !chelis_ir::lower::type_expr_has_rank_var(signature)
-            && result_type_expr.as_ref().is_some_and(|ty| {
-                tagged_expr_children(ty).is_some_and(|(tag, _)| tag == DeepTag::TTensor)
-            })
-            && let source_call = source_call_with_checked_argument_types(node, &arg_type_exprs)
-            && self.program_evaluation_profile(&source_call)
-                == chelis_ir::evaluation::EvaluationProfile::FixedControl
-            // Scalar-staging trials must retain the same checked type evidence
-            // as admission, or a data argument can be mistaken for a control
-            // expression and executed a second time by the lowerer.
-            && let Some(value) = self.try_named_axis_def_call(
-                &resolved,
-                &def_expr,
-                tagged_expr_children(&source_call)
-                    .map(|(_, children)| children)
-                    .expect("source call preserves its decoded carrier"),
-                &args,
-                true,
-            )?
-        {
-            return Ok(value);
         }
 
         // Std.Io.Json's private serializer intrinsic. Keep generic
@@ -1944,7 +1740,7 @@ impl<'a> EvalContext<'a> {
             // kernel at application; site B keeps only the defs C also
             // handles per call (rank- and precision-polymorphic ones).
             && self.def_kernel(&resolved)?.is_none()
-            && let Some(routed) = self.try_named_axis_def_call(&resolved, &def_expr, kids, &args, false)?
+            && let Some(routed) = self.try_named_axis_def_call(&resolved, &def_expr, kids, &args)?
         {
             return Ok(routed);
         }
@@ -2386,19 +2182,18 @@ impl<'a> EvalContext<'a> {
             staged_inputs.insert(name.clone(), input);
         }
 
-        let planning = RandomExecutionContext::new(RandomLoweringState {
-            seed: self.random_seed,
-            counter: self.random_counter,
-        });
-        let plan = lowering
-            .lower_evaluation_plan(region.expression(), scoped_types, &planning)
-            .map_err(|diagnostic| {
-                format!(
-                    "host runtime could not lower a checked local tensor ascription \
-                     for evaluation: {diagnostic}"
-                )
-            })?;
-        let dag = plan.dag_for_inspection();
+        let dag = chelis_ir::lower::try_lower_subexpr_program_with_context(
+            region.expression(),
+            scoped_types,
+            &lowering,
+        )
+        .map_err(|diagnostic| {
+            format!(
+                "host runtime could not lower a checked local tensor ascription \
+                 for evaluation: {diagnostic}"
+            )
+        })?;
+        let dag = &dag;
         let roots = dag.roots().to_vec();
         if roots.is_empty() {
             return Err(
@@ -2413,24 +2208,18 @@ impl<'a> EvalContext<'a> {
                 "host runtime: checked local tensor ascription produced no local guard site"
                     .to_string()
             })?;
-        let preparation_context = RandomExecutionContext::new(RandomLoweringState {
-            seed: self.random_seed,
-            counter: self.random_counter,
-        });
-        let prepared = chelis_ir::eval::prepare_tensor_plan_inputs_with_demand(
-            &plan,
-            &preparation_context,
+        let prepared = chelis_ir::eval::prepare_tensor_roots_inputs_with_demand(
+            dag,
+            &roots,
             |name, demand| self.prepare_named_axis_input(name, demand, &staged_inputs),
         )?;
-        let mut execution = RandomExecutionContext::new(RandomLoweringState {
-            seed: self.random_seed,
-            counter: self.random_counter,
-        });
+        let mut frame = self.random_frame();
         let values =
-            chelis_ir::eval::eval_tensor_plan_with_strict(&plan, &mut execution, |name| {
+            chelis_ir::eval::eval_tensor_roots_with_frame(dag, &roots, &mut frame, |name| {
                 prepared.get(name).cloned()
-            })?;
-        self.random_counter = execution.state().counter;
+            });
+        self.commit_random_frame(&frame);
+        let values = values?;
         let value = pack_dag_roots(dag, &roots, &values, "local tensor ascription")?;
         for claim in inherited_result_claims {
             claim.verdict(&value, producer_operation)?;
@@ -2958,6 +2747,32 @@ impl<'a> EvalContext<'a> {
         }
     }
 
+    /// The active handler's next [05-RNG-1] key, advancing its ordinal. A
+    /// draw outside every handler is an internal error: the checker rejects
+    /// an unhandled Random effect, and no draw falls back to seed 0.
+    fn next_random_key(&mut self, op: &str) -> Result<chelis_types::RandomKey, String> {
+        let seed = self
+            .random_seed
+            .ok_or_else(|| format!("internal: {op} was evaluated outside every Random handler"))?;
+        let counter = self.random_counter;
+        self.random_counter = self.random_counter.saturating_add(1);
+        Ok(chelis_types::RandomKey::from_counter(seed, counter))
+    }
+
+    /// [05-OP-37] in the host walk: the rate is the input dtype's tagged
+    /// scalar, validated before the draw consumes its ordinal.
+    fn eval_dropout_builtin(&mut self, args: &[RuntimeValue]) -> Result<RuntimeValue, String> {
+        let input = expect_tensor_arg(args, 0)?;
+        let rate = expect_float_control(args, 1, "dropout")?;
+        let prepared = chelis_types::PreparedDropout::new(input.value.storage(), rate)
+            .map_err(|error| error.to_string())?;
+        let key = self.next_random_key("dropout")?;
+        let storage = prepared.apply(key).map_err(|error| error.to_string())?;
+        Ok(RuntimeValue::Tensor(RuntimeTensorValue::new(
+            IrTensorValue::from_storage(input.value.shape.clone(), storage),
+        )))
+    }
+
     fn eval_builtin(
         &mut self,
         name: &str,
@@ -3024,17 +2839,15 @@ impl<'a> EvalContext<'a> {
             "lte" => ordered_compare(args, CompareOp::Lte),
             "uniform_like" => {
                 let template = expect_tensor_arg(args, 0)?;
-                let low = expect_float_arg(args, 1)?;
-                let high = expect_float_arg(args, 2)?;
-                let seed = self.random_seed.unwrap_or(0);
-                let counter = self.random_counter;
-                self.random_counter = self.random_counter.saturating_add(1);
+                let low = expect_float_control(args, 1, "uniform_like")?;
+                let high = expect_float_control(args, 2, "uniform_like")?;
+                // [05-OP-8]: the bounds validate before the draw consumes
+                // its ordinal.
+                let prepared = prepare_uniform_like(&template, low, high)?;
+                let key = self.next_random_key("uniform_like")?;
                 Ok(RuntimeValue::Tensor(uniform_like_value(
-                    &template,
-                    low,
-                    high,
-                    chelis_types::random_draw_key(seed, counter),
-                )))
+                    &template, &prepared, key,
+                )?))
             }
             // Logical ops dispatch on the actual argument shape: scalar
             // bool args (already wired) keep the `bool_binop` /
@@ -4749,16 +4562,6 @@ fn runtime_values_equal(lhs: &RuntimeValue, rhs: &RuntimeValue) -> Result<bool, 
     }
 }
 
-/// Whether a kernel's DAG draws from the Random stream; such a kernel is
-/// lowered per application and advances `random_counter` when applied.
-fn kernel_draws_random(kernel: &HostDefKernel) -> bool {
-    kernel
-        .dag
-        .nodes()
-        .iter()
-        .any(|node| matches!(node.op, RiscOp::UniformLike { .. } | RiscOp::Dropout { .. }))
-}
-
 /// One evaluated argument as the kernel `Load` its declared parameter names.
 /// A tensor finalizes at the declared element dtype, the same ingress the
 /// interpreter applies to its own frame (chelis#729); a scalar becomes an
@@ -4882,7 +4685,6 @@ mod tensor_entry_actualization_tests {
 #[cfg(test)]
 mod legacy_capture_order_tests {
     use super::*;
-    use chelis_ir::evaluation::{EvaluationProfile, LegacyEvaluationReason};
 
     const DRAW: &str = "uniform_like(to_tensor([0.0f32, 0.0f32]), 0.0f32, 1.0f32)";
     const LIVE: &str = "add(x, uniform_like(weights, 0.0f32, 1.0f32))";
@@ -4975,12 +4777,16 @@ mod legacy_capture_order_tests {
         let RuntimeValue::Tensor(template) = zeros() else {
             unreachable!()
         };
-        RuntimeValue::Tensor(uniform_like_value(
-            &template,
-            0.0,
-            1.0,
-            chelis_types::random_draw_key(seed, counter),
-        ))
+        let bound = |value| chelis_types::scalar_from_f64("test", Prim::F32, value).unwrap();
+        let prepared = prepare_uniform_like(&template, bound(0.0), bound(1.0)).unwrap();
+        RuntimeValue::Tensor(
+            uniform_like_value(
+                &template,
+                &prepared,
+                chelis_types::RandomKey::from_counter(seed, counter),
+            )
+            .unwrap(),
+        )
     }
 
     fn admitted_call(ctx: &mut EvalContext<'_>, name: &str) -> Result<RuntimeValue, String> {
@@ -4997,25 +4803,29 @@ mod legacy_capture_order_tests {
         let kernel = ctx
             .def_kernel(name)?
             .expect("baseline admits real helper kernel");
-        let product = kernel.as_ref();
-        assert_eq!(
-            product.profile(),
-            EvaluationProfile::Legacy(LegacyEvaluationReason::NoDropout)
-        );
-        assert!(kernel.plan().is_none() && kernel.staged_plan().is_none());
-        let graph = kernel.kernel_for_inspection();
+        let graph = kernel.as_ref();
         assert!(graph.staged.is_none());
         let draws: Vec<_> = graph
             .dag
             .nodes()
             .iter()
-            .filter(|node| matches!(node.op, RiscOp::UniformLike { .. }))
+            .filter(|node| matches!(node.op, RiscOp::UniformLike))
             .collect();
         assert_eq!(draws.len(), 1);
         assert_eq!(
             draws[0].inputs.len(),
-            1,
-            "legacy baked-key UniformLike, not activated path"
+            4,
+            "key-operand UniformLike with no path activation"
+        );
+        assert!(
+            matches!(
+                graph.dag.get(draws[0].inputs[3]).map(|key| &key.op),
+                Some(RiscOp::DrawKey {
+                    handler: chelis_ir::dag::RandomHandler::Inherited,
+                    ..
+                })
+            ),
+            "the helper draws the caller's inherited stream"
         );
         assert_eq!(
             (ctx.random_counter, ctx.transcript.clone()),
@@ -5363,11 +5173,6 @@ mod legacy_capture_order_tests {
             ));
             for warm in [false, true] {
                 let mut ctx = context(&library, &tensors);
-                let declaration = ctx.lookup_top_level_def("keep").unwrap().1;
-                assert_eq!(
-                    chelis_ir::lower::evaluation_profile(&declaration, ctx.program.defs()),
-                    EvaluationProfile::Legacy(LegacyEvaluationReason::RuntimeRate)
-                );
                 if warm {
                     let closure = ctx.resolve_top_level("keep").unwrap();
                     assert!(

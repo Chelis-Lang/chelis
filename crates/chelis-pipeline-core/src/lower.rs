@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use chelis_ir::Dag;
-use chelis_ir::lower::{LowerDiagnostic, LoweredLibrary as IrLoweredLibrary};
+use chelis_ir::lower::{LowerDiagnostic, LoweredLibrary as IrLoweredLibrary, RandomRegionOwners};
 
 use crate::artifacts::RootBindingMode;
 use crate::roots::root_metadata;
@@ -55,13 +55,14 @@ pub fn lower_checked(
     mode: LoweringMode,
 ) -> Result<LoweredCompilation, CoreLowerError> {
     let lower_result =
-        chelis_ir::lower::try_lower_program_to_library(checked.program()).map(LoweredProgram::from);
+        chelis_ir::lower::try_lower_program_to_library_with_random_regions(checked.program())
+            .map(LoweredProgram::from);
     finish_isolated_lowering(checked, mode, lower_result)
 }
 
-/// Select fixed-control C host execution before legacy value-only lowering.
-/// A selected host payload has no independently emitted top-level DAG, hence
-/// no positional root binding. Ordinary programs retain the existing lowering
+/// Select the C host program for a program whose tensor helpers draw
+/// `dropout`, before value-only lowering. A selected host payload has no
+/// independently emitted top-level DAG, hence no positional root binding. Ordinary programs retain the existing lowering
 /// and root-count guards; a failed collecting lowerer is never a recovery hint.
 /// `AllowHostBackend` asks for the CLI's host selection policy: it permits a
 /// nonfatal raw-lowering decline only when the collected host requires that
@@ -85,7 +86,7 @@ pub fn lower_checked_for_c_execution(
 }
 
 /// Opt-in pass capture follows the same C lane and ordinary root guards.
-/// Captures never make an ordinary helper into a planned execution helper.
+/// Captures never change which host program the lane selects.
 #[cfg(feature = "lowering-trace")]
 pub fn lower_checked_for_c_execution_with_trace(
     checked: CheckedCompilation,
@@ -119,14 +120,10 @@ fn finish_c_execution_lowering(
     ),
     CoreLowerError,
 > {
-    if host
-        .as_ref()
-        .is_some_and(|plan| plan.has_execution_helpers())
-    {
+    if host.as_ref().is_some_and(|plan| plan.has_dropout_helpers()) {
         let lowered = finish_lowering(
             checked,
-            Dag::new(),
-            &BTreeSet::new(),
+            LoweredProgram::default(),
             RootCountContext::Program,
             RootBindingMode::SelectedHostBackend,
         )?;
@@ -157,49 +154,21 @@ fn finish_c_execution_lowering(
     }
 }
 
-/// Additive evaluator products derived from the same sealed checked source.
-/// Ordinary lowering/cache carriers remain unchanged and cannot stand in for
-/// this non-serialized execution transport.
-pub fn lower_checked_for_evaluation(
-    checked: &CheckedCompilation,
-) -> Result<chelis_ir::lower::EvaluationProgram, CoreLowerError> {
-    chelis_ir::lower::try_lower_program_to_evaluation_library(checked.program())
-        .map(|library| library.program().clone())
-        .map_err(CoreLowerError::Lower)
-}
-
-pub fn lower_checked_with_evaluation_context(
-    checked: &ContextCheckedCompilation<'_>,
-    evaluation: &chelis_ir::lower::EvaluationLibrary,
-) -> Result<chelis_ir::lower::EvaluationProgram, CoreLowerError> {
-    if evaluation.library_for_inspection().library_proof_id()
-        != checked.library().program().library_proof_id()
-    {
-        return Err(CoreLowerError::Lower(
-            LowerDiagnostic::new(
-                "the evaluation library does not match its checked context",
-                None,
-                None,
-            )
-            .fatal(),
-        ));
-    }
-    chelis_ir::lower::try_lower_program_with_evaluation_context(
-        evaluation,
-        checked.extension().program(),
-    )
-    .map_err(CoreLowerError::Lower)
-}
-
+#[derive(Default)]
 struct LoweredProgram {
     dag: Dag,
     rootless_defs: BTreeSet<String>,
+    random_regions: RandomRegionOwners,
 }
 
-impl From<IrLoweredLibrary> for LoweredProgram {
-    fn from(library: IrLoweredLibrary) -> Self {
+impl From<(IrLoweredLibrary, RandomRegionOwners)> for LoweredProgram {
+    fn from((library, random_regions): (IrLoweredLibrary, RandomRegionOwners)) -> Self {
         let (dag, rootless_defs) = library.into_dag_and_rootless_defs();
-        Self { dag, rootless_defs }
+        Self {
+            dag,
+            rootless_defs,
+            random_regions,
+        }
     }
 }
 
@@ -208,6 +177,7 @@ impl From<chelis_ir::lower::ComposedLowering> for LoweredProgram {
         Self {
             dag: composed.dag,
             rootless_defs: composed.rootless_defs,
+            random_regions: composed.random_regions,
         }
     }
 }
@@ -217,37 +187,30 @@ fn finish_isolated_lowering(
     mode: LoweringMode,
     lower_result: Result<LoweredProgram, LowerDiagnostic>,
 ) -> Result<LoweredCompilation, CoreLowerError> {
-    let (dag, rootless_defs, root_binding_mode) = match lower_result {
+    let (lowered, root_binding_mode) = match lower_result {
         Ok(library) if mode == LoweringMode::AllowHostBackend && library.dag.roots().is_empty() => {
-            (
-                library.dag,
-                library.rootless_defs,
-                RootBindingMode::SelectedHostBackend,
-            )
+            (library, RootBindingMode::SelectedHostBackend)
         }
-        Ok(library) => (library.dag, library.rootless_defs, RootBindingMode::Exact),
+        Ok(library) => (library, RootBindingMode::Exact),
         Err(diagnostic)
             if mode == LoweringMode::AllowHostOnly
                 && !diagnostic.fatal
                 && checked.root_metadata.tensor_names.is_empty() =>
         {
             (
-                Dag::new(),
-                BTreeSet::new(),
+                LoweredProgram::default(),
                 RootBindingMode::AcceptedNonfatalRejection,
             )
         }
         Err(diagnostic) if mode == LoweringMode::AllowHostBackend && !diagnostic.fatal => (
-            Dag::new(),
-            BTreeSet::new(),
+            LoweredProgram::default(),
             RootBindingMode::AcceptedNonfatalRejection,
         ),
         Err(diagnostic) => return Err(CoreLowerError::Lower(diagnostic)),
     };
     finish_lowering(
         checked,
-        dag,
-        &rootless_defs,
+        lowered,
         RootCountContext::Program,
         root_binding_mode,
     )
@@ -295,20 +258,25 @@ fn finish_contextual_lowering(
     lower_result: Result<LoweredProgram, LowerDiagnostic>,
     tensor_names: &TensorRootNames,
 ) -> Result<LoweredCompilation, CoreLowerError> {
-    let (mut dag, rootless_defs, accepted_nonfatal_rejection) = match lower_result {
-        Ok(composed) => (composed.dag, composed.rootless_defs, false),
+    let library_program = || LoweredProgram {
+        dag: library_dag.clone(),
+        ..LoweredProgram::default()
+    };
+    let (mut lowered, accepted_nonfatal_rejection) = match lower_result {
+        Ok(composed) => (composed, false),
         Err(diagnostic)
             if mode == LoweringMode::AllowHostOnly
                 && !diagnostic.fatal
                 && tensor_names.is_empty() =>
         {
-            (library_dag.clone(), BTreeSet::new(), true)
+            (library_program(), true)
         }
         Err(diagnostic) if mode == LoweringMode::AllowHostBackend && !diagnostic.fatal => {
-            (library_dag.clone(), BTreeSet::new(), true)
+            (library_program(), true)
         }
         Err(diagnostic) => return Err(CoreLowerError::Lower(diagnostic)),
     };
+    let dag = &mut lowered.dag;
 
     // The composed DAG prepends the library's roots, so new-code roots begin
     // at `library_root_count`. The `.min` is a defensive slice guard: a healthy
@@ -330,8 +298,7 @@ fn finish_contextual_lowering(
     };
     finish_lowering(
         checked,
-        dag,
-        &rootless_defs,
+        lowered,
         RootCountContext::NewCode,
         root_binding_mode,
     )
@@ -339,14 +306,18 @@ fn finish_contextual_lowering(
 
 fn finish_lowering(
     checked: CheckedCompilation,
-    dag: Dag,
-    rootless_defs: &BTreeSet<String>,
+    lowered: LoweredProgram,
     root_context: RootCountContext,
     root_binding_mode: RootBindingMode,
 ) -> Result<LoweredCompilation, CoreLowerError> {
+    let LoweredProgram {
+        dag,
+        rootless_defs,
+        random_regions,
+    } = lowered;
     let named_roots = match root_binding_mode {
         RootBindingMode::Exact => NamedRoots::aligned(
-            &checked.root_metadata.tensor_names.without(rootless_defs),
+            &checked.root_metadata.tensor_names.without(&rootless_defs),
             dag.roots(),
             root_context,
         )?,
@@ -361,6 +332,7 @@ fn finish_lowering(
         dag,
         named_roots,
         forward_node_index,
+        random_regions,
     })
 }
 
@@ -390,7 +362,7 @@ mod tests {
     fn lowered(dag: Dag) -> LoweredProgram {
         LoweredProgram {
             dag,
-            rootless_defs: BTreeSet::new(),
+            ..LoweredProgram::default()
         }
     }
 
@@ -414,11 +386,7 @@ mod tests {
             let (actual, ordinary_host, plan) =
                 lower_checked_for_c_execution(checked.clone(), &manifest, mode).unwrap();
             assert_eq!(ordinary_host.is_some(), expected_host.is_some());
-            assert!(
-                !plan
-                    .as_ref()
-                    .is_some_and(|plan| plan.has_execution_helpers())
-            );
+            assert!(!plan.as_ref().is_some_and(|plan| plan.has_dropout_helpers()));
             assert_eq!(actual.named_roots(), ordinary.named_roots());
             assert_eq!(actual.forward_node_index(), ordinary.forward_node_index());
             assert_eq!(actual.dag().nodes().len(), ordinary.dag().nodes().len());

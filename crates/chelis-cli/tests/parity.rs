@@ -537,58 +537,14 @@ fn parity_dropout_static_rate() {
 }
 
 #[test]
-fn parity_dropout_staged_claim_eval_and_c_rejection() {
-    check_dropout_eval_and_c_rejection(
-        "dropout_staged_claim.ch",
+fn parity_dropout_staged_claim() {
+    let path = examples_root().join("dropout_staged_claim.ch");
+    assert_check_clean(&path);
+    assert_eq!(
+        run_eval(&path),
         b"main = tensor(shape=[2, 2], data=[2.0, 0.0, 0.0, 0.0])\n",
     );
-}
-
-fn check_dropout_eval_and_c_rejection(file: &str, expected: &[u8]) {
-    use chelis_compiler_api::{
-        compiler::compile,
-        schema::{CompileRequest, CompileTarget, SourceKind},
-    };
-    let path = examples_root().join(file);
-    assert_check_clean(&path);
-    assert_eq!(run_eval(&path), expected);
-    let error = compile(CompileRequest {
-        source_kind: SourceKind::Surf,
-        source: fs::read_to_string(&path).unwrap(),
-        target: CompileTarget::C,
-        entry_name: Some("main".into()),
-    })
-    .expect_err("the example's C lane remains explicitly unsupported");
-    assert_eq!(error.errors.len(), 1, "{error:?}");
-    assert_eq!(error.errors[0].kind().as_str(), "unsupported_feature");
-    assert!(
-        error.errors[0]
-            .message
-            .contains("unimplemented chelis#1192")
-    );
-    let directory = tempdir().unwrap();
-    let output = Command::cargo_bin("chelis")
-        .unwrap()
-        .args(["build", path.to_str().unwrap(), "--target", "c", "--output"])
-        .arg(directory.path().join("out"))
-        .output()
-        .unwrap();
-    assert!(!output.status.success(), "C dropout remains unsupported");
-    let diagnostic = format!(
-        "{}{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-    assert!(
-        diagnostic.starts_with("error: unsupported: compiled `dropout` op at lowered node "),
-        "{diagnostic}"
-    );
-    assert!(diagnostic.contains("(codegen:c)"), "{diagnostic}");
-    assert!(
-        diagnostic
-            .contains("unimplemented chelis#1192: compiled `dropout` kernels are not implemented"),
-        "{diagnostic}"
-    );
+    drive_parity(&path, true);
 }
 
 #[test]

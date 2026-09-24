@@ -84,17 +84,15 @@ fn compiled_static_rate_exported_library_call_survives_context_decode() {
     }
 }
 
+// chelis#2411: a runtime rate is an ordinary [05-OP-37] operand. The call
+// used to be refused; it now draws ordinal 0 of the handler, which the
+// independent reference below recomputes from the spec text.
 #[test]
-fn concrete_runtime_rate_actual_is_not_frozen_from_its_evaluated_value() {
+fn concrete_runtime_rate_actual_draws_the_conforming_stream() {
     let source = "def keep(x: tensor[4, f32], rate: f32) -> tensor[4, f32] = dropout(x, rate)\ndef main() = with seed(42i64) { keep(to_tensor([1.0f32, 1.0f32, 1.0f32, 1.0f32]), tensor_to_scalar(scalar_to_tensor(0.5f32))) }\n";
-    let error = eval_selected(request(source), &["main".into()]).unwrap_err();
-    assert!(
-        error
-            .errors
-            .iter()
-            .any(|error| error.message.contains("dropout")),
-        "{error:?}"
-    );
+    let result = eval_selected(request(source), &["main".into()])
+        .unwrap_or_else(|error| panic!("{error:?}"));
+    assert_eq!(tensor(&result, "main"), mask(0)[..4]);
 }
 
 #[test]
@@ -250,8 +248,10 @@ fn a_local_callable_still_shadows_the_generic_dropout_definition() {
     assert_eq!(tensor(&result, "main.1"), mask(0)[..4]);
 }
 
+// chelis#2411: a generic runtime rate draws the conforming stream at its own
+// dtype's arithmetic width; it was refused before.
 #[test]
-fn generic_runtime_rate_is_not_specialized_from_its_evaluated_value() {
+fn generic_runtime_rate_draws_the_conforming_stream() {
     for dtype in ["f32", "f64"] {
         for definition in [
             "def keep[p: Float](x: tensor[4, p]) -> tensor[4, p] = dropout(x, cast(tensor_to_scalar(scalar_to_tensor(0.5f32)), p))".to_string(),
@@ -260,13 +260,13 @@ fn generic_runtime_rate_is_not_specialized_from_its_evaluated_value() {
         ] {
             let callee = if definition.contains("def run") { "run" } else { "keep" };
             let source = format!("{definition}\ndef main() = with seed(42i64) {{ {callee}(to_tensor([1.0{dtype}, 1.0{dtype}, 1.0{dtype}, 1.0{dtype}])) }}");
-            let error = eval_selected(request(&source), &["main".into()]).unwrap_err();
-            // These sources passed checking and reach the existing excluded
-            // evaluator lane; a parse/type error cannot satisfy the control.
-            assert_eq!(error.stage, "eval", "{error:?}");
-            assert_eq!(error.errors.len(), 1, "{error:?}");
-            assert_eq!(error.errors[0].message, "unknown runtime name `dropout`");
-            assert!(error.transcript.is_empty());
+            let result = eval_selected(request(&source), &["main".into()])
+                .unwrap_or_else(|error| panic!("{source}\n{error:?}"));
+            assert_eq!(
+                tensor(&result, "main"),
+                mask_at_width(42, 0, dtype == "f64")[..4],
+                "{source}"
+            );
         }
     }
 }
@@ -937,6 +937,25 @@ fn mask(ordinal: u64) -> Vec<f64> {
     mask_with_seed(42, ordinal)
 }
 
+/// [05-OP-37] with rate 0.5 over ones: the f64 comparison reads the exact
+/// unit, every narrower dtype its f32 rounding.
+fn mask_at_width(seed: u64, ordinal: u64, exact: bool) -> Vec<f64> {
+    fn mix(mut x: u64) -> u64 {
+        x = x.wrapping_add(0x9e3779b97f4a7c15);
+        x = (x ^ (x >> 30)).wrapping_mul(0xbf58476d1ce4e5b9);
+        x = (x ^ (x >> 27)).wrapping_mul(0x94d049bb133111eb);
+        x ^ (x >> 31)
+    }
+    (0..32)
+        .map(|index| {
+            let word = mix(seed ^ mix(ordinal).rotate_left(17) ^ mix(index).rotate_left(41));
+            let unit = (word >> 11) as f64 / 9007199254740992.0;
+            let unit = if exact { unit } else { f64::from(unit as f32) };
+            if unit < 0.5 { 0.0 } else { 2.0 }
+        })
+        .collect()
+}
+
 fn mask_with_seed(seed: u64, ordinal: u64) -> Vec<f64> {
     fn mix(mut x: u64) -> u64 {
         x = x.wrapping_add(0x9e3779b97f4a7c15);
@@ -1248,21 +1267,18 @@ fn dropout_failure_preserves_only_the_executed_output_prefix() {
 }
 
 #[test]
-fn runtime_rate_keeps_explicit_legacy_dispatch_and_dynamic_control_does_not() {
+fn runtime_rate_and_dynamic_control_both_draw_the_handled_stream() {
     let ones = std::iter::repeat_n("1.0f32", 32)
         .collect::<Vec<_>>()
         .join(", ");
     let source = format!(
         "def excluded(x: tensor[32, f32], rate: f32) = (dropout(x, rate), 7i64)\ndef main() = with seed(42i64) {{ excluded(to_tensor([{ones}]), 0.5f32) }}\n"
     );
-    let error = eval_selected(request(&source), &["main".into()]).unwrap_err();
-    assert_eq!(error.stage, "lower", "{error:?}");
-    assert!(
-        error.errors.iter().any(|error| error
-            .message
-            .contains("requires a statically-resolvable rate")),
-        "{error:?}"
-    );
+    // [05-OP-37]: a runtime rate is an ordinary operand, so the helper draws
+    // the handled stream's ordinal 0 (chelis#2411).
+    let result = eval_selected(request(&source), &["main".into()])
+        .unwrap_or_else(|error| panic!("{error:?}"));
+    assert_eq!(tensor(&result, "main.0"), mask(0));
     // chelis#2405: a dynamic caller no longer excludes its fixed-rate helper,
     // which runs its own plan on the handled stream.
     let source = format!(
@@ -1342,7 +1358,7 @@ fn mismatch_nonfloat_and_alias_admission_follow_the_shared_signature() {
 }
 
 #[test]
-fn dead_draw_input_is_required_even_when_not_data_live_at_the_selected_root() {
+fn dead_draw_input_is_not_required_when_not_data_live_at_the_selected_root() {
     let source = "def sample(x: tensor[32, f32], y: tensor[32, f32]) -> tensor[32, f32] = with seed(42i64) {\n dead = dropout(y, 0.0f32)\n x\n}\n";
     let mut request = request(source);
     request
@@ -1356,7 +1372,9 @@ fn dead_draw_input_is_required_even_when_not_data_live_at_the_selected_root() {
         .iter()
         .find(|entry| entry.name == "sample")
         .unwrap();
-    assert!(entry.required_inputs.iter().any(|name| name == "y"));
+    // The discarded draw still takes its ordinal through its key; its data is
+    // never read, so the caller need not supply it.
+    assert!(!entry.required_inputs.iter().any(|name| name == "y"));
 }
 
 #[test]
@@ -1396,24 +1414,118 @@ fn nonunit_cotangent_matches_same_seed_finite_differences() {
     }
 }
 
+/// spec/06 §5.2 with [05-OP-37]: a draw inside an activation the selected
+/// root runs validates its rate and traps whether or not anything reads its
+/// result. The rows are the selected root's own handler (as a value root and
+/// as a function root), a discarded inner handler, a discarded call of a
+/// helper with its own handler, and a declaration the root references only
+/// through a dead binding, both as an inlined function and as a value
+/// declaration. The uniform row is [05-OP-8]'s bound check.
+///
+/// Evidentiary status: REGRESSION TEST. At 3b5f029d8 every row returned the
+/// root's value, because a region with no live draw was dropped as unreached.
 #[test]
-fn selected_declaration_keeps_a_dead_reference_to_an_effecting_declaration() {
-    let source = "x: tensor[32, f32] = x\nsampled = with seed(42i64) { dropout(x, 1.0f32) }\nselected = {\n dead = sampled\n copy(x)\n}\nunrelated = with seed(7i64) { dropout(x, 0.5f32) }\n";
-    let error = eval_selected(request(source), &["selected".into()]).unwrap_err();
-    assert!(
-        error
-            .errors
-            .iter()
-            .any(|error| error.message == "numeric trap: domain in dropout at f32"),
-        "{error:?}"
-    );
-    let result = eval_selected(request(source), &["unrelated".into()]).unwrap();
-    assert!(
-        result
-            .roots
-            .iter()
-            .any(|root| root.name.as_deref() == Some("unrelated"))
-    );
+fn a_selected_activations_discarded_draws_still_validate_and_trap() {
+    let rows = [
+        (
+            "own handler, value root",
+            "x: tensor[32, f32] = x\nselected = with seed(42i64) {\n dead = dropout(copy(x), 1.0f32)\n copy(x)\n}\n",
+            "numeric trap: domain in dropout at f32",
+        ),
+        (
+            "own handler, function root",
+            "def selected(x: tensor[32, f32]) -> tensor[32, f32] = with seed(42i64) {\n dead = dropout(copy(x), 1.0f32)\n x\n}\n",
+            "numeric trap: domain in dropout at f32",
+        ),
+        (
+            "discarded inner handler",
+            "x: tensor[32, f32] = x\nselected = with seed(42i64) {\n dead = with seed(9i64) { dropout(copy(x), 1.0f32) }\n dropout(copy(x), 0.5f32)\n}\n",
+            "numeric trap: domain in dropout at f32",
+        ),
+        (
+            "discarded helper with its own handler",
+            "def h(v: tensor[32, f32]) -> tensor[32, f32] = with seed(9i64) {\n dead = dropout(copy(v), 1.0f32)\n v\n}\ndef selected(x: tensor[32, f32]) -> tensor[32, f32] = with seed(42i64) {\n a = h(copy(x))\n dropout(x, 0.5f32)\n}\n",
+            "numeric trap: domain in dropout at f32",
+        ),
+        (
+            "dead reference to a function declaration",
+            "def sampled(x: tensor[32, f32]) -> tensor[32, f32] = with seed(42i64) { dropout(x, 1.0f32) }\ndef selected(x: tensor[32, f32]) -> tensor[32, f32] = {\n dead = sampled(copy(x))\n x\n}\n",
+            "numeric trap: domain in dropout at f32",
+        ),
+        (
+            "dead reference to a value declaration",
+            "x: tensor[32, f32] = x\nsampled = with seed(42i64) { dropout(x, 1.0f32) }\nselected = {\n dead = sampled\n copy(x)\n}\nunrelated = with seed(7i64) { dropout(x, 0.5f32) }\n",
+            "numeric trap: domain in dropout at f32",
+        ),
+        (
+            "discarded uniform with reversed bounds",
+            "x: tensor[32, f32] = x\nselected = with seed(42i64) {\n dead = uniform_like(copy(x), 1.0f32, 0.0f32)\n copy(x)\n}\n",
+            "numeric trap: domain in uniform_like at f32",
+        ),
+    ];
+    for (row, source, trap) in rows {
+        let error = eval_selected(request(source), &["selected".into()])
+            .map(|result| format!("{:?}", result.roots))
+            .expect_err(row);
+        assert!(
+            error.errors.iter().any(|error| error.message == trap),
+            "{row}: {error:?}"
+        );
+    }
+}
+
+/// The complement of the trap rows: selecting one root never runs another
+/// declaration's activation, so its invalid rate does not trap and its draws
+/// take no ordinal of the selected stream.
+#[test]
+fn an_unselected_declarations_invalid_draw_does_not_run() {
+    let source = "x: tensor[32, f32] = x\nselected = with seed(42i64) { dropout(copy(x), 0.5f32) }\nunrelated = with seed(42i64) { dropout(x, 1.0f32) }\n";
+    let result = eval_selected(request(source), &["selected".into()]).unwrap();
+    assert_eq!(tensor(&result, "selected"), mask(0));
+    let source = "def unrelated(y: tensor[32, f32]) -> tensor[32, f32] = with seed(42i64) { dropout(y, 1.0f32) }\ndef selected(x: tensor[32, f32]) -> tensor[32, f32] = with seed(42i64) {\n dead = dropout(copy(x), 0.5f32)\n dropout(x, 0.5f32)\n}\n";
+    let result = eval_selected(request(source), &["selected".into()]).unwrap();
+    assert_eq!(tensor(&result, "selected"), mask(1));
+}
+
+/// [05-RNG-1]: keeping a selected activation's discarded draws shifts no
+/// ordinal. A discarded draw takes the ordinal it owns, and a helper's
+/// discarded draw is taken on the stream it inherits.
+#[test]
+fn a_selected_activations_discarded_draws_keep_their_ordinals() {
+    let helper_dead_only = "def h(v: tensor[32, f32]) -> tensor[32, f32] ! { Random } = {\n dead = dropout(copy(v), 0.5f32)\n v\n}\n";
+    let rows = [
+        (
+            "value root, discarded then live",
+            "x: tensor[32, f32] = x\nselected = with seed(42i64) {\n dead = dropout(copy(x), 0.5f32)\n dropout(copy(x), 0.5f32)\n}\n".to_string(),
+            mask(1),
+        ),
+        (
+            "inherited helper whose only draw is discarded",
+            format!("{helper_dead_only}def selected(x: tensor[32, f32]) -> tensor[32, f32] = with seed(42i64) {{\n a = h(copy(x))\n dropout(x, 0.5f32)\n}}\n"),
+            mask(1),
+        ),
+        (
+            "discarded call of an inherited helper",
+            "def h(v: tensor[32, f32]) -> tensor[32, f32] ! { Random } = dropout(v, 0.5f32)\ndef selected(x: tensor[32, f32]) -> tensor[32, f32] = with seed(42i64) {\n dead = h(copy(x))\n dropout(x, 0.5f32)\n}\n".to_string(),
+            mask(1),
+        ),
+        (
+            "inherited helper, discarded then live",
+            "def h(v: tensor[32, f32]) -> tensor[32, f32] ! { Random } = {\n dead = dropout(copy(v), 0.5f32)\n dropout(v, 0.5f32)\n}\ndef selected(x: tensor[32, f32]) -> tensor[32, f32] = with seed(42i64) { h(x) }\n".to_string(),
+            mask(1),
+        ),
+        (
+            "runtime if whose unselected arm draws",
+            "def pick(v: tensor[32, f32], flag: bool) -> tensor[32, f32] ! { Random } = if flag then dropout(v, 0.5f32) else v\ndef selected(x: tensor[32, f32]) -> tensor[32, f32] = with seed(42i64) {\n flag = lt(tensor_to_scalar(sum(copy(x), 0i32)), 0.0f32)\n a = pick(copy(x), flag)\n add(a, dropout(x, 0.5f32))\n}\n".to_string(),
+            mask(0).iter().map(|value| value + 1.0).collect(),
+        ),
+    ];
+    assert_ne!(mask(0), mask(1), "the ordinal rows must discriminate");
+    for (row, source, expected) in rows {
+        let result = eval_selected(request(&source), &["selected".into()])
+            .unwrap_or_else(|error| panic!("{row}\n{error:?}"));
+        assert_eq!(tensor(&result, "selected"), expected, "{row}");
+    }
 }
 
 #[test]
@@ -1599,15 +1711,24 @@ fn uniform_draws_beneath_recursion_keep_their_stream() {
 /// Evidentiary status: REGRESSION TEST (every row returns values, not an
 /// error, without the fence).
 #[test]
-fn plan_less_dropout_under_grad_of_dynamic_control_or_vmap_is_refused() {
+fn dropout_under_grad_of_dynamic_control_draws_and_vmap_is_refused() {
     let ones = ones32();
     let row = "[1.0f32, 1.0f32, 1.0f32, 1.0f32]";
+    // Dropout under a runtime `if` inside `grad` draws the taken arm's key at
+    // ordinal 0 and replays it for the pathwise adjoint; the following draw
+    // takes ordinal 1.
+    let source = format!(
+        "def loss(x: tensor[32, f32]) -> tensor[f32] ! {{ Random }} = if gt(tensor_to_scalar(sum(copy(x), 0i32)), 0.0f32) then sum(dropout(x, 0.5f32), 0i32) else sum(x, 0i32)\ndef main() = with seed(42i64) {{\n x = to_tensor([{ones}])\n g = grad(loss)(copy(x))\n after = dropout(x, 0.5f32)\n (g, after)\n}}\n"
+    );
+    let result = eval_selected(request(&source), &["main".into()])
+        .unwrap_or_else(|error| panic!("{error:?}"));
+    assert_eq!(tensor(&result, "main.0"), mask(0));
+    assert_eq!(tensor(&result, "main.1"), mask(1));
+    // chelis#2409: vmap over a function that draws has no conforming stream
+    // until explicit keys, so it is refused rather than drawn at seed zero.
     let vmap_keep =
         "def keep(x: tensor[4, f32]) -> tensor[4, f32] ! { Random } = dropout(x, 0.5f32)\n";
     for source in [
-        format!(
-            "def loss(x: tensor[32, f32]) -> tensor[f32] ! {{ Random }} = if gt(tensor_to_scalar(sum(copy(x), 0i32)), 0.0f32) then sum(dropout(x, 0.5f32), 0i32) else sum(x, 0i32)\ndef main() = with seed(42i64) {{\n x = to_tensor([{ones}])\n g = grad(loss)(copy(x))\n after = dropout(x, 0.5f32)\n (g, after)\n}}\n"
-        ),
         format!(
             "{vmap_keep}def main() = with seed(42i64) {{\n xs = to_tensor([{row}, {row}, {row}])\n ys = vmap(keep)(xs)\n after = dropout(to_tensor({row}), 0.5f32)\n (ys, after)\n}}\n"
         ),
@@ -1616,14 +1737,12 @@ fn plan_less_dropout_under_grad_of_dynamic_control_or_vmap_is_refused() {
         ),
     ] {
         let error = eval_selected(request(&source), &["main".into()]).unwrap_err();
-        assert_eq!(error.stage, "eval", "{source}\n{error:?}");
         assert!(
             error.errors.iter().any(|error| {
-                error.message.contains("unsupported: op `dropout` on ")
-                    && error
-                        .message
-                        .contains("without a fixed-control plan (runtime)")
-                    && error.message.contains("unimplemented chelis#2413")
+                error
+                    .message
+                    .contains("`vmap` over a function that draws from `Random`")
+                    && error.message.contains("unimplemented chelis#2409")
             }),
             "{source}\n{error:?}"
         );
@@ -1708,4 +1827,128 @@ fn grad_of_a_captured_drawing_closure_still_sees_its_draw() {
         .unwrap_or_else(|error| panic!("{source}\n{error:?}"));
     assert_eq!(tensor(&result, "main.0"), mask(0));
     assert_eq!(tensor(&result, "main.1"), mask(1));
+}
+
+/// [05-RNG-1] enters only the selected arm of a runtime `if`, so in the DAG
+/// evaluator a draw in an unselected arm neither validates its controls nor
+/// takes an ordinal (chelis#2410): the whole-program graph computes both arms
+/// of a `where`, and each draw there carries its arm's path condition as its
+/// activation. Each row adds the arm's value to a later draw, so a shifted
+/// ordinal changes the result. Flags come from data, so lowering cannot fold
+/// them.
+///
+/// Evidentiary status: REGRESSION TEST for the row taking `grad` through an
+/// unselected drawing arm, which dcc9256c4 refused with the #2410 rejection.
+/// The other rows passed there and lock this lane's stream beside the
+/// lowering change.
+#[test]
+fn a_draw_in_an_unselected_arm_takes_no_ordinal_in_the_dag_evaluator() {
+    let sum = "tensor_to_scalar(sum(copy(x), 0i32))";
+    let selected = |body: &str| {
+        format!(
+            "def selected(x: tensor[32, f32]) -> tensor[32, f32] = with seed(42i64) {{\n s = {sum}\n{body}}}\n"
+        )
+    };
+    let unit = |ordinal| spec_unit_uniform(42, ordinal, 32);
+    let add = |left: &[f32], right: &[f32]| -> Vec<f32> {
+        left.iter()
+            .zip(right)
+            .map(|(left, right)| left + right)
+            .collect()
+    };
+    let as_f32 = |values: Vec<f64>| {
+        values
+            .into_iter()
+            .map(|value| value as f32)
+            .collect::<Vec<_>>()
+    };
+    let ones = vec![1.0_f32; 32];
+    // [05-OP-37] at rate 0.25 over ones: a kept element is `1 / 0.75` at
+    // binary32.
+    let quarter_rate = unit(0)
+        .into_iter()
+        .map(|unit| if unit < 0.25 { 0.0 } else { 1.0_f32 / 0.75_f32 })
+        .collect::<Vec<_>>();
+    let noisy = "def layer(x: tensor[32, f32], noisy: bool, eps: f32) -> tensor[32, f32] ! { Random } = if noisy then add(copy(x), uniform_like(x, neg(eps), eps)) else x\n";
+    let loss = |comparison: &str| {
+        format!(
+            "def loss(x: tensor[32, f32]) -> tensor[f32] ! {{ Random }} = if {comparison}({sum}, 0.0f32) then sum(dropout(x, 0.5f32), 0i32) else sum(x, 0i32)\n"
+        )
+    };
+    let rows = [
+        (
+            "uniform, invalid run-time bounds, unselected",
+            format!(
+                "{noisy}{}",
+                selected(" layer(x, lt(s, 0.0f32), sub(0.0f32, s))\n")
+            ),
+            ones.clone(),
+        ),
+        (
+            "uniform, valid run-time bounds, unselected, then a draw",
+            format!(
+                "{noisy}{}",
+                selected(
+                    " add(layer(copy(x), lt(s, 0.0f32), s), uniform_like(x, 0.0f32, 1.0f32))\n"
+                )
+            ),
+            add(&ones, &unit(0)),
+        ),
+        (
+            "uniform in a nested arm, then a draw",
+            format!(
+                "def pick(x: tensor[32, f32], a: bool, b: bool) -> tensor[32, f32] ! {{ Random }} = if a then if b then uniform_like(x, 0.0f32, 1.0f32) else x else x\n{}",
+                selected(
+                    " add(pick(copy(x), gt(s, 0.0f32), lt(s, 0.0f32)), uniform_like(x, 0.0f32, 1.0f32))\n"
+                )
+            ),
+            add(&ones, &unit(0)),
+        ),
+        (
+            "dropout in both arms, then a draw",
+            format!(
+                "def pick(x: tensor[32, f32], flag: bool) -> tensor[32, f32] ! {{ Random }} = if flag then dropout(x, 0.5f32) else dropout(x, 0.25f32)\n{}",
+                selected(" add(pick(copy(x), lt(s, 0.0f32)), dropout(x, 0.5f32))\n")
+            ),
+            add(&quarter_rate, &as_f32(mask(1))),
+        ),
+        (
+            "grad through an unselected drawing arm, then a draw",
+            format!(
+                "{}{}",
+                loss("lt"),
+                selected(" add(grad(loss)(copy(x)), dropout(x, 0.5f32))\n")
+            ),
+            add(&ones, &as_f32(mask(0))),
+        ),
+        (
+            "grad through a selected drawing arm, then a draw",
+            format!(
+                "{}{}",
+                loss("gt"),
+                selected(" add(grad(loss)(copy(x)), dropout(x, 0.5f32))\n")
+            ),
+            add(&as_f32(mask(0)), &as_f32(mask(1))),
+        ),
+    ];
+    assert_ne!(unit(0), unit(1));
+    let mut failures = Vec::new();
+    for (row, source, expected) in rows {
+        match eval_selected(request(&source), &["selected".into()]) {
+            Ok(result) => {
+                let actual = as_f32(tensor(&result, "selected"));
+                let bits = |values: &[f32]| {
+                    values
+                        .iter()
+                        .map(|value| value.to_bits())
+                        .collect::<Vec<_>>()
+                };
+                if bits(&actual) != bits(&expected) {
+                    failures.push(format!("{row}: {actual:?}"));
+                }
+            }
+            Err(error) => failures.push(format!("{row}: {error:?}")),
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
 }

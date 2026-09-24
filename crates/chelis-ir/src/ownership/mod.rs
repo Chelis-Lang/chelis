@@ -1060,7 +1060,6 @@ fn verified_host_action<'a>(
 pub struct VerifiedHostTensorHelperView<'a> {
     helper: &'a HostTensorHelper,
     dag: VerifiedDagView<'a>,
-    execution: Option<crate::evaluation::EvaluationEmissionView<'a>>,
     #[cfg(feature = "lowering-trace")]
     source_location: (usize, usize),
 }
@@ -1093,10 +1092,6 @@ impl<'a> VerifiedHostTensorHelperView<'a> {
 
     pub fn dag(self) -> VerifiedDagView<'a> {
         self.dag
-    }
-
-    pub fn execution(self) -> Option<crate::evaluation::EvaluationEmissionView<'a>> {
-        self.execution
     }
 }
 
@@ -1227,10 +1222,6 @@ impl<'a> VerifiedHostFunctionView<'a> {
                 dag: &raw.dag,
                 plan: &plan.plan,
             },
-            execution: plan
-                .execution
-                .as_ref()
-                .map(|execution| execution.emission_view()),
         })
     }
 
@@ -1306,10 +1297,6 @@ impl<'a> VerifiedHostEmission<'a> {
                 dag: &raw.dag,
                 plan: &plan.plan,
             },
-            execution: plan
-                .execution
-                .as_ref()
-                .map(|execution| execution.emission_view()),
         })
     }
 
@@ -1446,7 +1433,6 @@ enum OwnershipProof {
 struct NestedDagProof {
     location: NestedDagLocation,
     plan: DagOwnershipPlan,
-    execution: Option<crate::evaluation::ExecutionMetadata>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1483,23 +1469,21 @@ pub fn lower_host_ownership(
     manifested: &ManifestedProgram,
     host: ConcreteHostProgram,
 ) -> Result<HostOwnershipProgram, OwnershipError> {
-    lower_host_ownership_with_execution(manifested, host, None)
+    lower_host_ownership_impl(manifested, host)
 }
 
-/// Consume the opaque host execution carrier and bind every lowering-owned
-/// helper schedule to the exact host payload verified for emission.
+/// Consume the opaque host carrier, whose helper traces the caller has
+/// already snapshotted, and lower its exact host payload to ownership IR.
 pub fn lower_host_execution_ownership(
     manifested: &ManifestedProgram,
     plan: crate::host::HostExecutionPlan,
 ) -> Result<HostOwnershipProgram, OwnershipError> {
-    let (host, execution) = plan.into_parts();
-    lower_host_ownership_with_execution(manifested, host, Some(execution))
+    lower_host_ownership_impl(manifested, plan.into_program())
 }
 
-fn lower_host_ownership_with_execution(
+fn lower_host_ownership_impl(
     manifested: &ManifestedProgram,
     mut host: ConcreteHostProgram,
-    execution: Option<crate::host::HostExecutionAssociations>,
 ) -> Result<HostOwnershipProgram, OwnershipError> {
     let root_bindings = lower::materialize_manifest_roots(&mut host, manifested.manifest())?;
     let mut sites = ir::HostSiteBuilder::default();
@@ -1512,7 +1496,7 @@ fn lower_host_ownership_with_execution(
     )?;
     let mut sites = sites.finish();
     last_use::schedule(&mut program, &mut sites)?;
-    let nested_dags = lower_nested_dags(&host, execution)?;
+    let nested_dags = lower_nested_dags(&host)?;
     Ok(OwnershipProgram {
         payload: HostEmissionPayload {
             program: host,
@@ -1726,74 +1710,19 @@ fn host_payload<P: EmissionPayload>(
         })
 }
 
-fn lower_nested_dags(
-    host: &ConcreteHostProgram,
-    execution: Option<crate::host::HostExecutionAssociations>,
-) -> Result<Vec<NestedDagProof>, OwnershipError> {
-    let (global_execution, function_execution) = execution.unwrap_or_else(|| {
-        (
-            vec![None; host.global_tensor_helpers.len()],
-            host.functions
-                .iter()
-                .map(|function| vec![None; function.tensor_helpers.len()])
-                .collect(),
-        )
-    });
-    if global_execution.len() != host.global_tensor_helpers.len()
-        || function_execution.len() != host.functions.len()
-        || function_execution
-            .iter()
-            .zip(&host.functions)
-            .any(|(execution, function)| execution.len() != function.tensor_helpers.len())
-    {
-        return Err(OwnershipError::LoweringInvariant {
-            unit: "host-execution-plan".to_string(),
-            detail: "helper execution metadata does not match the concrete host topology"
-                .to_string(),
-        });
-    }
+fn lower_nested_dags(host: &ConcreteHostProgram) -> Result<Vec<NestedDagProof>, OwnershipError> {
     let mut result = Vec::new();
-    for (helper, (child, execution)) in host
-        .global_tensor_helpers
-        .iter()
-        .zip(global_execution)
-        .enumerate()
-    {
-        if let Some(execution) = &execution {
-            execution.validate_for_dag(&child.dag).map_err(|detail| {
-                OwnershipError::LoweringInvariant {
-                    unit: format!("global tensor helper {helper}"),
-                    detail,
-                }
-            })?;
-        }
+    for (helper, child) in host.global_tensor_helpers.iter().enumerate() {
         result.push(NestedDagProof {
             location: NestedDagLocation::Global(helper),
             plan: DagOwnershipPlan::lower(&child.dag)?,
-            execution,
         });
     }
-    for (function, (host_function, executions)) in
-        host.functions.iter().zip(function_execution).enumerate()
-    {
-        for (helper, (child, execution)) in host_function
-            .tensor_helpers
-            .iter()
-            .zip(executions)
-            .enumerate()
-        {
-            if let Some(execution) = &execution {
-                execution.validate_for_dag(&child.dag).map_err(|detail| {
-                    OwnershipError::LoweringInvariant {
-                        unit: format!("function {function} tensor helper {helper}"),
-                        detail,
-                    }
-                })?;
-            }
+    for (function, host_function) in host.functions.iter().enumerate() {
+        for (helper, child) in host_function.tensor_helpers.iter().enumerate() {
             result.push(NestedDagProof {
                 location: NestedDagLocation::Function { function, helper },
                 plan: DagOwnershipPlan::lower(&child.dag)?,
-                execution,
             });
         }
     }

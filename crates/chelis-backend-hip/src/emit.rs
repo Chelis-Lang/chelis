@@ -122,6 +122,12 @@ pub struct HipEmitter {
     device_entrypoint_mode: bool,
     /// Shared specialization for every kernel and its launch arguments.
     kernel_rank: usize,
+    /// The next ordinal of each scoped Random handler region, advanced in
+    /// node order as each of its draw keys is emitted. One entry point's walk
+    /// is one activation, so [`Self::begin_activation`] resets it per entry.
+    scoped_draws: BTreeMap<u32, u64>,
+    /// The emission-time key of each emitted draw key, by node.
+    draw_keys: BTreeMap<NodeId, u64>,
 }
 
 #[derive(Debug, Clone)]
@@ -432,6 +438,8 @@ impl HipEmitter {
                 .collect(),
             extra_peak_device_bytes_estimate: 0,
             device_entrypoint_mode: false,
+            scoped_draws: BTreeMap::new(),
+            draw_keys: BTreeMap::new(),
             kernel_rank: match dag
                 .nodes()
                 .iter()
@@ -514,6 +522,7 @@ impl HipEmitter {
         }
 
         // Walk DAG in topological order
+        e.begin_activation();
         for node in dag.nodes() {
             // Skip FusedElem nodes inlined into a trailing reduction.
             if e.reduction_inlined.contains(&node.id.0) {
@@ -630,6 +639,14 @@ impl HipEmitter {
         Ok((e.lines.join("\n"), breakdown))
     }
 
+    /// Start one entry point's walk. Each entry runs the graph as its own
+    /// activation, so every scoped region's ordinals count from zero again
+    /// (`spec/design/randomness_counter_stream.md` §2).
+    fn begin_activation(&mut self) {
+        self.scoped_draws.clear();
+        self.draw_keys.clear();
+    }
+
     fn emit_device_entrypoint(
         &mut self,
         dag: VerifiedDagView<'_>,
@@ -692,6 +709,7 @@ impl HipEmitter {
             self.line("");
         }
 
+        self.begin_activation();
         for node in dag.nodes() {
             if self.reduction_inlined.contains(&node.id.0) {
                 continue;
@@ -762,6 +780,9 @@ impl HipEmitter {
             // Skip reduction-inlined FusedElem nodes (they become part of the
             // reduction kernel).
             if self.reduction_inlined.contains(&node.id.0) {
+                continue;
+            }
+            if self.is_emission_literal(node) {
                 continue;
             }
             match &node.op {
@@ -1405,11 +1426,15 @@ impl HipEmitter {
             RiscOp::Floor => Some(format!("kernel_floor_{}", kind_for_node(node)?.suffix())),
             RiscOp::Ceil => Some(format!("kernel_ceil_{}", kind_for_node(node)?.suffix())),
             RiscOp::Round => Some(format!("kernel_round_{}", kind_for_node(node)?.suffix())),
-            RiscOp::UniformLike { .. } => Some(format!(
+            RiscOp::UniformLike => Some(format!(
                 "kernel_uniform_like_{}",
                 kind_for_node(node)?.suffix()
             )),
-            RiscOp::Dropout { .. } | RiscOp::Drop => None,
+            RiscOp::Drop
+            | RiscOp::Dropout
+            | RiscOp::DropoutReplay
+            | RiscOp::UniformBoundAdjoint { .. }
+            | RiscOp::DrawKey { .. } => None,
             RiscOp::Copy => Some(Self::cast_kernel_name(node, dag)?),
             // WS-A4: bind `accumulator` instead of `..` per the
             // destructure-`..` memory rule. The kernel name encodes
@@ -1821,9 +1846,7 @@ impl HipEmitter {
             RiscOp::Round => {
                 kernels::unary_func(self.kernel_rank, name, "rintf", elem_for_unary()?)
             }
-            RiscOp::UniformLike { .. } => {
-                kernels::uniform_like(self.kernel_rank, name, elem_for_unary()?)
-            }
+            RiscOp::UniformLike => kernels::uniform_like(self.kernel_rank, name, elem_for_unary()?),
             // WS-A4: bind `accumulator` instead of `..`. The fused
             // reduction path is f32-only today (its source kernel
             // template doesn't carry a dtype suffix); the unfused path
@@ -2112,6 +2135,7 @@ impl HipEmitter {
                 .unwrap_or_else(|| panic!("op {:?} has no kernel name", node.op)))
         };
         match &node.op {
+            RiscOp::Const { .. } if self.is_emission_literal(node) => {}
             RiscOp::Const { value } => {
                 self.emit_const(id, value.as_f64_lossy(), &node.output_type)?
             }
@@ -2296,11 +2320,29 @@ impl HipEmitter {
                 &node.inputs,
                 &node.output_type,
             ),
-            RiscOp::UniformLike { low, high, seed } => {
-                self.emit_uniform_like_launch(id, *low, *high, *seed, &node.output_type)?
+            RiscOp::DrawKey {
+                handler,
+                draw: chelis_ir::dag::RandomDraw::UniformLike,
+                dtype,
+            } => self.record_scoped_draw_key(node, *handler, *dtype, dag)?,
+            RiscOp::UniformLike => {
+                let (low, high, key) = self.keyed_uniform_like_parameters(node, dag)?;
+                self.emit_uniform_like_launch(id, low, high, key, &node.output_type)?
             }
-            RiscOp::Dropout { .. } => {
-                unreachable!("dropout should be rejected before HIP code generation")
+            RiscOp::Dropout
+            | RiscOp::DropoutReplay
+            | RiscOp::UniformBoundAdjoint { .. }
+            | RiscOp::DrawKey { .. } => {
+                return Err(Unsupported::new(
+                    UnsupportedKind::Op(chelis_ir::grad::risc_op_name(&node.op).to_string()),
+                    "a key-operand random node in the HIP DAG emitter",
+                    Stage::Codegen("hip"),
+                    chelis_types::unimplemented_rejection!(
+                        1192,
+                        "the HIP lane has no port of the key-operand random kernels or the \
+                         draw key yet; compiled dropout on every target is phase 6 of chelis#2413"
+                    ),
+                ));
             }
             RiscOp::Copy => self.emit_unary_launch(
                 id,
@@ -3000,6 +3042,105 @@ impl HipEmitter {
         );
         self.indent -= 1;
         self.line("}");
+    }
+
+    /// A constant the storage plan gives no storage because only draw
+    /// emission reads it, as a literal: a `with seed` region's seed and a
+    /// draw's bounds, which [`Self::record_scoped_draw_key`] and
+    /// [`Self::keyed_uniform_like_parameters`] fold into the launch.
+    fn is_emission_literal(&self, node: &DagNode) -> bool {
+        matches!(node.op, RiscOp::Const { .. })
+            && *self.plan.node_kind(node.id) == NodeMemoryKind::Skipped
+    }
+
+    /// The HIP lane's counter-stream bridge
+    /// (`spec/design/randomness_counter_stream.md` §2): a device kernel has no
+    /// host Random frame, so only a draw key of a `with seed` region lowered
+    /// inside this graph, with literal bounds and no activation, has a key the
+    /// emitter can compute. Each region's ordinals count from zero in node
+    /// order, as its scoped counter does in the other lanes, and the bounds
+    /// are validated before the ordinal is taken ([05-OP-8]).
+    fn record_scoped_draw_key(
+        &mut self,
+        node: &DagNode,
+        handler: chelis_ir::dag::RandomHandler,
+        dtype: Prim,
+        dag: VerifiedDagView<'_>,
+    ) -> Result<(), Unsupported> {
+        let bridge = |reason: &str| {
+            Unsupported::new(
+                UnsupportedKind::Op("DrawKey".to_string()),
+                format!("a HIP draw key {reason}"),
+                Stage::Codegen("hip"),
+                chelis_types::unimplemented_rejection!(
+                    1192,
+                    "the HIP lane computes a draw key only for a `with seed` region in the \
+                     same kernel with literal bounds; compiled randomness on every target is \
+                     phase 6 of chelis#2413"
+                ),
+            )
+        };
+        let chelis_ir::dag::RandomHandler::Scoped { instance } = handler else {
+            return Err(bridge("that inherits its caller's Random stream"));
+        };
+        if node.inputs.len() != 3 {
+            return Err(bridge("under a runtime activation"));
+        }
+        let literal = |input: NodeId| match dag.get(input).map(|node| &node.op) {
+            Some(RiscOp::Const { value }) => Some(*value),
+            _ => None,
+        };
+        let seed = literal(node.inputs[0])
+            .and_then(|seed| seed.as_i64_exact())
+            .ok_or_else(|| bridge("without its literal seed"))?;
+        let (Some(low), Some(high)) = (literal(node.inputs[1]), literal(node.inputs[2])) else {
+            return Err(bridge("with runtime bounds"));
+        };
+        chelis_types::dtype_semantics::UniformLikeParameters::new(dtype, low, high)
+            .map_err(|error| bridge(&format!("whose literal bounds trap: {error}")))?;
+        let ordinal = self.scoped_draws.entry(instance).or_insert(0);
+        let key = chelis_types::RandomKey::from_counter(seed as u64, *ordinal).bits();
+        *ordinal += 1;
+        self.draw_keys.insert(node.id, key);
+        Ok(())
+    }
+
+    /// The literal f32 bounds and emission-time key of a keyed `UniformLike`
+    /// whose draw key [`Self::record_scoped_draw_key`] computed.
+    fn keyed_uniform_like_parameters(
+        &self,
+        node: &DagNode,
+        dag: VerifiedDagView<'_>,
+    ) -> Result<(f64, f64, u64), Unsupported> {
+        let unsupported = || {
+            Unsupported::new(
+                UnsupportedKind::Op("UniformLike".to_string()),
+                "a HIP uniform_like without an emission-time draw key",
+                Stage::Codegen("hip"),
+                chelis_types::unimplemented_rejection!(
+                    1192,
+                    "the HIP lane computes a draw key only for a `with seed` region in the \
+                     same kernel with literal bounds; compiled randomness on every target is \
+                     phase 6 of chelis#2413"
+                ),
+            )
+        };
+        if node.inputs.len() != 4 {
+            return Err(unsupported());
+        }
+        let bound = |input: NodeId| match dag.get(input).map(|node| &node.op) {
+            Some(RiscOp::Const { value }) => Some(value.as_f64_lossy()),
+            _ => None,
+        };
+        let key = self
+            .draw_keys
+            .get(&node.inputs[3])
+            .copied()
+            .ok_or_else(unsupported)?;
+        match (bound(node.inputs[1]), bound(node.inputs[2])) {
+            (Some(low), Some(high)) => Ok((low, high, key)),
+            _ => Err(unsupported()),
+        }
     }
 
     fn emit_uniform_like_launch(
@@ -4658,8 +4799,11 @@ impl HipEmitter {
             | RiscOp::Floor
             | RiscOp::Ceil
             | RiscOp::Round
-            | RiscOp::UniformLike { .. }
-            | RiscOp::Dropout { .. }
+            | RiscOp::UniformLike
+            | RiscOp::Dropout
+            | RiscOp::DropoutReplay
+            | RiscOp::UniformBoundAdjoint { .. }
+            | RiscOp::DrawKey { .. }
             | RiscOp::Copy
             | RiscOp::Drop
             | RiscOp::Sum { .. }
@@ -4959,7 +5103,8 @@ impl HipEmitter {
             | Prim::Int16
             | Prim::Int32
             | Prim::Int64
-            | Prim::String => {
+            | Prim::String
+            | Prim::Key => {
                 return Err(Unsupported::new(
                     UnsupportedKind::Dtype(ty.precision.name().to_string()),
                     "a HIP kernel family with f32/f64 variants only",
@@ -5094,6 +5239,8 @@ impl HipEmitter {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeSet;
+
     use super::*;
 
     fn emit_test_dag(
@@ -5212,7 +5359,8 @@ mod tests {
                 | Prim::F16
                 | Prim::Bf16
                 | Prim::F8e4m3
-                | Prim::String => {}
+                | Prim::String
+                | Prim::Key => {}
             }
             let runtime_width = prim
                 .runtime_dtype()
@@ -5596,6 +5744,55 @@ mod tests {
         );
     }
 
+    /// `uniform_like(template, low, high)` as the first draw of a `with
+    /// seed(seed)` region in the graph, whose key the HIP lane computes.
+    fn scoped_uniform(
+        dag: &mut Dag,
+        template: NodeId,
+        ty: TensorType,
+        (low, high): (f64, f64),
+        seed: i64,
+    ) -> NodeId {
+        let rank0 = |precision| TensorType {
+            dims: vec![],
+            precision,
+        };
+        let low = dag.add_node(
+            RiscOp::synth_const(Prim::F32, low),
+            vec![],
+            rank0(Prim::F32),
+            None,
+        );
+        let high = dag.add_node(
+            RiscOp::synth_const(Prim::F32, high),
+            vec![],
+            rank0(Prim::F32),
+            None,
+        );
+        let seed = dag.add_node(
+            RiscOp::synth_const(Prim::Int64, seed as f64),
+            vec![],
+            rank0(Prim::Int64),
+            None,
+        );
+        let key = dag.add_node(
+            RiscOp::DrawKey {
+                handler: chelis_ir::dag::RandomHandler::Scoped { instance: 0 },
+                draw: chelis_ir::dag::RandomDraw::UniformLike,
+                dtype: ty.precision,
+            },
+            vec![seed, low, high],
+            rank0(Prim::Key),
+            None,
+        );
+        dag.add_node(
+            RiscOp::UniformLike,
+            vec![template, low, high, key],
+            ty,
+            None,
+        )
+    }
+
     /// Issue #251 (parallel #248): `uniform_like` `low` / `high` args must
     /// emit through `chelis_f32_from_bits`, not a lossy `{:.8}f` literal.
     /// The reproducer `1e-40` collapses to `0.0f` under `%.8`.
@@ -5612,12 +5809,7 @@ mod tests {
             vec_f32(8),
             None,
         );
-        let u = dag.add_node(
-            RiscOp::UniformLike { low, high, seed: 7 },
-            vec![like],
-            vec_f32(8),
-            None,
-        );
+        let u = scoped_uniform(&mut dag, like, vec_f32(8), (low, high), 7);
         dag.add_root(u);
         let (hip, _) = emit_test_dag(&dag, "test_fn").unwrap();
 
@@ -5642,8 +5834,197 @@ mod tests {
         // Negative parity: no lossy decimal literal for the collapsed
         // denormal `low`.
         assert!(
-            !hip.contains("float t1_low = 0.00000000f;"),
+            !hip.contains(&format!("float t{}_low = 0.00000000f;", u.0)),
             "uniform_like must not emit a lossy `{{:.8}}f` literal:\n{hip}"
+        );
+    }
+
+    /// [05-RNG-1]: each generated entry point runs the graph as its own
+    /// activation, so a `with seed` region's two draws take ordinals 0 and 1
+    /// in the host entry and again in its device twin. The expected keys are
+    /// transcribed from the spec, not from `RandomKey`.
+    ///
+    /// Evidentiary status: REGRESSION TEST. At 3b5f029d8 the region counter
+    /// was set once per emitter, so the device entry took ordinals 2 and 3.
+    #[test]
+    fn each_entry_point_keys_its_scoped_draws_from_ordinal_zero() {
+        fn splitmix64(mut value: u64) -> u64 {
+            value = value.wrapping_add(0x9e37_79b9_7f4a_7c15);
+            value = (value ^ (value >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+            value = (value ^ (value >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+            value ^ (value >> 31)
+        }
+        let key = |ordinal: u64| 7 ^ splitmix64(ordinal).rotate_left(17);
+        let mut dag = Dag::new();
+        let like = dag.add_node(
+            RiscOp::Load {
+                name: "like".into(),
+            },
+            vec![],
+            vec_f32(8),
+            None,
+        );
+        let first = scoped_uniform(&mut dag, like, vec_f32(8), (0.0, 1.0), 7);
+        let second = scoped_uniform(&mut dag, first, vec_f32(8), (-1.0, 1.0), 7);
+        dag.add_root(second);
+        let (hip, _) = emit_test_dag(&dag, "test_fn").unwrap();
+        let entry_keys = |signature: &str| {
+            let body = hip
+                .split_once(signature)
+                .unwrap_or_else(|| panic!("no `{signature}` in:\n{hip}"))
+                .1;
+            let body = body.split("\nextern \"C\"").next().unwrap();
+            body.lines()
+                .filter_map(|line| {
+                    let (name, value) = line.trim().split_once(" = ")?;
+                    name.strip_prefix("unsigned long long t")?
+                        .strip_suffix("_key")?;
+                    value.strip_suffix("ULL;")?.parse::<u64>().ok()
+                })
+                .collect::<Vec<_>>()
+        };
+        let expected = vec![key(0), key(1)];
+        assert_ne!(expected[0], expected[1]);
+        assert_eq!(entry_keys("extern \"C\" void test_fn("), expected);
+        assert_eq!(entry_keys("extern \"C\" void test_fn_device("), expected);
+    }
+
+    /// A draw's seed and literal bounds are read only while the draw is
+    /// emitted, so they take no device slot, fill launch or release, and
+    /// every owner and slot an entry point names is one it declares.
+    ///
+    /// Evidentiary status: REGRESSION TEST. At dcc9256c4 the storage plan
+    /// gave the seed a slot and an owner that the emitter never declared, so
+    /// the host entry released an undeclared `o_t` and `chelis_slot`, and
+    /// each bound was filled on the device by `kernel_fill_f32`.
+    #[test]
+    fn scoped_draw_literals_take_no_device_storage() {
+        fn used_and_declared(body: &str, prefix: &str) -> (BTreeSet<String>, BTreeSet<String>) {
+            let mut used = BTreeSet::new();
+            let mut declared = BTreeSet::new();
+            let bytes = body.as_bytes();
+            for (start, _) in body.match_indices(prefix) {
+                let identifier_before = start > 0
+                    && (bytes[start - 1].is_ascii_alphanumeric() || bytes[start - 1] == b'_');
+                let digits = body[start + prefix.len()..]
+                    .bytes()
+                    .take_while(u8::is_ascii_digit)
+                    .count();
+                if identifier_before || digits == 0 {
+                    continue;
+                }
+                let name = &body[start..start + prefix.len() + digits];
+                used.insert(name.to_string());
+                if body[..start].ends_with("chelis_device_tensor_owner *") {
+                    declared.insert(name.to_string());
+                }
+            }
+            (used, declared)
+        }
+        for ty in [vec_f32(8), vec_f64(8)] {
+            let mut dag = Dag::new();
+            let like = dag.add_node(
+                RiscOp::Load {
+                    name: "like".into(),
+                },
+                vec![],
+                ty.clone(),
+                None,
+            );
+            let first = scoped_uniform(&mut dag, like, ty.clone(), (0.0, 1.0), 7);
+            let second = scoped_uniform(&mut dag, first, ty.clone(), (-1.0, 1.0), 7);
+            dag.add_root(second);
+            let (hip, _) = emit_test_dag(&dag, "test_fn").unwrap();
+            let entries = hip.split("extern \"C\" void ").skip(1).collect::<Vec<_>>();
+            assert_eq!(entries.len(), 2, "{hip}");
+            for entry in entries {
+                assert!(!entry.contains("kernel_fill_f32"), "{entry}");
+                for prefix in ["o_t", "chelis_slot"] {
+                    let (used, declared) = used_and_declared(entry, prefix);
+                    assert!(!used.is_empty(), "{entry}");
+                    assert_eq!(used, declared, "{prefix} names in:\n{entry}");
+                }
+            }
+        }
+    }
+
+    /// `spec/design/randomness_counter_stream.md` §2: whether a draw under a
+    /// runtime activation takes its ordinal is decided when the graph runs,
+    /// so the HIP lane refuses an activated draw key with its typed rejection
+    /// instead of computing a key at emission.
+    ///
+    /// Evidentiary status: LOCK on behaviour present at 7d0b996ca.
+    #[test]
+    fn an_activated_draw_key_is_refused_on_the_device() {
+        let rank0 = |precision| TensorType {
+            dims: vec![],
+            precision,
+        };
+        let mut dag = Dag::new();
+        let like = dag.add_node(
+            RiscOp::Load {
+                name: "like".into(),
+            },
+            vec![],
+            vec_f32(8),
+            None,
+        );
+        let active = dag.add_node(
+            RiscOp::Load {
+                name: "active".into(),
+            },
+            vec![],
+            rank0(Prim::Bool),
+            None,
+        );
+        let low = dag.add_node(
+            RiscOp::synth_const(Prim::F32, 0.0),
+            vec![],
+            rank0(Prim::F32),
+            None,
+        );
+        let high = dag.add_node(
+            RiscOp::synth_const(Prim::F32, 1.0),
+            vec![],
+            rank0(Prim::F32),
+            None,
+        );
+        let seed = dag.add_node(
+            RiscOp::synth_const(Prim::Int64, 7.0),
+            vec![],
+            rank0(Prim::Int64),
+            None,
+        );
+        let key = dag.add_node(
+            RiscOp::DrawKey {
+                handler: chelis_ir::dag::RandomHandler::Scoped { instance: 0 },
+                draw: chelis_ir::dag::RandomDraw::UniformLike,
+                dtype: Prim::F32,
+            },
+            vec![seed, low, high, active],
+            rank0(Prim::Key),
+            None,
+        );
+        let draw = dag.add_node(
+            RiscOp::UniformLike,
+            vec![like, low, high, key, active],
+            vec_f32(8),
+            None,
+        );
+        dag.add_root(draw);
+        let Err(error) = emit_test_dag(&dag, "test_fn") else {
+            panic!("the HIP lane computed a key for an activated draw");
+        };
+        assert_eq!(
+            *error.what,
+            UnsupportedKind::Op("DrawKey".to_string()),
+            "{error}"
+        );
+        assert!(
+            error
+                .context
+                .contains("a HIP draw key under a runtime activation"),
+            "{error}"
         );
     }
 
@@ -5660,22 +6041,13 @@ mod tests {
             vec_f64(8),
             None,
         );
-        let u = dag.add_node(
-            RiscOp::UniformLike {
-                low,
-                high,
-                seed: 17,
-            },
-            vec![like],
-            vec_f64(8),
-            None,
-        );
+        let u = scoped_uniform(&mut dag, like, vec_f64(8), (low, high), 17);
         dag.add_root(u);
         let (hip, _) = emit_test_dag(&dag, "test_fn").unwrap();
 
         assert!(hip.contains("__device__ double chelis_uniform_sample_f64("));
-        assert!(hip.contains("double t1_low = chelis_f64_from_bits("));
-        assert!(hip.contains("double t1_high = chelis_f64_from_bits("));
+        assert!(hip.contains(&format!("double t{}_low = chelis_f64_from_bits(", u.0)));
+        assert!(hip.contains(&format!("double t{}_high = chelis_f64_from_bits(", u.0)));
         assert!(hip.contains("double low, double high"));
         assert!(hip.contains("out[i] = chelis_uniform_sample_f64("));
         assert!(

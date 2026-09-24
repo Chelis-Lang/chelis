@@ -224,7 +224,7 @@ def selected(
 }
 
 #[test]
-fn fixed_control_helper_trace_captures_actual_pre_and_post_ad_execution() {
+fn drawing_helper_trace_captures_the_actual_pre_and_post_ad_graphs() {
     let program = manifested(
         r#"
 def loss(x: tensor[32, f32]) -> f32 = with seed(42i64) {
@@ -239,66 +239,34 @@ def derivative(x: tensor[32, f32]) -> tensor[32, f32] = grad(loss)(x)
     let trace = plan
         .function_helper_trace("derivative", 0)
         .unwrap()
-        .expect("fixed-control helper trace");
-    assert_eq!(trace.executions.len(), 1);
-    let execution = &trace.executions[0];
-    let gradient = &trace.lowering.gradients[execution.gradient];
-    same_dag(execution.forward.dag_for_inspection(), &gradient.forward);
-    same_dag(execution.backward.dag_for_inspection(), &gradient.backward);
+        .expect("drawing helper trace");
+    assert_eq!(trace.lowering.gradients.len(), 1);
+    let gradient = &trace.lowering.gradients[0];
+    let count = |dag: &chelis_ir::Dag, op: fn(&RiscOp) -> bool| {
+        dag.nodes().iter().filter(|node| op(&node.op)).count()
+    };
+    let draw_key = |op: &RiscOp| matches!(op, RiscOp::DrawKey { .. });
+    assert_eq!(count(&gradient.forward, draw_key), 1);
     assert_eq!(
-        execution
-            .forward
-            .dag_for_inspection()
-            .nodes()
-            .iter()
-            .filter(|node| matches!(node.op, RiscOp::Dropout { .. }))
-            .count(),
-        1
+        count(&gradient.backward, draw_key),
+        1,
+        "the backward graph reads the forward key; it takes no second one"
     );
     assert_eq!(
-        execution
-            .backward
-            .dag_for_inspection()
-            .nodes()
-            .iter()
-            .filter(|node| matches!(node.op, RiscOp::Dropout { .. }))
-            .count(),
-        2,
+        count(&gradient.backward, |op| matches!(op, RiscOp::DropoutReplay)),
+        1,
         "post-AD capture includes the actual backward replay"
     );
-    let application = &trace.applications[0];
-    assert_eq!(application.gradient, execution.gradient);
-    assert_eq!(application.remap.occurrences.len(), 5);
-    assert_eq!(application.remap.draws.len(), 1);
-    assert_eq!(application.remap.scopes.len(), 3);
-    for (source, target) in &application.remap.occurrences {
-        assert!(
-            execution
-                .backward
-                .source_for_inspection()
-                .iter()
-                .any(|occurrence| occurrence.id == *source)
-        );
-        assert!(
-            application
-                .after_splice
-                .source
-                .iter()
-                .any(|occurrence| occurrence.id == *target)
-        );
-    }
-    let normalization = trace
-        .normalization
+    let application = gradient
+        .application
         .as_ref()
-        .expect("fixed-control helper records execution normalization");
-    assert!(!normalization.before_dce.steps.is_empty());
-    assert!(!normalization.after_drops.steps.is_empty());
+        .expect("the actual grad splice is recorded");
+    assert_eq!(count(&application.after_splice, draw_key), 1);
+    assert!(trace.requirements.is_empty());
 }
 
 #[test]
 fn resource_requirement_survives_actual_ad_splice() {
-    use chelis_ir::lowering_trace::{FullSourceKind, FullStep};
-
     let program = manifested(
         r#"
 def loss(x: tensor[4, f32]) -> f32 = with device("cpu:author-device") {
@@ -313,93 +281,20 @@ def derivative(x: tensor[4, f32]) -> tensor[4, f32] = grad(loss)(x)
         .function_helper_trace("derivative", 0)
         .unwrap()
         .expect("selected derivative helper trace");
-    let execution = trace.executions.first().expect("actual gradient execution");
-
-    let kinds = |plan: &chelis_ir::evaluation::EvaluationPlan| {
-        plan.full_spine_for_inspection()
-            .source
-            .into_iter()
-            .map(|event| match event.kind {
-                FullSourceKind::Requirement(device) => format!("require:{device}"),
-                FullSourceKind::Control(chelis_ir::execution_spine::Control::Enter {
-                    scope,
-                    seed,
-                }) => format!("enter:{}:{seed}", scope.index()),
-                FullSourceKind::Forward { draw, scope, .. } => {
-                    format!("forward:{}:{}", draw.index(), scope.index())
-                }
-                FullSourceKind::Control(chelis_ir::execution_spine::Control::Leave { scope }) => {
-                    format!("leave:{}", scope.index())
-                }
-            })
-            .collect::<Vec<_>>()
-    };
-    let expected = [
-        "require:cpu:author-device",
-        "enter:1:42",
-        "forward:0:1",
-        "leave:1",
-    ];
-    assert_eq!(kinds(&execution.forward), expected);
-    assert_eq!(kinds(&execution.backward), expected);
     assert_eq!(
-        execution
-            .backward
-            .source_for_inspection()
-            .iter()
-            .map(|event| event.id.index())
-            .collect::<Vec<_>>(),
-        [0, 1, 2],
-        "legacy occurrence IDs remain random-only after AD"
+        trace.requirements,
+        ["cpu:author-device"],
+        "the gradient subcontext records the Resource handler it entered, once"
     );
-    let final_spine = plan
-        .function_helper_full_spine("derivative", 0)
-        .unwrap()
-        .expect("selected helper full spine");
+    let backward = &trace.lowering.gradients[0].backward;
     assert_eq!(
-        final_spine
-            .source
-            .iter()
-            .map(|event| event.id.0)
-            .collect::<Vec<_>>(),
-        [0, 1, 2, 3],
-        "AD splice rebases the distinct full-source namespace once"
-    );
-    assert!(matches!(
-        final_spine.source[0].kind,
-        FullSourceKind::Requirement(ref device) if device == "cpu:author-device"
-    ));
-    assert_eq!(
-        execution
-            .backward
-            .full_spine_for_inspection()
-            .steps
-            .iter()
-            .filter(|step| matches!(step, FullStep::Requirement { .. }))
-            .count(),
-        1
-    );
-    assert_eq!(
-        execution
-            .backward
-            .dag_for_inspection()
+        backward
             .nodes()
             .iter()
-            .filter(|node| matches!(node.op, RiscOp::Dropout { .. }))
+            .filter(|node| matches!(node.op, RiscOp::DrawKey { .. }))
             .count(),
-        2,
-        "backward replay adds a node but no source occurrence"
-    );
-    assert_eq!(
-        trace
-            .applications
-            .first()
-            .expect("actual grad splice")
-            .remap
-            .occurrences
-            .len(),
-        3,
-        "the legacy remap remains random-only"
+        1,
+        "backward replay adds a node but no draw key"
     );
 }
 
@@ -428,6 +323,5 @@ def derivative(x: tensor[3, f32]) -> tensor[3, f32] = grad(loss)(x)
         .unwrap()
         .expect("successful helper trace");
     assert_eq!(trace.lowering.gradients.len(), 1);
-    assert!(trace.executions.is_empty());
-    assert!(trace.normalization.is_none());
+    assert!(trace.requirements.is_empty());
 }

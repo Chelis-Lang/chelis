@@ -233,6 +233,8 @@ fn element_size_bytes(prim: Prim) -> usize {
              should have been rejected upstream"
         ),
         Prim::String => 8,
+        // A random key is one 64-bit word.
+        Prim::Key => 8,
     }
 }
 

@@ -57,7 +57,6 @@ fn with_source_metadata(source: &str) -> (ownership_support::GeneratedProgram, V
     use chelis_compiler_api::emission_observer::SelectedEmission;
     use chelis_compiler_api::schema::{CompileRequest, CompileTarget, SourceKind};
     use chelis_ir::host::ConcreteHostExprKind as E;
-    use chelis_ir::lowering_trace::FullSourceKind as F;
     let mut metadata = serde_json::Map::new();
     let artifact = compile_for_execution_with_observer(CompileRequest {
         source_kind: SourceKind::Surf, source: source.into(), target: CompileTarget::C, entry_name: Some("run".into()),
@@ -70,27 +69,33 @@ fn with_source_metadata(source: &str) -> (ownership_support::GeneratedProgram, V
                 E::TensorCall { helper, .. } => (3, *helper, 0),
                 _ => continue,
             };
+            // A helper's retained events are its draw keys in node order: the
+            // draw index is the occurrence and full-source word, and the
+            // scope is 0 for the inherited stream or `instance + 1`.
             let mut full = Vec::new();
-            if kind == 3 && let Some(execution) = host.function(site.unit_word() - 1).unwrap().tensor_helper(target).unwrap().execution() {
-                let complete = execution.full_source();
-                for source in complete.source {
-                    let legacy = execution.source().iter().find_map(|legacy| {
-                        use chelis_ir::execution_spine::SourceKind as L;
-                        let matches = match (&source.kind, legacy.kind) {
-                            (F::Forward { node: a, draw: b, scope: c }, L::Forward { node, draw, scope }) => *a == node && *b == draw && *c == scope,
-                            (F::Control(a), L::Control(b)) => *a == b,
-                            _ => false,
-                        };
-                        matches.then(|| legacy.id.index().to_string())
-                    });
-                    let mut entry = match source.kind {
-                        F::Forward { draw, scope, .. } => json!(["forward", draw.index().to_string(), scope.index().to_string(), source.id.0.to_string()]),
-                        F::Control(chelis_ir::execution_spine::Control::Enter { scope, .. }) => json!(["fixed_enter", null, scope.index().to_string(), source.id.0.to_string()]),
-                        F::Control(chelis_ir::execution_spine::Control::Leave { scope }) => json!(["fixed_leave", null, scope.index().to_string(), source.id.0.to_string()]),
-                        F::Requirement(device) => json!(["resource", device, null, source.id.0.to_string()]),
+            if kind == 3 {
+                let dag = host
+                    .function(site.unit_word() - 1)
+                    .unwrap()
+                    .tensor_helper(target)
+                    .unwrap()
+                    .dag();
+                let keys = dag.nodes().iter().filter_map(|node| match node.op {
+                    chelis_ir::dag::RiscOp::DrawKey { handler, .. } => Some(handler),
+                    _ => None,
+                });
+                for (draw, handler) in keys.enumerate() {
+                    let scope = match handler {
+                        chelis_ir::dag::RandomHandler::Inherited => 0,
+                        chelis_ir::dag::RandomHandler::Scoped { instance } => instance as usize + 1,
                     };
-                    entry.as_array_mut().unwrap().push(json!(legacy));
-                    full.push(entry);
+                    full.push(json!([
+                        "forward",
+                        draw.to_string(),
+                        scope.to_string(),
+                        draw.to_string(),
+                        draw.to_string()
+                    ]));
                 }
             }
             metadata.insert(site.site_word().to_string(), json!({
@@ -289,38 +294,32 @@ fn retained_full_source_ids_survive_resource_offsets_and_reject_association_muta
     let (c, metadata) = with_source_metadata(&input);
     let observed_entry = selected_observed_entry(&c, "run");
     let rows = source_rows_with_entry(&c, &observed_entry, true);
-    assert_eq!(rows.len(), 22);
-    assert!(metadata.as_object().unwrap().values().any(|site| {
-        site["full"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|event| event[0] == "resource")
-    }));
+    assert_eq!(rows.len(), 18);
     assert!(associations_match(&rows, &metadata));
-    assert_eq!(rows[3].1["full"], tagged(2)); // independently retained Resource, enter, draw
-    assert_eq!(rows[3].1["inherited"], false);
-    assert_eq!(rows[7].1["inherited"], true);
+    // A Resource handler around the helper's draw leaves its draw word alone.
+    assert_eq!(rows[2].1["full"], tagged(0));
+    assert_eq!(rows[2].1["inherited"], false);
+    assert_eq!(rows[5].1["inherited"], true);
     for (label, index, field, replacement) in [
-        ("wrong full source", 3, "full", tagged(0)),
-        ("missing call", 3, "calls", json!([])),
+        ("wrong full source", 2, "full", tagged(1)),
+        ("missing call", 2, "calls", json!([])),
         (
             "wrong host occurrence",
             1,
             "source",
-            rows[6].1["source"].clone(),
+            rows[4].1["source"].clone(),
         ),
         (
             "wrong helper with equal local draw",
-            7,
+            5,
             "source",
-            rows[9].1["source"].clone(),
+            rows[7].1["source"].clone(),
         ),
         (
             "wrong inherited host scope",
-            7,
+            5,
             "host",
-            rows[9].1["host"].clone(),
+            rows[7].1["host"].clone(),
         ),
     ] {
         let mut mutant = rows.clone();
@@ -328,15 +327,15 @@ fn retained_full_source_ids_survive_resource_offsets_and_reject_association_muta
         assert!(!associations_match(&mutant, &metadata), "{label}");
     }
     assert_eq!(rows[0].0["invocation"], tagged(17));
-    assert_eq!(rows[11].0["invocation"], tagged(18));
-    assert_eq!(rows[11].0["sequence"], tagged(0));
+    assert_eq!(rows[9].0["invocation"], tagged(18));
+    assert_eq!(rows[9].0["sequence"], tagged(0));
     for (field, replacement) in [
         ("occurrence", tagged(99)),
         ("draw", Value::Null),
         ("scope", tagged(99)),
     ] {
         let mut mutant = rows.clone();
-        mutant[3].0[field] = replacement;
+        mutant[2].0[field] = replacement;
         assert!(
             !associations_match(&mutant, &metadata),
             "wrong/missing legacy {field}"
@@ -345,7 +344,7 @@ fn retained_full_source_ids_survive_resource_offsets_and_reject_association_muta
 
     // Both following helpers have local occurrence/draw 0. The actual callee
     // must still reject a different helper slot as its source authority.
-    let helper = &rows[7].1["source"];
+    let helper = &rows[5].1["source"];
     let guard = format!(
         "call->source->unit.value == {}ULL && call->source->target.value == {}ULL",
         helper[0].as_str().unwrap(),
@@ -513,8 +512,6 @@ static const char *event_name(__chelis_random_observer_event_kind kind) {
         case __CHELIS_RANDOM_OBSERVER_INVOCATION_INIT: return "invocation_init";
         case __CHELIS_RANDOM_OBSERVER_HOST_INSTALL: return "host_install";
         case __CHELIS_RANDOM_OBSERVER_HOST_RESTORE: return "host_restore";
-        case __CHELIS_RANDOM_OBSERVER_FIXED_ENTER: return "fixed_enter";
-        case __CHELIS_RANDOM_OBSERVER_FIXED_LEAVE: return "fixed_leave";
         case __CHELIS_RANDOM_OBSERVER_FORWARD: return "forward";
         case __CHELIS_RANDOM_OBSERVER_REPLAY: return "replay";
     }
@@ -638,40 +635,20 @@ fn expected_rows(run_symbol: &str) -> Vec<Value> {
             outer_saved.clone(),
         ),
     ];
-    let mut enter = row(
-        2,
-        "fixed_enter",
-        "fixed",
-        state(Some((7, 0))),
-        vec![inactive.clone(), state(Some((42, 0)))],
-    );
-    enter["occurrence"] = tagged(0);
-    enter["scope"] = tagged(1);
-    rows.push(enter);
     let mut forward = row(
-        3,
+        2,
         "forward",
         "fixed",
         state(Some((7, 1))),
-        vec![inactive.clone(), state(Some((42, 0)))],
+        outer_saved.clone(),
     );
-    forward["occurrence"] = tagged(1);
+    forward["occurrence"] = tagged(0);
     forward["draw"] = tagged(0);
     forward["scope"] = tagged(1);
     forward["used"] = json!({"seed": tagged(7), "counter": tagged(0)});
     rows.push(forward);
-    let mut leave = row(
-        4,
-        "fixed_leave",
-        "fixed",
-        state(Some((42, 0))),
-        outer_saved.clone(),
-    );
-    leave["occurrence"] = tagged(2);
-    leave["scope"] = tagged(1);
-    rows.push(leave);
     let mut replay = row(
-        5,
+        3,
         "replay",
         "fixed",
         state(Some((42, 0))),
@@ -682,14 +659,14 @@ fn expected_rows(run_symbol: &str) -> Vec<Value> {
     replay["used"] = json!({"seed": tagged(7), "counter": tagged(0)});
     rows.push(replay);
     rows.push(row(
-        6,
+        4,
         "host_install",
         "unsupported_host",
         state(Some((99, 0))),
         vec![inactive.clone(), state(Some((42, 0)))],
     ));
     let mut nested = row(
-        7,
+        5,
         "forward",
         "fixed",
         state(Some((99, 1))),
@@ -701,14 +678,14 @@ fn expected_rows(run_symbol: &str) -> Vec<Value> {
     nested["used"] = json!({"seed": tagged(99), "counter": tagged(0)});
     rows.push(nested);
     rows.push(row(
-        8,
+        6,
         "host_restore",
         "unsupported_host",
         state(Some((42, 0))),
         outer_saved.clone(),
     ));
     let mut following = row(
-        9,
+        7,
         "forward",
         "fixed",
         state(Some((42, 1))),
@@ -719,13 +696,7 @@ fn expected_rows(run_symbol: &str) -> Vec<Value> {
     following["scope"] = tagged(0);
     following["used"] = json!({"seed": tagged(42), "counter": tagged(0)});
     rows.push(following);
-    rows.push(row(
-        10,
-        "host_restore",
-        "unsupported_host",
-        inactive,
-        vec![],
-    ));
+    rows.push(row(8, "host_restore", "unsupported_host", inactive, vec![]));
     for row in &mut rows {
         if row["state"]["active"] == true {
             let seed = row["state"]["seed"].clone();
@@ -735,11 +706,11 @@ fn expected_rows(run_symbol: &str) -> Vec<Value> {
                 json!({"seed": seed, "counter": counter, "successor": tagged(n.wrapping_add(1))});
         }
     }
-    for row in &mut rows[2..6] {
+    for row in &mut rows[2..4] {
         row["producer"] = json!(format!("{run_symbol}__tensor_0__with_rng"));
     }
-    rows[7]["producer"] = json!(format!("{run_symbol}__tensor_1__with_rng"));
-    rows[9]["producer"] = json!(format!("{run_symbol}__tensor_2__with_rng"));
+    rows[5]["producer"] = json!(format!("{run_symbol}__tensor_1__with_rng"));
+    rows[7]["producer"] = json!(format!("{run_symbol}__tensor_2__with_rng"));
     rows
 }
 
@@ -767,8 +738,6 @@ fn nested_host_and_fixed_frames_record_actual_forward_replay_and_restoration() {
     assert_eq!(
         fixed_producers,
         [
-            format!("{run_symbol}__tensor_0__with_rng"),
-            format!("{run_symbol}__tensor_0__with_rng"),
             format!("{run_symbol}__tensor_0__with_rng"),
             format!("{run_symbol}__tensor_0__with_rng"),
             format!("{run_symbol}__tensor_1__with_rng"),
@@ -831,11 +800,11 @@ int main(void) {{
         .lines()
         .map(|line| serde_json::from_str::<Value>(line).unwrap())
         .collect::<Vec<_>>();
-    assert_eq!(rows.len(), 22);
-    assert!(rows[..11].iter().all(|row| row["invocation"] == tagged(20)));
-    assert!(rows[11..].iter().all(|row| row["invocation"] == tagged(21)));
+    assert_eq!(rows.len(), 18);
+    assert!(rows[..9].iter().all(|row| row["invocation"] == tagged(20)));
+    assert!(rows[9..].iter().all(|row| row["invocation"] == tagged(21)));
     assert_eq!(rows[0]["sequence"], tagged(0));
-    assert_eq!(rows[11]["sequence"], tagged(0));
+    assert_eq!(rows[9]["sequence"], tagged(0));
 }
 
 #[test]
@@ -871,13 +840,13 @@ fn independent_expectation_rejects_missing_saved_preincrement_and_replay_advance
     let c = observed_source();
     let expected = expected_rows(c.symbol("run"));
     let mut missing_saved = expected.clone();
-    missing_saved[3]["saved"].as_array_mut().unwrap().pop();
+    missing_saved[2]["saved"].as_array_mut().unwrap().pop();
     assert_ne!(missing_saved, expected);
     let mut preincrement = expected.clone();
-    preincrement[3]["state"]["counter"] = tagged(0);
+    preincrement[2]["state"]["counter"] = tagged(0);
     assert_ne!(preincrement, expected);
     let mut replay_advance = expected.clone();
-    replay_advance[5]["state"]["counter"] = tagged(1);
+    replay_advance[3]["state"]["counter"] = tagged(1);
     assert_ne!(replay_advance, expected);
 }
 

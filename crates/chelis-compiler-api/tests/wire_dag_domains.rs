@@ -25,67 +25,6 @@ fn float(bits: &str) -> Value {
 }
 
 #[test]
-fn random_parameter_carriers_have_the_inputs_exact_dtype_and_domain() {
-    for seed in [0, u64::MAX] {
-        let value = graph(
-            json!({"kind":"uniform_like","low":float("80000000"),"high":float("3f800000"),"seed":seed}),
-        );
-        let decoded: WireDag = serde_json::from_value(value.clone()).unwrap();
-        assert_eq!(serde_json::to_value(decoded).unwrap(), value);
-    }
-    assert!(admits(&graph(
-        json!({"kind":"dropout","rate":float("00000000"),"seed":0})
-    )));
-    for op in [
-        json!({"kind":"uniform_like","low":{"dtype":"f64","bits":"0000000000000000"},"high":float("3f800000"),"seed":0}),
-        json!({"kind":"uniform_like","low":float("3f800000"),"high":float("00000000"),"seed":0}),
-        json!({"kind":"uniform_like","low":float("ff7fffff"),"high":float("7f7fffff"),"seed":0}),
-        json!({"kind":"uniform_like","low":float("7fc00001"),"high":float("3f800000"),"seed":0}),
-        json!({"kind":"dropout","rate":float("3f800000"),"seed":0}),
-        json!({"kind":"dropout","rate":float("bf000000"),"seed":0}),
-        json!({"kind":"dropout","rate":0.0,"seed":0}),
-        json!({"kind":"dropout","rate":float("00000000")}),
-    ] {
-        assert!(!admits(&graph(op.clone())), "accepted {op}");
-    }
-}
-
-#[test]
-fn every_float_dtype_checks_random_domains_at_its_governing_arithmetic_width() {
-    for (dtype, zero, one, low, high, difference_finite) in [
-        (
-            "f64",
-            "8000000000000000",
-            "3ff0000000000000",
-            "ffefffffffffffff",
-            "7fefffffffffffff",
-            false,
-        ),
-        ("f32", "80000000", "3f800000", "ff7fffff", "7f7fffff", false),
-        ("f16", "8000", "3c00", "fbff", "7bff", true),
-        ("bf16", "8000", "3f80", "ff7f", "7f7f", false),
-    ] {
-        let scalar = |bits| json!({"dtype":dtype,"bits":bits});
-        let mut value = graph(
-            json!({"kind":"uniform_like","low":scalar(zero),"high":scalar(one),"seed":u64::MAX}),
-        );
-        for index in [0, 1] {
-            value["nodes"][index]["output_type"]["precision"] = json!(dtype);
-        }
-        assert!(admits(&value), "rejected {dtype}");
-        value["nodes"][1]["op"]["high"] = scalar(zero);
-        assert!(admits(&value), "rejected equal {dtype} bounds");
-        value["nodes"][1]["op"]["low"] = scalar(low);
-        value["nodes"][1]["op"]["high"] = scalar(high);
-        assert_eq!(
-            admits(&value),
-            difference_finite,
-            "wrong difference width for {dtype}"
-        );
-    }
-}
-
-#[test]
 fn in_memory_reference_and_numeric_mutations_cannot_be_serialized() {
     use chelis_compiler_api::schema::WireRiscOp;
     let mut wire: WireDag =
@@ -98,7 +37,7 @@ fn in_memory_reference_and_numeric_mutations_cannot_be_serialized() {
 }
 
 #[test]
-fn live_lowering_emits_exact_parameter_carriers_and_rejects_bad_domains() {
+fn live_lowering_emits_exact_control_carriers_as_operands() {
     use chelis_compiler_api::schema::{LowerRequest, SourceKind};
     let lower = |body: &str| {
         chelis_compiler_api::compiler::lower(LowerRequest {
@@ -109,25 +48,25 @@ fn live_lowering_emits_exact_parameter_carriers_and_rejects_bad_domains() {
             entry: Some("sample".into()),
         })
     };
+    // Wire v17: the bounds are exact f32 carriers on ordinary constant
+    // operands of the draw, never fields of the random node.
     let lowered = lower("uniform_like(x, 0.1f32, 1.0f32)").unwrap();
     let wire = serde_json::to_value(lowered).unwrap();
-    let op = wire["dag"]["nodes"]
-        .as_array()
-        .unwrap()
+    let nodes = wire["dag"]["nodes"].as_array().unwrap();
+    let uniform = nodes
         .iter()
-        .map(|node| &node["op"])
-        .find(|op| op["kind"] == "uniform_like")
+        .find(|node| node["op"]["kind"] == "uniform_like")
         .unwrap();
-    assert_eq!(op["low"], float("3dcccccd"));
-    assert_eq!(op["high"], float("3f800000"));
-    let error = lower("dropout(x, 1.0f32)").unwrap_err();
-    assert!(
-        error
-            .errors
-            .iter()
-            .any(|diagnostic| diagnostic.message.contains("dropout")),
-        "{error:?}"
-    );
+    assert_eq!(uniform["op"], json!({"kind":"uniform_like"}));
+    let operand = |slot: usize| {
+        let id = usize::try_from(uniform["inputs"][slot].as_u64().unwrap()).unwrap();
+        nodes[id]["op"]["value"].clone()
+    };
+    assert_eq!(operand(1), float("3dcccccd"));
+    assert_eq!(operand(2), float("3f800000"));
+    // [05-OP-37]: a rate outside [0, 1) is refused by the draw at execution,
+    // before it takes an ordinal; lowering carries it as an operand.
+    lower("dropout(x, 1.0f32)").unwrap();
 }
 
 #[test]

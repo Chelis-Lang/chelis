@@ -12,12 +12,8 @@
 //! authority is verified by `capacity_census_wire`; this small tripwire also
 //! rejects reintroducing the retired raw random-parameter fields.
 //!
-//! The remaining native IR list (separate from wire authority):
-//!
-//! * `UniformLike { low, high }` and `Dropout { rate }` - float-only op
-//!   PARAMETERS (RNG bounds and a probability). Their f32-domain values
-//!   are stored as exact f64 images here; no tensor element payload or
-//!   integer capacity crosses these fields.
+//! The native IR list is empty: the random operations' bounds and rate are
+//! operand nodes, not op fields (chelis#2413).
 //!
 //! Prove's own `f64` fields (`ad_rail`/`arb_oracle` box and range
 //! bounds) are real-valued ENVELOPE mathematics, not dtype-carrying
@@ -89,13 +85,7 @@ fn risc_op_has_no_unsealed_numeric_payload_beyond_the_census() {
     let fields = raw_float_payload_fields(block);
     assert_eq!(
         fields,
-        vec![
-            // UniformLike bounds + Dropout rate: exact images of
-            // float-only f32-domain parameters.
-            "high: f64".to_string(),
-            "low: f64".to_string(),
-            "rate: f64".to_string(),
-        ],
+        Vec::<String>::new(),
         "a raw float payload field entered or left `RiscOp` without a \
          census entry. Sealed constants go through the dtype_semantics \
          module (chelis#856); anything else needs a citation HERE and, \
@@ -148,19 +138,20 @@ fn wire_risc_op_mirror_has_no_unsealed_numeric_payload_beyond_the_census() {
 }
 
 #[test]
-fn retired_wire_random_parameters_cannot_regain_raw_float_admission() {
+fn retired_wire_random_parameters_cannot_return_as_fields() {
     let source =
         std::fs::read_to_string(repo_root().join("crates/chelis-compiler-api/src/schema.rs"))
             .expect("schema.rs readable");
     let block = enum_block(&source, "WireRiscOp");
     assert!(raw_float_payload_fields(block).is_empty());
-    for field in ["low", "high", "rate"] {
-        let sealed = format!("{field}: ScalarValue");
-        assert_eq!(block.matches(&sealed).count(), 1, "{sealed}");
-        for raw in ["f32", "f64", "Vec<f32>", "Vec<f64>"] {
-            let unsealed = format!("{field}: {raw}");
-            let mutation = block.replace(&sealed, &unsealed);
-            assert_eq!(raw_float_payload_fields(&mutation), [unsealed]);
-        }
+    // Wire v17 (chelis#2413): random controls and seeds are earlier operand
+    // nodes, so no random operation carries a numeric field at all.
+    for field in ["low:", "high:", "rate:", "seed:"] {
+        assert!(!block.contains(field), "WireRiscOp regained `{field}`");
+    }
+    // A control that returned as a raw field line would still be refused.
+    for raw in ["f32", "f64", "Vec<f32>", "Vec<f64>"] {
+        let mutation = block.replace("    UniformLike {},", &format!("    low: {raw},"));
+        assert_eq!(raw_float_payload_fields(&mutation), [format!("low: {raw}")]);
     }
 }

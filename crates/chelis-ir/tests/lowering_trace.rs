@@ -48,10 +48,7 @@ fn feature_off_lane_defers_to_the_feature_owned_trace_oracle() {}
 
 #[cfg(feature = "lowering-trace")]
 #[test]
-fn execution_trace_captures_the_actual_ad_call_without_replaying_seed_controls() {
-    use chelis_ir::execution_spine::{SourceKind, Step};
-    use chelis_ir::lower::try_lower_program_to_evaluation_library;
-    use chelis_ir::lowering_trace::try_lower_program_to_evaluation_library_with_trace;
+fn trace_captures_the_actual_ad_call_with_its_scoped_draw_key() {
     let program = checked(
         r#"
 def loss(x: tensor[32, f32]) -> f32 = with seed(42i64) {
@@ -61,67 +58,52 @@ def loss(x: tensor[32, f32]) -> f32 = with seed(42i64) {
 def derivative(x: tensor[32, f32]) -> tensor[32, f32] = grad(loss)(x)
 "#,
     );
-    let ordinary = try_lower_program_to_evaluation_library(&program).unwrap();
-    let (observed, trace) = try_lower_program_to_evaluation_library_with_trace(&program).unwrap();
-    assert_eq!(
-        bincode::serialize(ordinary.library_for_inspection()).unwrap(),
-        bincode::serialize(observed.library_for_inspection()).unwrap()
-    );
-    assert_eq!(trace.executions.len(), 1);
-    let execution = &trace.executions[0];
-    let gradient = &trace.lowering.gradients[execution.gradient];
-    same_dag(execution.forward.dag_for_inspection(), &gradient.forward);
-    same_dag(execution.backward.dag_for_inspection(), &gradient.backward);
-    assert_eq!(execution.forward.source_for_inspection().len(), 5);
-    let source_kinds = |plan: &chelis_ir::evaluation::EvaluationPlan| {
-        plan.source_for_inspection()
+    let ordinary = try_lower_program_to_library(&program).unwrap();
+    let (observed, trace) = try_lower_program_to_library_with_trace(&program).unwrap();
+    same_dag(ordinary.dag(), observed.dag());
+    assert_eq!(trace.gradients.len(), 1);
+    let gradient = &trace.gradients[0];
+    let draw_keys = |dag: &Dag| {
+        dag.nodes()
             .iter()
-            .map(|event| match event.kind {
-                SourceKind::Forward { draw, scope, .. } => (0, draw.index(), scope.index()),
-                SourceKind::Control(chelis_ir::execution_spine::Control::Enter {
-                    scope, ..
-                }) => (1, scope.index(), 0),
-                SourceKind::Control(chelis_ir::execution_spine::Control::Leave { scope }) => {
-                    (2, scope.index(), 0)
-                }
+            .filter(|node| {
+                matches!(
+                    node.op,
+                    RiscOp::DrawKey {
+                        handler: chelis_ir::dag::RandomHandler::Scoped { .. },
+                        ..
+                    }
+                )
             })
-            .collect::<Vec<_>>()
+            .count()
     };
+    assert_eq!(draw_keys(&gradient.forward), 1);
     assert_eq!(
-        source_kinds(&execution.forward),
-        source_kinds(&execution.backward)
+        draw_keys(&gradient.backward),
+        1,
+        "the backward graph recomputes the forward key, never a second one"
     );
     assert_eq!(
-        execution
+        gradient
             .backward
-            .steps_for_inspection()
-            .iter()
-            .filter(|step| matches!(step, Step::Control { .. }))
-            .count(),
-        4
-    );
-    assert_eq!(
-        execution
-            .backward
-            .dag_for_inspection()
             .nodes()
             .iter()
-            .filter(|node| matches!(node.op, RiscOp::Dropout { .. }))
+            .filter(|node| matches!(node.op, RiscOp::DropoutReplay))
             .count(),
-        2
+        1
     );
-    // Execute the captured backward graph itself. Replay does not require an
-    // active outer Random effect after its local seed handler has left.
-    let mut context =
-        chelis_ir::evaluation::RandomExecutionContext::new(chelis_ir::host::RandomLoweringState {
-            seed: None,
-            counter: 0,
-        });
-    let values =
-        chelis_ir::eval::eval_tensor_plan_with_strict(&execution.backward, &mut context, |name| {
+    // Execute the captured backward graph itself. Its key belongs to the
+    // local seed handler, so no outer Random frame is needed.
+    let mut frame = chelis_ir::eval::RandomFrame::unhandled();
+    let values = chelis_ir::eval::eval_tensor_roots_with_frame(
+        &gradient.backward,
+        &[gradient.gradients[&gradient.wrt[0]]],
+        &mut frame,
+        |name| {
             (name == "x").then(|| chelis_ir::eval::TensorValue::from_vec(vec![32], vec![1.0; 32]))
-        })
-        .unwrap();
+        },
+    )
+    .unwrap();
     let derivative = &values[&gradient.gradients[&gradient.wrt[0]]];
     let bits = derivative
         .to_f64_lossy_vec()
@@ -135,170 +117,7 @@ def derivative(x: tensor[32, f32]) -> tensor[32, f32] = grad(loss)(x)
         2, 2,
     ];
     assert_eq!(bits, expected.map(|value| (value as f32).to_bits()));
-    assert_eq!(context.state().seed, None);
-    assert_eq!(context.state().counter, 0);
-}
-
-#[cfg(feature = "lowering-trace")]
-#[test]
-fn selected_source_census_keeps_draw_free_dependencies_and_excludes_siblings() {
-    use chelis_ir::execution_spine::{Control, SourceKind};
-    let program = checked(
-        r#"
-x: tensor[32, f32] = x
-empty_scope = with seed(7i64) { x }
-unrelated = with seed(99i64) { x }
-sample = with seed(42i64) { dropout(empty_scope, 0.0f32) }
-"#,
-    );
-    let library = chelis_ir::lower::try_lower_program_to_evaluation_library(&program).unwrap();
-    let selected = library.program().select_roots(&["sample".into()]).unwrap();
-    let seeds = selected
-        .plan()
-        .source_for_inspection()
-        .iter()
-        .filter_map(|event| match event.kind {
-            SourceKind::Control(Control::Enter { seed, .. }) => Some(seed),
-            _ => None,
-        })
-        .collect::<Vec<_>>();
-    assert_eq!(seeds, [7, 42]);
-    assert_eq!(selected.plan().source_for_inspection().len(), 5);
-    let mut context =
-        chelis_ir::evaluation::RandomExecutionContext::new(chelis_ir::host::RandomLoweringState {
-            seed: None,
-            counter: 0,
-        });
-    let values =
-        chelis_ir::eval::eval_tensor_plan_with_strict(selected.plan(), &mut context, |name| {
-            (name == "x").then(|| chelis_ir::eval::TensorValue::from_vec(vec![32], vec![1.0; 32]))
-        })
-        .unwrap();
-    assert_eq!(
-        values[&selected.roots()["sample"]].to_f64_lossy_vec(),
-        vec![1.0; 32]
-    );
-}
-
-#[cfg(feature = "lowering-trace")]
-#[test]
-fn selecting_a_draw_free_region_retains_controls_without_changing_dispatch() {
-    use chelis_ir::evaluation::{EvaluationProfile, LegacyEvaluationReason};
-    use chelis_ir::execution_spine::{Control, SourceKind};
-    let program = checked(
-        r#"
-x: tensor[2, f32] = x
-selected = with seed(7i64) { with seed(7i64) { x } }
-unrelated = with seed(99i64) { x }
-"#,
-    );
-    let library = chelis_ir::lower::try_lower_program_to_evaluation_library(&program).unwrap();
-    let names = ["selected".into()];
-    assert_eq!(
-        library.program().profile_for_roots(&names).unwrap(),
-        EvaluationProfile::Legacy(LegacyEvaluationReason::NoDropout)
-    );
-    let selected = library.program().select_roots(&names).unwrap();
-    let source = selected.plan().source_for_inspection();
-    assert_eq!(source.len(), 4);
-    assert_eq!(
-        source
-            .iter()
-            .filter_map(|event| match event.kind {
-                SourceKind::Control(Control::Enter { seed, .. }) => Some(seed),
-                _ => None,
-            })
-            .collect::<Vec<_>>(),
-        [7, 7]
-    );
-    let mut context =
-        chelis_ir::evaluation::RandomExecutionContext::new(chelis_ir::host::RandomLoweringState {
-            seed: None,
-            counter: 23,
-        });
-    let values =
-        chelis_ir::eval::eval_tensor_plan_with_strict(selected.plan(), &mut context, |name| {
-            (name == "x").then(|| chelis_ir::eval::TensorValue::from_vec(vec![2], vec![3.0, 5.0]))
-        })
-        .unwrap();
-    assert_eq!(
-        values[&selected.roots()["selected"]].to_f64_lossy_vec(),
-        [3.0, 5.0]
-    );
-    assert_eq!((context.state().seed, context.state().counter), (None, 23));
-    assert!(library.program().select_roots(&["missing".into()]).is_err());
-
-    let excluded = checked(
-        "def choose(x: tensor[2, f32], flag: bool) -> tensor[2, f32] = if flag then x else x\n",
-    );
-    let library = chelis_ir::lower::try_lower_program_to_evaluation_library(&excluded).unwrap();
-    assert!(!library.library_for_inspection().lowered_names()["choose"]);
-    assert!(library.program().select_roots(&["choose".into()]).is_err());
-}
-
-#[cfg(feature = "lowering-trace")]
-#[test]
-fn context_composition_retains_declared_controls_without_confusing_local_aliases() {
-    use chelis_ir::execution_spine::{Control, SourceKind};
-    let source = r#"
-x: tensor[32, f32] = x
-empty_scope = with seed(7i64) { x }
-unrelated = with seed(99i64) { x }
-"#;
-    let deep = desugar_program(&parse_str(source).unwrap()).expect("Surf fixture must desugar");
-    let env = chelis_types::build_type_env_from_library(&deep).unwrap();
-    let library =
-        chelis_ir::lower::try_lower_program_to_evaluation_library(&checked(source)).unwrap();
-    let original = bincode::serialize(library.library_for_inspection()).unwrap();
-    for (body, expected) in [
-        (
-            "sample = with seed(42i64) { dropout(empty_scope, 0.0f32) }",
-            vec![7, 42],
-        ),
-        (
-            "sample = {\n empty_scope = x\n with seed(42i64) { dropout(empty_scope, 0.0f32) }\n}",
-            vec![42],
-        ),
-    ] {
-        let deep = desugar_program(&parse_str(body).unwrap()).expect("Surf fixture must desugar");
-        let program = chelis_types::check_ir_with_context(&env, &deep).unwrap();
-        let program = chelis_effects::check_program(&program).unwrap();
-        let program = chelis_types::check_linearity(&program).unwrap();
-        let composed =
-            chelis_ir::lower::try_lower_program_with_evaluation_context(&library, &program)
-                .unwrap();
-        let selected = composed.select_roots(&["sample".into()]).unwrap();
-        let seeds = selected
-            .plan()
-            .source_for_inspection()
-            .iter()
-            .filter_map(|event| match event.kind {
-                SourceKind::Control(Control::Enter { seed, .. }) => Some(seed),
-                _ => None,
-            })
-            .collect::<Vec<_>>();
-        assert_eq!(seeds, expected);
-        let mut context = chelis_ir::evaluation::RandomExecutionContext::new(
-            chelis_ir::host::RandomLoweringState {
-                seed: None,
-                counter: 0,
-            },
-        );
-        let values =
-            chelis_ir::eval::eval_tensor_plan_with_strict(selected.plan(), &mut context, |name| {
-                (name == "x")
-                    .then(|| chelis_ir::eval::TensorValue::from_vec(vec![32], vec![1.0; 32]))
-            })
-            .unwrap();
-        assert_eq!(
-            values[&selected.roots()["sample"]].to_f64_lossy_vec(),
-            vec![1.0; 32]
-        );
-        assert_eq!(
-            bincode::serialize(library.library_for_inspection()).unwrap(),
-            original
-        );
-    }
+    assert_eq!(frame.inherited_counter(), None);
 }
 
 #[cfg(feature = "lowering-trace")]

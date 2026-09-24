@@ -107,7 +107,9 @@ fn prim_census_class(prim: Prim) -> PrimCensusClass {
         // reserved dtype becomes a silent seam on the day it activates.
         Prim::F32 | Prim::F64 | Prim::F16 | Prim::Bf16 | Prim::F8e4m3 => PrimCensusClass::Float,
         Prim::Int8 | Prim::Int16 | Prim::Int32 | Prim::Int64 => PrimCensusClass::Integer,
-        Prim::Bool | Prim::String => PrimCensusClass::NonNumeric,
+        // A random key (chelis#2413) is an opaque word with no arithmetic,
+        // cast, or literal carrier: structurally non-numeric.
+        Prim::Bool | Prim::String | Prim::Key => PrimCensusClass::NonNumeric,
     }
 }
 
@@ -126,6 +128,7 @@ const ALL_PRIMS: &[Prim] = &[
     Prim::Int64,
     Prim::Bool,
     Prim::String,
+    Prim::Key,
 ];
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -2875,8 +2878,16 @@ const SEMANTIC_REGISTRATIONS: &[SemanticRegistration] = &[
         atom: "[05-OP-37]",
     },
     SemanticRegistration {
-        callable: "[compiler-kernel-numeric] chelis_types::dtype_semantics::PreparedDropout::apply(&self, seed: u64, ordinal: u64) -> Result<TensorStorage, NumericKernelError>",
+        callable: "[compiler-kernel-numeric] chelis_types::dtype_semantics::PreparedDropout::apply(&self, key: RandomKey) -> Result<TensorStorage, NumericKernelError>",
         atom: "[05-OP-37]",
+    },
+    SemanticRegistration {
+        callable: "[compiler-kernel-numeric] chelis_types::dtype_semantics::PreparedUniformLike::new(prim: Prim, len: usize, low: ScalarValue, high: ScalarValue) -> Result<PreparedUniformLike, NumericKernelError>",
+        atom: "[05-OP-8]",
+    },
+    SemanticRegistration {
+        callable: "[compiler-kernel-numeric] chelis_types::dtype_semantics::PreparedUniformLike::apply(&self, key: RandomKey) -> Result<TensorStorage, NumericKernelError>",
+        atom: "[05-OP-8]",
     },
     SemanticRegistration {
         callable: "[compiler-builtin-numeric] dropout(input: &tensor[D, p_float], rate: p_float) -> tensor[D, p_float]",
@@ -6607,11 +6618,25 @@ fn fixed_control_dropout_is_registered_against_its_exact_authority_atom() {
 }
 
 #[test]
-fn prepared_dropout_kernel_boundaries_have_exact_semantic_authority() {
+fn prepared_random_kernel_boundaries_have_exact_semantic_authority() {
     let spec = fs::read_to_string(repo_root().join(CONTROLLING_SPEC_REL)).unwrap();
-    for callable in [
-        "[compiler-kernel-numeric] chelis_types::dtype_semantics::PreparedDropout::new(input: &TensorStorage, rate: ScalarValue) -> Result<PreparedDropout, NumericKernelError>",
-        "[compiler-kernel-numeric] chelis_types::dtype_semantics::PreparedDropout::apply(&self, seed: u64, ordinal: u64) -> Result<TensorStorage, NumericKernelError>",
+    for (callable, atom) in [
+        (
+            "[compiler-kernel-numeric] chelis_types::dtype_semantics::PreparedDropout::new(input: &TensorStorage, rate: ScalarValue) -> Result<PreparedDropout, NumericKernelError>",
+            "[05-OP-37]",
+        ),
+        (
+            "[compiler-kernel-numeric] chelis_types::dtype_semantics::PreparedDropout::apply(&self, key: RandomKey) -> Result<TensorStorage, NumericKernelError>",
+            "[05-OP-37]",
+        ),
+        (
+            "[compiler-kernel-numeric] chelis_types::dtype_semantics::PreparedUniformLike::new(prim: Prim, len: usize, low: ScalarValue, high: ScalarValue) -> Result<PreparedUniformLike, NumericKernelError>",
+            "[05-OP-8]",
+        ),
+        (
+            "[compiler-kernel-numeric] chelis_types::dtype_semantics::PreparedUniformLike::apply(&self, key: RandomKey) -> Result<TensorStorage, NumericKernelError>",
+            "[05-OP-8]",
+        ),
     ] {
         let rows = SEMANTIC_REGISTRATIONS
             .iter()
@@ -6622,10 +6647,7 @@ fn prepared_dropout_kernel_boundaries_have_exact_semantic_authority() {
             1,
             "missing or duplicate kernel boundary: {callable}"
         );
-        assert_eq!(
-            rows[0].atom, "[05-OP-37]",
-            "wrong kernel authority: {callable}"
-        );
+        assert_eq!(rows[0].atom, atom, "wrong kernel authority: {callable}");
         assert!(registration_problem(*rows[0], &spec).is_none());
     }
 }

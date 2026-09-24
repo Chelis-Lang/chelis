@@ -172,6 +172,15 @@ impl HostAbiType {
                     ),
                 ));
             }
+            ConcreteHostType::Scalar(Prim::Key) => {
+                return Err(rejected_dtype(
+                    Prim::Key,
+                    chelis_types::deliberate_rejection!(
+                        "[05-RNG-1]",
+                        "a random key has no host ABI carrier; it exists only inside a graph"
+                    ),
+                ));
+            }
             ConcreteHostType::Function(_, _) => {
                 return Err(unsupported_function_value(ty, "C host ABI value selection"));
             }

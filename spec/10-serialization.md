@@ -23,9 +23,9 @@ before consuming any package or symbol metadata.
 
 ## 3. Compiler API Wire Contract
 
-WireDag JSON is an exact-version contract. Schema version 16 is explicitly
+WireDag JSON is an exact-version contract. Schema version 17 is explicitly
 present in every payload and is the only accepted version. A missing version,
-versions 1 through 15, and every future version are decode errors before any IR
+versions 1 through 16, and every future version are decode errors before any IR
 node is consumed. There is no versionless default, legacy migration, additive-
 variant tolerance, or best-effort compatibility path.
 
@@ -163,7 +163,7 @@ int64 node. The decoder enforces the owner matrix from
 `spec/05-risc-primitives.md` §2.4.1, the source rank and dtype, the normalized
 axis range, and the exact input cardinality before IR construction.
 
-Every tagged variant must be known to the version 16 decoder. `OneHot` remains only a transient
+Every tagged variant must be known to the version 17 decoder. `OneHot` remains only a transient
 IR/specialization marker and backends must not receive it after specialization.
 
 Execution-value envelopes carry the independently required exact
@@ -256,17 +256,34 @@ empty tensors. Checked count and target-capacity admission precedes allocation
 or access under [04-NUM-11].
 
 `Const.value`, `Pad.fill`, and `ConstTensor.data` use the same scalar/storage
-grammar, not private alternate encodings. `UniformLike.low`, `UniformLike.high`,
-and `Dropout.rate` use scalar carriers of the exact active float dtype of the
-template/input. Their value-domain checks remain [05-OP-8/37], before Random
-consumption; the codec neither inserts casts nor implements an adjoint.
-`UniformLike.inputs` contains its template followed by at most one rank-zero
-Bool path activation; `Dropout.inputs` contains exactly its data input.
-Both operations preserve the first input's exact shape and dtype. The optional
-activation is an earlier-node reference under §3.4, not another template.
-Their `seed` fields are exact uint64 JSON integers holding [05-RNG-1]'s
-two's-complement image of a signed int64 seed. Every seed bit is significant;
-zero is a seed, not absence, and there is no default seed.
+grammar, not private alternate encodings. The random operations carry no
+numeric fields: their controls and their key are operand nodes.
+`UniformLike.inputs` is its template, its `low` and `high` bounds, its key,
+and at most one rank-zero Bool path activation. `Dropout.inputs` is its data
+input, its rate, its key, and at most one activation. The bounds and the rate
+are rank-zero operands of the template's or input's exact active float dtype.
+(Not fully implemented; chelis#1295.)
+Both operations preserve the first input's exact shape and dtype. Their
+value-domain checks remain [05-OP-8/37], before Random consumption; the codec
+neither inserts casts nor implements an adjoint. `DropoutReplay.inputs` is
+its cotangent, its rate, its forward draw's key and that draw's activation
+when it has one. `UniformBoundAdjoint.inputs` is its template, its
+cotangent, its forward draw's key and that draw's activation when it has one.
+Each reads the key without consuming it. An activation is an earlier-node
+reference under §3.4, not another template.
+
+`key` is a structural precision with no literal carrier: every key is the
+rank-zero output of a `DrawKey` node, consumed by at most one `UniformLike` or
+`Dropout` and otherwise read only by that draw's replays. `DrawKey` carries
+its `handler`, its `draw` (`uniform_like` or `dropout`) and the draw's
+template or input `dtype`. An `inherited` handler takes the next ordinal of
+the stream the graph's caller holds. A `scoped` handler is a `with seed`
+region lowered inside the graph: its `instance` is an exact u32 region
+identity, not a count or a numeric value, and its first input is a rank-zero
+`int64` constant holding the region's signed seed, whose two's-complement
+image is [05-RNG-1]'s stream seed. Every seed bit is significant; zero is a
+seed, not absence, and there is no default seed. The remaining inputs are the
+draw's controls, in the draw's own order, and at most one activation.
 
 ### 3.3 Source Syntax And Locations
 

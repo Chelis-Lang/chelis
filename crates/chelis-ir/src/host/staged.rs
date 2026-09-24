@@ -32,8 +32,6 @@ pub(crate) enum StageValue {
 #[derive(Debug, Clone)]
 pub(crate) struct HostSource {
     pub before: usize,
-    /// Independently recorded source occurrence cut, before this host action.
-    pub occurrences_before: Option<usize>,
     pub value: StageValue,
     pub ty: HostTypeTerm,
     pub expression: Expr,
@@ -82,7 +80,6 @@ pub(crate) fn partition(
     params: &[HostParam],
     external_inputs: &BTreeMap<NodeId, String>,
     host_parameters: &BTreeMap<HostValueId, (String, HostTypeTerm)>,
-    evaluation: Option<&mut crate::evaluation::StagedEvaluationPlan>,
 ) -> Result<HostStagedPlan, String> {
     let [root] = logical.roots() else {
         return Err("a staged tensor region must have exactly one tensor result".into());
@@ -170,14 +167,13 @@ pub(crate) fn partition(
             .map(|id| StageValue::Host(*id))
             .collect(),
         stages: Vec::new(),
-        evaluation,
     };
     let mut start = 0;
     for source in sources {
         if source.before < start || source.before > logical.nodes().len() {
             return Err("a staged source requires one ordered producer".into());
         }
-        partition.append_kernel(start, source.before, source.occurrences_before)?;
+        partition.append_kernel(start, source.before)?;
         let captures = source
             .captures
             .iter()
@@ -220,8 +216,7 @@ pub(crate) fn partition(
         partition.available.insert(source.value);
         start = source.before + usize::from(matches!(source.value, StageValue::Tensor(_)));
     }
-    let final_occurrence = partition.evaluation.as_ref().map(|plan| plan.source_len());
-    partition.append_kernel(start, logical.nodes().len(), final_occurrence)?;
+    partition.append_kernel(start, logical.nodes().len())?;
     if !partition.available.contains(&StageValue::Tensor(*root)) {
         return Err("a staged tensor result has no executed producer".into());
     }
@@ -238,26 +233,11 @@ struct Partition<'a> {
     reserved: BTreeSet<String>,
     available: BTreeSet<StageValue>,
     stages: Vec<HostStage>,
-    evaluation: Option<&'a mut crate::evaluation::StagedEvaluationPlan>,
 }
 
 impl Partition<'_> {
-    fn append_kernel(
-        &mut self,
-        start: usize,
-        end: usize,
-        source_end: Option<usize>,
-    ) -> Result<(), String> {
-        let source_end = match (&self.evaluation, source_end) {
-            (Some(_), Some(end)) => Some(end),
-            (Some(_), None) => return Err("staged source lost its execution occurrence cut".into()),
-            (None, _) => None,
-        };
-        let has_controls = self
-            .evaluation
-            .as_ref()
-            .is_some_and(|plan| source_end != Some(plan.source_position()));
-        if start == end && !has_controls {
+    fn append_kernel(&mut self, start: usize, end: usize) -> Result<(), String> {
+        if start == end {
             return Ok(());
         }
         fn add_value_export(logical: &Dag, dependency: NodeId, exports: &mut BTreeSet<NodeId>) {
@@ -438,6 +418,9 @@ impl Partition<'_> {
                         site: crate::dag::ExtentWitnessSite::LocalAscriptionClaim { .. },
                         ..
                     }
+                    // A key is never a dependency: its consumer, retained
+                    // here, reads it, and the draw executes with its segment.
+                    | RiscOp::DrawKey { .. }
                 )
             })
             .map(|node| node.id)
@@ -459,19 +442,6 @@ impl Partition<'_> {
         }
         self.reserved.insert(completion_name.clone());
         outputs.push(completion_name);
-        if let Some(evaluation) = &mut self.evaluation {
-            // Imported values become Loads, not second executions of their
-            // producers. Only this segment's own nodes transport Random sites.
-            let local = remap
-                .into_iter()
-                .filter(|(node, _)| (start..end).contains(&node.0))
-                .collect();
-            evaluation.append_segment(
-                dag.clone(),
-                &local,
-                source_end.expect("checked source cut"),
-            )?;
-        }
         self.stages.push(HostStage::Kernel { dag, outputs });
         Ok(())
     }
@@ -714,7 +684,6 @@ mod tests {
         dag.add_root(result);
         let sources = vec![HostSource {
             before: actual.0,
-            occurrences_before: None,
             value: StageValue::Tensor(actual),
             ty: HostTypeTerm::Scalar(HostPrecisionTerm::Concrete(Prim::Int64)),
             expression: chelis_deep::parser::parse_str("(lit {type: (t-prim {} i64)} 2)")
@@ -740,7 +709,7 @@ mod tests {
     #[test]
     fn staged_plan_has_one_source_and_no_unresolved_helper_inputs() {
         let (dag, sources, params, inputs) = fixture(false);
-        let plan = partition(&dag, &sources, &params, &inputs, &BTreeMap::new(), None).unwrap();
+        let plan = partition(&dag, &sources, &params, &inputs, &BTreeMap::new()).unwrap();
         assert_eq!(plan.stages().len(), 3);
         let mut available = BTreeSet::from(["x".to_owned()]);
         for stage in plan.stages() {
@@ -777,13 +746,13 @@ mod tests {
             dims: vec![DimInfo::Named("other".into(), Some(2))],
             precision: Prim::F32,
         });
-        partition(&dag, &refined, &params, &inputs, &BTreeMap::new(), None).unwrap();
+        partition(&dag, &refined, &params, &inputs, &BTreeMap::new()).unwrap();
     }
 
     #[test]
     fn completion_roots_do_not_take_ownership_of_literal_result_claims() {
         let (dag, sources, params, inputs) = fixture(true);
-        let plan = partition(&dag, &sources, &params, &inputs, &BTreeMap::new(), None).unwrap();
+        let plan = partition(&dag, &sources, &params, &inputs, &BTreeMap::new()).unwrap();
         for stage in plan.stages() {
             if let HostStage::Kernel { dag, .. } = stage {
                 assert_eq!(crate::verify::verify(dag), Vec::<String>::new(), "{dag:?}");
@@ -845,7 +814,6 @@ mod tests {
         dag.add_root(result);
         let sources = vec![HostSource {
             before: actual.0,
-            occurrences_before: None,
             value: StageValue::Tensor(actual),
             ty: HostTypeTerm::Scalar(HostPrecisionTerm::Concrete(Prim::Int64)),
             expression: chelis_deep::parser::parse_str("(lit {type: (t-prim {} i64)} 2)")
@@ -866,7 +834,6 @@ mod tests {
             }],
             &BTreeMap::from([(x, "x".into())]),
             &BTreeMap::new(),
-            None,
         )
         .unwrap();
         let mut retained_owner = false;
@@ -981,7 +948,6 @@ mod tests {
 
         let sources = vec![HostSource {
             before: actual.0,
-            occurrences_before: None,
             value: StageValue::Tensor(actual),
             ty: HostTypeTerm::Scalar(HostPrecisionTerm::Concrete(Prim::Int64)),
             expression: chelis_deep::parser::parse_str("(lit {type: (t-prim {} i64)} 2)")
@@ -1003,7 +969,6 @@ mod tests {
             &params,
             &BTreeMap::from([(input, "x".into())]),
             &BTreeMap::new(),
-            None,
         )
         .unwrap();
 
@@ -1108,7 +1073,6 @@ mod tests {
 
         let sources = vec![HostSource {
             before: actual.0,
-            occurrences_before: None,
             value: StageValue::Tensor(actual),
             ty: HostTypeTerm::Scalar(HostPrecisionTerm::Concrete(Prim::Int64)),
             expression: chelis_deep::parser::parse_str("(lit {type: (t-prim {} int64)} 2)")
@@ -1130,7 +1094,6 @@ mod tests {
             &params,
             &BTreeMap::from([(input, "x".into())]),
             &BTreeMap::new(),
-            None,
         )
         .unwrap();
 
@@ -1224,7 +1187,7 @@ mod tests {
                 _ => unreachable!(),
             }
             assert!(
-                partition(&dag, &sources, &params, &inputs, &host_parameters, None).is_err(),
+                partition(&dag, &sources, &params, &inputs, &host_parameters).is_err(),
                 "{mutation}"
             );
         }

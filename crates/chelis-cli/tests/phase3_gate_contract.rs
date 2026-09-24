@@ -305,21 +305,16 @@ fn compiled_dropout_gate_follows_the_emitted_entry_scope() {
     })
     .expect("selecting the source-fixed C dropout entry must retain its sealed plan");
 
+    // [05-OP-37]: a runtime rate is an operand the C draw validates at
+    // execution, so the selected entry compiles (chelis#2411).
     let runtime = source.replace("dropout(x, 0.5)", "dropout(x, tensor_to_scalar(sum(x, 0)))");
-    let error = compile_for_execution(CompileRequest {
+    compile_for_execution(CompileRequest {
         source_kind: SourceKind::Surf,
         source: runtime,
         target: CompileTarget::C,
         entry_name: Some("noisy".to_string()),
     })
-    .expect_err("selected runtime-rate dropout must remain unsupported");
-    assert!(
-        error.errors[0].message.contains("RuntimeRate")
-            || error.errors[0]
-                .message
-                .contains("statically-resolvable rate"),
-        "{error:?}"
-    );
+    .expect("selected runtime-rate dropout compiles");
 }
 
 /// A scalar activation uses the host-expression lane, but callable

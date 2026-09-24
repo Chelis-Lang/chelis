@@ -2,13 +2,15 @@
 
 Tracker: chelis#2413. Evidence: `docs/investigations/randomness_assessment_2026_09_22.md`.
 
+Status: phases 1, 2, 3 and 5 are implemented; phase 3 carries the key-operand IR with the `DrawKey` bridge and wire schema 17. Phases 4 and 6 are open.
+
 This document plans how the implementation reaches the randomness semantics the numbered spec already decides:
 - `spec/04-type-system.md` §7.1 (the `Random` effect and `with seed`);
 - `spec/05-risc-primitives.md` [05-RNG-1], [05-OP-8] and [05-OP-37];
 - spec/06 §2.11 and §3.2;
 - spec/07 §2.
 
-It decides no language semantics. Where it restates a rule, the numbered spec wins. The one normative change it needs, to spec/10 §3.2's wire layout, lands with phase 3.
+It decides no language semantics. Where it restates a rule, the numbered spec wins. The one normative change it needs, to spec/10 §3.2's wire layout, landed with phase 3.
 
 On 2026-09-23 Chelis decided to move to explicit single-use keys (`randomness_explicit_keys.md`). Phases 1 to 3, 5 and 6 below are shared by both designs. Phase 3's key-operand IR is the explicit-key IR, with a bridge that computes today's counter keys until the switch. No new counter-only ordinal machinery is built (new activation counting, `vmap` and `par` bases), because keys remove ordinals.
 
@@ -17,7 +19,7 @@ On 2026-09-23 Chelis decided to move to explicit single-use keys (`randomness_ex
 The assessment found that only `dropout` follows [05-RNG-1], and only inside fixed-control execution plans:
 - `uniform_like` uses an older mixing whose draws mirror each other in every lane (#2408);
 - `vmap` over a random function violates the sequential reading in both lanes: eval draws at seed 0, and C draws the whole batch at one ordinal (#2409);
-- compiled C consumes an ordinal for an unselected arm (#2410).
+- compiled C consumes an ordinal for an unselected arm (#2410; phase 3 closes it).
 
 These spec-legal programs are rejected:
 - runtime rates and bounds, in every lane (#2411);
@@ -65,7 +67,7 @@ This is the explicit-key IR. Only the key source changes at the switch.
 - in the DAG evaluator, a `RandomFrame` argument;
 - in generated C, today's `chelis_rng_state`.
 
-`DrawKey` is effectful: a DCE root, never merged, never folded or recomputed, and ordered as today. It advances the frame exactly when today's lowering consumes an ordinal. Where lowering attaches today's `random_path_condition` (`lower.rs`, the AD transform subcontexts), `DrawKey` carries it as an activation and advances only when it is true; nowhere else is an activation added. It takes its kernel's controls as ordering inputs and, when active, advances the frame only after they validate, preserving [05-OP-37]'s "validation consumes no ordinal". When inactive, it neither validates nor advances. A scoped `with seed` inside a kernel carries its literal seed.
+`DrawKey` is effectful: a DCE root, never merged, never folded or recomputed, and ordered as today. Every draw lowered under a runtime branch carries its path condition as its activation, on its `DrawKey` and on its primitive: the conjunction of the enclosing `if` arm predicates, which inside a `grad` body starts from the activation of the position the body is spliced into. A draw that no runtime branch encloses has no activation, except in a `grad` body or a staged host segment, where it carries a constant-true activation. `DrawKey` advances the frame only when its activation is true, so a draw in an unselected arm takes no ordinal, as [05-RNG-1] requires (#2410). A lane that cannot evaluate an activation refuses the draw. It takes its kernel's controls as ordering inputs and, when active, advances the frame only after they validate, preserving [05-OP-37]'s "validation consumes no ordinal". When inactive, it neither validates nor advances. A scoped `with seed` inside a kernel carries its literal seed.
 
 `vmap` over a function that draws is refused with a typed #2409 rejection in both lanes until the switch defines it. Today eval draws at seed 0, and C draws one batched ordinal. Both are silently non-conforming, so they become loud.
 
@@ -108,8 +110,8 @@ Each phase is one pull request with its own red-team rounds. The oracle for ever
    6. spec/10 §3.2 and the changelog.
 
    Oracles:
-   - every program that ran at the base produces identical bits, except programs that `vmap` a random function, which are now refused (#2409);
-   - the reference-match oracle excludes C programs that draw in an unselected arm, which stay shifted by one ordinal until the switch (#2410);
+   - every program that ran at the base produces identical bits, except programs that `vmap` a random function, which are now refused (#2409), and compiled C programs that draw in an unselected arm, which now take the reference's ordinals;
+   - a draw in an unselected arm takes no ordinal and validates nothing in any lane, and the reference-match oracle covers it (#2410 closes in phase 3);
    - runtime rates and bounds, and dropout under runtime `if`/`match`/recursion, run in eval and C and match the reference;
    - a rate reached through adjoint-contract slots rejects with `RandomSelectionParameter`, with the rejection registry regenerated, while `stop_gradient(rate)` and a rate independent of the parameters both differentiate;
    - no `EvaluationProfile` remains.
