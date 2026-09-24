@@ -603,8 +603,8 @@ For every dtype and every storable value:
 3. The probe corpus (`docs/investigations/probes/`) holds the byte-decode
    evidence for [#716]/[#723] if you need to re-derive what "faithful" must
    produce for those cells.
-4. Gate with `scripts/gate.py --local`; macOS Smoke is the workspace
-   oracle.
+4. Gate with `scripts/gate.py --fast` before every push; macOS Smoke is the
+   workspace oracle.
 
 ---
 

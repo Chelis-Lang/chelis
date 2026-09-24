@@ -126,7 +126,7 @@ charset checker was added: that would be a second source of truth for
   rather than doubling a workspace shard. The stable `Workspace Tests
   (Linux)` context aggregates the shards, and `Integration Tests (Linux)`
   aggregates it with the parallel phase oracles. A stage name runs one
-  subset; `--list` prints the canonical full list and `--local` derives
+  subset; `--list` prints the canonical full list and `--validation` derives
   per-crate tests from the diff against `origin/main`.
 - `python3 scripts/gate.py ...` is a bootstrap command, not permission to use
   the system interpreter for gate logic. Unless it is already running in

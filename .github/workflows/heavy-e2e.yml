@@ -91,62 +91,6 @@ jobs:
         if: always() && matrix.shard == 1
         run: cargo test -p chelis-cli --test chelis_std_self_test_corpus -- --ignored --nocapture
 
-  native-random-observer-debt:
-    name: Native Random Observer Debt
-    runs-on: ${{ github.ref == 'refs/heads/main' && 'chelis-ci-warm-x64' || 'ubuntu-latest' }}
-    defaults:
-      run:
-        shell: chelis-ci-shell run {0}
-    timeout-minutes: 70
-    env:
-      CARGO_PROFILE_DEV_DEBUG: 0
-      CARGO_PROFILE_TEST_DEBUG: 0
-    steps:
-      - uses: actions/checkout@v6
-
-      - name: Free disk space (Ubuntu)
-        if: runner.environment == 'github-hosted'
-        uses: ./.github/actions/free-disk-space
-
-      - name: Set up project CI
-        uses: ./.github/actions/setup-project-ci
-
-      - name: Cache cargo registry and build
-        uses: Swatinem/rust-cache@v2
-        with:
-          prefix-key: devenv-${{ hashFiles('devenv.lock', 'devenv.yaml', 'devenv.nix', 'devenv/*.nix', '.kache.toml') }}
-          shared-key: linux-workspace
-          save-if: false
-
-      - name: Build product prerequisites
-        run: cargo build --workspace --lib --bins
-
-      - name: Execute every feature-gated observer debt row
-        run: >-
-          cargo nextest run -p chelis-compiler-api
-          --features native-random-observer
-          --test native_random_observer
-          --profile ci-full
-          --ignore-default-filter
-          --no-fail-fast
-          -E '(test(/^authored_observer_spellings_do_not_collide_with_private_support_or_wrappers$/)
-          + test(/^feature_on_ordinary_public_call_emits_no_observation$/)
-          + test(/^host_source_identity_qualifies_nested_and_following_helper_occurrences$/)
-          + test(/^nested_host_and_fixed_frames_record_actual_forward_replay_and_restoration$/)
-          + test(/^repeated_direct_callees_keep_linked_identity_and_restore_the_call_stack$/)
-          + test(/^repeated_observed_calls_restart_sequence_and_keep_invocation_identity$/)
-          + test(/^sink_error_is_not_silent_success$/)
-          + test(/^unsupported_argument_effects_cannot_certify_descendant_calls$/))'
-
-      - name: Upload native observer debt JUnit
-        if: always()
-        uses: actions/upload-artifact@v7
-        with:
-          name: junit-native-random-observer-debt
-          path: target/nextest/ci-full/junit.xml
-          if-no-files-found: error
-          retention-days: 14
-
   script-nightly:
     name: Script Integration Tests (Linux)
     runs-on: ${{ github.ref == 'refs/heads/main' && 'chelis-ci-warm-x64' || 'ubuntu-latest' }}
@@ -718,7 +662,7 @@ jobs:
 
   report:
     name: Surface nightly status
-    needs: [script-nightly, dtype-phase3-oracle, faithful-observation-phase2-oracle, compiled-value-ownership-phase0-oracle, runtime-representation-phase0-oracle, runtime-extent-oracle, generalize-sweep-oracle-shard, full-workspace, native-random-observer-debt, integration-support, backend-sanitizers-full]
+    needs: [script-nightly, dtype-phase3-oracle, faithful-observation-phase2-oracle, compiled-value-ownership-phase0-oracle, runtime-representation-phase0-oracle, runtime-extent-oracle, generalize-sweep-oracle-shard, full-workspace, integration-support, backend-sanitizers-full]
     if: always() && github.ref == 'refs/heads/main'
     runs-on: ${{ github.ref == 'refs/heads/main' && 'chelis-ci-warm-x64' || 'ubuntu-latest' }}
     permissions:

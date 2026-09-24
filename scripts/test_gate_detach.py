@@ -98,10 +98,10 @@ class _PopenStub:
         return self.calls[-1][0]
 
 
-def _spawn(environ, tmp, *, argv=None, popen=None, mode="local", pid=41277):
+def _spawn(environ, tmp, *, argv=None, popen=None, mode="validation", pid=41277):
     stub = _PopenStub(pid) if popen is None else popen
     payload = gate.spawn_detached(
-        argv if argv is not None else ["--local"],
+        argv if argv is not None else ["--validation"],
         environ=environ,
         executable=Path("/managed/python"),
         directory=gate.detach_directory(environ, Path(tmp)),
@@ -116,13 +116,13 @@ def _spawn(environ, tmp, *, argv=None, popen=None, mode="local", pid=41277):
 
 class ArgumentShapeTests(unittest.TestCase):
     def test_detach_parses_with_local_and_alone(self):
-        self.assertTrue(_parse_quietly(["--detach", "--local"]).detach)
+        self.assertTrue(_parse_quietly(["--detach", "--validation"]).detach)
         self.assertTrue(_parse_quietly(["--detach"]).detach)
 
     def test_detach_forwards_every_lease_flag(self):
         for flag in (["--no-wait"], ["--no-lease"], ["--lease-timeout", "30"]):
             with self.subTest(flag=flag):
-                args = _parse_quietly(["--detach", "--local", *flag])
+                args = _parse_quietly(["--detach", "--validation", *flag])
                 self.assertTrue(args.detach)
 
     def test_status_defaults_to_latest_and_accepts_a_path(self):
@@ -146,7 +146,7 @@ class ArgumentShapeTests(unittest.TestCase):
             ["--detach", "lint-and-unit"],
             ["--detach", "--status"],
             ["--status", "--fast"],
-            ["--status", "--local"],
+            ["--status", "--validation"],
             ["--status", "--list"],
             ["integration", "--status"],
             ["--status", "--no-wait"],
@@ -166,11 +166,11 @@ class SpawnTests(unittest.TestCase):
     def test_exactly_one_spawn_with_the_expected_argv_and_kwargs(self):
         with tempfile.TemporaryDirectory() as tmp:
             environ = _isolated_environ(tmp)
-            payload, stub = _spawn(environ, tmp, argv=["--local"])
+            payload, stub = _spawn(environ, tmp, argv=["--validation"])
         self.assertEqual(len(stub.calls), 1)
         self.assertEqual(stub.last_argv[0], "/managed/python")
         self.assertEqual(stub.last_argv[1], str(Path(gate.__file__).resolve()))
-        self.assertEqual(stub.last_argv[2:], ["--local"])
+        self.assertEqual(stub.last_argv[2:], ["--validation"])
         kwargs = stub.last_kwargs
         self.assertTrue(kwargs["start_new_session"])
         self.assertEqual(kwargs["stdin"], subprocess.DEVNULL)
@@ -182,9 +182,9 @@ class SpawnTests(unittest.TestCase):
     def test_detach_is_stripped_and_everything_else_passes_through(self):
         self.assertEqual(
             gate.detach_child_argv(
-                ["--detach", "--local", "--lease-timeout", "30", "--no-wait"]
+                ["--detach", "--validation", "--lease-timeout", "30", "--no-wait"]
             ),
-            ["--local", "--lease-timeout", "30", "--no-wait"],
+            ["--validation", "--lease-timeout", "30", "--no-wait"],
         )
 
     def test_the_log_is_created_and_the_handle_names_it(self):
@@ -211,7 +211,7 @@ class SpawnTests(unittest.TestCase):
 
 
 class LauncherTests(unittest.TestCase):
-    def _run(self, tmp, argv=("--detach", "--local"), popen=None):
+    def _run(self, tmp, argv=("--detach", "--validation"), popen=None):
         environ = _isolated_environ(tmp)
         out, err = io.StringIO(), io.StringIO()
         stub = _PopenStub() if popen is None else popen
@@ -231,7 +231,7 @@ class LauncherTests(unittest.TestCase):
             argv=list(argv),
             environ=environ,
             executable=Path("/managed/python"),
-            mode="local",
+            mode="validation",
             repo_root=Path(tmp),
             output_stream=out,
             error_stream=err,
@@ -281,11 +281,11 @@ class LauncherTests(unittest.TestCase):
                 return payload
 
             code = gate.run_detach(
-                _parse_quietly(["--detach", "--local"]),
-                argv=["--detach", "--local"],
+                _parse_quietly(["--detach", "--validation"]),
+                argv=["--detach", "--validation"],
                 environ=environ,
                 executable=Path("/managed/python"),
-                mode="local",
+                mode="validation",
                 repo_root=Path(tmp),
                 output_stream=out,
                 error_stream=err,
@@ -321,13 +321,13 @@ class StatusTests(unittest.TestCase):
 
     def _summary(self, **fields):
         body = {
-            "mode": "local",
+            "mode": "validation",
             "termination": "pass",
             "exit_code": 0,
             "seconds": 471.2,
         }
         body.update(fields)
-        path = Path(self.tmp) / f"20260905T032000.0Z-{self.payload['pid']}-local.json"
+        path = Path(self.tmp) / f"20260905T032000.0Z-{self.payload['pid']}-validation.json"
         path.write_text(json.dumps(body), encoding="utf-8")
         return path
 
@@ -449,10 +449,10 @@ class StatusTests(unittest.TestCase):
         only match for the whole window before this run finishes, so polling
         would return ITS verdict: a false PASS on the once-per-pull-request
         gate while the real run is still going."""
-        stale = Path(self.tmp) / f"20260101T120000.0Z-{self.payload['pid']}-local.json"
+        stale = Path(self.tmp) / f"20260101T120000.0Z-{self.payload['pid']}-validation.json"
         stale.write_text(
             json.dumps(
-                {"mode": "local", "termination": "pass", "exit_code": 0,
+                {"mode": "validation", "termination": "pass", "exit_code": 0,
                  "seconds": 471.2}
             ),
             encoding="utf-8",
@@ -477,15 +477,15 @@ class StatusTests(unittest.TestCase):
         summary must end later. That closes both directions at once."""
         report = Path(self.tmp)
         pid = self.payload["pid"]
-        stale = report / f"20260101T120000.0Z-{pid}-local.json"
-        ours = report / f"20260905T032000.0Z-{pid}-local.json"
-        later = report / f"20990101T120000.0Z-{pid}-local.json"
+        stale = report / f"20260101T120000.0Z-{pid}-validation.json"
+        ours = report / f"20260905T032000.0Z-{pid}-validation.json"
+        later = report / f"20990101T120000.0Z-{pid}-validation.json"
         stale.write_text(json.dumps({"exit_code": 0, "termination": "pass"}), encoding="utf-8")
         ours.write_text(json.dumps({"exit_code": 1, "termination": "stage-failure"}), encoding="utf-8")
         later.write_text(json.dumps({"exit_code": 0, "termination": "pass"}), encoding="utf-8")
         self.assertEqual(
             gate.find_summary(
-                report, pid, "local", not_before=self.payload["started_at"]
+                report, pid, "validation", not_before=self.payload["started_at"]
             ),
             ours,
         )
@@ -498,13 +498,13 @@ class StatusTests(unittest.TestCase):
         false PASS it exists to prevent, while still looking like a guard."""
         report = Path(self.tmp)
         pid = self.payload["pid"]
-        (report / f"20260101T120000.0Z-{pid}-local.json").write_text(
+        (report / f"20260101T120000.0Z-{pid}-validation.json").write_text(
             "{}", encoding="utf-8"
         )
         for floor in (None, "", "not a timestamp"):
             with self.subTest(floor=floor):
                 self.assertIsNone(
-                    gate.find_summary(report, pid, "local", not_before=floor)
+                    gate.find_summary(report, pid, "validation", not_before=floor)
                 )
 
     def test_a_handle_without_a_usable_started_at_is_rejected(self):
@@ -529,26 +529,26 @@ class StatusTests(unittest.TestCase):
         """`write_summary` always produces a readable stamp, so a name this
         reader cannot parse is not something this gate wrote and cannot be
         proven to belong to this run."""
-        odd = Path(self.tmp) / f"nostamp-{self.payload['pid']}-local.json"
+        odd = Path(self.tmp) / f"nostamp-{self.payload['pid']}-validation.json"
         odd.write_text("{}", encoding="utf-8")
         self.assertIsNone(
             gate.find_summary(
                 Path(self.tmp),
                 self.payload["pid"],
-                "local",
+                "validation",
                 not_before=self.payload["started_at"],
             )
         )
 
     def test_find_summary_ignores_another_pids_summary(self):
         self._summary()
-        (Path(self.tmp) / "20260905T032000.0Z-99999-local.json").write_text(
+        (Path(self.tmp) / "20260905T032000.0Z-99999-validation.json").write_text(
             json.dumps({"exit_code": 1}), encoding="utf-8"
         )
         found = gate.find_summary(
             Path(self.tmp),
             self.payload["pid"],
-            "local",
+            "validation",
             not_before=self.payload["started_at"],
         )
         self.assertIsNotNone(found)
@@ -593,7 +593,7 @@ class UnreadableSummaryTests(unittest.TestCase):
             stamp = (
                 gate._parse_iso(payload["started_at"])
             ).strftime("%Y%m%dT%H%M%S.%f") + "Z"
-            (Path(tmp) / f"{stamp}-{payload['pid']}-local.json").write_text(
+            (Path(tmp) / f"{stamp}-{payload['pid']}-validation.json").write_text(
                 "{ truncated", encoding="utf-8"
             )
             state = gate.detached_state(payload)
@@ -629,11 +629,11 @@ class UnreadableSummaryTests(unittest.TestCase):
                 )
 
             code = gate.run_detach(
-                _parse_quietly(["--detach", "--local"]),
-                argv=["--detach", "--local"],
+                _parse_quietly(["--detach", "--validation"]),
+                argv=["--detach", "--validation"],
                 environ=environ,
                 executable=Path("/managed/python"),
-                mode="local",
+                mode="validation",
                 repo_root=Path(tmp) / "unrelated",
                 output_stream=out,
                 error_stream=err,
@@ -655,7 +655,7 @@ class SummaryNamingTests(unittest.TestCase):
 
     def test_a_real_write_summary_name_is_readable_by_the_real_reader(self):
         with tempfile.TemporaryDirectory() as tmp:
-            report = gate.GateReport(mode="local", started_at="2026-09-05T03:00:00.000Z")
+            report = gate.GateReport(mode="validation", started_at="2026-09-05T03:00:00.000Z")
             report.exit_code = 0
             path = gate.write_summary(
                 report, environ={gate.REPORT_DIR_ENV: tmp}, repo_root=Path(tmp)
@@ -666,7 +666,7 @@ class SummaryNamingTests(unittest.TestCase):
                 "cannot read; --status would report every run as still running"
             )
             found = gate.find_summary(
-                Path(tmp), os.getpid(), "local", not_before="2026-09-05T03:00:00.000Z"
+                Path(tmp), os.getpid(), "validation", not_before="2026-09-05T03:00:00.000Z"
             )
             self.assertEqual(found, path)
 
@@ -689,17 +689,25 @@ class NoReExecTests(unittest.TestCase):
         def find_uv():
             raise AssertionError("the child must not look for uv")
 
+        def execvpe(*_):
+            raise AssertionError("the child must not re-exec")
+
         with tempfile.TemporaryDirectory() as tmp:
-            venv = Path(tmp) / "venv"
+            # The launcher already runs the checkout's own interpreter, so the
+            # child it spawns with that interpreter owns it too.
+            venv = Path(tmp) / ".venv"
             (venv / "bin").mkdir(parents=True)
+            (venv / "bin" / "python").write_text("", encoding="utf-8")
             (venv / "pyvenv.cfg").write_text("uv = 0.4.0\n", encoding="utf-8")
             result = gate.ensure_managed_runtime(
-                ["--local"],
+                ["--validation"],
                 environ={},
                 executable=venv / "bin" / "python",
                 prefix=venv,
                 base_prefix=Path("/usr"),
+                repo_root=Path(tmp),
                 find_uv=find_uv,
+                execvpe=execvpe,
             )
         self.assertIsNone(result)
 
@@ -707,7 +715,7 @@ class NoReExecTests(unittest.TestCase):
 class ReaperSafetyTests(unittest.TestCase):
     """A detached run has `ppid == 1` by design, so the obvious worry is that
     `reap_orphans.py --kill`, the hygiene step every agent runs before
-    building, would reap it. Measured on a real detached `--local` run: it
+    building, would reap it. Measured on a real detached `--validation` run: it
     cannot, for two independent reasons, and both are locked here because
     either one changing would create the hazard.
 
@@ -726,7 +734,7 @@ class ReaperSafetyTests(unittest.TestCase):
 
     def _detached_snapshot(self, gate_alive: bool):
         gate_proc = self._proc(
-            500, 1, f"/venv/bin/python3 {REPO_ROOT}/scripts/gate.py --local"
+            500, 1, f"/venv/bin/python3 {REPO_ROOT}/scripts/gate.py --validation"
         )
         children = [
             self._proc(501, 500, f"cargo check --manifest-path {REPO_ROOT}/Cargo.toml"),

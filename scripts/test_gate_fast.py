@@ -230,7 +230,7 @@ class FastCommandListTests(unittest.TestCase):
         self.assertEqual(materialized[0], "/py/bin/python")
 
     def test_fast_note_and_annotation_are_distinct_constants(self):
-        self.assertEqual(gate.FAST_ANNOTATION, "fast + local + ci")
+        self.assertEqual(gate.FAST_ANNOTATION, "fast + validation + ci")
         self.assertNotEqual(gate.FAST_ANNOTATION, gate.LOCAL_ANNOTATION)
         self.assertTrue(gate.FAST_DYNAMIC_NOTE.startswith("# "))
 
@@ -239,14 +239,14 @@ class FastArgTests(unittest.TestCase):
     def test_fast_alone_parses(self):
         args = _parse_quietly(["--fast"])
         self.assertTrue(args.fast)
-        self.assertFalse(args.local)
+        self.assertFalse(args.validation)
 
     def test_fast_excludes_stage_list_local_and_integration_selectors(self):
         for argv in (
             ["--fast", "lint-and-unit"],
             ["--fast", "runtime-representation"],
             ["--fast", "--list"],
-            ["--fast", "--local"],
+            ["--fast", "--validation"],
             ["--fast", "integration", "--tests-only"],
             ["--fast", "integration", "--support-only"],
         ):
@@ -266,9 +266,9 @@ class FastArgTests(unittest.TestCase):
 
     def test_lease_flag_pairs_are_exclusive(self):
         for argv in (
-            ["--local", "--no-lease", "--no-wait"],
-            ["--local", "--no-lease", "--lease-timeout", "5"],
-            ["--local", "--no-wait", "--lease-timeout", "5"],
+            ["--validation", "--no-lease", "--no-wait"],
+            ["--validation", "--no-lease", "--lease-timeout", "5"],
+            ["--validation", "--no-wait", "--lease-timeout", "5"],
         ):
             with self.subTest(argv=argv), self.assertRaises(SystemExit):
                 _parse_quietly(argv)
@@ -276,12 +276,12 @@ class FastArgTests(unittest.TestCase):
     def test_lease_timeout_must_be_positive(self):
         for value in ("0", "-3"):
             with self.subTest(value=value), self.assertRaises(SystemExit):
-                _parse_quietly(["--local", "--lease-timeout", value])
-        args = _parse_quietly(["--local", "--lease-timeout", "90"])
+                _parse_quietly(["--validation", "--lease-timeout", value])
+        args = _parse_quietly(["--validation", "--lease-timeout", "90"])
         self.assertEqual(args.lease_timeout, 90.0)
 
     def test_lease_flags_parse_with_local_fast_and_bare(self):
-        self.assertTrue(_parse_quietly(["--local", "--no-wait"]).no_wait)
+        self.assertTrue(_parse_quietly(["--validation", "--no-wait"]).no_wait)
         self.assertTrue(_parse_quietly(["--fast", "--no-lease"]).no_lease)
         self.assertTrue(_parse_quietly(["--no-lease"]).no_lease)
 
@@ -296,7 +296,7 @@ class PreflightTests(unittest.TestCase):
         environ_extra=None,
         probe_calls=None,
     ):
-        report = gate.GateReport(mode="local", started_at="now")
+        report = gate.GateReport(mode="validation", started_at="now")
         out, err = io.StringIO(), io.StringIO()
         calls = [] if probe_calls is None else probe_calls
 
@@ -313,7 +313,7 @@ class PreflightTests(unittest.TestCase):
             environ.update(environ_extra or {})
             with mock.patch.object(gate, "_git_facts", lambda: dict(CANNED_GIT_FACTS)):
                 code, environment = gate.run_preflight(
-                    mode="local",
+                    mode="validation",
                     report=report,
                     environ=environ,
                     executable=Path(sys.executable),
@@ -326,13 +326,13 @@ class PreflightTests(unittest.TestCase):
         return code, environment, report, out.getvalue(), err.getvalue(), calls
 
     def test_host_system_defaults_to_platform_and_is_resolved_at_call_time(self):
-        report = gate.GateReport(mode="local", started_at="now")
+        report = gate.GateReport(mode="validation", started_at="now")
         with tempfile.TemporaryDirectory() as tmp, \
                 mock.patch.object(gate, "_git_facts", lambda: dict(CANNED_GIT_FACTS)), \
                 mock.patch.object(gate, "host_system", lambda: "Linux"), \
                 mock.patch.object(gate, "run_probe", lambda *a, **k: self.fail("probe ran")):
             code, _env = gate.run_preflight(
-                mode="local", report=report, environ={"PATH": os.environ.get("PATH", "")},
+                mode="validation", report=report, environ={"PATH": os.environ.get("PATH", "")},
                 executable=Path(sys.executable), repo_root=Path(tmp),
                 output_stream=io.StringIO(), error_stream=io.StringIO(),
             )
@@ -648,14 +648,14 @@ class SummaryTests(unittest.TestCase):
         self.assertIn(gate.PROBE_RUNBOOK, err)
 
     def test_summary_written_on_keyboard_interrupt(self):
-        rc, summary, launched, out, err, lease_paths = self._run_main(["--local"], raise_on=2)
+        rc, summary, launched, out, err, lease_paths = self._run_main(["--validation"], raise_on=2)
         self.assertEqual(rc, 130)
         self.assertEqual(summary["termination"], "user-cancel")
         self.assertEqual(summary["exit_code"], 130)
         self.assertEqual(len(launched), 2)
         self.assertEqual(len(summary["stages"]), 1)
         self.assertIn("cancelled", err)
-        # The lease taken by --local is released in main's finally.
+        # The lease taken by --validation is released in main's finally.
         self.assertEqual(summary["lease"]["mode"], "held")
         self.assertEqual(sorted(p.name for p in lease_paths),
                          ["gate.lock", "gate.lock.queue", "gate.lock.queue.lock"])
@@ -676,10 +676,10 @@ class SummaryTests(unittest.TestCase):
 
     def test_local_summary_records_the_held_lease_and_releases_it(self):
         rc, summary, launched, _out, _err, lease_paths = self._run_main(
-            ["--local"], diff="crates/chelis-surf/src/lib.rs\n"
+            ["--validation"], diff="crates/chelis-surf/src/lib.rs\n"
         )
         self.assertEqual(rc, 0)
-        self.assertEqual(summary["mode"], "local")
+        self.assertEqual(summary["mode"], "validation")
         self.assertEqual(summary["lease"]["mode"], "held")
         self.assertEqual(summary["lease"]["wait_seconds"], 0.0)
         self.assertIsNone(summary["lease"]["holder_seen"])
@@ -700,7 +700,7 @@ class SummaryTests(unittest.TestCase):
         self.assertEqual(summary["git"]["head"], CANNED_GIT_FACTS["head"])
 
     def test_no_lease_is_recorded_as_bypassed(self):
-        rc, summary, _launched, _out, _err, lease_paths = self._run_main(["--local", "--no-lease"])
+        rc, summary, _launched, _out, _err, lease_paths = self._run_main(["--validation", "--no-lease"])
         self.assertEqual(rc, 0)
         self.assertEqual(summary["lease"]["mode"], "bypassed")
         self.assertEqual(lease_paths, [])
@@ -774,11 +774,11 @@ class SummaryTests(unittest.TestCase):
         unknown.files_changed_by_run = None
         self.assertIn("changed: unknown (git status failed after the run)", gate.human_summary(unknown, None, REPO_ROOT))
 
-        local = gate.GateReport(mode="local", started_at="now")
+        local = gate.GateReport(mode="validation", started_at="now")
         local.termination = "lease-timeout"
         local.exit_code = 4
         line = gate.human_summary(local, None, REPO_ROOT)
-        self.assertTrue(line.startswith("gate --local: 0 stages, "), line)
+        self.assertTrue(line.startswith("gate --validation: 0 stages, "), line)
         self.assertIn("LEASE-TIMEOUT (exit 4)", line)
         self.assertNotIn("changed:", line)
 
@@ -799,7 +799,7 @@ class SummaryTests(unittest.TestCase):
 class LeaseTests(unittest.TestCase):
     def _lease(self, path: Path, **overrides) -> "gate.GateLease":
         settings = dict(
-            mode="local",
+            mode="validation",
             worktree=Path("/wt"),
             head="abc",
             wait=False,
@@ -823,7 +823,7 @@ class LeaseTests(unittest.TestCase):
                 self.assertTrue(lease.held)
                 sidecar = json.loads((Path(tmp) / "nested" / "gate.lock.json").read_text())
                 self.assertEqual(sidecar["pid"], os.getpid())
-                self.assertEqual(sidecar["mode"], "local")
+                self.assertEqual(sidecar["mode"], "validation")
                 self.assertEqual(sidecar["worktree"], "/wt")
                 self.assertEqual(sidecar["head"], "abc")
                 self.assertEqual(sidecar["schema_version"], 1)
@@ -848,11 +848,11 @@ class LeaseTests(unittest.TestCase):
                 with self.assertRaises(gate.LeaseHeld) as raised:
                     second.acquire()
                 self.assertEqual(raised.exception.holder["pid"], os.getpid())
-                self.assertEqual(raised.exception.holder["mode"], "local")
+                self.assertEqual(raised.exception.holder["mode"], "validation")
                 self.assertFalse(second.held)
                 self.assertEqual(gate.GateLease.peek(path)["pid"], os.getpid())
                 # The failed acquirer must not have disturbed the holder's sidecar.
-                self.assertEqual(gate.GateLease.current_holder(path)["mode"], "local")
+                self.assertEqual(gate.GateLease.current_holder(path)["mode"], "validation")
             finally:
                 first.release()
             self._lease(path).acquire()
@@ -884,7 +884,7 @@ class LeaseTests(unittest.TestCase):
                 text = out.getvalue()
                 self.assertEqual(text.count("waiting for the gate lease"), 1)
                 self.assertIn(f"pid {os.getpid()}", text)
-                self.assertEqual(json.loads((path.with_name("gate.lock.json")).read_text())["mode"], "local")
+                self.assertEqual(json.loads((path.with_name("gate.lock.json")).read_text())["mode"], "validation")
             finally:
                 waiter.release()
 
@@ -1062,7 +1062,7 @@ class LeaseTests(unittest.TestCase):
             holder = self._lease(Path(tmp) / gate.LEASE_FILE_NAME, worktree=Path("/other"))
             holder.acquire()
             try:
-                code, lease, report, _out, err = self._take(tmp, "local", no_wait=True)
+                code, lease, report, _out, err = self._take(tmp, "validation", no_wait=True)
             finally:
                 holder.release()
         self.assertEqual(code, gate.EXIT_LEASE_TIMEOUT)
@@ -1091,7 +1091,7 @@ class LeaseTests(unittest.TestCase):
 
     def test_no_lease_bypasses(self):
         with tempfile.TemporaryDirectory() as tmp:
-            code, lease, report, _out, _err = self._take(tmp, "local", no_lease=True)
+            code, lease, report, _out, _err = self._take(tmp, "validation", no_lease=True)
             self.assertEqual(list(Path(tmp).iterdir()), [])
         self.assertIsNone(code)
         self.assertIsNone(lease)
@@ -1099,7 +1099,7 @@ class LeaseTests(unittest.TestCase):
 
     def test_local_takes_and_records_the_lease(self):
         with tempfile.TemporaryDirectory() as tmp:
-            code, lease, report, _out, _err = self._take(tmp, "local")
+            code, lease, report, _out, _err = self._take(tmp, "validation")
             try:
                 self.assertIsNone(code)
                 self.assertTrue(lease.held)
@@ -1116,7 +1116,7 @@ class LeaseTests(unittest.TestCase):
             path = Path(tmp) / gate.LEASE_FILE_NAME
             path.write_text("")
             path.with_name("gate.lock.json").write_text(
-                json.dumps({"pid": 1, "worktree": "/dead", "mode": "local"})
+                json.dumps({"pid": 1, "worktree": "/dead", "mode": "validation"})
             )
             self.assertIsNone(gate.GateLease.peek(path))
             lease = self._lease(path)
@@ -1172,7 +1172,7 @@ class LeaseTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             blocker = Path(tmp) / "not-a-dir"
             blocker.write_text("")
-            code, lease, report, _out, err = self._take(str(blocker), "local")
+            code, lease, report, _out, err = self._take(str(blocker), "validation")
         self.assertIsNone(code)
         self.assertIsNone(lease)
         self.assertEqual(report.lease["mode"], "bypassed")

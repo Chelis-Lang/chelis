@@ -646,8 +646,8 @@ The exact Deep grammar and binder rules are normative in spec/03 §2.5.1/§2.6.
 3. The probe corpus (`docs/investigations/probes/`, `checker_holes.py`)
    regenerates the wrapper battery's evidence from scratch if you need to
    re-derive current behavior.
-4. Gate with `scripts/gate.py --local`; the workspace oracle is CI's
-   macOS Smoke.
+4. Gate with `scripts/gate.py --fast` before every push; the workspace oracle
+   is CI's macOS Smoke.
 
 ---
 
@@ -771,8 +771,8 @@ cargo nextest run --profile ci --no-fail-fast \
 The invariant and source contracts run inside that command, including the
 fitness/cascade/handler/owner-stamp controls. The compile-fail witness doctests
 and applicable CI checks on the candidate head are required supporting evidence,
-but neither replaces this oracle. `scripts/gate.py --local` is an optional local
-reproduction of supporting checks.
+but neither replaces this oracle. `scripts/gate.py --validation` is an optional
+local reproduction of supporting checks.
 
 The witness doctests are `crates/chelis-types/src/errors.rs`'s eight
 ` ```compile_fail ` blocks. `cargo nextest` does not execute doctests, so
@@ -780,7 +780,7 @@ until chelis#875 they ran in no continuous job and this paragraph claimed
 supporting evidence the repo was not producing. They are now driven by the
 `cargo test -p chelis-types -p chelis-compiler-api --doc` stage in
 `scripts/gate.py`, which is in
-both the `--local` subset and CI's `lint-rust` worker.
+both the `--validation` subset and CI's `lint-rust` worker.
 
 Scope of the guarantee, so this section does not read stronger than the
 mechanism: the witness makes a `Type::Error` **without a diagnostic**
@@ -949,7 +949,7 @@ top-level forms and [03-PROG-2] states the rejection contract.
 The authoritative oracle is [#908]'s
 `scripts/unrepresentable_domain_oracle.py`, run by `scripts/gate.py`'s
 `integration` support stage (`heavy-e2e.yml` nightly/manual
-`integration-support` worker) and by its `--local` pre-push subset. It executes
+`integration-support` worker) and by its optional `--validation` subset. It executes
 `crates/chelis-compiler-api/tests/phase3_stamped_ingress.rs` as one of its
 obligations; that suite is evidence, not a second oracle. The suite's
 parity table drives every module-text door over one shared accept/reject
