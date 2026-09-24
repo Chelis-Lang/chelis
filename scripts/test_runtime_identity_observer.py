@@ -656,6 +656,94 @@ class ObservationFailureTests(unittest.TestCase):
         with self.assertRaisesRegex(observer.ObservationError, "stale source/input inventory"):
             observer.check_receipt(receipt)
 
+    def test_local_unit_dependency_metadata_tracks_selected_inputs_and_membership(self):
+        package = self.root / "package"
+        for directory in ("src/nested", "tests", "docs"):
+            (package / directory).mkdir(parents=True)
+        for name in ("Cargo.toml", "src/lib.rs", "src/nested/mod.rs", "tests/case.rs", "docs/guide.md"):
+            (package / name).write_text("")
+        selected = ("Cargo.toml", "src/lib.rs", "src/nested/mod.rs")
+        declarations = {"physical": str(self.root), "fixed": True, "inventory": {
+            "logical_prefix": "workspace", "files": ["Cargo.toml"], "explicitly_required": ["Cargo.toml"], "class": "build"}}
+        toolchain = {"physical": str(self.root / "sysroot"), "inventory": {
+            "logical_prefix": "toolchain", "files": ["libstd.rlib"], "explicitly_required": ["libstd.rlib"], "class": "toolchain"}}
+        generated = {"physical": str(self.root / "out"), "generated": True, "inventory": {
+            "logical_prefix": "package/generated", "files": ["bindings.rs"], "explicitly_required": ["bindings.rs"], "class": "build"}}
+        receipt = {"roots": [observer.inventory(package, "package", ["Cargo.toml"]), declarations, toolchain, generated],
+                   "required_inputs": [{"logical_path": "package/" + name} for name in selected]
+                   + [{"logical_path": path} for path in ("workspace/Cargo.toml", "toolchain/libstd.rlib", "package/generated/bindings.rs")]}
+        dep_info = self.root / "unit.d"
+        dep_info.write_text(f"{self.root}/libunit.rlib: src/lib.rs\n\nsrc/lib.rs:\n\n# env-dep:CARGO_PKG_NAME=unit\n")
+        observer.track_inventory(receipt, dep_info)
+        rule, *rest = dep_info.read_text().split("\n")
+        # Cargo rebuilds when a listed file or directory changes: selected inputs,
+        # the directories where one can be added or removed, and a retained
+        # declaration file, never tests, toolchain or generated inputs.
+        self.assertEqual(
+            set(rule.split(": ", 1)[1].split()),
+            {"src/lib.rs", str(self.root / "Cargo.toml"),
+             *(str(package / name) for name in ("", "src", "src/nested", *selected))},
+        )
+        self.assertEqual(rest, ["", "src/lib.rs:", "", "# env-dep:CARGO_PKG_NAME=unit", ""])
+
+    @unittest.skipUnless(HELPER and RUSTC, "requires compiled adapter and native rustc")
+    def test_only_producers_retain_workspace_declarations(self):
+        workspace = self.root / "workspace"
+        package = workspace / "member"
+        package.mkdir(parents=True)
+        manifest = workspace / "Cargo.toml"
+        manifest.write_text('[workspace]\nmembers = ["member"]\n')
+        (package / "Cargo.toml").write_text('[package]\nname = "member"\nversion = "0.0.0"\nedition = "2021"\n')
+        source = package / "lib.rs"
+        source.write_text("pub fn value() -> u8 { 1 }\n")
+        os.environ.update({"CARGO_MANIFEST_DIR": str(package), "CARGO_PKG_NAME": "member", "CARGO_PKG_VERSION": "0.0.0",
+                           "CHELIS_IDENTITY_PACKAGE_SOURCE": "path:member", "CHELIS_IDENTITY_WORKSPACE": str(workspace)})
+        arguments = [str(source), "--crate-name", "member", "--crate-type", "lib"]
+        dependency = observer.collect_unit(RUSTC, arguments)
+        os.environ["CHELIS_IDENTITY_ROLE"] = "runtime"
+        producer = observer.collect_unit(RUSTC, arguments)
+        # Cargo does not rebuild every unit for a workspace edit. A dependency
+        # records the declarations' effect in its invocation instead, so the
+        # edit cannot strand it; the producer retains and tracks the text.
+        manifest.write_text('[workspace]\nmembers = ["member"]\n# edited\n')
+        observer.check_receipt(dependency)
+        with self.assertRaisesRegex(observer.ObservationError, "stale source/input inventory"):
+            observer.check_receipt(producer)
+
+    @unittest.skipUnless(RUSTC, "requires native rustc")
+    def test_input_probe_does_not_share_compiler_incremental_state(self):
+        package = self.root / "package"
+        package.mkdir()
+        source = package / "lib.rs"
+        source.write_text("pub fn value() -> u8 { 1 }\n")
+        # A cache wrapper can prune the real compilation's incremental directory
+        # while the probe runs; an occupied path fails any probe that uses it.
+        occupied = self.root / "incremental"
+        occupied.write_text("not a directory")
+        roots = [observer.inventory(package, "package", [])]
+        observer.compiler_inputs(RUSTC, [str(source), "--crate-name", "subject", "--crate-type", "lib",
+                                         "-C", "incremental=" + str(occupied)], roots, package, package, None)
+        self.assertEqual(roots[0]["inventory"]["explicitly_required"], ["lib.rs"])
+
+    @unittest.skipUnless(HELPER and RUSTC, "requires compiled adapter and native rustc")
+    def test_build_script_inventory_is_its_compile_closure(self):
+        package = self.root / "package"
+        (package / "src").mkdir(parents=True)
+        (package / "Cargo.toml").write_text('[package]\nname = "fixture"\nversion = "0.0.0"\nedition = "2021"\n[workspace]\n')
+        (package / "src" / "lib.rs").write_text("pub fn value() -> u8 { 1 }\n")
+        script = package / "build.rs"
+        script.write_text("fn main() {}\n")
+        os.environ.update({"CARGO_MANIFEST_DIR": str(package), "CARGO_PKG_NAME": "fixture", "CARGO_PKG_VERSION": "0.0.0",
+                           "CHELIS_IDENTITY_PACKAGE_SOURCE": "path:.", "CHELIS_IDENTITY_WORKSPACE": str(package)})
+        receipt = observer.collect_unit(RUSTC, [str(script), "--crate-name", "build_script_build", "--crate-type", "bin"])
+        # Cargo never recompiles a build script for its package's other sources.
+        (package / "src" / "added.rs").write_text("pub fn added() {}\n")
+        (package / "src" / "lib.rs").write_text("pub fn value() -> u8 { 2 }\n")
+        observer.check_receipt(receipt)
+        script.write_text("fn main() { println!(); }\n")
+        with self.assertRaisesRegex(observer.ObservationError, "stale source/input inventory"):
+            observer.check_receipt(receipt)
+
 
 if __name__ == "__main__":
     unittest.main()

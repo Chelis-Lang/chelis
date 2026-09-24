@@ -191,14 +191,18 @@ Producer build scripts declare their role but never invoke Cargo.
 
 The Cargo entrypoint observes actual rustc units and build-script executions,
 binds exact Cargo artifacts to compiler-output bytes, and checks cached inputs
-and output digests. Each producer's build hook watches every top-level entry
-except tests, benches, examples and build trees, so a change there rebuilds the
-producer. Cargo does not track other inputs that rustc never reads, such as a
-new top-level producer entry or an unreferenced source file in a runtime
-dependency: the driver rejects that stale cached unit by name, and
-`cargo clean -p <package>` followed by a managed build recovers. An unmanaged or
-stale target must be rebuilt under the managed driver; there is no fallback
-descriptor and no automatic deletion of a user's target directory.
+and output digests. Compiler dependency metadata for each local unit lists its
+selected package inputs and every directory that contains or leads to one, so
+adding, removing or changing a selected input rebuilds that unit; a build
+script's own unit covers only what its compiler reads. Only producer units
+retain the owning workspace's manifest, toolchain file and Cargo configuration,
+and their metadata lists those files too; other units record the declarations'
+effect in their observed compiler invocation. A cached input that still changes
+without a rebuild, such as a mutated custom sysroot, fails the build with the
+stale package's name, and `cargo clean -p <package>` followed by a managed build
+recovers. An unmanaged or stale target must be rebuilt under the managed
+driver; there is no fallback descriptor and no automatic deletion of a user's
+target directory.
 Commands and explicit provenance requirements are in `README.md` and
 `docs/manual_gates.md`.
 

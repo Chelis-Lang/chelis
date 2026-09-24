@@ -483,8 +483,12 @@ def compiler_inputs(real_rustc, args, roots, manifest_dir, workspace, out):
         arg = args[index]
         if arg in {"--emit", "-o"}:
             index += 2
-        elif arg.startswith(("--emit=", "-o=")):
+        elif arg.startswith(("--emit=", "-o=", "-Cincremental=")):
             index += 1
+        elif arg == "-C" and index + 1 < len(args) and args[index + 1].startswith("incremental="):
+            # Incremental state belongs to the real compilation. A cache wrapper
+            # may prune or relocate that directory while this probe runs.
+            index += 2
         else:
             filtered.append(arg); index += 1
     try:
@@ -594,11 +598,15 @@ def collect_unit(
     if specification_path:
         roots.append({"physical": str(specification_path.parent), "inventory": {"logical_prefix": "toolchain/target", "files": [specification_path.name], "explicitly_required": [specification_path.name], "class": "toolchain"}, "fixed": True})
     workspace = source_workspace(manifest_dir) if identity["source"].startswith("path:") else Path(os.environ["CHELIS_IDENTITY_WORKSPACE"])
-    # Owning workspace declarations affect this package; unrelated consumer
-    # manifests are not substituted for a path dependency's source workspace.
+    out = unit_out_dir(one(args, "--crate-name"))
+    # Workspace declarations are recipe inputs that Cargo does not rebuild every
+    # unit for. Producer units retain the owning workspace's declarations and
+    # track them; every other unit records their effect in its observed
+    # invocation, so a declaration edit cannot strand a cached dependency.
+    producer = kind != "build_script" and bool(os.environ.get("CHELIS_IDENTITY_ROLE") or (out and Path(out, "chelis-runtime-identity-producer.json").exists()))
     for name in ("Cargo.toml", "rust-toolchain.toml", ".cargo/config.toml"):
         path = workspace / name
-        if path.is_file() and manifest_dir != workspace:
+        if producer and path.is_file() and manifest_dir != workspace:
             suffix = Path(name).parent.as_posix()
             logical = "workspace" if suffix == "." else "workspace/" + suffix
             roots.append({"physical": str(path.parent), "inventory": {"logical_prefix": logical, "files": [path.name], "explicitly_required": [path.name], "class": "build"}, "fixed": True})
@@ -626,7 +634,6 @@ def collect_unit(
             dependencies.append({"name": name, "observation": str(receipt_for(artifact))})
     build = None
     execution = None
-    out = unit_out_dir(one(args, "--crate-name"))
     ambient = []
     if out and kind != "build_script" and manifest["package"].get("build", (manifest_dir / "build.rs").exists()) and execution_path(out).exists():
         execution = load(execution_path(out))
@@ -704,6 +711,13 @@ def collect_unit(
             "compiler": {"verbose_version": compiler, "tools": tools}, "inputs": [], "dependencies": [], "build_script": None,
             "build_environment": list({item["name"]: dict(item) for item in execution["environment"] + execution["configuration_environment"]}.values()) if execution else []}
     observed_environment = compiler_inputs(real_rustc, args, roots, manifest_dir, workspace, out)
+    if kind == "build_script":
+        # The build-script program compiles only what rustc reads for it. Its
+        # package's other sources are inputs of the units it helps build, and
+        # Cargo never recompiles the script when they change.
+        package_root = roots[0]
+        package_root["inventory"]["files"] = sorted(set(package_root["inventory"]["explicitly_required"]))
+        package_root["fixed"] = True
     unit["compiler_environment"] = list({item["name"]: dict(item) for item in observed_environment}.values())
     supplied = {"OUT_DIR", "CARGO", "CARGO_MANIFEST_DIR", "CARGO_MANIFEST_PATH", "CARGO_CRATE_NAME", "CARGO_BIN_NAME", "CARGO_PRIMARY_PACKAGE", "CARGO_TARGET_TMPDIR"}
     supplied.update("CARGO_PKG_" + suffix for suffix in ("VERSION", "VERSION_MAJOR", "VERSION_MINOR", "VERSION_PATCH", "VERSION_PRE", "AUTHORS", "NAME", "DESCRIPTION", "HOMEPAGE", "REPOSITORY", "LICENSE", "LICENSE_FILE", "RUST_VERSION", "README"))
@@ -862,6 +876,57 @@ def output_paths(real_rustc, args):
     return outputs
 
 
+def dep_info_path(args):
+    for emit in values(args, "--emit"):
+        for item in emit.split(","):
+            kind, _, explicit = item.partition("=")
+            if kind == "dep-info":
+                if explicit:
+                    return Path(explicit)
+                directory = one(args, "--out-dir")
+                extra = next((value.partition("=")[2] for value in values(args, "-C") if value.startswith("extra-filename=")), "")
+                return Path(directory, one(args, "--crate-name") + extra + ".d") if directory else None
+    return None
+
+
+def track_inventory(receipt, dep_info):
+    """Add a local unit's selected inputs to rustc's dependency metadata.
+
+    Cargo reuses a local unit until a path in its dep-info changes, and rustc
+    lists only the files it read. An added, removed or unread selected input
+    would leave the receipt stale instead of rebuilding the unit. List every
+    selected source and declaration input and, for an enumerated inventory,
+    each directory that contains one or leads to one, so membership changes
+    rebuild the unit too. Toolchain and generated inputs have their own owners.
+    """
+    planned = {entry["logical_path"] for entry in receipt["required_inputs"]}
+    tracked = set()
+    for root in receipt["roots"]:
+        if root["inventory"]["class"] == "toolchain" or root.get("generated"):
+            continue
+        physical = Path(root["physical"])
+        prefix = root["inventory"]["logical_prefix"].rstrip("/")
+        for name in root["inventory"]["files"]:
+            if (prefix + "/" + name if prefix else name) not in planned:
+                continue
+            path = physical / name
+            tracked.add(path)
+            while not root.get("fixed") and path != physical:
+                path = path.parent
+                tracked.add(path)
+    lines = dep_info.read_text(encoding="utf-8").split("\n")
+    rule = next((index for index, line in enumerate(lines) if ": " in line and not line.startswith("#")), None)
+    if rule is None:
+        raise ObservationError(f"rustc dep-info has no dependency rule: {dep_info}")
+    lines[rule] += "".join(" " + str(path).replace(" ", "\\ ") for path in sorted(tracked))
+    fd, temporary = tempfile.mkstemp(prefix=dep_info.name + ".", dir=dep_info.parent)
+    with os.fdopen(fd, "w", encoding="utf-8") as stream:
+        stream.write("\n".join(lines))
+    # Replace rather than rewrite: a cache wrapper may have restored the file as
+    # a link to its shared store entry.
+    os.replace(temporary, dep_info)
+
+
 def build_script_launcher(helper, real):
     """Return the executable text that replaces an observed build script.
 
@@ -949,9 +1014,12 @@ def observe_rustc(real_rustc, args):
     code = subprocess.call(command, close_fds=False)
     if code:
         return code
-    # Keep rustc's dep-info an honest compiler-read source inventory. Producer
-    # hooks watch their source trees; receipt validation separately invalidates
-    # changed transitive inputs and directory membership before accepting reuse.
+    # Rustc lists only the files it read. Cargo must also rebuild a local unit
+    # whose selected inputs or their membership changed, not reuse it stale.
+    dep_info = dep_info_path(args)
+    if (dep_info and os.environ.get("CHELIS_IDENTITY_BACKEND") == "cargo" and receipt.get("roots")
+            and receipt["unit"]["package"]["source"].startswith("path:")):
+        track_inventory(receipt, dep_info)
     if role:
         graph_recipe(receipt if role == "runtime" else find_runtime(receipt))
         for output in outputs:

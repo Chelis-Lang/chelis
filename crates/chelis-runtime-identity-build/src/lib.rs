@@ -1,11 +1,6 @@
 //! Effectful boundary for managed runtime identity production.
-use chelis_runtime_identity::{RecordKind, UNSELECTED_COMPONENTS};
-use std::{
-    env,
-    error::Error,
-    fmt, fs,
-    path::{Path, PathBuf},
-};
+use chelis_runtime_identity::RecordKind;
+use std::{env, error::Error, fmt, fs, path::PathBuf};
 
 #[derive(Debug)]
 pub struct BuildError(pub String);
@@ -34,14 +29,10 @@ pub fn declare_producer(kind: RecordKind) -> Result<(), BuildError> {
     ] {
         println!("cargo:rerun-if-env-changed={name}");
     }
-    // Watch only entries the identity inventory can select. Tests, benches and
-    // examples are never runtime inputs, so editing one must not rerun this
-    // hook and rebuild the producer with everything that depends on it.
-    let manifest = env::var_os("CARGO_MANIFEST_DIR")
-        .ok_or_else(|| BuildError("CARGO_MANIFEST_DIR is absent".into()))?;
-    for entry in watched_entries(Path::new(&manifest))? {
-        println!("cargo:rerun-if-changed={}", entry.display());
-    }
+    // No source watch: the observer lists each compiled unit's selected inputs
+    // in its dependency metadata, so Cargo rebuilds exactly the units whose
+    // inputs changed. The directives above also stop Cargo from rerunning this
+    // hook whenever any other package file, such as a test, changes.
     let out = PathBuf::from(
         env::var_os("OUT_DIR").ok_or_else(|| BuildError("OUT_DIR is absent".into()))?,
     );
@@ -56,39 +47,4 @@ pub fn declare_producer(kind: RecordKind) -> Result<(), BuildError> {
     )
     .map_err(|e| BuildError(format!("writing producer declaration: {e}")))?;
     Ok(())
-}
-
-fn watched_entries(manifest: &Path) -> Result<Vec<PathBuf>, BuildError> {
-    let mut watched = Vec::new();
-    for entry in fs::read_dir(manifest)
-        .map_err(|e| BuildError(format!("reading {}: {e}", manifest.display())))?
-    {
-        let entry = entry.map_err(|e| BuildError(e.to_string()))?;
-        if !UNSELECTED_COMPONENTS.contains(&entry.file_name().to_string_lossy().as_ref()) {
-            watched.push(entry.path());
-        }
-    }
-    watched.sort();
-    Ok(watched)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn producer_hook_watches_only_selectable_entries() {
-        let root = env::temp_dir().join(format!("chelis-producer-watch-{}", std::process::id()));
-        for directory in ["src", "tests", "benches", "examples", "target"] {
-            fs::create_dir_all(root.join(directory)).unwrap();
-        }
-        fs::write(root.join("Cargo.toml"), "").unwrap();
-        fs::write(root.join("build.rs"), "").unwrap();
-        let watched = watched_entries(&root);
-        fs::remove_dir_all(&root).unwrap();
-        assert_eq!(
-            watched.unwrap(),
-            ["Cargo.toml", "build.rs", "src"].map(|name| root.join(name))
-        );
-    }
 }
