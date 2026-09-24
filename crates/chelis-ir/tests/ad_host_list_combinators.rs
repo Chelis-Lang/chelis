@@ -5,19 +5,26 @@ use chelis_unord::UnordMap;
 
 fn checked_deep(src: &str) -> chelis_types::CheckedProgram {
     let exprs = chelis_deep::parser::parse_and_stamp(src).expect("Deep fixture");
-    let checked = chelis_types::check_ir_program(&exprs, chelis_types::ProgramOrigin::Unlinked)
-        .unwrap_or_else(|report| {
-            panic!(
-                "type check failed: {:?}",
-                report
-                    .errors
-                    .iter()
-                    .map(|error| error.message.clone())
-                    .collect::<Vec<_>>()
-            )
-        });
-    let checked = chelis_effects::check_program(&checked).expect("effects");
-    chelis_types::check_linearity(&checked).expect("linearity")
+    let checked = chelis_types::check_ir_program(
+        &exprs,
+        chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
+    )
+    .unwrap_or_else(|report| {
+        panic!(
+            "type check failed: {:?}",
+            report
+                .errors
+                .iter()
+                .map(|error| error.message.clone())
+                .collect::<Vec<_>>()
+        )
+    });
+    let checked =
+        chelis_effects::check_program(&checked, &mut chelis_types::NativeServices::new(None))
+            .expect("effects");
+    chelis_types::check_linearity(&checked, &mut chelis_types::NativeServices::new(None))
+        .expect("linearity")
 }
 
 fn def_name_and_body(expr: &Expr) -> Option<(String, Expr)> {
@@ -54,7 +61,13 @@ fn eval_out(src: &str) -> TensorValue {
     });
     let roots = dag.roots().to_vec();
     assert_eq!(roots.len(), 1, "out subexpression should have one root");
-    let values = eval_tensor_roots_with_strict(&dag, &roots, |_| None).expect("subexpression eval");
+    let values = eval_tensor_roots_with_strict(
+        &dag,
+        &roots,
+        |_| None,
+        &mut chelis_types::NativeServices::new(None),
+    )
+    .expect("subexpression eval");
     values[&roots[0]].clone()
 }
 

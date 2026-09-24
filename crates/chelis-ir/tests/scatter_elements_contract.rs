@@ -110,7 +110,12 @@ fn scatter_elements_forward_axis0_preserves_off_axis_coord() {
         "updates".to_string(),
         TensorValue::from_vec(vec![2, 3], vec![1.0, 1.1, 1.2, 2.0, 2.1, 2.2]),
     );
-    let vals = eval_tensor_with(&dag, |n| inputs.get(n).cloned()).expect("scatter_elements eval");
+    let vals = eval_tensor_with(
+        &dag,
+        |n| inputs.get(n).cloned(),
+        &mut chelis_types::NativeServices::new(None),
+    )
+    .expect("scatter_elements eval");
     let out = &vals[&scatter];
 
     // Hand-computed ONNX ScatterElements result:
@@ -188,7 +193,12 @@ fn scatter_elements_forward_axis1_substitutes_column() {
         "updates".to_string(),
         TensorValue::from_vec(vec![2, 2], vec![100.0, 101.0, 200.0, 202.0]),
     );
-    let vals = eval_tensor_with(&dag, |n| inputs.get(n).cloned()).expect("scatter_elements eval");
+    let vals = eval_tensor_with(
+        &dag,
+        |n| inputs.get(n).cloned(),
+        &mut chelis_types::NativeServices::new(None),
+    )
+    .expect("scatter_elements eval");
     let out = &vals[&scatter];
 
     // (0,0): col 2 -> out[0,2]=100.0
@@ -259,7 +269,12 @@ fn scatter_elements_forward_duplicate_last_write_wins() {
         "updates".to_string(),
         TensorValue::from_vec(vec![2, 2], vec![7.0, 8.0, 9.0, 10.0]),
     );
-    let vals = eval_tensor_with(&dag, |n| inputs.get(n).cloned()).expect("scatter_elements eval");
+    let vals = eval_tensor_with(
+        &dag,
+        |n| inputs.get(n).cloned(),
+        &mut chelis_types::NativeServices::new(None),
+    )
+    .expect("scatter_elements eval");
     let out = &vals[&scatter];
 
     // out[1,0] receives update (0,0)=7.0 then (1,0)=9.0 -> 9.0 wins.

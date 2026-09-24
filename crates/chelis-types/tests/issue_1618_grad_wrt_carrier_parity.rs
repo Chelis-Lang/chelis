@@ -34,10 +34,12 @@ fn ingress_diagnostics(source: &str) -> Vec<String> {
     let typed = diagnostics(check_typed_program(
         &program,
         chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
     ));
     let ir = diagnostics(check_ir_program(
         &program,
         chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
     ));
     assert_eq!(
         typed, ir,

@@ -1894,9 +1894,11 @@ fn a_resolved_canonical_traps_on_eval_against_its_literal() {
         )],
         "the checker resolved the claim, so the canonical value is that literal",
     );
-    let err = chelis_ir::eval::eval_tensor_with(&dag, |name| {
-        (name == "x").then(|| chelis_ir::eval::TensorValue::from_vec(vec![4], vec![1.0; 4]))
-    })
+    let err = chelis_ir::eval::eval_tensor_with(
+        &dag,
+        |name| (name == "x").then(|| chelis_ir::eval::TensorValue::from_vec(vec![4], vec![1.0; 4])),
+        &mut chelis_types::NativeServices::new(None),
+    )
     .expect_err("the reshape computes 16 against a claim of 4");
     assert!(
         err.contains("numeric trap: domain in reshape at i64"),

@@ -53,7 +53,11 @@ fn conv_arity_zero_through_six_is_total_and_exact() {
     for arity in 0..=6 {
         let deep = core_program(&conv_program(arity));
         let outcome = catch_unwind(AssertUnwindSafe(|| {
-            check_ir_fitness(&deep, chelis_types::ProgramOrigin::Unlinked)
+            check_ir_fitness(
+                &deep,
+                chelis_types::ProgramOrigin::Unlinked,
+                &mut chelis_types::NativeServices::new(None),
+            )
         }));
         let report = outcome.unwrap_or_else(|_| panic!("conv arity {arity} must not panic"));
 
@@ -95,7 +99,11 @@ fn every_builtin_rejects_zero_and_oversized_arity_without_panicking() {
             let source = format!("(def {{}} bad (app {{}} (var {{}} {name}) {args}))");
             let deep = parse_deep_lenient(&source).expect("generated Deep fixture parses");
             let outcome = catch_unwind(AssertUnwindSafe(|| {
-                check_ir_fitness(&deep, chelis_types::ProgramOrigin::Unlinked)
+                check_ir_fitness(
+                    &deep,
+                    chelis_types::ProgramOrigin::Unlinked,
+                    &mut chelis_types::NativeServices::new(None),
+                )
             }));
             let report = outcome
                 .unwrap_or_else(|_| panic!("builtin `{name}` with arity {arity} must not panic"));

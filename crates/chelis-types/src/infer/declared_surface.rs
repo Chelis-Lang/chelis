@@ -37,17 +37,36 @@ impl DeclaredTypeSurface {
     }
 }
 
-pub fn resolve_declared_surface(exprs: &[deep::Expr]) -> Result<DeclaredTypeSurface, InferResult> {
-    crate::session::resolve_declared_surface(exprs)
+pub fn resolve_declared_surface(
+    exprs: &[deep::Expr],
+    native: &mut NativeServices,
+) -> Result<DeclaredTypeSurface, InferResult> {
+    crate::session::resolve_declared_surface(exprs, native)
 }
 
 pub(crate) fn resolve_declared_surface_in_session(
     exprs: &[deep::Expr],
     sink: &mut DiagnosticSink<'_>,
 ) -> Result<DeclaredTypeSurface, InferStats> {
-    let stack_scope = StackExhaustionScope::enter();
+    sink.enter_stack_scope();
+    let result = resolve_declared_surface_in_session_scoped(exprs, sink);
+    sink.exit_stack_scope();
+    result
+}
+
+fn resolve_declared_surface_in_session_scoped(
+    exprs: &[deep::Expr],
+    sink: &mut DiagnosticSink<'_>,
+) -> Result<DeclaredTypeSurface, InferStats> {
     fn validate_carriers(expr: &deep::Expr, sink: &mut DiagnosticSink<'_>) {
-        stack_guard!("validate_carriers", expr);
+        if sink.frame_exhausted("validate_carriers", || expr.span_id()) {
+            return;
+        }
+        validate_carriers_frame(expr, sink);
+        sink.exit_frame();
+    }
+
+    fn validate_carriers_frame(expr: &deep::Expr, sink: &mut DiagnosticSink<'_>) {
         if let Some((tag, meta, children)) = stamped_parts(expr) {
             // Node binder roles also admit patterns. Declaration collectors
             // require names here and otherwise skip the malformed declaration.
@@ -92,12 +111,25 @@ pub(crate) fn resolve_declared_surface_in_session(
         expr: &'a deep::Expr,
         module: Option<String>,
         out: &mut Vec<(Option<String>, &'a deep::Expr)>,
+        stack: &mut StackBudget<'_>,
     ) {
-        stack_guard!("declared_surface_items", expr);
+        if stack.frame_exhausted("declared_surface_items", || expr.span_id()) {
+            return;
+        }
+        items_frame(expr, module, out, stack);
+        stack.exit_frame();
+    }
+
+    fn items_frame<'a>(
+        expr: &'a deep::Expr,
+        module: Option<String>,
+        out: &mut Vec<(Option<String>, &'a deep::Expr)>,
+        stack: &mut StackBudget<'_>,
+    ) {
         if let Some((DeepTag::Module, _, children)) = stamped_parts(expr) {
             let owner = children.first().and_then(symbol_name).map(str::to_string);
             for child in &children[1..] {
-                items(child, owner.clone(), out);
+                items(child, owner.clone(), out, stack);
             }
         } else {
             out.push((module, expr));
@@ -119,15 +151,15 @@ pub(crate) fn resolve_declared_surface_in_session(
     for expr in exprs {
         validate_carriers(expr, sink);
     }
-    stack_scope.drain_into(sink);
+    sink.drain_stack_bail();
     if !sink.is_empty() {
         return Err(failed());
     }
     let mut declarations = Vec::new();
     for expr in exprs {
-        items(expr, None, &mut declarations);
+        items(expr, None, &mut declarations, &mut sink.stack());
     }
-    stack_scope.drain_into(sink);
+    sink.drain_stack_bail();
     if !sink.is_empty() {
         return Err(failed());
     }
@@ -174,7 +206,7 @@ pub(crate) fn resolve_declared_surface_in_session(
     let (mut env, mut vg) = builtins::builtin_env();
     let mut registry = AdtRegistry::new();
     builtins::register_prelude_adts(&mut env, &mut vg, &mut registry);
-    let headers = precollect_type_resolution_env(&declarations, &registry);
+    let headers = precollect_type_resolution_env(&declarations, &registry, &mut sink.stack());
     registry.install_resolution_env(headers.clone());
     let mut subst = Subst::new();
 
@@ -242,7 +274,7 @@ pub(crate) fn resolve_declared_surface_in_session(
             }
         }
     }
-    stack_scope.drain_into(sink);
+    sink.drain_stack_bail();
     if sink.is_empty() {
         Ok(DeclaredTypeSurface {
             registry,
@@ -262,7 +294,8 @@ mod tests {
         let source = chelis_deep::parser::parse_str(
             "(typealias {} A () (t-adt {} B)) (typealias {} B () (t-tuple {} (t-prim {} f64) (t-adt {} A)))"
         ).unwrap();
-        let resolved = resolve_declared_surface(&source).unwrap();
+        let resolved =
+            resolve_declared_surface(&source, &mut crate::NativeServices::new(None)).unwrap();
         assert!(
             matches!(&resolved.registry().aliases["A"].body, Type::Adt(name, _) if name == "B")
         );
@@ -358,7 +391,9 @@ mod tests {
             form(DeepTag::Import, vec![name("Absent")]),
             number,
         ] {
-            assert!(resolve_declared_surface(&[source]).is_err());
+            assert!(
+                resolve_declared_surface(&[source], &mut crate::NativeServices::new(None)).is_err()
+            );
         }
     }
 }

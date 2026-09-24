@@ -4,10 +4,17 @@ use chelis_ir::host::{HostLoweringSession, host_def_kernel};
 
 fn checked(src: &str) -> chelis_types::CheckedProgram {
     let expanded = chelis_deep::parser::parse_str(src).expect("Deep fixture");
-    let typed = chelis_types::check_ir_program(&expanded, chelis_types::ProgramOrigin::Unlinked)
-        .expect("type check");
-    let effected = chelis_effects::check_program(&typed).expect("effect check");
-    chelis_types::check_linearity(&effected).expect("linearity")
+    let typed = chelis_types::check_ir_program(
+        &expanded,
+        chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
+    )
+    .expect("type check");
+    let effected =
+        chelis_effects::check_program(&typed, &mut chelis_types::NativeServices::new(None))
+            .expect("effect check");
+    chelis_types::check_linearity(&effected, &mut chelis_types::NativeServices::new(None))
+        .expect("linearity")
 }
 
 fn decision(source: &str, name: &str, kernel: bool) {

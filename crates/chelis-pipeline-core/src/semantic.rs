@@ -13,8 +13,11 @@ use crate::{
 };
 
 /// Analyze prepared Deep through one monolithic IR type session.
-pub fn analyze_prepared(prepared: PreparedProgram) -> PreparedTypeAnalysisOutcome {
-    match analyze_ir_program(prepared.expanded_deep(), prepared.origin()) {
+pub fn analyze_prepared(
+    prepared: PreparedProgram,
+    native: &mut chelis_types::NativeServices,
+) -> PreparedTypeAnalysisOutcome {
+    match analyze_ir_program(prepared.expanded_deep(), prepared.origin(), native) {
         TypeAnalysisOutcome::Rejected { fitness } => {
             PreparedTypeAnalysisOutcome::Rejected { fitness }
         }
@@ -31,10 +34,14 @@ pub fn analyze_prepared(prepared: PreparedProgram) -> PreparedTypeAnalysisOutcom
 /// Analyze a prepared library and retain both products from one type session.
 pub fn analyze_prepared_library(
     prepared: PreparedProgram,
+    native: &mut chelis_types::NativeServices,
 ) -> Result<PreparedLibraryAnalysis, LibraryRejection> {
-    let (type_env, program) =
-        chelis_types::build_compiled_library_context(prepared.expanded_deep(), prepared.origin())
-            .map_err(|report| LibraryRejection::Type { report })?;
+    let (type_env, program) = chelis_types::build_compiled_library_context(
+        prepared.expanded_deep(),
+        prepared.origin(),
+        native,
+    )
+    .map_err(|report| LibraryRejection::Type { report })?;
     let analysis = prepared_analysis_from_checked(prepared, program);
     Ok(PreparedLibraryAnalysis { type_env, analysis })
 }
@@ -43,9 +50,15 @@ pub fn analyze_prepared_library(
 pub fn complete_library_checks(
     prepared: PreparedLibraryAnalysis,
     runtime: &LoweringRuntime,
+    native: &mut chelis_types::NativeServices,
 ) -> Result<CheckedLibrary, LibraryRejection> {
-    let checked = complete_checks(prepared.analysis, SemanticContext::Isolated, runtime)
-        .map_err(library_semantic_rejection)?;
+    let checked = complete_checks(
+        prepared.analysis,
+        SemanticContext::Isolated,
+        runtime,
+        native,
+    )
+    .map_err(library_semantic_rejection)?;
     bind_checked_library(prepared.type_env, checked)
 }
 
@@ -53,8 +66,9 @@ pub fn complete_library_checks(
 pub fn check_prepared_library(
     prepared: PreparedProgram,
     runtime: &LoweringRuntime,
+    native: &mut chelis_types::NativeServices,
 ) -> Result<CheckedLibrary, LibraryRejection> {
-    complete_library_checks(analyze_prepared_library(prepared)?, runtime)
+    complete_library_checks(analyze_prepared_library(prepared, native)?, runtime, native)
 }
 
 /// Parse cached library products into a checked library proof.
@@ -77,15 +91,16 @@ pub fn check_prepared_library(
 pub fn validate_cached_library(
     cached_type_env: TypeEnv,
     cached_program: CheckedProgram,
+    native: &mut chelis_types::NativeServices,
 ) -> Result<CheckedLibrary, LibraryRejection> {
     if cached_program.context_library_proof_id().is_some()
         || !cached_type_env.matches_checked_program(&cached_program)
     {
         return Err(LibraryRejection::ContextMismatch);
     }
-    let effected = chelis_effects::check_program(&cached_program)
+    let effected = chelis_effects::check_program(&cached_program, native)
         .map_err(|errors| LibraryRejection::Effects { errors })?;
-    let program = chelis_types::check_linearity(&effected)
+    let program = chelis_types::check_linearity(&effected, native)
         .map_err(|errors| LibraryRejection::Linearity { errors })?;
     if !cached_type_env.matches_checked_program(&program) {
         return Err(LibraryRejection::ContextMismatch);
@@ -101,12 +116,14 @@ fn analyze_prepared_with_context(
     prepared: PreparedProgram,
     type_env: &TypeEnv,
     signature_context: &SignatureInferenceMetadata,
+    native: &mut chelis_types::NativeServices,
 ) -> Result<PreparedTypeAnalysis, InferResult> {
     let program = chelis_types::check_ir_with_signature_context(
         type_env,
         signature_context,
         prepared.expanded_deep(),
         prepared.origin(),
+        native,
     )?;
     Ok(prepared_analysis_from_checked(prepared, program))
 }
@@ -115,11 +132,13 @@ fn analyze_prepared_with_context(
 pub fn analyze_prepared_with_library<'library>(
     prepared: PreparedProgram,
     library: &'library CheckedLibrary,
+    native: &mut chelis_types::NativeServices,
 ) -> Result<ContextualTypeAnalysis<'library>, InferResult> {
     let analysis = analyze_prepared_with_context(
         prepared,
         library.type_env(),
         library.program().signature_inference(),
+        native,
     )?;
     Ok(ContextualTypeAnalysis { library, analysis })
 }
@@ -128,11 +147,13 @@ pub fn analyze_prepared_with_library<'library>(
 pub fn analyze_prepared_library_with_base<'library>(
     prepared: PreparedProgram,
     library: &'library CheckedLibrary,
+    native: &mut chelis_types::NativeServices,
 ) -> Result<ContextualLibraryTypeAnalysis<'library>, InferResult> {
     let (type_env, program) = chelis_types::build_compiled_library_context_with_base(
         library.type_env(),
         prepared.expanded_deep(),
         prepared.origin(),
+        native,
     )?;
     let analysis = prepared_analysis_from_checked(prepared, program);
     Ok(ContextualLibraryTypeAnalysis {
@@ -162,9 +183,10 @@ pub fn complete_checks(
     analysis: PreparedTypeAnalysis,
     context: SemanticContext,
     runtime: &LoweringRuntime,
+    native: &mut chelis_types::NativeServices,
 ) -> Result<CheckedCompilation, SemanticRejection> {
     match context {
-        SemanticContext::Isolated => complete_checks_in_context(analysis, None, runtime),
+        SemanticContext::Isolated => complete_checks_in_context(analysis, None, runtime, native),
     }
 }
 
@@ -172,18 +194,19 @@ fn complete_checks_in_context(
     analysis: PreparedTypeAnalysis,
     library: Option<&CheckedProgram>,
     runtime: &LoweringRuntime,
+    native: &mut chelis_types::NativeServices,
 ) -> Result<CheckedCompilation, SemanticRejection> {
     let effected = if let Some(library) = library {
-        chelis_effects::check_effects_with_context(library, &analysis.program)
+        chelis_effects::check_effects_with_context(library, &analysis.program, native)
     } else {
-        chelis_effects::check_program(&analysis.program)
+        chelis_effects::check_program(&analysis.program, native)
     }
     .map_err(|errors| SemanticRejection::Effects { errors })?;
 
     let program = if let Some(library) = library {
-        chelis_types::check_linearity_with_context(library, &effected)
+        chelis_types::check_linearity_with_context(library, &effected, native)
     } else {
-        chelis_types::check_linearity(&effected)
+        chelis_types::check_linearity(&effected, native)
     }
     .map_err(|errors| SemanticRejection::Linearity { errors })?;
 
@@ -200,11 +223,13 @@ fn complete_checks_in_context(
 pub fn complete_context_checks<'library>(
     contextual: ContextualTypeAnalysis<'library>,
     runtime: &LoweringRuntime,
+    native: &mut chelis_types::NativeServices,
 ) -> Result<ContextCheckedCompilation<'library>, SemanticRejection> {
     let extension = complete_checks_in_context(
         contextual.analysis,
         Some(contextual.library.program()),
         runtime,
+        native,
     )?;
     Ok(ContextCheckedCompilation {
         library: contextual.library,
@@ -216,11 +241,13 @@ pub fn complete_context_checks<'library>(
 pub fn complete_context_library_checks(
     contextual: ContextualLibraryTypeAnalysis<'_>,
     runtime: &LoweringRuntime,
+    native: &mut chelis_types::NativeServices,
 ) -> Result<CheckedLibrary, LibraryRejection> {
     let extension = complete_checks_in_context(
         contextual.analysis,
         Some(contextual.library.program()),
         runtime,
+        native,
     )
     .map_err(library_semantic_rejection)?;
     let checked = compose_context(contextual.library, extension, runtime);

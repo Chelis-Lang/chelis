@@ -58,7 +58,12 @@ fn shape_node_evaluates_to_runtime_extent() {
         "x".into(),
         TensorValue::from_vec(vec![2, 3], vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0]),
     );
-    let values = eval_tensor_with(&dag, |name| inputs.get(name).cloned()).expect("eval");
+    let values = eval_tensor_with(
+        &dag,
+        |name| inputs.get(name).cloned(),
+        &mut chelis_types::NativeServices::new(None),
+    )
+    .expect("eval");
     assert_eq!(values[&s0].shape, Vec::<usize>::new(), "extent is a scalar");
     assert_eq!(
         values[&s0].to_f64_lossy_vec(),

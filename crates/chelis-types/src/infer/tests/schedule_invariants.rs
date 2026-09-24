@@ -200,7 +200,7 @@ fn deep_type_has_hole(root: &chelis_deep::Expr) -> bool {
     false
 }
 
-fn measure(program: &Program) -> Measured {
+fn measure(program: &Program, stack: &mut StackBudget<'_>) -> Measured {
     let source = program.source();
     let exprs = chelis_deep::parser::parse_str(&source)
         .unwrap_or_else(|error| panic!("generated Deep must parse: {error:?}\n{source}"));
@@ -224,14 +224,14 @@ fn measure(program: &Program) -> Measured {
             FlatItem::Declared(position)
         })
         .collect::<Vec<_>>();
-    let plan = FunctionInferencePlan::build(&items);
+    let plan = FunctionInferencePlan::build(&items, &mut crate::NativeServices::new(None));
     assert!(plan.complete, "plan must complete\n{source}");
     let module_fn_indices = plan
         .ordered_members()
         .filter(|member| items[member.item_index].0.is_some())
         .map(|member| member.item_index)
         .collect::<BTreeSet<_>>();
-    let schedule = primary_inference_schedule(&plan, &items);
+    let schedule = primary_inference_schedule(&plan, &items, stack);
     let mut headers: BTreeMap<&'static str, Header> = BTreeMap::new();
     for declaration in &program.declarations {
         headers.insert(declaration.name, Header::Absent);
@@ -590,8 +590,8 @@ fn collapsed(order: &[usize], vertex: &[usize]) -> Vec<usize> {
 }
 
 /// Check every invariant on one program and return the violations.
-fn violations(program: &Program) -> Vec<String> {
-    let measured = measure(program);
+fn violations(program: &Program, stack: &mut StackBudget<'_>) -> Vec<String> {
+    let measured = measure(program, stack);
     let reference = reference(program, &measured);
     let source = program.source();
     let schedule = &measured.schedule;
@@ -654,10 +654,10 @@ fn violations(program: &Program) -> Vec<String> {
     failures
 }
 
-fn assert_invariants(programs: &[Program]) {
+fn assert_invariants(programs: &[Program], stack: &mut StackBudget<'_>) {
     let mut failures = Vec::new();
     for program in programs {
-        failures.extend(violations(program));
+        failures.extend(violations(program, stack));
     }
     assert!(
         failures.is_empty(),
@@ -776,7 +776,13 @@ fn round_eight_layouts() -> Vec<Vec<Declaration>> {
 fn round_eight_alphabet_satisfies_the_schedule_invariants() {
     let programs = programs_over(round_eight_layouts());
     assert_eq!(programs.len(), 192);
-    assert_invariants(&programs);
+    assert_invariants(
+        &programs,
+        &mut StackBudget::new(
+            &mut NativeServices::new(None),
+            &mut StackBailRecord::default(),
+        ),
+    );
 }
 
 /// Rounds 5 and 6: an anchor function, an eager value, and a reader that is
@@ -840,7 +846,13 @@ fn matrix_layouts() -> Vec<Vec<Declaration>> {
 fn anchor_value_reader_matrix_satisfies_the_schedule_invariants() {
     let programs = programs_over(matrix_layouts());
     assert_eq!(programs.len(), 64);
-    assert_invariants(&programs);
+    assert_invariants(
+        &programs,
+        &mut StackBudget::new(
+            &mut NativeServices::new(None),
+            &mut StackBailRecord::default(),
+        ),
+    );
 }
 
 /// Round 6: a mutually recursive pair straddling the value one member reads,
@@ -936,7 +948,13 @@ fn recursive_layouts() -> Vec<Vec<Declaration>> {
 fn recursive_component_layouts_satisfy_the_schedule_invariants() {
     let programs = programs_over(recursive_layouts());
     assert_eq!(programs.len(), 24);
-    assert_invariants(&programs);
+    assert_invariants(
+        &programs,
+        &mut StackBudget::new(
+            &mut NativeServices::new(None),
+            &mut StackBailRecord::default(),
+        ),
+    );
 }
 
 /// Round 7: a `defsig`-less helper, its caller, and a value reading the
@@ -976,7 +994,13 @@ fn function_visibility_layouts() -> Vec<Vec<Declaration>> {
 fn function_visibility_layouts_satisfy_the_schedule_invariants() {
     let programs = programs_over(function_visibility_layouts());
     assert_eq!(programs.len(), 12);
-    assert_invariants(&programs);
+    assert_invariants(
+        &programs,
+        &mut StackBudget::new(
+            &mut NativeServices::new(None),
+            &mut StackBailRecord::default(),
+        ),
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -1054,8 +1078,23 @@ fn round_five_hoisted_reader_follows_the_value_it_reads() {
             ),
         ],
     );
-    assert!(violations(&program).is_empty());
-    let measured = measure(&program);
+    assert!(
+        violations(
+            &program,
+            &mut StackBudget::new(
+                &mut NativeServices::new(None),
+                &mut StackBailRecord::default()
+            )
+        )
+        .is_empty()
+    );
+    let measured = measure(
+        &program,
+        &mut StackBudget::new(
+            &mut NativeServices::new(None),
+            &mut StackBailRecord::default(),
+        ),
+    );
     assert_before(&program, &measured, "seed", "carried");
     assert_before(&program, &measured, "carried", "later_reader");
 }
@@ -1140,8 +1179,25 @@ fn round_six_recursive_component_follows_the_value_a_member_reads() {
                     ),
                 ],
             );
-            assert!(violations(&program).is_empty(), "{}", program.source());
-            let measured = measure(&program);
+            assert!(
+                violations(
+                    &program,
+                    &mut StackBudget::new(
+                        &mut NativeServices::new(None),
+                        &mut StackBailRecord::default()
+                    )
+                )
+                .is_empty(),
+                "{}",
+                program.source()
+            );
+            let measured = measure(
+                &program,
+                &mut StackBudget::new(
+                    &mut NativeServices::new(None),
+                    &mut StackBailRecord::default(),
+                ),
+            );
             assert_before(&program, &measured, "carried", "ping");
             assert_before(&program, &measured, "carried", "pong");
         }
@@ -1182,8 +1238,23 @@ fn round_seven_value_reading_a_caller_waits_for_the_defsig_less_chain() {
             ),
         ],
     );
-    assert!(violations(&program).is_empty());
-    let measured = measure(&program);
+    assert!(
+        violations(
+            &program,
+            &mut StackBudget::new(
+                &mut NativeServices::new(None),
+                &mut StackBailRecord::default()
+            )
+        )
+        .is_empty()
+    );
+    let measured = measure(
+        &program,
+        &mut StackBudget::new(
+            &mut NativeServices::new(None),
+            &mut StackBailRecord::default(),
+        ),
+    );
     assert_before(&program, &measured, "helper", "caller");
     assert_before(&program, &measured, "caller", "consumer");
 }
@@ -1230,13 +1301,28 @@ fn round_eight_stall_free_program_keeps_planner_order() {
             ),
         ],
     );
-    let measured = measure(&program);
+    let measured = measure(
+        &program,
+        &mut StackBudget::new(
+            &mut NativeServices::new(None),
+            &mut StackBailRecord::default(),
+        ),
+    );
     let reference = reference(&program, &measured);
     assert!(
         reference.cyclic_components.is_empty(),
         "D4_min has no reference cycle"
     );
-    assert!(violations(&program).is_empty());
+    assert!(
+        violations(
+            &program,
+            &mut StackBudget::new(
+                &mut NativeServices::new(None),
+                &mut StackBailRecord::default()
+            )
+        )
+        .is_empty()
+    );
     assert_before(&program, &measured, "tailfn", "carried");
     assert_before(&program, &measured, "carried", "helper");
     assert_before(&program, &measured, "helper", "caller");
@@ -1276,13 +1362,28 @@ fn a_value_reading_a_later_function_does_not_stall() {
             ),
         ],
     );
-    let measured = measure(&program);
+    let measured = measure(
+        &program,
+        &mut StackBudget::new(
+            &mut NativeServices::new(None),
+            &mut StackBailRecord::default(),
+        ),
+    );
     let reference = reference(&program, &measured);
     assert!(
         reference.cyclic_components.is_empty(),
         "C2 has no reference cycle"
     );
-    assert!(violations(&program).is_empty());
+    assert!(
+        violations(
+            &program,
+            &mut StackBudget::new(
+                &mut NativeServices::new(None),
+                &mut StackBailRecord::default()
+            )
+        )
+        .is_empty()
+    );
     assert_before(&program, &measured, "tail", "carried");
     assert_before(&program, &measured, "carried", "head");
 }
@@ -1323,10 +1424,25 @@ fn a_textual_chain_would_close_a_cycle_this_graph_does_not_have() {
             ),
         ],
     );
-    let measured = measure(&program);
+    let measured = measure(
+        &program,
+        &mut StackBudget::new(
+            &mut NativeServices::new(None),
+            &mut StackBailRecord::default(),
+        ),
+    );
     let reference = reference(&program, &measured);
     assert!(reference.cyclic_components.is_empty());
-    assert!(violations(&program).is_empty());
+    assert!(
+        violations(
+            &program,
+            &mut StackBudget::new(
+                &mut NativeServices::new(None),
+                &mut StackBailRecord::default()
+            )
+        )
+        .is_empty()
+    );
     assert_before(&program, &measured, "second", "reads");
     assert_before(&program, &measured, "reads", "first");
 }
@@ -1384,11 +1500,24 @@ fn a_below_floor_reader_of_a_hole_signature_function_follows_it() {
         ],
     );
     assert!(
-        violations(&holed_wrapped).is_empty(),
+        violations(
+            &holed_wrapped,
+            &mut StackBudget::new(
+                &mut NativeServices::new(None),
+                &mut StackBailRecord::default()
+            )
+        )
+        .is_empty(),
         "{}",
         holed_wrapped.source()
     );
-    let measured = measure(&holed_wrapped);
+    let measured = measure(
+        &holed_wrapped,
+        &mut StackBudget::new(
+            &mut NativeServices::new(None),
+            &mut StackBailRecord::default(),
+        ),
+    );
     assert_before(&holed_wrapped, &measured, "f", "r");
 
     // A bare unit has no planner region at all, so the mirror edge could never
@@ -1419,11 +1548,24 @@ fn a_below_floor_reader_of_a_hole_signature_function_follows_it() {
         ],
     );
     assert!(
-        violations(&holed_bare).is_empty(),
+        violations(
+            &holed_bare,
+            &mut StackBudget::new(
+                &mut NativeServices::new(None),
+                &mut StackBailRecord::default()
+            )
+        )
+        .is_empty(),
         "{}",
         holed_bare.source()
     );
-    let measured = measure(&holed_bare);
+    let measured = measure(
+        &holed_bare,
+        &mut StackBudget::new(
+            &mut NativeServices::new(None),
+            &mut StackBailRecord::default(),
+        ),
+    );
     assert_before(&holed_bare, &measured, "f", "r");
 
     // Control: a complete header is honest before its body ([04-INF-6]), so
@@ -1465,8 +1607,25 @@ fn a_below_floor_reader_of_a_hole_signature_function_follows_it() {
             ),
         ],
     );
-    assert!(violations(&complete).is_empty(), "{}", complete.source());
-    let measured = measure(&complete);
+    assert!(
+        violations(
+            &complete,
+            &mut StackBudget::new(
+                &mut NativeServices::new(None),
+                &mut StackBailRecord::default()
+            )
+        )
+        .is_empty(),
+        "{}",
+        complete.source()
+    );
+    let measured = measure(
+        &complete,
+        &mut StackBudget::new(
+            &mut NativeServices::new(None),
+            &mut StackBailRecord::default(),
+        ),
+    );
     assert_before(&complete, &measured, "r", "g");
 }
 
@@ -1611,7 +1770,13 @@ fn a_value_naming_a_function_that_reads_it_back_is_a_recorded_stall() {
                 reader,
             ],
         );
-        let measured = measure(&program);
+        let measured = measure(
+            &program,
+            &mut StackBudget::new(
+                &mut NativeServices::new(None),
+                &mut StackBailRecord::default(),
+            ),
+        );
         let reference = reference(&program, &measured);
         let item_named = |name: &str| {
             measured
@@ -1641,7 +1806,18 @@ fn a_value_naming_a_function_that_reads_it_back_is_a_recorded_stall() {
             "{label}: component must be cyclic\n{}",
             program.source()
         );
-        assert!(violations(&program).is_empty(), "{}", program.source());
+        assert!(
+            violations(
+                &program,
+                &mut StackBudget::new(
+                    &mut NativeServices::new(None),
+                    &mut StackBailRecord::default()
+                )
+            )
+            .is_empty(),
+            "{}",
+            program.source()
+        );
         assert_eq!(measured.schedule.len(), measured.flat.len());
     }
 }
@@ -1685,14 +1861,31 @@ fn a_genuine_binding_cycle_stays_total_as_one_component() {
             ),
         ],
     );
-    let measured = measure(&three);
+    let measured = measure(
+        &three,
+        &mut StackBudget::new(
+            &mut NativeServices::new(None),
+            &mut StackBailRecord::default(),
+        ),
+    );
     let three_reference = reference(&three, &measured);
     assert!(
         !three_reference.cyclic_components.is_empty(),
         "{}",
         three.source()
     );
-    assert!(violations(&three).is_empty(), "{}", three.source());
+    assert!(
+        violations(
+            &three,
+            &mut StackBudget::new(
+                &mut NativeServices::new(None),
+                &mut StackBailRecord::default()
+            )
+        )
+        .is_empty(),
+        "{}",
+        three.source()
+    );
     assert_eq!(measured.schedule.len(), measured.flat.len());
     let three_positions = positions(&measured.schedule);
     let component_slots = three_reference
@@ -1774,14 +1967,31 @@ fn a_genuine_binding_cycle_stays_total_as_one_component() {
             ),
         ],
     );
-    let measured = measure(&mirror);
+    let measured = measure(
+        &mirror,
+        &mut StackBudget::new(
+            &mut NativeServices::new(None),
+            &mut StackBailRecord::default(),
+        ),
+    );
     let mirror_reference = reference(&mirror, &measured);
     assert!(
         !mirror_reference.cyclic_components.is_empty(),
         "{}",
         mirror.source()
     );
-    assert!(violations(&mirror).is_empty(), "{}", mirror.source());
+    assert!(
+        violations(
+            &mirror,
+            &mut StackBudget::new(
+                &mut NativeServices::new(None),
+                &mut StackBailRecord::default()
+            )
+        )
+        .is_empty(),
+        "{}",
+        mirror.source()
+    );
     assert_eq!(measured.schedule.len(), measured.flat.len());
     let mirror_positions = positions(&measured.schedule);
     let component_slots = mirror_reference
@@ -1814,8 +2024,15 @@ fn a_mixed_bare_and_module_component_follows_the_value_a_member_reads() {
     .expect("mixed Deep fixture parses");
     let items = top_level_decl_items_with_modules(&exprs);
     assert_eq!(items.len(), 3);
-    let plan = FunctionInferencePlan::build(&items);
-    let schedule = primary_inference_schedule(&plan, &items);
+    let plan = FunctionInferencePlan::build(&items, &mut crate::NativeServices::new(None));
+    let schedule = primary_inference_schedule(
+        &plan,
+        &items,
+        &mut StackBudget::new(
+            &mut NativeServices::new(None),
+            &mut StackBailRecord::default(),
+        ),
+    );
     // carried (1) must precede both members; members contiguous.
     let position = positions(&schedule);
     assert!(
@@ -1852,8 +2069,15 @@ fn cycle_precedence_value_is_available_before_the_cyclic_component() {
     let exprs = chelis_deep::parser::parse_str(source).expect("fixture parses");
 
     let items = top_level_decl_items_with_modules(&exprs);
-    let plan = FunctionInferencePlan::build(&items);
-    let schedule = primary_inference_schedule(&plan, &items);
+    let plan = FunctionInferencePlan::build(&items, &mut crate::NativeServices::new(None));
+    let schedule = primary_inference_schedule(
+        &plan,
+        &items,
+        &mut StackBudget::new(
+            &mut NativeServices::new(None),
+            &mut StackBailRecord::default(),
+        ),
+    );
     let item_named = |name: &str| {
         items
             .iter()

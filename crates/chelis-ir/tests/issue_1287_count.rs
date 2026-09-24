@@ -48,7 +48,12 @@ fn evaluator_counts_multi_axis_groups_in_original_row_major_order() {
         vec![1, 0, 1, 1, 0, 0, 1, 1, 0, 1, 1, 1],
     )
     .expect("bool fixture");
-    let values = eval_tensor(&dag, &UnordMap::from([("x".into(), input)])).expect("count eval");
+    let values = eval_tensor(
+        &dag,
+        &UnordMap::from([("x".into(), input)]),
+        &mut chelis_types::NativeServices::new(None),
+    )
+    .expect("count eval");
     let output = &values[&chelis_ir::dag::NodeId(1)];
     assert_eq!(output.shape, vec![3]);
     assert_eq!(output.to_f64_lossy_vec(), vec![3.0, 3.0, 2.0]);
@@ -61,7 +66,12 @@ fn evaluator_returns_zero_for_a_selected_zero_extent() {
     assert!(verify::verify(&dag).is_empty());
     let input = TensorValue::finalize_from_wide_int("test", Prim::Bool, vec![2, 0, 3], vec![])
         .expect("empty bool fixture");
-    let values = eval_tensor(&dag, &UnordMap::from([("x".into(), input)])).expect("count eval");
+    let values = eval_tensor(
+        &dag,
+        &UnordMap::from([("x".into(), input)]),
+        &mut chelis_types::NativeServices::new(None),
+    )
+    .expect("count eval");
     assert_eq!(
         values[&chelis_ir::dag::NodeId(1)].to_f64_lossy_vec(),
         vec![0.0; 6]
@@ -103,11 +113,18 @@ fn verifier_rejects_noncanonical_axes_wrong_dtype_and_wrong_shape() {
 fn lower_deep(source: &str) -> Result<Dag, String> {
     let exprs =
         chelis_deep::parser::parse_and_stamp(source).map_err(|e| format!("parse: {e:?}"))?;
-    let checked = check_typed_program(&exprs, chelis_types::ProgramOrigin::Unlinked)
-        .map_err(|r| format!("check: {:#?}", r.errors))?;
-    let checked = chelis_effects::check_program(&checked).map_err(|e| format!("effects: {e:?}"))?;
+    let checked = check_typed_program(
+        &exprs,
+        chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
+    )
+    .map_err(|r| format!("check: {:#?}", r.errors))?;
     let checked =
-        chelis_types::check_linearity(&checked).map_err(|e| format!("linearity: {e:?}"))?;
+        chelis_effects::check_program(&checked, &mut chelis_types::NativeServices::new(None))
+            .map_err(|e| format!("effects: {e:?}"))?;
+    let checked =
+        chelis_types::check_linearity(&checked, &mut chelis_types::NativeServices::new(None))
+            .map_err(|e| format!("linearity: {e:?}"))?;
     chelis_ir::lowering_runtime::with_native_lowering_runtime(|runtime| {
         try_lower_program(&checked, runtime)
     })

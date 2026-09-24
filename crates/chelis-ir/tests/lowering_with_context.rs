@@ -28,40 +28,71 @@ fn parse(src: &str) -> Vec<Expr> {
 
 fn check_lib(library_src: &str) -> (Vec<Expr>, TypeEnv, CheckedProgram) {
     let library_exprs = parse(library_src);
-    let env = build_type_env_from_library(&library_exprs, chelis_types::ProgramOrigin::Unlinked)
-        .expect("library type-checks clean");
+    let env = build_type_env_from_library(
+        &library_exprs,
+        chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
+    )
+    .expect("library type-checks clean");
 
     // Build a CheckedProgram for the library by running the standard
     // monolithic IR check check on the library source itself, then the
     // effect + linearity passes — this is the same pipeline `lower_program`
     // expects.
-    let checked = check_ir_program(&library_exprs, chelis_types::ProgramOrigin::Unlinked)
-        .expect("library IR check clean");
-    let checked = chelis_effects::check_program(&checked).expect("library effect clean");
-    let checked = check_linearity(&checked).expect("library linearity clean");
+    let checked = check_ir_program(
+        &library_exprs,
+        chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
+    )
+    .expect("library IR check clean");
+    let checked =
+        chelis_effects::check_program(&checked, &mut chelis_types::NativeServices::new(None))
+            .expect("library effect clean");
+    let checked = check_linearity(&checked, &mut chelis_types::NativeServices::new(None))
+        .expect("library linearity clean");
     (library_exprs, env, checked)
 }
 
 fn check_with_ctx(ctx: &TypeEnv, new_src: &str) -> CheckedProgram {
     let new_exprs = parse(new_src);
-    let checked = check_ir_with_context(ctx, &new_exprs, chelis_types::ProgramOrigin::Unlinked)
-        .expect("new-code IR check clean");
-    let checked = chelis_effects::check_program(&checked).expect("new-code effect clean");
-    check_linearity(&checked).expect("new-code linearity clean")
+    let checked = check_ir_with_context(
+        ctx,
+        &new_exprs,
+        chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
+    )
+    .expect("new-code IR check clean");
+    let checked =
+        chelis_effects::check_program(&checked, &mut chelis_types::NativeServices::new(None))
+            .expect("new-code effect clean");
+    check_linearity(&checked, &mut chelis_types::NativeServices::new(None))
+        .expect("new-code linearity clean")
 }
 
 fn check_monolithic(combined_src: &str) -> CheckedProgram {
     let exprs = parse(combined_src);
-    let checked = check_ir_program(&exprs, chelis_types::ProgramOrigin::Unlinked)
-        .expect("monolithic IR check clean");
-    let checked = chelis_effects::check_program(&checked).expect("monolithic effect clean");
-    check_linearity(&checked).expect("monolithic linearity clean")
+    let checked = check_ir_program(
+        &exprs,
+        chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
+    )
+    .expect("monolithic IR check clean");
+    let checked =
+        chelis_effects::check_program(&checked, &mut chelis_types::NativeServices::new(None))
+            .expect("monolithic effect clean");
+    check_linearity(&checked, &mut chelis_types::NativeServices::new(None))
+        .expect("monolithic linearity clean")
 }
 
 fn eval_dag_root_values(dag: &Dag, inputs: &UnordMap<String, TensorValue>) -> Vec<TensorValue> {
     let roots: Vec<NodeId> = dag.roots().to_vec();
-    let values = eval_tensor_roots_with(dag, &roots, |name| inputs.get(name).cloned())
-        .expect("eval succeeds");
+    let values = eval_tensor_roots_with(
+        dag,
+        &roots,
+        |name| inputs.get(name).cloned(),
+        &mut chelis_types::NativeServices::new(None),
+    )
+    .expect("eval succeeds");
     roots
         .iter()
         .map(|id| values.get(id).cloned().expect("evaluated root has a value"))
@@ -82,8 +113,13 @@ fn eval_named_roots(
     use chelis_ir::dag::RiscOp;
 
     let roots = dag.roots();
-    let values = eval_tensor_roots_with(dag, roots, |name| inputs.get(name).cloned())
-        .expect("eval succeeds");
+    let values = eval_tensor_roots_with(
+        dag,
+        roots,
+        |name| inputs.get(name).cloned(),
+        &mut chelis_types::NativeServices::new(None),
+    )
+    .expect("eval succeeds");
 
     let mut out = UnordMap::new();
     for &root in roots {
@@ -510,6 +546,7 @@ fn shadowed_host_value_lowers_and_references_follow_source_order() {
             &ctx,
             &parse("(def {} value (lit {type: (t-prim {} i32)} 2))"),
             chelis_types::ProgramOrigin::Unlinked,
+            &mut chelis_types::NativeServices::new(None),
         )
         .is_err()
     );
@@ -545,7 +582,13 @@ fn shadowed_tensor_value_does_not_reclassify_materialized_or_lexically_bound_val
         lower_program_with_context(&library, &new_checked, runtime)
     });
     let new_roots = &dag.roots()[library_roots.len()..];
-    let values = eval_tensor_roots_with(&dag, new_roots, |_| None).expect("new roots evaluate");
+    let values = eval_tensor_roots_with(
+        &dag,
+        new_roots,
+        |_| None,
+        &mut chelis_types::NativeServices::new(None),
+    )
+    .expect("new roots evaluate");
     assert_eq!(
         new_roots
             .iter()
@@ -560,8 +603,13 @@ fn shadowed_tensor_value_does_not_reclassify_materialized_or_lexically_bound_val
         lower_program_with_context(&library, &original_reference, runtime)
     });
     let root = *original_dag.roots().last().expect("original scalar root");
-    let values = eval_tensor_roots_with(&original_dag, &[root], |_| None)
-        .expect("original library binding evaluates");
+    let values = eval_tensor_roots_with(
+        &original_dag,
+        &[root],
+        |_| None,
+        &mut chelis_types::NativeServices::new(None),
+    )
+    .expect("original library binding evaluates");
     assert_eq!(values[&root].to_f64_lossy_vec(), vec![1.0]);
 }
 
@@ -609,8 +657,13 @@ fn shadowed_callable_reclassifies_transitive_library_calls() {
         .roots()
         .last()
         .expect("transitive call contributes a root");
-    let values = eval_tensor_roots_with(&dag, &[root], |_| None)
-        .expect("transitive call has no unresolved parameter inputs");
+    let values = eval_tensor_roots_with(
+        &dag,
+        &[root],
+        |_| None,
+        &mut chelis_types::NativeServices::new(None),
+    )
+    .expect("transitive call has no unresolved parameter inputs");
     assert_eq!(values[&root].to_f64_lossy_vec(), vec![5.0]);
 }
 
@@ -649,8 +702,13 @@ fn host_replacement_excludes_transitive_library_calls_from_new_roots() {
         lower_program_with_context(&library, &new_checked, runtime)
     });
     let new_roots = &dag.roots()[library.dag().roots().len()..];
-    let values = eval_tensor_roots_with(&dag, new_roots, |_| None)
-        .expect("unaffected tensor root evaluates");
+    let values = eval_tensor_roots_with(
+        &dag,
+        new_roots,
+        |_| None,
+        &mut chelis_types::NativeServices::new(None),
+    )
+    .expect("unaffected tensor root evaluates");
     assert_eq!(
         new_roots
             .iter()

@@ -156,12 +156,20 @@ pub(super) fn report_builtin_arity(
 /// set so that `uniform_like(t, -3.0, ...)` (a `neg` literal) and
 /// `uniform_like(t, cast(2.0, f32), ...)` -- both of which the backend folds --
 /// are accepted rather than spuriously rejected.
-pub(super) fn is_static_numeric_bound(expr: &deep::Expr) -> bool {
+pub(super) fn is_static_numeric_bound(expr: &deep::Expr, stack: &mut StackBudget<'_>) -> bool {
     // Recurses on the `cast`/`neg` inner node; guard the native stack against a
     // pathologically deep wrapper chain, bailing conservatively to `false` (the
     // bound is then treated as non-resolvable and rejected loudly, never a
     // silent accept).
-    stack_guard!("is_static_numeric_bound", expr, false);
+    if stack.frame_exhausted("is_static_numeric_bound", || expr.span_id()) {
+        return false;
+    }
+    let result = is_static_numeric_bound_frame(expr, stack);
+    stack.exit_frame();
+    result
+}
+
+fn is_static_numeric_bound_frame(expr: &deep::Expr, stack: &mut StackBudget<'_>) -> bool {
     if matches!(
         expr,
         deep::Expr::Atom(deep::Atom::Float(_) | deep::Atom::Int(_), _)
@@ -181,14 +189,16 @@ pub(super) fn is_static_numeric_bound(expr: &deep::Expr) -> bool {
         // A float-target cast of a resolvable value. An integer target
         // truncates and is left unresolved, matching the lowering.
         DeepTag::Cast => {
-            let inner_resolvable = kids.first().is_some_and(is_static_numeric_bound);
+            let inner_resolvable = kids
+                .first()
+                .is_some_and(|expr| is_static_numeric_bound(expr, stack));
             let target_is_float = kids.get(1).is_some_and(deep_prim_is_float);
             target_is_float && inner_resolvable
         }
         // neg(<inner>): unary minus desugars to `(app {} (var {} neg) <inner>)`.
-        DeepTag::App if kids.first().is_some_and(expr_is_neg_var) => {
-            kids.get(1).is_some_and(is_static_numeric_bound)
-        }
+        DeepTag::App if kids.first().is_some_and(expr_is_neg_var) => kids
+            .get(1)
+            .is_some_and(|expr| is_static_numeric_bound(expr, stack)),
         // Only a `lit`-tagged list carries a numeric atom AS ITS VALUE.
         // The lowering's `extract_f64_value` catch-all reads element 2 of
         // ANY list, which blesses a form whose value is NOT at element 2 --
@@ -1212,7 +1222,7 @@ pub(super) fn collect_all_declarations(
     report_orphan_defsigs(items, origin, errors);
     report_builtin_shadowing(&bare_items, errors);
     note_eager_value_ordinals(items, env);
-    let resolution_env = precollect_type_resolution_env(items, adt_reg);
+    let resolution_env = precollect_type_resolution_env(items, adt_reg, &mut errors.stack());
     // Install the provisional self/forward header scope explicitly in this
     // per-check registry clone. Declaration bodies resolve against it, while
     // only successful bodies enter the validated maps that survive serde.
@@ -1223,9 +1233,8 @@ pub(super) fn collect_all_declarations(
     // in that window waits it out. An abandoned collection leaves later
     // declarations unbound; the check entry's `cancellation_gate` rejects the
     // unit before anything reads it.
-    let cancel = crate::cancel::current_cancel_token();
     for (index, (module, expr)) in items.iter().enumerate() {
-        if cancel.as_ref().is_some_and(CancelToken::is_cancelled) {
+        if errors.cancellation_observed() {
             return;
         }
         let diagnostic_owner = declaration_diagnostic_owners
@@ -1245,7 +1254,7 @@ pub(super) fn collect_all_declarations(
         );
     }
     for (index, (module, expr)) in items.iter().enumerate() {
-        if cancel.as_ref().is_some_and(CancelToken::is_cancelled) {
+        if errors.cancellation_observed() {
             return;
         }
         let diagnostic_owner = declaration_diagnostic_owners
@@ -1272,6 +1281,7 @@ pub(super) fn collect_all_declarations(
 pub(super) fn precollect_type_resolution_env(
     items: &[(Option<String>, &deep::Expr)],
     adt_reg: &AdtRegistry,
+    stack: &mut StackBudget<'_>,
 ) -> TypeResolutionEnv {
     let mut headers = TypeResolutionEnv::from_registry(adt_reg);
     let mut declarations: UnordMap<String, (Vec<String>, Vec<&deep::Expr>)> = UnordMap::new();
@@ -1336,6 +1346,7 @@ pub(super) fn precollect_type_resolution_env(
                     &mut evidence,
                     name,
                     &headers,
+                    stack,
                 );
             }
         }
@@ -1368,8 +1379,32 @@ fn collect_nominal_kind_evidence(
     evidence: &mut UnordMap<String, Vec<(bool, bool)>>,
     owner: &str,
     existing_headers: &TypeResolutionEnv,
+    stack: &mut StackBudget<'_>,
 ) {
-    stack_guard!("collect_nominal_kind_evidence", expr);
+    if stack.frame_exhausted("collect_nominal_kind_evidence", || expr.span_id()) {
+        return;
+    }
+    collect_nominal_kind_evidence_frame(
+        expr,
+        context,
+        own_params,
+        evidence,
+        owner,
+        existing_headers,
+        stack,
+    );
+    stack.exit_frame();
+}
+
+fn collect_nominal_kind_evidence_frame(
+    expr: &deep::Expr,
+    context: Option<NominalParamKind>,
+    own_params: &UnordMap<&str, usize>,
+    evidence: &mut UnordMap<String, Vec<(bool, bool)>>,
+    owner: &str,
+    existing_headers: &TypeResolutionEnv,
+    stack: &mut StackBudget<'_>,
+) {
     let Some((tag, _, kids)) = stamped_parts(expr) else {
         return;
     };
@@ -1409,6 +1444,7 @@ fn collect_nominal_kind_evidence(
                         evidence,
                         owner,
                         existing_headers,
+                        stack,
                     );
                 }
                 collect_nominal_kind_evidence(
@@ -1418,6 +1454,7 @@ fn collect_nominal_kind_evidence(
                     evidence,
                     owner,
                     existing_headers,
+                    stack,
                 );
             }
         }
@@ -1450,6 +1487,7 @@ fn collect_nominal_kind_evidence(
                     evidence,
                     owner,
                     existing_headers,
+                    stack,
                 );
             }
         }
@@ -1462,6 +1500,7 @@ fn collect_nominal_kind_evidence(
                     evidence,
                     owner,
                     existing_headers,
+                    stack,
                 );
             }
         }
@@ -1474,6 +1513,7 @@ fn collect_nominal_kind_evidence(
                     evidence,
                     owner,
                     existing_headers,
+                    stack,
                 );
             }
         }
@@ -2238,7 +2278,19 @@ pub(super) fn check_rank_body_discipline(
     user_def_names: &UnordSet<String>,
     errors: &mut DiagnosticSink<'_>,
 ) {
-    stack_guard!("check_rank_body_discipline", expr);
+    if errors.frame_exhausted("check_rank_body_discipline", || expr.span_id()) {
+        return;
+    }
+    check_rank_body_discipline_frame(def_name, expr, user_def_names, errors);
+    errors.exit_frame();
+}
+
+fn check_rank_body_discipline_frame(
+    def_name: &str,
+    expr: &deep::Expr,
+    user_def_names: &UnordSet<String>,
+    errors: &mut DiagnosticSink<'_>,
+) {
     // chelis#1107 amendment: bridge a stamped `Expr::Node` one level and
     // recurse. The walk re-enters per child, so each nested Node is bridged in
     // turn -- without this the §4.2 rank-body-discipline check returned at the
@@ -2640,7 +2692,8 @@ pub(super) fn infer_top_level(
             // shape-rewriting op (or an unproven user call) is rejected here.
             if type_contains_rank(&decl_ty)
                 && !is_exact_op35_wrapper(&name)
-                && let Some((_, body_expr)) = extract_fn_params_and_body(&kids[1])
+                && let Some((_, body_expr)) =
+                    extract_fn_params_and_body(&kids[1], &mut errors.stack())
             {
                 check_rank_body_discipline(&name, &body_expr, user_def_names, errors);
             }
@@ -2677,7 +2730,12 @@ pub(super) fn infer_top_level(
             // into `Ref(T)`.
             let initial_failed = unify_result.is_err();
             let recovered_by_relaxed_retry = if initial_failed {
-                let relaxed_decl = shape_a_relaxed_return(&kids[1], &resolved_body, &resolved_decl);
+                let relaxed_decl = shape_a_relaxed_return(
+                    &kids[1],
+                    &resolved_body,
+                    &resolved_decl,
+                    &mut errors.stack(),
+                );
                 relaxed_decl
                     .as_ref()
                     .is_some_and(|relaxed| unify(&body_ty, relaxed, subst).is_ok())
@@ -2813,11 +2871,13 @@ pub(super) fn infer_top_level(
         // sourceless runtime scalar. Classified against the pre-binding scope.
         // The `Sourceless`/`Unknown` arm CLEARS any stale provenance so a
         // re-bind to a sourceless RHS does not inherit an earlier entry.
-        match classify_expand_size(&kids[1], env, adt_reg, subst) {
+        match classify_expand_size(&kids[1], env, adt_reg, subst, &mut errors.stack()) {
             SizeClass::Static => {
-                if let Some(value) =
-                    fold_static_int_expr(&kids[1], |bound| env.static_size_value(bound))
-                {
+                if let Some(value) = fold_static_int_expr_with_stack(
+                    &kids[1],
+                    |bound| env.static_size_value(bound),
+                    &mut errors.stack(),
+                ) {
                     env.mark_static_size_value(&name, value);
                 } else {
                     env.mark_size_provenance(&name, crate::env::SizeProvenance::Static);

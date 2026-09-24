@@ -83,25 +83,47 @@ fn diagnostics(errors: &[CheckError]) -> Vec<String> {
 }
 
 fn check_ir_diagnostics(exprs: &[Expr]) -> Vec<String> {
-    check_ir_program(exprs, chelis_types::ProgramOrigin::Unlinked)
-        .err()
-        .map(|result| diagnostics(&result.errors))
-        .unwrap_or_default()
+    check_ir_program(
+        exprs,
+        chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
+    )
+    .err()
+    .map(|result| diagnostics(&result.errors))
+    .unwrap_or_default()
 }
 
 fn check_typed_diagnostics(exprs: &[Expr]) -> Vec<String> {
-    check_typed_program(exprs, chelis_types::ProgramOrigin::Unlinked)
-        .err()
-        .map(|result| diagnostics(&result.errors))
-        .unwrap_or_default()
+    check_typed_program(
+        exprs,
+        chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
+    )
+    .err()
+    .map(|result| diagnostics(&result.errors))
+    .unwrap_or_default()
 }
 
 fn infer_ir_diagnostics(exprs: &[Expr]) -> Vec<String> {
-    diagnostics(&infer_ir_program(exprs, chelis_types::ProgramOrigin::Unlinked).errors)
+    diagnostics(
+        &infer_ir_program(
+            exprs,
+            chelis_types::ProgramOrigin::Unlinked,
+            &mut chelis_types::NativeServices::new(None),
+        )
+        .errors,
+    )
 }
 
 fn infer_diagnostics(exprs: &[Expr]) -> Vec<String> {
-    diagnostics(&infer_program(exprs, chelis_types::ProgramOrigin::Unlinked).errors)
+    diagnostics(
+        &infer_program(
+            exprs,
+            chelis_types::ProgramOrigin::Unlinked,
+            &mut chelis_types::NativeServices::new(None),
+        )
+        .errors,
+    )
 }
 
 fn assert_entry_parity(row: Row, carrier: &str, exprs: &[Expr]) -> Vec<String> {
@@ -123,8 +145,16 @@ fn assert_entry_parity(row: Row, carrier: &str, exprs: &[Expr]) -> Vec<String> {
         );
     }
 
-    let check_report = check_program(exprs, chelis_types::ProgramOrigin::Unlinked);
-    let ir_report = check_ir_fitness(exprs, chelis_types::ProgramOrigin::Unlinked);
+    let check_report = check_program(
+        exprs,
+        chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
+    );
+    let ir_report = check_ir_fitness(
+        exprs,
+        chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
+    );
     assert_eq!(
         diagnostics(&check_report.errors),
         infer,

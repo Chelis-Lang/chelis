@@ -59,11 +59,22 @@ fn lowering_scalar_helpers_keeps_scope_snapshot_allocations_bounded() {
             }
             // Original scalar input ascription and helper15 call with 32 args.
             deep.extend(fragments);
-            let checked =
-                chelis_types::check_typed_program(&deep, chelis_types::ProgramOrigin::Unlinked)
-                    .unwrap();
-            let checked = chelis_effects::check_program(&checked).unwrap();
-            let checked = chelis_types::check_linearity(&checked).unwrap();
+            let checked = chelis_types::check_typed_program(
+                &deep,
+                chelis_types::ProgramOrigin::Unlinked,
+                &mut chelis_types::NativeServices::new(None),
+            )
+            .unwrap();
+            let checked = chelis_effects::check_program(
+                &checked,
+                &mut chelis_types::NativeServices::new(None),
+            )
+            .unwrap();
+            let checked = chelis_types::check_linearity(
+                &checked,
+                &mut chelis_types::NativeServices::new(None),
+            )
+            .unwrap();
             let before = BYTES.load(Ordering::Relaxed);
             let lowered = chelis_ir::lowering_runtime::with_native_lowering_runtime(|runtime| {
                 chelis_ir::lower::try_lower_program_to_library(&checked, runtime)

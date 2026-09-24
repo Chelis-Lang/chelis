@@ -94,10 +94,17 @@ fn host_expr_schema_carries_span_id_and_merged_spans() {
 
 fn check(source: &str) -> chelis_types::CheckedProgram {
     let exprs = chelis_deep::parser::parse_str(source).expect("deep parse");
+    let checked = check_ir_program(
+        &exprs,
+        chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
+    )
+    .expect("IR check clean");
     let checked =
-        check_ir_program(&exprs, chelis_types::ProgramOrigin::Unlinked).expect("IR check clean");
-    let checked = chelis_effects::check_program(&checked).expect("effects clean");
-    check_linearity(&checked).expect("linearity clean")
+        chelis_effects::check_program(&checked, &mut chelis_types::NativeServices::new(None))
+            .expect("effects clean");
+    check_linearity(&checked, &mut chelis_types::NativeServices::new(None))
+        .expect("linearity clean")
 }
 
 fn collect_input_spans(exprs: &[Expr]) -> BTreeSet<String> {

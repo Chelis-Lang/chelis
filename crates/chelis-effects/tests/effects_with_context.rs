@@ -24,13 +24,23 @@ fn parse_deep(src: &str) -> Vec<Expr> {
 /// Build (library_typeenv, library_checked_with_effects) from library Deep.
 fn build_library_pair(library_src: &str) -> (TypeEnv, CheckedProgram) {
     let lib_deep = parse_deep(library_src);
-    let typeenv = build_type_env_from_library(&lib_deep, chelis_types::ProgramOrigin::Unlinked)
-        .expect("library type-checks");
+    let typeenv = build_type_env_from_library(
+        &lib_deep,
+        chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
+    )
+    .expect("library type-checks");
     // Run the FULL effects pipeline on the library — same way Phase D's
     // contract requires (the library's effect rows are already validated).
-    let lib_checked = check_ir_program(&lib_deep, chelis_types::ProgramOrigin::Unlinked)
-        .expect("library IR check");
-    let lib_with_effects = check_program(&lib_checked).expect("library effects clean");
+    let lib_checked = check_ir_program(
+        &lib_deep,
+        chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
+    )
+    .expect("library IR check");
+    let lib_with_effects =
+        check_program(&lib_checked, &mut chelis_types::NativeServices::new(None))
+            .expect("library effects clean");
     (typeenv, lib_with_effects)
 }
 
@@ -38,8 +48,13 @@ fn build_library_pair(library_src: &str) -> (TypeEnv, CheckedProgram) {
 /// then return it. New-code's `annotated_exprs()` carry only new defs.
 fn build_new_code_checked(typeenv: &TypeEnv, new_src: &str) -> CheckedProgram {
     let new_deep = parse_deep(new_src);
-    check_ir_with_context(typeenv, &new_deep, chelis_types::ProgramOrigin::Unlinked)
-        .expect("new code type-checks")
+    check_ir_with_context(
+        typeenv,
+        &new_deep,
+        chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
+    )
+    .expect("new code type-checks")
 }
 
 // ── Parity tests (5 library+snippet pairs) ───────────────────────────────
@@ -56,14 +71,26 @@ fn parity_pure_library_pure_snippet() {
 
     let (typeenv, lib_checked) = build_library_pair(library);
     let new_checked = build_new_code_checked(&typeenv, snippet);
-    check_effects_with_context(&lib_checked, &new_checked)
-        .expect("pure library, pure snippet must pass");
+    check_effects_with_context(
+        &lib_checked,
+        &new_checked,
+        &mut chelis_types::NativeServices::new(None),
+    )
+    .expect("pure library, pure snippet must pass");
 
     // Monolithic equivalent:
     let combined = parse_deep(&format!("{library}\n{snippet}"));
-    let combined_checked =
-        check_ir_program(&combined, chelis_types::ProgramOrigin::Unlinked).unwrap();
-    check_program(&combined_checked).expect("monolithic must also pass");
+    let combined_checked = check_ir_program(
+        &combined,
+        chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
+    )
+    .unwrap();
+    check_program(
+        &combined_checked,
+        &mut chelis_types::NativeServices::new(None),
+    )
+    .expect("monolithic must also pass");
 }
 
 /// Parity 2: library exposes an Io helper; new-code calls it. Both
@@ -83,8 +110,12 @@ fn parity_library_io_helper_called_from_snippet() {
     let expected_type_env = new_checked.type_env().clone();
     let expected_signatures = new_checked.signature_inference().clone();
     let expected_linearity = new_checked.linearity().clone();
-    let new_with_effects = check_effects_with_context(&lib_checked, &new_checked)
-        .expect("io-inheriting snippet must pass");
+    let new_with_effects = check_effects_with_context(
+        &lib_checked,
+        &new_checked,
+        &mut chelis_types::NativeServices::new(None),
+    )
+    .expect("io-inheriting snippet must pass");
 
     assert_eq!(new_with_effects.type_env(), &expected_type_env);
     assert_eq!(new_with_effects.signature_inference(), &expected_signatures);
@@ -104,9 +135,17 @@ fn parity_library_io_helper_called_from_snippet() {
 
     // Monolithic parity:
     let combined = parse_deep(&format!("{library}\n{snippet}"));
-    let combined_checked =
-        check_ir_program(&combined, chelis_types::ProgramOrigin::Unlinked).unwrap();
-    check_program(&combined_checked).expect("monolithic must also pass");
+    let combined_checked = check_ir_program(
+        &combined,
+        chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
+    )
+    .unwrap();
+    check_program(
+        &combined_checked,
+        &mut chelis_types::NativeServices::new(None),
+    )
+    .expect("monolithic must also pass");
 }
 
 /// Parity 3: library exposes a Test wrapper; new-code calls it. Both paths
@@ -122,8 +161,12 @@ fn parity_library_test_helper_called_from_snippet() {
 
     let (typeenv, lib_checked) = build_library_pair(library);
     let new_checked = build_new_code_checked(&typeenv, snippet);
-    let new_with_effects = check_effects_with_context(&lib_checked, &new_checked)
-        .expect("test-inheriting snippet must pass");
+    let new_with_effects = check_effects_with_context(
+        &lib_checked,
+        &new_checked,
+        &mut chelis_types::NativeServices::new(None),
+    )
+    .expect("test-inheriting snippet must pass");
 
     let snippet_text = chelis_deep::printer::print_canonical(new_with_effects.annotated_exprs());
     assert!(
@@ -132,9 +175,17 @@ fn parity_library_test_helper_called_from_snippet() {
     );
 
     let combined = parse_deep(&format!("{library}\n{snippet}"));
-    let combined_checked =
-        check_ir_program(&combined, chelis_types::ProgramOrigin::Unlinked).unwrap();
-    check_program(&combined_checked).expect("monolithic must also pass");
+    let combined_checked = check_ir_program(
+        &combined,
+        chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
+    )
+    .unwrap();
+    check_program(
+        &combined_checked,
+        &mut chelis_types::NativeServices::new(None),
+    )
+    .expect("monolithic must also pass");
 }
 
 /// Parity 4: declared `! {}` snippet calling Test-effecting library wrapper
@@ -150,8 +201,12 @@ fn parity_declared_empty_eff_snippet_rejects_test_effect_from_library() {
 
     let (typeenv, lib_checked) = build_library_pair(library);
     let new_checked = build_new_code_checked(&typeenv, snippet);
-    let ctx_errors = check_effects_with_context(&lib_checked, &new_checked)
-        .expect_err("declared !{} but inherits Test from library must reject");
+    let ctx_errors = check_effects_with_context(
+        &lib_checked,
+        &new_checked,
+        &mut chelis_types::NativeServices::new(None),
+    )
+    .expect_err("declared !{} but inherits Test from library must reject");
     assert!(
         ctx_errors
             .iter()
@@ -161,10 +216,17 @@ fn parity_declared_empty_eff_snippet_rejects_test_effect_from_library() {
 
     // Monolithic parity:
     let combined = parse_deep(&format!("{library}\n{snippet}"));
-    let combined_checked =
-        check_ir_program(&combined, chelis_types::ProgramOrigin::Unlinked).unwrap();
-    let mono_errors = check_program(&combined_checked)
-        .expect_err("monolithic must also reject !{} that calls Test helper");
+    let combined_checked = check_ir_program(
+        &combined,
+        chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
+    )
+    .unwrap();
+    let mono_errors = check_program(
+        &combined_checked,
+        &mut chelis_types::NativeServices::new(None),
+    )
+    .expect_err("monolithic must also reject !{} that calls Test helper");
     assert_eq!(
         ctx_errors
             .iter()
@@ -197,13 +259,21 @@ fn parity_random_lib_helper_under_test_context_composes_both_effects() {
     // Positive: declared {Random, Test} accepts.
     let (typeenv, lib_checked) = build_library_pair(library);
     let new_ok = build_new_code_checked(&typeenv, snippet_ok2);
-    check_effects_with_context(&lib_checked, &new_ok)
-        .expect("declared {Random,Test} must accept lib_drop + test_assert");
+    check_effects_with_context(
+        &lib_checked,
+        &new_ok,
+        &mut chelis_types::NativeServices::new(None),
+    )
+    .expect("declared {Random,Test} must accept lib_drop + test_assert");
 
     // Negative: declared {Test} rejects with UnhandledEffect mentioning Random.
     let new_bad = build_new_code_checked(&typeenv, snippet_bad);
-    let ctx_errors = check_effects_with_context(&lib_checked, &new_bad)
-        .expect_err("declared {Test} must reject lib_drop's Random");
+    let ctx_errors = check_effects_with_context(
+        &lib_checked,
+        &new_bad,
+        &mut chelis_types::NativeServices::new(None),
+    )
+    .expect_err("declared {Test} must reject lib_drop's Random");
     assert!(
         ctx_errors
             .iter()
@@ -213,9 +283,17 @@ fn parity_random_lib_helper_under_test_context_composes_both_effects() {
 
     // Monolithic parity (negative case): same rejection.
     let combined = parse_deep(&format!("{library}\n{snippet_bad}"));
-    let combined_checked =
-        check_ir_program(&combined, chelis_types::ProgramOrigin::Unlinked).unwrap();
-    let mono_errors = check_program(&combined_checked).expect_err("monolithic must also reject");
+    let combined_checked = check_ir_program(
+        &combined,
+        chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
+    )
+    .unwrap();
+    let mono_errors = check_program(
+        &combined_checked,
+        &mut chelis_types::NativeServices::new(None),
+    )
+    .expect_err("monolithic must also reject");
     assert!(
         mono_errors
             .iter()
@@ -239,8 +317,12 @@ fn new_code_inherits_io_via_library_read_file_wrapper() {
 
     let (typeenv, lib_checked) = build_library_pair(library);
     let new_checked = build_new_code_checked(&typeenv, snippet);
-    let new_with_effects = check_effects_with_context(&lib_checked, &new_checked)
-        .expect("io-inheriting snippet must pass");
+    let new_with_effects = check_effects_with_context(
+        &lib_checked,
+        &new_checked,
+        &mut chelis_types::NativeServices::new(None),
+    )
+    .expect("io-inheriting snippet must pass");
 
     let snippet_text = chelis_deep::printer::print_canonical(new_with_effects.annotated_exprs());
     assert!(
@@ -253,8 +335,12 @@ fn new_code_inherits_io_via_library_read_file_wrapper() {
         "fixtures/core/tests/effects_with_context/new_code_inherits_io_via_library_read_file_wrapper_bad_snippet.deep"
     );
     let new_bad = build_new_code_checked(&typeenv, bad_snippet);
-    let errors = check_effects_with_context(&lib_checked, &new_bad)
-        .expect_err("declared !{} but inherits Io from lib_load must reject");
+    let errors = check_effects_with_context(
+        &lib_checked,
+        &new_bad,
+        &mut chelis_types::NativeServices::new(None),
+    )
+    .expect_err("declared !{} but inherits Io from lib_load must reject");
     assert!(
         errors
             .iter()
@@ -275,8 +361,12 @@ fn new_code_inherits_test_via_library_wrapper() {
 
     let (typeenv, lib_checked) = build_library_pair(library);
     let new_checked = build_new_code_checked(&typeenv, snippet);
-    let new_with_effects = check_effects_with_context(&lib_checked, &new_checked)
-        .expect("test-inheriting snippet must pass");
+    let new_with_effects = check_effects_with_context(
+        &lib_checked,
+        &new_checked,
+        &mut chelis_types::NativeServices::new(None),
+    )
+    .expect("test-inheriting snippet must pass");
 
     let snippet_text = chelis_deep::printer::print_canonical(new_with_effects.annotated_exprs());
     assert!(
@@ -289,8 +379,12 @@ fn new_code_inherits_test_via_library_wrapper() {
         "fixtures/core/tests/effects_with_context/new_code_inherits_test_via_library_wrapper_bad_snippet.deep"
     );
     let new_bad = build_new_code_checked(&typeenv, bad_snippet);
-    let errors = check_effects_with_context(&lib_checked, &new_bad)
-        .expect_err("declared !{} but inherits Test from lib_assert_eq must reject");
+    let errors = check_effects_with_context(
+        &lib_checked,
+        &new_bad,
+        &mut chelis_types::NativeServices::new(None),
+    )
+    .expect_err("declared !{} but inherits Test from lib_assert_eq must reject");
     assert!(
         errors
             .iter()
@@ -327,8 +421,12 @@ fn no_leak_snippet_a_effects_do_not_persist_into_snippet_b() {
     // Snippet A: assert it type-checks, has Test effect on `stamp`, and
     // accepts.
     let a_checked = build_new_code_checked(&typeenv, snippet_a);
-    let a_with_effects =
-        check_effects_with_context(&lib_checked, &a_checked).expect("snippet A passes");
+    let a_with_effects = check_effects_with_context(
+        &lib_checked,
+        &a_checked,
+        &mut chelis_types::NativeServices::new(None),
+    )
+    .expect("snippet A passes");
     let a_text = chelis_deep::printer::print_canonical(a_with_effects.annotated_exprs());
     assert!(
         a_text.contains("test"),
@@ -343,8 +441,12 @@ fn no_leak_snippet_a_effects_do_not_persist_into_snippet_b() {
     // `stamp`, then declares `! {}`. If snippet A's effect row leaked,
     // the new `stamp` would be rejected.
     let b_checked = build_new_code_checked(&typeenv, snippet_b);
-    let b_with_effects =
-        check_effects_with_context(&lib_checked, &b_checked).expect("snippet B passes");
+    let b_with_effects = check_effects_with_context(
+        &lib_checked,
+        &b_checked,
+        &mut chelis_types::NativeServices::new(None),
+    )
+    .expect("snippet B passes");
     let b_text = chelis_deep::printer::print_canonical(b_with_effects.annotated_exprs());
     // call_b's body is just `lib_id(z)`; lib_id is effect-free.
     assert!(
@@ -372,7 +474,12 @@ fn no_leak_snippet_a_effects_do_not_persist_into_snippet_b() {
         "fixtures/core/tests/effects_with_context/no_leak_snippet_a_effects_do_not_persist_into_snippet_b_snippet_c.deep"
     );
     let c_checked = build_new_code_checked(&typeenv, snippet_c);
-    check_effects_with_context(&lib_checked, &c_checked).expect(
+    check_effects_with_context(
+        &lib_checked,
+        &c_checked,
+        &mut chelis_types::NativeServices::new(None),
+    )
+    .expect(
         "snippet C declares pure stamp; library_program must NOT have been mutated by snippet A",
     );
 }
@@ -396,12 +503,21 @@ fn no_leak_repeated_calls_against_same_library_are_independent() {
 
     // Call 1: effectful_snippet. Must accept (declared {Test} matches inferred {Test}).
     let eff_checked = build_new_code_checked(&typeenv, effectful_snippet);
-    check_effects_with_context(&lib_checked, &eff_checked).expect("effectful snippet accepts");
+    check_effects_with_context(
+        &lib_checked,
+        &eff_checked,
+        &mut chelis_types::NativeServices::new(None),
+    )
+    .expect("effectful snippet accepts");
 
     // Call 2: pure_snippet. Must accept and produce ZERO effects on `quiet`.
     let pure_checked = build_new_code_checked(&typeenv, pure_snippet);
-    let pure_with_effects =
-        check_effects_with_context(&lib_checked, &pure_checked).expect("pure snippet accepts");
+    let pure_with_effects = check_effects_with_context(
+        &lib_checked,
+        &pure_checked,
+        &mut chelis_types::NativeServices::new(None),
+    )
+    .expect("pure snippet accepts");
     let text = chelis_deep::printer::print_canonical(pure_with_effects.annotated_exprs());
     assert!(
         !text.contains("test") && !text.contains("io") && !text.contains("random"),
@@ -429,7 +545,12 @@ fn error_messages_reference_new_code_names_not_library() {
 
     let (typeenv, lib_checked) = build_library_pair(library);
     let new_checked = build_new_code_checked(&typeenv, snippet);
-    let errors = check_effects_with_context(&lib_checked, &new_checked).expect_err("must reject");
+    let errors = check_effects_with_context(
+        &lib_checked,
+        &new_checked,
+        &mut chelis_types::NativeServices::new(None),
+    )
+    .expect_err("must reject");
 
     // The error message must name `leak` (new-code def), NOT `lib_check`
     // (the library helper).
@@ -458,9 +579,14 @@ fn legacy_check_program_still_works() {
     let combined = parse_deep(include_str!(
         "fixtures/core/tests/effects_with_context/legacy_check_program_still_works.deep"
     ));
-    let checked =
-        check_ir_program(&combined, chelis_types::ProgramOrigin::Unlinked).expect("IR check");
-    let with_effects = check_program(&checked).expect("legacy check_program clean");
+    let checked = check_ir_program(
+        &combined,
+        chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
+    )
+    .expect("IR check");
+    let with_effects = check_program(&checked, &mut chelis_types::NativeServices::new(None))
+        .expect("legacy check_program clean");
     let text = chelis_deep::printer::print_canonical(with_effects.annotated_exprs());
     assert!(
         text.contains("io"),
@@ -481,8 +607,12 @@ fn snippet_composing_two_library_helpers_picks_up_both_effects() {
 
     let (typeenv, lib_checked) = build_library_pair(library);
     let new_checked = build_new_code_checked(&typeenv, snippet);
-    let new_with_effects = check_effects_with_context(&lib_checked, &new_checked)
-        .expect("declared {IO, Test} composes both library helpers");
+    let new_with_effects = check_effects_with_context(
+        &lib_checked,
+        &new_checked,
+        &mut chelis_types::NativeServices::new(None),
+    )
+    .expect("declared {IO, Test} composes both library helpers");
 
     let text = chelis_deep::printer::print_canonical(new_with_effects.annotated_exprs());
     assert!(text.contains("io"), "must inherit io, got:\n{text}");

@@ -218,7 +218,36 @@ pub(super) fn pattern_bindings(
     covered_variants: &mut Vec<String>,
     has_wildcard: &mut bool,
 ) {
-    stack_guard!("pattern_bindings", pat);
+    if errors.frame_exhausted("pattern_bindings", || pat.span_id()) {
+        return;
+    }
+    pattern_bindings_frame(
+        pat,
+        scrutinee_ty,
+        env,
+        vg,
+        subst,
+        adt_reg,
+        errors,
+        product,
+        covered_variants,
+        has_wildcard,
+    );
+    errors.exit_frame();
+}
+
+fn pattern_bindings_frame(
+    pat: &deep::Expr,
+    scrutinee_ty: &Type,
+    env: &mut Env,
+    vg: &mut VarGen,
+    subst: &mut Subst,
+    adt_reg: &AdtRegistry,
+    errors: &mut DiagnosticSink<'_>,
+    product: &mut InferenceProduct,
+    covered_variants: &mut Vec<String>,
+    has_wildcard: &mut bool,
+) {
     if let Some((tag, _, kids)) = stamped_parts(pat) {
         match tag {
             DeepTag::PatVar => {

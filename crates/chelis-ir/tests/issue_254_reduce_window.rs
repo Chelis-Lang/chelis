@@ -53,7 +53,8 @@ fn build_reduce_window(
 fn eval_with_input(dag: &Dag, name: &str, shape: Vec<usize>, data: Vec<f64>) -> TensorValue {
     let mut inputs = UnordMap::new();
     inputs.insert(name.to_string(), TensorValue::from_vec(shape, data));
-    let values = eval_tensor(dag, &inputs).expect("eval succeeds");
+    let values = eval_tensor(dag, &inputs, &mut chelis_types::NativeServices::new(None))
+        .expect("eval succeeds");
     // The output is the second node (id = 1).
     values
         .get(&chelis_ir::dag::NodeId(1))
@@ -336,7 +337,12 @@ fn reduce_window_grad_lowers_to_adjoint_and_evaluates() {
         "x".to_string(),
         TensorValue::from_vec(vec![4], vec![10.0, 20.0, 30.0, 40.0]),
     );
-    let vals = eval_tensor(&grad_result.dag, &inputs).unwrap();
+    let vals = eval_tensor(
+        &grad_result.dag,
+        &inputs,
+        &mut chelis_types::NativeServices::new(None),
+    )
+    .unwrap();
     let grad = &vals[&grad_result.grad_nodes[&load]];
     assert_eq!(grad.shape, vec![4]);
     // Windows [0,1], [1,2], [2,3]: ends covered once, interior twice.

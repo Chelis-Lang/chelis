@@ -14,12 +14,18 @@ use chelis_types::types::Prim;
 fn deep_to_library(source: &str) -> Result<LoweredLibrary, String> {
     let deep =
         chelis_deep::parser::parse_str(source).map_err(|error| format!("Deep parse: {error:?}"))?;
-    let checked = check_typed_program(&deep, chelis_types::ProgramOrigin::Unlinked)
-        .map_err(|errors| format!("typecheck failed: {:?}", errors.errors))?;
-    let checked = chelis_effects::check_program(&checked)
-        .map_err(|errors| format!("effects failed: {errors:?}"))?;
-    let checked = chelis_types::check_linearity(&checked)
-        .map_err(|errors| format!("linearity failed: {errors:?}"))?;
+    let checked = check_typed_program(
+        &deep,
+        chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
+    )
+    .map_err(|errors| format!("typecheck failed: {:?}", errors.errors))?;
+    let checked =
+        chelis_effects::check_program(&checked, &mut chelis_types::NativeServices::new(None))
+            .map_err(|errors| format!("effects failed: {errors:?}"))?;
+    let checked =
+        chelis_types::check_linearity(&checked, &mut chelis_types::NativeServices::new(None))
+            .map_err(|errors| format!("linearity failed: {errors:?}"))?;
     chelis_ir::lowering_runtime::with_native_lowering_runtime(|runtime| {
         try_lower_program_to_library(&checked, runtime)
     })

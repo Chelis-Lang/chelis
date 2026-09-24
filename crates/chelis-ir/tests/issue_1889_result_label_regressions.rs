@@ -13,7 +13,12 @@ type CallerNamedClaim = (String, NamedAxis, NamedAxis);
 
 fn checked_deep(source: &str, origin: ProgramOrigin) -> chelis_types::CheckedProgram {
     let expanded = chelis_deep::parser::parse_and_stamp(source).expect("Deep fixture");
-    let checked = chelis_types::check_ir_program(&expanded, origin).unwrap_or_else(|report| {
+    let checked = chelis_types::check_ir_program(
+        &expanded,
+        origin,
+        &mut chelis_types::NativeServices::new(None),
+    )
+    .unwrap_or_else(|report| {
         panic!(
             "type check failed: {:?}",
             report
@@ -23,8 +28,11 @@ fn checked_deep(source: &str, origin: ProgramOrigin) -> chelis_types::CheckedPro
                 .collect::<Vec<_>>()
         )
     });
-    let checked = chelis_effects::check_program(&checked).expect("effects");
-    chelis_types::check_linearity(&checked).expect("linearity")
+    let checked =
+        chelis_effects::check_program(&checked, &mut chelis_types::NativeServices::new(None))
+            .expect("effects");
+    chelis_types::check_linearity(&checked, &mut chelis_types::NativeServices::new(None))
+        .expect("linearity")
 }
 
 fn named_entry(source: &str, name: &str) -> chelis_ir::Dag {
@@ -140,9 +148,11 @@ fn caller_result_label_does_not_merge_an_unrelated_helper_parameter_binder() {
          `gain: tensor[fixed]` binder: {false_guard:?}\n{dag:#?}"
     );
 
-    let output = eval_tensor_with(&dag, |name| {
-        (name == "x").then(|| TensorValue::from_vec(vec![2], vec![4.0, 5.0]))
-    })
+    let output = eval_tensor_with(
+        &dag,
+        |name| (name == "x").then(|| TensorValue::from_vec(vec![2], vec![4.0, 5.0])),
+        &mut chelis_types::NativeServices::new(None),
+    )
     .expect("the unrelated gain extent does not constrain the returned x axis");
     let root = *dag.roots().last().expect("bridge root");
     assert_eq!(output[&root].shape, vec![2]);
@@ -177,11 +187,15 @@ fn authored_repeated_binder_still_enforces_one_runtime_witness() {
         "an explicitly repeated authored binder remains one runtime witness:\n{dag:#?}"
     );
 
-    let error = eval_tensor_with(&dag, |name| match name {
-        "x" => Some(TensorValue::from_vec(vec![2], vec![1.0, 2.0])),
-        "y" => Some(TensorValue::from_vec(vec![3], vec![3.0, 4.0, 5.0])),
-        _ => None,
-    })
+    let error = eval_tensor_with(
+        &dag,
+        |name| match name {
+            "x" => Some(TensorValue::from_vec(vec![2], vec![1.0, 2.0])),
+            "y" => Some(TensorValue::from_vec(vec![3], vec![3.0, 4.0, 5.0])),
+            _ => None,
+        },
+        &mut chelis_types::NativeServices::new(None),
+    )
     .expect_err("inconsistent witnesses for an authored binder must trap");
     assert!(
         error.contains("extent `d`"),
@@ -251,9 +265,14 @@ fn rank_polymorphic_result_label_does_not_merge_distinct_argument_axes() {
          axis into the same entry class: {false_guard:?}\n{dag:#?}"
     );
 
-    let output = eval_tensor_with(&dag, |name| {
-        (name == "x").then(|| TensorValue::from_vec(vec![2, 3], vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0]))
-    })
+    let output = eval_tensor_with(
+        &dag,
+        |name| {
+            (name == "x")
+                .then(|| TensorValue::from_vec(vec![2, 3], vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0]))
+        },
+        &mut chelis_types::NativeServices::new(None),
+    )
     .expect("batch and seq remain distinct");
     let root = *dag.roots().last().expect("a2 root");
     assert_eq!(output[&root].shape, vec![2, 3, 1]);

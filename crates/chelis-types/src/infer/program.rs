@@ -25,7 +25,7 @@ struct RecursiveAbortObservation {
 
 #[cfg(test)]
 std::thread_local! {
-    static PRIMARY_RECURSIVE_CANCEL_COUNTDOWN: Cell<Option<usize>> = const { Cell::new(None) };
+    static PRIMARY_RECURSIVE_CANCEL_COUNTDOWN: RefCell<Option<(usize, CancelToken)>> = const { RefCell::new(None) };
     static RECURSIVE_ABORT_OBSERVATION: RefCell<Option<RecursiveAbortObservation>> = const { RefCell::new(None) };
 }
 
@@ -35,19 +35,22 @@ struct PrimaryRecursiveCancelGuard;
 #[cfg(test)]
 impl Drop for PrimaryRecursiveCancelGuard {
     fn drop(&mut self) {
-        PRIMARY_RECURSIVE_CANCEL_COUNTDOWN.with(|countdown| countdown.set(None));
+        PRIMARY_RECURSIVE_CANCEL_COUNTDOWN.with(|countdown| *countdown.borrow_mut() = None);
     }
 }
 
 #[cfg(test)]
-fn cancel_primary_recursive_after_members(count: usize) -> PrimaryRecursiveCancelGuard {
+fn cancel_primary_recursive_after_members(
+    count: usize,
+    token: CancelToken,
+) -> PrimaryRecursiveCancelGuard {
     assert!(
         count > 0,
         "the test hook must allow at least one SCC member"
     );
     PRIMARY_RECURSIVE_CANCEL_COUNTDOWN.with(|countdown| {
         assert!(
-            countdown.replace(Some(count)).is_none(),
+            countdown.replace(Some((count, token))).is_none(),
             "the primary recursive cancellation hook is already armed"
         );
     });
@@ -58,16 +61,15 @@ fn cancel_primary_recursive_after_members(count: usize) -> PrimaryRecursiveCance
 #[cfg(test)]
 fn primary_recursive_member_finished_for_test() {
     PRIMARY_RECURSIVE_CANCEL_COUNTDOWN.with(|countdown| {
-        let Some(remaining) = countdown.get() else {
+        let mut countdown = countdown.borrow_mut();
+        let Some((remaining, token)) = countdown.as_mut() else {
             return;
         };
-        if remaining == 1 {
-            countdown.set(None);
-            crate::cancel::current_cancel_token()
-                .expect("the cancellation test hook requires an installed token")
-                .cancel();
+        if *remaining == 1 {
+            token.cancel();
+            *countdown = None;
         } else {
-            countdown.set(Some(remaining - 1));
+            *remaining -= 1;
         }
     });
 }
@@ -254,12 +256,12 @@ fn sweep_recursive_collection_contracts(
         let mut diagnosed = false;
 
         for (declaration_index, name) in &members {
-            if crate::cancel::cancellation_requested() {
+            if errors.cancellation_observed() {
                 component_scope.abort(env, var_gen, subst, errors.recursive_state_mut());
                 return;
             }
             let (module, expr) = &items[*declaration_index];
-            scratch.begin_root(expr);
+            scratch.begin_root(expr, &mut errors.stack());
             errors.set_opacity_current_item(
                 crate::opacity::module_key_for_item(module.as_deref(), Some(name)),
                 Some(name.clone()),
@@ -382,7 +384,7 @@ fn sweep_recursive_collection_contracts(
 /// abandoned inference never bound, and report their absence as if the program
 /// were wrong.
 ///
-/// Same covered-or-rejected discipline as `StackExhaustionScope::drain_into` —
+/// Same covered-or-rejected discipline as `DiagnosticSink::drain_stack_bail` —
 /// a check unit that stopped early must fail, never return a partial `Ok`.
 #[must_use = "a tripped cancellation gate must end the check unit"]
 fn bind_library_products(
@@ -398,7 +400,7 @@ fn bind_library_products(
 }
 
 fn cancellation_gate(errors: &mut DiagnosticSink<'_>) -> bool {
-    if !crate::cancel::cancellation_requested() {
+    if !errors.cancellation_observed() {
         return false;
     }
     if !errors
@@ -411,11 +413,15 @@ fn cancellation_gate(errors: &mut DiagnosticSink<'_>) -> bool {
 }
 
 /// Run type inference on a list of top-level Deep expressions.
-pub fn infer_program(exprs: &[deep::Expr], origin: ProgramOrigin) -> InferResult {
+pub fn infer_program(
+    exprs: &[deep::Expr],
+    origin: ProgramOrigin,
+    native: &mut NativeServices,
+) -> InferResult {
     // WI-1 follow-up: run the whole pipeline on a grown stack so a deeply
     // nested but finite program checks end-to-end instead of tripping a
-    // per-site `stack_guard!` partway through one of the recursive passes.
-    crate::session::infer_program(exprs, origin)
+    // per-site stack guard partway through one of the recursive passes.
+    crate::session::infer_program(exprs, origin, native)
 }
 
 pub(crate) fn infer_program_in_session(
@@ -432,12 +438,22 @@ pub(super) fn infer_program_with_product_in_session(
     origin: ProgramOrigin,
     errors: &mut DiagnosticSink<'_>,
 ) -> InferenceProduct {
-    let mut recursive_scope = errors.enter_recursive_inference();
-    let errors = recursive_scope.sink();
     // Reset the stack-exhaustion flag for this check unit; `drain` below
     // turns any walker stack bail into a hard located error so deep input
     // can never produce a silent green / partial result.
-    let stack_scope = StackExhaustionScope::enter();
+    errors.enter_stack_scope();
+    let result = infer_program_with_product_in_session_scoped(exprs, origin, errors);
+    errors.exit_stack_scope();
+    result
+}
+
+fn infer_program_with_product_in_session_scoped(
+    exprs: &[deep::Expr],
+    origin: ProgramOrigin,
+    errors: &mut DiagnosticSink<'_>,
+) -> InferenceProduct {
+    let mut recursive_scope = errors.enter_recursive_inference();
+    let errors = recursive_scope.sink();
     let (mut env, mut vg) = builtins::builtin_env();
     let mut subst = Subst::new();
     let mut adt_reg = AdtRegistry::new();
@@ -481,9 +497,10 @@ pub(super) fn infer_program_with_product_in_session(
     // declaration pass — without it, the entire HM checker is a no-op on
     // module-wrapped programs.
     let user_def_names = collect_user_def_names(&top_level_decl_items(exprs));
-    let declared_signatures = collect_declared_sig_metadata(items.iter().map(|(_, expr)| *expr));
+    let declared_signatures =
+        collect_declared_sig_metadata(items.iter().map(|(_, expr)| *expr), &mut errors.stack());
     validate_binder_literal_adoption_in_program(&items, &declared_signatures, errors);
-    let external_input_types = collect_literal_external_input_types(&items);
+    let external_input_types = collect_literal_external_input_types(&items, &mut errors.stack());
     let (metadata_prebound_names, function_metadata_failures) =
         prebind_defsig_less_function_body_types(
             &items,
@@ -495,23 +512,22 @@ pub(super) fn infer_program_with_product_in_session(
             &adt_reg,
             errors,
         );
-    let top_level_references = TopLevelReferenceGraph::build(&items);
+    let top_level_references = TopLevelReferenceGraph::build(&items, &mut errors.stack());
     product.function_inference_plan =
-        FunctionInferencePlan::build_from_reference_graph(&top_level_references);
+        FunctionInferencePlan::build_from_reference_graph(&top_level_references, errors.native());
     let inference_groups = primary_inference_groups_with_reference_graph(
         &product.function_inference_plan,
         &items,
         &top_level_references,
+        &mut errors.stack(),
     );
-    // Match the persisted-state driver: cache the TLS token once and poll at
+    // Match the persisted-state driver: poll the invocation's token at
     // declaration granularity. In particular, an incomplete cyclic component
     // must consume its structured scope through `abort` before this schedule
     // returns; finishing or generalizing a partially inferred group would
     // leak its pins, temporary bindings, and child level.
-    let cancel = crate::cancel::current_cancel_token();
-    let cancelled = || cancel.as_ref().is_some_and(CancelToken::is_cancelled);
     'schedule: for group in inference_groups {
-        if cancelled() {
+        if errors.cancellation_observed() {
             break;
         }
         let component_diagnostic_checkpoint = errors.checkpoint();
@@ -569,14 +585,14 @@ pub(super) fn infer_program_with_product_in_session(
         }
         let mut deferred_bindings = Vec::new();
         for &declaration_index in &group.indices {
-            if cancelled() {
+            if errors.cancellation_observed() {
                 if let Some(scope) = component_scope.take() {
                     scope.abort(&mut env, &vg, &mut subst, errors.recursive_state_mut());
                 }
                 break 'schedule;
             }
             let (module, expr) = &items[declaration_index];
-            product.begin_root(expr);
+            product.begin_root(expr, &mut errors.stack());
             let decl_name = top_level_decl_name(expr);
             errors.set_opacity_current_item(
                 crate::opacity::module_key_for_item(module.as_deref(), decl_name),
@@ -643,7 +659,7 @@ pub(super) fn infer_program_with_product_in_session(
                 primary_recursive_member_finished_for_test();
             }
         }
-        if cancelled() {
+        if errors.cancellation_observed() {
             if let Some(scope) = component_scope.take() {
                 scope.abort(&mut env, &vg, &mut subst, errors.recursive_state_mut());
             }
@@ -708,10 +724,10 @@ pub(super) fn infer_program_with_product_in_session(
     // protocol after inference. Build the same declaration-type view the IR
     // entries supply; stamped input stays stamped and every reader below must
     // handle that carrier directly.
-    let semantic_type_env = build_ir_type_env(exprs);
+    let semantic_type_env = build_ir_type_env(exprs, &mut errors.stack());
     validate_semantic_program(exprs, &semantic_type_env, &top_level_references, errors);
     if cancellation_gate(errors) {
-        stack_scope.drain_into(errors);
+        errors.drain_stack_bail();
         product.top_level_references = top_level_references;
         return product;
     }
@@ -725,7 +741,7 @@ pub(super) fn infer_program_with_product_in_session(
 
     // If any walker bailed on a nearly-exhausted stack during this run,
     // surface it as a hard located failure (covered-or-rejected).
-    stack_scope.drain_into(errors);
+    errors.drain_stack_bail();
 
     product.top_level_references = top_level_references;
     product
@@ -734,10 +750,11 @@ pub(super) fn infer_program_with_product_in_session(
 pub fn check_ir_program(
     exprs: &[deep::Expr],
     origin: ProgramOrigin,
+    native: &mut NativeServices,
 ) -> Result<CheckedProgram, InferResult> {
     // Compose: empty outer scope, then check exprs as new code against it.
     // This keeps a single source of truth for the IR check pipeline.
-    check_ir_with_context(&TypeEnv::empty(), exprs, origin)
+    check_ir_with_context(&TypeEnv::empty(), exprs, origin, native)
 }
 
 /// Build a stacked outer-scope context from a library decl list. The
@@ -752,11 +769,25 @@ pub fn check_ir_program(
 pub fn build_type_env_from_library(
     library_exprs: &[deep::Expr],
     origin: ProgramOrigin,
+    native: &mut NativeServices,
 ) -> Result<TypeEnv, InferResult> {
-    crate::session::build_type_env_from_library(library_exprs, origin)
+    crate::session::build_type_env_from_library(library_exprs, origin, native)
 }
 
 pub(crate) fn build_type_env_from_library_in_session(
+    library_exprs: &[deep::Expr],
+    origin: ProgramOrigin,
+    errors: &mut DiagnosticSink<'_>,
+) -> Result<TypeEnv, InferStats> {
+    // Reset the stack-exhaustion flag for this check unit; drained below
+    // before the empty-errors gate (covered-or-rejected on deep input).
+    errors.enter_stack_scope();
+    let result = build_type_env_from_library_in_session_scoped(library_exprs, origin, errors);
+    errors.exit_stack_scope();
+    result
+}
+
+fn build_type_env_from_library_in_session_scoped(
     library_exprs: &[deep::Expr],
     origin: ProgramOrigin,
     errors: &mut DiagnosticSink<'_>,
@@ -765,34 +796,26 @@ pub(crate) fn build_type_env_from_library_in_session(
     // (#908 producer switch).
     let normalized = normalize_program_input(library_exprs);
     let library_exprs = &normalized;
-    // Reset the stack-exhaustion flag for this check unit; drained below
-    // before the empty-errors gate (covered-or-rejected on deep input).
-    let stack_scope = StackExhaustionScope::enter();
-    let detail_profile = std::env::var_os("CHELIS_PROFILE_COMPILE_CONTEXT_DETAIL")
-        .map(|v| v == "1")
-        .unwrap_or(false);
-    let mut sub_t = std::time::Instant::now();
-    let log_sub = |label: &str, t: &mut std::time::Instant| {
-        if detail_profile {
-            eprintln!(
-                "build_type_env_sub: {:>8.4}s {}",
-                t.elapsed().as_secs_f64(),
-                label
-            );
-            *t = std::time::Instant::now();
-        }
-    };
+    let mut sub_t = errors.native().profile_clock();
     // Start from the empty (builtins + prelude ADTs) state.
     let empty = TypeEnv::empty();
     let mut state = empty.inner().clone();
 
     // Library IR declared-type lookup.
-    let library_ir = build_ir_type_env(library_exprs);
-    log_sub("build_ir_type_env_initial", &mut sub_t);
+    let library_ir = build_ir_type_env(library_exprs, &mut errors.stack());
+    errors.native().profile_phase(
+        &mut sub_t,
+        "build_type_env_sub",
+        "build_ir_type_env_initial",
+    );
 
     let product = infer_ir_program_with_state(library_exprs, &mut state, origin, errors);
     let stats = product.stats();
-    log_sub("infer_ir_program_with_state", &mut sub_t);
+    errors.native().profile_phase(
+        &mut sub_t,
+        "build_type_env_sub",
+        "infer_ir_program_with_state",
+    );
     // chelis#930: inference may have abandoned its schedule. Stop before the
     // validators, which would otherwise report the un-inferred tail as program
     // errors and spend the rest of the phase doing it.
@@ -805,13 +828,21 @@ pub(crate) fn build_type_env_from_library_in_session(
         &product.top_level_references,
         errors,
     );
-    log_sub("validate_semantic_program", &mut sub_t);
+    errors.native().profile_phase(
+        &mut sub_t,
+        "build_type_env_sub",
+        "validate_semantic_program",
+    );
     validate_tensor_precisions_in_program(library_exprs, errors);
     crate::invariants::validate_type_invariants_in_program_with_sink(library_exprs, errors);
-    log_sub("validate_tensor_precisions", &mut sub_t);
+    errors.native().profile_phase(
+        &mut sub_t,
+        "build_type_env_sub",
+        "validate_tensor_precisions",
+    );
     // Surface a stack-exhaustion bail from the passes above as a hard
     // located error before the gate (and before the errors drain below).
-    stack_scope.drain_into(errors);
+    errors.drain_stack_bail();
     if !errors.is_empty() {
         return Err(stats);
     }
@@ -827,7 +858,11 @@ pub(crate) fn build_type_env_from_library_in_session(
             library_def_names.insert(name.to_string());
         }
     }
-    log_sub("collect_library_def_names", &mut sub_t);
+    errors.native().profile_phase(
+        &mut sub_t,
+        "build_type_env_sub",
+        "collect_library_def_names",
+    );
 
     // Build a richer `ir_types` by annotating library exprs against
     // the now-populated state and re-extracting type metadata. The raw
@@ -843,21 +878,29 @@ pub(crate) fn build_type_env_from_library_in_session(
     // Pass this unit's declared signatures directly into annotation so
     // separate-`sig` parameter stamps and binder scopes cannot observe a
     // different sequential, nested, or parallel check.
-    let declared_signatures = collect_declared_sig_metadata(library_exprs);
+    let declared_signatures = collect_declared_sig_metadata(library_exprs, &mut errors.stack());
     let annotation_context = AnnotationResolutionContext::root(&declared_signatures);
     let library_annotated =
         annotate_top_levels(library_exprs, &product, annotation_context, errors);
-    log_sub("annotate_library_exprs_outer_loop", &mut sub_t);
+    errors.native().profile_phase(
+        &mut sub_t,
+        "build_type_env_sub",
+        "annotate_library_exprs_outer_loop",
+    );
     if cancellation_gate(errors) {
         return Err(stats);
     }
-    let library_ir_annotated = build_ir_type_env(&library_annotated);
-    log_sub("build_ir_type_env_from_annotated", &mut sub_t);
+    let library_ir_annotated = build_ir_type_env(&library_annotated, &mut errors.stack());
+    errors.native().profile_phase(
+        &mut sub_t,
+        "build_type_env_sub",
+        "build_ir_type_env_from_annotated",
+    );
 
     // The annotation loop above recurses (annotate_expr_with_scope); if it
     // bailed on low stack, reject rather than return a partially-annotated
     // library context.
-    stack_scope.drain_into(errors);
+    errors.drain_stack_bail();
     if !errors.is_empty() {
         return Err(stats);
     }
@@ -910,11 +953,23 @@ pub(crate) fn build_type_env_from_library_in_session(
 pub fn build_compiled_library_context(
     library_exprs: &[deep::Expr],
     origin: ProgramOrigin,
+    native: &mut NativeServices,
 ) -> Result<(TypeEnv, CheckedProgram), InferResult> {
-    crate::session::build_compiled_library_context(library_exprs, origin)
+    crate::session::build_compiled_library_context(library_exprs, origin, native)
 }
 
 pub(crate) fn build_compiled_library_context_in_session(
+    library_exprs: &[deep::Expr],
+    origin: ProgramOrigin,
+    errors: &mut DiagnosticSink<'_>,
+) -> Result<(TypeEnv, CheckedProgram), InferStats> {
+    errors.enter_stack_scope();
+    let result = build_compiled_library_context_in_session_scoped(library_exprs, origin, errors);
+    errors.exit_stack_scope();
+    result
+}
+
+fn build_compiled_library_context_in_session_scoped(
     library_exprs: &[deep::Expr],
     origin: ProgramOrigin,
     errors: &mut DiagnosticSink<'_>,
@@ -933,13 +988,12 @@ pub(crate) fn build_compiled_library_context_in_session(
     // entry never normalized it.
     let folded = chelis_deep::pipe::fold_program_pipes(library_exprs);
     let library_exprs = &folded[..];
-    let stack_scope = StackExhaustionScope::enter();
     // Mirror `build_type_env_from_library` up through the validators so the
     // type_env half stays bit-compatible with the existing public API.
     let empty = TypeEnv::empty();
     let mut state = empty.inner().clone();
 
-    let library_ir = build_ir_type_env(library_exprs);
+    let library_ir = build_ir_type_env(library_exprs, &mut errors.stack());
 
     let product = infer_ir_program_with_state(library_exprs, &mut state, origin, errors);
     let stats = product.stats();
@@ -958,7 +1012,7 @@ pub(crate) fn build_compiled_library_context_in_session(
     crate::invariants::validate_type_invariants_in_program_with_sink(library_exprs, errors);
     // Surface any stack-exhaustion bail from the passes above as a hard
     // located error (covered-or-rejected) before the empty-errors gate.
-    stack_scope.drain_into(errors);
+    errors.drain_stack_bail();
     if !errors.is_empty() {
         return Err(stats);
     }
@@ -982,20 +1036,20 @@ pub(crate) fn build_compiled_library_context_in_session(
     //
     // The explicit annotation context supplies this unit's separate-`sig`
     // parameter metadata and per-def binder scope to the recursive pass.
-    let declared_signatures = collect_declared_sig_metadata(library_exprs);
+    let declared_signatures = collect_declared_sig_metadata(library_exprs, &mut errors.stack());
     let annotation_context = AnnotationResolutionContext::root(&declared_signatures);
     let library_annotated =
         annotate_top_levels(library_exprs, &product, annotation_context, errors);
     // Annotation also recurses (annotate_expr_with_scope); if it bailed on
     // low stack, reject rather than return a partially-annotated program.
-    stack_scope.drain_into(errors);
+    errors.drain_stack_bail();
     if !errors.is_empty() {
         return Err(stats);
     }
     if cancellation_gate(errors) {
         return Err(stats);
     }
-    let library_ir_annotated = build_ir_type_env(&library_annotated);
+    let library_ir_annotated = build_ir_type_env(&library_annotated, &mut errors.stack());
 
     let type_env = TypeEnv::from_inner(TypeEnvInner {
         env: state.env,
@@ -1065,11 +1119,29 @@ pub fn build_compiled_library_context_with_base(
     base: &TypeEnv,
     library_exprs: &[deep::Expr],
     origin: ProgramOrigin,
+    native: &mut NativeServices,
 ) -> Result<(TypeEnv, CheckedProgram), InferResult> {
-    crate::session::build_compiled_library_context_with_base(base, library_exprs, origin)
+    crate::session::build_compiled_library_context_with_base(base, library_exprs, origin, native)
 }
 
 pub(crate) fn build_compiled_library_context_with_base_in_session(
+    base: &TypeEnv,
+    library_exprs: &[deep::Expr],
+    origin: ProgramOrigin,
+    errors: &mut DiagnosticSink<'_>,
+) -> Result<(TypeEnv, CheckedProgram), InferStats> {
+    errors.enter_stack_scope();
+    let result = build_compiled_library_context_with_base_in_session_scoped(
+        base,
+        library_exprs,
+        origin,
+        errors,
+    );
+    errors.exit_stack_scope();
+    result
+}
+
+fn build_compiled_library_context_with_base_in_session_scoped(
     base: &TypeEnv,
     library_exprs: &[deep::Expr],
     origin: ProgramOrigin,
@@ -1090,12 +1162,11 @@ pub(crate) fn build_compiled_library_context_with_base_in_session(
     // entry never normalized it.
     let folded = chelis_deep::pipe::fold_program_pipes(library_exprs);
     let library_exprs = &folded[..];
-    let stack_scope = StackExhaustionScope::enter();
     // Seed from the base context's snapshot rather than the empty state.
     let mut state = base.resume_for_new_check();
 
     // `library_exprs` declared types (IR), layered on top of the base's.
-    let new_ir = build_ir_type_env(library_exprs);
+    let new_ir = build_ir_type_env(library_exprs, &mut errors.stack());
     let combined_ir: BTreeMap<String, deep::Expr> = state
         .ir_types
         .iter()
@@ -1125,7 +1196,7 @@ pub(crate) fn build_compiled_library_context_with_base_in_session(
     crate::invariants::validate_type_invariants_in_program_with_sink(library_exprs, errors);
     // Surface any stack-exhaustion bail from the passes above as a hard
     // located error (covered-or-rejected) before the empty-errors gate.
-    stack_scope.drain_into(errors);
+    errors.drain_stack_bail();
     if !errors.is_empty() {
         return Err(stats);
     }
@@ -1148,20 +1219,20 @@ pub(crate) fn build_compiled_library_context_with_base_in_session(
     // explicit declared-signature context for this layer's exprs so
     // separate-`sig` defs get borrow-correct `(params ...)` stamps without
     // inheriting binders from the base context.
-    let declared_signatures = collect_declared_sig_metadata(library_exprs);
+    let declared_signatures = collect_declared_sig_metadata(library_exprs, &mut errors.stack());
     let annotation_context = AnnotationResolutionContext::root(&declared_signatures);
     let library_annotated =
         annotate_top_levels(library_exprs, &product, annotation_context, errors);
     // Annotation also recurses (annotate_expr_with_scope); if it bailed on
     // low stack, reject rather than return a partially-annotated program.
-    stack_scope.drain_into(errors);
+    errors.drain_stack_bail();
     if !errors.is_empty() {
         return Err(stats);
     }
     if cancellation_gate(errors) {
         return Err(stats);
     }
-    let new_ir_annotated = build_ir_type_env(&library_annotated);
+    let new_ir_annotated = build_ir_type_env(&library_annotated, &mut errors.stack());
 
     // The returned TypeEnv's `ir_types` is the union: base declared types
     // plus this layer's, this layer winning on shadow.
@@ -1242,12 +1313,14 @@ pub fn check_ir_with_context(
     context: &TypeEnv,
     new_exprs: &[deep::Expr],
     origin: ProgramOrigin,
+    native: &mut NativeServices,
 ) -> Result<CheckedProgram, InferResult> {
     check_ir_with_signature_context(
         context,
         &SignatureInferenceMetadata::default(),
         new_exprs,
         origin,
+        native,
     )
 }
 
@@ -1256,12 +1329,14 @@ pub fn check_ir_with_signature_context(
     signature_context: &SignatureInferenceMetadata,
     new_exprs: &[deep::Expr],
     origin: ProgramOrigin,
+    native: &mut NativeServices,
 ) -> Result<CheckedProgram, InferResult> {
     let mut checked = crate::session::check_ir_with_signature_context(
         context,
         signature_context,
         new_exprs,
         origin,
+        native,
     )?;
     checked.bind_context_library_proof(context.library_proof_id());
     Ok(checked)
@@ -1274,46 +1349,55 @@ pub(crate) fn check_ir_with_signature_context_in_session(
     origin: ProgramOrigin,
     errors: &mut DiagnosticSink<'_>,
 ) -> Result<CheckedProgram, InferStats> {
+    // Reset the stack-exhaustion flag for this check unit; drained into the
+    // error vector below before the empty-errors gate so a deep-input stack
+    // bail always fails the check (never a silent green / partial result).
+    errors.enter_stack_scope();
+    let result = check_ir_with_signature_context_in_session_scoped(
+        context,
+        signature_context,
+        new_exprs,
+        origin,
+        errors,
+    );
+    errors.exit_stack_scope();
+    result
+}
+
+fn check_ir_with_signature_context_in_session_scoped(
+    context: &TypeEnv,
+    signature_context: &SignatureInferenceMetadata,
+    new_exprs: &[deep::Expr],
+    origin: ProgramOrigin,
+    errors: &mut DiagnosticSink<'_>,
+) -> Result<CheckedProgram, InferStats> {
     // Normalize Node → List while preserving BareList structural role
     // (#908 producer switch).
     let normalized = normalize_program_input(new_exprs);
     let new_exprs = &normalized;
-    // Reset the stack-exhaustion flag for this check unit; drained into the
-    // error vector below before the empty-errors gate so a deep-input stack
-    // bail always fails the check (never a silent green / partial result).
-    let stack_scope = StackExhaustionScope::enter();
-    let detail_profile = std::env::var_os("CHELIS_PROFILE_COMPILE_CONTEXT_DETAIL")
-        .map(|v| v == "1")
-        .unwrap_or(false);
-    let mut sub_t = std::time::Instant::now();
-    let log_sub = |label: &str, t: &mut std::time::Instant| {
-        if detail_profile {
-            eprintln!(
-                "check_ir_sub: {:>8.4}s {}",
-                t.elapsed().as_secs_f64(),
-                label
-            );
-            *t = std::time::Instant::now();
-        }
-    };
+    let mut sub_t = errors.native().profile_clock();
     let mut state = context.resume_for_new_check();
 
     // New-code declared types (IR) layered on top of library's.
-    let new_ir = build_ir_type_env(new_exprs);
+    let new_ir = build_ir_type_env(new_exprs, &mut errors.stack());
     let combined_ir: BTreeMap<String, deep::Expr> = state
         .ir_types
         .iter()
         .chain(new_ir.iter())
         .map(|(k, v)| (k.clone(), v.clone()))
         .collect();
-    log_sub("build_ir_and_combine", &mut sub_t);
+    errors
+        .native()
+        .profile_phase(&mut sub_t, "check_ir_sub", "build_ir_and_combine");
 
     // Library is already validated; only run validate / inference on
     // new exprs. Inference's canonical collector binds the new-code's
     // own declared types (library schemes are already in state.env).
     let mut product = infer_ir_program_with_state(new_exprs, &mut state, origin, errors);
     let stats = product.stats();
-    log_sub("infer_ir_program_with_state", &mut sub_t);
+    errors
+        .native()
+        .profile_phase(&mut sub_t, "check_ir_sub", "infer_ir_program_with_state");
     // chelis#930: see `build_type_env_from_library_in_session` — stop before
     // the validators if inference abandoned its schedule.
     if cancellation_gate(errors) {
@@ -1329,13 +1413,17 @@ pub(crate) fn check_ir_with_signature_context_in_session(
         &product.top_level_references,
         errors,
     );
-    log_sub("validate_semantic_program", &mut sub_t);
+    errors
+        .native()
+        .profile_phase(&mut sub_t, "check_ir_sub", "validate_semantic_program");
     validate_tensor_precisions_in_program(new_exprs, errors);
     crate::invariants::validate_type_invariants_in_program_with_sink(new_exprs, errors);
-    log_sub("validate_tensor_precisions", &mut sub_t);
+    errors
+        .native()
+        .profile_phase(&mut sub_t, "check_ir_sub", "validate_tensor_precisions");
     // Surface any stack-exhaustion bail from the passes above as a hard
     // located error (covered-or-rejected) before the empty-errors gate.
-    stack_scope.drain_into(errors);
+    errors.drain_stack_bail();
     if !errors.is_empty() {
         return Err(stats);
     }
@@ -1343,10 +1431,12 @@ pub(crate) fn check_ir_with_signature_context_in_session(
     // Annotate ONLY the new-code exprs, starting from the library
     // snapshot state so library names resolve during annotation.
     let annotated_exprs = annotate_ir_program(new_exprs, &product, errors);
-    log_sub("annotate_ir_program", &mut sub_t);
+    errors
+        .native()
+        .profile_phase(&mut sub_t, "check_ir_sub", "annotate_ir_program");
     // Annotation also recurses (annotate_expr_with_scope); if it bailed on
     // low stack, reject rather than return a partially-annotated program.
-    stack_scope.drain_into(errors);
+    errors.drain_stack_bail();
     if !errors.is_empty() {
         return Err(stats);
     }
@@ -1357,13 +1447,15 @@ pub(crate) fn check_ir_with_signature_context_in_session(
     // passes (lower, effects, linearity) can resolve `(var libname)` calls
     // from new-code without a separate library lookup. New-code types take
     // precedence on shadow.
-    let mut annotated_type_env = build_ir_type_env(&annotated_exprs);
+    let mut annotated_type_env = build_ir_type_env(&annotated_exprs, &mut errors.stack());
     for (name, ty) in &context.inner().ir_types {
         annotated_type_env
             .entry(name.clone())
             .or_insert_with(|| ty.clone());
     }
-    log_sub("annotated_type_env_build", &mut sub_t);
+    errors
+        .native()
+        .profile_phase(&mut sub_t, "check_ir_sub", "annotated_type_env_build");
     let checked = finalize_checked_program(
         annotated_exprs,
         annotated_type_env,
@@ -1387,8 +1479,9 @@ pub(crate) fn check_ir_with_signature_context_in_session(
 pub fn check_typed_program(
     exprs: &[deep::Expr],
     origin: ProgramOrigin,
+    native: &mut NativeServices,
 ) -> Result<CheckedProgram, InferResult> {
-    crate::session::check_typed_program(exprs, origin)
+    crate::session::check_typed_program(exprs, origin, native)
 }
 
 pub(crate) fn check_typed_program_in_session(
@@ -1399,7 +1492,17 @@ pub(crate) fn check_typed_program_in_session(
     // Outermost scope covers both inference (which has its own inner scope)
     // and the annotation pass below, so a bail in either surfaces as a hard
     // located failure rather than a partially-annotated `Ok`.
-    let stack_scope = StackExhaustionScope::enter();
+    errors.enter_stack_scope();
+    let result = check_typed_program_in_session_scoped(exprs, origin, errors);
+    errors.exit_stack_scope();
+    result
+}
+
+fn check_typed_program_in_session_scoped(
+    exprs: &[deep::Expr],
+    origin: ProgramOrigin,
+    errors: &mut DiagnosticSink<'_>,
+) -> Result<CheckedProgram, InferStats> {
     // One tree for inference and annotation: the pipe fold ONLY, not the
     // carrier normalization. chelis#1023 pins that a stamped program stays
     // stamped through the checker's output, and this entry deliberately
@@ -1409,9 +1512,9 @@ pub(crate) fn check_typed_program_in_session(
     let stats = product.stats();
     if errors.is_empty() {
         let annotated_exprs = annotate_ir_program(exprs, &product, errors);
-        let annotated_type_env = build_ir_type_env(&annotated_exprs);
+        let annotated_type_env = build_ir_type_env(&annotated_exprs, &mut errors.stack());
         // Annotation recurses; reject if it bailed on low stack.
-        stack_scope.drain_into(errors);
+        errors.drain_stack_bail();
         if !errors.is_empty() {
             return Err(stats);
         }
@@ -1448,11 +1551,26 @@ pub(crate) fn check_typed_program_in_session(
     }
 }
 
-pub fn infer_ir_program(exprs: &[deep::Expr], origin: ProgramOrigin) -> InferResult {
-    crate::session::infer_ir_program(exprs, origin)
+pub fn infer_ir_program(
+    exprs: &[deep::Expr],
+    origin: ProgramOrigin,
+    native: &mut NativeServices,
+) -> InferResult {
+    crate::session::infer_ir_program(exprs, origin, native)
 }
 
 pub(crate) fn infer_ir_program_in_session(
+    exprs: &[deep::Expr],
+    origin: ProgramOrigin,
+    errors: &mut DiagnosticSink<'_>,
+) -> InferStats {
+    errors.enter_stack_scope();
+    let result = infer_ir_program_in_session_scoped(exprs, origin, errors);
+    errors.exit_stack_scope();
+    result
+}
+
+fn infer_ir_program_in_session_scoped(
     exprs: &[deep::Expr],
     origin: ProgramOrigin,
     errors: &mut DiagnosticSink<'_>,
@@ -1461,8 +1579,7 @@ pub(crate) fn infer_ir_program_in_session(
     // (#908 producer switch).
     let normalized = normalize_program_input(exprs);
     let exprs = &normalized;
-    let stack_scope = StackExhaustionScope::enter();
-    let type_env = build_ir_type_env(exprs);
+    let type_env = build_ir_type_env(exprs, &mut errors.stack());
     let product = infer_ir_program_with_env(exprs, &type_env, origin, errors);
     let stats = product.stats();
     // chelis#930 review: this was the one `*_in_session` entry with no gate.
@@ -1473,18 +1590,18 @@ pub(crate) fn infer_ir_program_in_session(
     // repo Contract Invariant: perfect success requires an empty error list
     // to be HONEST, and a truncated walk is not).
     if cancellation_gate(errors) {
-        stack_scope.drain_into(errors);
+        errors.drain_stack_bail();
         return stats;
     }
     validate_semantic_program(exprs, &type_env, &product.top_level_references, errors);
     if cancellation_gate(errors) {
-        stack_scope.drain_into(errors);
+        errors.drain_stack_bail();
         return stats;
     }
     validate_tensor_precisions_in_program(exprs, errors);
     crate::invariants::validate_type_invariants_in_program_with_sink(exprs, errors);
     // Surface any walker stack bail as a hard located error.
-    stack_scope.drain_into(errors);
+    errors.drain_stack_bail();
     stats
 }
 
@@ -1559,21 +1676,20 @@ pub(super) fn infer_ir_program_with_state(
     );
     let errors = opacity_scope.sink();
 
-    // Per-decl profile: when CHELIS_PROFILE_COMPILE_CONTEXT_DETAIL=1, emit
-    // one stderr line per top-level decl with its name and inference time.
+    // Per-decl profile: when the shell enables profiling on the native
+    // services, emit one stderr line per top-level decl with its name and
+    // inference time.
     // Aggregated by name in caller scripts to attribute cost per module.
-    let detail_profile = std::env::var_os("CHELIS_PROFILE_COMPILE_CONTEXT_DETAIL")
-        .map(|v| v == "1")
-        .unwrap_or(false);
     let user_def_names = collect_user_def_names(&top_level_decl_items(exprs));
-    let declared_signatures = collect_declared_sig_metadata(items.iter().map(|(_, expr)| *expr));
+    let declared_signatures =
+        collect_declared_sig_metadata(items.iter().map(|(_, expr)| *expr), &mut errors.stack());
     validate_binder_literal_adoption_in_program(&items, &declared_signatures, errors);
     // PP9 uses the same two bounded prebind capabilities at both entries:
     // [04-INF-4] external-input ascriptions are declaration-local, while a
     // defsig-less function body stamp supplies the callable header that
     // [04-INF-2]/[04-INF-3] make forward-visible. Eager values are never
     // prebound from body metadata, preserving #1134's source-order rule.
-    let external_input_types = collect_literal_external_input_types(&items);
+    let external_input_types = collect_literal_external_input_types(&items, &mut errors.stack());
     let (metadata_prebound_names, function_metadata_failures) =
         prebind_defsig_less_function_body_types(
             &items,
@@ -1585,23 +1701,21 @@ pub(super) fn infer_ir_program_with_state(
             &state.adt_reg,
             errors,
         );
-    let top_level_references = TopLevelReferenceGraph::build(&items);
+    let top_level_references = TopLevelReferenceGraph::build(&items, &mut errors.stack());
     product.function_inference_plan =
-        FunctionInferencePlan::build_from_reference_graph(&top_level_references);
+        FunctionInferencePlan::build_from_reference_graph(&top_level_references, errors.native());
     let inference_groups = primary_inference_groups_with_reference_graph(
         &product.function_inference_plan,
         &items,
         &top_level_references,
+        &mut errors.stack(),
     );
     // chelis#930: cooperative cancellation at top-level-declaration
     // granularity. Body inference is one of the two front-end passes whose
     // cost scales with declaration count, so an abandoned compile has to be
     // able to stop inside it rather than only at the end of the phase. The
-    // token is read ONCE (a TLS lookup) and polled per declaration as a
-    // relaxed load, leaving the type checker's own recursive walk — which runs
+    // invocation's token is polled per declaration as one relaxed load, leaving the type checker's own recursive walk — which runs
     // many orders of magnitude more often — untouched.
-    let cancel = crate::cancel::current_cancel_token();
-    let cancelled = || cancel.as_ref().is_some_and(CancelToken::is_cancelled);
     'schedule: for group in inference_groups {
         let component_diagnostic_checkpoint = errors.checkpoint();
         let cyclic = group.cyclic;
@@ -1658,7 +1772,7 @@ pub(super) fn infer_ir_program_with_state(
         }
         let mut deferred_bindings = Vec::new();
         for &declaration_index in &group.indices {
-            if cancelled() {
+            if errors.cancellation_observed() {
                 if let Some(scope) = component_scope.take() {
                     scope.abort(
                         &mut state.env,
@@ -1670,12 +1784,8 @@ pub(super) fn infer_ir_program_with_state(
                 break 'schedule;
             }
             let (module, expr) = &items[declaration_index];
-            product.begin_root(expr);
-            let t0 = if detail_profile {
-                Some(std::time::Instant::now())
-            } else {
-                None
-            };
+            product.begin_root(expr, &mut errors.stack());
+            let mut decl_clock = errors.native().profile_clock();
             let decl_name = top_level_decl_name(expr);
             errors.set_opacity_current_item(
                 crate::opacity::module_key_for_item(module.as_deref(), decl_name),
@@ -1729,11 +1839,11 @@ pub(super) fn infer_ir_program_with_state(
                 errors,
             );
             product.finish_root(&state.subst, errors);
-            if let Some(t0) = t0 {
-                let elapsed = t0.elapsed();
-                let name = top_level_decl_name(expr).unwrap_or("<anon>");
-                eprintln!("infer_ir_decl: {:>8.4}s {}", elapsed.as_secs_f64(), name);
-            }
+            errors.native().profile_phase(
+                &mut decl_clock,
+                "infer_ir_decl",
+                top_level_decl_name(expr).unwrap_or("<anon>"),
+            );
             // Issue #256 round 2: drain the deferred-borrow ledger for this
             // def and re-check each recorded variable against the now-complete
             // substitution. Draining per-def keeps error attribution local and
@@ -1754,7 +1864,7 @@ pub(super) fn infer_ir_program_with_state(
             // `validate_deferred_opaque_uses`).
             validate_deferred_opaque_uses(&state.subst, &state.adt_reg, errors);
         }
-        if cancelled() {
+        if errors.cancellation_observed() {
             if let Some(scope) = component_scope.take() {
                 scope.abort(
                     &mut state.env,
@@ -1815,7 +1925,7 @@ pub(super) fn infer_ir_program_with_state(
     errors.set_opacity_current_item(None, None);
     state.env.set_current_declaration_ordinal(None);
 
-    if cancelled() {
+    if errors.cancellation_observed() {
         // Abandoned mid-schedule. The remaining declarations were never
         // inferred, so the walks below would attribute their absence to the
         // program and spend the phase's remaining budget doing it. The caller's
@@ -1899,20 +2009,33 @@ fn eager_value_definition_ordinals(
 /// answers `true`, which can only ADD a precedence edge and never drop one;
 /// the guard's record still turns the bail into a hard failure at the check
 /// boundary, so the over-approximation is never observed on a passing program.
-fn deep_type_contains_hole(expr: &deep::Expr) -> bool {
-    stack_guard!("deep_type_contains_hole", expr, true);
+fn deep_type_contains_hole(expr: &deep::Expr, stack: &mut StackBudget<'_>) -> bool {
+    if stack.frame_exhausted("deep_type_contains_hole", || expr.span_id()) {
+        return true;
+    }
+    let result = deep_type_contains_hole_frame(expr, stack);
+    stack.exit_frame();
+    result
+}
+
+fn deep_type_contains_hole_frame(expr: &deep::Expr, stack: &mut StackBudget<'_>) -> bool {
     if let Some((tag, _, kids)) = stamped_parts(expr) {
         if matches!(tag, DeepTag::TVar | DeepTag::DVar | DeepTag::DRank)
             && kids.first().and_then(symbol_name) == Some("_")
         {
             return true;
         }
-        return kids.iter().any(deep_type_contains_hole);
+        return kids.iter().any(|expr| deep_type_contains_hole(expr, stack));
     }
     match expr {
-        deep::Expr::List(list, _) => list.elements.iter().any(deep_type_contains_hole),
-        deep::Expr::BareList(elements, _) => elements.iter().any(deep_type_contains_hole),
-        deep::Expr::MetaExpr(meta, _) => deep_type_contains_hole(&meta.expr),
+        deep::Expr::List(list, _) => list
+            .elements
+            .iter()
+            .any(|expr| deep_type_contains_hole(expr, stack)),
+        deep::Expr::BareList(elements, _) => elements
+            .iter()
+            .any(|expr| deep_type_contains_hole(expr, stack)),
+        deep::Expr::MetaExpr(meta, _) => deep_type_contains_hole(&meta.expr, stack),
         _ => false,
     }
 }
@@ -1931,7 +2054,10 @@ struct DeclaredSignatureScan {
     holed: UnordSet<String>,
 }
 
-fn scan_declared_signatures(items: &[(Option<String>, &deep::Expr)]) -> DeclaredSignatureScan {
+fn scan_declared_signatures(
+    items: &[(Option<String>, &deep::Expr)],
+    stack: &mut StackBudget<'_>,
+) -> DeclaredSignatureScan {
     let mut signed = UnordSet::new();
     let mut holed = UnordSet::new();
     for (_, expr) in items {
@@ -1942,7 +2068,9 @@ fn scan_declared_signatures(items: &[(Option<String>, &deep::Expr)]) -> Declared
             continue;
         };
         signed.insert(name.to_string());
-        if defsig_parts(kids).is_some_and(|(_, _, type_expr)| deep_type_contains_hole(type_expr)) {
+        if defsig_parts(kids)
+            .is_some_and(|(_, _, type_expr)| deep_type_contains_hole(type_expr, stack))
+        {
             holed.insert(name.to_string());
         }
     }
@@ -2017,17 +2145,19 @@ fn scan_declared_signatures(items: &[(Option<String>, &deep::Expr)]) -> Declared
 pub(super) fn primary_inference_schedule(
     function_plan: &FunctionInferencePlan,
     items: &[(Option<String>, &deep::Expr)],
+    stack: &mut StackBudget<'_>,
 ) -> Vec<usize> {
-    let references = TopLevelReferenceGraph::build(items);
-    primary_inference_schedule_with_reference_graph(function_plan, items, &references)
+    let references = TopLevelReferenceGraph::build(items, stack);
+    primary_inference_schedule_with_reference_graph(function_plan, items, &references, stack)
 }
 
 fn primary_inference_schedule_with_reference_graph(
     function_plan: &FunctionInferencePlan,
     items: &[(Option<String>, &deep::Expr)],
     references: &TopLevelReferenceGraph,
+    stack: &mut StackBudget<'_>,
 ) -> Vec<usize> {
-    let reference_components = references.inference_components();
+    let reference_components = references.inference_components(stack.native());
     if !function_plan.complete || !reference_components.complete {
         return Vec::new();
     }
@@ -2081,7 +2211,7 @@ fn primary_inference_schedule_with_reference_graph(
     }
     // chelis#1486: the hole edge is not bounded by the planner's region, so it
     // needs every `def`'s ordinal, not only a module function's.
-    let signatures = scan_declared_signatures(items);
+    let signatures = scan_declared_signatures(items, stack);
     let mut hole_signature_definitions: BTreeMap<String, usize> = BTreeMap::new();
     for (index, (_, expr)) in items.iter().enumerate() {
         let Some((DeepTag::Def, _, _)) = stamped_parts(expr) else {
@@ -2207,10 +2337,11 @@ fn primary_inference_groups_with_reference_graph(
     function_plan: &FunctionInferencePlan,
     items: &[(Option<String>, &deep::Expr)],
     references: &TopLevelReferenceGraph,
+    stack: &mut StackBudget<'_>,
 ) -> Vec<PrimaryInferenceGroup> {
     let schedule =
-        primary_inference_schedule_with_reference_graph(function_plan, items, references);
-    primary_inference_groups_for_schedule(function_plan, references, schedule)
+        primary_inference_schedule_with_reference_graph(function_plan, items, references, stack);
+    primary_inference_groups_for_schedule(function_plan, references, schedule, stack.native())
 }
 
 /// Group one explicit schedule: every full-reference component is emitted
@@ -2220,8 +2351,9 @@ pub(super) fn primary_inference_groups_for_schedule(
     function_plan: &FunctionInferencePlan,
     references: &TopLevelReferenceGraph,
     schedule: Vec<usize>,
+    native: &mut NativeServices,
 ) -> Vec<PrimaryInferenceGroup> {
-    let reference_components = references.inference_components();
+    let reference_components = references.inference_components(native);
     if !reference_components.complete {
         return Vec::new();
     }
@@ -2325,8 +2457,9 @@ pub(super) struct CollectedIrTypes {
 
 fn collect_literal_external_input_types(
     items: &[(Option<String>, &deep::Expr)],
+    stack: &mut StackBudget<'_>,
 ) -> UnordMap<usize, deep::Expr> {
-    let collected = collect_ir_types_with_origins(items.iter().map(|(_, expr)| *expr));
+    let collected = collect_ir_types_with_origins(items.iter().map(|(_, expr)| *expr), stack);
     collected
         .type_env
         .iter()
@@ -2337,7 +2470,7 @@ fn collect_literal_external_input_types(
                 return None;
             };
             let body = kids.get(1)?;
-            body_is_type_stamped_literal_self_ref(body, name)
+            body_is_type_stamped_literal_self_ref(body, name, stack)
                 .then(|| (declaration_index, ty_expr.clone()))
         })
         .collect()
@@ -2365,7 +2498,7 @@ fn prebind_defsig_less_function_body_types(
     let CollectedIrTypes {
         type_env,
         final_origin_by_name,
-    } = collect_ir_types_with_origins(items.iter().map(|(_, expr)| *expr));
+    } = collect_ir_types_with_origins(items.iter().map(|(_, expr)| *expr), &mut errors.stack());
     let mut prebound_names = UnordSet::new();
     let mut failures = UnordMap::new();
     for (name, ty_expr) in type_env {
@@ -2448,12 +2581,13 @@ fn prebind_literal_external_input_for_declaration(
     }
 }
 
-pub(super) fn build_ir_type_env(exprs: &[deep::Expr]) -> IrTypeEnv {
-    collect_ir_types_with_origins(top_level_decl_items(exprs)).type_env
+pub(super) fn build_ir_type_env(exprs: &[deep::Expr], stack: &mut StackBudget<'_>) -> IrTypeEnv {
+    collect_ir_types_with_origins(top_level_decl_items(exprs), stack).type_env
 }
 
 pub(super) fn collect_ir_types_with_origins<'a>(
     items: impl IntoIterator<Item = &'a deep::Expr>,
+    stack: &mut StackBudget<'_>,
 ) -> CollectedIrTypes {
     let mut type_env = BTreeMap::new();
     let mut final_origin_by_name = UnordMap::new();
@@ -2464,7 +2598,7 @@ pub(super) fn collect_ir_types_with_origins<'a>(
         let (Some(name), Some(body)) = (kids.first().and_then(symbol_name), kids.get(1)) else {
             continue;
         };
-        if let Some(ty) = expr_type_expr(body, &type_env) {
+        if let Some(ty) = expr_type_expr(body, &type_env, stack) {
             type_env.insert(name.to_string(), ty);
             final_origin_by_name.insert(name.to_string(), declaration_index);
         }
@@ -2927,6 +3061,7 @@ mod component_level_scope_tests {
             &chelis_deep::parser::parse_str("(def {} clean (fn {} (params {} x) (var {} x)))")
                 .expect("follow-up parses"),
             crate::ProgramOrigin::Unlinked,
+            &mut crate::NativeServices::new(None),
         );
         assert!(follow_up.errors.is_empty());
     }
@@ -2943,9 +3078,12 @@ mod component_level_scope_tests {
 
         let observation = {
             let token = crate::cancel::CancelToken::new();
-            let _cancel_guard = crate::cancel::install_cancel_token(token);
-            let _hook_guard = cancel_primary_recursive_after_members(1);
-            let result = infer_program(&exprs, crate::ProgramOrigin::Unlinked);
+            let _hook_guard = cancel_primary_recursive_after_members(1, token.clone());
+            let result = infer_program(
+                &exprs,
+                crate::ProgramOrigin::Unlinked,
+                &mut NativeServices::new(Some(token)),
+            );
             assert!(
                 result
                     .errors
@@ -2969,6 +3107,7 @@ mod component_level_scope_tests {
             )
             .expect("follow-up parses"),
             crate::ProgramOrigin::Unlinked,
+            &mut crate::NativeServices::new(None),
         );
         assert!(
             follow_up.errors.is_empty(),

@@ -101,6 +101,7 @@ pub(super) fn shape_a_relaxed_return(
     body_expr: &deep::Expr,
     body_ty: &Type,
     decl_ty: &Type,
+    stack: &mut StackBudget<'_>,
 ) -> Option<Type> {
     // body is the def's body, which the desugarer wraps as
     // `(fn (params ...) body_inner)` whenever the def has params.  Walk
@@ -114,7 +115,7 @@ pub(super) fn shape_a_relaxed_return(
         return None;
     }
     let inner = children(body_list).get(1)?;
-    descend_to_tail_var(inner)?;
+    descend_to_tail_var(inner, stack)?;
 
     // The body's inferred type and the declared type both must be
     // `Fn(params, ret)` with matching params and a return-position
@@ -166,8 +167,22 @@ pub(super) fn shape_a_relaxed_return(
 /// already covering the parameter being returned.  Heterogeneous
 /// bare-var returns would extend the relaxation beyond v3 scope and
 /// need a richer coercion story.
-pub(super) fn descend_to_tail_var(expr: &deep::Expr) -> Option<&str> {
-    stack_guard!("descend_to_tail_var", expr, None);
+pub(super) fn descend_to_tail_var<'e>(
+    expr: &'e deep::Expr,
+    stack: &mut StackBudget<'_>,
+) -> Option<&'e str> {
+    if stack.frame_exhausted("descend_to_tail_var", || expr.span_id()) {
+        return None;
+    }
+    let result = descend_to_tail_var_frame(expr, stack);
+    stack.exit_frame();
+    result
+}
+
+fn descend_to_tail_var_frame<'e>(
+    expr: &'e deep::Expr,
+    stack: &mut StackBudget<'_>,
+) -> Option<&'e str> {
     let list = match expr {
         deep::Expr::List(list, _) => list,
         _ => return None,
@@ -176,14 +191,14 @@ pub(super) fn descend_to_tail_var(expr: &deep::Expr) -> Option<&str> {
         Some(DeepTag::Var) => var_name_list(list),
         Some(DeepTag::Let) => {
             let body = children(list).get(1)?;
-            descend_to_tail_var(body)
+            descend_to_tail_var(body, stack)
         }
         Some(DeepTag::If) => {
             let kids = children(list);
             let then_e = kids.get(1)?;
             let else_e = kids.get(2)?;
-            let then_name = descend_to_tail_var(then_e)?;
-            let else_name = descend_to_tail_var(else_e)?;
+            let then_name = descend_to_tail_var(then_e, stack)?;
+            let else_name = descend_to_tail_var(else_e, stack)?;
             if then_name == else_name {
                 Some(then_name)
             } else {
@@ -208,7 +223,7 @@ pub(super) fn descend_to_tail_var(expr: &deep::Expr) -> Option<&str> {
                     return None;
                 }
                 let arm_body = children(arm_list).get(2)?;
-                let arm_name = descend_to_tail_var(arm_body)?;
+                let arm_name = descend_to_tail_var(arm_body, stack)?;
                 match name {
                     None => name = Some(arm_name),
                     Some(prev) if prev == arm_name => {}
@@ -435,7 +450,11 @@ mod dimension_observation_tests {
                 args,
                 &[Dim::Lit(1), Dim::Lit(2), known],
                 &kernel,
-                &subst
+                &subst,
+                &mut StackBudget::new(
+                    &mut NativeServices::new(None),
+                    &mut StackBailRecord::default()
+                )
             ),
             Some(vec![3])
         );
@@ -444,7 +463,11 @@ mod dimension_observation_tests {
                 args,
                 &[Dim::Lit(1), Dim::Lit(2), unknown],
                 &kernel,
-                &subst
+                &subst,
+                &mut StackBudget::new(
+                    &mut NativeServices::new(None),
+                    &mut StackBailRecord::default()
+                )
             ),
             None
         );
@@ -453,7 +476,11 @@ mod dimension_observation_tests {
                 args,
                 &[Dim::Lit(1), Dim::Lit(2), Dim::Lit(2)],
                 &kernel,
-                &subst
+                &subst,
+                &mut StackBudget::new(
+                    &mut NativeServices::new(None),
+                    &mut StackBailRecord::default()
+                )
             ),
             None
         );

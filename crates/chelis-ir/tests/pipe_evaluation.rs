@@ -74,8 +74,13 @@ fn pipe_unary_builtin_stage_lowers_and_evaluates() {
         !roots.is_empty(),
         "lowered pipe must produce at least one root"
     );
-    let values = eval_tensor_roots_with_strict(&dag, &roots, |name| inputs.get(name).cloned())
-        .expect("eval succeeds");
+    let values = eval_tensor_roots_with_strict(
+        &dag,
+        &roots,
+        |name| inputs.get(name).cloned(),
+        &mut chelis_types::NativeServices::new(None),
+    )
+    .expect("eval succeeds");
     let out = &values[roots.last().unwrap()];
     assert_eq!(out.shape, vec![3]);
     // relu([-1, 0, 2.5]) = [0, 0, 2.5]
@@ -125,8 +130,13 @@ fn pipe_plain_callable_with_args_lowers_and_evaluates() {
     ]);
     let roots: Vec<NodeId> = dag.roots().to_vec();
     assert!(!roots.is_empty());
-    let values = eval_tensor_roots_with_strict(&dag, &roots, |name| inputs.get(name).cloned())
-        .expect("eval succeeds");
+    let values = eval_tensor_roots_with_strict(
+        &dag,
+        &roots,
+        |name| inputs.get(name).cloned(),
+        &mut chelis_types::NativeServices::new(None),
+    )
+    .expect("eval succeeds");
     let out = &values[roots.last().unwrap()];
     assert_eq!(out.shape, vec![3]);
     assert_eq!(out.to_f64_lossy_vec(), vec![11.0, 22.0, 33.0]);
@@ -202,12 +212,20 @@ fn pipe_grad_stage_matches_non_pipe_application() {
     assert!(!pipe_roots.is_empty(), "pipe DAG must have a root");
     assert!(!app_roots.is_empty(), "app DAG must have a root");
 
-    let pipe_values =
-        eval_tensor_roots_with_strict(&pipe_dag, &pipe_roots, |name| inputs.get(name).cloned())
-            .expect("pipe eval");
-    let app_values =
-        eval_tensor_roots_with_strict(&app_dag, &app_roots, |name| inputs.get(name).cloned())
-            .expect("app eval");
+    let pipe_values = eval_tensor_roots_with_strict(
+        &pipe_dag,
+        &pipe_roots,
+        |name| inputs.get(name).cloned(),
+        &mut chelis_types::NativeServices::new(None),
+    )
+    .expect("pipe eval");
+    let app_values = eval_tensor_roots_with_strict(
+        &app_dag,
+        &app_roots,
+        |name| inputs.get(name).cloned(),
+        &mut chelis_types::NativeServices::new(None),
+    )
+    .expect("app eval");
 
     let pipe_out = &pipe_values[pipe_roots.last().unwrap()];
     let app_out = &app_values[app_roots.last().unwrap()];
@@ -300,12 +318,20 @@ fn pipe_vmap_grad_stage_matches_non_pipe_application() {
     assert!(!pipe_roots.is_empty());
     assert!(!app_roots.is_empty());
 
-    let pipe_values =
-        eval_tensor_roots_with_strict(&pipe_dag, &pipe_roots, |name| inputs.get(name).cloned())
-            .expect("pipe eval");
-    let app_values =
-        eval_tensor_roots_with_strict(&app_dag, &app_roots, |name| inputs.get(name).cloned())
-            .expect("app eval");
+    let pipe_values = eval_tensor_roots_with_strict(
+        &pipe_dag,
+        &pipe_roots,
+        |name| inputs.get(name).cloned(),
+        &mut chelis_types::NativeServices::new(None),
+    )
+    .expect("pipe eval");
+    let app_values = eval_tensor_roots_with_strict(
+        &app_dag,
+        &app_roots,
+        |name| inputs.get(name).cloned(),
+        &mut chelis_types::NativeServices::new(None),
+    )
+    .expect("app eval");
 
     let pipe_out = &pipe_values[pipe_roots.last().unwrap()];
     let app_out = &app_values[app_roots.last().unwrap()];
@@ -381,8 +407,13 @@ fn pipe_vmap_def_stage_lowers_and_evaluates() {
     )]);
     let roots: Vec<NodeId> = dag.roots().to_vec();
     assert!(!roots.is_empty(), "lowered vmap-pipe must produce a root");
-    let values = eval_tensor_roots_with_strict(&dag, &roots, |name| inputs.get(name).cloned())
-        .expect("eval succeeds");
+    let values = eval_tensor_roots_with_strict(
+        &dag,
+        &roots,
+        |name| inputs.get(name).cloned(),
+        &mut chelis_types::NativeServices::new(None),
+    )
+    .expect("eval succeeds");
     let out = &values[roots.last().unwrap()];
     assert_eq!(out.shape, vec![2, 3]);
     // vmap(relu_row)([[-1, 0, 2.5], [-3, 1, 0.5]]) = [[0, 0, 2.5], [0, 1, 0.5]]
@@ -554,12 +585,20 @@ fn pipe_fn_typed_parameter_stage_matches_non_pipe_call_site() {
     assert!(!pipe_roots.is_empty(), "pipe DAG must have a root");
     assert!(!app_roots.is_empty(), "app DAG must have a root");
 
-    let pipe_values =
-        eval_tensor_roots_with_strict(&pipe_dag, &pipe_roots, |name| inputs.get(name).cloned())
-            .expect("pipe eval succeeds");
-    let app_values =
-        eval_tensor_roots_with_strict(&app_dag, &app_roots, |name| inputs.get(name).cloned())
-            .expect("app eval succeeds");
+    let pipe_values = eval_tensor_roots_with_strict(
+        &pipe_dag,
+        &pipe_roots,
+        |name| inputs.get(name).cloned(),
+        &mut chelis_types::NativeServices::new(None),
+    )
+    .expect("pipe eval succeeds");
+    let app_values = eval_tensor_roots_with_strict(
+        &app_dag,
+        &app_roots,
+        |name| inputs.get(name).cloned(),
+        &mut chelis_types::NativeServices::new(None),
+    )
+    .expect("app eval succeeds");
 
     let pipe_out = &pipe_values[pipe_roots.last().unwrap()];
     let app_out = &app_values[app_roots.last().unwrap()];

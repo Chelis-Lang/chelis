@@ -9,9 +9,14 @@ fn checked_program() -> CheckedProgram {
                 (app {} (var {} relu) (var {} x))))"#,
     )
     .expect("fixture parses");
-    let typed = check_ir_program(&exprs, chelis_types::ProgramOrigin::Unlinked)
-        .expect("fixture type-checks");
-    check_linearity(&typed).expect("fixture passes linearity")
+    let typed = check_ir_program(
+        &exprs,
+        chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
+    )
+    .expect("fixture type-checks");
+    check_linearity(&typed, &mut chelis_types::NativeServices::new(None))
+        .expect("fixture passes linearity")
 }
 
 fn mutate_annotation_leaves(
@@ -348,7 +353,7 @@ fn effect_only_reannotation_preserves_every_checked_context() {
         let expected_annotated = annotated.clone();
 
         let rewritten = checked
-            .try_with_effect_annotations(annotated)
+            .try_with_effect_annotations(annotated, &mut chelis_types::NativeServices::new(None))
             .unwrap_or_else(|errors| panic!("{carrier} effects rewrite failed: {errors:?}"));
 
         assert_eq!(
@@ -396,7 +401,7 @@ fn non_effect_reannotation_mutations_are_rejected_exactly_once() {
             let mut forged = candidate.clone();
             mutate(&mut forged);
             let result = checked
-                .try_with_effect_annotations(forged)
+                .try_with_effect_annotations(forged, &mut chelis_types::NativeServices::new(None))
                 .expect_err("non-effects mutation must not reconstruct success");
             assert_eq!(
                 result.errors.len(),
@@ -423,7 +428,9 @@ fn typed_metadata_canonicalizes_order_and_rejects_duplicate_effect_rows() {
     let reversed = chelis_deep::Metadata::try_from_values(values).unwrap();
     assert_eq!(*root, reversed);
     *root = reversed;
-    checked.try_with_effect_annotations(reordered).unwrap();
+    checked
+        .try_with_effect_annotations(reordered, &mut chelis_types::NativeServices::new(None))
+        .unwrap();
 
     let mut candidate = checked.annotated_exprs().to_vec();
     let root = root_metadata_mut(&mut candidate);
@@ -445,7 +452,9 @@ fn typed_metadata_canonicalizes_order_and_rejects_duplicate_effect_rows() {
             true
         }
     ));
-    checked.try_with_effect_annotations(candidate).unwrap();
+    checked
+        .try_with_effect_annotations(candidate, &mut chelis_types::NativeServices::new(None))
+        .unwrap();
 }
 
 #[test]

@@ -118,11 +118,19 @@ fn assert_api_diagnostic_counts(
     for (entry, result) in [
         (
             "ir",
-            check_ir_program(program, chelis_types::ProgramOrigin::Unlinked),
+            check_ir_program(
+                program,
+                chelis_types::ProgramOrigin::Unlinked,
+                &mut chelis_types::NativeServices::new(None),
+            ),
         ),
         (
             "typed",
-            check_typed_program(program, chelis_types::ProgramOrigin::Unlinked),
+            check_typed_program(
+                program,
+                chelis_types::ProgramOrigin::Unlinked,
+                &mut chelis_types::NativeServices::new(None),
+            ),
         ),
     ] {
         let report = result.expect_err("the adversarial property must reject");
@@ -247,11 +255,19 @@ fn assert_rejected(fixture: &str, position: &str) {
             for (entry, result) in [
                 (
                     "ir",
-                    check_ir_program(&exprs, chelis_types::ProgramOrigin::Unlinked),
+                    check_ir_program(
+                        &exprs,
+                        chelis_types::ProgramOrigin::Unlinked,
+                        &mut chelis_types::NativeServices::new(None),
+                    ),
                 ),
                 (
                     "typed",
-                    check_typed_program(&exprs, chelis_types::ProgramOrigin::Unlinked),
+                    check_typed_program(
+                        &exprs,
+                        chelis_types::ProgramOrigin::Unlinked,
+                        &mut chelis_types::NativeServices::new(None),
+                    ),
                 ),
             ] {
                 let report = result.expect_err("reserved primitive must reject");
@@ -275,11 +291,19 @@ fn assert_one_report_per_site(program: Vec<chelis_deep::Expr>, expected: &[(&str
     for (entry, result) in [
         (
             "ir",
-            check_ir_program(&program, chelis_types::ProgramOrigin::Unlinked),
+            check_ir_program(
+                &program,
+                chelis_types::ProgramOrigin::Unlinked,
+                &mut chelis_types::NativeServices::new(None),
+            ),
         ),
         (
             "typed",
-            check_typed_program(&program, chelis_types::ProgramOrigin::Unlinked),
+            check_typed_program(
+                &program,
+                chelis_types::ProgramOrigin::Unlinked,
+                &mut chelis_types::NativeServices::new(None),
+            ),
         ),
     ] {
         let report = result.expect_err("reserved dtype sites must reject");
@@ -359,8 +383,16 @@ fn no_clause_inline_tensor_precision_is_rejected_as_undeclared() {
     );
     let program = core_fixture(source);
     for result in [
-        check_ir_program(&program, chelis_types::ProgramOrigin::Unlinked),
-        check_typed_program(&program, chelis_types::ProgramOrigin::Unlinked),
+        check_ir_program(
+            &program,
+            chelis_types::ProgramOrigin::Unlinked,
+            &mut chelis_types::NativeServices::new(None),
+        ),
+        check_typed_program(
+            &program,
+            chelis_types::ProgramOrigin::Unlinked,
+            &mut chelis_types::NativeServices::new(None),
+        ),
     ] {
         let report = result.expect_err("an unlisted precision name is not a binder");
         assert!(
@@ -377,8 +409,16 @@ fn no_clause_inline_tensor_precision_is_rejected_as_undeclared() {
         "fixtures/core/tests/issue_1606_f8e4m3_scalar_position/explicit_precision.json"
     ));
     for result in [
-        check_ir_program(&explicit, chelis_types::ProgramOrigin::Unlinked),
-        check_typed_program(&explicit, chelis_types::ProgramOrigin::Unlinked),
+        check_ir_program(
+            &explicit,
+            chelis_types::ProgramOrigin::Unlinked,
+            &mut chelis_types::NativeServices::new(None),
+        ),
+        check_typed_program(
+            &explicit,
+            chelis_types::ProgramOrigin::Unlinked,
+            &mut chelis_types::NativeServices::new(None),
+        ),
     ] {
         result.expect("an explicit matching clause remains valid");
     }
@@ -387,8 +427,16 @@ fn no_clause_inline_tensor_precision_is_rejected_as_undeclared() {
         "fixtures/core/tests/issue_1606_f8e4m3_scalar_position/excluded_precision.json"
     ));
     for result in [
-        check_ir_program(&excluded, chelis_types::ProgramOrigin::Unlinked),
-        check_typed_program(&excluded, chelis_types::ProgramOrigin::Unlinked),
+        check_ir_program(
+            &excluded,
+            chelis_types::ProgramOrigin::Unlinked,
+            &mut chelis_types::NativeServices::new(None),
+        ),
+        check_typed_program(
+            &excluded,
+            chelis_types::ProgramOrigin::Unlinked,
+            &mut chelis_types::NativeServices::new(None),
+        ),
     ] {
         let report = result.expect_err("an explicit clause is authoritative over `p`");
         assert!(
@@ -430,11 +478,19 @@ fn hand_authored_property_parameter_contract_remains_independent_from_defsig() {
     for (entry, result) in [
         (
             "ir",
-            check_ir_program(&program, chelis_types::ProgramOrigin::Unlinked),
+            check_ir_program(
+                &program,
+                chelis_types::ProgramOrigin::Unlinked,
+                &mut chelis_types::NativeServices::new(None),
+            ),
         ),
         (
             "typed",
-            check_typed_program(&program, chelis_types::ProgramOrigin::Unlinked),
+            check_typed_program(
+                &program,
+                chelis_types::ProgramOrigin::Unlinked,
+                &mut chelis_types::NativeServices::new(None),
+            ),
         ),
     ] {
         let report = result.expect_err("the authored f32 parameter must conflict with defsig f64");
@@ -461,11 +517,19 @@ fn matching_hand_authored_property_parameter_contract_remains_valid() {
     for (entry, result) in [
         (
             "ir",
-            check_ir_program(&program, chelis_types::ProgramOrigin::Unlinked),
+            check_ir_program(
+                &program,
+                chelis_types::ProgramOrigin::Unlinked,
+                &mut chelis_types::NativeServices::new(None),
+            ),
         ),
         (
             "typed",
-            check_typed_program(&program, chelis_types::ProgramOrigin::Unlinked),
+            check_typed_program(
+                &program,
+                chelis_types::ProgramOrigin::Unlinked,
+                &mut chelis_types::NativeServices::new(None),
+            ),
         ),
     ] {
         result.unwrap_or_else(|report| {
@@ -509,11 +573,19 @@ fn property_copy_ownership_uses_spanless_semantic_type_syntax() {
             for (entry, result) in [
                 (
                     "ir",
-                    check_ir_program(&program, chelis_types::ProgramOrigin::Unlinked),
+                    check_ir_program(
+                        &program,
+                        chelis_types::ProgramOrigin::Unlinked,
+                        &mut chelis_types::NativeServices::new(None),
+                    ),
                 ),
                 (
                     "typed",
-                    check_typed_program(&program, chelis_types::ProgramOrigin::Unlinked),
+                    check_typed_program(
+                        &program,
+                        chelis_types::ProgramOrigin::Unlinked,
+                        &mut chelis_types::NativeServices::new(None),
+                    ),
                 ),
             ] {
                 let report = result.expect_err("the reserved dtype must reject");
@@ -559,11 +631,19 @@ fn property_copy_ownership_ignores_nonsemantic_metadata_differences() {
             for (entry, result) in [
                 (
                     "ir",
-                    check_ir_program(&program, chelis_types::ProgramOrigin::Unlinked),
+                    check_ir_program(
+                        &program,
+                        chelis_types::ProgramOrigin::Unlinked,
+                        &mut chelis_types::NativeServices::new(None),
+                    ),
                 ),
                 (
                     "typed",
-                    check_typed_program(&program, chelis_types::ProgramOrigin::Unlinked),
+                    check_typed_program(
+                        &program,
+                        chelis_types::ProgramOrigin::Unlinked,
+                        &mut chelis_types::NativeServices::new(None),
+                    ),
                 ),
             ] {
                 let report = result.expect_err("the declaration-owned reserved spelling rejects");
@@ -672,11 +752,19 @@ fn property_copy_ownership_fails_closed_per_invalid_or_noncanonical_slot() {
         for (entry, result) in [
             (
                 "ir",
-                check_ir_program(&invalid, chelis_types::ProgramOrigin::Unlinked),
+                check_ir_program(
+                    &invalid,
+                    chelis_types::ProgramOrigin::Unlinked,
+                    &mut chelis_types::NativeServices::new(None),
+                ),
             ),
             (
                 "typed",
-                check_typed_program(&invalid, chelis_types::ProgramOrigin::Unlinked),
+                check_typed_program(
+                    &invalid,
+                    chelis_types::ProgramOrigin::Unlinked,
+                    &mut chelis_types::NativeServices::new(None),
+                ),
             ),
         ] {
             let report = result.expect_err("the invalid neighboring slot must reject");
@@ -711,11 +799,19 @@ fn property_copy_ownership_fails_closed_per_invalid_or_noncanonical_slot() {
         for (entry, result) in [
             (
                 "ir",
-                check_ir_program(&noncanonical, chelis_types::ProgramOrigin::Unlinked),
+                check_ir_program(
+                    &noncanonical,
+                    chelis_types::ProgramOrigin::Unlinked,
+                    &mut chelis_types::NativeServices::new(None),
+                ),
             ),
             (
                 "typed",
-                check_typed_program(&noncanonical, chelis_types::ProgramOrigin::Unlinked),
+                check_typed_program(
+                    &noncanonical,
+                    chelis_types::ProgramOrigin::Unlinked,
+                    &mut chelis_types::NativeServices::new(None),
+                ),
             ),
         ] {
             let report = result.expect_err("a noncanonical params carrier must fail closed");
@@ -814,11 +910,19 @@ fn property_copy_ownership_accepts_the_transitional_list_type_carrier() {
             for (entry, result) in [
                 (
                     "ir",
-                    check_ir_program(&program, chelis_types::ProgramOrigin::Unlinked),
+                    check_ir_program(
+                        &program,
+                        chelis_types::ProgramOrigin::Unlinked,
+                        &mut chelis_types::NativeServices::new(None),
+                    ),
                 ),
                 (
                     "typed",
-                    check_typed_program(&program, chelis_types::ProgramOrigin::Unlinked),
+                    check_typed_program(
+                        &program,
+                        chelis_types::ProgramOrigin::Unlinked,
+                        &mut chelis_types::NativeServices::new(None),
+                    ),
                 ),
             ] {
                 let report = result.expect_err("the reserved dtype must reject");
@@ -843,8 +947,16 @@ fn property_quantifier_recovery_keeps_an_independent_body_error() {
         "fixtures/core/tests/issue_1606_f8e4m3_scalar_position/property_body_error.json"
     ));
     for result in [
-        check_ir_program(&program, chelis_types::ProgramOrigin::Unlinked),
-        check_typed_program(&program, chelis_types::ProgramOrigin::Unlinked),
+        check_ir_program(
+            &program,
+            chelis_types::ProgramOrigin::Unlinked,
+            &mut chelis_types::NativeServices::new(None),
+        ),
+        check_typed_program(
+            &program,
+            chelis_types::ProgramOrigin::Unlinked,
+            &mut chelis_types::NativeServices::new(None),
+        ),
     ] {
         let report = result.expect_err("the binder and non-bool body must both reject");
         assert_eq!(report.errors.len(), 2, "{:?}", report.errors);
@@ -876,11 +988,19 @@ fn legacy_unknown_tensor_precision_spans_do_not_inherit_the_tensor_span() {
         for (entry, result) in [
             (
                 "ir",
-                check_ir_program(&program, chelis_types::ProgramOrigin::Unlinked),
+                check_ir_program(
+                    &program,
+                    chelis_types::ProgramOrigin::Unlinked,
+                    &mut chelis_types::NativeServices::new(None),
+                ),
             ),
             (
                 "typed",
-                check_typed_program(&program, chelis_types::ProgramOrigin::Unlinked),
+                check_typed_program(
+                    &program,
+                    chelis_types::ProgramOrigin::Unlinked,
+                    &mut chelis_types::NativeServices::new(None),
+                ),
             ),
         ] {
             let report = result.expect_err("legacy reserved precision must reject");
@@ -992,8 +1112,16 @@ fn a_failed_signature_does_not_hide_an_independent_body_site() {
         include_str!("fixtures/core/tests/issue_1606_f8e4m3_scalar_position/body_cast.json");
     let program = core_fixture(source);
     for result in [
-        check_ir_program(&program, chelis_types::ProgramOrigin::Unlinked),
-        check_typed_program(&program, chelis_types::ProgramOrigin::Unlinked),
+        check_ir_program(
+            &program,
+            chelis_types::ProgramOrigin::Unlinked,
+            &mut chelis_types::NativeServices::new(None),
+        ),
+        check_typed_program(
+            &program,
+            chelis_types::ProgramOrigin::Unlinked,
+            &mut chelis_types::NativeServices::new(None),
+        ),
     ] {
         let report = result.expect_err("both reserved sites must reject");
         assert_eq!(report.errors.len(), 2, "{:?}", report.errors);
@@ -1022,8 +1150,16 @@ fn declaration_ownership_does_not_absorb_a_same_spelling_cast_failure() {
     );
     let program = core_fixture(source);
     for result in [
-        check_ir_program(&program, chelis_types::ProgramOrigin::Unlinked),
-        check_typed_program(&program, chelis_types::ProgramOrigin::Unlinked),
+        check_ir_program(
+            &program,
+            chelis_types::ProgramOrigin::Unlinked,
+            &mut chelis_types::NativeServices::new(None),
+        ),
+        check_typed_program(
+            &program,
+            chelis_types::ProgramOrigin::Unlinked,
+            &mut chelis_types::NativeServices::new(None),
+        ),
     ] {
         let report = result.expect_err("the declaration and cast sites must both reject");
         assert_eq!(report.errors.len(), 2, "{:?}", report.errors);
@@ -1060,11 +1196,19 @@ fn a_rejected_tensor_precision_preserves_dimensions_for_the_body() {
         for (entry, result) in [
             (
                 "ir",
-                check_ir_program(&program, chelis_types::ProgramOrigin::Unlinked),
+                check_ir_program(
+                    &program,
+                    chelis_types::ProgramOrigin::Unlinked,
+                    &mut chelis_types::NativeServices::new(None),
+                ),
             ),
             (
                 "typed",
-                check_typed_program(&program, chelis_types::ProgramOrigin::Unlinked),
+                check_typed_program(
+                    &program,
+                    chelis_types::ProgramOrigin::Unlinked,
+                    &mut chelis_types::NativeServices::new(None),
+                ),
             ),
         ] {
             let report = result.expect_err("the reserved dtype and invalid axis must reject");
@@ -1159,8 +1303,16 @@ fn valid_parts_of_a_failed_signature_still_constrain_the_body() {
     ] {
         let program = core_fixture(source);
         for result in [
-            check_ir_program(&program, chelis_types::ProgramOrigin::Unlinked),
-            check_typed_program(&program, chelis_types::ProgramOrigin::Unlinked),
+            check_ir_program(
+                &program,
+                chelis_types::ProgramOrigin::Unlinked,
+                &mut chelis_types::NativeServices::new(None),
+            ),
+            check_typed_program(
+                &program,
+                chelis_types::ProgramOrigin::Unlinked,
+                &mut chelis_types::NativeServices::new(None),
+            ),
         ] {
             let report = result.expect_err("reserved type and independent mismatch must reject");
             assert_eq!(report.errors.len(), 2, "{source}: {:?}", report.errors);
@@ -1203,8 +1355,16 @@ fn matching_deep_signature_and_annotation_share_a_declaration_owner() {
         );
         let program = chelis_deep::parse_and_stamp_file(&source).expect("parse two authored sites");
         for result in [
-            check_ir_program(&program, chelis_types::ProgramOrigin::Unlinked),
-            check_typed_program(&program, chelis_types::ProgramOrigin::Unlinked),
+            check_ir_program(
+                &program,
+                chelis_types::ProgramOrigin::Unlinked,
+                &mut chelis_types::NativeServices::new(None),
+            ),
+            check_typed_program(
+                &program,
+                chelis_types::ProgramOrigin::Unlinked,
+                &mut chelis_types::NativeServices::new(None),
+            ),
         ] {
             let report = result.expect_err("the declaration-owned annotation must reject");
             assert_eq!(report.errors.len(), 1, "{:?}", report.errors);
@@ -1234,8 +1394,16 @@ fn a_bad_cast_target_is_checked_even_when_its_operand_already_failed() {
         "fixtures/core/tests/issue_1606_f8e4m3_scalar_position/failed_operand_cast.json"
     ));
     for result in [
-        check_ir_program(&program, chelis_types::ProgramOrigin::Unlinked),
-        check_typed_program(&program, chelis_types::ProgramOrigin::Unlinked),
+        check_ir_program(
+            &program,
+            chelis_types::ProgramOrigin::Unlinked,
+            &mut chelis_types::NativeServices::new(None),
+        ),
+        check_typed_program(
+            &program,
+            chelis_types::ProgramOrigin::Unlinked,
+            &mut chelis_types::NativeServices::new(None),
+        ),
     ] {
         let report = result.expect_err("both reserved sites must reject");
         assert_eq!(report.errors.len(), 2, "{:?}", report.errors);
@@ -1252,8 +1420,16 @@ fn an_arity_mismatch_does_not_recheck_parameter_annotations() {
              (def {{}} classify (fn {{}} (params {{}} (x {{type: (t-prim {{}} f8e5m2)}}){extra}) (lit {{type: (t-prim {{}} i32)}} 0)))"
         )).expect("parse independent annotations");
         for result in [
-            check_ir_program(&program, chelis_types::ProgramOrigin::Unlinked),
-            check_typed_program(&program, chelis_types::ProgramOrigin::Unlinked),
+            check_ir_program(
+                &program,
+                chelis_types::ProgramOrigin::Unlinked,
+                &mut chelis_types::NativeServices::new(None),
+            ),
+            check_typed_program(
+                &program,
+                chelis_types::ProgramOrigin::Unlinked,
+                &mut chelis_types::NativeServices::new(None),
+            ),
         ] {
             let report = result.expect_err("both reserved sites reject");
             let reserved: Vec<_> = report
@@ -1297,8 +1473,16 @@ fn checked_parameters_receive_their_actual_declared_types() {
     ] {
         let program = core_fixture(fixture);
         for result in [
-            check_ir_program(&program, chelis_types::ProgramOrigin::Unlinked),
-            check_typed_program(&program, chelis_types::ProgramOrigin::Unlinked),
+            check_ir_program(
+                &program,
+                chelis_types::ProgramOrigin::Unlinked,
+                &mut chelis_types::NativeServices::new(None),
+            ),
+            check_typed_program(
+                &program,
+                chelis_types::ProgramOrigin::Unlinked,
+                &mut chelis_types::NativeServices::new(None),
+            ),
         ] {
             let checked = result.expect("valid declared parameter");
             let signature = checked
@@ -1319,8 +1503,12 @@ fn a_canonical_parameter_hole_does_not_erase_declared_shape_evidence() {
     let text = chelis_deep::printer::print_canonical_flat(&desugared);
     let stamped = chelis_deep::parse_and_stamp_file(&text).expect("stamp canonical Deep");
     for (carrier, expressions) in [("desugared", desugared), ("stamped", stamped)] {
-        let report = check_ir_program(&expressions, chelis_types::ProgramOrigin::Unlinked)
-            .expect_err("the zero-stride validator must retain declared tensor shapes");
+        let report = check_ir_program(
+            &expressions,
+            chelis_types::ProgramOrigin::Unlinked,
+            &mut chelis_types::NativeServices::new(None),
+        )
+        .expect_err("the zero-stride validator must retain declared tensor shapes");
         assert_eq!(report.errors.len(), 1, "{carrier}: {:?}", report.errors);
         assert!(
             matches!(
@@ -1344,8 +1532,16 @@ fn source_annotation_presence_and_read_only_inference_survive_transport() {
     let decoded: Vec<chelis_deep::Expr> = serde_json::from_slice(&encoded).expect("decode input");
     for expressions in [&program, &printed, &decoded] {
         for result in [
-            check_ir_program(expressions, chelis_types::ProgramOrigin::Unlinked),
-            check_typed_program(expressions, chelis_types::ProgramOrigin::Unlinked),
+            check_ir_program(
+                expressions,
+                chelis_types::ProgramOrigin::Unlinked,
+                &mut chelis_types::NativeServices::new(None),
+            ),
+            check_typed_program(
+                expressions,
+                chelis_types::ProgramOrigin::Unlinked,
+                &mut chelis_types::NativeServices::new(None),
+            ),
         ] {
             let checked = result.expect("read-only inference stays valid");
             let function = checked
@@ -1374,8 +1570,16 @@ fn a_parameter_hole_does_not_erase_an_independent_body_mismatch() {
         ))
         .expect("parameter-hole Deep fixture");
         for result in [
-            check_ir_program(&program, chelis_types::ProgramOrigin::Unlinked),
-            check_typed_program(&program, chelis_types::ProgramOrigin::Unlinked),
+            check_ir_program(
+                &program,
+                chelis_types::ProgramOrigin::Unlinked,
+                &mut chelis_types::NativeServices::new(None),
+            ),
+            check_typed_program(
+                &program,
+                chelis_types::ProgramOrigin::Unlinked,
+                &mut chelis_types::NativeServices::new(None),
+            ),
         ] {
             if accepted {
                 result.expect("the body agrees with the declared result");
@@ -1428,8 +1632,16 @@ fn multiple_reserved_sites_survive_printing_and_serialization() {
             serde_json::from_slice(&encoded).expect("decode input");
         for expressions in [&program, &printed, &decoded] {
             for result in [
-                check_ir_program(expressions, chelis_types::ProgramOrigin::Unlinked),
-                check_typed_program(expressions, chelis_types::ProgramOrigin::Unlinked),
+                check_ir_program(
+                    expressions,
+                    chelis_types::ProgramOrigin::Unlinked,
+                    &mut chelis_types::NativeServices::new(None),
+                ),
+                check_typed_program(
+                    expressions,
+                    chelis_types::ProgramOrigin::Unlinked,
+                    &mut chelis_types::NativeServices::new(None),
+                ),
             ] {
                 let report = result.expect_err("all authored reserved sites reject");
                 assert_eq!(
@@ -1479,8 +1691,16 @@ fn signature_ownership_requires_explicit_authority() {
     ] {
         let program = core_fixture(fixture);
         for result in [
-            check_ir_program(&program, chelis_types::ProgramOrigin::Unlinked),
-            check_typed_program(&program, chelis_types::ProgramOrigin::Unlinked),
+            check_ir_program(
+                &program,
+                chelis_types::ProgramOrigin::Unlinked,
+                &mut chelis_types::NativeServices::new(None),
+            ),
+            check_typed_program(
+                &program,
+                chelis_types::ProgramOrigin::Unlinked,
+                &mut chelis_types::NativeServices::new(None),
+            ),
         ] {
             if accepted {
                 result.expect("the applicable precision binder remains valid");
@@ -1517,8 +1737,16 @@ fn a_printed_program_preserves_its_diagnostic_count() {
         ("decoded", &decoded),
     ] {
         for result in [
-            check_ir_program(expressions, chelis_types::ProgramOrigin::Unlinked),
-            check_typed_program(expressions, chelis_types::ProgramOrigin::Unlinked),
+            check_ir_program(
+                expressions,
+                chelis_types::ProgramOrigin::Unlinked,
+                &mut chelis_types::NativeServices::new(None),
+            ),
+            check_typed_program(
+                expressions,
+                chelis_types::ProgramOrigin::Unlinked,
+                &mut chelis_types::NativeServices::new(None),
+            ),
         ] {
             let report = result.expect_err("the reserved type must reject on every carrier");
             counts.push((carrier, report.errors.len()));
@@ -1543,8 +1771,16 @@ fn a_divergent_binder_lowering_does_not_duplicate_the_reserved_site() {
         "fixtures/core/tests/issue_1606_f8e4m3_scalar_position/divergent_binder.json"
     ));
     for result in [
-        check_ir_program(&program, chelis_types::ProgramOrigin::Unlinked),
-        check_typed_program(&program, chelis_types::ProgramOrigin::Unlinked),
+        check_ir_program(
+            &program,
+            chelis_types::ProgramOrigin::Unlinked,
+            &mut chelis_types::NativeServices::new(None),
+        ),
+        check_typed_program(
+            &program,
+            chelis_types::ProgramOrigin::Unlinked,
+            &mut chelis_types::NativeServices::new(None),
+        ),
     ] {
         let report = result.expect_err("the reserved site must reject");
         let reserved = report
@@ -1565,8 +1801,16 @@ fn handwritten_deep_cannot_bypass_the_type_resolver() {
         );
         let exprs = chelis_deep::parse_and_stamp_file(&source).expect("stamp Deep fixture");
         for result in [
-            check_ir_program(&exprs, chelis_types::ProgramOrigin::Unlinked),
-            check_typed_program(&exprs, chelis_types::ProgramOrigin::Unlinked),
+            check_ir_program(
+                &exprs,
+                chelis_types::ProgramOrigin::Unlinked,
+                &mut chelis_types::NativeServices::new(None),
+            ),
+            check_typed_program(
+                &exprs,
+                chelis_types::ProgramOrigin::Unlinked,
+                &mut chelis_types::NativeServices::new(None),
+            ),
         ] {
             let report = result.expect_err("reserved primitive must reject");
             assert!(
@@ -1592,8 +1836,16 @@ fn handwritten_reserved_type_variable_cannot_bypass_the_resolver() {
         );
         let exprs = chelis_deep::parse_and_stamp_file(&source).expect("stamp Deep fixture");
         for result in [
-            check_ir_program(&exprs, chelis_types::ProgramOrigin::Unlinked),
-            check_typed_program(&exprs, chelis_types::ProgramOrigin::Unlinked),
+            check_ir_program(
+                &exprs,
+                chelis_types::ProgramOrigin::Unlinked,
+                &mut chelis_types::NativeServices::new(None),
+            ),
+            check_typed_program(
+                &exprs,
+                chelis_types::ProgramOrigin::Unlinked,
+                &mut chelis_types::NativeServices::new(None),
+            ),
         ] {
             let report = result.expect_err("reserved type variable must reject");
             assert!(
@@ -1630,8 +1882,16 @@ fn assert_accepted(source: &str) {
     let stamped = chelis_deep::parse_and_stamp_file(&text).expect("stamp canonical Deep");
     for exprs in [&desugared, &stamped] {
         for result in [
-            check_ir_program(exprs, chelis_types::ProgramOrigin::Unlinked),
-            check_typed_program(exprs, chelis_types::ProgramOrigin::Unlinked),
+            check_ir_program(
+                exprs,
+                chelis_types::ProgramOrigin::Unlinked,
+                &mut chelis_types::NativeServices::new(None),
+            ),
+            check_typed_program(
+                exprs,
+                chelis_types::ProgramOrigin::Unlinked,
+                &mut chelis_types::NativeServices::new(None),
+            ),
         ] {
             assert!(result.is_ok(), "{source}: {result:?}");
         }
@@ -1718,8 +1978,16 @@ fn every_active_float_is_still_accepted() {
             chelis_deep::parse_and_stamp_file(&text).expect("stamp active primitive fixture");
         for program in [&legacy, &stamped] {
             for result in [
-                check_ir_program(program, chelis_types::ProgramOrigin::Unlinked),
-                check_typed_program(program, chelis_types::ProgramOrigin::Unlinked),
+                check_ir_program(
+                    program,
+                    chelis_types::ProgramOrigin::Unlinked,
+                    &mut chelis_types::NativeServices::new(None),
+                ),
+                check_typed_program(
+                    program,
+                    chelis_types::ProgramOrigin::Unlinked,
+                    &mut chelis_types::NativeServices::new(None),
+                ),
             ] {
                 result.expect("active float remains admissible");
             }

@@ -10,9 +10,9 @@ use chelis_deep::ast::{Atom, Expr, List};
 use serde::{Deserialize, Serialize};
 
 use crate::CheckedProgram;
-use crate::cancel::CancelToken;
 use crate::errors::{CheckError, CheckErrorKind};
 use crate::infer::SignatureInferenceMetadata;
+use crate::native::NativeServices;
 use crate::types::Type;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -420,7 +420,9 @@ impl LinearScope {
     }
 }
 
-struct Checker {
+struct Checker<'n> {
+    /// The invocation's native services (cancellation, stack probes).
+    native: &'n mut NativeServices,
     errors: Vec<CheckError>,
     info: LinearityInfo,
     top_level_types: BTreeMap<String, Expr>,
@@ -460,7 +462,7 @@ struct Checker {
     type_headers: crate::deep_type::TypeResolutionEnv,
 }
 
-impl Checker {
+impl Checker<'_> {
     fn push_diagnostic(&mut self, error: CheckError) {
         // Linearity-F2 / F3 W2 cascade close: every linearity
         // violation is an error.  W1 PR 1's destructure-cascade
@@ -507,9 +509,13 @@ fn pre_declare_one(expr: &Expr, type_env: &BTreeMap<String, Expr>, scope: &mut L
     }
 }
 
-pub fn check_linearity(program: &CheckedProgram) -> Result<CheckedProgram, Vec<CheckError>> {
+pub fn check_linearity(
+    program: &CheckedProgram,
+    native: &mut NativeServices,
+) -> Result<CheckedProgram, Vec<CheckError>> {
     let tensor_carrying_adts = compute_tensor_carrying_adts(program.annotated_exprs());
     let mut checker = Checker {
+        native,
         errors: Vec::new(),
         info: LinearityInfo::default(),
         top_level_types: program.type_env().clone(),
@@ -526,9 +532,8 @@ pub fn check_linearity(program: &CheckedProgram) -> Result<CheckedProgram, Vec<C
     // linearity is the third-largest front-end phase on a declaration-heavy
     // program. Abandoning the walk proves nothing about the tail, so this is a
     // hard failure rather than a partial `Ok` (covered-or-rejected).
-    let cancel = crate::cancel::current_cancel_token();
     for expr in program.annotated_exprs() {
-        if cancel.as_ref().is_some_and(CancelToken::is_cancelled) {
+        if checker.native.cancellation_observed() {
             checker
                 .errors
                 .push(crate::cancel::cancellation_check_error());
@@ -571,6 +576,7 @@ pub fn check_linearity(program: &CheckedProgram) -> Result<CheckedProgram, Vec<C
 pub fn check_linearity_with_context(
     library_program: &CheckedProgram,
     new_program: &CheckedProgram,
+    native: &mut NativeServices,
 ) -> Result<CheckedProgram, Vec<CheckError>> {
     // Pre-compute library callable signatures: a name set keyed on each
     // library `def`, used to ensure new-code call sites referring to a
@@ -639,6 +645,7 @@ pub fn check_linearity_with_context(
     let mut merged_type_headers = library_program.type_headers().clone();
     merged_type_headers.extend_from(new_program.type_headers());
     let mut checker = Checker {
+        native,
         errors: Vec::new(),
         info: LinearityInfo::default(),
         top_level_types: new_program.type_env().clone(),
@@ -673,9 +680,8 @@ pub fn check_linearity_with_context(
     // Walk ONLY new-code bodies. Library bodies are never re-walked,
     // so library tensor parameters never enter the new-code scope.
     // chelis#930: cancellable at the same grain as [`check_linearity`].
-    let cancel = crate::cancel::current_cancel_token();
     for expr in new_program.annotated_exprs() {
-        if cancel.as_ref().is_some_and(CancelToken::is_cancelled) {
+        if checker.native.cancellation_observed() {
             checker
                 .errors
                 .push(crate::cancel::cancellation_check_error());
@@ -691,7 +697,7 @@ pub fn check_linearity_with_context(
     }
 }
 
-impl Checker {
+impl Checker<'_> {
     fn check_top_level(&mut self, expr: &Expr, scope: &mut LinearScope) {
         // Linearity-F3 PR 1 + PR 2: recurse through `(module {} name
         // children...)` wrappers so module-wrapped top-level defs
@@ -1263,6 +1269,7 @@ impl Checker {
                 &available_signatures,
                 &self.top_level_types,
                 &self.type_headers,
+                self.native,
             )
             .unwrap_or_else(|result| {
                 // The resolver diagnostic is part of linearity's
@@ -3076,7 +3083,7 @@ mod tests {
             BTreeMap::from([("poison".to_string(), node("t-fn", vec![], vec![]))]),
         );
 
-        let errors = check_linearity(&program)
+        let errors = check_linearity(&program, &mut crate::NativeServices::new(None))
             .expect_err("malformed callee metadata must make linearity fail");
         assert_eq!(
             errors.len(),
@@ -3120,7 +3127,7 @@ mod tests {
             BTreeMap::new(),
         );
 
-        let errors = check_linearity(&program)
+        let errors = check_linearity(&program, &mut crate::NativeServices::new(None))
             .expect_err("an unreadable runtime carrier must fail closed at linearity");
         assert!(
             errors
@@ -3143,7 +3150,7 @@ mod tests {
             BTreeMap::new(),
         );
 
-        let errors = check_linearity(&program)
+        let errors = check_linearity(&program, &mut crate::NativeServices::new(None))
             .expect_err("a known runtime head without metadata must fail closed");
         assert!(
             errors
@@ -3200,7 +3207,7 @@ mod tests {
                 vec![node("def", vec![], vec![sym("accepted"), body])],
                 BTreeMap::new(),
             );
-            check_linearity(&program)
+            check_linearity(&program, &mut crate::NativeServices::new(None))
                 .unwrap_or_else(|errors| panic!("{label} must remain admitted: {errors:?}"));
         }
     }
@@ -3235,7 +3242,7 @@ mod tests {
             BTreeMap::from([("x".to_string(), tensor_4_f32())]),
         );
 
-        let errors = check_linearity(&program)
+        let errors = check_linearity(&program, &mut crate::NativeServices::new(None))
             .expect_err("the handler and body must both retain their ownership uses");
         assert!(
             errors
@@ -3266,7 +3273,7 @@ mod tests {
                 vec![node("def", vec![], vec![sym("bad"), body])],
                 BTreeMap::new(),
             );
-            let errors = check_linearity(&program)
+            let errors = check_linearity(&program, &mut crate::NativeServices::new(None))
                 .expect_err("a non-runtime carrier in runtime position must fail closed");
             assert!(
                 errors
@@ -3318,7 +3325,7 @@ mod tests {
                 vec![node("def", vec![], vec![sym("bad"), body])],
                 BTreeMap::new(),
             );
-            let errors = check_linearity(&program)
+            let errors = check_linearity(&program, &mut crate::NativeServices::new(None))
                 .expect_err("a non-runtime carrier in runtime position must fail closed");
             let malformed_count = errors
                 .iter()
@@ -3353,7 +3360,7 @@ mod tests {
             BTreeMap::new(),
         );
 
-        check_linearity(&program)
+        check_linearity(&program, &mut crate::NativeServices::new(None))
             .expect("a singleton binder list in a structural slot is not a runtime carrier");
     }
 
@@ -3401,7 +3408,7 @@ mod tests {
             BTreeMap::from([("x".to_string(), malformed_type)]),
         );
 
-        let errors = check_linearity(&program)
+        let errors = check_linearity(&program, &mut crate::NativeServices::new(None))
             .expect_err("an unreadable type carrier must conservatively retain ownership");
         assert!(
             errors.iter().any(|error| {
@@ -3446,7 +3453,7 @@ mod tests {
             BTreeMap::from([("x".to_string(), tensor_4_f32())]),
         );
 
-        let errors = check_linearity(&program)
+        let errors = check_linearity(&program, &mut crate::NativeServices::new(None))
             .expect_err("an undecodable carrier must conservatively traverse nested uses");
         assert!(
             errors.iter().any(|error| {
@@ -3470,7 +3477,7 @@ mod tests {
             BTreeMap::new(),
         );
 
-        let errors = check_linearity(&program)
+        let errors = check_linearity(&program, &mut crate::NativeServices::new(None))
             .expect_err("an empty undecodable runtime carrier must fail closed");
         assert!(
             errors
@@ -3560,7 +3567,7 @@ mod tests {
                 BTreeMap::from([("x".to_string(), malformed_type)]),
             );
 
-            let errors = check_linearity(&program)
+            let errors = check_linearity(&program, &mut crate::NativeServices::new(None))
                 .expect_err("malformed type evidence must not authorize borrowing");
             assert!(
                 errors
@@ -3612,7 +3619,7 @@ mod tests {
             BTreeMap::from([("x".to_string(), tensor_4_f32())]),
         );
 
-        let errors = check_linearity(&program)
+        let errors = check_linearity(&program, &mut crate::NativeServices::new(None))
             .expect_err("unexpected malformed children must retain ownership evidence");
         assert!(
             errors.iter().any(|error| {
@@ -3810,7 +3817,7 @@ mod tests {
                 BTreeMap::from([("x".to_string(), tensor_4_f32())]),
             );
 
-            let errors = check_linearity(&program)
+            let errors = check_linearity(&program, &mut crate::NativeServices::new(None))
                 .expect_err("a malformed arm must diagnose and retain nested ownership traversal");
             assert!(
                 errors.iter().any(|error| {

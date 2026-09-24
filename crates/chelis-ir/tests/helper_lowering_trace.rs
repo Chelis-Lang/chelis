@@ -28,10 +28,17 @@ fn manifested(source: &str) -> ManifestedProgram {
     // Preserve legacy carriers and signature metadata that select the host lane.
     let deep: Vec<chelis_deep::Expr> =
         serde_json::from_str(source).expect("deserialize lossless Deep fixture");
-    let checked: CheckedProgram = check_typed_program(&deep, chelis_types::ProgramOrigin::Unlinked)
-        .expect("check fixture types");
-    let checked = chelis_effects::check_program(&checked).expect("check fixture effects");
-    let checked = check_linearity(&checked).expect("check fixture linearity");
+    let checked: CheckedProgram = check_typed_program(
+        &deep,
+        chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
+    )
+    .expect("check fixture types");
+    let checked =
+        chelis_effects::check_program(&checked, &mut chelis_types::NativeServices::new(None))
+            .expect("check fixture effects");
+    let checked = check_linearity(&checked, &mut chelis_types::NativeServices::new(None))
+        .expect("check fixture linearity");
     let realizability = infer_realizability(&checked, C_TENSOR_PRIMS);
     let manifest = compute_root_manifest(&checked, &realizability);
     ManifestedProgram::new(checked, manifest, Target::C)

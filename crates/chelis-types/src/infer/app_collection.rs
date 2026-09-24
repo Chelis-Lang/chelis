@@ -172,7 +172,9 @@ pub(super) fn tensor_concat_call_evidence(
     errors: &mut DiagnosticSink<'_>,
     product: &InferenceProduct,
 ) -> TensorConcatCallEvidence {
-    let raw_axis = kids.get(2).and_then(extract_int_for_dim);
+    let raw_axis = kids
+        .get(2)
+        .and_then(|expr| extract_int_for_dim(expr, &mut errors.stack()));
     let list_info = match kids.get(1).and_then(collect_cons_chain_for_shape) {
         Some(elements) => ConcatListInfo::Direct(
             elements

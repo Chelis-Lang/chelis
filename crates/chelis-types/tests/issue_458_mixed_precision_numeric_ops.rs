@@ -36,7 +36,11 @@ use chelis_types::errors::CheckErrorKind;
 /// program type-checked cleanly.
 fn check_diagnostics(source: &str) -> Vec<(CheckErrorKind, String)> {
     let deep = chelis_deep::parse_and_stamp_file(source).expect("Deep fixture");
-    match check_ir_program(&deep, chelis_types::ProgramOrigin::Unlinked) {
+    match check_ir_program(
+        &deep,
+        chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
+    ) {
         Ok(_) => Vec::new(),
         Err(rep) => rep
             .errors

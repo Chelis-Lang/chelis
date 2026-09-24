@@ -45,6 +45,7 @@ use chelis_deep::{Atom, DeepTag};
 use crate::errors::{CheckError, CheckErrorKind, ErrorWitness, report_witness};
 use crate::session::DiagnosticSink;
 
+use super::StackBudget;
 use super::common::stamped_parts;
 
 /// Read the child at `index` of a form that reads that child's content, where
@@ -59,13 +60,13 @@ pub(super) fn read_optional_slot<'a, T>(
     tag: DeepTag,
     index: usize,
     shape: SlotShape,
-    extract: impl FnOnce(&'a deep::Expr) -> Option<T>,
+    extract: impl FnOnce(&'a deep::Expr, &mut StackBudget<'_>) -> Option<T>,
     errors: &mut DiagnosticSink<'_>,
 ) -> Result<Option<T>, ErrorWitness> {
     let Some(child) = kids.get(index) else {
         return Ok(None);
     };
-    match extract(child) {
+    match extract(child, &mut errors.stack()) {
         Some(value) => Ok(Some(value)),
         None => Err(malformed_slot(tag, index, shape, Some(child), None, errors)),
     }

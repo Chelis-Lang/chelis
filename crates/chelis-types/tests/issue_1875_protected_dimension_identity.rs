@@ -127,11 +127,15 @@ fn check(library: &str, consumer: &str, route: Route) -> Result<CheckedProgram, 
         return check_ir_program(
             &parse(&format!("{library}\n{consumer}")),
             chelis_types::ProgramOrigin::Unlinked,
+            &mut chelis_types::NativeServices::new(None),
         );
     }
-    let (context, _) =
-        build_compiled_library_context(&parse(library), chelis_types::ProgramOrigin::Unlinked)
-            .expect("library accepted");
+    let (context, _) = build_compiled_library_context(
+        &parse(library),
+        chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
+    )
+    .expect("library accepted");
     let context = if matches!(route, Route::Decoded) {
         let bytes = bincode::serialize(&context).unwrap();
         bincode::deserialize::<TypeEnv>(&bytes).unwrap()
@@ -142,6 +146,7 @@ fn check(library: &str, consumer: &str, route: Route) -> Result<CheckedProgram, 
         &context,
         &parse(consumer),
         chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
     )
 }
 
@@ -171,7 +176,11 @@ fn direct_and_adt_bad_results_reject_both_orders() {
         for reversed in [false, true] {
             let source = direct_control(SEVENTEEN, reversed, adt);
             failures.extend(verdict_error(
-                check_ir_program(&parse(&source), chelis_types::ProgramOrigin::Unlinked),
+                check_ir_program(
+                    &parse(&source),
+                    chelis_types::ProgramOrigin::Unlinked,
+                    &mut chelis_types::NativeServices::new(None),
+                ),
                 false,
                 &source,
             ));
@@ -188,6 +197,7 @@ fn direct_and_adt_matching_results_accept_both_orders() {
                 "fixtures/core/tests/issue_1875_protected_dimension_identity/representative.deep"
             )),
             chelis_types::ProgramOrigin::Unlinked,
+            &mut chelis_types::NativeServices::new(None),
         ),
         true,
         "representative Deep program",
@@ -196,7 +206,11 @@ fn direct_and_adt_matching_results_accept_both_orders() {
         for reversed in [false, true] {
             let source = direct_control(D, reversed, adt);
             assert_verdict(
-                check_ir_program(&parse(&source), chelis_types::ProgramOrigin::Unlinked),
+                check_ir_program(
+                    &parse(&source),
+                    chelis_types::ProgramOrigin::Unlinked,
+                    &mut chelis_types::NativeServices::new(None),
+                ),
                 true,
                 &source,
             );
@@ -210,7 +224,11 @@ fn insertion_bad_results_reject_both_orders() {
     for reversed in [false, true] {
         let source = insertion_control(SEVENTEEN, reversed);
         failures.extend(verdict_error(
-            check_ir_program(&parse(&source), chelis_types::ProgramOrigin::Unlinked),
+            check_ir_program(
+                &parse(&source),
+                chelis_types::ProgramOrigin::Unlinked,
+                &mut chelis_types::NativeServices::new(None),
+            ),
             false,
             &source,
         ));
@@ -223,7 +241,11 @@ fn insertion_matching_results_accept_both_orders() {
     for reversed in [false, true] {
         let source = insertion_control(D, reversed);
         assert_verdict(
-            check_ir_program(&parse(&source), chelis_types::ProgramOrigin::Unlinked),
+            check_ir_program(
+                &parse(&source),
+                chelis_types::ProgramOrigin::Unlinked,
+                &mut chelis_types::NativeServices::new(None),
+            ),
             true,
             &source,
         );
@@ -340,7 +362,11 @@ fn return_only_and_distinctness_boundaries() {
         ),
     ] {
         assert_verdict(
-            check_ir_program(&parse(source), chelis_types::ProgramOrigin::Unlinked),
+            check_ir_program(
+                &parse(source),
+                chelis_types::ProgramOrigin::Unlinked,
+                &mut chelis_types::NativeServices::new(None),
+            ),
             accepts,
             source,
         );

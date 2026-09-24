@@ -19,7 +19,11 @@ fn diagnostics(source: &str) -> Vec<CheckError> {
     } else {
         parse_core(source).expect("Deep fixture must parse")
     };
-    match check_typed_program(&decls, chelis_types::ProgramOrigin::Unlinked) {
+    match check_typed_program(
+        &decls,
+        chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
+    ) {
         Ok(_) => Vec::new(),
         Err(report) => report.errors,
     }

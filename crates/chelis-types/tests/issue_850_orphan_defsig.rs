@@ -8,7 +8,7 @@ use chelis_types::{
 
 fn errors(source: &str, origin: ProgramOrigin) -> Vec<CheckError> {
     let exprs = parse_str(source).expect("Deep fixture must parse");
-    match check_ir_program(&exprs, origin) {
+    match check_ir_program(&exprs, origin, &mut chelis_types::NativeServices::new(None)) {
         Ok(_) => Vec::new(),
         Err(result) => result.errors,
     }
@@ -67,12 +67,21 @@ fn def_without_defsig_remains_valid() {
 fn a_previous_library_def_does_not_back_a_new_units_orphan_defsig() {
     let library =
         parse_str("(def {} existing (lit {type: (t-prim {} i32)} 1))").expect("library fixture");
-    let context =
-        build_type_env_from_library(&library, ProgramOrigin::Unlinked).expect("library must check");
+    let context = build_type_env_from_library(
+        &library,
+        ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
+    )
+    .expect("library must check");
     let next = parse_str("(defsig {} existing (t-prim {} i32))").expect("next fixture");
-    let errors = check_ir_with_context(&context, &next, ProgramOrigin::Unlinked)
-        .expect_err("a defsig must be backed in its own check unit")
-        .errors;
+    let errors = check_ir_with_context(
+        &context,
+        &next,
+        ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
+    )
+    .expect_err("a defsig must be backed in its own check unit")
+    .errors;
     assert!(
         errors.iter().any(|error| matches!(
             &error.kind,
@@ -128,8 +137,12 @@ fn cached_linked_context_does_not_authorize_a_new_unlinked_unit() {
          (def {} existing (lit {type: (t-prim {} i32)} 1))",
     )
     .expect("linked library fixture");
-    let context = build_type_env_from_library(&library, ProgramOrigin::Linked)
-        .expect("trusted linked dependency interface checks");
+    let context = build_type_env_from_library(
+        &library,
+        ProgramOrigin::Linked,
+        &mut chelis_types::NativeServices::new(None),
+    )
+    .expect("trusted linked dependency interface checks");
     let encoded = bincode::serialize(&context).expect("library context serializes");
     let cached: TypeEnv = bincode::deserialize(&encoded).expect("library context deserializes");
     let next = parse_str(
@@ -137,9 +150,14 @@ fn cached_linked_context_does_not_authorize_a_new_unlinked_unit() {
          (defsig {} existing (t-prim {} i32))",
     )
     .expect("new raw unit");
-    let errors = check_ir_with_context(&cached, &next, ProgramOrigin::Unlinked)
-        .expect_err("cached linked declarations grant neither origin nor same-unit definitions")
-        .errors;
+    let errors = check_ir_with_context(
+        &cached,
+        &next,
+        ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
+    )
+    .expect_err("cached linked declarations grant neither origin nor same-unit definitions")
+    .errors;
     assert!(
         errors
             .iter()

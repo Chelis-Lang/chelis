@@ -21,10 +21,12 @@ fn diagnostics(program: &[Expr]) -> (Vec<String>, Vec<String>) {
         render(check_ir_program(
             program,
             chelis_types::ProgramOrigin::Unlinked,
+            &mut chelis_types::NativeServices::new(None),
         )),
         render(check_typed_program(
             program,
             chelis_types::ProgramOrigin::Unlinked,
+            &mut chelis_types::NativeServices::new(None),
         )),
     )
 }

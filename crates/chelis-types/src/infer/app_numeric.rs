@@ -719,7 +719,9 @@ pub(super) fn validate_numeric_and_reduction_arguments(
         if fname == "softmax"
             && let Some(first_arg) = arg_tys.first()
             && let Type::Tensor(dims, _) = type_for_readonly_check(first_arg, subst)
-            && let Some(raw) = kids.get(2).and_then(extract_int_for_dim)
+            && let Some(raw) = kids
+                .get(2)
+                .and_then(|expr| extract_int_for_dim(expr, &mut errors.stack()))
             && normalize_static_axis(dims.len(), raw).is_none()
         {
             reject!(

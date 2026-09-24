@@ -871,7 +871,7 @@ pub(super) fn infer_cast(
         DeepTag::Cast,
         2,
         SlotShape::ModeSelector,
-        |child| symbol_name(child).and_then(deep::CastMode::from_deep_selector),
+        |child, _| symbol_name(child).and_then(deep::CastMode::from_deep_selector),
         errors,
     ) {
         Ok(Some(mode)) => mode,

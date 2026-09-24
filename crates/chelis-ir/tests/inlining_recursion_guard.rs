@@ -131,8 +131,13 @@ fn nested_fn_param_call_lowers_via_substituted_callable() {
         !roots.is_empty(),
         "lowered call must produce at least one root"
     );
-    let values = eval_tensor_roots_with_strict(&dag, &roots, |name| inputs.get(name).cloned())
-        .expect("eval succeeds");
+    let values = eval_tensor_roots_with_strict(
+        &dag,
+        &roots,
+        |name| inputs.get(name).cloned(),
+        &mut chelis_types::NativeServices::new(None),
+    )
+    .expect("eval succeeds");
     let out = &values[roots.last().unwrap()];
     assert_eq!(out.shape, vec![3]);
     // doubler(doubler([1, 2, 3])) = doubler([2, 4, 6]) = [4, 8, 12].
@@ -259,8 +264,13 @@ fn static_base_case_recursion_unrolls_within_cap() {
     )]);
     let roots: Vec<NodeId> = dag.roots().to_vec();
     assert!(!roots.is_empty(), "unrolled lowering must produce a root");
-    let values = eval_tensor_roots_with_strict(&dag, &roots, |name| inputs.get(name).cloned())
-        .expect("eval succeeds after full static unroll");
+    let values = eval_tensor_roots_with_strict(
+        &dag,
+        &roots,
+        |name| inputs.get(name).cloned(),
+        &mut chelis_types::NativeServices::new(None),
+    )
+    .expect("eval succeeds after full static unroll");
     let out = &values[roots.last().unwrap()];
     assert_eq!(out.shape, vec![3]);
     assert_eq!(

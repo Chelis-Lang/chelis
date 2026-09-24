@@ -25,7 +25,11 @@ fn typecheck_core(source: &str) -> Vec<CheckError> {
     } else {
         parse_core(source).expect("Deep fixture parse should succeed")
     };
-    match check_typed_program(&deep, chelis_types::ProgramOrigin::Unlinked) {
+    match check_typed_program(
+        &deep,
+        chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
+    ) {
         Ok(_) => Vec::new(),
         Err(prog_errors) => prog_errors.errors,
     }

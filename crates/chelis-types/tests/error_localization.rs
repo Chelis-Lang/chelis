@@ -8,7 +8,11 @@ use chelis_types::{check_ir_program, check_typed_program};
 /// CheckError structs for inspection.
 fn check_errors(source: &str) -> Vec<CheckError> {
     let exprs: Vec<chelis_deep::Expr> = serde_json::from_str(source).expect("core AST fixture");
-    match check_ir_program(&exprs, chelis_types::ProgramOrigin::Unlinked) {
+    match check_ir_program(
+        &exprs,
+        chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
+    ) {
         Ok(_) => Vec::new(),
         Err(rep) => rep.errors,
     }
@@ -19,11 +23,19 @@ fn check_errors_at_both_ingresses(source: &str) -> Vec<(&'static str, Vec<CheckE
     [
         (
             "normalized IR",
-            check_ir_program(&exprs, chelis_types::ProgramOrigin::Unlinked),
+            check_ir_program(
+                &exprs,
+                chelis_types::ProgramOrigin::Unlinked,
+                &mut chelis_types::NativeServices::new(None),
+            ),
         ),
         (
             "typed Deep",
-            check_typed_program(&exprs, chelis_types::ProgramOrigin::Unlinked),
+            check_typed_program(
+                &exprs,
+                chelis_types::ProgramOrigin::Unlinked,
+                &mut chelis_types::NativeServices::new(None),
+            ),
         ),
     ]
     .into_iter()

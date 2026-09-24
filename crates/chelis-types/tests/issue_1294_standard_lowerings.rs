@@ -10,9 +10,13 @@ use chelis_types::check_ir_program;
 
 fn check(source: &str) -> Result<(), String> {
     let program = chelis_deep::parse_and_stamp_file(source).expect("Deep fixture");
-    check_ir_program(&program, chelis_types::ProgramOrigin::Unlinked)
-        .map(|_| ())
-        .map_err(|e| format!("{e:?}"))
+    check_ir_program(
+        &program,
+        chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
+    )
+    .map(|_| ())
+    .map_err(|e| format!("{e:?}"))
 }
 
 #[test]

@@ -47,9 +47,11 @@ fn call_witness_checks_each_literal_and_returns_the_observed_extent() {
         let mut dag = Dag::new();
         let witness = claimed_witness(&mut dag, &required);
         dag.add_root(witness);
-        let outcome = eval_tensor_with(&dag, |_| {
-            Some(TensorValue::from_vec(vec![actual], vec![7.0; actual]))
-        });
+        let outcome = eval_tensor_with(
+            &dag,
+            |_| Some(TensorValue::from_vec(vec![actual], vec![7.0; actual])),
+            &mut chelis_types::NativeServices::new(None),
+        );
         if let Some(required) = fails {
             let error = outcome.unwrap_err();
             assert!(
@@ -89,8 +91,12 @@ fn discarded_result_keeps_a_potentially_failing_witness() {
     dag.node_mut(result).unwrap().shape_deps.push(witness);
     dag.add_root(result);
     let dag = dead_code_eliminate(&dag);
-    let error =
-        eval_tensor_with(&dag, |_| Some(TensorValue::from_vec(vec![5], vec![7.0; 5]))).unwrap_err();
+    let error = eval_tensor_with(
+        &dag,
+        |_| Some(TensorValue::from_vec(vec![5], vec![7.0; 5])),
+        &mut chelis_types::NativeServices::new(None),
+    )
+    .unwrap_err();
     assert!(error.contains("claimed = 4, x axis 0 = 5"), "{error}");
 }
 
@@ -116,7 +122,7 @@ fn unrelated_root_does_not_activate_another_invocations_witness() {
             .iter()
             .all(|node| !matches!(node.op, RiscOp::ExtentWitness { .. }))
     );
-    assert!(eval_tensor_with(&dag, |_| None).is_ok());
+    assert!(eval_tensor_with(&dag, |_| None, &mut chelis_types::NativeServices::new(None)).is_ok());
 }
 
 #[test]
@@ -174,9 +180,11 @@ fn graph_rebuilds_preserve_witness_claims_and_call_provenance() {
         assert_eq!(witnesses.len(), 2, "distinct call checks must not CSE");
         assert_eq!(witnesses[0].span_id.as_deref(), Some("call-f"));
         assert_eq!(witnesses[1].span_id.as_deref(), Some("call-g"));
-        let outcome = eval_tensor_with(&dag, |_| {
-            Some(TensorValue::from_vec(vec![actual], vec![7.0; actual]))
-        });
+        let outcome = eval_tensor_with(
+            &dag,
+            |_| Some(TensorValue::from_vec(vec![actual], vec![7.0; actual])),
+            &mut chelis_types::NativeServices::new(None),
+        );
         assert_eq!(outcome.is_ok(), actual == 4);
         if actual == 5 {
             assert!(outcome.unwrap_err().contains("claimed = 4, x axis 0 = 5"));
@@ -204,12 +212,16 @@ fn vectorization_shares_witness_and_shifts_its_source_axis() {
                 ..
             }
         ));
-        let outcome = eval_tensor_with(&dag, |_| {
-            Some(TensorValue::from_vec(
-                vec![2, actual],
-                vec![7.0; 2 * actual],
-            ))
-        });
+        let outcome = eval_tensor_with(
+            &dag,
+            |_| {
+                Some(TensorValue::from_vec(
+                    vec![2, actual],
+                    vec![7.0; 2 * actual],
+                ))
+            },
+            &mut chelis_types::NativeServices::new(None),
+        );
         if actual == 4 {
             let values = outcome.unwrap();
             let value = &values[&dag.roots()[0]];
@@ -243,9 +255,11 @@ fn gradient_retains_primal_shape_checks() {
         dag.add_root(output);
         let gradient =
             chelis_ir::grad::grad_dag(&dag, output, &[input]).expect("differentiable sum");
-        let outcome = eval_tensor_with(&gradient.dag, |_| {
-            Some(TensorValue::from_vec(vec![actual], vec![7.0; actual]))
-        });
+        let outcome = eval_tensor_with(
+            &gradient.dag,
+            |_| Some(TensorValue::from_vec(vec![actual], vec![7.0; actual])),
+            &mut chelis_types::NativeServices::new(None),
+        );
         assert_eq!(outcome.is_ok(), actual == 4);
         if actual == 5 {
             assert!(outcome.unwrap_err().contains("claimed = 4, x axis 0 = 5"));

@@ -320,7 +320,7 @@ impl InferenceProduct {
         }
     }
 
-    pub(super) fn begin_root(&mut self, root: &deep::Expr) {
+    pub(super) fn begin_root(&mut self, root: &deep::Expr, stack: &mut StackBudget<'_>) {
         assert!(
             self.active_epoch.is_none(),
             "type-stamp epochs must not overlap"
@@ -333,7 +333,7 @@ impl InferenceProduct {
             writes: UnordMap::new(),
             bridge_aliases: UnordMap::new(),
         };
-        register_annotation_owners(root, &mut epoch);
+        register_annotation_owners(root, &mut epoch, stack);
         self.active_epoch = Some(epoch);
         self.active_declaration_name = stamped_parts(root)
             .and_then(|(tag, _, children)| {
@@ -1593,24 +1593,39 @@ pub(super) fn internal_owner_stamp_error(message: String) -> CheckError {
 // only arm that ever wrote to a sink was the version-skew fallback that
 // `child_stamp_role`'s totality made unrepresentable, so the walk no longer
 // takes a `DiagnosticSink`.
-pub(super) fn register_annotation_owners(expr: &deep::Expr, epoch: &mut TypeStampEpoch) {
-    stack_guard!("register_annotation_owners", expr);
+pub(super) fn register_annotation_owners(
+    expr: &deep::Expr,
+    epoch: &mut TypeStampEpoch,
+    stack: &mut StackBudget<'_>,
+) {
+    if stack.frame_exhausted("register_annotation_owners", || expr.span_id()) {
+        return;
+    }
+    register_annotation_owners_frame(expr, epoch, stack);
+    stack.exit_frame();
+}
+
+fn register_annotation_owners_frame(
+    expr: &deep::Expr,
+    epoch: &mut TypeStampEpoch,
+    stack: &mut StackBudget<'_>,
+) {
     let (tag, kids) = match expr.carrier() {
         deep::ExprCarrier::DecodedNode(tag, _, children) => (Some(tag), children),
         deep::ExprCarrier::MetadataExpression(meta) => {
-            register_annotation_owners(&meta.expr, epoch);
+            register_annotation_owners(&meta.expr, epoch, stack);
             return;
         }
         deep::ExprCarrier::StructuralList(children)
         | deep::ExprCarrier::UndecodableHead(_, _, children) => {
             for child in children {
-                register_annotation_owners(child, epoch);
+                register_annotation_owners(child, epoch, stack);
             }
             return;
         }
         deep::ExprCarrier::MalformedLegacyList(list) => {
             for child in &list.elements {
-                register_annotation_owners(child, epoch);
+                register_annotation_owners(child, epoch, stack);
             }
             return;
         }
@@ -1637,7 +1652,7 @@ pub(super) fn register_annotation_owners(expr: &deep::Expr, epoch: &mut TypeStam
         // returned.
         match tag.map(|tag| child_stamp_role(tag, index, kids.len())) {
             Some(ChildStampRole::RuntimeExpr | ChildStampRole::ExplicitInferenceBypass) | None => {
-                register_annotation_owners(child, epoch);
+                register_annotation_owners(child, epoch, stack);
             }
             Some(
                 ChildStampRole::Syntax
@@ -1729,7 +1744,7 @@ pub(crate) fn run_type_stamp_mutation_case(
 ) -> bool {
     let owner = node_expr(DeepTag::App, vec![]);
     let mut product = InferenceProduct::default();
-    product.begin_root(&owner);
+    product.begin_root(&owner, &mut errors.stack());
     match case {
         TypeStampMutationCase::Missing => {
             product.finish_root(&Subst::new(), errors);
@@ -1765,7 +1780,7 @@ pub(crate) fn run_type_stamp_mutation_case(
             let runtime_child = node_expr(DeepTag::Var, vec![symbol_expr("x")]);
             let root = node_expr(DeepTag::App, vec![runtime_child]);
             let mut product = InferenceProduct::default();
-            product.begin_root(&root);
+            product.begin_root(&root, &mut errors.stack());
             // chelis#1107 amendment (justified-safe, not routed): `root` is
             // built two lines above by this file's own `node_expr`, which
             // returns `deep::Expr::List` unconditionally. No stamped `Node`
@@ -1800,7 +1815,7 @@ pub(crate) fn run_finalization_mutation_case(
         FinalizationMutationCase::MissingRuntimeStamp => vec![runtime],
         FinalizationMutationCase::SilentErrorOwner => {
             let mut product = InferenceProduct::default();
-            product.begin_root(&runtime);
+            product.begin_root(&runtime, &mut errors.stack());
             product.record_canonical(&runtime, crate::errors::error_sentinel_for_test());
             product.finish_root(&Subst::new(), errors);
             annotate_ir_program(std::slice::from_ref(&runtime), &product, errors)
@@ -1837,10 +1852,11 @@ pub(crate) fn run_finalization_mutation_case(
 /// and parallel checks cannot observe another unit's declarations.
 pub(super) fn collect_declared_sig_metadata<'a>(
     exprs: impl IntoIterator<Item = &'a deep::Expr>,
+    stack: &mut StackBudget<'_>,
 ) -> UnordMap<String, DeclaredSigMetadata> {
     let mut map: UnordMap<String, DeclaredSigMetadata> = UnordMap::new();
     for expr in exprs {
-        collect_defsig_param_types(expr, &mut map);
+        collect_defsig_param_types(expr, &mut map, stack);
     }
     map
 }
@@ -1853,22 +1869,34 @@ pub(super) fn collect_declared_sig_metadata<'a>(
 pub(super) fn collect_defsig_param_types(
     expr: &deep::Expr,
     map: &mut UnordMap<String, DeclaredSigMetadata>,
+    stack: &mut StackBudget<'_>,
 ) {
     // Bail before unbounded recursion exhausts the native stack on a
-    // deeply-nested input. No error vector here; `stack_guard_tripped`
+    // deeply-nested input. No error vector here; `StackBudget::frame_exhausted`
     // records the bail so the check entry boundary fails hard with a located
     // diagnostic. See `STACK_RED_ZONE_BYTES`. (In practice this walker only
     // descends `module` wrappers, which do not nest deeply, but the guard
     // keeps the "every recursive walker is bounded" invariant uniform and
     // cheap.)
-    stack_guard!("collect_defsig_param_types", expr);
+    if stack.frame_exhausted("collect_defsig_param_types", || expr.span_id()) {
+        return;
+    }
+    collect_defsig_param_types_frame(expr, map, stack);
+    stack.exit_frame();
+}
+
+fn collect_defsig_param_types_frame(
+    expr: &deep::Expr,
+    map: &mut UnordMap<String, DeclaredSigMetadata>,
+    stack: &mut StackBudget<'_>,
+) {
     let Some((tag, meta, kids)) = stamped_parts(expr) else {
         return;
     };
     match tag {
         DeepTag::Module => {
             for child in kids.iter().skip(1) {
-                collect_defsig_param_types(child, map);
+                collect_defsig_param_types(child, map, stack);
             }
         }
         DeepTag::Defsig => {
@@ -2148,8 +2176,9 @@ impl CheckedProgram {
     pub fn try_with_effect_annotations(
         &self,
         annotated_exprs: Vec<deep::Expr>,
+        native: &mut NativeServices,
     ) -> Result<Self, InferResult> {
-        crate::session::try_checked_program_with_effect_annotations(self, annotated_exprs)
+        crate::session::try_checked_program_with_effect_annotations(self, annotated_exprs, native)
     }
 
     pub fn exprs(&self) -> &[deep::Expr] {
@@ -2500,7 +2529,11 @@ pub(crate) fn checked_program_with_effect_annotations_in_session(
     annotated_exprs: Vec<deep::Expr>,
     errors: &mut DiagnosticSink<'_>,
 ) -> CheckedProgram {
-    if !effects_only_rewrite_matches(original.annotated_exprs(), &annotated_exprs) {
+    if !effects_only_rewrite_matches(
+        original.annotated_exprs(),
+        &annotated_exprs,
+        &mut errors.stack(),
+    ) {
         errors.push(CheckError::new(
             CheckErrorKind::Other,
             "checked-program effects-only reannotation changed a span, atom, child, or non-`effects` metadata entry"
@@ -2531,17 +2564,34 @@ pub(crate) fn checked_program_with_effect_annotations_in_session(
 pub(super) fn effects_only_rewrite_matches(
     original: &[deep::Expr],
     candidate: &[deep::Expr],
+    stack: &mut StackBudget<'_>,
 ) -> bool {
     original.len() == candidate.len()
         && original
             .iter()
             .zip(candidate)
-            .all(|(before, after)| effects_only_expr_matches(before, after))
+            .all(|(before, after)| effects_only_expr_matches(before, after, stack))
         && chelis_deep::metadata::validate_metadata(candidate).is_ok()
 }
 
-pub(super) fn effects_only_expr_matches(before: &deep::Expr, after: &deep::Expr) -> bool {
-    stack_guard!("effects_only_expr_matches", before, false);
+pub(super) fn effects_only_expr_matches(
+    before: &deep::Expr,
+    after: &deep::Expr,
+    stack: &mut StackBudget<'_>,
+) -> bool {
+    if stack.frame_exhausted("effects_only_expr_matches", || before.span_id()) {
+        return false;
+    }
+    let result = effects_only_expr_matches_frame(before, after, stack);
+    stack.exit_frame();
+    result
+}
+
+fn effects_only_expr_matches_frame(
+    before: &deep::Expr,
+    after: &deep::Expr,
+    stack: &mut StackBudget<'_>,
+) -> bool {
     // PP7/E5e justified symmetric site: this is strict representation
     // equality modulo derived effects. List is compared only with List,
     // beside the corresponding Node/BareList/UnknownForm arms; `_ => false`
@@ -2552,7 +2602,7 @@ pub(super) fn effects_only_expr_matches(before: &deep::Expr, after: &deep::Expr)
         }
         (deep::Expr::Map(before_map, before_span), deep::Expr::Map(after_map, after_span)) => {
             before_span == after_span
-                && metadata_matches_except_effects(before_map, after_map, false)
+                && metadata_matches_except_effects(before_map, after_map, false, stack)
         }
         (
             deep::Expr::MetaExpr(before_meta, before_span),
@@ -2563,8 +2613,9 @@ pub(super) fn effects_only_expr_matches(before: &deep::Expr, after: &deep::Expr)
                     &before_meta.metadata,
                     &after_meta.metadata,
                     false,
+                    stack,
                 )
-                && effects_only_expr_matches(&before_meta.expr, &after_meta.expr)
+                && effects_only_expr_matches(&before_meta.expr, &after_meta.expr, stack)
         }
         (deep::Expr::List(before_list, before_span), deep::Expr::List(after_list, after_span)) => {
             before_span == after_span
@@ -2582,22 +2633,29 @@ pub(super) fn effects_only_expr_matches(before: &deep::Expr, after: &deep::Expr)
                             ) = (before_element, after_element)
                         {
                             return before_map_span == after_map_span
-                                && metadata_matches_except_effects(before_map, after_map, true);
+                                && metadata_matches_except_effects(
+                                    before_map, after_map, true, stack,
+                                );
                         }
-                        effects_only_expr_matches(before_element, after_element)
+                        effects_only_expr_matches(before_element, after_element, stack)
                     })
         }
         (deep::Expr::Node(before_node, before_span), deep::Expr::Node(after_node, after_span)) => {
             before_span == after_span
                 && before_node.tag() == after_node.tag()
-                && metadata_matches_except_effects(before_node.meta(), after_node.meta(), true)
+                && metadata_matches_except_effects(
+                    before_node.meta(),
+                    after_node.meta(),
+                    true,
+                    stack,
+                )
                 && before_node.children_slice().len() == after_node.children_slice().len()
                 && before_node
                     .children_slice()
                     .iter()
                     .zip(after_node.children_slice())
                     .all(|(before_child, after_child)| {
-                        effects_only_expr_matches(before_child, after_child)
+                        effects_only_expr_matches(before_child, after_child, stack)
                     })
         }
         (
@@ -2610,17 +2668,17 @@ pub(super) fn effects_only_expr_matches(before: &deep::Expr, after: &deep::Expr)
                     .iter()
                     .zip(after_elements)
                     .all(|(before_child, after_child)| {
-                        effects_only_expr_matches(before_child, after_child)
+                        effects_only_expr_matches(before_child, after_child, stack)
                     })
         }
         (deep::Expr::UnknownForm(before_data), deep::Expr::UnknownForm(after_data)) => {
             before_data.head == after_data.head
                 && before_data.span == after_data.span
-                && metadata_matches_except_effects(&before_data.meta, &after_data.meta, true)
+                && metadata_matches_except_effects(&before_data.meta, &after_data.meta, true, stack)
                 && before_data.children.len() == after_data.children.len()
                 && before_data.children.iter().zip(&after_data.children).all(
                     |(before_child, after_child)| {
-                        effects_only_expr_matches(before_child, after_child)
+                        effects_only_expr_matches(before_child, after_child, stack)
                     },
                 )
         }
@@ -2635,10 +2693,11 @@ fn metadata_matches_except_effects(
     before: &deep::Metadata,
     after: &deep::Metadata,
     ignore_effects: bool,
+    stack: &mut StackBudget<'_>,
 ) -> bool {
     match (
-        metadata_without_derived_effects(before, ignore_effects),
-        metadata_without_derived_effects(after, ignore_effects),
+        metadata_without_derived_effects(before, ignore_effects, stack),
+        metadata_without_derived_effects(after, ignore_effects, stack),
     ) {
         (Ok(before), Ok(after)) => before == after,
         _ => false,
@@ -2654,9 +2713,10 @@ impl From<chelis_deep::metadata::MetadataError> for EffectComparisonError {
 fn metadata_without_derived_effects(
     meta: &deep::Metadata,
     remove_here: bool,
+    stack: &mut StackBudget<'_>,
 ) -> Result<deep::Metadata, EffectComparisonError> {
     let mut result =
-        meta.try_map_expressions(&mut |expr, _| expression_without_derived_effects(expr))?;
+        meta.try_map_expressions(&mut |expr, _| expression_without_derived_effects(expr, stack))?;
     if remove_here {
         result.remove(chelis_deep::annotations::MetadataKey::Effects);
     }
@@ -2664,23 +2724,31 @@ fn metadata_without_derived_effects(
 }
 fn expression_without_derived_effects(
     expr: &deep::Expr,
+    stack: &mut StackBudget<'_>,
 ) -> Result<deep::Expr, EffectComparisonError> {
-    stack_guard!(
-        "expression_without_derived_effects",
-        expr,
-        Err(EffectComparisonError)
-    );
+    if stack.frame_exhausted("expression_without_derived_effects", || expr.span_id()) {
+        return Err(EffectComparisonError);
+    }
+    let result = expression_without_derived_effects_frame(expr, stack);
+    stack.exit_frame();
+    result
+}
+
+fn expression_without_derived_effects_frame(
+    expr: &deep::Expr,
+    stack: &mut StackBudget<'_>,
+) -> Result<deep::Expr, EffectComparisonError> {
     // PP7/E5e producer exception: the exhaustive transformer rebuilds every
     // expression as the same carrier while removing only derived effects.
     Ok(match expr {
         deep::Expr::Atom(..) => expr.clone(),
         deep::Expr::Map(meta, span) => {
-            deep::Expr::Map(metadata_without_derived_effects(meta, false)?, *span)
+            deep::Expr::Map(metadata_without_derived_effects(meta, false, stack)?, *span)
         }
         deep::Expr::MetaExpr(meta, span) => deep::Expr::MetaExpr(
             deep::MetaExpr {
-                metadata: metadata_without_derived_effects(&meta.metadata, false)?,
-                expr: Box::new(expression_without_derived_effects(&meta.expr)?),
+                metadata: metadata_without_derived_effects(&meta.metadata, false, stack)?,
+                expr: Box::new(expression_without_derived_effects(&meta.expr, stack)?),
             },
             *span,
         ),
@@ -2688,10 +2756,10 @@ fn expression_without_derived_effects(
             Box::new(
                 chelis_deep::node::Node::try_new(
                     node.tag(),
-                    metadata_without_derived_effects(node.meta(), true)?,
+                    metadata_without_derived_effects(node.meta(), true, stack)?,
                     node.children_slice()
                         .iter()
-                        .map(expression_without_derived_effects)
+                        .map(|expr| expression_without_derived_effects(expr, stack))
                         .collect::<Result<_, _>>()?,
                 )
                 .map_err(|_| EffectComparisonError)?,
@@ -2705,11 +2773,11 @@ fn expression_without_derived_effects(
                     && let deep::Expr::Map(meta, span) = value
                 {
                     elements.push(deep::Expr::Map(
-                        metadata_without_derived_effects(meta, true)?,
+                        metadata_without_derived_effects(meta, true, stack)?,
                         *span,
                     ));
                 } else {
-                    elements.push(expression_without_derived_effects(value)?);
+                    elements.push(expression_without_derived_effects(value, stack)?);
                 }
             }
             deep::Expr::List(deep::List { elements }, *span)
@@ -2717,17 +2785,17 @@ fn expression_without_derived_effects(
         deep::Expr::BareList(values, span) => deep::Expr::BareList(
             values
                 .iter()
-                .map(expression_without_derived_effects)
+                .map(|expr| expression_without_derived_effects(expr, stack))
                 .collect::<Result<_, _>>()?,
             *span,
         ),
         deep::Expr::UnknownForm(data) => deep::Expr::UnknownForm(Box::new(deep::UnknownFormData {
             head: data.head.clone(),
-            meta: metadata_without_derived_effects(&data.meta, true)?,
+            meta: metadata_without_derived_effects(&data.meta, true, stack)?,
             children: data
                 .children
                 .iter()
-                .map(expression_without_derived_effects)
+                .map(|expr| expression_without_derived_effects(expr, stack))
                 .collect::<Result<_, _>>()?,
             span: data.span,
         })),

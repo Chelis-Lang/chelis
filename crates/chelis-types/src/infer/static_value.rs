@@ -567,7 +567,7 @@ pub(super) fn resolve_axis_pair_member(
     // through to host-runtime defense-in-depth.
     // chelis#731 §C3: the out-of-bounds `Err` now carries the
     // witness-`Type::Error` from `report`, so the caller propagates it.
-    match axis_expr.and_then(extract_int_for_dim) {
+    match axis_expr.and_then(|expr| extract_int_for_dim(expr, &mut errors.stack())) {
         Some(raw) => match tensor_ty {
             Type::Tensor(dims, _) => match normalize_static_axis(dims.len(), raw) {
                 Some(axis) => Ok(axis),
@@ -623,7 +623,7 @@ pub(super) fn resolve_builtin_axis(
 ) -> Result<usize, Type> {
     reject_non_int32_axis(op, axis_ty, list, errors)?;
     // Issue #216: cast-aware extractor; see `resolve_axis_pair_member`.
-    let raw_axis = axis_expr.and_then(extract_int_for_dim);
+    let raw_axis = axis_expr.and_then(|expr| extract_int_for_dim(expr, &mut errors.stack()));
     match (tensor_ty, raw_axis) {
         (Type::Tensor(dims, _), Some(raw)) => match normalize_static_axis(dims.len(), raw) {
             Some(axis) => Ok(axis),

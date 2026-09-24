@@ -276,12 +276,11 @@ pub(super) fn infer_signature_metadata_with_context_and_headers(
     // scaling pass — and on a large program the single most expensive one.
     // Polling the inner loop rather than the outer sweep keeps the bound
     // independent of program size: one declaration, not one O(n) sweep.
-    let cancel = crate::cancel::current_cancel_token();
     'fixed_point: for _ in 0..passes {
         functions.clear();
         let mut available_signatures = imported_signatures.clone();
         for expr in &ordered_defs {
-            if cancel.as_ref().is_some_and(CancelToken::is_cancelled) {
+            if errors.cancellation_observed() {
                 break 'fixed_point;
             }
             let Some((DeepTag::Def, _, kids)) = stamped_parts(expr) else {
@@ -480,8 +479,8 @@ fn cancel_later_dependency_after_edges_for_test(
     LaterDependencyCancellationHook
 }
 
-fn initialization_cancelled(cancel: Option<&CancelToken>, errors: &mut DiagnosticSink<'_>) -> bool {
-    if !cancel.is_some_and(CancelToken::is_cancelled) {
+fn initialization_cancelled(errors: &mut DiagnosticSink<'_>) -> bool {
+    if !errors.cancellation_observed() {
         return false;
     }
     if !errors
@@ -512,10 +511,11 @@ pub(super) struct TopLevelReferenceComponents {
 }
 
 impl TopLevelReferenceGraph {
-    pub(super) fn build(items: &[(Option<String>, &deep::Expr)]) -> Self {
+    pub(super) fn build(
+        items: &[(Option<String>, &deep::Expr)],
+        stack: &mut StackBudget<'_>,
+    ) -> Self {
         profile_reference_graph_build();
-        let cancel = crate::cancel::current_cancel_token();
-        let cancelled = || cancel.as_ref().is_some_and(CancelToken::is_cancelled);
         let mut graph = Self {
             definition_vertex_by_item: vec![None; items.len()],
             item_references: vec![Vec::new(); items.len()],
@@ -525,7 +525,7 @@ impl TopLevelReferenceGraph {
 
         let mut declared_signature_names = UnordSet::new();
         for (_, expr) in items {
-            if cancelled() {
+            if stack.native().cancellation_observed() {
                 graph.complete = false;
                 return graph;
             }
@@ -541,7 +541,7 @@ impl TopLevelReferenceGraph {
         }
 
         for (item_index, (_, expr)) in items.iter().enumerate() {
-            if cancelled() {
+            if stack.native().cancellation_observed() {
                 graph.complete = false;
                 return graph;
             }
@@ -571,19 +571,25 @@ impl TopLevelReferenceGraph {
         }
 
         for (item_index, (_, expr)) in items.iter().enumerate() {
-            if cancelled() {
+            if stack.native().cancellation_observed() {
                 graph.complete = false;
                 return graph;
             }
             let mut references = BTreeSet::new();
             let mut bound = Vec::new();
-            collect_top_level_references(expr, &graph.vertex_by_name, &mut bound, &mut references);
+            collect_top_level_references(
+                expr,
+                &graph.vertex_by_name,
+                &mut bound,
+                &mut references,
+                stack,
+            );
 
             // [04-INF-4]: the literal self-reference of an explicitly typed
             // external input is its declaration spelling, not an eager edge.
             if let Some((DeepTag::Def, _, kids)) = stamped_parts(expr)
                 && let (Some(name), Some(body)) = (kids.first().and_then(symbol_name), kids.get(1))
-                && (body_is_type_stamped_literal_self_ref(body, name)
+                && (body_is_type_stamped_literal_self_ref(body, name, stack)
                     || (declared_signature_names.contains(name)
                         && body_is_literal_self_ref_shape(body, name)))
                 && let Some(vertex) = graph.vertex_by_name.get(name).copied()
@@ -614,7 +620,10 @@ impl TopLevelReferenceGraph {
     /// and hole precedence edges may merge these components, but no consumer
     /// may split one and reintroduce an inference-order `UnboundVariable` for
     /// an eager cycle.
-    pub(super) fn inference_components(&self) -> TopLevelReferenceComponents {
+    pub(super) fn inference_components(
+        &self,
+        native: &mut NativeServices,
+    ) -> TopLevelReferenceComponents {
         if !self.complete {
             return TopLevelReferenceComponents {
                 component_by_item: vec![None; self.item_references.len()],
@@ -623,9 +632,7 @@ impl TopLevelReferenceGraph {
             };
         }
         let adjacency = self.adjacency();
-        let cancel = crate::cancel::current_cancel_token();
-        let Some(vertex_components) = unprofiled_scc_vertex_components(&adjacency, cancel.as_ref())
-        else {
+        let Some(vertex_components) = unprofiled_scc_vertex_components(&adjacency, native) else {
             return TopLevelReferenceComponents {
                 component_by_item: vec![None; self.item_references.len()],
                 complete: false,
@@ -727,17 +734,16 @@ impl TopLevelReferenceGraph {
 
     fn initialization_analysis(
         &self,
-        cancel: Option<&CancelToken>,
+        native: &mut NativeServices,
     ) -> Option<TopLevelInitializationAnalysis> {
-        let cancelled = || cancel.is_some_and(CancelToken::is_cancelled);
-        if !self.complete || cancelled() {
+        if !self.complete || native.cancellation_observed() {
             return None;
         }
         let adjacency = self.adjacency();
-        if cancelled() {
+        if native.cancellation_observed() {
             return None;
         }
-        let mut components = unprofiled_scc_vertex_components(&adjacency, cancel)?;
+        let mut components = unprofiled_scc_vertex_components(&adjacency, native)?;
         components.retain(|component| {
             let cyclic = component.len() > 1
                 || component
@@ -765,7 +771,7 @@ impl TopLevelReferenceGraph {
                 .min()
                 .unwrap_or(usize::MAX)
         });
-        if cancelled() {
+        if native.cancellation_observed() {
             return None;
         }
         Some(TopLevelInitializationAnalysis {
@@ -777,8 +783,7 @@ impl TopLevelReferenceGraph {
 
     #[cfg(test)]
     fn cyclic_eager_components(&self) -> Vec<Vec<usize>> {
-        let cancel = crate::cancel::current_cancel_token();
-        self.initialization_analysis(cancel.as_ref())
+        self.initialization_analysis(&mut NativeServices::new(None))
             .map(|analysis| analysis.eager_cycle_components)
             .unwrap_or_default()
     }
@@ -787,10 +792,9 @@ impl TopLevelReferenceGraph {
         &self,
         adjacency: &[Vec<usize>],
         component: &[usize],
-        cancel: Option<&CancelToken>,
+        native: &mut NativeServices,
     ) -> Option<Vec<usize>> {
-        let cancelled = || cancel.is_some_and(CancelToken::is_cancelled);
-        if cancelled() {
+        if native.cancellation_observed() {
             return None;
         }
         let members = component.iter().copied().collect::<UnordSet<_>>();
@@ -818,14 +822,14 @@ impl TopLevelReferenceGraph {
             let mut seen = UnordSet::new();
             seen.insert(first);
             while let Some(vertex) = queue.pop_front() {
-                if cancelled() {
+                if native.cancellation_observed() {
                     return None;
                 }
                 if vertex == start {
                     let mut reverse = vec![start];
                     let mut current = start;
                     while current != first {
-                        if cancelled() {
+                        if native.cancellation_observed() {
                             return None;
                         }
                         current = predecessor[&current];
@@ -859,17 +863,16 @@ impl TopLevelReferenceGraph {
     pub(super) fn acyclic_later_eager_value_dependencies(
         &self,
     ) -> Option<Vec<LaterEagerValueDependency>> {
-        let cancel = crate::cancel::current_cancel_token();
-        let analysis = self.initialization_analysis(cancel.as_ref())?;
-        self.later_eager_value_dependencies(&analysis, cancel.as_ref())
+        let mut native = NativeServices::new(None);
+        let analysis = self.initialization_analysis(&mut native)?;
+        self.later_eager_value_dependencies(&analysis, &mut native)
     }
 
     fn later_eager_value_dependencies(
         &self,
         analysis: &TopLevelInitializationAnalysis,
-        cancel: Option<&CancelToken>,
+        native: &mut NativeServices,
     ) -> Option<Vec<LaterEagerValueDependency>> {
-        let cancelled = || cancel.is_some_and(CancelToken::is_cancelled);
         let vertex_count = self.definitions.len();
         let mut visit_epoch = vec![0usize; vertex_count];
         let mut predecessor = vec![usize::MAX; vertex_count];
@@ -885,7 +888,7 @@ impl TopLevelReferenceGraph {
             .filter(|(_, definition)| definition.kind == TopLevelDefinitionKind::EagerValue)
             .map(|(vertex, _)| vertex)
         {
-            if cancelled() {
+            if native.cancellation_observed() {
                 return None;
             }
             // CycleDetected takes precedence only when this eager root is
@@ -901,12 +904,12 @@ impl TopLevelReferenceGraph {
             queue.push_back(root);
             reached_later.clear();
             while let Some(vertex) = queue.pop_front() {
-                if cancelled() {
+                if native.cancellation_observed() {
                     return None;
                 }
                 for &next in &analysis.adjacency[vertex] {
                     later_dependency_edge_inspected();
-                    if cancelled() {
+                    if native.cancellation_observed() {
                         return None;
                     }
                     if vertex == root
@@ -941,13 +944,13 @@ impl TopLevelReferenceGraph {
             });
             reached_later.dedup();
             for &later in &reached_later {
-                if cancelled() {
+                if native.cancellation_observed() {
                     return None;
                 }
                 let mut path = vec![later];
                 let mut current = later;
                 while current != root {
-                    if cancelled() {
+                    if native.cancellation_observed() {
                         return None;
                     }
                     current = predecessor[current];
@@ -977,20 +980,19 @@ impl TopLevelReferenceGraph {
                 self.definitions[finding.later].name.clone(),
             )
         });
-        if cancelled() {
+        if native.cancellation_observed() {
             return None;
         }
         Some(findings)
     }
 
     pub(super) fn report_initialization_errors(&self, errors: &mut DiagnosticSink<'_>) {
-        let cancel = crate::cancel::current_cancel_token();
-        let Some(analysis) = self.initialization_analysis(cancel.as_ref()) else {
-            initialization_cancelled(cancel.as_ref(), errors);
+        let Some(analysis) = self.initialization_analysis(errors.native()) else {
+            initialization_cancelled(errors);
             return;
         };
-        let Some(findings) = self.later_eager_value_dependencies(&analysis, cancel.as_ref()) else {
-            initialization_cancelled(cancel.as_ref(), errors);
+        let Some(findings) = self.later_eager_value_dependencies(&analysis, errors.native()) else {
+            initialization_cancelled(errors);
             return;
         };
 
@@ -1000,14 +1002,14 @@ impl TopLevelReferenceGraph {
         // cancellation diagnostic, even if the sink already has source errors.
         let mut cycle_paths = Vec::with_capacity(analysis.eager_cycle_components.len());
         for component in &analysis.eager_cycle_components {
-            let Some(path) = self.cycle_path(&analysis.adjacency, component, cancel.as_ref())
+            let Some(path) = self.cycle_path(&analysis.adjacency, component, errors.native())
             else {
-                initialization_cancelled(cancel.as_ref(), errors);
+                initialization_cancelled(errors);
                 return;
             };
             cycle_paths.push(path);
         }
-        if initialization_cancelled(cancel.as_ref(), errors) {
+        if initialization_cancelled(errors) {
             return;
         }
 
@@ -1020,7 +1022,7 @@ impl TopLevelReferenceGraph {
             .collect::<UnordSet<_>>();
         let mut staged = Vec::with_capacity(cycle_paths.len() + findings.len());
         for path in cycle_paths {
-            if initialization_cancelled(cancel.as_ref(), errors) {
+            if initialization_cancelled(errors) {
                 return;
             }
             let names = path
@@ -1038,7 +1040,7 @@ impl TopLevelReferenceGraph {
             ));
         }
         for finding in findings {
-            if initialization_cancelled(cancel.as_ref(), errors) {
+            if initialization_cancelled(errors) {
                 return;
             }
             let root = &self.definitions[finding.root];
@@ -1069,7 +1071,7 @@ impl TopLevelReferenceGraph {
                 )],
             ));
         }
-        if initialization_cancelled(cancel.as_ref(), errors) {
+        if initialization_cancelled(errors) {
             return;
         }
         for error in staged {
@@ -1083,19 +1085,33 @@ fn collect_top_level_references(
     vertex_by_name: &UnordMap<String, usize>,
     bound: &mut Vec<UnordSet<String>>,
     references: &mut BTreeSet<TopLevelReference>,
+    stack: &mut StackBudget<'_>,
 ) {
-    stack_guard!("collect_top_level_references", expr);
+    if stack.frame_exhausted("collect_top_level_references", || expr.span_id()) {
+        return;
+    }
+    collect_top_level_references_frame(expr, vertex_by_name, bound, references, stack);
+    stack.exit_frame();
+}
+
+fn collect_top_level_references_frame(
+    expr: &deep::Expr,
+    vertex_by_name: &UnordMap<String, usize>,
+    bound: &mut Vec<UnordSet<String>>,
+    references: &mut BTreeSet<TopLevelReference>,
+    stack: &mut StackBudget<'_>,
+) {
     match expr {
         deep::Expr::Atom(_, _) => {}
         deep::Expr::Map(map, _) => {
             map.visit_syntax(&mut |_, value| {
-                collect_top_level_references(value, vertex_by_name, bound, references);
+                collect_top_level_references(value, vertex_by_name, bound, references, stack);
             });
         }
         // Metadata describes the expression; it is not executed as part of a
         // top-level initializer. The stamped expression itself still is.
         deep::Expr::MetaExpr(meta, _) => {
-            collect_top_level_references(&meta.expr, vertex_by_name, bound, references)
+            collect_top_level_references(&meta.expr, vertex_by_name, bound, references, stack)
         }
         deep::Expr::List(list, _) => match get_tag(list) {
             Some(DeepTag::App) => {
@@ -1109,10 +1125,16 @@ fn collect_top_level_references(
                         kind: TopLevelReferenceKind::Apply,
                     });
                 } else if let Some(callee) = kids.first() {
-                    collect_top_level_references(callee, vertex_by_name, bound, references);
+                    collect_top_level_references(callee, vertex_by_name, bound, references, stack);
                 }
                 for argument in kids.iter().skip(1) {
-                    collect_top_level_references(argument, vertex_by_name, bound, references);
+                    collect_top_level_references(
+                        argument,
+                        vertex_by_name,
+                        bound,
+                        references,
+                        stack,
+                    );
                 }
             }
             Some(DeepTag::Var) => {
@@ -1137,7 +1159,13 @@ fn collect_top_level_references(
                     );
                     // [04-INF-7]: nested lambda bodies are part of the eager
                     // syntactic reference set even if the closure is stored.
-                    collect_top_level_references(&kids[1], vertex_by_name, bound, references);
+                    collect_top_level_references(
+                        &kids[1],
+                        vertex_by_name,
+                        bound,
+                        references,
+                        stack,
+                    );
                     bound.pop();
                 }
             }
@@ -1158,6 +1186,7 @@ fn collect_top_level_references(
                             vertex_by_name,
                             bound,
                             references,
+                            stack,
                         );
                         if let Some(name) = symbol_name(&bind_kids[index]) {
                             bound
@@ -1168,17 +1197,23 @@ fn collect_top_level_references(
                         index += 2;
                     }
                 }
-                collect_top_level_references(&kids[1], vertex_by_name, bound, references);
+                collect_top_level_references(&kids[1], vertex_by_name, bound, references, stack);
                 bound.pop();
             }
             Some(DeepTag::Match) => {
                 let kids = children(list);
                 if let Some(scrutinee) = kids.first() {
-                    collect_top_level_references(scrutinee, vertex_by_name, bound, references);
+                    collect_top_level_references(
+                        scrutinee,
+                        vertex_by_name,
+                        bound,
+                        references,
+                        stack,
+                    );
                 }
                 for arm in kids.iter().skip(1) {
                     let Some((DeepTag::Arm, _, arm_kids)) = stamped_parts(arm) else {
-                        collect_top_level_references(arm, vertex_by_name, bound, references);
+                        collect_top_level_references(arm, vertex_by_name, bound, references, stack);
                         continue;
                     };
                     let Some(pattern) = arm_kids.first() else {
@@ -1190,29 +1225,35 @@ fn collect_top_level_references(
                             .collect(),
                     );
                     for scoped in arm_kids.iter().skip(1) {
-                        collect_top_level_references(scoped, vertex_by_name, bound, references);
+                        collect_top_level_references(
+                            scoped,
+                            vertex_by_name,
+                            bound,
+                            references,
+                            stack,
+                        );
                     }
                     bound.pop();
                 }
             }
             _ => {
                 for child in children(list) {
-                    collect_top_level_references(child, vertex_by_name, bound, references);
+                    collect_top_level_references(child, vertex_by_name, bound, references, stack);
                 }
             }
         },
         deep::Expr::Node(node, span) => {
             let bridged = deep::Expr::List(node.to_list(*span), *span);
-            collect_top_level_references(&bridged, vertex_by_name, bound, references);
+            collect_top_level_references(&bridged, vertex_by_name, bound, references, stack);
         }
         deep::Expr::BareList(elements, _) => {
             for child in elements {
-                collect_top_level_references(child, vertex_by_name, bound, references);
+                collect_top_level_references(child, vertex_by_name, bound, references, stack);
             }
         }
         deep::Expr::UnknownForm(data) => {
             for child in &data.children {
-                collect_top_level_references(child, vertex_by_name, bound, references);
+                collect_top_level_references(child, vertex_by_name, bound, references, stack);
             }
         }
     }
@@ -1250,25 +1291,32 @@ impl FunctionInferencePlan {
     /// SCCs are constructed in O(vertices + edges), returned callee-first,
     /// and retain source order within each component.
     #[cfg(test)]
-    pub(super) fn build(items: &[(Option<String>, &deep::Expr)]) -> Self {
-        let references = TopLevelReferenceGraph::build(items);
-        Self::build_from_reference_graph(&references)
+    pub(super) fn build(
+        items: &[(Option<String>, &deep::Expr)],
+        native: &mut NativeServices,
+    ) -> Self {
+        let references = TopLevelReferenceGraph::build(
+            items,
+            &mut StackBudget::new(native, &mut StackBailRecord::default()),
+        );
+        Self::build_from_reference_graph(&references, native)
     }
 
     /// Project the function-only SCC plan from the canonical top-level
     /// reference graph. The main inference driver builds that graph once and
     /// shares it with cycle diagnostics and the mixed-component scheduler.
-    pub(super) fn build_from_reference_graph(references: &TopLevelReferenceGraph) -> Self {
+    pub(super) fn build_from_reference_graph(
+        references: &TopLevelReferenceGraph,
+        native: &mut NativeServices,
+    ) -> Self {
         profile_plan_build();
         if !references.complete {
             return Self::incomplete();
         }
-        let cancel = crate::cancel::current_cancel_token();
-        let cancelled = || cancel.as_ref().is_some_and(CancelToken::is_cancelled);
         let mut compact_by_reference_vertex = vec![None; references.definitions.len()];
         let mut function_vertices = Vec::new();
         for (reference_vertex, definition) in references.definitions.iter().enumerate() {
-            if cancelled() {
+            if native.cancellation_observed() {
                 return Self::incomplete();
             }
             if definition.kind != TopLevelDefinitionKind::Function {
@@ -1280,7 +1328,7 @@ impl FunctionInferencePlan {
 
         let mut graph = vec![Vec::<usize>::new(); function_vertices.len()];
         for (vertex, &reference_vertex) in function_vertices.iter().enumerate() {
-            if cancelled() {
+            if native.cancellation_observed() {
                 return Self::incomplete();
             }
             let mut callees = references.outgoing[reference_vertex]
@@ -1293,7 +1341,7 @@ impl FunctionInferencePlan {
         }
         profile_graph(graph.len(), graph.iter().map(Vec::len).sum());
 
-        let Some(vertex_components) = ordered_scc_vertex_components(&graph, cancel.as_ref()) else {
+        let Some(vertex_components) = ordered_scc_vertex_components(&graph, native) else {
             return Self::incomplete();
         };
         let mut component_by_vertex = vec![0; graph.len()];
@@ -1364,24 +1412,23 @@ struct TarjanFrame {
 /// native-stack limit on long declaration chains.
 fn ordered_scc_vertex_components(
     graph: &[Vec<usize>],
-    cancel: Option<&CancelToken>,
+    native: &mut NativeServices,
 ) -> Option<Vec<Vec<usize>>> {
-    scc_vertex_components(graph, cancel, true)
+    scc_vertex_components(graph, native, true)
 }
 
 fn unprofiled_scc_vertex_components(
     graph: &[Vec<usize>],
-    cancel: Option<&CancelToken>,
+    native: &mut NativeServices,
 ) -> Option<Vec<Vec<usize>>> {
-    scc_vertex_components(graph, cancel, false)
+    scc_vertex_components(graph, native, false)
 }
 
 fn scc_vertex_components(
     graph: &[Vec<usize>],
-    cancel: Option<&CancelToken>,
+    native: &mut NativeServices,
     profile: bool,
 ) -> Option<Vec<Vec<usize>>> {
-    let cancelled = || cancel.is_some_and(CancelToken::is_cancelled);
     let mut next_index = 0usize;
     let mut indices = vec![None; graph.len()];
     let mut lowlinks = vec![0usize; graph.len()];
@@ -1395,7 +1442,7 @@ fn scc_vertex_components(
         if indices[start].is_some() {
             continue;
         }
-        if cancelled() {
+        if native.cancellation_observed() {
             return None;
         }
         indices[start] = Some(next_index);
@@ -1413,7 +1460,7 @@ fn scc_vertex_components(
 
         while let Some(frame) = frames.last().copied() {
             if frame.next_edge < graph[frame.vertex].len() {
-                if cancelled() {
+                if native.cancellation_observed() {
                     return None;
                 }
                 let callee = graph[frame.vertex][frame.next_edge];
@@ -1480,7 +1527,7 @@ fn scc_vertex_components(
     }
     let mut component_graph = vec![UnordSet::<usize>::new(); unordered.len()];
     for (caller, callees) in graph.iter().enumerate() {
-        if cancelled() {
+        if native.cancellation_observed() {
             return None;
         }
         for &callee in callees {
@@ -1506,7 +1553,7 @@ fn scc_vertex_components(
         visiting[root] = true;
         let mut component_frames = vec![(root, 0usize)];
         while let Some((component, next_dependency)) = component_frames.last().copied() {
-            if cancelled() {
+            if native.cancellation_observed() {
                 return None;
             }
             if next_dependency < dependencies[component].len() {
@@ -1634,7 +1681,8 @@ pub(super) fn cancel_function_plan_after_edges_for_test(
 
 #[cfg(test)]
 pub(super) fn linear_scc_component_vertices_for_test(graph: &[Vec<usize>]) -> Vec<Vec<usize>> {
-    ordered_scc_vertex_components(graph, None).expect("uncancelled SCC construction completes")
+    ordered_scc_vertex_components(graph, &mut NativeServices::new(None))
+        .expect("uncancelled SCC construction completes")
 }
 
 pub(super) fn collect_defsig_names(exprs: &[deep::Expr]) -> UnordSet<String> {
@@ -1692,6 +1740,7 @@ pub(crate) fn param_has_consuming_use(
     available_signatures: &UnordMap<String, Type>,
     type_env: &BTreeMap<String, deep::Expr>,
     type_headers: &TypeResolutionEnv,
+    native: &mut NativeServices,
 ) -> Result<bool, InferResult> {
     crate::session::param_has_consuming_use(
         expr,
@@ -1699,6 +1748,7 @@ pub(crate) fn param_has_consuming_use(
         available_signatures,
         type_env,
         type_headers,
+        native,
     )
 }
 
@@ -1749,7 +1799,31 @@ pub(super) fn param_has_consuming_use_inner(
     type_headers: &TypeResolutionEnv,
     errors: &mut DiagnosticSink<'_>,
 ) -> bool {
-    stack_guard!("param_has_consuming_use_inner", expr, false);
+    if errors.frame_exhausted("param_has_consuming_use_inner", || expr.span_id()) {
+        return false;
+    }
+    let result = param_has_consuming_use_inner_frame(
+        expr,
+        param,
+        bound,
+        available_signatures,
+        type_env,
+        type_headers,
+        errors,
+    );
+    errors.exit_frame();
+    result
+}
+
+fn param_has_consuming_use_inner_frame(
+    expr: &deep::Expr,
+    param: &str,
+    bound: &mut Vec<UnordSet<String>>,
+    available_signatures: &UnordMap<String, Type>,
+    type_env: &BTreeMap<String, deep::Expr>,
+    type_headers: &TypeResolutionEnv,
+    errors: &mut DiagnosticSink<'_>,
+) -> bool {
     match expr {
         deep::Expr::Atom(_, _) => false,
         deep::Expr::Map(map, _) => map.any_syntax(&mut |value| {
@@ -1775,9 +1849,9 @@ pub(super) fn param_has_consuming_use_inner(
         deep::Expr::List(list, _) if list.unknown_tag_symbol() == Some("drop") => {
             // Legacy internal `drop` spelling, outside the vocabulary;
             // recognized at the raw-string boundary.
-            children(list)
-                .first()
-                .is_some_and(|child| expr_mentions_unshadowed_name(child, param, bound))
+            children(list).first().is_some_and(|child| {
+                expr_mentions_unshadowed_name(child, param, bound, &mut errors.stack())
+            })
         }
         deep::Expr::List(list, _) => match get_tag(list) {
             Some(DeepTag::Var) => {
@@ -1796,9 +1870,9 @@ pub(super) fn param_has_consuming_use_inner(
                     )
                 })
             }
-            Some(DeepTag::Realize) => children(list)
-                .first()
-                .is_some_and(|child| expr_mentions_unshadowed_name(child, param, bound)),
+            Some(DeepTag::Realize) => children(list).first().is_some_and(|child| {
+                expr_mentions_unshadowed_name(child, param, bound, &mut errors.stack())
+            }),
             Some(DeepTag::App) => app_consumes_param(
                 list,
                 param,
@@ -1833,7 +1907,7 @@ pub(super) fn param_has_consuming_use_inner(
                 if kids.len() < 2 {
                     return false;
                 }
-                if expr_mentions_unshadowed_name(&kids[1], param, bound) {
+                if expr_mentions_unshadowed_name(&kids[1], param, bound, &mut errors.stack()) {
                     return true;
                 }
                 false
@@ -1882,10 +1956,9 @@ pub(super) fn param_has_consuming_use_inner(
             }
             Some(DeepTag::Match) => {
                 let kids = children(list);
-                if kids
-                    .first()
-                    .is_some_and(|scrutinee| expr_mentions_unshadowed_name(scrutinee, param, bound))
-                {
+                if kids.first().is_some_and(|scrutinee| {
+                    expr_mentions_unshadowed_name(scrutinee, param, bound, &mut errors.stack())
+                }) {
                     return true;
                 }
                 for arm in kids.iter().skip(1) {
@@ -1895,7 +1968,10 @@ pub(super) fn param_has_consuming_use_inner(
                     if arm_kids.len() < 3 {
                         continue;
                     }
-                    bound.push(pattern_names_for_signature(&arm_kids[0]));
+                    bound.push(pattern_names_for_signature(
+                        &arm_kids[0],
+                        &mut errors.stack(),
+                    ));
                     let consumes = param_has_consuming_use_inner(
                         &arm_kids[1],
                         param,
@@ -2090,14 +2166,30 @@ pub(super) fn expr_mentions_unshadowed_name(
     expr: &deep::Expr,
     name: &str,
     bound: &mut Vec<UnordSet<String>>,
+    stack: &mut StackBudget<'_>,
 ) -> bool {
-    stack_guard!("expr_mentions_unshadowed_name", expr, false);
+    if stack.frame_exhausted("expr_mentions_unshadowed_name", || expr.span_id()) {
+        return false;
+    }
+    let result = expr_mentions_unshadowed_name_frame(expr, name, bound, stack);
+    stack.exit_frame();
+    result
+}
+
+fn expr_mentions_unshadowed_name_frame(
+    expr: &deep::Expr,
+    name: &str,
+    bound: &mut Vec<UnordSet<String>>,
+    stack: &mut StackBudget<'_>,
+) -> bool {
     match expr {
         deep::Expr::Atom(_, _) => false,
         deep::Expr::Map(map, _) => {
-            map.any_syntax(&mut |value| expr_mentions_unshadowed_name(value, name, bound))
+            map.any_syntax(&mut |value| expr_mentions_unshadowed_name(value, name, bound, stack))
         }
-        deep::Expr::MetaExpr(meta, _) => expr_mentions_unshadowed_name(&meta.expr, name, bound),
+        deep::Expr::MetaExpr(meta, _) => {
+            expr_mentions_unshadowed_name(&meta.expr, name, bound, stack)
+        }
         deep::Expr::List(list, _) => match get_tag(list) {
             Some(DeepTag::Var) => var_name_list(list) == Some(name) && !is_bound_name(name, bound),
             Some(DeepTag::Fn) => {
@@ -2111,26 +2203,26 @@ pub(super) fn expr_mentions_unshadowed_name(
                         .map(|(n, _)| n)
                         .collect(),
                 );
-                let result = expr_mentions_unshadowed_name(&kids[1], name, bound);
+                let result = expr_mentions_unshadowed_name(&kids[1], name, bound, stack);
                 bound.pop();
                 result
             }
             _ => children(list)
                 .iter()
-                .any(|child| expr_mentions_unshadowed_name(child, name, bound)),
+                .any(|child| expr_mentions_unshadowed_name(child, name, bound, stack)),
         },
         // Bridge: reconstruct List so existing tag-dispatch logic runs unchanged (#908)
         deep::Expr::Node(node, span) => {
             let bridged = deep::Expr::List(node.to_list(*span), *span);
-            expr_mentions_unshadowed_name(&bridged, name, bound)
+            expr_mentions_unshadowed_name(&bridged, name, bound, stack)
         }
         deep::Expr::BareList(elems, _) => elems
             .iter()
-            .any(|child| expr_mentions_unshadowed_name(child, name, bound)),
+            .any(|child| expr_mentions_unshadowed_name(child, name, bound, stack)),
         deep::Expr::UnknownForm(data) => data
             .children
             .iter()
-            .any(|child| expr_mentions_unshadowed_name(child, name, bound)),
+            .any(|child| expr_mentions_unshadowed_name(child, name, bound, stack)),
     }
 }
 
@@ -2425,18 +2517,36 @@ pub(super) fn param_source_infos(expr: &deep::Expr) -> Vec<(String, bool)> {
         .collect()
 }
 
-pub(super) fn pattern_names_for_signature(expr: &deep::Expr) -> UnordSet<String> {
+pub(super) fn pattern_names_for_signature(
+    expr: &deep::Expr,
+    stack: &mut StackBudget<'_>,
+) -> UnordSet<String> {
     let mut names = UnordSet::new();
-    collect_pattern_names_for_signature(expr, &mut names);
+    collect_pattern_names_for_signature(expr, &mut names, stack);
     names
 }
 
-pub(super) fn collect_pattern_names_for_signature(expr: &deep::Expr, names: &mut UnordSet<String>) {
+pub(super) fn collect_pattern_names_for_signature(
+    expr: &deep::Expr,
+    names: &mut UnordSet<String>,
+    stack: &mut StackBudget<'_>,
+) {
     // Bail before unbounded recursion exhausts the native stack on a
     // deeply-nested pattern. No error vector here; the guard records the bail
     // so the check entry boundary fails hard with a located diagnostic. See
     // `STACK_RED_ZONE_BYTES`.
-    stack_guard!("collect_pattern_names_for_signature", expr);
+    if stack.frame_exhausted("collect_pattern_names_for_signature", || expr.span_id()) {
+        return;
+    }
+    collect_pattern_names_for_signature_frame(expr, names, stack);
+    stack.exit_frame();
+}
+
+fn collect_pattern_names_for_signature_frame(
+    expr: &deep::Expr,
+    names: &mut UnordSet<String>,
+    stack: &mut StackBudget<'_>,
+) {
     // chelis#1107: carrier-preserving read; a `List`-only destructure collected
     // no pattern binder at all from a stamped `match`.
     let Some((tag, _, kids)) = stamped_parts(expr) else {
@@ -2453,12 +2563,12 @@ pub(super) fn collect_pattern_names_for_signature(expr: &deep::Expr, names: &mut
                 names.insert(name.to_string());
             }
             if let Some(inner) = kids.get(1) {
-                collect_pattern_names_for_signature(inner, names);
+                collect_pattern_names_for_signature(inner, names, stack);
             }
         }
         _ => {
             for child in kids {
-                collect_pattern_names_for_signature(child, names);
+                collect_pattern_names_for_signature(child, names, stack);
             }
         }
     }
@@ -2506,8 +2616,12 @@ pub(super) fn is_bound_name(name: &str, bound: &[UnordSet<String>]) -> bool {
 /// literal self-reference, as produced by `x = (x : T)`. A declaration-level
 /// `x: T = x` is recognized separately by the cycle detector because Surf
 /// represents its type as a sibling `defsig`, not as body metadata.
-pub(super) fn body_is_type_stamped_literal_self_ref(body: &deep::Expr, name: &str) -> bool {
-    if expr_type_expr(body, &IrTypeEnv::new()).is_none() {
+pub(super) fn body_is_type_stamped_literal_self_ref(
+    body: &deep::Expr,
+    name: &str,
+    stack: &mut StackBudget<'_>,
+) -> bool {
+    if expr_type_expr(body, &IrTypeEnv::new(), stack).is_none() {
         return false;
     }
     body_is_literal_self_ref_shape(body, name)
@@ -2551,12 +2665,23 @@ pub(super) fn body_is_literal_self_ref_shape(body: &deep::Expr, name: &str) -> b
     }
 }
 
-pub(super) fn param_name_for_refs(param: &deep::Expr) -> Option<String> {
-    stack_guard!("param_name_for_refs", param, None);
+pub(super) fn param_name_for_refs(
+    param: &deep::Expr,
+    stack: &mut StackBudget<'_>,
+) -> Option<String> {
+    if stack.frame_exhausted("param_name_for_refs", || param.span_id()) {
+        return None;
+    }
+    let result = param_name_for_refs_frame(param, stack);
+    stack.exit_frame();
+    result
+}
+
+fn param_name_for_refs_frame(param: &deep::Expr, stack: &mut StackBudget<'_>) -> Option<String> {
     match param {
         deep::Expr::Atom(deep::Atom::Name(name), _) => Some(name.clone()),
         deep::Expr::Atom(_, _) => None,
-        deep::Expr::MetaExpr(meta, _) => param_name_for_refs(&meta.expr),
+        deep::Expr::MetaExpr(meta, _) => param_name_for_refs(&meta.expr, stack),
         // A Deep param is `(name {type: ...})` — a List with the name as
         // the FIRST element and the meta map as the second. `children()`
         // skips first two (tag + meta) and returns nothing for a 2-elem
@@ -2586,7 +2711,13 @@ mod top_level_reference_graph_tests {
     fn graph(source: &str) -> TopLevelReferenceGraph {
         let exprs = deep_program(source);
         let items = top_level_decl_items_with_modules(&exprs);
-        TopLevelReferenceGraph::build(&items)
+        TopLevelReferenceGraph::build(
+            &items,
+            &mut StackBudget::new(
+                &mut NativeServices::new(None),
+                &mut StackBailRecord::default(),
+            ),
+        )
     }
 
     /// [04-INF-8] regression: the compiled-wrong-answer shape is one
@@ -2622,8 +2753,12 @@ mod top_level_reference_graph_tests {
         let exprs = deep_program(include_str!(
             "../../tests/fixtures/core/src/declarations/direct_wins.deep"
         ));
-        let report = crate::check_ir_program(&exprs, crate::ProgramOrigin::Unlinked)
-            .expect_err("direct read must reject");
+        let report = crate::check_ir_program(
+            &exprs,
+            crate::ProgramOrigin::Unlinked,
+            &mut crate::NativeServices::new(None),
+        )
+        .expect_err("direct read must reject");
         let matching = report
             .errors
             .iter()
@@ -2647,8 +2782,12 @@ mod top_level_reference_graph_tests {
         let exprs = deep_program(include_str!(
             "../../tests/fixtures/core/src/declarations/pure_direct.deep"
         ));
-        let report = crate::check_ir_program(&exprs, crate::ProgramOrigin::Unlinked)
-            .expect_err("direct read must reject");
+        let report = crate::check_ir_program(
+            &exprs,
+            crate::ProgramOrigin::Unlinked,
+            &mut crate::NativeServices::new(None),
+        )
+        .expect_err("direct read must reject");
         let matching = report
             .errors
             .iter()
@@ -2671,14 +2810,22 @@ mod top_level_reference_graph_tests {
         let library = deep_program(include_str!(
             "../../tests/fixtures/core/src/declarations/prior.deep"
         ));
-        let context = crate::build_type_env_from_library(&library, crate::ProgramOrigin::Unlinked)
-            .expect("the prior i32 binding builds a reusable context");
+        let context = crate::build_type_env_from_library(
+            &library,
+            crate::ProgramOrigin::Unlinked,
+            &mut crate::NativeServices::new(None),
+        )
+        .expect("the prior i32 binding builds a reusable context");
         let current = deep_program(include_str!(
             "../../tests/fixtures/core/src/declarations/current.deep"
         ));
-        let report =
-            crate::check_ir_with_context(&context, &current, crate::ProgramOrigin::Unlinked)
-                .expect_err("the indirect dependency on current-unit later must reject");
+        let report = crate::check_ir_with_context(
+            &context,
+            &current,
+            crate::ProgramOrigin::Unlinked,
+            &mut crate::NativeServices::new(None),
+        )
+        .expect_err("the indirect dependency on current-unit later must reject");
         let matching = report
             .errors
             .iter()
@@ -2700,8 +2847,12 @@ mod top_level_reference_graph_tests {
         let exprs = deep_program(include_str!(
             "../../tests/fixtures/core/src/declarations/unrelated_direct.deep"
         ));
-        let report = crate::check_ir_program(&exprs, crate::ProgramOrigin::Unlinked)
-            .expect_err("both roots' distinct initialization errors must reject");
+        let report = crate::check_ir_program(
+            &exprs,
+            crate::ProgramOrigin::Unlinked,
+            &mut crate::NativeServices::new(None),
+        )
+        .expect_err("both roots' distinct initialization errors must reject");
         let direct = report
             .errors
             .iter()
@@ -2734,8 +2885,12 @@ mod top_level_reference_graph_tests {
         let exprs = deep_program(include_str!(
             "../../tests/fixtures/core/src/declarations/separate_cycle.deep"
         ));
-        let report = crate::check_ir_program(&exprs, crate::ProgramOrigin::Unlinked)
-            .expect_err("both the eager cycle and indirect later dependency must reject");
+        let report = crate::check_ir_program(
+            &exprs,
+            crate::ProgramOrigin::Unlinked,
+            &mut crate::NativeServices::new(None),
+        )
+        .expect_err("both the eager cycle and indirect later dependency must reject");
         assert!(
             report
                 .errors
@@ -2786,7 +2941,7 @@ mod top_level_reference_graph_tests {
         ));
         let carried = graph.vertex_by_name["carried"];
         let f = graph.vertex_by_name["f"];
-        let projection = graph.inference_components();
+        let projection = graph.inference_components(&mut crate::NativeServices::new(None));
         assert!(projection.complete);
         let component_index = projection.component_by_item[graph.definition(carried).item_index]
             .expect("carried is scheduled in a definition component");
@@ -2816,8 +2971,12 @@ mod top_level_reference_graph_tests {
             "../../tests/fixtures/core/src/declarations/indirect_later_diagnostic.deep"
         );
         let exprs = deep_program(source);
-        let report = crate::check_ir_program(&exprs, crate::ProgramOrigin::Unlinked)
-            .expect_err("[04-INF-8] must reject");
+        let report = crate::check_ir_program(
+            &exprs,
+            crate::ProgramOrigin::Unlinked,
+            &mut crate::NativeServices::new(None),
+        )
+        .expect_err("[04-INF-8] must reject");
         let matching = report
             .errors
             .iter()
@@ -2839,10 +2998,13 @@ mod top_level_reference_graph_tests {
             "../../tests/fixtures/core/src/declarations/cancel_later_dependency.deep"
         ));
         let token = CancelToken::new();
-        let _cancel_guard = crate::cancel::install_cancel_token(token.clone());
-        let _reachability_hook = cancel_later_dependency_after_edges_for_test(1, token);
-        let report = crate::check_ir_program(&exprs, crate::ProgramOrigin::Unlinked)
-            .expect_err("cancelled initialization analysis must reject");
+        let _reachability_hook = cancel_later_dependency_after_edges_for_test(1, token.clone());
+        let report = crate::check_ir_program(
+            &exprs,
+            crate::ProgramOrigin::Unlinked,
+            &mut NativeServices::new(Some(token)),
+        )
+        .expect_err("cancelled initialization analysis must reject");
         assert_eq!(report.errors.len(), 1, "{:#?}", report.errors);
         assert!(
             report
@@ -2860,10 +3022,13 @@ mod top_level_reference_graph_tests {
             "../../tests/fixtures/core/src/declarations/cancel_after_error.deep"
         ));
         let token = CancelToken::new();
-        let _cancel_guard = crate::cancel::install_cancel_token(token.clone());
-        let _reachability_hook = cancel_later_dependency_after_edges_for_test(1, token);
-        let report = crate::check_ir_program(&exprs, crate::ProgramOrigin::Unlinked)
-            .expect_err("source failure plus cancelled initialization analysis must reject");
+        let _reachability_hook = cancel_later_dependency_after_edges_for_test(1, token.clone());
+        let report = crate::check_ir_program(
+            &exprs,
+            crate::ProgramOrigin::Unlinked,
+            &mut NativeServices::new(Some(token)),
+        )
+        .expect_err("source failure plus cancelled initialization analysis must reject");
         assert!(
             report.errors.iter().any(|error| matches!(
                 &error.kind,

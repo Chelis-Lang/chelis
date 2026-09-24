@@ -213,8 +213,11 @@ fn checked_applications_and_lexical_shadows_remain_distinct() {
         include_str!("fixtures/core/tests/builtin_atom_discovery/application_05.deep"),
     ] {
         let deep = chelis_deep::parse_and_stamp_file(source).expect("core fixture parses");
-        let checked =
-            chelis_types::check_typed_program(&deep, chelis_types::ProgramOrigin::Unlinked);
+        let checked = chelis_types::check_typed_program(
+            &deep,
+            chelis_types::ProgramOrigin::Unlinked,
+            &mut chelis_types::NativeServices::new(None),
+        );
         assert!(checked.is_ok(), "{source}: {checked:?}");
     }
     for source in [
@@ -223,8 +226,12 @@ fn checked_applications_and_lexical_shadows_remain_distinct() {
     ] {
         let deep = chelis_deep::parse_and_stamp_file(source).expect("core fixture parses");
         assert!(
-            chelis_types::check_typed_program(&deep, chelis_types::ProgramOrigin::Unlinked)
-                .is_err(),
+            chelis_types::check_typed_program(
+                &deep,
+                chelis_types::ProgramOrigin::Unlinked,
+                &mut chelis_types::NativeServices::new(None)
+            )
+            .is_err(),
             "{source}"
         );
     }
@@ -241,7 +248,12 @@ fn symbolic_observation_preserves_legal_applications_and_rejects_wrong_bounds() 
     ] {
         let deep = chelis_deep::parse_and_stamp_file(source).expect("core fixture parses");
         assert!(
-            chelis_types::check_typed_program(&deep, chelis_types::ProgramOrigin::Unlinked).is_ok(),
+            chelis_types::check_typed_program(
+                &deep,
+                chelis_types::ProgramOrigin::Unlinked,
+                &mut chelis_types::NativeServices::new(None)
+            )
+            .is_ok(),
             "{source}"
         );
     }
@@ -253,9 +265,12 @@ fn symbolic_observation_preserves_legal_applications_and_rejects_wrong_bounds() 
         include_str!("fixtures/core/tests/builtin_atom_discovery/application_17.deep"),
     ] {
         let deep = chelis_deep::parse_and_stamp_file(source).expect("core fixture parses");
-        let errors =
-            chelis_types::check_typed_program(&deep, chelis_types::ProgramOrigin::Unlinked)
-                .unwrap_err();
+        let errors = chelis_types::check_typed_program(
+            &deep,
+            chelis_types::ProgramOrigin::Unlinked,
+            &mut chelis_types::NativeServices::new(None),
+        )
+        .unwrap_err();
         assert!(!errors.errors.is_empty(), "{source}");
         assert!(
             errors

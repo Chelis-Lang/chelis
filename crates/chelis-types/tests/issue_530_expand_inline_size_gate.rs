@@ -45,9 +45,13 @@ fn messages(rep: &InferResult) -> Vec<String> {
 /// with an empty message vector would be a swallowed reject in a mask).
 fn assert_form3_reject_message(source: &str, label: &str) {
     let deep = parse_core(source);
-    let rep = check_ir_program(&deep, chelis_types::ProgramOrigin::Unlinked)
-        .err()
-        .unwrap_or_else(|| panic!("{label}: sourceless inline `expand` size must reject at check"));
+    let rep = check_ir_program(
+        &deep,
+        chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
+    )
+    .err()
+    .unwrap_or_else(|| panic!("{label}: sourceless inline `expand` size must reject at check"));
     let msgs = messages(&rep);
     assert!(
         msgs.iter().any(|m| m.contains("insert")
@@ -165,7 +169,11 @@ fn issue530_shape_sourced_size_still_accepted() {
         "fixtures/core/tests/issue_530_expand_inline_size_gate/issue530_shape_sourced_size_still_accepted.0.deep"
     );
     let deep = parse_core(source);
-    let rep = check_ir_program(&deep, chelis_types::ProgramOrigin::Unlinked);
+    let rep = check_ir_program(
+        &deep,
+        chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
+    );
     assert!(
         rep.is_ok(),
         "a shape(c, 0)-sourced expand size must still check clean; got {:?}",
@@ -181,7 +189,11 @@ fn issue530_named_dim_size_still_accepted() {
         "fixtures/core/tests/issue_530_expand_inline_size_gate/issue530_named_dim_size_still_accepted.0.deep"
     );
     let deep = parse_core(source);
-    let rep = check_ir_program(&deep, chelis_types::ProgramOrigin::Unlinked);
+    let rep = check_ir_program(
+        &deep,
+        chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
+    );
     assert!(
         rep.is_ok(),
         "a Form-2 named-dim expand size must still check clean; got {:?}",
@@ -196,7 +208,11 @@ fn issue530_static_literal_size_still_accepted() {
         "fixtures/core/tests/issue_530_expand_inline_size_gate/issue530_static_literal_size_still_accepted.0.deep"
     );
     let deep = parse_core(source);
-    let rep = check_ir_program(&deep, chelis_types::ProgramOrigin::Unlinked);
+    let rep = check_ir_program(
+        &deep,
+        chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
+    );
     assert!(
         rep.is_ok(),
         "a static literal expand size must still check clean; got {:?}",
@@ -212,7 +228,11 @@ fn issue530_cast_literal_size_still_accepted() {
         "fixtures/core/tests/issue_530_expand_inline_size_gate/issue530_cast_literal_size_still_accepted.0.deep"
     );
     let deep = parse_core(source);
-    let rep = check_ir_program(&deep, chelis_types::ProgramOrigin::Unlinked);
+    let rep = check_ir_program(
+        &deep,
+        chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
+    );
     assert!(
         rep.is_ok(),
         "a cast(2, i64) static expand size must still check clean; got {:?}",
@@ -285,11 +305,13 @@ fn issue1791_a_sourceless_size_rejects_in_pipe_position_too() {
     let piped = check_ir_program(
         &parse_core(SOURCELESS_IN_PIPE_POSITION),
         chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
     )
     .expect_err("a sourceless size must reject in pipe position");
     let direct = check_ir_program(
         &parse_core(SOURCELESS_IN_DIRECT_POSITION),
         chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
     )
     .expect_err("the direct spelling already rejected");
     assert_eq!(
@@ -320,6 +342,7 @@ fn issue1791_a_shape_sourced_size_in_pipe_position_still_checks_clean() {
     let rep = check_ir_program(
         &parse_core(SHAPE_SOURCED_IN_PIPE_POSITION),
         chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
     );
     assert!(
         rep.is_ok(),
@@ -355,7 +378,7 @@ fn issue1791_the_named_axis_form_keeps_its_own_literal_size_diagnostic() {
     // Direct position, four-argument anchored form: the lock.
     let anchored = check_ir_program(&parse_core(
         include_str!("fixtures/core/tests/issue_530_expand_inline_size_gate/issue1791_the_named_axis_form_keeps_its_own_literal_size_diagnostic.0.deep"),
-    ), chelis_types::ProgramOrigin::Unlinked)
+    ), chelis_types::ProgramOrigin::Unlinked, &mut chelis_types::NativeServices::new(None))
     .expect_err("the named-axis form requires a literal size");
     assert!(
         messages(&anchored).iter().any(|m| m.contains(needle)),
@@ -366,7 +389,7 @@ fn issue1791_the_named_axis_form_keeps_its_own_literal_size_diagnostic() {
     // Pipe position, three-argument named form: the regression.
     let named_in_pipe = check_ir_program(&parse_core(
         include_str!("fixtures/core/tests/issue_530_expand_inline_size_gate/issue1791_the_named_axis_form_keeps_its_own_literal_size_diagnostic.1.deep"),
-    ), chelis_types::ProgramOrigin::Unlinked)
+    ), chelis_types::ProgramOrigin::Unlinked, &mut chelis_types::NativeServices::new(None))
     .expect_err("a sourceless named-axis size must reject in pipe position too");
     assert!(
         messages(&named_in_pipe).iter().any(|m| m.contains(needle)),
@@ -378,7 +401,7 @@ fn issue1791_the_named_axis_form_keeps_its_own_literal_size_diagnostic() {
     // clean on the base.
     let anchored_in_pipe = check_ir_program(&parse_core(
         include_str!("fixtures/core/tests/issue_530_expand_inline_size_gate/issue1791_the_named_axis_form_keeps_its_own_literal_size_diagnostic.2.deep"),
-    ), chelis_types::ProgramOrigin::Unlinked)
+    ), chelis_types::ProgramOrigin::Unlinked, &mut chelis_types::NativeServices::new(None))
     .expect_err("the anchored form rejects in pipe position too");
     assert!(
         messages(&anchored_in_pipe)

@@ -25,6 +25,7 @@ fn diagnostics(name: &str, args: &[&str], both: bool) -> Vec<String> {
     let mut typed = kinds(check_typed_program(
         &program,
         chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
     ));
     typed.sort();
     if both {
@@ -32,6 +33,7 @@ fn diagnostics(name: &str, args: &[&str], both: bool) -> Vec<String> {
         let mut ir = kinds(check_ir_program(
             &expanded,
             chelis_types::ProgramOrigin::Unlinked,
+            &mut chelis_types::NativeServices::new(None),
         ));
         ir.sort();
         assert_eq!(typed, ir, "checker ingress disagreement: {name}, {args:?}");

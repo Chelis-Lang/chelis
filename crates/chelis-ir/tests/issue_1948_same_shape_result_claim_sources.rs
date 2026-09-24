@@ -175,12 +175,18 @@ fn blas_pattern(claim: InteriorClaim) -> Dag {
 }
 
 fn eval_blas_pattern(dag: &Dag, declared: Option<usize>) -> Result<Vec<f64>, String> {
-    let values = eval_tensor_with(dag, |name| match name {
-        "declared" => declared.map(|extent| TensorValue::from_vec(vec![extent], vec![0.0; extent])),
-        "a" => Some(TensorValue::from_vec(vec![2, 3], vec![1.0; 6])),
-        "b" => Some(TensorValue::from_vec(vec![3, 4], vec![1.0; 12])),
-        _ => None,
-    })?;
+    let values = eval_tensor_with(
+        dag,
+        |name| match name {
+            "declared" => {
+                declared.map(|extent| TensorValue::from_vec(vec![extent], vec![0.0; extent]))
+            }
+            "a" => Some(TensorValue::from_vec(vec![2, 3], vec![1.0; 6])),
+            "b" => Some(TensorValue::from_vec(vec![3, 4], vec![1.0; 12])),
+            _ => None,
+        },
+        &mut chelis_types::NativeServices::new(None),
+    )?;
     Ok(values[&dag.roots()[0]].to_f64_lossy_vec())
 }
 
@@ -250,15 +256,21 @@ fn dense_gather_pattern(claim: InteriorClaim) -> Dag {
 }
 
 fn eval_dense_gather_pattern(dag: &Dag, declared: Option<usize>) -> Result<Vec<f64>, String> {
-    let values = eval_tensor_with(dag, |name| match name {
-        "declared" => declared.map(|extent| TensorValue::from_vec(vec![extent], vec![0.0; extent])),
-        "values" => Some(TensorValue::from_vec(
-            vec![2, 3],
-            vec![10.0, 11.0, 12.0, 20.0, 21.0, 22.0],
-        )),
-        "indices" => Some(TensorValue::from_vec(vec![4], vec![0.0, 1.0, 0.0, 1.0])),
-        _ => None,
-    })?;
+    let values = eval_tensor_with(
+        dag,
+        |name| match name {
+            "declared" => {
+                declared.map(|extent| TensorValue::from_vec(vec![extent], vec![0.0; extent]))
+            }
+            "values" => Some(TensorValue::from_vec(
+                vec![2, 3],
+                vec![10.0, 11.0, 12.0, 20.0, 21.0, 22.0],
+            )),
+            "indices" => Some(TensorValue::from_vec(vec![4], vec![0.0, 1.0, 0.0, 1.0])),
+            _ => None,
+        },
+        &mut chelis_types::NativeServices::new(None),
+    )?;
     Ok(values[&dag.roots()[0]].to_f64_lossy_vec())
 }
 
@@ -471,15 +483,19 @@ fn named_claim_fusion_dag(claimed: bool, producer_is_interior: bool) -> (Dag, No
 }
 
 fn eval_named_claim(dag: &Dag, declared_extent: usize) -> Result<Vec<f64>, String> {
-    let values = eval_tensor_with(dag, |name| match name {
-        "declared" => Some(TensorValue::from_vec(
-            vec![declared_extent],
-            vec![0.0; declared_extent],
-        )),
-        "left" => Some(TensorValue::from_vec(vec![3], vec![1.0, 2.0, 3.0])),
-        "right" => Some(TensorValue::from_vec(vec![3], vec![4.0, 5.0, 6.0])),
-        _ => None,
-    })?;
+    let values = eval_tensor_with(
+        dag,
+        |name| match name {
+            "declared" => Some(TensorValue::from_vec(
+                vec![declared_extent],
+                vec![0.0; declared_extent],
+            )),
+            "left" => Some(TensorValue::from_vec(vec![3], vec![1.0, 2.0, 3.0])),
+            "right" => Some(TensorValue::from_vec(vec![3], vec![4.0, 5.0, 6.0])),
+            _ => None,
+        },
+        &mut chelis_types::NativeServices::new(None),
+    )?;
     Ok(values[&dag.roots()[0]].to_f64_lossy_vec())
 }
 
@@ -556,17 +572,21 @@ fn eval_identity_claim(
     declared_extent: usize,
     runtime_extent: usize,
 ) -> Result<Vec<f64>, String> {
-    let values = eval_tensor_with(dag, |name| match name {
-        "declared" => Some(TensorValue::from_vec(
-            vec![declared_extent],
-            vec![0.0; declared_extent],
-        )),
-        "value" => Some(TensorValue::from_vec(
-            vec![runtime_extent],
-            (0..runtime_extent).map(|index| index as f64).collect(),
-        )),
-        _ => None,
-    })?;
+    let values = eval_tensor_with(
+        dag,
+        |name| match name {
+            "declared" => Some(TensorValue::from_vec(
+                vec![declared_extent],
+                vec![0.0; declared_extent],
+            )),
+            "value" => Some(TensorValue::from_vec(
+                vec![runtime_extent],
+                (0..runtime_extent).map(|index| index as f64).collect(),
+            )),
+            _ => None,
+        },
+        &mut chelis_types::NativeServices::new(None),
+    )?;
     Ok(values[&dag.roots()[0]].to_f64_lossy_vec())
 }
 
@@ -746,9 +766,11 @@ fn rank_zero_inputs_are_excluded_from_same_shape_result_claim_observation() {
         "rank-0 inputs are absent from the complete positive-rank relation"
     );
 
-    let error = eval_tensor_with(&dag, |name| {
-        (name == "x").then(|| TensorValue::from_vec(vec![3], vec![1.0, 2.0, 3.0]))
-    })
+    let error = eval_tensor_with(
+        &dag,
+        |name| (name == "x").then(|| TensorValue::from_vec(vec![3], vec![1.0, 2.0, 3.0])),
+        &mut chelis_types::NativeServices::new(None),
+    )
     .expect_err("the declared result extent 2 disagrees with add's extent 3");
     assert_eq!(
         error,

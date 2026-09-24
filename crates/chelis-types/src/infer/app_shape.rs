@@ -184,7 +184,7 @@ pub(super) fn infer_expand_app(
     // and arithmetic spellings.
     let size_class = kids
         .get(3)
-        .map(|arg| classify_expand_size(arg, env, adt_reg, subst))
+        .map(|arg| classify_expand_size(arg, env, adt_reg, subst, &mut errors.stack()))
         .unwrap_or(SizeClass::Unknown);
     let result_ty = Type::Var(vg.fresh_tvar());
     check_expand_signature(
@@ -304,7 +304,7 @@ pub(super) fn check_permute_signature(
     // family).
     let Some(axes) = kids[2..]
         .iter()
-        .map(extract_int_for_dim)
+        .map(|expr| extract_int_for_dim(expr, &mut errors.stack()))
         .collect::<Option<Vec<_>>>()
     else {
         return Type::Tensor(dims, prec);
@@ -410,7 +410,13 @@ pub(super) fn infer_reshape_app(
                         ),
                     );
                 }
-                let dims = reshape_output_dims(shape_expr, input_var_name.as_deref(), &[], subst);
+                let dims = reshape_output_dims(
+                    shape_expr,
+                    input_var_name.as_deref(),
+                    &[],
+                    subst,
+                    &mut errors.stack(),
+                );
                 if let Err(error) = validate_reshape_target_dims(&dims, subst) {
                     return report(errors, error.into());
                 }
@@ -498,7 +504,13 @@ pub(super) fn infer_reshape_app(
                 // chelis#1512: the target list stands on its own, so validate
                 // it here rather than only on the replay. Relocating a
                 // decision is how a check silently stops happening.
-                let dims = reshape_output_dims(shape_expr, input_var_name.as_deref(), &[], subst);
+                let dims = reshape_output_dims(
+                    shape_expr,
+                    input_var_name.as_deref(),
+                    &[],
+                    subst,
+                    &mut errors.stack(),
+                );
                 if let Err(error) = validate_reshape_target_dims(&dims, subst) {
                     return report(errors, error.into());
                 }
@@ -564,7 +576,13 @@ pub(super) fn check_reshape_signature(
     let input_dims = match type_for_readonly_check(&arg_tys[0], subst) {
         Type::Tensor(dims, precision) => {
             let dims = dims.clone();
-            let target = reshape_output_dims(shape_expr, input_var_name, &dims, subst);
+            let target = reshape_output_dims(
+                shape_expr,
+                input_var_name,
+                &dims,
+                subst,
+                &mut errors.stack(),
+            );
             if let Err(error) = validate_reshape_target_dims(&target, subst) {
                 return report(errors, error.into());
             }
@@ -589,7 +607,8 @@ pub(super) fn check_reshape_signature(
             return Type::Tensor(target, precision);
         }
         Type::Prim(precision) => {
-            let target = reshape_output_dims(shape_expr, input_var_name, &[], subst);
+            let target =
+                reshape_output_dims(shape_expr, input_var_name, &[], subst, &mut errors.stack());
             if let Err(error) = validate_reshape_target_dims(&target, subst) {
                 return report(errors, error.into());
             }
@@ -726,7 +745,8 @@ pub(super) fn check_shrink_signature(
     // to runtime, output wildcards) from "structurally malformed"
     // (reject at infer with a clear axis-tagged message). See PR #214
     // red team round 1 finding R1-F1.
-    let bounds: Vec<Option<(i64, i64)>> = match cons_chain_int_pairs(&kids[2]) {
+    let bounds: Vec<Option<(i64, i64)>> = match cons_chain_int_pairs(&kids[2], &mut errors.stack())
+    {
         PairListShape::Literal(pairs) => pairs.into_iter().map(Some).collect(),
         // chelis#616: per-axis mixing — a literal pair keeps its precise
         // extent (and its infer-time validation); only a RUNTIME pair's own
@@ -957,7 +977,10 @@ pub(super) fn check_stride_signature(
     // `extract_int_for_dim` so `cast(N, i32)`-wrapped literal strides
     // reach the positive-stride check at infer time instead of falling
     // back to host runtime (red team round 3 finding R3-HIGH1).
-    let strides: Vec<Option<i64>> = kids[2..].iter().map(extract_int_for_dim).collect();
+    let strides: Vec<Option<i64>> = kids[2..]
+        .iter()
+        .map(|expr| extract_int_for_dim(expr, &mut errors.stack()))
+        .collect();
 
     if strides.len() != dims.len() {
         return report(
@@ -1166,7 +1189,8 @@ pub(super) fn check_pad_signature(
         );
     }
 
-    let padding: Vec<Option<(i64, i64)>> = match cons_chain_int_pairs(&kids[2]) {
+    let padding: Vec<Option<(i64, i64)>> = match cons_chain_int_pairs(&kids[2], &mut errors.stack())
+    {
         PairListShape::Literal(pairs) => pairs.into_iter().map(Some).collect(),
         // chelis#616: per-axis mixing — only a RUNTIME pair's own axis
         // wildcards (see the shrink arm for the mis-size this prevents).
@@ -1396,8 +1420,8 @@ pub(super) fn check_reduce_window_signature(
     // are accepted at infer time (the type is still `List[i64]`) but
     // the output shape collapses to wildcards so the host runtime can
     // do the final shape check.
-    let window_lit = cons_chain_int_list(&kids[2]);
-    let strides_lit = cons_chain_int_list(&kids[3]);
+    let window_lit = cons_chain_int_list(&kids[2], &mut errors.stack());
+    let strides_lit = cons_chain_int_list(&kids[3], &mut errors.stack());
     let (Some(window_shape), Some(strides)) = (window_lit, strides_lit) else {
         return Type::Tensor(vec![Dim::Wildcard; dims.len()], prec);
     };
@@ -1522,10 +1546,13 @@ pub(super) fn check_reduce_window_signature(
 /// Shares the cons-chain walk with `collect_cons_chain_for_shape`
 /// (the structural recognizer) and only adds the per-element
 /// integer-literal extraction on top.
-pub(super) fn cons_chain_int_list(expr: &deep::Expr) -> Option<Vec<i64>> {
+pub(super) fn cons_chain_int_list(
+    expr: &deep::Expr,
+    stack: &mut StackBudget<'_>,
+) -> Option<Vec<i64>> {
     collect_cons_chain_for_shape(expr)?
         .iter()
-        .map(|e| extract_int_for_dim(e))
+        .map(|e| extract_int_for_dim(e, stack))
         .collect()
 }
 
@@ -1569,7 +1596,10 @@ pub(super) enum PairListShape {
 /// Walk a `Cons(Cons(start_i, Cons(end_i, Nil)), ..., Nil)` chain — the
 /// desugared form of a Surf `[[start_0, end_0], [start_1, end_1], ...]`
 /// list-of-pair literal — and classify it via [`PairListShape`].
-pub(super) fn cons_chain_int_pairs(expr: &deep::Expr) -> PairListShape {
+pub(super) fn cons_chain_int_pairs(
+    expr: &deep::Expr,
+    stack: &mut StackBudget<'_>,
+) -> PairListShape {
     let mut pairs: Vec<Option<(i64, i64)>> = Vec::new();
     let mut any_non_literal = false;
     let mut cursor = expr;
@@ -1618,7 +1648,7 @@ pub(super) fn cons_chain_int_pairs(expr: &deep::Expr) -> PairListShape {
                     Some(t) => t,
                     None => return PairListShape::Unknown,
                 };
-                match cons_chain_two_ints(pair_expr, axis) {
+                match cons_chain_two_ints(pair_expr, axis, stack) {
                     InnerPairShape::Literal(pair) => pairs.push(Some(pair)),
                     InnerPairShape::NonLiteral => {
                         any_non_literal = true;
@@ -1664,7 +1694,11 @@ pub(super) enum InnerPairShape {
 /// literals participate in the infer-time bounds check rather than
 /// silently falling back to `NonLiteral` (red team round 2 finding
 /// R2-L1; mirrors how reshape extracts dim literals).
-pub(super) fn cons_chain_two_ints(expr: &deep::Expr, _axis: usize) -> InnerPairShape {
+pub(super) fn cons_chain_two_ints(
+    expr: &deep::Expr,
+    _axis: usize,
+    stack: &mut StackBudget<'_>,
+) -> InnerPairShape {
     // chelis#1107 amendment: carrier-preserving read.
     let (outer_tag, outer_kids) = match stamped_parts(expr) {
         Some((tag, _, kids)) => (Some(tag), kids),
@@ -1745,7 +1779,7 @@ pub(super) fn cons_chain_two_ints(expr: &deep::Expr, _axis: usize) -> InnerPairS
                     Some(t) => t,
                     None => return InnerPairShape::Unknown,
                 };
-                head_values.push(extract_int_for_dim(head_expr));
+                head_values.push(extract_int_for_dim(head_expr, stack));
                 elements_seen += 1;
                 inner_cursor = tail;
                 // Guard against extra trailing elements: if we already
@@ -1813,6 +1847,7 @@ pub(super) fn reshape_output_dims(
     input_var_name: Option<&str>,
     input_dims: &[Dim],
     subst: &Subst,
+    stack: &mut StackBudget<'_>,
 ) -> Vec<Dim> {
     let elements = match collect_shape_list_elements(shape_expr) {
         Some(elems) => elems,
@@ -1823,7 +1858,7 @@ pub(super) fn reshape_output_dims(
     };
     elements
         .into_iter()
-        .map(|elem| reshape_output_dim(elem, input_var_name, input_dims, subst))
+        .map(|elem| reshape_output_dim(elem, input_var_name, input_dims, subst, stack))
         .collect()
 }
 
@@ -1848,12 +1883,13 @@ pub(super) fn reshape_output_dim(
     input_var_name: Option<&str>,
     input_dims: &[Dim],
     subst: &Subst,
+    stack: &mut StackBudget<'_>,
 ) -> Dim {
-    if let Some(n) = extract_int_for_dim(elem) {
+    if let Some(n) = extract_int_for_dim(elem, stack) {
         return Dim::Lit(n);
     }
     if input_var_name.is_some()
-        && let Some(axis) = extract_shape_axis_of(elem, input_var_name)
+        && let Some(axis) = extract_shape_axis_of(elem, input_var_name, stack)
         && let Some(dim) = input_dims.get(axis)
     {
         // Resolve through current substitution so a recently-bound dim
@@ -1934,6 +1970,7 @@ pub(super) fn collect_shape_list_elements(expr: &deep::Expr) -> Option<Vec<&deep
 pub(super) fn extract_shape_axis_of(
     expr: &deep::Expr,
     input_var_name: Option<&str>,
+    stack: &mut StackBudget<'_>,
 ) -> Option<usize> {
     let input = input_var_name?;
     let candidate = match peel_cast(expr) {
@@ -1956,7 +1993,7 @@ pub(super) fn extract_shape_axis_of(
         return None;
     }
     let axis_expr = shape_args.get(2)?;
-    let axis = extract_int_for_dim(axis_expr)?;
+    let axis = extract_int_for_dim(axis_expr, stack)?;
     if axis < 0 {
         return None;
     }
@@ -2059,9 +2096,17 @@ pub(super) fn app_children_of(expr: &deep::Expr) -> Option<&[deep::Expr]> {
 /// (decompiler output, custom tooling, macro expansion). The swap there
 /// is defense-in-depth on Deep-direct paths; the post-fix tests use
 /// `parse_deep` rather than the Surf parser.
-pub(super) fn extract_int_for_dim(expr: &deep::Expr) -> Option<i64> {
-    stack_guard!("extract_int_for_dim", expr, None);
-    if let Some(value) = extract_int_literal(expr) {
+pub(super) fn extract_int_for_dim(expr: &deep::Expr, stack: &mut StackBudget<'_>) -> Option<i64> {
+    if stack.frame_exhausted("extract_int_for_dim", || expr.span_id()) {
+        return None;
+    }
+    let result = extract_int_for_dim_frame(expr, stack);
+    stack.exit_frame();
+    result
+}
+
+fn extract_int_for_dim_frame(expr: &deep::Expr, stack: &mut StackBudget<'_>) -> Option<i64> {
+    if let Some(value) = extract_int_literal(expr, stack) {
         return Some(value);
     }
     // chelis#1107: carrier-preserving read. A `List`-only destructure meant a
@@ -2069,13 +2114,13 @@ pub(super) fn extract_int_for_dim(expr: &deep::Expr) -> Option<i64> {
     // `check_typed_program` while `check_ir_program` extracted it.
     let (tag, _, kids) = stamped_parts(expr)?;
     match tag {
-        DeepTag::Cast => extract_int_for_dim(kids.first()?),
+        DeepTag::Cast => extract_int_for_dim(kids.first()?, stack),
         DeepTag::App => {
             let func = kids.first()?;
             if !is_builtin_var(func, "cast") {
                 return None;
             }
-            extract_int_for_dim(kids.get(1)?)
+            extract_int_for_dim(kids.get(1)?, stack)
         }
         _ => None,
     }

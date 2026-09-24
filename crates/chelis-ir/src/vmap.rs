@@ -673,8 +673,13 @@ mod tests {
     }
 
     fn eval_root(dag: &Dag, root: NodeId, inputs: &UnordMap<String, TensorValue>) -> TensorValue {
-        let values = eval_tensor_roots_with_strict(dag, &[root], |name| inputs.get(name).cloned())
-            .expect("evaluation should succeed");
+        let values = eval_tensor_roots_with_strict(
+            dag,
+            &[root],
+            |name| inputs.get(name).cloned(),
+            &mut chelis_types::NativeServices::new(None),
+        )
+        .expect("evaluation should succeed");
         values[&root].clone()
     }
 

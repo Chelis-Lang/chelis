@@ -64,7 +64,11 @@ fn bare_int_literal_defaults_to_int32() {
         "fixtures/core/tests/dtype_foundation_adversarial/bare_int_literal_defaults_to_int32_71.deep"
     );
     let deep = parse_core_fixture(src);
-    let res = check_ir_program(&deep, chelis_types::ProgramOrigin::Unlinked);
+    let res = check_ir_program(
+        &deep,
+        chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
+    );
     assert!(
         res.is_ok(),
         "bare `42` should type-check as i32 against an i32 declared return; \
@@ -81,7 +85,11 @@ fn bare_int_literal_rejected_against_int64_context() {
         "fixtures/core/tests/dtype_foundation_adversarial/bare_int_literal_rejected_against_int64_context_86.deep"
     );
     let deep = parse_core_fixture(src);
-    let res = check_ir_program(&deep, chelis_types::ProgramOrigin::Unlinked);
+    let res = check_ir_program(
+        &deep,
+        chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
+    );
     // Per §5.3 contextual inference (§5.6) should NOT widen a bare
     // integer literal to i64 outside a tensor literal context. So
     // either: (a) the checker rejects mismatch, or (b) it silently
@@ -103,7 +111,11 @@ fn bare_float_literal_does_not_satisfy_int64() {
         "fixtures/core/tests/dtype_foundation_adversarial/bare_float_literal_does_not_satisfy_int64_106.deep"
     );
     let deep = parse_core_fixture(src);
-    let res = check_ir_program(&deep, chelis_types::ProgramOrigin::Unlinked);
+    let res = check_ir_program(
+        &deep,
+        chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
+    );
     assert!(
         res.is_err(),
         "spec §5.3: bare float literal `1.0` is f32 by default, never i64"
@@ -131,7 +143,11 @@ fn cast_to_f8e4m3_via_to_tensor_pipe_still_rejected() {
         "fixtures/core/tests/dtype_foundation_adversarial/cast_to_f8e4m3_via_to_tensor_pipe_still_rejected_132.deep"
     );
     let deep = parse_core_fixture(src);
-    let res = check_ir_program(&deep, chelis_types::ProgramOrigin::Unlinked);
+    let res = check_ir_program(
+        &deep,
+        chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
+    );
     let rep = res.expect_err("indirect cast to f8e4m3 must still be rejected");
     let messages: Vec<&str> = rep.errors.iter().map(|e| e.message.as_str()).collect();
     assert!(
@@ -147,7 +163,11 @@ fn literal_suffix_f32_is_implemented_per_spec_5_5() {
         "fixtures/core/tests/dtype_foundation_adversarial/literal_suffix_f32_is_implemented_per_spec_5_5_154.deep"
     );
     let exprs = parse_core_fixture(src);
-    let res = check_ir_program(&exprs, chelis_types::ProgramOrigin::Unlinked);
+    let res = check_ir_program(
+        &exprs,
+        chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
+    );
     assert!(
         res.is_ok(),
         "spec §5.5: `1.0f32` should bind at f32 against an f32 return; got: {:?}",
@@ -164,7 +184,11 @@ fn literal_suffix_i64_is_implemented_per_spec_5_5() {
         "fixtures/core/tests/dtype_foundation_adversarial/literal_suffix_i64_is_implemented_per_spec_5_5_182.deep"
     );
     let exprs = parse_core_fixture(src);
-    let res = check_ir_program(&exprs, chelis_types::ProgramOrigin::Unlinked);
+    let res = check_ir_program(
+        &exprs,
+        chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
+    );
     assert!(
         res.is_ok(),
         "spec §5.5: `42i64` should bind at i64 against an i64 return"
@@ -180,7 +204,11 @@ fn cast_to_f8e4m3_then_arithmetic_does_not_cascade_silently() {
         "fixtures/core/tests/dtype_foundation_adversarial/cast_to_f8e4m3_then_arithmetic_does_not_cascade_silently_254.deep"
     );
     let deep = parse_core_fixture(src);
-    let res = check_ir_program(&deep, chelis_types::ProgramOrigin::Unlinked);
+    let res = check_ir_program(
+        &deep,
+        chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
+    );
     let rep = res.expect_err("must error on the f8e4m3 cast");
     let messages: Vec<&str> = rep.errors.iter().map(|e| e.message.as_str()).collect();
     assert!(
@@ -200,7 +228,11 @@ fn bf16_literal_suffix_infers_bf16() {
         "fixtures/core/tests/dtype_foundation_adversarial/bf16_literal_suffix_infers_bf16_272.deep"
     );
     let deep = parse_core_fixture(src);
-    let res = check_ir_program(&deep, chelis_types::ProgramOrigin::Unlinked);
+    let res = check_ir_program(
+        &deep,
+        chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
+    );
     assert!(
         res.is_ok(),
         "spec §5.5: `1.0bf16` should bind at bf16; got: {:?}",
@@ -215,7 +247,11 @@ fn i64_literal_suffix_infers_int64() {
         "fixtures/core/tests/dtype_foundation_adversarial/i64_literal_suffix_infers_int64_285.deep"
     );
     let deep = parse_core_fixture(src);
-    let res = check_ir_program(&deep, chelis_types::ProgramOrigin::Unlinked);
+    let res = check_ir_program(
+        &deep,
+        chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
+    );
     assert!(
         res.is_ok(),
         "spec §5.5: `42i64` should bind at i64; got: {:?}",
@@ -234,7 +270,11 @@ fn f32_literal_does_not_widen_to_f64_context() {
         "fixtures/core/tests/dtype_foundation_adversarial/f32_literal_does_not_widen_to_f64_context_302.deep"
     );
     let deep = parse_core_fixture(src);
-    let res = check_ir_program(&deep, chelis_types::ProgramOrigin::Unlinked);
+    let res = check_ir_program(
+        &deep,
+        chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
+    );
     assert!(
         res.is_err(),
         "spec §5.5: typed `1.0f32` must not silently widen to f64; checker accepted: {res:?}"
@@ -248,6 +288,10 @@ fn overflowing_unsuffixed_literal_rejects_in_i64_context() {
         "fixtures/core/tests/dtype_foundation_adversarial/d1_diagnostic_mentions_i64_suffix_and_cast_384.deep"
     );
     let deep = parse_core_fixture(src);
-    check_ir_program(&deep, chelis_types::ProgramOrigin::Unlinked)
-        .expect_err("literal must overflow the i32 default even in an i64 context");
+    check_ir_program(
+        &deep,
+        chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
+    )
+    .expect_err("literal must overflow the i32 default even in an i64 context");
 }

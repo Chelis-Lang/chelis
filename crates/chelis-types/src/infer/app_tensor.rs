@@ -170,6 +170,7 @@ pub(super) fn conv_parameters(
     strides: &deep::Expr,
     padding: &deep::Expr,
     rank: usize,
+    stack: &mut StackBudget<'_>,
 ) -> Result<Option<Vec<ConvAxisParameters>>, String> {
     let strides = collect_shape_list_elements(strides);
     let padding = collect_shape_list_elements(padding);
@@ -189,9 +190,9 @@ pub(super) fn conv_parameters(
         let pair = stamped_parts(pair)
             .filter(|(tag, _, kids)| *tag == DeepTag::Tuple && kids.len() == 2)
             .map(|(_, _, kids)| kids);
-        let stride = extract_int_for_dim(stride);
-        let low = pair.and_then(|xs| extract_int_for_dim(&xs[0]));
-        let high = pair.and_then(|xs| extract_int_for_dim(&xs[1]));
+        let stride = extract_int_for_dim(stride, stack);
+        let low = pair.and_then(|xs| extract_int_for_dim(&xs[0], stack));
+        let high = pair.and_then(|xs| extract_int_for_dim(&xs[1], stack));
         if stride.is_some_and(|s| s <= 0) {
             return Err(format!(
                 "conv requires a positive stride, got {} (spatial axis {axis})",
@@ -217,12 +218,13 @@ pub(super) fn compute_concrete_conv_spatial(
     input_dims: &[Dim],
     kernel_dims: &[Dim],
     subst: &Subst,
+    stack: &mut StackBudget<'_>,
 ) -> Option<Vec<i64>> {
     let rank = input_dims.len().checked_sub(2)?;
     if rank == 0 || kernel_dims.len() != input_dims.len() {
         return None;
     }
-    let params = conv_parameters(arg_exprs.get(2)?, arg_exprs.get(3)?, rank).ok()??;
+    let params = conv_parameters(arg_exprs.get(2)?, arg_exprs.get(3)?, rank, stack).ok()??;
     input_dims[2..]
         .iter()
         .zip(&kernel_dims[2..])
@@ -304,7 +306,13 @@ pub(super) fn check_conv_signature(
         return report(errors, error.into());
     }
     let rank = input_dims.len() - 2;
-    let spatial = compute_concrete_conv_spatial(arg_exprs, input_dims, kernel_dims, subst);
+    let spatial = compute_concrete_conv_spatial(
+        arg_exprs,
+        input_dims,
+        kernel_dims,
+        subst,
+        &mut errors.stack(),
+    );
     let mut output_dims = vec![
         subst.apply_dim(&input_dims[0]),
         subst.apply_dim(&kernel_dims[0]),
@@ -538,10 +546,11 @@ pub(super) fn check_reduction_signature(
         && (axis_exprs.len() == 1 || name == "count")
         && axis_exprs
             .iter()
-            .all(|axis| extract_int_for_dim(axis).is_some())
+            .all(|axis| extract_int_for_dim(axis, &mut errors.stack()).is_some())
     {
         for axis_expr in axis_exprs {
-            let raw = extract_int_for_dim(axis_expr).expect("guarded static axis");
+            let raw =
+                extract_int_for_dim(axis_expr, &mut errors.stack()).expect("guarded static axis");
             let Some(axis) = normalize_static_axis(dims.len(), raw) else {
                 return report(
                     errors,
@@ -592,7 +601,7 @@ pub(super) fn check_reduction_signature(
             // A positional integer that reaches the named path: either the
             // operand is rank-spread (index meaningless at symbolic rank) or it
             // is mixed with other axes. Direct the user to name each axis.
-            if extract_int_for_dim(ax).is_some() {
+            if extract_int_for_dim(ax, &mut errors.stack()).is_some() {
                 return report(
                     errors,
                     CheckError::new(
@@ -895,7 +904,10 @@ pub(super) fn check_expand_signature(
     // in `insert` throughout. `expand` therefore names the fix rather than
     // adopting a form that would raise the rank it must leave alone.
     if axis_is_dim_name
-        && arg_exprs.get(1).and_then(extract_int_for_dim).is_none()
+        && arg_exprs
+            .get(1)
+            .and_then(|expr| extract_int_for_dim(expr, &mut errors.stack()))
+            .is_none()
         && let Some(new_name) = arg_exprs.get(1).and_then(symbolic_dim_ref_name)
     {
         if !inserts_only {
@@ -992,7 +1004,10 @@ pub(super) fn check_expand_signature(
     // Uses `extract_int_for_dim` so a `cast(N, i32)`-wrapped literal axis
     // reaches the non-negative-axis check. Extent folding has its own exact
     // i64 path below.
-    let axis = match arg_exprs.get(1).and_then(extract_int_for_dim) {
+    let axis = match arg_exprs
+        .get(1)
+        .and_then(|expr| extract_int_for_dim(expr, &mut errors.stack()))
+    {
         Some(axis) if axis >= 0 => axis as usize,
         Some(axis) => {
             return report(
@@ -1072,10 +1087,13 @@ pub(super) fn check_expand_signature(
             ),
         );
     }
-    let size = match arg_exprs
-        .get(2)
-        .and_then(|expr| fold_static_int_expr(expr, |name| env.static_size_value(name)))
-    {
+    let size = match arg_exprs.get(2).and_then(|expr| {
+        fold_static_int_expr_with_stack(
+            expr,
+            |name| env.static_size_value(name),
+            &mut errors.stack(),
+        )
+    }) {
         Some(size) if size >= 0 => Dim::Lit(size),
         Some(size) => {
             return report(
@@ -1276,7 +1294,7 @@ pub(super) fn check_named_expand_signature(
     // program break downstream (chelis#339).
     let Some(size) = arg_exprs
         .get(2)
-        .and_then(|expr| fold_static_int_expr(expr, |_| None))
+        .and_then(|expr| fold_static_int_expr_with_stack(expr, |_| None, &mut errors.stack()))
     else {
         return report(
             errors,
@@ -1448,7 +1466,7 @@ pub(super) fn peel_to_tensor_argument(ty: &Type) -> ToTensorPeel<'_> {
 /// infer time (red team round 3 finding R3-MED1). Mutual recursion
 /// with `extract_int_for_dim` is bounded: each call strictly reduces
 /// the expression depth (peels one wrapper layer).
-pub(super) fn extract_int_literal(expr: &deep::Expr) -> Option<i64> {
+pub(super) fn extract_int_literal(expr: &deep::Expr, stack: &mut StackBudget<'_>) -> Option<i64> {
     if let deep::Expr::Atom(deep::Atom::Int(n), _) = expr {
         return Some(*n);
     }
@@ -1465,7 +1483,7 @@ pub(super) fn extract_int_literal(expr: &deep::Expr) -> Option<i64> {
         }),
         DeepTag::App => match (kids.first(), kids.get(1)) {
             (Some(func), Some(arg)) if is_builtin_var(func, "neg") => {
-                extract_int_for_dim(arg).and_then(i64::checked_neg)
+                extract_int_for_dim(arg, stack).and_then(i64::checked_neg)
             }
             _ => None,
         },

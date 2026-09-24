@@ -139,7 +139,12 @@ fn issue_199_blas_matmul_grad_wrt_lhs_is_finite_and_correct() {
     let mut inputs: UnordMap<String, chelis_ir::eval::TensorValue> = UnordMap::new();
     inputs.insert("a".into(), a_val);
     inputs.insert("b".into(), b_val);
-    let values = eval_tensor(&result.dag, &inputs).expect("eval gradient DAG");
+    let values = eval_tensor(
+        &result.dag,
+        &inputs,
+        &mut chelis_types::NativeServices::new(None),
+    )
+    .expect("eval gradient DAG");
     let grad_a_val = values
         .get(&grad_a)
         .expect("grad-a node must evaluate to a tensor");
@@ -169,7 +174,12 @@ fn issue_199_blas_matmul_grad_wrt_rhs_is_finite_and_correct() {
     let mut inputs: UnordMap<String, chelis_ir::eval::TensorValue> = UnordMap::new();
     inputs.insert("a".into(), a_val);
     inputs.insert("b".into(), b_val);
-    let values = eval_tensor(&result.dag, &inputs).expect("eval gradient DAG");
+    let values = eval_tensor(
+        &result.dag,
+        &inputs,
+        &mut chelis_types::NativeServices::new(None),
+    )
+    .expect("eval gradient DAG");
     let grad_b_val = values
         .get(&grad_b)
         .expect("grad-b node must evaluate to a tensor");
@@ -201,7 +211,12 @@ fn issue_199_blas_matmul_grad_matches_finite_difference() {
     let mut inputs: UnordMap<String, chelis_ir::eval::TensorValue> = UnordMap::new();
     inputs.insert("a".into(), a_val.clone());
     inputs.insert("b".into(), b_val.clone());
-    let analytical_values = eval_tensor(&result.dag, &inputs).expect("analytical eval");
+    let analytical_values = eval_tensor(
+        &result.dag,
+        &inputs,
+        &mut chelis_types::NativeServices::new(None),
+    )
+    .expect("analytical eval");
     let analytical_grad = &analytical_values[&grad_a].to_f64_lossy_vec();
 
     // Numerical: central differences over each element of A.
@@ -220,11 +235,21 @@ fn issue_199_blas_matmul_grad_matches_finite_difference() {
             let a_minus = TensorValue::from_vec(a_val.shape.clone(), minus_data);
             let mut inputs_p = inputs.clone();
             inputs_p.insert("a".into(), a_plus);
-            let f_plus_map = eval_tensor(&dag, &inputs_p).expect("plus eval");
+            let f_plus_map = eval_tensor(
+                &dag,
+                &inputs_p,
+                &mut chelis_types::NativeServices::new(None),
+            )
+            .expect("plus eval");
             let f_plus = f_plus_map[&out].to_f64_lossy_vec()[0];
             let mut inputs_m = inputs.clone();
             inputs_m.insert("a".into(), a_minus);
-            let f_minus_map = eval_tensor(&dag, &inputs_m).expect("minus eval");
+            let f_minus_map = eval_tensor(
+                &dag,
+                &inputs_m,
+                &mut chelis_types::NativeServices::new(None),
+            )
+            .expect("minus eval");
             let f_minus = f_minus_map[&out].to_f64_lossy_vec()[0];
             numerical[idx] = (f_plus - f_minus) / (2.0 * h);
         }

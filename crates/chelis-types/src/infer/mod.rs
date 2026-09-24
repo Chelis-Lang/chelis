@@ -2,12 +2,10 @@
 //!
 //! Walks Deep AST nodes and assigns types using Hindley-Milner inference.
 
-#[macro_use]
 mod stack;
 
-use stack::*;
-pub use stack::{
-    reset_grow_segment_bytes_for_test, run_on_grown_stack, set_grow_segment_bytes_for_test,
+pub(crate) use stack::{
+    FALLBACK_MAX_DEPTH, GROW_SEGMENT_BYTES, STACK_RED_ZONE_BYTES, StackBailRecord, StackBudget,
 };
 
 use chelis_unord::{UnordMap, UnordSet};
@@ -21,7 +19,6 @@ use chelis_vocab::EffectKind;
 
 use crate::adt::{AdtRegistry, CallShape};
 use crate::builtins;
-use crate::cancel::CancelToken;
 use crate::context::{TypeEnv, TypeEnvInner};
 use crate::deep_type::{
     BinderMode, DeepTypeResolver, ResolvedCastTarget, TypeDiagnosticLocation, TypeResolutionEnv,
@@ -31,6 +28,7 @@ use crate::deep_type::{
 use crate::env::{DeclarationBinderIdentities, Env, TopLevelValueVisibility};
 use crate::errors::*;
 use crate::linearity::LinearityInfo;
+use crate::native::NativeServices;
 use crate::session::{DeclarationDiagnosticOwner, DeclarationTypeDiagnosticClass, DiagnosticSink};
 use crate::types::*;
 use crate::unify::*;
@@ -49,38 +47,7 @@ pub enum ProgramOrigin {
     Linked,
 }
 
-trait DiagnosticOutput {
-    fn push(&mut self, error: CheckError);
-
-    fn declaration_owns_unknown_primitive(
-        &self,
-        _owner: &DeclarationDiagnosticOwner,
-        _primitive_name: &str,
-    ) -> bool {
-        false
-    }
-
-    fn resolved_unknown_primitive_at(
-        &self,
-        _location: &TypeDiagnosticLocation,
-        _primitive_name: &str,
-    ) -> bool {
-        false
-    }
-}
-
-#[cfg(test)]
-impl DiagnosticOutput for Vec<CheckError> {
-    fn push(&mut self, error: CheckError) {
-        Vec::push(self, error);
-    }
-}
-
-impl DiagnosticOutput for DiagnosticSink<'_> {
-    fn push(&mut self, error: CheckError) {
-        DiagnosticSink::push(self, error);
-    }
-
+impl DiagnosticSink<'_> {
     fn declaration_owns_unknown_primitive(
         &self,
         owner: &DeclarationDiagnosticOwner,
@@ -105,7 +72,10 @@ impl DiagnosticOutput for DiagnosticSink<'_> {
     }
 }
 
-use std::cell::{Cell, RefCell};
+#[cfg(test)]
+use crate::cancel::CancelToken;
+#[cfg(test)]
+use std::cell::RefCell;
 
 mod annotate;
 mod app;
@@ -180,6 +150,7 @@ use program::*;
 use rigid::*;
 use slot::*;
 pub use static_int::fold_static_int_expr;
+use static_int::fold_static_int_expr_with_stack;
 use static_value::*;
 use validate::*;
 use vmap_extent::*;

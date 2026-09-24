@@ -30,8 +30,12 @@ fn parse_fixture(source: &str) -> Vec<chelis_deep::Expr> {
 
 fn assert_legal() {
     let exprs = parse(LEGAL);
-    check_ir_program(&exprs, chelis_types::ProgramOrigin::Unlinked)
-        .unwrap_or_else(|result| panic!("legal explicit binder must check: {:?}", result.errors));
+    check_ir_program(
+        &exprs,
+        chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
+    )
+    .unwrap_or_else(|result| panic!("legal explicit binder must check: {:?}", result.errors));
 }
 
 fn assert_rogue_rejected(result: Result<chelis_types::CheckedProgram, chelis_types::InferResult>) {
@@ -57,6 +61,7 @@ fn sibling_definition_does_not_inherit_binders() {
     assert_rogue_rejected(check_ir_program(
         &exprs,
         chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
     ));
 }
 
@@ -66,6 +71,7 @@ fn sequential_checks_do_not_inherit_binders() {
     assert_rogue_rejected(check_ir_program(
         &parse(ROGUE),
         chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
     ));
     assert_legal();
 }
@@ -82,6 +88,7 @@ fn parallel_checks_keep_binders_thread_local_by_construction() {
             assert_rogue_rejected(check_ir_program(
                 &parse(ROGUE),
                 chelis_types::ProgramOrigin::Unlinked,
+                &mut chelis_types::NativeServices::new(None),
             ));
         }
     });
@@ -91,19 +98,28 @@ fn parallel_checks_keep_binders_thread_local_by_construction() {
 
 #[test]
 fn stacked_context_does_not_export_a_body_binder() {
-    let context = build_type_env_from_library(&parse(LEGAL), chelis_types::ProgramOrigin::Unlinked)
-        .expect("legal library must check");
+    let context = build_type_env_from_library(
+        &parse(LEGAL),
+        chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
+    )
+    .expect("legal library must check");
     assert_rogue_rejected(check_ir_with_context(
         &context,
         &parse(ROGUE),
         chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
     ));
 }
 
 #[test]
 fn serialized_context_drops_transient_binder_scope() {
-    let context = build_type_env_from_library(&parse(LEGAL), chelis_types::ProgramOrigin::Unlinked)
-        .expect("legal library must check");
+    let context = build_type_env_from_library(
+        &parse(LEGAL),
+        chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
+    )
+    .expect("legal library must check");
     let bytes = bincode::serialize(&context).expect("TypeEnv cache serialization must succeed");
     let restored: TypeEnv =
         bincode::deserialize(&bytes).expect("TypeEnv cache deserialization must succeed");
@@ -111,6 +127,7 @@ fn serialized_context_drops_transient_binder_scope() {
         &restored,
         &parse(ROGUE),
         chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
     ));
 }
 
@@ -130,7 +147,12 @@ fn explicit_signature_binders_reach_generated_annotation_finalization() {
     let exprs = parse_fixture(include_str!(
         "fixtures/core/tests/rt800_binder_scope_isolation/explicit_signature_binders_reach_generated_annotation_finalization.0.deep"
     ));
-    check_ir_program(&exprs, chelis_types::ProgramOrigin::Unlinked).unwrap_or_else(|result| {
+    check_ir_program(
+        &exprs,
+        chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
+    )
+    .unwrap_or_else(|result| {
         panic!(
             "the declaration-owned `piece`/`classes`/`p` scope must survive finalization: {:?}",
             result.errors
@@ -144,9 +166,13 @@ fn unknown_nominal_metadata_reports_once_without_finalizer_duplication() {
         "(def {} bad
            (fn {} (params {} (x {type: (t-adt {} Missing)})) (var {} x)))",
     );
-    let errors = check_ir_program(&exprs, chelis_types::ProgramOrigin::Unlinked)
-        .expect_err("unknown nominal metadata must reject")
-        .errors;
+    let errors = check_ir_program(
+        &exprs,
+        chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
+    )
+    .expect_err("unknown nominal metadata must reject")
+    .errors;
     assert_eq!(
         errors.len(),
         1,

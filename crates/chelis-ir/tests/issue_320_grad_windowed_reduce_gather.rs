@@ -137,7 +137,8 @@ fn issue_320_grad_through_symbolic_mean_is_exact() {
         "x".into(),
         TensorValue::from_vec(vec![4], vec![10.0, 20.0, 30.0, 40.0]),
     );
-    let fwd = eval_tensor(&dag, &inputs).expect("symbolic mean forward eval");
+    let fwd = eval_tensor(&dag, &inputs, &mut chelis_types::NativeServices::new(None))
+        .expect("symbolic mean forward eval");
     assert_close(
         "symbolic_mean_value",
         &fwd[&mean].to_f64_lossy_vec(),
@@ -148,7 +149,12 @@ fn issue_320_grad_through_symbolic_mean_is_exact() {
     let result =
         grad_dag_checked(&dag, mean, &[x]).expect("symbolic mean grad must construct (issue #320)");
     let grad_x = result.grad_nodes[&x];
-    let vals = eval_tensor(&result.dag, &inputs).expect("symbolic mean grad eval");
+    let vals = eval_tensor(
+        &result.dag,
+        &inputs,
+        &mut chelis_types::NativeServices::new(None),
+    )
+    .expect("symbolic mean grad eval");
     assert_close(
         "grad_symbolic_mean",
         &vals[&grad_x].to_f64_lossy_vec(),
@@ -182,7 +188,12 @@ fn issue_320_lower_mean_over_literal_extent_still_exact() {
         "x".into(),
         TensorValue::from_vec(vec![4], vec![1.0, 2.0, 3.0, 4.0]),
     );
-    let vals = eval_tensor(&result.dag, &inputs).expect("literal mean grad eval");
+    let vals = eval_tensor(
+        &result.dag,
+        &inputs,
+        &mut chelis_types::NativeServices::new(None),
+    )
+    .expect("literal mean grad eval");
     assert_close(
         "grad_literal_mean",
         &vals[&grad_x].to_f64_lossy_vec(),
@@ -214,7 +225,12 @@ fn issue_320_grad_max_reduce_over_literal_shape_still_exact() {
         "x".into(),
         TensorValue::from_vec(vec![4], vec![1.0, 9.0, 3.0, 2.0]),
     );
-    let vals = eval_tensor(&result.dag, &inputs).expect("literal max_reduce grad eval");
+    let vals = eval_tensor(
+        &result.dag,
+        &inputs,
+        &mut chelis_types::NativeServices::new(None),
+    )
+    .expect("literal max_reduce grad eval");
     assert_close(
         "grad_literal_max_reduce",
         &vals[&grad_x].to_f64_lossy_vec(),
@@ -257,7 +273,12 @@ fn issue_320_grad_gather_over_literal_shape_still_exact() {
         TensorValue::from_vec(vec![4], vec![10.0, 20.0, 30.0, 40.0]),
     );
     inputs.insert("idx".into(), TensorValue::from_vec(vec![2], vec![0.0, 2.0]));
-    let vals = eval_tensor(&result.dag, &inputs).expect("literal gather grad eval");
+    let vals = eval_tensor(
+        &result.dag,
+        &inputs,
+        &mut chelis_types::NativeServices::new(None),
+    )
+    .expect("literal gather grad eval");
     assert_close(
         "grad_literal_gather",
         &vals[&grad_x].to_f64_lossy_vec(),

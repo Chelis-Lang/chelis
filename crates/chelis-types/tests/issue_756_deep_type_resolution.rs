@@ -27,7 +27,11 @@ fn parse(source: &str) -> Vec<chelis_deep::Expr> {
 
 fn assert_accepts(source: &str, label: &str) {
     let exprs = parse(source);
-    if let Err(result) = check_ir_program(&exprs, chelis_types::ProgramOrigin::Unlinked) {
+    if let Err(result) = check_ir_program(
+        &exprs,
+        chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
+    ) {
         let messages: Vec<_> = result.errors.iter().map(|error| &error.message).collect();
         panic!("{label}: expected a clean check, got {messages:?}");
     }
@@ -35,7 +39,11 @@ fn assert_accepts(source: &str, label: &str) {
 
 fn assert_core_accepts(source: &str, label: &str) {
     let deep = chelis_deep::parse_and_stamp_file(source).expect("Deep fixture");
-    let fitness = chelis_types::check_program(&deep, chelis_types::ProgramOrigin::Unlinked);
+    let fitness = chelis_types::check_program(
+        &deep,
+        chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
+    );
     assert!(
         fitness.errors.is_empty(),
         "{label}: fitness/check_program must be clean, got {:?}",
@@ -46,7 +54,11 @@ fn assert_core_accepts(source: &str, label: &str) {
         "{label}: fitness/check_program scored {}, expected >= 0.9",
         fitness.score
     );
-    if let Err(result) = check_ir_program(&deep, chelis_types::ProgramOrigin::Unlinked) {
+    if let Err(result) = check_ir_program(
+        &deep,
+        chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
+    ) {
         let messages: Vec<_> = result.errors.iter().map(|error| &error.message).collect();
         panic!("{label}: expected a clean check, got {messages:?}");
     }
@@ -64,8 +76,12 @@ fn assert_one_type_resolution_error(source: &str, needle: &str, label: &str) {
             return;
         }
     };
-    let result = check_ir_program(&exprs, chelis_types::ProgramOrigin::Unlinked)
-        .expect_err("malformed/unknown Deep type must fail the checker");
+    let result = check_ir_program(
+        &exprs,
+        chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
+    )
+    .expect_err("malformed/unknown Deep type must fail the checker");
     assert_eq!(
         result.errors.len(),
         1,
@@ -222,8 +238,12 @@ fn annotation_pass_preserves_nested_defsig_binder_result_type() {
                (var {type: (t-tensor {} (d-var {} n) (t-prim {} f32))} x))
                (var {} y))))",
     );
-    let checked = check_ir_program(&exprs, chelis_types::ProgramOrigin::Unlinked)
-        .expect("program must check");
+    let checked = check_ir_program(
+        &exprs,
+        chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
+    )
+    .expect("program must check");
     let rendered = chelis_deep::printer::print_canonical(checked.annotated_exprs());
     assert!(
         !rendered.contains("(t-var {} _)"),
@@ -238,8 +258,12 @@ fn checked_nominal_metadata_resolves_against_precollected_headers() {
          (defsig {} make (t-fn {} (t-adt {} Marker)))
          (def {} make (fn {} (params {}) (var {} Marker)))",
     );
-    let checked = check_ir_program(&exprs, chelis_types::ProgramOrigin::Unlinked)
-        .expect("program must check");
+    let checked = check_ir_program(
+        &exprs,
+        chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
+    )
+    .expect("program must check");
     let signature = checked
         .signature_inference()
         .functions
@@ -255,15 +279,23 @@ fn checked_nominal_metadata_resolves_against_precollected_headers() {
 #[test]
 fn checked_metadata_resolves_nominals_imported_from_library_context() {
     let library = parse("(deftype {} LibMarker () (variant {} LibMarker))");
-    let context = build_type_env_from_library(&library, chelis_types::ProgramOrigin::Unlinked)
-        .expect("library context must check");
+    let context = build_type_env_from_library(
+        &library,
+        chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
+    )
+    .expect("library context must check");
     let new_exprs = parse(
         "(defsig {} make (t-fn {} (t-adt {} LibMarker)))
          (def {} make (fn {} (params {}) (var {} LibMarker)))",
     );
-    let checked =
-        check_ir_with_context(&context, &new_exprs, chelis_types::ProgramOrigin::Unlinked)
-            .expect("new code must check");
+    let checked = check_ir_with_context(
+        &context,
+        &new_exprs,
+        chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
+    )
+    .expect("new code must check");
     let signature = checked
         .signature_inference()
         .functions
@@ -287,14 +319,23 @@ fn checked_metadata_resolves_aliases_imported_from_library_context() {
         "(deftype {} LibMarker () (variant {} LibMarker))
          (typealias {} LibAlias () (t-adt {} LibMarker))",
     );
-    let context = build_type_env_from_library(&library, chelis_types::ProgramOrigin::Unlinked)
-        .expect("library context must check");
+    let context = build_type_env_from_library(
+        &library,
+        chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
+    )
+    .expect("library context must check");
     let new_exprs = parse(
         "(defsig {} make (t-fn {} (t-adt {} LibAlias)))
          (def {} make (fn {} (params {}) (var {} LibMarker)))",
     );
-    check_ir_with_context(&context, &new_exprs, chelis_types::ProgramOrigin::Unlinked)
-        .expect("a validated alias header must survive stacked context construction");
+    check_ir_with_context(
+        &context,
+        &new_exprs,
+        chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
+    )
+    .expect("a validated alias header must survive stacked context construction");
 }
 
 #[test]
@@ -471,8 +512,12 @@ fn independent_rhs_and_malformed_let_ascription_each_report_once() {
              (var {type: (t-prim {} missing_dtype)} missing))
              (lit {} 0)))",
     );
-    let result = check_ir_program(&exprs, chelis_types::ProgramOrigin::Unlinked)
-        .expect_err("the independent RHS and ascription roots must both fail the checker");
+    let result = check_ir_program(
+        &exprs,
+        chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
+    )
+    .expect_err("the independent RHS and ascription roots must both fail the checker");
     assert_eq!(
         result.errors.len(),
         2,
@@ -507,8 +552,12 @@ fn prebound_failure_is_owned_by_its_exact_duplicate_name_declaration() {
         "(def {} duplicate (var {} missing))
          (def {} duplicate (lit {type: (t-prim {} missing_dtype)} 1.0))",
     );
-    let result = check_ir_program(&exprs, chelis_types::ProgramOrigin::Unlinked)
-        .expect_err("duplicate declarations with independent roots must fail the checker");
+    let result = check_ir_program(
+        &exprs,
+        chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
+    )
+    .expect_err("duplicate declarations with independent roots must fail the checker");
     assert_eq!(
         result.errors.len(),
         3,
@@ -545,8 +594,12 @@ fn undeclared_variable_in_closed_top_level_metadata_reports_once() {
 #[test]
 fn invalid_declaration_cannot_seed_a_reusable_context() {
     let exprs = parse(&field_type("(t-adt {} Missing)"));
-    let result = build_type_env_from_library(&exprs, chelis_types::ProgramOrigin::Unlinked)
-        .expect_err("an invalid declaration must not produce a cacheable TypeEnv");
+    let result = build_type_env_from_library(
+        &exprs,
+        chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
+    )
+    .expect_err("an invalid declaration must not produce a cacheable TypeEnv");
     assert_eq!(
         result.errors.len(),
         1,

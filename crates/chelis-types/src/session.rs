@@ -11,7 +11,9 @@ use crate::errors::{CheckError, ErrorWitness};
 use crate::infer::recursion::{Caller, RecursiveState};
 use crate::infer::{
     CheckedProgram, InferResult, InferStats, ProgramOrigin, SignatureInferenceMetadata,
+    StackBailRecord, StackBudget,
 };
+use crate::native::NativeServices;
 use crate::opacity::OpacityContextData;
 use chelis_unord::UnordMap;
 
@@ -78,9 +80,81 @@ pub struct DiagnosticSink<'session> {
     type_resolution_witnesses: UnordMap<(TypeResolutionDiagnosticOwner, String), ErrorWitness>,
     opacity: Option<OpacityContextData>,
     recursive: RecursiveState,
+    /// The invocation's native services (cancellation, stack probes,
+    /// profiling), borrowed for the whole session.
+    native: &'session mut NativeServices,
+    /// First stack-exhaustion bail and check-unit scope depth.
+    stack_bails: StackBailRecord,
 }
 
 impl<'session> DiagnosticSink<'session> {
+    fn open(errors: &'session mut Vec<CheckError>, native: &'session mut NativeServices) -> Self {
+        Self {
+            errors,
+            type_resolution_witnesses: UnordMap::new(),
+            opacity: None,
+            recursive: RecursiveState::default(),
+            native,
+            stack_bails: StackBailRecord::default(),
+        }
+    }
+
+    /// The invocation's native services.
+    pub(crate) fn native(&mut self) -> &mut NativeServices {
+        self.native
+    }
+
+    /// Poll the invocation's cancellation flag (one relaxed load).
+    pub(crate) fn cancellation_observed(&mut self) -> bool {
+        self.native.cancellation_observed()
+    }
+
+    /// The explicit state a guarded recursive walker needs.
+    pub(crate) fn stack(&mut self) -> StackBudget<'_> {
+        StackBudget::new(self.native, &mut self.stack_bails)
+    }
+
+    /// Enter one guarded walker frame; see [`StackBudget::frame_exhausted`].
+    pub(crate) fn frame_exhausted<'e>(
+        &mut self,
+        site: &str,
+        span_id: impl FnOnce() -> Option<&'e str>,
+    ) -> bool {
+        self.stack().frame_exhausted(site, span_id)
+    }
+
+    /// Leave a frame entered by a non-exhausted [`Self::frame_exhausted`].
+    pub(crate) fn exit_frame(&mut self) {
+        self.native.exit_frame();
+    }
+
+    /// Enter a check unit for stack-exhaustion tracking. Entering the
+    /// OUTERMOST unit resets the recorded bail. Pair with
+    /// [`Self::exit_stack_scope`] on every return path.
+    pub(crate) fn enter_stack_scope(&mut self) {
+        self.stack_bails.enter_scope();
+    }
+
+    /// Leave a check unit entered with [`Self::enter_stack_scope`].
+    pub(crate) fn exit_stack_scope(&mut self) {
+        self.stack_bails.exit_scope();
+    }
+
+    /// If a stack bail was recorded, push the located failure diagnostic.
+    /// Idempotent: takes the bail, so a second call is a no-op. Call after the
+    /// whole pipeline has run and before the empty-errors gate.
+    pub(crate) fn drain_stack_bail(&mut self) {
+        if let Some(error) = self.stack_bails.take_error() {
+            self.errors.push(error);
+        }
+    }
+
+    /// The recorded stack bail, for tests that observe the funnel directly.
+    #[cfg(test)]
+    pub(crate) fn recorded_stack_bail(&self) -> Option<&(String, Option<String>)> {
+        self.stack_bails.recorded()
+    }
+
     /// A checking pass starts with no active group, including declaration
     /// collection. Reentrant passes move the enclosing frame into the scope.
     pub(crate) fn enter_recursive_inference(&mut self) -> RecursiveInferenceScope<'_, 'session> {
@@ -338,12 +412,8 @@ mod diagnostic_checkpoint_tests {
     #[test]
     fn iter_since_includes_diagnostics_after_the_checkpoint() {
         let mut errors = Vec::new();
-        let mut sink = DiagnosticSink {
-            errors: &mut errors,
-            type_resolution_witnesses: UnordMap::new(),
-            opacity: None,
-            recursive: RecursiveState::default(),
-        };
+        let mut native = NativeServices::new(None);
+        let mut sink = DiagnosticSink::open(&mut errors, &mut native);
         let checkpoint = sink.checkpoint();
         sink.push(diagnostic("first new diagnostic"));
         sink.push(diagnostic("second new diagnostic"));
@@ -358,12 +428,8 @@ mod diagnostic_checkpoint_tests {
     #[test]
     fn iter_since_excludes_diagnostics_before_the_checkpoint() {
         let mut errors = Vec::new();
-        let mut sink = DiagnosticSink {
-            errors: &mut errors,
-            type_resolution_witnesses: UnordMap::new(),
-            opacity: None,
-            recursive: RecursiveState::default(),
-        };
+        let mut native = NativeServices::new(None);
+        let mut sink = DiagnosticSink::open(&mut errors, &mut native);
         sink.push(diagnostic("earlier diagnostic"));
         let checkpoint = sink.checkpoint();
         sink.push(diagnostic("new diagnostic"));
@@ -469,7 +535,7 @@ mod recursive_scope_tests {
     #[test]
     fn recursive_pins_are_inputs_of_one_session_not_ambient_generalization() {
         let (env, mut variables, mut subst) = fixture();
-        run_result(|outer| {
+        run_result(&mut crate::NativeServices::new(None), |outer| {
             begin_group(outer, &env);
             let current = caller(outer, &env, &mut variables, &mut subst, "left", "a");
             let mut outer_scope = outer.enter_recursive_caller(Some(current));
@@ -483,7 +549,7 @@ mod recursive_scope_tests {
                 &outer_reference,
             ));
 
-            run_result(|inner| {
+            run_result(&mut crate::NativeServices::new(None), |inner| {
                 begin_group(inner, &env);
                 let current = caller(inner, &env, &mut variables, &mut subst, "right", "b");
                 let mut inner_scope = inner.enter_recursive_caller(Some(current));
@@ -537,7 +603,7 @@ mod recursive_scope_tests {
             crate::infer::infer_ir_program_in_session,
         ] {
             let (env, mut variables, mut subst) = fixture();
-            let report = run_result(|sink| {
+            let report = run_result(&mut crate::NativeServices::new(None), |sink| {
                 begin_group(sink, &env);
                 let current = caller(sink, &env, &mut variables, &mut subst, "left", "a");
                 {
@@ -614,7 +680,7 @@ mod recursive_scope_tests {
     #[test]
     fn recursive_caller_scopes_restore_attribution_and_retain_recorded_occurrences() {
         let (env, mut variables, mut subst) = fixture();
-        let report = run_result(|sink| {
+        let report = run_result(&mut crate::NativeServices::new(None), |sink| {
             begin_group(sink, &env);
             let current = caller(sink, &env, &mut variables, &mut subst, "left", "a");
             {
@@ -680,8 +746,12 @@ mod opacity_scope_tests {
             "../tests/fixtures/core/tests/opaque_types/shared_104.deep"
         ))
         .expect("opaque library parses");
-        crate::build_type_env_from_library(&program, crate::ProgramOrigin::Unlinked)
-            .expect("opaque library checks")
+        crate::build_type_env_from_library(
+            &program,
+            crate::ProgramOrigin::Unlinked,
+            &mut crate::NativeServices::new(None),
+        )
+        .expect("opaque library checks")
     }
 
     fn policy(library: &TypeEnv, module: &str) -> OpacityContextData {
@@ -702,18 +772,18 @@ mod opacity_scope_tests {
     #[test]
     fn opacity_policy_belongs_to_the_diagnostic_session_not_the_thread() {
         let library = library();
-        let report = run_result(|outer| {
+        let report = run_result(&mut crate::NativeServices::new(None), |outer| {
             let mut outer_scope = outer.install_opacity_context(policy(&library, "agent.strategy"));
             let outer = outer_scope.sink();
 
             // Annotation-only sessions do not inherit another check's policy.
-            run_result(|annotation| {
+            run_result(&mut crate::NativeServices::new(None), |annotation| {
                 assert!(!rejects_construction(&library, annotation));
                 Ok(())
             })
             .expect("an inactive session does not enforce the outer policy");
 
-            run_result(|inner| {
+            run_result(&mut crate::NativeServices::new(None), |inner| {
                 let mut inner_scope = inner.install_opacity_context(policy(&library, "stats.prob"));
                 assert!(rejects_construction(&library, outer));
                 assert!(!rejects_construction(&library, inner_scope.sink()));
@@ -734,7 +804,7 @@ mod opacity_scope_tests {
     #[test]
     fn opacity_scopes_restore_policy_on_return_and_unwind_without_losing_errors() {
         let library = library();
-        let report = run_result(|sink| {
+        let report = run_result(&mut crate::NativeServices::new(None), |sink| {
             {
                 let mut outer_scope = sink.install_opacity_context(policy(&library, "stats.prob"));
                 let outer = outer_scope.sink();
@@ -804,12 +874,8 @@ mod rejected_signature_resolution_tests {
         let mut variables = VarGen::default();
         let mut errors = Vec::new();
         let result = {
-            let mut sink = DiagnosticSink {
-                errors: &mut errors,
-                type_resolution_witnesses: UnordMap::new(),
-                opacity: None,
-                recursive: RecursiveState::default(),
-            };
+            let mut native = NativeServices::new(None);
+            let mut sink = DiagnosticSink::open(&mut errors, &mut native);
             let mut resolver = DeepTypeResolver::new(
                 TypeUseSite::Defsig,
                 BinderMode::ExplicitGeneric(&binders),
@@ -888,16 +954,15 @@ mod rejected_signature_resolution_tests {
     }
 }
 
-pub(crate) fn infer_program(exprs: &[chelis_deep::Expr], origin: ProgramOrigin) -> InferResult {
-    crate::infer::run_on_grown_stack(|| {
+pub(crate) fn infer_program(
+    exprs: &[chelis_deep::Expr],
+    origin: ProgramOrigin,
+    native: &mut NativeServices,
+) -> InferResult {
+    native.with_grown_stack(|native| {
         let mut errors = Vec::new();
         let stats = {
-            let mut sink = DiagnosticSink {
-                errors: &mut errors,
-                type_resolution_witnesses: UnordMap::new(),
-                opacity: None,
-                recursive: RecursiveState::default(),
-            };
+            let mut sink = DiagnosticSink::open(&mut errors, native);
             match admit_metadata(exprs, &mut sink) {
                 Ok(()) => crate::infer::infer_program_in_session(exprs, origin, &mut sink),
                 Err(stats) => stats,
@@ -919,12 +984,8 @@ mod authoritative_type_stamp_tests {
     fn run(case: TypeStampMutationCase) -> (bool, Vec<CheckError>) {
         let mut errors = Vec::new();
         let result = {
-            let mut sink = DiagnosticSink {
-                errors: &mut errors,
-                type_resolution_witnesses: UnordMap::new(),
-                opacity: None,
-                recursive: RecursiveState::default(),
-            };
+            let mut native = NativeServices::new(None);
+            let mut sink = DiagnosticSink::open(&mut errors, &mut native);
             run_type_stamp_mutation_case(case, &mut sink)
         };
         (result, errors)
@@ -1005,12 +1066,8 @@ mod unresolved_operand_reconcile_tests {
     fn run(case: ReconcileMutationCase) -> (String, bool, Vec<CheckError>) {
         let mut errors = Vec::new();
         let (produced, bound) = {
-            let mut sink = DiagnosticSink {
-                errors: &mut errors,
-                type_resolution_witnesses: UnordMap::new(),
-                opacity: None,
-                recursive: RecursiveState::default(),
-            };
+            let mut native = NativeServices::new(None);
+            let mut sink = DiagnosticSink::open(&mut errors, &mut native);
             run_reconcile_mutation_case(case, &mut sink)
         };
         (produced, bound, errors)
@@ -1083,12 +1140,8 @@ mod annotated_totality_finalization_tests {
     fn errors_for(case: FinalizationMutationCase) -> Vec<CheckError> {
         let mut errors = Vec::new();
         {
-            let mut sink = DiagnosticSink {
-                errors: &mut errors,
-                type_resolution_witnesses: UnordMap::new(),
-                opacity: None,
-                recursive: RecursiveState::default(),
-            };
+            let mut native = NativeServices::new(None);
+            let mut sink = DiagnosticSink::open(&mut errors, &mut native);
             run_finalization_mutation_case(case, &mut sink);
         }
         errors
@@ -1123,7 +1176,7 @@ mod result_boundary_tests {
 
     #[test]
     fn run_result_rejects_ok_after_an_authoritative_diagnostic() {
-        let result = run_result(|sink| {
+        let result = run_result(&mut NativeServices::new(None), |sink| {
             sink.push(CheckError::new(
                 CheckErrorKind::Other,
                 "planted authoritative diagnostic".to_string(),
@@ -1138,17 +1191,27 @@ mod result_boundary_tests {
     }
 }
 
+/// Open a sink over fresh storage for a unit test and return its diagnostics.
+#[cfg(test)]
+pub(crate) fn run_test_session<T>(
+    native: &mut NativeServices,
+    run: impl FnOnce(&mut DiagnosticSink<'_>) -> T,
+) -> (T, Vec<CheckError>) {
+    let mut errors = Vec::new();
+    let value = {
+        let mut sink = DiagnosticSink::open(&mut errors, native);
+        run(&mut sink)
+    };
+    (value, errors)
+}
+
 fn run_result<T>(
+    native: &mut NativeServices,
     run: impl FnOnce(&mut DiagnosticSink<'_>) -> Result<T, InferStats>,
 ) -> Result<T, InferResult> {
     let mut errors = Vec::new();
     let result = {
-        let mut sink = DiagnosticSink {
-            errors: &mut errors,
-            type_resolution_witnesses: UnordMap::new(),
-            opacity: None,
-            recursive: RecursiveState::default(),
-        };
+        let mut sink = DiagnosticSink::open(&mut errors, native);
         run(&mut sink)
     };
     match result {
@@ -1193,9 +1256,10 @@ fn admit_metadata(
 
 fn run_with_metadata<T>(
     exprs: &[chelis_deep::Expr],
+    native: &mut NativeServices,
     run: impl FnOnce(&mut DiagnosticSink<'_>) -> Result<T, InferStats>,
 ) -> Result<T, InferResult> {
-    run_result(|sink| {
+    run_result(native, |sink| {
         admit_metadata(exprs, sink)?;
         run(sink)
     })
@@ -1204,9 +1268,10 @@ fn run_with_metadata<T>(
 pub(crate) fn build_type_env_from_library(
     exprs: &[chelis_deep::Expr],
     origin: ProgramOrigin,
+    native: &mut NativeServices,
 ) -> Result<TypeEnv, InferResult> {
-    crate::infer::run_on_grown_stack(|| {
-        run_with_metadata(exprs, |sink| {
+    native.with_grown_stack(|native| {
+        run_with_metadata(exprs, native, |sink| {
             crate::infer::build_type_env_from_library_in_session(exprs, origin, sink)
         })
     })
@@ -1214,9 +1279,10 @@ pub(crate) fn build_type_env_from_library(
 
 pub(crate) fn resolve_declared_surface(
     exprs: &[chelis_deep::Expr],
+    native: &mut NativeServices,
 ) -> Result<crate::infer::DeclaredTypeSurface, InferResult> {
-    crate::infer::run_on_grown_stack(|| {
-        run_with_metadata(exprs, |sink| {
+    native.with_grown_stack(|native| {
+        run_with_metadata(exprs, native, |sink| {
             crate::infer::resolve_declared_surface_in_session(exprs, sink)
         })
     })
@@ -1225,8 +1291,9 @@ pub(crate) fn resolve_declared_surface(
 pub(crate) fn build_compiled_library_context(
     exprs: &[chelis_deep::Expr],
     origin: ProgramOrigin,
+    native: &mut NativeServices,
 ) -> Result<(TypeEnv, CheckedProgram), InferResult> {
-    run_with_metadata(exprs, |sink| {
+    run_with_metadata(exprs, native, |sink| {
         crate::infer::build_compiled_library_context_in_session(exprs, origin, sink)
     })
 }
@@ -1235,8 +1302,9 @@ pub(crate) fn build_compiled_library_context_with_base(
     base: &TypeEnv,
     exprs: &[chelis_deep::Expr],
     origin: ProgramOrigin,
+    native: &mut NativeServices,
 ) -> Result<(TypeEnv, CheckedProgram), InferResult> {
-    run_with_metadata(exprs, |sink| {
+    run_with_metadata(exprs, native, |sink| {
         crate::infer::build_compiled_library_context_with_base_in_session(base, exprs, origin, sink)
     })
 }
@@ -1246,9 +1314,10 @@ pub(crate) fn check_ir_with_signature_context(
     signature_context: &SignatureInferenceMetadata,
     exprs: &[chelis_deep::Expr],
     origin: ProgramOrigin,
+    native: &mut NativeServices,
 ) -> Result<CheckedProgram, InferResult> {
-    crate::infer::run_on_grown_stack(|| {
-        run_with_metadata(exprs, |sink| {
+    native.with_grown_stack(|native| {
+        run_with_metadata(exprs, native, |sink| {
             crate::infer::check_ir_with_signature_context_in_session(
                 context,
                 signature_context,
@@ -1263,24 +1332,24 @@ pub(crate) fn check_ir_with_signature_context(
 pub(crate) fn check_typed_program(
     exprs: &[chelis_deep::Expr],
     origin: ProgramOrigin,
+    native: &mut NativeServices,
 ) -> Result<CheckedProgram, InferResult> {
-    crate::infer::run_on_grown_stack(|| {
-        run_with_metadata(exprs, |sink| {
+    native.with_grown_stack(|native| {
+        run_with_metadata(exprs, native, |sink| {
             crate::infer::check_typed_program_in_session(exprs, origin, sink)
         })
     })
 }
 
-pub(crate) fn infer_ir_program(exprs: &[chelis_deep::Expr], origin: ProgramOrigin) -> InferResult {
-    crate::infer::run_on_grown_stack(|| {
+pub(crate) fn infer_ir_program(
+    exprs: &[chelis_deep::Expr],
+    origin: ProgramOrigin,
+    native: &mut NativeServices,
+) -> InferResult {
+    native.with_grown_stack(|native| {
         let mut errors = Vec::new();
         let stats = {
-            let mut sink = DiagnosticSink {
-                errors: &mut errors,
-                type_resolution_witnesses: UnordMap::new(),
-                opacity: None,
-                recursive: RecursiveState::default(),
-            };
+            let mut sink = DiagnosticSink::open(&mut errors, native);
             match admit_metadata(exprs, &mut sink) {
                 Ok(()) => crate::infer::infer_ir_program_in_session(exprs, origin, &mut sink),
                 Err(stats) => stats,
@@ -1297,8 +1366,9 @@ pub(crate) fn infer_ir_program(exprs: &[chelis_deep::Expr], origin: ProgramOrigi
 pub(crate) fn try_checked_program_with_effect_annotations(
     original: &CheckedProgram,
     annotated_exprs: Vec<chelis_deep::Expr>,
+    native: &mut NativeServices,
 ) -> Result<CheckedProgram, InferResult> {
-    run_result(|sink| {
+    run_result(native, |sink| {
         admit_metadata(&annotated_exprs, sink)?;
         Ok(
             crate::infer::checked_program_with_effect_annotations_in_session(
@@ -1316,8 +1386,9 @@ pub(crate) fn param_has_consuming_use(
     available_signatures: &chelis_unord::UnordMap<String, crate::types::Type>,
     type_env: &std::collections::BTreeMap<String, chelis_deep::Expr>,
     type_headers: &crate::deep_type::TypeResolutionEnv,
+    native: &mut NativeServices,
 ) -> Result<bool, InferResult> {
-    run_result(|sink| {
+    run_result(native, |sink| {
         Ok(crate::infer::param_has_consuming_use_in_session(
             expr,
             param,
@@ -1336,7 +1407,7 @@ mod builtin_selection_tests {
 
     fn selections(source: &str) -> Result<Vec<BuiltinCaseSelection>, InferResult> {
         let deep = chelis_deep::parser::parse_str(source).expect("core discovery fixture");
-        run_with_metadata(&deep, |sink| {
+        run_with_metadata(&deep, &mut NativeServices::new(None), |sink| {
             Ok(crate::infer::builtin_selection_probe(&deep, sink))
         })
     }

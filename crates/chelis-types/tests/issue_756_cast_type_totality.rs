@@ -39,9 +39,13 @@ fn parse_core_fixture(source: &str) -> Vec<Expr> {
 
 fn reject_messages(source: &str, label: &str) -> Vec<String> {
     let deep = parse_core_fixture(source);
-    let rep: InferResult = check_ir_program(&deep, chelis_types::ProgramOrigin::Unlinked)
-        .err()
-        .unwrap_or_else(|| panic!("{label}: expected a check rejection, but it passed"));
+    let rep: InferResult = check_ir_program(
+        &deep,
+        chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
+    )
+    .err()
+    .unwrap_or_else(|| panic!("{label}: expected a check rejection, but it passed"));
     assert!(
         !rep.errors.is_empty(),
         "{label}: a rejection must carry at least one diagnostic"
@@ -51,7 +55,11 @@ fn reject_messages(source: &str, label: &str) -> Vec<String> {
 
 fn accept(source: &str, label: &str) {
     let deep = parse_core_fixture(source);
-    if let Err(rep) = check_ir_program(&deep, chelis_types::ProgramOrigin::Unlinked) {
+    if let Err(rep) = check_ir_program(
+        &deep,
+        chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
+    ) {
         let msgs: Vec<String> = rep.errors.iter().map(|e| e.message.clone()).collect();
         panic!("{label}: expected a clean check, got errors: {msgs:?}");
     }
@@ -66,7 +74,11 @@ fn deep_cast_program(target: &str) -> String {
 
 fn deep_fitness(source: &str) -> FitnessReport {
     let deep = parse_deep(source).expect("Deep cast fixture must parse");
-    check_ir_fitness(&deep, chelis_types::ProgramOrigin::Unlinked)
+    check_ir_fitness(
+        &deep,
+        chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
+    )
 }
 
 fn assert_deep_accepts(source: &str, label: &str) {
@@ -160,7 +172,11 @@ fn canonical_t_prim_with_an_extra_child_is_rejected_once() {
         "wrong-arity canonical types must be rejected at stamped ingress"
     );
     let deep = support::parse_unchecked_legacy(&deep_cast_program("(t-prim {} f32 extra)"));
-    let report = check_ir_fitness(&deep, chelis_types::ProgramOrigin::Unlinked);
+    let report = check_ir_fitness(
+        &deep,
+        chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
+    );
     assert!(
         report.score < 1.0,
         "malformed canonical target must reduce fitness below 1, got {report:?}"
@@ -186,7 +202,11 @@ fn canonical_formatter_output_for_bare_deep_cast_remains_checkable() {
     let parsed = parse_deep(&source).expect("bare-symbol Deep cast must parse");
     let formatted = print_canonical(&parsed);
     let reparsed = parse_deep(&formatted).expect("canonical formatter output must parse");
-    let report = check_ir_fitness(&reparsed, chelis_types::ProgramOrigin::Unlinked);
+    let report = check_ir_fitness(
+        &reparsed,
+        chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
+    );
     assert!(
         report.errors.is_empty() && report.score == 1.0,
         "canonical formatter output must remain checkable, got {report:?}\n{formatted}"

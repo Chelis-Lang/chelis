@@ -23,9 +23,13 @@ fn evaluate_tier2(prim: Prim, input: ScalarValue, lower: ActivationLowerer) -> S
     );
     let root = lower(&mut dag, x, &ty, None);
     let input = TensorValue::from_storage(vec![], tensor_from_scalars(prim, &[input]));
-    let values =
-        eval_tensor_roots_with_strict(&dag, &[root], |name| (name == "x").then(|| input.clone()))
-            .unwrap();
+    let values = eval_tensor_roots_with_strict(
+        &dag,
+        &[root],
+        |name| (name == "x").then(|| input.clone()),
+        &mut chelis_types::NativeServices::new(None),
+    )
+    .unwrap();
     values[&root].storage().scalar_at(0)
 }
 

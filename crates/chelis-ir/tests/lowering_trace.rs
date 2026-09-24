@@ -19,10 +19,17 @@ const SQUARE: &str = include_str!("fixtures/core/tests/lowering_trace/square_0.d
 #[cfg(feature = "lowering-trace")]
 fn checked(source: &str) -> CheckedProgram {
     let deep = parse_str(source).expect("parse fixture");
-    let program = check_typed_program(&deep, chelis_types::ProgramOrigin::Unlinked)
-        .expect("check fixture types");
-    let program = chelis_effects::check_program(&program).expect("check fixture effects");
-    chelis_types::check_linearity(&program).expect("check fixture linearity")
+    let program = check_typed_program(
+        &deep,
+        chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
+    )
+    .expect("check fixture types");
+    let program =
+        chelis_effects::check_program(&program, &mut chelis_types::NativeServices::new(None))
+            .expect("check fixture effects");
+    chelis_types::check_linearity(&program, &mut chelis_types::NativeServices::new(None))
+        .expect("check fixture linearity")
 }
 
 // The existing DAG codec compares every stored bit and metadata field. This
@@ -106,11 +113,15 @@ fn execution_trace_captures_the_actual_ad_call_without_replaying_seed_controls()
             seed: None,
             counter: 0,
         });
-    let values =
-        chelis_ir::eval::eval_tensor_plan_with_strict(&execution.backward, &mut context, |name| {
+    let values = chelis_ir::eval::eval_tensor_plan_with_strict(
+        &execution.backward,
+        &mut context,
+        |name| {
             (name == "x").then(|| chelis_ir::eval::TensorValue::from_vec(vec![32], vec![1.0; 32]))
-        })
-        .unwrap();
+        },
+        &mut chelis_types::NativeServices::new(None),
+    )
+    .unwrap();
     let derivative = &values[&gradient.gradients[&gradient.wrt[0]]];
     let bits = derivative
         .to_f64_lossy_vec()
@@ -159,11 +170,15 @@ fn selected_source_census_keeps_draw_free_dependencies_and_excludes_siblings() {
             seed: None,
             counter: 0,
         });
-    let values =
-        chelis_ir::eval::eval_tensor_plan_with_strict(selected.plan(), &mut context, |name| {
+    let values = chelis_ir::eval::eval_tensor_plan_with_strict(
+        selected.plan(),
+        &mut context,
+        |name| {
             (name == "x").then(|| chelis_ir::eval::TensorValue::from_vec(vec![32], vec![1.0; 32]))
-        })
-        .unwrap();
+        },
+        &mut chelis_types::NativeServices::new(None),
+    )
+    .unwrap();
     assert_eq!(
         values[&selected.roots()["sample"]].to_f64_lossy_vec(),
         vec![1.0; 32]
@@ -208,11 +223,15 @@ fn selecting_a_draw_free_region_retains_controls_without_changing_dispatch() {
             seed: None,
             counter: 23,
         });
-    let values =
-        chelis_ir::eval::eval_tensor_plan_with_strict(selected.plan(), &mut context, |name| {
+    let values = chelis_ir::eval::eval_tensor_plan_with_strict(
+        selected.plan(),
+        &mut context,
+        |name| {
             (name == "x").then(|| chelis_ir::eval::TensorValue::from_vec(vec![2], vec![3.0, 5.0]))
-        })
-        .unwrap();
+        },
+        &mut chelis_types::NativeServices::new(None),
+    )
+    .unwrap();
     assert_eq!(
         values[&selected.roots()["selected"]].to_f64_lossy_vec(),
         [3.0, 5.0]
@@ -249,9 +268,12 @@ fn context_composition_retains_declared_controls_without_confusing_local_aliases
         "fixtures/core/tests/lowering_trace/context_composition_retains_declared_controls_without_confusing_local_aliases_5.dp"
     );
     let deep = parse_str(source).unwrap();
-    let env =
-        chelis_types::build_type_env_from_library(&deep, chelis_types::ProgramOrigin::Unlinked)
-            .unwrap();
+    let env = chelis_types::build_type_env_from_library(
+        &deep,
+        chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
+    )
+    .unwrap();
     let library = chelis_ir::lowering_runtime::with_native_lowering_runtime(|runtime| {
         chelis_ir::lower::try_lower_program_to_evaluation_library(&checked(source), runtime)
     })
@@ -272,11 +294,19 @@ fn context_composition_retains_declared_controls_without_confusing_local_aliases
         ),
     ] {
         let deep = parse_str(body).unwrap();
+        let program = chelis_types::check_ir_with_context(
+            &env,
+            &deep,
+            chelis_types::ProgramOrigin::Unlinked,
+            &mut chelis_types::NativeServices::new(None),
+        )
+        .unwrap();
         let program =
-            chelis_types::check_ir_with_context(&env, &deep, chelis_types::ProgramOrigin::Unlinked)
+            chelis_effects::check_program(&program, &mut chelis_types::NativeServices::new(None))
                 .unwrap();
-        let program = chelis_effects::check_program(&program).unwrap();
-        let program = chelis_types::check_linearity(&program).unwrap();
+        let program =
+            chelis_types::check_linearity(&program, &mut chelis_types::NativeServices::new(None))
+                .unwrap();
         let composed = chelis_ir::lowering_runtime::with_native_lowering_runtime(|runtime| {
             chelis_ir::lower::try_lower_program_with_evaluation_context(&library, &program, runtime)
         })
@@ -301,12 +331,16 @@ fn context_composition_retains_declared_controls_without_confusing_local_aliases
                 counter: 0,
             },
         );
-        let values =
-            chelis_ir::eval::eval_tensor_plan_with_strict(selected.plan(), &mut context, |name| {
+        let values = chelis_ir::eval::eval_tensor_plan_with_strict(
+            selected.plan(),
+            &mut context,
+            |name| {
                 (name == "x")
                     .then(|| chelis_ir::eval::TensorValue::from_vec(vec![32], vec![1.0; 32]))
-            })
-            .unwrap();
+            },
+            &mut chelis_types::NativeServices::new(None),
+        )
+        .unwrap();
         assert_eq!(
             values[&selected.roots()["sample"]].to_f64_lossy_vec(),
             vec![1.0; 32]

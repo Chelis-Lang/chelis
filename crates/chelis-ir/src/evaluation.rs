@@ -763,6 +763,7 @@ impl StagedEvaluationFrame<'_> {
     pub fn eval_next_kernel<F>(
         &mut self,
         load_input: F,
+        native: &mut chelis_types::NativeServices,
     ) -> Result<UnordMap<NodeId, TensorValue>, String>
     where
         F: FnMut(&str) -> Option<TensorValue>,
@@ -772,7 +773,12 @@ impl StagedEvaluationFrame<'_> {
             .next()
             .ok_or("staged evaluation has no next kernel")?;
         self.frame.metadata = &segment.metadata;
-        crate::eval::eval_tensor_segment_with_strict(&segment.dag, &mut self.frame, load_input)
+        crate::eval::eval_tensor_segment_with_strict(
+            &segment.dag,
+            &mut self.frame,
+            load_input,
+            native,
+        )
     }
 }
 
@@ -972,8 +978,13 @@ mod input_preparation_tests {
                     .collect::<Vec<_>>()
             );
             assert!(
-                eval_tensor_roots_with_strict(&dag, &[root], |name| prepared.get(name).cloned())
-                    .is_ok()
+                eval_tensor_roots_with_strict(
+                    &dag,
+                    &[root],
+                    |name| prepared.get(name).cloned(),
+                    &mut chelis_types::NativeServices::new(None)
+                )
+                .is_ok()
             );
         }
     }
@@ -992,8 +1003,13 @@ mod input_preparation_tests {
             vec![("shape".to_owned(), TensorInputDemand::RequiredShape)]
         );
         assert_eq!(
-            eval_tensor_roots_with_strict(&dag, &[root], |name| prepared.get(name).cloned())
-                .unwrap_err(),
+            eval_tensor_roots_with_strict(
+                &dag,
+                &[root],
+                |name| prepared.get(name).cloned(),
+                &mut chelis_types::NativeServices::new(None)
+            )
+            .unwrap_err(),
             "missing required input `shape` for symbolic dimension `n`"
         );
     }
@@ -1010,8 +1026,13 @@ mod input_preparation_tests {
         .unwrap();
         assert_eq!(calls, ["a", "b"]);
         assert_eq!(
-            eval_tensor_roots_with_strict(&dag, &[root], |name| prepared.get(name).cloned())
-                .unwrap_err(),
+            eval_tensor_roots_with_strict(
+                &dag,
+                &[root],
+                |name| prepared.get(name).cloned(),
+                &mut chelis_types::NativeServices::new(None)
+            )
+            .unwrap_err(),
             "ambiguous dead-load sources [\"a\", \"b\"] for live symbolic dimension `n`"
         );
     }
@@ -1107,10 +1128,15 @@ mod input_preparation_tests {
         let root = dag.add_node(RiscOp::Add, vec![NodeId(0), NodeId(2)], ty(), None);
         for roots in [vec![root], vec![]] {
             let mut old_calls = Vec::new();
-            let old = eval_tensor_roots_with_strict(&dag, &roots, |name| {
-                old_calls.push(name.to_owned());
-                Some(value())
-            })
+            let old = eval_tensor_roots_with_strict(
+                &dag,
+                &roots,
+                |name| {
+                    old_calls.push(name.to_owned());
+                    Some(value())
+                },
+                &mut chelis_types::NativeServices::new(None),
+            )
             .unwrap();
             let mut calls = Vec::new();
             let prepared = prepare_tensor_roots_inputs(&dag, &roots, |name| {
@@ -1127,9 +1153,13 @@ mod input_preparation_tests {
                     vec!["x"]
                 }
             );
-            let actual =
-                eval_tensor_roots_with_strict(&dag, &roots, |name| prepared.get(name).cloned())
-                    .unwrap();
+            let actual = eval_tensor_roots_with_strict(
+                &dag,
+                &roots,
+                |name| prepared.get(name).cloned(),
+                &mut chelis_types::NativeServices::new(None),
+            )
+            .unwrap();
             assert_eq!(actual[&root], old[&root]);
             assert_eq!(actual[&root].storage(), old[&root].storage());
             assert_eq!(
@@ -1157,7 +1187,13 @@ mod input_preparation_tests {
         .unwrap();
         assert_eq!(calls, ["shape"]);
         assert!(prepared.contains_key("shape"));
-        let old = eval_tensor_roots_with_strict(&dag, &[root], |_| None).unwrap_err();
+        let old = eval_tensor_roots_with_strict(
+            &dag,
+            &[root],
+            |_| None,
+            &mut chelis_types::NativeServices::new(None),
+        )
+        .unwrap_err();
         assert_eq!(
             prepare_tensor_roots_inputs(&dag, &[root], |_| Ok(None)).unwrap_err(),
             old
@@ -1203,10 +1239,15 @@ mod input_preparation_tests {
         );
         for supplied in [false, true] {
             let mut old_calls = Vec::new();
-            let old = eval_tensor_roots_with_strict(&dag, &[live], |name| {
-                old_calls.push(name.to_owned());
-                (name == "live" || supplied).then(value)
-            });
+            let old = eval_tensor_roots_with_strict(
+                &dag,
+                &[live],
+                |name| {
+                    old_calls.push(name.to_owned());
+                    (name == "live" || supplied).then(value)
+                },
+                &mut chelis_types::NativeServices::new(None),
+            );
             let mut calls = Vec::new();
             let prepared = prepare_tensor_roots_inputs(&dag, &[live], |name| {
                 calls.push(name.to_owned());
@@ -1222,8 +1263,12 @@ mod input_preparation_tests {
                     vec!["optional", "optional", "live"]
                 }
             );
-            let actual =
-                eval_tensor_roots_with_strict(&dag, &[live], |name| prepared.get(name).cloned());
+            let actual = eval_tensor_roots_with_strict(
+                &dag,
+                &[live],
+                |name| prepared.get(name).cloned(),
+                &mut chelis_types::NativeServices::new(None),
+            );
             assert_eq!(actual, old);
         }
     }
@@ -1266,10 +1311,20 @@ mod input_preparation_tests {
         .unwrap();
         assert_eq!(calls, ["shape"]);
         assert!(prepared.is_empty());
-        let old = eval_tensor_roots_with_strict(&dag, &[root], |_| None).unwrap_err();
-        let actual =
-            eval_tensor_roots_with_strict(&dag, &[root], |name| prepared.get(name).cloned())
-                .unwrap_err();
+        let old = eval_tensor_roots_with_strict(
+            &dag,
+            &[root],
+            |_| None,
+            &mut chelis_types::NativeServices::new(None),
+        )
+        .unwrap_err();
+        let actual = eval_tensor_roots_with_strict(
+            &dag,
+            &[root],
+            |name| prepared.get(name).cloned(),
+            &mut chelis_types::NativeServices::new(None),
+        )
+        .unwrap_err();
         assert_eq!(actual, old);
         assert!(actual.contains("symbolic dimension"), "{actual}");
     }
@@ -1285,11 +1340,21 @@ mod input_preparation_tests {
             ty(),
             None,
         );
-        let old = eval_tensor_roots_with_strict(&dag, &[root], |_| Some(value())).unwrap();
+        let old = eval_tensor_roots_with_strict(
+            &dag,
+            &[root],
+            |_| Some(value()),
+            &mut chelis_types::NativeServices::new(None),
+        )
+        .unwrap();
         let prepared = prepare_tensor_roots_inputs(&dag, &[root], |_| Ok(Some(value()))).unwrap();
-        let actual =
-            eval_tensor_roots_with_strict(&dag, &[root], |name| prepared.get(name).cloned())
-                .unwrap();
+        let actual = eval_tensor_roots_with_strict(
+            &dag,
+            &[root],
+            |name| prepared.get(name).cloned(),
+            &mut chelis_types::NativeServices::new(None),
+        )
+        .unwrap();
         assert_eq!(actual, old);
         assert_eq!(actual[&root], value());
     }
@@ -1339,13 +1404,22 @@ mod input_preparation_tests {
             })
             .unwrap();
             assert_eq!(calls, ["shape"]);
-            let actual =
-                eval_tensor_roots_with_strict(&dag, &[root], |name| prepared.get(name).cloned());
+            let actual = eval_tensor_roots_with_strict(
+                &dag,
+                &[root],
+                |name| prepared.get(name).cloned(),
+                &mut chelis_types::NativeServices::new(None),
+            );
             let mut old_calls = Vec::new();
-            let old = eval_tensor_roots_with_strict(&dag, &[root], |name| {
-                old_calls.push(name.to_owned());
-                supplied.then(value)
-            });
+            let old = eval_tensor_roots_with_strict(
+                &dag,
+                &[root],
+                |name| {
+                    old_calls.push(name.to_owned());
+                    supplied.then(value)
+                },
+                &mut chelis_types::NativeServices::new(None),
+            );
             assert_eq!(calls, old_calls);
             assert_eq!(actual, old);
             if supplied {
@@ -1370,11 +1444,21 @@ mod input_preparation_tests {
             })
             .unwrap();
             assert_eq!(calls, ["a", "b"]);
-            let old =
-                eval_tensor_roots_with_strict(&dag, &[root], |_| supplied.then(value)).unwrap_err();
+            let old = eval_tensor_roots_with_strict(
+                &dag,
+                &[root],
+                |_| supplied.then(value),
+                &mut chelis_types::NativeServices::new(None),
+            )
+            .unwrap_err();
             assert_eq!(
-                eval_tensor_roots_with_strict(&dag, &[root], |name| prepared.get(name).cloned())
-                    .unwrap_err(),
+                eval_tensor_roots_with_strict(
+                    &dag,
+                    &[root],
+                    |name| prepared.get(name).cloned(),
+                    &mut chelis_types::NativeServices::new(None)
+                )
+                .unwrap_err(),
                 old
             );
             assert_eq!(
@@ -1421,9 +1505,13 @@ mod input_preparation_tests {
         .unwrap();
         assert_eq!(calls, ["shape", "x"]);
         assert!(!prepared.contains_key("shape"));
-        let actual =
-            eval_tensor_roots_with_strict(&dag, &[root], |name| prepared.get(name).cloned())
-                .unwrap();
+        let actual = eval_tensor_roots_with_strict(
+            &dag,
+            &[root],
+            |name| prepared.get(name).cloned(),
+            &mut chelis_types::NativeServices::new(None),
+        )
+        .unwrap();
         assert_eq!(actual[&root].shape, [1]);
         assert_eq!(
             actual[&root].storage().scalar_at(0),
@@ -1431,7 +1519,13 @@ mod input_preparation_tests {
         );
         assert_eq!(
             actual,
-            eval_tensor_roots_with_strict(&dag, &[root], |name| (name == "x").then(value)).unwrap()
+            eval_tensor_roots_with_strict(
+                &dag,
+                &[root],
+                |name| (name == "x").then(value),
+                &mut chelis_types::NativeServices::new(None)
+            )
+            .unwrap()
         );
     }
 
@@ -1471,12 +1565,20 @@ mod input_preparation_tests {
             })
             .unwrap();
             assert_eq!(calls, ["shape", "x"]);
-            let actual =
-                eval_tensor_roots_with_strict(&dag, &[root], |name| prepared.get(name).cloned());
+            let actual = eval_tensor_roots_with_strict(
+                &dag,
+                &[root],
+                |name| prepared.get(name).cloned(),
+                &mut chelis_types::NativeServices::new(None),
+            );
             assert_eq!(
                 actual,
-                eval_tensor_roots_with_strict(&dag, &[root], |name| (supplied || name == "x")
-                    .then(value))
+                eval_tensor_roots_with_strict(
+                    &dag,
+                    &[root],
+                    |name| (supplied || name == "x").then(value),
+                    &mut chelis_types::NativeServices::new(None)
+                )
             );
             if supplied {
                 assert_eq!(actual.unwrap()[&root], value());
@@ -1510,9 +1612,13 @@ mod input_preparation_tests {
         })
         .unwrap();
         assert_eq!(calls, ["x", "x"]);
-        let actual =
-            eval_tensor_roots_with_strict(&dag, &[root], |name| prepared.get(name).cloned())
-                .unwrap();
+        let actual = eval_tensor_roots_with_strict(
+            &dag,
+            &[root],
+            |name| prepared.get(name).cloned(),
+            &mut chelis_types::NativeServices::new(None),
+        )
+        .unwrap();
         assert_eq!(actual[&root], value());
         let mut roles = Vec::new();
         let role_prepared = prepare_tensor_roots_inputs_with_demand(&dag, &[root], |name, role| {
@@ -1546,10 +1652,15 @@ mod input_preparation_tests {
         assert_eq!(error, "initializer failed exactly");
         assert_eq!(calls, ["first", "broken"]);
         let mut old_calls = Vec::new();
-        let old = eval_tensor_roots_with_strict(&dag, &[], |name| {
-            old_calls.push(name.to_owned());
-            (name == "first").then(value)
-        })
+        let old = eval_tensor_roots_with_strict(
+            &dag,
+            &[],
+            |name| {
+                old_calls.push(name.to_owned());
+                (name == "first").then(value)
+            },
+            &mut chelis_types::NativeServices::new(None),
+        )
         .unwrap_err();
         calls.clear();
         let missing = prepare_tensor_roots_inputs(&dag, &[], |name| {
@@ -1591,8 +1702,13 @@ mod input_preparation_tests {
                 finalize_tensor("test", Prim::F16, RawTensor::Float(vec![3.0, 5.0])).unwrap(),
             ),
         ] {
-            let old =
-                eval_tensor_roots_with_strict(&dag, &[], |_| Some(input.clone())).unwrap_err();
+            let old = eval_tensor_roots_with_strict(
+                &dag,
+                &[],
+                |_| Some(input.clone()),
+                &mut chelis_types::NativeServices::new(None),
+            )
+            .unwrap_err();
             let prepared =
                 prepare_tensor_roots_inputs(&dag, &[], |_| Ok(Some(input.clone()))).unwrap();
             assert_eq!(
@@ -1600,9 +1716,13 @@ mod input_preparation_tests {
                 input.storage(),
                 "preparation preserves the tagged input"
             );
-            let actual =
-                eval_tensor_roots_with_strict(&dag, &[], |name| prepared.get(name).cloned())
-                    .unwrap_err();
+            let actual = eval_tensor_roots_with_strict(
+                &dag,
+                &[],
+                |name| prepared.get(name).cloned(),
+                &mut chelis_types::NativeServices::new(None),
+            )
+            .unwrap_err();
             assert_eq!(actual, old);
         }
     }
@@ -1619,9 +1739,12 @@ mod input_preparation_tests {
             None,
         );
         for (dag, root) in [(dropped, root), (bad_axis, bad)] {
-            let old = eval_tensor_roots_with_strict(&dag, &[root], |_| {
-                panic!("old validation precedes inputs")
-            })
+            let old = eval_tensor_roots_with_strict(
+                &dag,
+                &[root],
+                |_| panic!("old validation precedes inputs"),
+                &mut chelis_types::NativeServices::new(None),
+            )
             .unwrap_err();
             let actual = prepare_tensor_roots_inputs(&dag, &[root], |_| {
                 panic!("preparation validation precedes inputs")
@@ -1636,10 +1759,15 @@ mod input_preparation_tests {
         let plan = plan(loads(&["x", "executed_but_value_dead"]));
         let mut old_context = context(42);
         let mut old_calls = Vec::new();
-        let old = eval_tensor_plan_with_strict(&plan, &mut old_context, |name| {
-            old_calls.push(name.to_owned());
-            Some(value())
-        })
+        let old = eval_tensor_plan_with_strict(
+            &plan,
+            &mut old_context,
+            |name| {
+                old_calls.push(name.to_owned());
+                Some(value())
+            },
+            &mut chelis_types::NativeServices::new(None),
+        )
         .unwrap();
         let mut new_context = context(42);
         let mut calls = Vec::new();
@@ -1655,9 +1783,12 @@ mod input_preparation_tests {
         );
         assert_eq!(calls, ["x", "executed_but_value_dead"]);
         assert_eq!(calls, old_calls);
-        let actual = eval_tensor_plan_with_strict(&plan, &mut new_context, |name| {
-            prepared.get(name).cloned()
-        })
+        let actual = eval_tensor_plan_with_strict(
+            &plan,
+            &mut new_context,
+            |name| prepared.get(name).cloned(),
+            &mut chelis_types::NativeServices::new(None),
+        )
         .unwrap();
         assert_eq!(actual, old);
         assert_eq!(new_context.state().counter, old_context.state().counter);
@@ -1672,9 +1803,12 @@ mod input_preparation_tests {
         invalid.metadata.spine.steps.pop();
         for (plan, seed) in [(valid, 43), (invalid, 42)] {
             let mut context = context(seed);
-            let old = eval_tensor_plan_with_strict(&plan, &mut context, |_| {
-                panic!("old validation precedes inputs")
-            })
+            let old = eval_tensor_plan_with_strict(
+                &plan,
+                &mut context,
+                |_| panic!("old validation precedes inputs"),
+                &mut chelis_types::NativeServices::new(None),
+            )
             .unwrap_err();
             let actual = prepare_tensor_plan_inputs(&plan, &context, |_| {
                 panic!("preparation validation precedes inputs")
@@ -1691,16 +1825,26 @@ mod input_preparation_tests {
         let consumer = plan(loads(&["weights"]));
         let initializer_root = initializer.dag_for_inspection().roots()[0];
         let mut reference_context = context(42);
-        let initialized =
-            eval_tensor_plan_with_strict(&initializer, &mut reference_context, |_| Some(value()))
-                .unwrap();
-        let expected = eval_tensor_plan_with_strict(&consumer, &mut reference_context, |_| {
-            Some(initialized[&initializer_root].clone())
-        })
+        let initialized = eval_tensor_plan_with_strict(
+            &initializer,
+            &mut reference_context,
+            |_| Some(value()),
+            &mut chelis_types::NativeServices::new(None),
+        )
         .unwrap();
-        let wrong_ordinal = eval_tensor_plan_with_strict(&consumer, &mut context(42), |_| {
-            Some(initialized[&initializer_root].clone())
-        })
+        let expected = eval_tensor_plan_with_strict(
+            &consumer,
+            &mut reference_context,
+            |_| Some(initialized[&initializer_root].clone()),
+            &mut chelis_types::NativeServices::new(None),
+        )
+        .unwrap();
+        let wrong_ordinal = eval_tensor_plan_with_strict(
+            &consumer,
+            &mut context(42),
+            |_| Some(initialized[&initializer_root].clone()),
+            &mut chelis_types::NativeServices::new(None),
+        )
         .unwrap();
         assert_ne!(
             expected, wrong_ordinal,
@@ -1713,15 +1857,23 @@ mod input_preparation_tests {
         let prepared = prepare_tensor_plan_inputs(&consumer, &before_provider, |name| {
             assert_eq!(name, "weights");
             calls += 1;
-            eval_tensor_plan_with_strict(&initializer, &mut execution_context, |_| Some(value()))
-                .map(|values| Some(values[&initializer_root].clone()))
+            eval_tensor_plan_with_strict(
+                &initializer,
+                &mut execution_context,
+                |_| Some(value()),
+                &mut chelis_types::NativeServices::new(None),
+            )
+            .map(|values| Some(values[&initializer_root].clone()))
         })
         .unwrap();
         assert_eq!(before_provider.state().counter, 5);
         assert_eq!(execution_context.state().counter, 6);
-        let actual = eval_tensor_plan_with_strict(&consumer, &mut execution_context, |name| {
-            prepared.get(name).cloned()
-        })
+        let actual = eval_tensor_plan_with_strict(
+            &consumer,
+            &mut execution_context,
+            |name| prepared.get(name).cloned(),
+            &mut chelis_types::NativeServices::new(None),
+        )
         .unwrap();
         assert_eq!(calls, 1);
         assert_eq!(actual, expected);
@@ -2237,8 +2389,10 @@ mod tests {
                                 frame.with_context(|context| context.state.counter += 1);
                             }
                             HostStage::Kernel { dag, outputs } => {
-                                let computed =
-                                    frame.eval_next_kernel(|name| values.get(name).cloned())?;
+                                let computed = frame.eval_next_kernel(
+                                    |name| values.get(name).cloned(),
+                                    &mut chelis_types::NativeServices::new(None),
+                                )?;
                                 for (name, root) in outputs.iter().zip(dag.roots()) {
                                     values.insert(name.clone(), computed[root].clone());
                                 }
@@ -2276,9 +2430,12 @@ mod tests {
         // Independently calculated f32 discriminator, pinned as stored bits.
         let plan = fixture(&[f32::from_bits(0x3dcccccd) as f64], 1, false);
         let input = f32::from_bits(0x3f800005);
-        let values = eval_tensor_plan_with_strict(&plan, &mut context(), |_| {
-            Some(TensorValue::from_vec(vec![1], vec![input as f64]))
-        })
+        let values = eval_tensor_plan_with_strict(
+            &plan,
+            &mut context(),
+            |_| Some(TensorValue::from_vec(vec![1], vec![input as f64])),
+            &mut chelis_types::NativeServices::new(None),
+        )
         .unwrap();
         let actual = values[&plan.dag_for_inspection().roots()[0]].to_f64_lossy_vec()[0] as f32;
         assert_eq!(actual.to_bits(), 0x3f8e38e9);
@@ -2290,9 +2447,12 @@ mod tests {
         context: &mut RandomExecutionContext,
         count: usize,
     ) -> Result<Vec<f64>, String> {
-        let values = eval_tensor_plan_with_strict(plan, context, |name| {
-            (name == "x").then(|| TensorValue::from_vec(vec![count], vec![1.0; count]))
-        })?;
+        let values = eval_tensor_plan_with_strict(
+            plan,
+            context,
+            |name| (name == "x").then(|| TensorValue::from_vec(vec![count], vec![1.0; count])),
+            &mut chelis_types::NativeServices::new(None),
+        )?;
         Ok(values[&plan.dag.roots()[0]].to_f64_lossy_vec())
     }
 
@@ -2317,9 +2477,12 @@ mod tests {
                 plan.dag.node_mut(node.id).unwrap().output_type.precision = prim;
             }
             plan.validate().unwrap();
-            let result = eval_tensor_plan_with_strict(&plan, &mut context(), |_| {
-                Some(TensorValue::from_vec(vec![2], vec![-0.0; 2]))
-            })
+            let result = eval_tensor_plan_with_strict(
+                &plan,
+                &mut context(),
+                |_| Some(TensorValue::from_vec(vec![2], vec![-0.0; 2])),
+                &mut chelis_types::NativeServices::new(None),
+            )
             .unwrap();
             let values = result[&plan.dag.roots()[0]].to_f64_lossy_vec();
             assert_eq!(
@@ -2438,9 +2601,12 @@ mod tests {
                 prim = prim.name(),
             );
             let expressions = chelis_deep::parser::parse_str(&source).unwrap();
-            let checked =
-                chelis_types::check_ir_program(&expressions, chelis_types::ProgramOrigin::Unlinked)
-                    .unwrap();
+            let checked = chelis_types::check_ir_program(
+                &expressions,
+                chelis_types::ProgramOrigin::Unlinked,
+                &mut chelis_types::NativeServices::new(None),
+            )
+            .unwrap();
             let (forward_and_ad, next) =
                 crate::lowering_runtime::with_native_lowering_runtime(|runtime| {
                     let session = crate::host::HostLoweringSession::new(&checked, runtime);
@@ -2507,6 +2673,7 @@ mod tests {
                             "weights" => Some(weights.clone()),
                             _ => None,
                         },
+                        &mut chelis_types::NativeServices::new(None),
                     )
                     .unwrap();
                     // Independent [05-RNG-1] seed42 ordinal0 mask is [drop, keep, drop, drop].
@@ -2567,9 +2734,12 @@ mod tests {
                 }
                 assert_eq!(state.state().seed, Some(42));
                 assert_eq!(state.state().counter, 1);
-                let values = eval_tensor_plan_with_strict(&next, &mut state, |name| {
-                    (name == "x").then(|| input.clone())
-                })
+                let values = eval_tensor_plan_with_strict(
+                    &next,
+                    &mut state,
+                    |name| (name == "x").then(|| input.clone()),
+                    &mut chelis_types::NativeServices::new(None),
+                )
                 .unwrap();
                 let result = &values[&next.dag.roots()[0]];
                 assert_eq!(result.prim(), prim);
@@ -2908,16 +3078,19 @@ mod tests {
             let mut context = context();
             context.state.counter = 17;
             let mut frame = companion.frame(&mut context).unwrap();
-            frame.eval_next_kernel(|_| None).unwrap();
+            frame
+                .eval_next_kernel(|_| None, &mut chelis_types::NativeServices::new(None))
+                .unwrap();
             assert_eq!(frame.frame.scopes, [ScopeId(0)]);
             frame.with_context(|context| {
                 assert_eq!(context.state.counter, 17);
                 context.state.counter += 1;
             });
             frame
-                .eval_next_kernel(|name| {
-                    (name == "x").then(|| TensorValue::from_vec(vec![32], vec![1.0; 32]))
-                })
+                .eval_next_kernel(
+                    |name| (name == "x").then(|| TensorValue::from_vec(vec![32], vec![1.0; 32])),
+                    &mut chelis_types::NativeServices::new(None),
+                )
                 .unwrap();
             frame.with_context(|context| assert_eq!(context.state.counter, 18));
         }

@@ -28,8 +28,12 @@ use super::*;
 /// (reductions, elementwise activations, anything that reads the
 /// to_tensor app's `type:` metadata) sees a sound shape instead of
 /// a `Dim::Wildcard`.
-pub(super) fn static_to_tensor_shape(arg: &deep::Expr, expected_rank: usize) -> Option<Vec<Dim>> {
-    let dims = walk_static_cons_chain_shape(arg)?;
+pub(super) fn static_to_tensor_shape(
+    arg: &deep::Expr,
+    expected_rank: usize,
+    stack: &mut StackBudget<'_>,
+) -> Option<Vec<Dim>> {
+    let dims = walk_static_cons_chain_shape(arg, stack)?;
     if dims.len() != expected_rank {
         return None;
     }
@@ -41,8 +45,22 @@ pub(super) fn static_to_tensor_shape(arg: &deep::Expr, expected_rank: usize) -> 
 /// reduces to a numeric atom (or recursively to another Cons chain
 /// of uniform length). `dims` is the rank-N shape (outermost axis
 /// first).
-pub(super) fn walk_static_cons_chain_shape(expr: &deep::Expr) -> Option<Vec<usize>> {
-    stack_guard!("walk_static_cons_chain_shape", expr, None);
+pub(super) fn walk_static_cons_chain_shape(
+    expr: &deep::Expr,
+    stack: &mut StackBudget<'_>,
+) -> Option<Vec<usize>> {
+    if stack.frame_exhausted("walk_static_cons_chain_shape", || expr.span_id()) {
+        return None;
+    }
+    let result = walk_static_cons_chain_shape_frame(expr, stack);
+    stack.exit_frame();
+    result
+}
+
+fn walk_static_cons_chain_shape_frame(
+    expr: &deep::Expr,
+    stack: &mut StackBudget<'_>,
+) -> Option<Vec<usize>> {
     let elements = collect_cons_chain_for_shape(expr)?;
     if elements.is_empty() {
         // Empty list at the outermost level has rank 1, size 0.
@@ -54,7 +72,7 @@ pub(super) fn walk_static_cons_chain_shape(expr: &deep::Expr) -> Option<Vec<usiz
     // If every element is a numeric leaf, this is a rank-1 axis.
     if elements
         .iter()
-        .all(|element| extract_numeric_leaf_for_shape(element).is_some())
+        .all(|element| extract_numeric_leaf_for_shape(element, stack).is_some())
     {
         return Some(vec![elements.len()]);
     }
@@ -63,7 +81,7 @@ pub(super) fn walk_static_cons_chain_shape(expr: &deep::Expr) -> Option<Vec<usiz
     // axes must agree.
     let nested: Vec<Vec<usize>> = elements
         .iter()
-        .map(|element| walk_static_cons_chain_shape(element))
+        .map(|element| walk_static_cons_chain_shape(element, stack))
         .collect::<Option<_>>()?;
     let inner_shape = nested.first()?.clone();
     if nested.iter().any(|shape| shape != &inner_shape) {
@@ -117,8 +135,22 @@ pub(super) fn collect_cons_chain_for_shape(expr: &deep::Expr) -> Option<Vec<&dee
 /// type-check and IR-lowering passes agree on what counts as a
 /// "static to_tensor leaf." We don't need the actual value here,
 /// only the static-recognition predicate.
-pub(super) fn extract_numeric_leaf_for_shape(expr: &deep::Expr) -> Option<()> {
-    stack_guard!("extract_numeric_leaf_for_shape", expr, None);
+pub(super) fn extract_numeric_leaf_for_shape(
+    expr: &deep::Expr,
+    stack: &mut StackBudget<'_>,
+) -> Option<()> {
+    if stack.frame_exhausted("extract_numeric_leaf_for_shape", || expr.span_id()) {
+        return None;
+    }
+    let result = extract_numeric_leaf_for_shape_frame(expr, stack);
+    stack.exit_frame();
+    result
+}
+
+fn extract_numeric_leaf_for_shape_frame(
+    expr: &deep::Expr,
+    stack: &mut StackBudget<'_>,
+) -> Option<()> {
     if matches!(
         expr,
         deep::Expr::Atom(
@@ -144,7 +176,7 @@ pub(super) fn extract_numeric_leaf_for_shape(expr: &deep::Expr) -> Option<()> {
             | deep::Expr::Atom(deep::Atom::Bool(_), _) => Some(()),
             _ => None,
         },
-        DeepTag::Cast => extract_numeric_leaf_for_shape(kids.first()?),
+        DeepTag::Cast => extract_numeric_leaf_for_shape(kids.first()?, stack),
         DeepTag::App => {
             // Issue #218 R1 HIGH-1 mirror: a surface negative
             // literal `-x` desugars to `(app (var neg) <inner>)`.
@@ -155,7 +187,7 @@ pub(super) fn extract_numeric_leaf_for_shape(expr: &deep::Expr) -> Option<()> {
             if !is_builtin_var(callee, "neg") {
                 return None;
             }
-            extract_numeric_leaf_for_shape(kids.get(1)?)
+            extract_numeric_leaf_for_shape(kids.get(1)?, stack)
         }
         _ => None,
     }
@@ -246,6 +278,7 @@ pub(super) fn classify_expand_size(
     env: &Env,
     adt_reg: &AdtRegistry,
     subst: &Subst,
+    stack: &mut StackBudget<'_>,
 ) -> SizeClass {
     classify_size_in(
         expr,
@@ -255,6 +288,7 @@ pub(super) fn classify_expand_size(
             subst,
             piped: &[],
         },
+        stack,
     )
 }
 
@@ -292,17 +326,33 @@ impl SizeCtx<'_> {
     }
 }
 
-fn classify_size_in(expr: &deep::Expr, ctx: &SizeCtx<'_>) -> SizeClass {
-    stack_guard!("classify_expand_size", expr, SizeClass::Unknown);
+fn classify_size_in(
+    expr: &deep::Expr,
+    ctx: &SizeCtx<'_>,
+    stack: &mut StackBudget<'_>,
+) -> SizeClass {
+    if stack.frame_exhausted("classify_expand_size", || expr.span_id()) {
+        return SizeClass::Unknown;
+    }
+    let result = classify_size_in_frame(expr, ctx, stack);
+    stack.exit_frame();
+    result
+}
+
+fn classify_size_in_frame(
+    expr: &deep::Expr,
+    ctx: &SizeCtx<'_>,
+    stack: &mut StackBudget<'_>,
+) -> SizeClass {
     let env = ctx.env;
     // The checker and lowerer share one checked static folder.
-    if fold_static_int_expr(expr, |name| env.static_size_value(name)).is_some() {
+    if fold_static_int_expr_with_stack(expr, |name| env.static_size_value(name), stack).is_some() {
         return SizeClass::Static;
     }
     // An inline `shape(t, axis)` read (possibly `cast`-wrapped) of an
     // in-scope tensor is the canonical shape source (`bias_broadcast`).
-    if let Some(operand) = shape_read_operand(expr) {
-        return if shape_operand_is_in_scope_tensor(operand, ctx) {
+    if let Some(operand) = shape_read_operand(expr, stack) {
+        return if shape_operand_is_in_scope_tensor(operand, ctx, stack) {
             SizeClass::ShapeSourced
         } else {
             // `shape(<non-tensor>, ...)` cannot supply an extent.
@@ -323,9 +373,9 @@ fn classify_size_in(expr: &deep::Expr, ctx: &SizeCtx<'_>) -> SizeClass {
     };
     match tag {
         // `cast(<inner>, ty)` — provenance is the inner expr's.
-        DeepTag::Cast => kids
-            .first()
-            .map_or(SizeClass::Unknown, |inner| classify_size_in(inner, ctx)),
+        DeepTag::Cast => kids.first().map_or(SizeClass::Unknown, |inner| {
+            classify_size_in(inner, ctx, stack)
+        }),
         DeepTag::Var => match symbolic_dim_ref_name(expr) {
             // Inside a pipe stage, the stage parameter stands for what the
             // stage receives, so it carries that value's class (chelis#569).
@@ -349,7 +399,7 @@ fn classify_size_in(expr: &deep::Expr, ctx: &SizeCtx<'_>) -> SizeClass {
             None => SizeClass::Unknown,
         },
         // Integer arithmetic: combine the operands' classes.
-        DeepTag::App => classify_arith_app(kids, ctx),
+        DeepTag::App => classify_arith_app(kids, ctx, stack),
         // chelis#569's `pipe` arm is gone: `chelis_deep::pipe::fold_pipe`
         // rewrites `v |> s1 |> s2` into `s2(s1(v))` over the checker's input,
         // so the canonical spelling of a shape read reaches this slot as the
@@ -398,7 +448,11 @@ fn classify_size_in(expr: &deep::Expr, ctx: &SizeCtx<'_>) -> SizeClass {
 /// chelis#1107 round 3: takes the children slice rather than a `&deep::List`,
 /// so the classifier works on either carrier (a stamped `Expr::Node` has no
 /// `&deep::List` to hand over).
-fn classify_arith_app(kids: &[deep::Expr], ctx: &SizeCtx<'_>) -> SizeClass {
+fn classify_arith_app(
+    kids: &[deep::Expr],
+    ctx: &SizeCtx<'_>,
+    stack: &mut StackBudget<'_>,
+) -> SizeClass {
     let Some(callee) = kids.first() else {
         return SizeClass::Sourceless;
     };
@@ -406,7 +460,11 @@ fn classify_arith_app(kids: &[deep::Expr], ctx: &SizeCtx<'_>) -> SizeClass {
     if !is_int_arith {
         return SizeClass::Sourceless;
     }
-    combine_arith_classes(kids[1..].iter().map(|arg| classify_size_in(arg, ctx)))
+    combine_arith_classes(
+        kids[1..]
+            .iter()
+            .map(|arg| classify_size_in(arg, ctx, stack)),
+    )
 }
 
 /// The integer-arithmetic builtins the provenance walk follows.
@@ -460,18 +518,34 @@ fn combine_arith_classes(classes: impl Iterator<Item = SizeClass>) -> SizeClass 
 /// (chelis#397/#469). The check-layer analog of the IR layer's
 /// `shape_app_operand_axis`. The axis is not validated here (the operand's
 /// presence is what proves a tensor source); a runtime axis is fine.
-pub(super) fn shape_read_operand(expr: &deep::Expr) -> Option<&deep::Expr> {
-    stack_guard!("shape_read_operand", expr, None);
+pub(super) fn shape_read_operand<'e>(
+    expr: &'e deep::Expr,
+    stack: &mut StackBudget<'_>,
+) -> Option<&'e deep::Expr> {
+    if stack.frame_exhausted("shape_read_operand", || expr.span_id()) {
+        return None;
+    }
+    let result = shape_read_operand_frame(expr, stack);
+    stack.exit_frame();
+    result
+}
+
+fn shape_read_operand_frame<'e>(
+    expr: &'e deep::Expr,
+    stack: &mut StackBudget<'_>,
+) -> Option<&'e deep::Expr> {
     // chelis#1107: carrier-preserving read; a `List`-only destructure never
     // recognized a stamped `shape(...)` read.
     let (tag, _, kids) = stamped_parts(expr)?;
     // Strip outer `cast(..., ty)` wrappers (tag form and app form).
     if tag == DeepTag::Cast {
-        return kids.first().and_then(shape_read_operand);
+        return kids
+            .first()
+            .and_then(|expr| shape_read_operand(expr, stack));
     }
     let callee = kids.first()?;
     if tag == DeepTag::App && is_builtin_var(callee, "cast") {
-        return kids.get(1).and_then(shape_read_operand);
+        return kids.get(1).and_then(|expr| shape_read_operand(expr, stack));
     }
     if tag == DeepTag::App && is_builtin_var(callee, "shape") {
         // `(app {} (var shape) <operand> <axis>)`.
@@ -484,8 +558,12 @@ pub(super) fn shape_read_operand(expr: &deep::Expr) -> Option<&deep::Expr> {
 /// tensor (chelis#397/#469). The operand is a bare `var` (`shape(x, 0)`) or
 /// a borrow of one (`shape(&x, 0)`); either way the named binding must have
 /// a tensor type in `env`. A non-tensor operand cannot supply an extent.
-fn shape_operand_is_in_scope_tensor(operand: &deep::Expr, ctx: &SizeCtx<'_>) -> bool {
-    shape_operand_type(operand, ctx)
+fn shape_operand_is_in_scope_tensor(
+    operand: &deep::Expr,
+    ctx: &SizeCtx<'_>,
+    stack: &mut StackBudget<'_>,
+) -> bool {
+    shape_operand_type(operand, ctx, stack)
         .as_ref()
         .is_some_and(type_is_tensor)
 }
@@ -506,8 +584,24 @@ fn shape_operand_is_in_scope_tensor(operand: &deep::Expr, ctx: &SizeCtx<'_>) -> 
 /// any of these, nested to any depth. A projection resolves only on a
 /// single-record-variant ADT with named fields, which is the only shape
 /// `infer_access` itself projects.
-fn shape_operand_type(operand: &deep::Expr, ctx: &SizeCtx<'_>) -> Option<Type> {
-    stack_guard!("shape_operand_type", operand, None);
+fn shape_operand_type(
+    operand: &deep::Expr,
+    ctx: &SizeCtx<'_>,
+    stack: &mut StackBudget<'_>,
+) -> Option<Type> {
+    if stack.frame_exhausted("shape_operand_type", || operand.span_id()) {
+        return None;
+    }
+    let result = shape_operand_type_frame(operand, ctx, stack);
+    stack.exit_frame();
+    result
+}
+
+fn shape_operand_type_frame(
+    operand: &deep::Expr,
+    ctx: &SizeCtx<'_>,
+    stack: &mut StackBudget<'_>,
+) -> Option<Type> {
     if let Some(name) = symbolic_dim_ref_name(operand) {
         // A pipe stage's parameter denotes the upstream value (chelis#569).
         if let Some(param) = ctx.piped(name) {
@@ -521,14 +615,14 @@ fn shape_operand_type(operand: &deep::Expr, ctx: &SizeCtx<'_>) -> Option<Type> {
     if tag == DeepTag::Borrow {
         return kids
             .first()
-            .and_then(|inner| shape_operand_type(inner, ctx));
+            .and_then(|inner| shape_operand_type(inner, ctx, stack));
     }
     if tag == DeepTag::Access {
         // `(access {} target field)`: the field's declared type, read off the
         // single record variant of the target's ADT.
         let target = kids.first()?;
         let field = kids.get(1).and_then(symbol_name)?;
-        let mut resolved = shape_operand_type(target, ctx)?;
+        let mut resolved = shape_operand_type(target, ctx, stack)?;
         while let Type::Ref(inner) = resolved {
             resolved = *inner;
         }
@@ -544,7 +638,9 @@ fn shape_operand_type(operand: &deep::Expr, ctx: &SizeCtx<'_>) -> Option<Type> {
     }
     let callee = kids.first()?;
     if tag == DeepTag::App && is_builtin_var(callee, "borrow") {
-        return kids.get(1).and_then(|inner| shape_operand_type(inner, ctx));
+        return kids
+            .get(1)
+            .and_then(|inner| shape_operand_type(inner, ctx, stack));
     }
     None
 }

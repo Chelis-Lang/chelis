@@ -27,9 +27,14 @@ fn check_library_with_linearity(library_src: &str) -> chelis_types::CheckedProgr
     // Library leg: full IR check check, then linearity. Mirrors what the
     // production pipeline does before stashing a CompiledContext.
     let library_deep = parse_core_fixture(library_src);
-    let checked = check_ir_program(&library_deep, chelis_types::ProgramOrigin::Unlinked)
-        .unwrap_or_else(|e| panic!("library IR check check failed: {:?}", e.errors));
-    check_linearity(&checked).expect("library linearity must be clean")
+    let checked = check_ir_program(
+        &library_deep,
+        chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
+    )
+    .unwrap_or_else(|e| panic!("library IR check check failed: {:?}", e.errors));
+    check_linearity(&checked, &mut chelis_types::NativeServices::new(None))
+        .expect("library linearity must be clean")
 }
 
 fn check_new_with_context(
@@ -40,12 +45,23 @@ fn check_new_with_context(
     let ctx = build_type_env_from_library(
         &parse_core_fixture(library_src),
         chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
     )
     .expect("library context build OK");
     let new_deep = parse_core_fixture(new_src);
-    let new_checked = check_ir_with_context(&ctx, &new_deep, chelis_types::ProgramOrigin::Unlinked)
-        .unwrap_or_else(|e| panic!("with-context IR check failed: {:?}", e.errors));
-    check_linearity_with_context(&library_program, &new_checked).map(|_| ())
+    let new_checked = check_ir_with_context(
+        &ctx,
+        &new_deep,
+        chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
+    )
+    .unwrap_or_else(|e| panic!("with-context IR check failed: {:?}", e.errors));
+    check_linearity_with_context(
+        &library_program,
+        &new_checked,
+        &mut chelis_types::NativeServices::new(None),
+    )
+    .map(|_| ())
 }
 
 fn check_monolithic_combined(
@@ -54,9 +70,13 @@ fn check_monolithic_combined(
 ) -> Result<(), Vec<chelis_types::errors::CheckError>> {
     let combined_src = format!("{library_src}\n{new_src}");
     let combined_deep = parse_core_fixture(&combined_src);
-    let checked = check_typed_program(&combined_deep, chelis_types::ProgramOrigin::Unlinked)
-        .unwrap_or_else(|e| panic!("monolithic IR check failed: {:?}", e.errors));
-    check_linearity(&checked).map(|_| ())
+    let checked = check_typed_program(
+        &combined_deep,
+        chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
+    )
+    .unwrap_or_else(|e| panic!("monolithic IR check failed: {:?}", e.errors));
+    check_linearity(&checked, &mut chelis_types::NativeServices::new(None)).map(|_| ())
 }
 
 // ── Subtle requirement #1: library tensor params don't consume new-code ──
@@ -147,17 +167,30 @@ fn no_leak_between_snippets_against_same_library() {
     let lib_deep = parse_core_fixture(include_str!(
         "fixtures/core/tests/linearity_with_context/no_leak_between_snippets_against_same_library_157.deep"
     ));
-    let ctx = build_type_env_from_library(&lib_deep, chelis_types::ProgramOrigin::Unlinked)
-        .expect("ctx OK");
+    let ctx = build_type_env_from_library(
+        &lib_deep,
+        chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
+    )
+    .expect("ctx OK");
 
     // Snippet A: consuming fan-out — accepted and handled later by Copy
     // insertion during lowering.
     let bad_deep = parse_core_fixture(include_str!(
         "fixtures/core/tests/linearity_with_context/no_leak_between_snippets_against_same_library_163.deep"
     ));
-    let bad_checked = check_ir_with_context(&ctx, &bad_deep, chelis_types::ProgramOrigin::Unlinked)
-        .expect("IR check clean");
-    let fanout_res = check_linearity_with_context(&library_program, &bad_checked);
+    let bad_checked = check_ir_with_context(
+        &ctx,
+        &bad_deep,
+        chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
+    )
+    .expect("IR check clean");
+    let fanout_res = check_linearity_with_context(
+        &library_program,
+        &bad_checked,
+        &mut chelis_types::NativeServices::new(None),
+    );
     assert!(
         fanout_res.is_ok(),
         "source fan-out snippet must be accepted: {:?}",
@@ -168,10 +201,18 @@ fn no_leak_between_snippets_against_same_library() {
     let good_deep = parse_core_fixture(include_str!(
         "fixtures/core/tests/linearity_with_context/no_leak_between_snippets_against_same_library_180.deep"
     ));
-    let good_checked =
-        check_ir_with_context(&ctx, &good_deep, chelis_types::ProgramOrigin::Unlinked)
-            .expect("IR check clean");
-    let good_res = check_linearity_with_context(&library_program, &good_checked);
+    let good_checked = check_ir_with_context(
+        &ctx,
+        &good_deep,
+        chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
+    )
+    .expect("IR check clean");
+    let good_res = check_linearity_with_context(
+        &library_program,
+        &good_checked,
+        &mut chelis_types::NativeServices::new(None),
+    );
     assert!(
         good_res.is_ok(),
         "clean snippet must succeed; checker state must not leak between calls: {:?}",
@@ -552,10 +593,18 @@ fn empty_library_matches_monolithic() {
         "fixtures/core/tests/linearity_with_context/empty_library_matches_monolithic_631.deep"
     ));
     let ctx_empty = chelis_types::TypeEnv::empty();
-    let new_checked =
-        check_ir_with_context(&ctx_empty, &new_deep, chelis_types::ProgramOrigin::Unlinked)
-            .expect("IR check clean");
-    let res = check_linearity_with_context(&empty_lib_program, &new_checked);
+    let new_checked = check_ir_with_context(
+        &ctx_empty,
+        &new_deep,
+        chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
+    )
+    .expect("IR check clean");
+    let res = check_linearity_with_context(
+        &empty_lib_program,
+        &new_checked,
+        &mut chelis_types::NativeServices::new(None),
+    );
     assert!(
         res.is_ok(),
         "empty-library context must accept a clean snippet"

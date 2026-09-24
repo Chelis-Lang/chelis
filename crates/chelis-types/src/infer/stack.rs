@@ -1,8 +1,15 @@
 //! Native-stack budget and recursion depth protection for the recursive checker.
 //!
-//! Extracted verbatim from the former `infer.rs` monolith by the openspec
+//! Extracted from the former `infer.rs` monolith by the openspec
 //! `modularize-type-inference` change. Logic, statement order, and
 //! diagnostic order are unchanged.
+//!
+//! All state is explicit. The native probes (remaining stack, fallback depth,
+//! stack growth) are primitives on [`NativeServices`]; the first recorded bail
+//! and the check-unit scope depth live in a [`StackBailRecord`] owned by the
+//! invocation's `DiagnosticSink`. Every guarded recursive walker is a thin
+//! wrapper that enters one frame through [`StackBudget::frame_exhausted`],
+//! runs its body, and exits the frame explicitly on every return path.
 
 use super::*;
 
@@ -48,7 +55,7 @@ use super::*;
 /// NOT a red-zone shortfall: the tests dropped their 4000-deep chain's
 /// unguarded drop glue on the 1 MiB worker itself; measured empirically,
 /// the guarded walkers still bail comfortably inside 128 KiB.)
-pub(super) const STACK_RED_ZONE_BYTES: usize = 128 * 1024;
+pub(crate) const STACK_RED_ZONE_BYTES: usize = 128 * 1024;
 
 /// Fallback recursion-depth cap used *only* when
 /// `stacker::remaining_stack()` returns `None` (the platform cannot report
@@ -61,10 +68,11 @@ pub(super) const STACK_RED_ZONE_BYTES: usize = 128 * 1024;
 /// nests in the low hundreds at most -- but legitimate-deep programs on a
 /// `None` platform are the price of having no byte budget there; the
 /// primary, non-fallback path imposes no such depth ceiling). The
-/// `RecursionDepthGuard` RAII counter exists to feed this fallback.
-pub(super) const FALLBACK_MAX_DEPTH: usize = 20;
+/// explicit depth kept by `NativeServices::enter_frame`/`exit_frame` exists
+/// to feed this fallback.
+pub(crate) const FALLBACK_MAX_DEPTH: usize = 20;
 
-/// Size of the fresh stack segment `with_grown_stack` allocates for the whole
+/// Size of the fresh stack segment `NativeServices::with_grown_stack` allocates for the whole
 /// check pipeline. 512 MiB comfortably clears the depth the real reef-linked
 /// Shoals pricer reaches (its deepest desugared `app` body nests in the low
 /// thousands -- a finite source property: the reef linker concatenates each
@@ -79,248 +87,113 @@ pub(super) const FALLBACK_MAX_DEPTH: usize = 20;
 /// are demand-zeroed, so a shallow check that never descends deep only commits
 /// the few pages it actually touches -- the 512 MiB is reserved address space,
 /// not resident memory.
-pub(super) const GROW_SEGMENT_BYTES: usize = 512 * 1024 * 1024;
+pub(crate) const GROW_SEGMENT_BYTES: usize = 512 * 1024 * 1024;
 
-thread_local! {
-    /// Test-only per-thread override (in bytes) for the `with_grown_stack`
-    /// segment size. Reserved for the recursion-depth-guard test corpus, which
-    /// must still exercise the per-site `stack_guard!` SAFETY NET: with the
-    /// production 512 MiB segment no realistic test depth exhausts the stack,
-    /// so the safety-net tests shrink the segment (via `set_grow_segment_bytes_for_test`)
-    /// to a few MiB and drive a chain deep enough to overflow it, proving the
-    /// guard still converts the overflow into a located diagnostic rather than
-    /// a SIGSEGV.
-    ///
-    /// A thread-local (not a process-global env var) is used deliberately: the
-    /// override and the `grow` it governs run on the SAME check thread, so a
-    /// concurrent check on another thread -- another test in the same process
-    /// under `cargo test`, or a real parallel compile -- can never observe a
-    /// shrunk segment. `None` means "use the production `GROW_SEGMENT_BYTES`".
-    static GROW_SEGMENT_OVERRIDE: Cell<Option<usize>> = const { Cell::new(None) };
-}
-
-/// Install a test-only per-thread `with_grown_stack` segment size. Call from a
-/// test worker thread BEFORE invoking the checker on that thread. Not for
-/// production use; a too-small value makes a legitimately-deep program bail
-/// where it would otherwise check.
-#[doc(hidden)]
-pub fn set_grow_segment_bytes_for_test(bytes: usize) {
-    GROW_SEGMENT_OVERRIDE.with(|cell| cell.set(Some(bytes)));
-}
-
-/// Clear the test-only grown-segment override on the current thread.
-#[doc(hidden)]
-pub fn reset_grow_segment_bytes_for_test() {
-    GROW_SEGMENT_OVERRIDE.with(|cell| cell.set(None));
-}
-
-pub(super) fn grow_segment_bytes() -> usize {
-    GROW_SEGMENT_OVERRIDE
-        .with(Cell::get)
-        .filter(|&n| n > 0)
-        .unwrap_or(GROW_SEGMENT_BYTES)
-}
-
-/// Run the whole check pipeline `f` on a freshly-allocated stack segment
-/// (`GROW_SEGMENT_BYTES`, or a `CHELIS_GROW_SEGMENT_BYTES` test override).
-/// Wrap every PUBLIC check entry in this: a single grow at the boundary covers
-/// EVERY recursive pass that descends the `deep::Expr` tree (inference, the
-/// validate / annotate walkers, the deep `Expr` clones the pipeline makes, and
-/// the implicit drop of the result), because they all run inside this one
-/// closure on the grown segment. This is the WI-1 follow-up that lets a
-/// legitimately deep-but-finite program (a reef-linked pricer) check
-/// end-to-end instead of tripping a per-site `stack_guard!` partway through one
-/// of those passes.
+/// First stack-exhaustion bail recorded during the current check unit, plus
+/// the check-unit scope depth. Owned by the invocation's `DiagnosticSink`.
 ///
-/// We use `stacker::grow` (always allocate a fresh segment) rather than
-/// `stacker::maybe_grow` (allocate only when near exhaustion) on purpose: a
-/// check typically starts on a fresh, near-empty thread stack, so `maybe_grow`
-/// would see ample headroom and never grow -- the stack only nears exhaustion
-/// many frames INTO the descent, by which point we are deep inside the
-/// recursive walkers, far from this boundary, with no further grow site. One
-/// of those walkers' per-site `stack_guard!`s would then fire first. Allocating
-/// the big segment up front guarantees the headroom is in place before the
-/// descent begins. The per-site guards remain the safety net for input deeper
-/// than even this segment can hold (covered-or-rejected).
-pub(super) fn with_grown_stack<R>(f: impl FnOnce() -> R) -> R {
-    stacker::grow(grow_segment_bytes(), f)
-}
-
-/// Public wrapper over [`with_grown_stack`] for callers OUTSIDE this crate
-/// (the CLI `chelis check` entry) that drive deep `chelis_deep::Expr` work the
-/// chelis-types check entries do not themselves wrap: the reef/deep loader, the
-/// `prepared.decls.clone()` of the linked program, the desugarer, the fitness
-/// structure walk, `chelis_deep::validate`, and the final drop of the deep
-/// tree. Wrapping the whole CLI check operation in this runs ALL of that on one
-/// grown segment, so a deeply-nested but finite reef-linked program (the Shoals
-/// pricer) cannot SIGSEGV in a derived `Clone`/`Drop`/validator outside the
-/// type checker. The per-entry grows inside this crate still apply to their own
-/// recursion when called directly (eval, build, lsp), so nesting this around
-/// them is at worst a redundant -- not incorrect -- second grow.
-pub fn run_on_grown_stack<R>(f: impl FnOnce() -> R) -> R {
-    with_grown_stack(f)
-}
-
-thread_local! {
-    /// Current pipeline native-recursion depth on this thread, maintained
-    /// by `RecursionDepthGuard`. Only consulted on platforms where
-    /// `stacker::remaining_stack()` returns `None`; on the normal path the
-    /// byte budget governs and this counter is merely incremented and
-    /// decremented. Thread-local so concurrent checks on different threads
-    /// (e.g. nextest workers) do not share or corrupt the counter.
-    static RECURSION_DEPTH: Cell<usize> = const { Cell::new(0) };
-}
-
-/// RAII recursion-depth counter. Increments `RECURSION_DEPTH` on
-/// construction and decrements it on drop, so the count tracks live native
-/// recursion depth even across the early-return paths inside the guarded
-/// walkers. Used by `stack_guard_tripped` as the `None`-platform
-/// fallback. Construct one at the top of every guarded recursive walker.
-pub(super) struct RecursionDepthGuard;
-
-impl RecursionDepthGuard {
-    pub(super) fn enter() -> Self {
-        RECURSION_DEPTH.with(|cell| cell.set(cell.get() + 1));
-        RecursionDepthGuard
-    }
-
-    pub(super) fn depth() -> usize {
-        RECURSION_DEPTH.with(Cell::get)
-    }
-}
-
-impl Drop for RecursionDepthGuard {
-    fn drop(&mut self) {
-        RECURSION_DEPTH.with(|cell| cell.set(cell.get().saturating_sub(1)));
-    }
-}
-
-thread_local! {
-    /// First stack-exhaustion bail recorded during the current check unit,
-    /// as `(walker_site, optional_span_id)`. Set (first-write-wins) by
-    /// `stack_guard_tripped` whenever any guarded recursive walker bails on
-    /// low stack; reset to `None` when the OUTERMOST `StackExhaustionScope`
-    /// is entered and drained into the check's error vector before its
-    /// empty-errors gate. This is the soundness funnel: a stack bail that
-    /// merely stopped a no-error walker recursing (so it could not push its
-    /// own diagnostic) must STILL turn the whole check into a hard, located
-    /// failure rather than a silent green or partial result
-    /// (covered-or-rejected: exhaustion -> rejected, never swallowed).
-    /// Thread-local so concurrent checks on different threads do not
-    /// cross-contaminate.
-    pub(super) static STACK_EXHAUSTED: RefCell<Option<(String, Option<String>)>> = const { RefCell::new(None) };
-
-    /// Re-entrancy depth of `StackExhaustionScope` on this thread. The flag
-    /// is reset only when this transitions 0 -> 1 (the outermost scope), so
-    /// an inner public entry (e.g. `check_typed_program` -> `infer_program`)
+/// The bail is `(walker_site, optional_span_id)`, set first-write-wins by
+/// [`StackBudget::frame_exhausted`] whenever any guarded recursive walker
+/// bails on low stack; reset when the OUTERMOST check-unit scope is entered
+/// and drained into the check's diagnostics before its empty-errors gate.
+/// This is the soundness funnel: a stack bail that merely stopped a no-error
+/// walker recursing (so it could not push its own diagnostic) must STILL turn
+/// the whole check into a hard, located failure rather than a silent green or
+/// partial result (covered-or-rejected: exhaustion -> rejected, never
+/// swallowed).
+#[derive(Debug, Default)]
+pub(crate) struct StackBailRecord {
+    first: Option<(String, Option<String>)>,
+    /// Re-entrancy depth of check-unit scopes. The bail is reset only when
+    /// this transitions 0 -> 1 (the outermost scope), so an inner check unit
     /// does not wipe a bail the outer pass already recorded.
-    pub(super) static STACK_SCOPE_DEPTH: Cell<usize> = const { Cell::new(0) };
+    scope_depth: usize,
 }
 
-/// Marks a check unit for stack-exhaustion tracking. Construct one at the
-/// top of every public check entry. Entering the OUTERMOST scope resets the
-/// flag (so a prior exhausted run on a pooled thread cannot leak in);
-/// nested scopes are no-ops for the reset. Call `drain_into` after the
-/// pipeline to surface any recorded bail as a hard located error.
-pub(super) struct StackExhaustionScope;
-
-impl StackExhaustionScope {
-    pub(super) fn enter() -> Self {
-        STACK_SCOPE_DEPTH.with(|d| {
-            let depth = d.get();
-            if depth == 0 {
-                STACK_EXHAUSTED.with(|cell| *cell.borrow_mut() = None);
-            }
-            d.set(depth + 1);
-        });
-        StackExhaustionScope
+impl StackBailRecord {
+    /// Enter a check unit. Entering the OUTERMOST scope resets the bail;
+    /// nested scopes are no-ops for the reset. Pair with [`Self::exit_scope`]
+    /// on every return path.
+    pub(crate) fn enter_scope(&mut self) {
+        if self.scope_depth == 0 {
+            self.first = None;
+        }
+        self.scope_depth += 1;
     }
 
-    /// If a stack bail was recorded during this scope, push the located
-    /// failure diagnostic into `errors`. Idempotent: takes the flag, so a
-    /// second call is a no-op. Call after the whole pipeline has run and
-    /// before the empty-errors gate, so exhaustion always surfaces as a hard
-    /// check failure.
-    pub(super) fn drain_into(&self, errors: &mut impl DiagnosticOutput) {
-        if let Some((site, span_id)) = STACK_EXHAUSTED.with(|cell| cell.borrow_mut().take()) {
-            errors.push(stack_depth_error(&site, span_id.as_deref()));
+    /// Leave a check unit entered with [`Self::enter_scope`].
+    pub(crate) fn exit_scope(&mut self) {
+        self.scope_depth = self.scope_depth.saturating_sub(1);
+    }
+
+    /// Take the recorded bail, if any, as the located failure diagnostic.
+    /// Idempotent: a second call returns `None`.
+    pub(crate) fn take_error(&mut self) -> Option<CheckError> {
+        self.first
+            .take()
+            .map(|(site, span_id)| stack_depth_error(&site, span_id.as_deref()))
+    }
+
+    /// The recorded bail, for tests that observe the funnel directly.
+    #[cfg(test)]
+    pub(crate) fn recorded(&self) -> Option<&(String, Option<String>)> {
+        self.first.as_ref()
+    }
+
+    fn record(&mut self, site: &str, span_id: Option<&str>) {
+        if self.first.is_none() {
+            self.first = Some((site.to_string(), span_id.map(str::to_string)));
         }
     }
 }
 
-impl Drop for StackExhaustionScope {
-    fn drop(&mut self) {
-        STACK_SCOPE_DEPTH.with(|d| d.set(d.get().saturating_sub(1)));
-    }
+/// The explicit state one guarded recursive walker needs: the invocation's
+/// native services (stack probe and fallback depth) and the sink-owned bail
+/// record. Borrowed from a `DiagnosticSink` via `DiagnosticSink::stack`.
+pub(crate) struct StackBudget<'a> {
+    native: &'a mut NativeServices,
+    record: &'a mut StackBailRecord,
 }
 
-/// True when the current native stack is too close to exhaustion to safely
-/// recurse one more pipeline frame; when it returns `true` it has also
-/// recorded the bail (first-write-wins) into `STACK_EXHAUSTED` so the check
-/// entry boundary turns it into a hard located failure even for walkers
-/// that carry no error vector and can only `return`.
-///
-/// Primary path: `true` when `stacker::remaining_stack()` reports fewer than
-/// `STACK_RED_ZONE_BYTES` remaining. Fallback path (`remaining_stack()` is
-/// `None`, i.e. the platform cannot report remaining stack): `true` when the
-/// `RecursionDepthGuard` depth exceeds `FALLBACK_MAX_DEPTH`, so a `None`
-/// platform is never worse off than a pure static-depth guard. Callers must
-/// already hold a live `RecursionDepthGuard` so the fallback depth reflects
-/// this call.
-///
-/// `span_id` is a closure, not an already-resolved `Option<&str>`, so the
-/// span lookup -- a linear scan of the node's metadata map -- runs ONLY on
-/// the rare exhausted branch and never on the per-node type-checker hot path.
-pub(super) fn stack_guard_tripped<'a>(
-    site: &str,
-    span_id: impl FnOnce() -> Option<&'a str>,
-) -> bool {
-    let exceeded = match stacker::remaining_stack() {
-        Some(remaining) => remaining < STACK_RED_ZONE_BYTES,
-        None => RecursionDepthGuard::depth() > FALLBACK_MAX_DEPTH,
-    };
-    if exceeded {
-        let span_id = span_id();
-        STACK_EXHAUSTED.with(|cell| {
-            let mut slot = cell.borrow_mut();
-            if slot.is_none() {
-                *slot = Some((site.to_string(), span_id.map(str::to_string)));
-            }
-        });
+impl<'a> StackBudget<'a> {
+    pub(crate) fn new(native: &'a mut NativeServices, record: &'a mut StackBailRecord) -> Self {
+        Self { native, record }
     }
-    exceeded
-}
 
-/// Stack-recursion guard for one recursive AST walker. Place at the top of
-/// every self-recursive walker that descends a `deep::Expr` tree:
-///
-/// ```ignore
-/// stack_guard!("walker_name", expr, /* bail value */ false);
-/// ```
-///
-/// It constructs a live `RecursionDepthGuard` for the current frame (so the
-/// `None`-platform depth fallback is accurate), then, if the stack budget is
-/// exhausted, records the located bail in `STACK_EXHAUSTED` (so the check
-/// entry boundary fails hard -- never a silent partial result) and returns
-/// the supplied neutral bail value, stopping the recursion before the frame
-/// that would overflow. The bail value is whatever "stop / nothing found"
-/// means for the walker's return type (`false`, `None`, `()` via no third
-/// argument, an identity `expr.clone()`, etc.). `$expr` must be a
-/// `&deep::Expr` (or anything with a `span_id()` method) so the diagnostic
-/// can name where the depth is.
-macro_rules! stack_guard {
-    ($site:expr, $expr:expr, $bail:expr) => {
-        let _stack_depth_guard = RecursionDepthGuard::enter();
-        if stack_guard_tripped($site, || $expr.span_id()) {
-            return $bail;
+    /// Enter one guarded frame and probe the stack budget.
+    ///
+    /// Returns `false` when the walker may recurse; it must then call
+    /// [`Self::exit_frame`] on every return path after its body. Returns
+    /// `true` (with the frame already exited) when the native stack is too
+    /// close to exhaustion: the bail has been recorded first-write-wins, and
+    /// the walker must return its neutral bail value without recursing.
+    ///
+    /// `span_id` is a closure, not an already-resolved `Option<&str>`, so the
+    /// span lookup -- a linear scan of the node's metadata map -- runs ONLY on
+    /// the rare exhausted branch and never on the per-node hot path.
+    pub(crate) fn frame_exhausted<'e>(
+        &mut self,
+        site: &str,
+        span_id: impl FnOnce() -> Option<&'e str>,
+    ) -> bool {
+        self.native.enter_frame();
+        if self.native.stack_exhausted() {
+            self.record.record(site, span_id());
+            self.native.exit_frame();
+            return true;
         }
-    };
-    ($site:expr, $expr:expr) => {
-        let _stack_depth_guard = RecursionDepthGuard::enter();
-        if stack_guard_tripped($site, || $expr.span_id()) {
-            return;
-        }
-    };
+        false
+    }
+
+    /// Leave a frame entered by a non-exhausted [`Self::frame_exhausted`].
+    pub(crate) fn exit_frame(&mut self) {
+        self.native.exit_frame();
+    }
+
+    /// The invocation's native services.
+    pub(crate) fn native(&mut self) -> &mut NativeServices {
+        self.native
+    }
 }
 
 /// Build the typed diagnostic emitted when the check fails because a

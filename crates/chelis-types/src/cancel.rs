@@ -7,28 +7,25 @@
 //! slow eval abandonable, the eval lanes have to be able to notice a
 //! cancellation request and unwind on their own.
 //!
-//! The token remains a per-thread native runtime service with a
-//! restore-on-drop guard: nested or re-entrant evaluations cannot leak a
-//! token into an outer scope. Unlike immutable [`crate::ProgramOrigin`],
+//! The token is handed to one invocation explicitly, inside
+//! [`crate::NativeServices`]; there is no per-thread installation. Nested or
+//! concurrent invocations each carry their own services, so a token cannot
+//! leak into an unrelated scope. Unlike immutable [`crate::ProgramOrigin`],
 //! cancellation can change while a check is running.
 //!
 //! chelis#930 extended the same token to the **front end**. Parse, desugar,
 //! type-check and lowering have no node visit to poll at, so they poll at
 //! phase boundaries and at top-level-declaration boundaries inside the passes
 //! that scale with declaration count. Nothing new was introduced for that: the
-//! token, the guard, and the error kind are the ones below.
+//! token and the error kind are the ones below.
 //!
-//! Cost discipline: consumers are expected to call [`current_cancel_token`] **once**
-//! at context construction and cache the `Arc` for the duration of the
-//! evaluation, so the hot path is one relaxed atomic load behind an `Option`
-//! check rather than a TLS lookup per node visit. [`CancelToken::is_cancelled`]
-//! uses `Ordering::Relaxed` deliberately: the flag is a single-writer,
-//! many-reader hint whose only requirement is eventual visibility, and losing
-//! a race by one node visit is immaterial when the alternative is minutes.
-//! [`cancellation_requested`] is the uncached convenience form, for the
-//! handful-of-calls-per-compile phase boundaries only.
+//! Cost discipline: every polling site calls
+//! [`crate::NativeServices::cancellation_observed`], which is one relaxed
+//! atomic load behind an `Option` check. [`CancelToken::is_cancelled`] uses
+//! `Ordering::Relaxed` deliberately: the flag is a single-writer, many-reader
+//! hint whose only requirement is eventual visibility, and losing a race by one
+//! node visit is immaterial when the alternative is minutes.
 
-use std::cell::RefCell;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -85,50 +82,6 @@ impl CancelToken {
     }
 }
 
-thread_local! {
-    /// The token installed for the current thread, if any. `None` — the
-    /// default — means compiler work on this thread is not cancellable, which
-    /// is the behaviour every existing caller gets for free.
-    static CANCEL_TOKEN: RefCell<Option<CancelToken>> = const { RefCell::new(None) };
-}
-
-/// Install `token` for the current thread for the duration of the returned
-/// guard, restoring the previous value on drop.
-///
-/// Call this on the thread that will run the evaluation, before entering it.
-/// The guard's restore-on-drop is what makes nesting safe: an inner eval that
-/// installs its own token cannot strand it in the outer scope.
-#[must_use = "cancellation is uninstalled when the guard drops"]
-pub fn install_cancel_token(token: CancelToken) -> CancelTokenGuard {
-    let previous = CANCEL_TOKEN.with(|cell| cell.replace(Some(token)));
-    CancelTokenGuard { previous }
-}
-
-/// The token installed for the current thread, if any.
-///
-/// Intended to be called once per evaluation context and cached; see the
-/// module docs on cost.
-pub fn current_cancel_token() -> Option<CancelToken> {
-    CANCEL_TOKEN.with(|cell| cell.borrow().clone())
-}
-
-/// Whether the current thread has an installed token that has been cancelled.
-///
-/// One TLS borrow plus one relaxed load, with no `Arc` clone. That budget is
-/// right for the *coarse* polling sites added by chelis#930 — front-end phase
-/// boundaries, where the check runs a handful of times per compile — and wrong
-/// for anything iterating. A loop over declarations should hoist
-/// [`current_cancel_token`] above the loop and poll
-/// [`CancelToken::is_cancelled`] on the cached handle instead, the same
-/// discipline `EvalContext` follows for node visits.
-pub fn cancellation_requested() -> bool {
-    CANCEL_TOKEN.with(|cell| {
-        cell.borrow()
-            .as_ref()
-            .is_some_and(CancelToken::is_cancelled)
-    })
-}
-
 /// The hard failure a front-end pass reports when it abandons its walk
 /// because cancellation was requested (chelis#930).
 ///
@@ -151,18 +104,6 @@ pub fn cancellation_check_error() -> CheckError {
     )
 }
 
-/// Restores the previously installed token when dropped.
-pub struct CancelTokenGuard {
-    previous: Option<CancelToken>,
-}
-
-impl Drop for CancelTokenGuard {
-    fn drop(&mut self) {
-        let previous = self.previous.take();
-        CANCEL_TOKEN.with(|cell| *cell.borrow_mut() = previous);
-    }
-}
-
 /// Whether `message` is the cancellation sentinel rather than a genuine
 /// evaluation error.
 ///
@@ -176,61 +117,6 @@ pub fn is_cancellation(message: &str) -> bool {
 mod tests {
     use super::*;
 
-    #[test]
-    fn no_token_installed_by_default() {
-        assert!(current_cancel_token().is_none());
-    }
-
-    #[test]
-    fn install_exposes_token_and_guard_restores() {
-        let token = CancelToken::new();
-        {
-            let _guard = install_cancel_token(token.clone());
-            let seen = current_cancel_token().expect("token should be visible");
-            assert!(!seen.is_cancelled());
-            token.cancel();
-            assert!(seen.is_cancelled(), "clones share one flag");
-        }
-        assert!(
-            current_cancel_token().is_none(),
-            "guard must restore the previous (absent) token"
-        );
-    }
-
-    /// chelis#930's polling form. The three states have to be distinguished:
-    /// no token at all, an installed-but-untripped token, and a tripped one.
-    /// Collapsing the middle case into `true` would cancel every compile on a
-    /// thread that merely *armed* a timeout.
-    #[test]
-    fn cancellation_requested_distinguishes_absent_armed_and_tripped() {
-        assert!(
-            !cancellation_requested(),
-            "no token installed must never read as cancelled"
-        );
-        let token = CancelToken::new();
-        let _guard = install_cancel_token(token.clone());
-        assert!(
-            !cancellation_requested(),
-            "an armed but untripped token must not read as cancelled"
-        );
-        token.cancel();
-        assert!(cancellation_requested());
-    }
-
-    #[test]
-    fn cancellation_requested_is_restored_by_the_guard() {
-        {
-            let token = CancelToken::new();
-            token.cancel();
-            let _guard = install_cancel_token(token);
-            assert!(cancellation_requested());
-        }
-        assert!(
-            !cancellation_requested(),
-            "a cancelled token must not leak past its guard into the next compile"
-        );
-    }
-
     /// The front-end passes report cancellation through the check-error
     /// channel so an abandoned walk is a hard failure, never a partial `Ok`.
     /// The CLI's `--timeout` boundary only ever sees flattened text, so the
@@ -242,41 +128,18 @@ mod tests {
         assert!(is_cancellation(&format!("check: {}", error.message)));
     }
 
+    /// Clones share one flag, including across threads: the requester's
+    /// handle and the evaluating invocation's handle are the same `Arc`.
     #[test]
-    fn nested_installs_restore_the_outer_token() {
-        let outer = CancelToken::new();
-        let inner = CancelToken::new();
-        let _outer_guard = install_cancel_token(outer.clone());
-        {
-            let _inner_guard = install_cancel_token(inner.clone());
-            inner.cancel();
-            assert!(current_cancel_token().expect("inner").is_cancelled());
-        }
-        // The outer token is back, and was never cancelled by the inner one.
-        assert!(!current_cancel_token().expect("outer").is_cancelled());
-        outer.cancel();
-        assert!(current_cancel_token().expect("outer").is_cancelled());
-    }
-
-    #[test]
-    fn tokens_are_thread_local_but_flags_are_shared() {
+    fn clones_share_one_flag_across_threads() {
         let token = CancelToken::new();
-        let _guard = install_cancel_token(token.clone());
-        let observed = std::thread::spawn(current_cancel_token)
+        let seen = token.clone();
+        assert!(!seen.is_cancelled());
+        let shared = token.clone();
+        std::thread::spawn(move || shared.cancel())
             .join()
             .expect("join");
-        assert!(
-            observed.is_none(),
-            "a fresh thread inherits no token; it must be installed explicitly"
-        );
-        // ...but an explicitly shared clone does see the flag across threads.
-        let shared = token.clone();
-        token.cancel();
-        assert!(
-            std::thread::spawn(move || shared.is_cancelled())
-                .join()
-                .expect("join")
-        );
+        assert!(seen.is_cancelled(), "clones share one flag");
     }
 
     #[test]

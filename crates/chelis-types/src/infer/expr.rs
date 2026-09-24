@@ -188,17 +188,48 @@ pub(super) fn infer_expr_with_type_metadata_ownership(
 ) -> Type {
     // Bail before a deeply-nested `app` tree exhausts the native stack and
     // aborts the process (this is the gdb-pinned real-pricer crash site):
-    // when the budget is gone we record the located bail in `STACK_EXHAUSTED`
+    // when the budget is gone we record the located bail in the sink's stack
+    // bail record
     // (so the check entry boundary fails hard) and return `Type::Error`,
     // letting the stack unwind normally (no panic, no `catch_unwind`). See
     // `STACK_RED_ZONE_BYTES`. The WI-1 follow-up grows the native stack ONCE at
-    // each public check entry (`with_grown_stack`), so on a legitimately deep
+    // each public check entry (`NativeServices::with_grown_stack`), so on a
+    // legitimately deep
     // but finite program every recursive pass -- this one and the validate /
     // annotate / clone / drop passes -- runs inside the grown segment and this
     // guard does not fire; it remains the safety net for input deeper than the
     // grown segment can hold (covered-or-rejected).
-    stack_guard!("infer_expr", expr, vg.fresh_type());
+    if errors.frame_exhausted("infer_expr", || expr.span_id()) {
+        return vg.fresh_type();
+    }
+    let result = infer_expr_with_type_metadata_ownership_frame(
+        expr,
+        env,
+        vg,
+        subst,
+        adt_reg,
+        errors,
+        product,
+        expected_result,
+        type_metadata_resolution,
+        declaration_diagnostic_owner,
+    );
+    errors.exit_frame();
+    result
+}
 
+fn infer_expr_with_type_metadata_ownership_frame(
+    expr: &deep::Expr,
+    env: &mut Env,
+    vg: &mut VarGen,
+    subst: &mut Subst,
+    adt_reg: &AdtRegistry,
+    errors: &mut DiagnosticSink<'_>,
+    product: &mut InferenceProduct,
+    expected_result: Option<&Type>,
+    type_metadata_resolution: Option<&mut Option<OwnedTypeMetadataResolution>>,
+    declaration_diagnostic_owner: Option<&DeclarationDiagnosticOwner>,
+) -> Type {
     product.total_nodes += 1;
     let type_metadata_owned_by_caller = type_metadata_resolution.is_some();
 

@@ -8,7 +8,11 @@ use chelis_types::{
 
 fn check_core(source: &str) -> Result<CheckedProgram, chelis_types::InferResult> {
     let decls = parse_str(source).expect("Deep fixture parse");
-    check_ir_program(&decls, chelis_types::ProgramOrigin::Unlinked)
+    check_ir_program(
+        &decls,
+        chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
+    )
 }
 
 fn checked_core(source: &str) -> CheckedProgram {
@@ -17,7 +21,11 @@ fn checked_core(source: &str) -> CheckedProgram {
 
 fn check_deep(source: &str) -> Result<CheckedProgram, chelis_types::InferResult> {
     let program = chelis_deep::parser::parse_str(source).expect("Deep parse");
-    check_ir_program(&program, chelis_types::ProgramOrigin::Unlinked)
+    check_ir_program(
+        &program,
+        chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
+    )
 }
 
 #[test]
@@ -292,13 +300,17 @@ fn checker_owned_ascription_survives_clone_serialization_and_checker_rewrites() 
     );
 
     let effects = checked
-        .try_with_effect_annotations(checked.annotated_exprs().to_vec())
+        .try_with_effect_annotations(
+            checked.annotated_exprs().to_vec(),
+            &mut chelis_types::NativeServices::new(None),
+        )
         .expect("effects-only rewrite");
     assert_eq!(
         effects.local_tensor_ascriptions(),
         checked.local_tensor_ascriptions()
     );
-    let linearity = check_linearity(&effects).expect("linearity check");
+    let linearity = check_linearity(&effects, &mut chelis_types::NativeServices::new(None))
+        .expect("linearity check");
     assert_eq!(
         linearity.local_tensor_ascriptions(),
         checked.local_tensor_ascriptions()
@@ -311,9 +323,12 @@ fn checked_library_composition_preserves_both_identity_domains() {
         include_str!("fixtures/core/tests/issue_2110_local_ascription_obligations/checked_library_composition_preserves_both_identity_domains_360.deep"),
     )
     .expect("library Deep fixture parse");
-    let (context, library_checked) =
-        build_compiled_library_context(&library_decls, chelis_types::ProgramOrigin::Unlinked)
-            .expect("library type check");
+    let (context, library_checked) = build_compiled_library_context(
+        &library_decls,
+        chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
+    )
+    .expect("library type check");
 
     let application_decls = parse_str(
         include_str!("fixtures/core/tests/issue_2110_local_ascription_obligations/checked_library_composition_preserves_both_identity_domains_374.deep"),
@@ -323,6 +338,7 @@ fn checked_library_composition_preserves_both_identity_domains() {
         &context,
         &application_decls,
         chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
     )
     .expect("application type check");
     let composed = CheckedProgram::compose(&library_checked, &application_checked)

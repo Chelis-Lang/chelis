@@ -37,6 +37,7 @@ pub(super) fn extend_ir_env_with_declared_fn_params(
     fn_expr: &deep::Expr,
     parameter_types: &[deep::Expr],
     type_env: &ShapeTypeEnv,
+    stack: &mut StackBudget<'_>,
 ) -> ShapeTypeEnv {
     let mut scoped = type_env.clone();
     let Some((DeepTag::Fn, _, fn_children)) = stamped_parts(fn_expr) else {
@@ -49,7 +50,7 @@ pub(super) fn extend_ir_env_with_declared_fn_params(
         return scoped;
     };
     for (param, parameter_type) in params.iter().zip(parameter_types) {
-        if let Some(name) = param_name_for_refs(param) {
+        if let Some(name) = param_name_for_refs(param, stack) {
             scoped.insert(name, parameter_type.clone());
         }
     }
@@ -61,15 +62,29 @@ pub(super) fn extend_ir_env_with_declared_fn_params(
 pub(super) fn arg_tensor_type_expr(
     expr: &deep::Expr,
     type_env: &ShapeTypeEnv,
+    stack: &mut StackBudget<'_>,
 ) -> Option<deep::Expr> {
-    expr_shape_type_fact(peel_borrow(expr), type_env)
+    expr_shape_type_fact(peel_borrow(expr, stack), type_env, stack)
 }
 
 pub(super) fn expr_shape_type_fact(
     expr: &deep::Expr,
     type_env: &ShapeTypeEnv,
+    stack: &mut StackBudget<'_>,
 ) -> Option<deep::Expr> {
-    stack_guard!("expr_shape_type_fact", expr, None);
+    if stack.frame_exhausted("expr_shape_type_fact", || expr.span_id()) {
+        return None;
+    }
+    let result = expr_shape_type_fact_frame(expr, type_env, stack);
+    stack.exit_frame();
+    result
+}
+
+fn expr_shape_type_fact_frame(
+    expr: &deep::Expr,
+    type_env: &ShapeTypeEnv,
+    stack: &mut StackBudget<'_>,
+) -> Option<deep::Expr> {
     match expr {
         deep::Expr::Node(node, _) => {
             if node.tag() == DeepTag::Var
@@ -87,17 +102,25 @@ pub(super) fn expr_shape_type_fact(
             }
             None
         }
-        deep::Expr::MetaExpr(meta, _) => expr_shape_type_fact(&meta.expr, type_env),
+        deep::Expr::MetaExpr(meta, _) => expr_shape_type_fact(&meta.expr, type_env, stack),
         _ => None,
     }
 }
 
-pub(super) fn peel_borrow(expr: &deep::Expr) -> &deep::Expr {
-    stack_guard!("peel_borrow", expr, expr);
+pub(super) fn peel_borrow<'e>(expr: &'e deep::Expr, stack: &mut StackBudget<'_>) -> &'e deep::Expr {
+    if stack.frame_exhausted("peel_borrow", || expr.span_id()) {
+        return expr;
+    }
+    let result = peel_borrow_frame(expr, stack);
+    stack.exit_frame();
+    result
+}
+
+fn peel_borrow_frame<'e>(expr: &'e deep::Expr, stack: &mut StackBudget<'_>) -> &'e deep::Expr {
     if let Some((DeepTag::Borrow, _, kids)) = stamped_parts(expr)
         && let Some(child) = kids.first()
     {
-        return peel_borrow(child);
+        return peel_borrow(child, stack);
     }
     expr
 }
@@ -138,12 +161,13 @@ pub(super) fn record_let_binding_shape_fact(
     value_expr: &deep::Expr,
     type_env: &mut ShapeTypeEnv,
     static_env: &UnordMap<String, StaticValue>,
+    stack: &mut StackBudget<'_>,
 ) {
     // If the RHS is a shape-sensitive IR builtin
     // whose output type is derivable from its args,
     // register the derived type so downstream uses
     // of `name` resolve correctly.
-    let derived = derive_ir_builtin_output_type(value_expr, type_env, static_env);
+    let derived = derive_ir_builtin_output_type(value_expr, type_env, static_env, stack);
     match derived {
         Some(ty) => {
             type_env.insert(name.to_string(), ty);

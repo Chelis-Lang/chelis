@@ -53,7 +53,11 @@ fn issue216_sum_cast_wrapped_oob_axis_is_error() {
         "fixtures/core/tests/issue_216_cast_aware_extraction_sweep/issue216_sum_cast_wrapped_oob_axis_is_error_59.deep"
     );
     let deep = parse_core_fixture(src);
-    let res = check_ir_program(&deep, chelis_types::ProgramOrigin::Unlinked);
+    let res = check_ir_program(
+        &deep,
+        chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
+    );
     let rep = res.expect_err("expected check to fail on cast-wrapped OOB sum axis");
     assert!(
         rep.errors
@@ -77,7 +81,11 @@ fn issue216_max_reduce_cast_wrapped_oob_axis_is_error() {
         "fixtures/core/tests/issue_216_cast_aware_extraction_sweep/issue216_max_reduce_cast_wrapped_oob_axis_is_error_83.deep"
     );
     let deep = parse_core_fixture(src);
-    let res = check_ir_program(&deep, chelis_types::ProgramOrigin::Unlinked);
+    let res = check_ir_program(
+        &deep,
+        chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
+    );
     let rep = res.expect_err("expected check to fail on cast-wrapped OOB max_reduce axis");
     assert!(
         rep.errors
@@ -102,7 +110,11 @@ fn issue216_sum_cast_wrapped_negative_axis_typechecks() {
         "fixtures/core/tests/issue_216_cast_aware_extraction_sweep/issue216_sum_cast_wrapped_negative_axis_typechecks_108.deep"
     );
     let deep = parse_core_fixture(src);
-    let res = check_ir_program(&deep, chelis_types::ProgramOrigin::Unlinked);
+    let res = check_ir_program(
+        &deep,
+        chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
+    );
     if let Err(rep) = res {
         for err in &rep.errors {
             eprintln!("unexpected error: {:?}: {}", err.kind, err.message);
@@ -128,7 +140,11 @@ fn issue216_softmax_cast_wrapped_oob_axis_is_error() {
         "fixtures/core/tests/issue_216_cast_aware_extraction_sweep/issue216_softmax_cast_wrapped_oob_axis_is_error_134.deep"
     );
     let deep = parse_core_fixture(src);
-    let res = check_ir_program(&deep, chelis_types::ProgramOrigin::Unlinked);
+    let res = check_ir_program(
+        &deep,
+        chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
+    );
     let rep = res.expect_err("expected check to fail on cast-wrapped OOB softmax axis");
     assert!(
         rep.errors
@@ -160,7 +176,11 @@ fn issue216_shape_cast_wrapped_negative_axis_is_error() {
         "fixtures/core/tests/issue_216_cast_aware_extraction_sweep/issue216_shape_cast_wrapped_negative_axis_is_error_166.deep"
     );
     let deep = parse_core_fixture(src);
-    let res = check_ir_program(&deep, chelis_types::ProgramOrigin::Unlinked);
+    let res = check_ir_program(
+        &deep,
+        chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
+    );
     let rep = res.expect_err("expected check to fail on cast-wrapped negative shape axis");
     assert!(
         rep.errors
@@ -183,7 +203,11 @@ fn issue216_shape_cast_wrapped_oob_axis_is_error() {
         "fixtures/core/tests/issue_216_cast_aware_extraction_sweep/issue216_shape_cast_wrapped_oob_axis_is_error_189.deep"
     );
     let deep = parse_core_fixture(src);
-    let res = check_ir_program(&deep, chelis_types::ProgramOrigin::Unlinked);
+    let res = check_ir_program(
+        &deep,
+        chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
+    );
     let rep = res.expect_err("expected check to fail on cast-wrapped OOB shape axis");
     assert!(
         rep.errors
@@ -212,7 +236,11 @@ fn issue216_split_cast_wrapped_oob_axis_is_error() {
         "fixtures/core/tests/issue_216_cast_aware_extraction_sweep/issue216_split_cast_wrapped_oob_axis_is_error_218.deep"
     );
     let deep = parse_core_fixture(src);
-    let res = check_ir_program(&deep, chelis_types::ProgramOrigin::Unlinked);
+    let res = check_ir_program(
+        &deep,
+        chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
+    );
     let rep = res.expect_err("expected check to fail on cast-wrapped OOB split axis");
     assert!(
         rep.errors
@@ -242,7 +270,11 @@ fn issue216_gather_cast_wrapped_oob_axis_is_error() {
         "fixtures/core/tests/issue_216_cast_aware_extraction_sweep/issue216_gather_cast_wrapped_oob_axis_is_error_248.deep"
     );
     let deep = parse_core_fixture(src);
-    let res = check_ir_program(&deep, chelis_types::ProgramOrigin::Unlinked);
+    let res = check_ir_program(
+        &deep,
+        chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
+    );
     let rep = res.expect_err("expected check to fail on cast-wrapped OOB gather axis");
     assert!(
         rep.errors
@@ -272,7 +304,11 @@ fn issue216_trace_cast_wrapped_oob_axis_is_error() {
         "fixtures/core/tests/issue_216_cast_aware_extraction_sweep/issue216_trace_cast_wrapped_oob_axis_is_error_278.deep"
     );
     let deep = parse_core_fixture(src);
-    let res = check_ir_program(&deep, chelis_types::ProgramOrigin::Unlinked);
+    let res = check_ir_program(
+        &deep,
+        chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
+    );
     let rep = res.expect_err("expected check to fail on cast-wrapped OOB trace axis1");
     assert!(
         rep.errors
@@ -296,7 +332,11 @@ fn issue216_diagonal_cast_wrapped_oob_axis2_is_error() {
         "fixtures/core/tests/issue_216_cast_aware_extraction_sweep/issue216_diagonal_cast_wrapped_oob_axis2_is_error_302.deep"
     );
     let deep = parse_core_fixture(src);
-    let res = check_ir_program(&deep, chelis_types::ProgramOrigin::Unlinked);
+    let res = check_ir_program(
+        &deep,
+        chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
+    );
     let rep = res.expect_err("expected check to fail on cast-wrapped OOB diagonal axis2");
     assert!(
         rep.errors
@@ -332,7 +372,11 @@ fn issue216_conv_cast_wrapped_zero_stride_is_error() {
         "fixtures/core/tests/issue_216_cast_aware_extraction_sweep/issue216_conv_cast_wrapped_zero_stride_is_error_338.deep"
     );
     let deep = parse_core_fixture(src);
-    let res = check_ir_program(&deep, chelis_types::ProgramOrigin::Unlinked);
+    let res = check_ir_program(
+        &deep,
+        chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
+    );
     let rep = res.expect_err("expected check to fail on cast-wrapped zero conv stride");
     // Lock the post-fix diagnostic: "requires a positive stride, got 0".
     // Pre-fix the message was "requires a literal integer stride", which
@@ -360,7 +404,11 @@ fn issue216_conv_cast_wrapped_negative_padding_is_error() {
         "fixtures/core/tests/issue_216_cast_aware_extraction_sweep/issue216_conv_cast_wrapped_negative_padding_is_error_367.deep"
     );
     let deep = parse_core_fixture(src);
-    let res = check_ir_program(&deep, chelis_types::ProgramOrigin::Unlinked);
+    let res = check_ir_program(
+        &deep,
+        chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
+    );
     let rep = res.expect_err("expected check to fail on cast-wrapped negative conv padding");
     assert!(
         rep.errors
@@ -385,7 +433,11 @@ fn issue216_conv_cast_wrapped_wellformed_typechecks() {
         "fixtures/core/tests/issue_216_cast_aware_extraction_sweep/issue216_conv_cast_wrapped_wellformed_typechecks_393.deep"
     );
     let deep = parse_core_fixture(src);
-    let res = check_ir_program(&deep, chelis_types::ProgramOrigin::Unlinked);
+    let res = check_ir_program(
+        &deep,
+        chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
+    );
     if let Err(rep) = res {
         for err in &rep.errors {
             eprintln!("unexpected error: {:?}: {}", err.kind, err.message);
@@ -422,7 +474,11 @@ fn issue216_vmap_cast_wrapped_negative_axis_is_error() {
              (def {} g (vmap {} (var {} f)
                  (cast {} (lit {type: (t-prim {} i32)} -1) (t-prim {} i32))))";
     let deep = parse_deep(src).expect("deep parse");
-    let res = check_ir_program(&deep, chelis_types::ProgramOrigin::Unlinked);
+    let res = check_ir_program(
+        &deep,
+        chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
+    );
     let rep = res.expect_err("expected check to fail on cast-wrapped negative vmap axis");
     assert!(
         rep.errors
@@ -470,7 +526,11 @@ fn issue216_grad_wrt_cast_wrapped_negative_index_is_error() {
                 (grad {} (var {} loss)
                     (cast {} (lit {type: (t-prim {} i32)} -1) (t-prim {} i32))))";
     let deep = parse_deep(src).expect("deep parse");
-    let res = check_ir_program(&deep, chelis_types::ProgramOrigin::Unlinked);
+    let res = check_ir_program(
+        &deep,
+        chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
+    );
     let rep = res.expect_err("expected check to fail on cast-wrapped negative grad wrt index");
     // Lock the post-fix diagnostic: "must be non-negative, got -1".
     assert!(
@@ -505,7 +565,11 @@ fn issue216_grad_wrt_cast_wrapped_negative_tuple_index_is_error() {
                         (lit {type: (t-prim {} i32)} 0)
                         (cast {} (lit {type: (t-prim {} i32)} -1) (t-prim {} i32)))))";
     let deep = parse_deep(src).expect("deep parse");
-    let res = check_ir_program(&deep, chelis_types::ProgramOrigin::Unlinked);
+    let res = check_ir_program(
+        &deep,
+        chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
+    );
     let rep = res.expect_err("expected check to fail on cast-wrapped negative tuple wrt index");
     assert!(
         rep.errors

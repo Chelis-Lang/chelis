@@ -9,7 +9,11 @@ const REJECTED_DTYPES: &[&str] = &["i8", "i16", "i32", "i64", "bool"];
 
 fn diagnostics(source: &str) -> Vec<CheckError> {
     let deep = chelis_deep::parser::parse_str(source).expect("Deep fixture");
-    match check_typed_program(&deep, chelis_types::ProgramOrigin::Unlinked) {
+    match check_typed_program(
+        &deep,
+        chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
+    ) {
         Ok(_) => Vec::new(),
         Err(report) => report.errors,
     }

@@ -30,7 +30,11 @@ use chelis_types::errors::CheckError;
 fn check(source: &str) -> Result<String, Vec<CheckError>> {
     let deep: Vec<chelis_deep::Expr> =
         chelis_deep::parse_and_stamp_file(source).expect("valid core fixture");
-    match check_typed_program(&deep, chelis_types::ProgramOrigin::Unlinked) {
+    match check_typed_program(
+        &deep,
+        chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
+    ) {
         Ok(checked) => Ok(print_canonical(checked.annotated_exprs())),
         Err(report) => Err(report.errors),
     }

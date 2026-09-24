@@ -21,6 +21,7 @@ pub mod invariants;
 pub mod known_tags;
 pub mod linearity;
 pub mod manifest;
+pub mod native;
 pub mod observation;
 pub(crate) mod opacity;
 pub(crate) mod session;
@@ -51,10 +52,7 @@ pub use builtins::{
     InferenceDisposition, Realizability, ShapeClass, axis_argument_layout, builtin_decl,
     builtin_env, prelude_adt_defs, realizability, shape_class,
 };
-pub use cancel::{
-    CancelToken, CancelTokenGuard, EVAL_CANCELLED_MSG, cancellation_check_error,
-    cancellation_requested, current_cancel_token, install_cancel_token, is_cancellation,
-};
+pub use cancel::{CancelToken, EVAL_CANCELLED_MSG, cancellation_check_error, is_cancellation};
 pub use context::{LibraryProofId, TypeEnv};
 pub use dtype_semantics::{
     ArgReduceOp, CheckedCastKind, CheckedCastPlan, CheckedCastPlanError, CompareOp, FloatBinOp,
@@ -83,9 +81,9 @@ pub use infer::{
     build_compiled_library_context_with_base, build_type_env_from_library, check_ir_program,
     check_ir_with_context, check_ir_with_signature_context, check_typed_program,
     compose_local_tensor_ascriptions, fold_static_int_expr, infer_ir_program, infer_program,
-    reset_grow_segment_bytes_for_test, resolve_declared_surface, run_on_grown_stack,
-    set_grow_segment_bytes_for_test,
+    resolve_declared_surface,
 };
 pub use linearity::{LinearityInfo, check_linearity, check_linearity_with_context};
+pub use native::NativeServices;
 pub use observation::{ElementRef, format_element};
 pub use opacity::{demangle_ident, is_linker_format_name};

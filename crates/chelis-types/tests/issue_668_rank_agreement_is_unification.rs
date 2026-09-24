@@ -31,10 +31,12 @@ fn agreed_diagnostics(name: &str, args: &[&str]) -> Vec<String> {
     let ir = kinds(check_ir_program(
         &program,
         chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
     ));
     let typed = kinds(check_typed_program(
         &program,
         chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
     ));
     assert_eq!(ir, typed, "rank diagnostics must agree: {name}, {args:?}");
     ir
@@ -306,8 +308,16 @@ fn tensor_stamps(expr: &Expr, out: &mut Vec<(usize, bool)>) {
 fn the_expand_reproducer_stamps_rank_one_at_both_ingresses() {
     let exprs = template("expand_rank_stamp", &[]);
     for checked in [
-        check_ir_program(&exprs, chelis_types::ProgramOrigin::Unlinked),
-        check_typed_program(&exprs, chelis_types::ProgramOrigin::Unlinked),
+        check_ir_program(
+            &exprs,
+            chelis_types::ProgramOrigin::Unlinked,
+            &mut chelis_types::NativeServices::new(None),
+        ),
+        check_typed_program(
+            &exprs,
+            chelis_types::ProgramOrigin::Unlinked,
+            &mut chelis_types::NativeServices::new(None),
+        ),
     ] {
         let checked = checked.expect("rank-preserving expand must check");
         let mut stamps = Vec::new();

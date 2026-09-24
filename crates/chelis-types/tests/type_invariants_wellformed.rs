@@ -24,7 +24,12 @@ fn deep_of_dp(source: &str) -> Vec<chelis_deep::Expr> {
 }
 
 fn errors(exprs: &[chelis_deep::Expr]) -> Vec<CheckError> {
-    infer_ir_program(exprs, chelis_types::ProgramOrigin::Unlinked).errors
+    infer_ir_program(
+        exprs,
+        chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
+    )
+    .errors
 }
 
 fn kind_name(err: &CheckError) -> String {

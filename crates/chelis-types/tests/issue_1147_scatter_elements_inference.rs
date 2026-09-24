@@ -5,7 +5,11 @@ use chelis_types::errors::{CheckError, CheckErrorKind};
 
 fn diagnostics(source: &str) -> Vec<CheckError> {
     let deep = chelis_deep::parser::parse_str(source).expect("Deep fixture");
-    match check_typed_program(&deep, chelis_types::ProgramOrigin::Unlinked) {
+    match check_typed_program(
+        &deep,
+        chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
+    ) {
         Ok(_) => Vec::new(),
         Err(result) => result.errors,
     }

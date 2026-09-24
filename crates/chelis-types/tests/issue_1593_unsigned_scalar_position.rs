@@ -58,7 +58,11 @@ fn parse_core_fixture(source: &str) -> Vec<chelis_deep::Expr> {
 
 fn messages(source: &str) -> Vec<String> {
     let deep = parse_core_fixture(source);
-    match check_ir_program(&deep, chelis_types::ProgramOrigin::Unlinked) {
+    match check_ir_program(
+        &deep,
+        chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
+    ) {
         Ok(_) => Vec::new(),
         Err(report) => report
             .errors
@@ -395,11 +399,14 @@ fn a_deep_type_variable_naming_a_rejected_spelling_is_rejected() {
             ),
         ] {
             let deep = chelis_deep::parser::parse_and_stamp_file(&source).expect("deep parse");
-            let messages: Vec<String> =
-                match check_ir_program(&deep, chelis_types::ProgramOrigin::Unlinked) {
-                    Ok(_) => Vec::new(),
-                    Err(report) => report.errors.iter().map(|e| e.message.clone()).collect(),
-                };
+            let messages: Vec<String> = match check_ir_program(
+                &deep,
+                chelis_types::ProgramOrigin::Unlinked,
+                &mut chelis_types::NativeServices::new(None),
+            ) {
+                Ok(_) => Vec::new(),
+                Err(report) => report.errors.iter().map(|e| e.message.clone()).collect(),
+            };
             assert!(
                 messages
                     .iter()
@@ -425,7 +432,12 @@ fn an_ordinary_deep_type_variable_still_checks_clean() {
         );
         let deep = chelis_deep::parser::parse_and_stamp_file(&source).expect("deep parse");
         assert!(
-            check_ir_program(&deep, chelis_types::ProgramOrigin::Unlinked).is_ok(),
+            check_ir_program(
+                &deep,
+                chelis_types::ProgramOrigin::Unlinked,
+                &mut chelis_types::NativeServices::new(None)
+            )
+            .is_ok(),
             "`{name}` must still be a legal Deep type variable"
         );
     }

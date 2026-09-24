@@ -16,8 +16,12 @@ fn typed_rate_plan(source: &str) -> Result<EvaluationPlan, String> {
 }
 
 fn typed_rate_plan_from_ir(expressions: &[chelis_deep::Expr]) -> Result<EvaluationPlan, String> {
-    let checked =
-        chelis_types::check_ir_program(expressions, chelis_types::ProgramOrigin::Unlinked).unwrap();
+    let checked = chelis_types::check_ir_program(
+        expressions,
+        chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
+    )
+    .unwrap();
     let context = RandomExecutionContext::new(RandomLoweringState {
         seed: Some(42),
         counter: 0,
@@ -57,9 +61,12 @@ fn typed_static_rate_checks_only_actual_transitive_captures() {
             seed: Some(42),
             counter: 0,
         });
-        let values = eval_tensor_plan_with_strict(plan, &mut context, |_| {
-            Some(TensorValue::from_vec(vec![8], vec![1.0; 8]))
-        })
+        let values = eval_tensor_plan_with_strict(
+            plan,
+            &mut context,
+            |_| Some(TensorValue::from_vec(vec![8], vec![1.0; 8])),
+            &mut chelis_types::NativeServices::new(None),
+        )
         .unwrap();
         (
             values[&plan.dag_for_inspection().roots()[0]].to_f64_lossy_vec(),
@@ -109,9 +116,12 @@ fn typed_static_rate_specializes_helpers_and_gradient_captures() {
                 counter: 0,
             });
             for ordinal in 0..2 {
-                let values = eval_tensor_plan_with_strict(&plan, &mut context, |_| {
-                    Some(TensorValue::from_storage(vec![8], input.clone()))
-                })
+                let values = eval_tensor_plan_with_strict(
+                    &plan,
+                    &mut context,
+                    |_| Some(TensorValue::from_storage(vec![8], input.clone())),
+                    &mut chelis_types::NativeServices::new(None),
+                )
                 .unwrap();
                 let expected = (0..8)
                     .map(|index| {
@@ -176,9 +186,12 @@ fn typed_static_rate_does_not_duplicate_arguments() {
         seed: Some(42),
         counter: 0,
     });
-    eval_tensor_plan_with_strict(&plan, &mut context, |_| {
-        Some(TensorValue::from_vec(vec![8], vec![1.0; 8]))
-    })
+    eval_tensor_plan_with_strict(
+        &plan,
+        &mut context,
+        |_| Some(TensorValue::from_vec(vec![8], vec![1.0; 8])),
+        &mut chelis_types::NativeServices::new(None),
+    )
     .unwrap();
     assert_eq!(context.state().counter, expected.len() as u64);
 }
@@ -255,9 +268,12 @@ fn run(
     count: usize,
     context: &mut RandomExecutionContext,
 ) -> Result<Vec<f64>, String> {
-    let values = eval_tensor_plan_with_strict(plan, context, |name| {
-        (name == "x").then(|| TensorValue::from_vec(vec![count], vec![1.0; count]))
-    })?;
+    let values = eval_tensor_plan_with_strict(
+        plan,
+        context,
+        |name| (name == "x").then(|| TensorValue::from_vec(vec![count], vec![1.0; count])),
+        &mut chelis_types::NativeServices::new(None),
+    )?;
     Ok(values[&plan.dag_for_inspection().roots()[0]].to_f64_lossy_vec())
 }
 
@@ -275,9 +291,12 @@ fn staged_claim_failure_commits_the_preceding_draw_and_reuse_keeps_live_ordinals
         "fixtures/core/tests/dropout_fixed_stream_ir/staged_claim_failure_commits_the_preceding_draw_and_reuse_keeps_live_ordinals.deep"
     );
     let expressions = chelis_deep::parser::parse_and_stamp(source).unwrap();
-    let checked =
-        chelis_types::check_ir_program(&expressions, chelis_types::ProgramOrigin::Unlinked)
-            .unwrap();
+    let checked = chelis_types::check_ir_program(
+        &expressions,
+        chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
+    )
+    .unwrap();
     let mut context = RandomExecutionContext::new(RandomLoweringState {
         seed: Some(42),
         counter: 5,
@@ -336,7 +355,10 @@ fn staged_claim_failure_commits_the_preceding_draw_and_reuse_keeps_live_ordinals
                         );
                     }
                     HostStage::Kernel { dag, outputs } => {
-                        let computed = frame.eval_next_kernel(|name| values.get(name).cloned())?;
+                        let computed = frame.eval_next_kernel(
+                            |name| values.get(name).cloned(),
+                            &mut chelis_types::NativeServices::new(None),
+                        )?;
                         for (output, root) in outputs.iter().zip(dag.roots()) {
                             values.insert(output.clone(), computed[root].clone());
                         }
@@ -610,9 +632,12 @@ fn valid_uniform_like_occupies_one_shared_ordinal_between_dropout_calls() {
 #[test]
 fn local_movement_failure_occurs_after_the_earlier_entered_draw() {
     let expressions = chelis_deep::parser::parse_and_stamp(include_str!("fixtures/core/tests/dropout_fixed_stream_ir/local_movement_failure_occurs_after_the_earlier_entered_draw.deep")).unwrap();
-    let checked =
-        chelis_types::check_ir_program(&expressions, chelis_types::ProgramOrigin::Unlinked)
-            .unwrap();
+    let checked = chelis_types::check_ir_program(
+        &expressions,
+        chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
+    )
+    .unwrap();
     let mut context = RandomExecutionContext::new(RandomLoweringState {
         seed: Some(42),
         counter: 5,
@@ -629,9 +654,12 @@ fn local_movement_failure_occurs_after_the_earlier_entered_draw() {
     let plan = kernel
         .plan()
         .expect("fixed-control helper has execution transport");
-    let error = eval_tensor_plan_with_strict(plan, &mut context, |_| {
-        Some(TensorValue::from_vec(vec![2], vec![1.0; 2]))
-    })
+    let error = eval_tensor_plan_with_strict(
+        plan,
+        &mut context,
+        |_| Some(TensorValue::from_vec(vec![2], vec![1.0; 2])),
+        &mut chelis_types::NativeServices::new(None),
+    )
     .unwrap_err();
     assert!(error.contains("shrink"), "{error}");
     assert_eq!(
@@ -647,9 +675,12 @@ fn explicit_drop_in_gradient_retains_draws_and_verified_terminal_ownership() {
         "fixtures/core/tests/dropout_fixed_stream_ir/explicit_drop_in_gradient_retains_draws_and_verified_terminal_ownership.deep"
     );
     let expressions = chelis_deep::parser::parse_and_stamp(source).unwrap();
-    let checked =
-        chelis_types::check_ir_program(&expressions, chelis_types::ProgramOrigin::Unlinked)
-            .unwrap();
+    let checked = chelis_types::check_ir_program(
+        &expressions,
+        chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
+    )
+    .unwrap();
     let mut context = RandomExecutionContext::new(RandomLoweringState {
         seed: Some(42),
         counter: 0,

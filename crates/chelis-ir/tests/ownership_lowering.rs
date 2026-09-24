@@ -102,11 +102,17 @@ fn front(source: &str) -> Front {
     // Preserve legacy carriers and signature metadata that select the host lane.
     let deep: Vec<chelis_deep::Expr> =
         serde_json::from_str(source).expect("deserialize lossless Deep fixture");
-    let checked = check_typed_program(&deep, chelis_types::ProgramOrigin::Unlinked)
-        .unwrap_or_else(|errors| panic!("type check: {:?}", errors.errors));
-    let checked = chelis_effects::check_program(&checked)
-        .unwrap_or_else(|error| panic!("effects: {error:?}"));
-    let checked = check_linearity(&checked).unwrap_or_else(|error| panic!("linearity: {error:?}"));
+    let checked = check_typed_program(
+        &deep,
+        chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
+    )
+    .unwrap_or_else(|errors| panic!("type check: {:?}", errors.errors));
+    let checked =
+        chelis_effects::check_program(&checked, &mut chelis_types::NativeServices::new(None))
+            .unwrap_or_else(|error| panic!("effects: {error:?}"));
+    let checked = check_linearity(&checked, &mut chelis_types::NativeServices::new(None))
+        .unwrap_or_else(|error| panic!("linearity: {error:?}"));
     let realizability = infer_realizability(&checked, C_TENSOR_PRIMS);
     let manifest = compute_root_manifest(&checked, &realizability);
     let compiled = chelis_ir::lowering_runtime::with_native_lowering_runtime(|runtime| {
@@ -672,7 +678,12 @@ fn assert_front_rejects(source: &str) {
     let deep: Vec<chelis_deep::Expr> =
         serde_json::from_str(source).expect("negative twin still deserializes");
     assert!(
-        check_typed_program(&deep, chelis_types::ProgramOrigin::Unlinked).is_err(),
+        check_typed_program(
+            &deep,
+            chelis_types::ProgramOrigin::Unlinked,
+            &mut chelis_types::NativeServices::new(None)
+        )
+        .is_err(),
         "negative twin unexpectedly checked"
     );
 }
