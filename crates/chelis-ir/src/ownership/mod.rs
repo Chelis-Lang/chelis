@@ -2068,7 +2068,7 @@ impl DagOwnershipPlan {
             }
         }
         Ok(Self {
-            capacity_scope: scopes.fresh(),
+            capacity_scope: crate::capacity_key::CapacityScope::from_supply_id(scopes.fresh_id()),
             owners,
             directives,
         })
