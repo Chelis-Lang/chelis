@@ -689,9 +689,15 @@ class NoReExecTests(unittest.TestCase):
         def find_uv():
             raise AssertionError("the child must not look for uv")
 
+        def execvpe(*_):
+            raise AssertionError("the child must not re-exec")
+
         with tempfile.TemporaryDirectory() as tmp:
-            venv = Path(tmp) / "venv"
+            # The launcher already runs the checkout's own interpreter, so the
+            # child it spawns with that interpreter owns it too.
+            venv = Path(tmp) / ".venv"
             (venv / "bin").mkdir(parents=True)
+            (venv / "bin" / "python").write_text("", encoding="utf-8")
             (venv / "pyvenv.cfg").write_text("uv = 0.4.0\n", encoding="utf-8")
             result = gate.ensure_managed_runtime(
                 ["--validation"],
@@ -699,7 +705,9 @@ class NoReExecTests(unittest.TestCase):
                 executable=venv / "bin" / "python",
                 prefix=venv,
                 base_prefix=Path("/usr"),
+                repo_root=Path(tmp),
                 find_uv=find_uv,
+                execvpe=execvpe,
             )
         self.assertIsNone(result)
 

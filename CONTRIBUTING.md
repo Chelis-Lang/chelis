@@ -105,9 +105,10 @@ python3 scripts/gate.py --fast
 python3 scripts/gate.py --validation  # optional
 ```
 
-`scripts/gate.py` is stdlib-only and re-executes itself through uv when
-`python3` is not already a uv- or Devenv-managed runtime, so that form is
-correct in every environment; every other script is invoked as
+`scripts/gate.py` is stdlib-only and re-executes itself through this
+checkout's own interpreter, or through uv when there is none and `python3` is
+not already a uv- or Devenv-managed runtime, so that form is correct in every
+environment; every other script is invoked as
 `.venv/bin/python scripts/<name>.py`.
 
 Push before requesting the red-team round; the review runs against the

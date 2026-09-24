@@ -133,14 +133,16 @@ consistently:
   shell the equivalent is `python scripts/<name>.py`.
 - **The gate:** `python3 scripts/gate.py --fast`, `python3 scripts/gate.py
   --validation`, or `python3 scripts/gate.py --list`, in every environment.
-  `scripts/gate.py` is stdlib-only; when `python3` is not already a uv- or
-  Devenv-managed runtime it re-executes itself as
-  `uv run --managed-python --python 3.11 --no-project python scripts/gate.py`
-  and then exports its selected interpreter as `PYO3_PYTHON` to every child
-  command. It never requires a checkout-local `.venv`, and its `--fast` and
-  `--validation` preflight warns when one is missing (create it with
-  `uv venv --python 3.11`), because direct cargo and nextest invocations
-  outside the gate fall back to it. Do not invoke the gate through
+  `scripts/gate.py` is stdlib-only. Without an explicit `PYO3_PYTHON` it
+  re-executes itself through this checkout's own interpreter (its Devenv state
+  venv, else `.venv`) whenever `python3` is some other interpreter, another
+  checkout's venv included; with no owned interpreter, an unmanaged `python3`
+  re-executes as
+  `uv run --managed-python --python 3.11 --no-project python scripts/gate.py`.
+  It then exports its selected interpreter as `PYO3_PYTHON` to every child
+  command. Its `--fast` and `--validation` preflight warns when `.venv` is
+  missing (create it with `uv venv --python 3.11`), because the capacity census
+  legs and direct cargo and nextest invocations outside the gate need it. Do not invoke the gate through
   `.venv/bin/python`; the `uv run` form above is the gate's own fallback, not a
   routine invocation.
 - **Direct cargo commands:** `.cargo/config.toml` defaults `PYO3_PYTHON` to

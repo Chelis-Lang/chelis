@@ -50,15 +50,21 @@ as branch-owned.
 ## The Python bootstrap
 
 `python3` is only the gate bootstrap. `scripts/gate.py` is stdlib-only and is
-the one `python3` entry point that self-heals: when its runtime is not already
-uv- or Devenv-managed it re-executes itself through
+the one `python3` entry point that self-heals. Without an explicit
+`PYO3_PYTHON`, it runs on this checkout's own interpreter whenever one exists:
+the activated Devenv state venv under this checkout, else `.venv`. A launch
+under any other interpreter re-executes through it, including another
+checkout's venv that comes first on `PATH` (chelis#2511); the capacity census
+accepts only this checkout's interpreter and would otherwise refuse it at the
+end of the runtime-representation stage. With no owned interpreter, a runtime
+that is not already uv- or Devenv-managed re-executes through
 `uv run --managed-python --python 3.11 --no-project` before running gate logic,
-so `python3 scripts/gate.py` is correct in every environment. It exports its
-selected interpreter as `PYO3_PYTHON` to every child command and never requires
-a checkout-local `.venv`; its `--fast` and `--validation` preflight warns when the
-worktree has no `.venv/bin/python` (create it with `uv venv --python 3.11`),
-because direct cargo and nextest runs outside the gate fall back to it when
-`PYO3_PYTHON` is unset. If uv is missing, the gate exits with installation and
+so `python3 scripts/gate.py` starts correctly in every environment. It exports
+its selected interpreter as `PYO3_PYTHON` to every child command. Its `--fast`
+and `--validation` preflight warns when the worktree has no `.venv/bin/python`
+(create it with `uv venv --python 3.11`): the census legs need it, and direct
+cargo and nextest runs outside the gate fall back to it when `PYO3_PYTHON` is
+unset. If uv is missing, the gate exits with installation and
 Python-provisioning commands.
 
 That re-exec drops `UV_PYTHON_PREFERENCE` from the child environment. uv reads

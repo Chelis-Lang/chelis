@@ -16,7 +16,8 @@ macOS-smoke, LOC-report, no-AI-authorship, and docs CI jobs are
 deliberately out of scope; `scripts/test_gate.py` excludes those jobs
 by name so the exclusion is visible and reviewable.
 
-Usage (an unmanaged launcher is automatically re-executed through uv):
+Usage (a launcher is re-executed through this checkout's own interpreter when
+it exists, else an unmanaged one through uv):
     python3 scripts/gate.py            # run every gate command
     python3 scripts/gate.py lint-and-unit   # run the Rust-policy subset
     python3 scripts/gate.py ci-fast         # hosted units + reviewed integrations
@@ -765,6 +766,39 @@ def is_managed_runtime(
     return False
 
 
+def owns_interpreter(environ: dict[str, str], prefix: Path, repo_root: Path) -> bool:
+    """Whether ``prefix`` is this checkout's own environment: its activated
+    Devenv state venv, or its ``.venv``.
+
+    This is the rule the capacity census's native execution enforces
+    (`capacity_census_native_execution._owned_interpreter`), and
+    `scripts/test_gate_diagnostics.py` checks that the two agree. Any other
+    managed venv, another checkout's included (chelis#2511), is not owned.
+    """
+    root = repo_root.resolve()
+    prefix = prefix.resolve()
+    devenv_state = environ.get("DEVENV_STATE")
+    if devenv_state:
+        state = Path(devenv_state).resolve()
+        if state.is_relative_to(root / ".devenv") and prefix == state / "venv":
+            return True
+    return prefix == (root / ".venv").resolve()
+
+
+def owned_interpreter(environ: dict[str, str], repo_root: Path) -> Path | None:
+    """This checkout's own interpreter, if one exists: the activated Devenv
+    state venv under this checkout, else its ``.venv``."""
+    root = repo_root.resolve()
+    devenv_state = environ.get("DEVENV_STATE")
+    if devenv_state:
+        state = Path(devenv_state).resolve()
+        candidate = state / "venv" / "bin" / "python"
+        if state.is_relative_to(root / ".devenv") and candidate.is_file():
+            return candidate
+    candidate = root / ".venv" / "bin" / "python"
+    return candidate if candidate.is_file() else None
+
+
 def ensure_managed_runtime(
     argv: list[str],
     *,
@@ -772,21 +806,40 @@ def ensure_managed_runtime(
     executable: Path | None = None,
     prefix: Path | None = None,
     base_prefix: Path | None = None,
+    repo_root: Path = REPO_ROOT,
     find_uv=shutil.which,
     execvpe=os.execvpe,
     error_stream=None,
 ) -> int | None:
-    """Re-exec an unmanaged gate launch through uv.
+    """Re-exec a gate launch through this checkout's own interpreter, or an
+    unmanaged launch through uv.
 
-    Returns ``None`` when the current runtime is already managed. A successful
-    re-exec never returns. Missing uv returns 127 after actionable setup
-    guidance.
+    Without an explicit ``PYO3_PYTHON``, the running interpreter becomes the
+    one every child command receives, so this checkout's own interpreter is
+    used whenever it exists. A venv another checkout put first on ``PATH`` is
+    managed but not owned, and the census refuses it only at the end of the
+    runtime-representation stage (chelis#2511). Returns ``None`` when the
+    current runtime is owned, or, with no owned interpreter to switch to or an
+    explicit ``PYO3_PYTHON``, when it is managed. A successful re-exec never
+    returns. Missing uv returns 127 after actionable setup guidance.
     """
     environment = dict(os.environ if environ is None else environ)
     current_executable = Path(sys.executable) if executable is None else executable
     current_prefix = Path(sys.prefix) if prefix is None else prefix
     current_base = Path(sys.base_prefix) if base_prefix is None else base_prefix
     error = sys.stderr if error_stream is None else error_stream
+
+    if not environment.get("PYO3_PYTHON"):
+        if owns_interpreter(environment, current_prefix, repo_root):
+            return None
+        owned = owned_interpreter(environment, repo_root)
+        if owned is not None:
+            execvpe(
+                str(owned),
+                [str(owned), str(Path(__file__).resolve()), *argv],
+                environment,
+            )
+            raise RuntimeError("owned-interpreter re-exec unexpectedly returned")
 
     if is_managed_runtime(
         environment,
@@ -1960,9 +2013,10 @@ def run_preflight(
     if not venv_present:
         print(
             f"gate: warning: {venv_python} is missing. The gate exports "
-            "PYO3_PYTHON so its own commands do not need it; direct cargo and "
-            "nextest runs in this worktree do. Create it with: uv venv "
-            "--python 3.11",
+            "PYO3_PYTHON so most of its commands do not need it, but the "
+            "runtime-representation oracle's census legs refuse an interpreter "
+            "this checkout does not own, and direct cargo and nextest runs in "
+            "this worktree need it too. Create it with: uv venv --python 3.11",
             file=error,
         )
 
