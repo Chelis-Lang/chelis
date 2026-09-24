@@ -170,7 +170,7 @@ struct MonoSpecializationState {
 #[derive(Default)]
 struct HostInvocationState {
     inlining: UnordSet<String>,
-    preflight: Vec<UnordMap<usize, TensorHelperPreflightFacts>>,
+    preflight: Vec<PreflightFrame>,
     type_subst: UnordMap<String, HostTypeTerm>,
     mono: MonoSpecializationState,
 }
@@ -409,6 +409,111 @@ struct TensorHelperPreflightFacts {
     contains_grad_like: bool,
 }
 
+/// Identity of one tensor-helper preflight frame, allocated by
+/// [`LoweringRuntime::fresh_preflight_frame`]. Ids are never reissued on a
+/// thread, so sibling frames and frames of nested sessions never alias.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct PreflightFrameId(u64);
+
+/// The explicit identity of a Deep node for tensor-helper preflight facts:
+/// the frame that analyzed the node's tree, plus the node's structural child
+/// path from that frame's root, interned as a node index of the frame
+/// ([`PreflightFacts`]). A child index counts the semantic children
+/// [`visit_semantic_expr_children`] yields: a tagged node's `children`, an
+/// untagged list's elements, a `MetaExpr`'s wrapped expression (index 0).
+///
+/// This replaces a key of the node's address (route (1) of the pointer-key
+/// removal). A content key was ruled out: shadowing makes content-equal
+/// nodes with different bindings common, and coverage depends on where a
+/// tree came from, not on what it contains. Host lowering threads the
+/// identity beside the `&Expr` it names: a child it descends into by
+/// semantic index `i` gets [`preflight_child`]`(id, i)`, and a tree built
+/// during lowering (a clone, a rewritten or synthesized body, a signature
+/// copy) gets `None`, exactly as its fresh address was covered by no frame.
+/// A frame only describes the one borrowed tree it analyzed, and a node is
+/// covered iff the analysis reached it, so the hit/miss and coverage classes
+/// are the address key's for every live frame. An id is only passed down
+/// the recursion, never stored or returned, so it is never read after its
+/// frame pops.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct PreflightNode {
+    frame: PreflightFrameId,
+    node: usize,
+}
+
+/// A preflight identity; `None` names a tree no live frame analyzed.
+type PreflightId = Option<PreflightNode>;
+
+/// One frame's facts by interned structural path. Node `0` is the frame
+/// root. A node the analysis only passes through (the binding list of a
+/// `let`, whose values it analyzes) has no facts, so it is not covered.
+struct PreflightFacts {
+    facts: Vec<Option<TensorHelperPreflightFacts>>,
+    /// `(parent node, semantic child index)` -> child node.
+    children: UnordMap<(usize, usize), usize>,
+}
+
+impl PreflightFacts {
+    fn new() -> Self {
+        Self {
+            facts: vec![None],
+            children: UnordMap::new(),
+        }
+    }
+
+    /// Intern the path `parent`/`index`.
+    fn intern_child(&mut self, parent: usize, index: usize) -> usize {
+        let next = self.facts.len();
+        let child = *self.children.entry((parent, index)).or_insert(next);
+        if child == next {
+            self.facts.push(None);
+        }
+        child
+    }
+
+    fn child(&self, parent: usize, index: usize) -> Option<usize> {
+        self.children.get(&(parent, index)).copied()
+    }
+}
+
+struct PreflightFrame {
+    id: PreflightFrameId,
+    facts: PreflightFacts,
+}
+
+fn preflight_frame<'a>(node: PreflightNode, program: &'a HostCx<'_>) -> Option<&'a PreflightFacts> {
+    program
+        .state
+        .invocation
+        .preflight
+        .iter()
+        .rev()
+        .find(|frame| frame.id == node.frame)
+        .map(|frame| &frame.facts)
+}
+
+/// The facts a live frame recorded for `id`; `None` when `id` is uncovered.
+fn preflight_facts(id: PreflightId, program: &HostCx<'_>) -> Option<TensorHelperPreflightFacts> {
+    let node = id?;
+    preflight_frame(node, program)?.facts[node.node]
+}
+
+/// The identity of the semantic child `index` of the node `id` names.
+fn preflight_child(id: PreflightId, index: usize, program: &HostCx<'_>) -> PreflightId {
+    let node = id?;
+    let child = preflight_frame(node, program)?.child(node.node, index)?;
+    Some(PreflightNode {
+        frame: node.frame,
+        node: child,
+    })
+}
+
+/// [`preflight_child`] along a path of semantic child indices.
+fn preflight_descendant(id: PreflightId, path: &[usize], program: &HostCx<'_>) -> PreflightId {
+    path.iter()
+        .fold(id, |id, index| preflight_child(id, *index, program))
+}
+
 /// The lexical callable bindings visible while precomputing tensor-helper
 /// facts. This type deliberately does not implement `Clone`: nested `fn` and
 /// `let` expressions must update one scope and then restore it, rather than
@@ -450,61 +555,52 @@ impl CallableScope {
     }
 }
 
-/// Limits pointer-keyed tensor-helper preflight facts to the lifetime of the
-/// owned Deep expression they describe. Host lowering creates rewritten body
-/// trees for callable-let substitution; their addresses are stable only while
-/// that body is being lowered and must never escape into a program-wide cache.
-/// The frame is pushed on entry and popped on every exit.
+/// Limits tensor-helper preflight facts to the lifetime of the owned Deep
+/// expression they describe. Host lowering creates rewritten body trees for
+/// callable-let substitution; their facts hold only while that body is
+/// being lowered and must never escape into a program-wide cache. The frame
+/// is pushed on entry and popped on every exit; `body` receives the
+/// identity of `expr`, the frame root.
 fn with_preflight<R>(
     expr: &Expr,
     program: &mut HostCx<'_>,
-    body: impl FnOnce(&mut HostCx<'_>) -> R,
+    body: impl FnOnce(&mut HostCx<'_>, PreflightNode) -> R,
 ) -> R {
+    let root = PreflightNode {
+        frame: PreflightFrameId(program.runtime.fresh_preflight_frame()),
+        node: 0,
+    };
     scoped(
         program,
-        |program| push_preflight_frame(expr, program),
+        |program| push_preflight_frame(expr, root.frame, program),
         |program, ()| pop_preflight_frame(program),
-        body,
+        |program| body(program, root),
     )
 }
 
-/// [`with_preflight`] when no live frame already covers `expr`; otherwise
-/// `body` reads the covering frame.
+/// [`with_preflight`] when no live frame covers `id`, the identity of
+/// `expr`; otherwise `body` reads the covering frame through `id`.
 fn with_preflight_if_uncovered<R>(
     expr: &Expr,
+    id: PreflightId,
     program: &mut HostCx<'_>,
-    body: impl FnOnce(&mut HostCx<'_>) -> R,
+    body: impl FnOnce(&mut HostCx<'_>, PreflightNode) -> R,
 ) -> R {
-    scoped(
-        program,
-        |program| {
-            let key = expr as *const Expr as usize;
-            let covered = program
-                .state
-                .invocation
-                .preflight
-                .iter()
-                .rev()
-                .any(|facts| facts.contains_key(&key));
-            if !covered {
-                push_preflight_frame(expr, program);
-            }
-            !covered
-        },
-        |program, pushed| {
-            if pushed {
-                pop_preflight_frame(program);
-            }
-        },
-        body,
-    )
+    match id {
+        Some(node) if preflight_facts(id, program).is_some() => body(program, node),
+        _ => with_preflight(expr, program, body),
+    }
 }
 
-fn push_preflight_frame(expr: &Expr, program: &mut HostCx<'_>) {
+fn push_preflight_frame(expr: &Expr, id: PreflightFrameId, program: &mut HostCx<'_>) {
     let summaries = cached_dynamic_to_tensor_def_summaries(program);
-    let mut facts = UnordMap::new();
+    let mut facts = PreflightFacts::new();
     analyze_tensor_helper_preflight(expr, &summaries, &mut facts);
-    program.state.invocation.preflight.push(facts);
+    program
+        .state
+        .invocation
+        .preflight
+        .push(PreflightFrame { id, facts });
 }
 
 fn pop_preflight_frame(program: &mut HostCx<'_>) {
@@ -3167,8 +3263,10 @@ fn lower_host_program_invocation(
             // `lower_host_function`.
             global_tensor_helpers.declaration_name = Some(name.to_string());
             let inlined_body = inline_local_callable_lets(body);
+            // `inline_local_callable_lets` returns a new tree.
             let mut value = try_ok!(lower_host_expr(
                 &inlined_body,
+                None,
                 program,
                 &global_scope,
                 &mut global_tensor_helpers,
@@ -4304,7 +4402,7 @@ fn host_def_kernel_product(
     let Some(signature) = host_def_signature(name, body, None, program)? else {
         return Ok(Ok(None));
     };
-    with_preflight(&signature.body_expr, program, |program| {
+    with_preflight(&signature.body_expr, program, |program, body_id| {
         // Classify lexical controls before host signature preparation substitutes
         // local callable aliases: that rewrite does not carry closure captures.
         let profile_body = as_list(body)
@@ -4348,6 +4446,7 @@ fn host_def_kernel_product(
         let expected = match try_ok!(def_body_decision_impl(
             program,
             &signature,
+            Some(body_id),
             profile == crate::evaluation::EvaluationProfile::FixedControl,
         )?) {
             DefBodyDecision::Kernel(expected) => expected,
@@ -5336,18 +5435,21 @@ fn is_static_scalar(expr: &Expr) -> bool {
 fn def_body_decision(
     program: &mut HostCx<'_>,
     signature: &HostDefSignature,
+    body_id: PreflightId,
 ) -> LowerResult<Result<DefBodyDecision, crate::lower::LowerDiagnostic>> {
     let fixed_dropout = cached_subexpr_lowering_context(program).c_execution_profile(
         &signature.body_expr,
         &kernel_scope_types(&signature.scope, Some(&signature.params)),
         program.runtime,
     )? == crate::evaluation::EvaluationProfile::FixedControl;
-    def_body_decision_impl(program, signature, fixed_dropout)
+    def_body_decision_impl(program, signature, body_id, fixed_dropout)
 }
 
+/// `body_id` is the preflight identity of `signature.body_expr`.
 fn def_body_decision_impl(
     program: &mut HostCx<'_>,
     signature: &HostDefSignature,
+    body_id: PreflightId,
     evaluation_dropout: bool,
 ) -> LowerResult<Result<DefBodyDecision, crate::lower::LowerDiagnostic>> {
     let body_expr = &signature.body_expr;
@@ -5412,7 +5514,7 @@ fn def_body_decision_impl(
     {
         return Ok(Ok(DefBodyDecision::TensorVar(name.to_string(), expected)));
     }
-    if tensor_helper_preflight_rejects(body_expr, program) {
+    if tensor_helper_preflight_rejects(body_id, program) {
         record_host_work(|profile| {
             profile.tensor_helper_fallbacks += 1;
             profile.tensor_helper_preflight_rejections += 1;
@@ -5441,9 +5543,11 @@ fn def_body_decision_impl(
 /// host lane. A failed kernel lowering falls through to host lowering here,
 /// which is the pre-existing chelis#1515 split; `host_def_kernel` does not
 /// inherit it.
+/// `body_id` is the preflight identity of `signature.body_expr`.
 fn lower_def_body_kernel(
     program: &mut HostCx<'_>,
     signature: &HostDefSignature,
+    body_id: PreflightId,
     tensor_helpers: &mut TensorHelperSink,
 ) -> LowerResult<Result<Option<HostExpr>, crate::lower::LowerDiagnostic>> {
     // A returned/dynamically-computed callable has no C value ABI. Do not
@@ -5471,7 +5575,7 @@ fn lower_def_body_kernel(
         staged::StagingAttempt::HostControlBoundary => return Ok(Ok(None)),
         staged::StagingAttempt::NotApplicable => {}
     }
-    let expected = match try_ok!(def_body_decision(program, signature)?) {
+    let expected = match try_ok!(def_body_decision(program, signature, body_id)?) {
         DefBodyDecision::Host => return Ok(Ok(None)),
         DefBodyDecision::TensorVar(name, expected) => {
             return Ok(Ok(Some(HostExpr::new(HostExprKind::Var(
@@ -5965,10 +6069,9 @@ fn lower_host_function(
     };
     let mut tensor_helpers =
         TensorHelperSink::for_declaration(collect_execution, collect_trace, name);
-    // The preflight facts are keyed by the body expression's address, so the
-    // guard opens on the signature's own copy, which is not moved until the
-    // body has been lowered.
-    with_preflight(&signature.body_expr, program, |program| {
+    // The frame root is the signature's own body, a tree `host_def_signature`
+    // rewrote (class: known frame root); the lowering below descends from it.
+    with_preflight(&signature.body_expr, program, |program, body_id| {
         // If the declared return type is a tensor, the body must produce a
         // tensor even when downstream type-metadata annotations are missing
         // from the reef'd deep AST. Force the body through the tensor-helper
@@ -5989,11 +6092,13 @@ fn lower_host_function(
         let mut host_body = match try_ok!(lower_def_body_kernel(
             program,
             &signature,
+            Some(body_id),
             &mut tensor_helpers
         )?) {
             Some(kernel_call) => kernel_call,
             None => try_ok!(lower_host_body_with_record_locals(
                 &signature,
+                Some(body_id),
                 program,
                 &mut tensor_helpers
             )?),
@@ -6091,16 +6196,18 @@ fn synthesize_callable_application(
 /// missing on the reef'd deep AST's `app` nodes.
 fn try_lower_tensor_helper_call(
     expr: &Expr,
+    id: PreflightId,
     program: &mut HostCx<'_>,
     scope: &UnordMap<String, HostTypeTerm>,
     tensor_helpers: &mut TensorHelperSink,
     expected: TensorType,
 ) -> LowerResult<Option<HostExpr>> {
-    try_lower_tensor_helper_call_inner(expr, program, scope, tensor_helpers, expected, None)
+    try_lower_tensor_helper_call_inner(expr, id, program, scope, tensor_helpers, expected, None)
 }
 
 fn try_lower_tensor_helper_call_with_context(
     expr: &Expr,
+    id: PreflightId,
     program: &mut HostCx<'_>,
     scope: &UnordMap<String, HostTypeTerm>,
     tensor_helpers: &mut TensorHelperSink,
@@ -6109,6 +6216,7 @@ fn try_lower_tensor_helper_call_with_context(
 ) -> LowerResult<Option<HostExpr>> {
     try_lower_tensor_helper_call_inner(
         expr,
+        id,
         program,
         scope,
         tensor_helpers,
@@ -6119,6 +6227,7 @@ fn try_lower_tensor_helper_call_with_context(
 
 fn try_lower_tensor_helper_call_inner(
     expr: &Expr,
+    id: PreflightId,
     program: &mut HostCx<'_>,
     scope: &UnordMap<String, HostTypeTerm>,
     tensor_helpers: &mut TensorHelperSink,
@@ -6134,8 +6243,8 @@ fn try_lower_tensor_helper_call_inner(
             HostTypeTerm::Tensor(expected),
         ))));
     }
-    with_preflight_if_uncovered(expr, program, |program| {
-        if tensor_helper_preflight_rejects(expr, program) {
+    with_preflight_if_uncovered(expr, id, program, |program, id| {
+        if tensor_helper_preflight_rejects(Some(id), program) {
             record_host_work(|profile| {
                 profile.tensor_helper_fallbacks += 1;
                 profile.tensor_helper_preflight_rejections += 1;
@@ -6341,8 +6450,10 @@ fn hoist_record_projections(
 ///
 /// Only the host route takes this: a body the DAG can carry never reaches it,
 /// so a compile-time-known record construction keeps its kernel lowering.
+/// `body_id` is the preflight identity of `signature.body_expr`.
 fn lower_host_body_with_record_locals(
     signature: &HostDefSignature,
+    body_id: PreflightId,
     program: &mut HostCx<'_>,
     tensor_helpers: &mut TensorHelperSink,
 ) -> LowerResult<Result<HostExpr, crate::lower::LowerDiagnostic>> {
@@ -6352,6 +6463,7 @@ fn lower_host_body_with_record_locals(
         // did before this mechanism existed.
         return lower_host_expr(
             &signature.body_expr,
+            body_id,
             program,
             &signature.scope,
             tensor_helpers,
@@ -6368,6 +6480,7 @@ fn lower_host_body_with_record_locals(
     if hoists.is_empty() {
         return lower_host_expr(
             &signature.body_expr,
+            body_id,
             program,
             &signature.scope,
             tensor_helpers,
@@ -6406,14 +6519,18 @@ fn lower_host_body_with_record_locals(
         ret_ty: signature.ret_ty.clone(),
         body_expr: rewritten.clone(),
     };
+    // The rewritten body, its signature copy and each hoisted source are
+    // trees built here: no frame analyzed them.
     let body = match try_ok!(lower_def_body_kernel(
         program,
         &rewritten_signature,
+        None,
         tensor_helpers
     )?) {
         Some(kernel_call) => kernel_call,
         None => try_ok!(lower_host_expr(
             &rewritten,
+            None,
             program,
             &scope,
             tensor_helpers
@@ -6423,6 +6540,7 @@ fn lower_host_body_with_record_locals(
     for hoist in &hoists {
         let value = try_ok!(lower_host_expr(
             &hoist.source,
+            None,
             program,
             &signature.scope,
             tensor_helpers
@@ -7111,8 +7229,10 @@ fn lower_staged_host_plan(
                     captured_scope.insert(capture.binding.clone(), capture.ty.clone());
                 }
                 let ty = ty.clone();
+                // A staged source expression is a clone the partition owns.
                 let mut body = try_ok!(lower_host_expr_with_expected(
                     expression,
+                    None,
                     program,
                     &captured_scope,
                     helpers,
@@ -8006,13 +8126,15 @@ fn summary_dims_bind_to_inputs(input_tys: &[TensorType], dims: &[DimExpr]) -> bo
         .all(|name| available.contains(name.as_str()))
 }
 
+/// Lower `expr`, whose preflight identity is `id` ([`PreflightNode`]).
 fn lower_host_expr(
     expr: &Expr,
+    id: PreflightId,
     program: &mut HostCx<'_>,
     scope: &UnordMap<String, HostTypeTerm>,
     tensor_helpers: &mut TensorHelperSink,
 ) -> LowerResult<Result<HostExpr, crate::lower::LowerDiagnostic>> {
-    lower_host_expr_with_expected(expr, program, scope, tensor_helpers, None)
+    lower_host_expr_with_expected(expr, id, program, scope, tensor_helpers, None)
 }
 
 /// `lower_host_expr_with_expected` for callers that already hold an
@@ -8020,24 +8142,26 @@ fn lower_host_expr(
 /// than repeating the `match expected_ty` at each one.
 fn lower_host_expr_with_expected_opt(
     expr: &Expr,
+    id: PreflightId,
     program: &mut HostCx<'_>,
     scope: &UnordMap<String, HostTypeTerm>,
     tensor_helpers: &mut TensorHelperSink,
     expected_ty: Option<&HostTypeTerm>,
 ) -> LowerResult<Result<HostExpr, crate::lower::LowerDiagnostic>> {
-    lower_host_expr_with_expected(expr, program, scope, tensor_helpers, expected_ty)
+    lower_host_expr_with_expected(expr, id, program, scope, tensor_helpers, expected_ty)
 }
 
 fn lower_host_expr_with_expected(
     expr: &Expr,
+    id: PreflightId,
     program: &mut HostCx<'_>,
     scope: &UnordMap<String, HostTypeTerm>,
     tensor_helpers: &mut TensorHelperSink,
     expected_ty: Option<&HostTypeTerm>,
 ) -> LowerResult<Result<HostExpr, crate::lower::LowerDiagnostic>> {
-    let result = with_preflight_if_uncovered(expr, program, |program| {
+    let result = with_preflight_if_uncovered(expr, id, program, |program, id| {
         with_host_expr_profile(program, |program| {
-            lower_host_expr_kind(expr, program, scope, tensor_helpers, expected_ty)
+            lower_host_expr_kind(expr, Some(id), program, scope, tensor_helpers, expected_ty)
         })
     });
     let mut result = try_ok!(result?);
@@ -8064,6 +8188,7 @@ fn lower_host_expr_with_expected(
 struct SequentialHostLetBinding<'expr> {
     binding: &'expr Expr,
     initializer: &'expr Expr,
+    initializer_id: PreflightId,
     bind_span: Option<&'expr str>,
     layer: usize,
 }
@@ -8078,6 +8203,7 @@ struct SequentialHostLetChain<'expr> {
     layers: Vec<SequentialHostLetLayer>,
     bind_expr: Expr,
     body: &'expr Expr,
+    body_id: PreflightId,
 }
 
 /// Flatten only the direct tail chain produced for sequential Surf bindings:
@@ -8086,14 +8212,16 @@ struct SequentialHostLetChain<'expr> {
 /// same lexical predecessors that source evaluation gives it.
 fn sequential_host_let_chain<'expr>(
     expr: &'expr Expr,
+    id: PreflightId,
     program: &mut HostCx<'_>,
     scope: &UnordMap<String, HostTypeTerm>,
 ) -> LowerResult<Option<SequentialHostLetChain<'expr>>> {
     let mut bindings = Vec::new();
     let mut layers = Vec::new();
     let mut current = expr;
+    let mut current_id = id;
     let mut layer = 0;
-    let body = loop {
+    let (body, body_id) = loop {
         let Expr::List(list, _) = current else {
             return Ok(None);
         };
@@ -8111,24 +8239,28 @@ fn sequential_host_let_chain<'expr>(
             return Ok(None);
         }
         let bind_span = bind_expr.span_id();
+        let bind_id = preflight_child(current_id, 0, program);
         let bind_kids = children(bind_list);
         if !bind_kids.len().is_multiple_of(2) {
             return Ok(None);
         }
-        for pair in bind_kids.as_chunks::<2>().0 {
+        for (pair_index, pair) in bind_kids.as_chunks::<2>().0.iter().enumerate() {
             bindings.push(SequentialHostLetBinding {
                 binding: &pair[0],
                 initializer: &pair[1],
+                initializer_id: preflight_child(bind_id, pair_index * 2 + 1, program),
                 bind_span,
                 layer,
             });
         }
         let next = try_some!(kids.get(1));
+        let next_id = preflight_child(current_id, 1, program);
         if matches!(next, Expr::List(next_list, _) if tag(next_list) == Some(DeepTag::Let)) {
             current = next;
+            current_id = next_id;
             layer += 1;
         } else {
-            break next;
+            break (next, next_id);
         }
     };
 
@@ -8151,6 +8283,7 @@ fn sequential_host_let_chain<'expr>(
             span,
         ),
         body,
+        body_id,
     }))
 }
 
@@ -8178,8 +8311,11 @@ fn lower_checked_local_ascription_region(
         )
     }));
 
+    // The region expression is a tree the checked lowering context
+    // synthesized from the bindings it spans: no frame analyzed it.
     Ok(try_lower_tensor_helper_call_with_context(
         local_region.expression(),
+        None,
         program,
         scope,
         tensor_helpers,
@@ -8270,6 +8406,7 @@ fn malformed_host_authority(
 
 fn lower_host_expr_kind(
     expr: &Expr,
+    id: PreflightId,
     program: &mut HostCx<'_>,
     scope: &UnordMap<String, HostTypeTerm>,
     tensor_helpers: &mut TensorHelperSink,
@@ -8279,8 +8416,14 @@ fn lower_host_expr_kind(
     if !is_app_expr
         && let Some(tensor_ty) = expr_tensor_type(expr, program, scope)?
         && !should_keep_tensor_expr_in_host_lane(expr)
-        && let Some(tensor_call) =
-            try_lower_tensor_helper_call(expr, program, scope, tensor_helpers, tensor_ty.clone())?
+        && let Some(tensor_call) = try_lower_tensor_helper_call(
+            expr,
+            id,
+            program,
+            scope,
+            tensor_helpers,
+            tensor_ty.clone(),
+        )?
     {
         return Ok(Ok(tensor_call));
     }
@@ -8294,10 +8437,12 @@ fn lower_host_expr_kind(
             if children(list).is_empty() {
                 return Ok(Ok(HostExpr::new(HostExprKind::Unit)));
             }
-            let items =
-                try_ok!(try_collect_results(children(list).iter().map(|child| {
-                    lower_host_expr(child, program, scope, tensor_helpers)
-                }))?);
+            let items = try_ok!(try_collect_results(children(list).iter().enumerate().map(
+                |(index, child)| {
+                    let child_id = preflight_child(id, index, program);
+                    lower_host_expr(child, child_id, program, scope, tensor_helpers)
+                }
+            ))?);
             let ty = expr_host_type(expr, program, scope)?;
             let ty = if ty.is_unresolved() {
                 HostTypeTerm::Tuple(items.iter().map(host_expr_type).collect())
@@ -8309,6 +8454,7 @@ fn lower_host_expr_kind(
         Expr::List(list, _) if tag(list) == Some(DeepTag::Record) => {
             try_ok!(lower_record_host_expr(
                 list,
+                id,
                 program,
                 scope,
                 tensor_helpers,
@@ -8319,7 +8465,14 @@ fn lower_host_expr_kind(
             let child = try_ok!(children(list).first().ok_or_else(|| {
                 host_expr_lowering_error(expr, "a `lit` node has no literal child")
             }));
-            let value = try_ok!(lower_host_expr(child, program, scope, tensor_helpers)?);
+            let child_id = preflight_child(id, 0, program);
+            let value = try_ok!(lower_host_expr(
+                child,
+                child_id,
+                program,
+                scope,
+                tensor_helpers
+            )?);
 
             // The lexical carriers are i64/f64, but the checked `lit` owns
             // the value's width ([04-LIT-1]). Finalize before any return,
@@ -8411,15 +8564,19 @@ fn lower_host_expr_kind(
             // ADT constructed in one resolves its instantiation from the
             // caller's expected type — the same rule the match arms follow.
             // The condition is not a result position and keeps plain lowering.
+            let then_id = preflight_child(id, 1, program);
             let then_expr = try_ok!(lower_host_expr_with_expected_opt(
                 &kids[1],
+                then_id,
                 program,
                 scope,
                 tensor_helpers,
                 expected_ty,
             )?);
+            let else_id = preflight_child(id, 2, program);
             let else_expr = try_ok!(lower_host_expr_with_expected_opt(
                 &kids[2],
+                else_id,
                 program,
                 scope,
                 tensor_helpers,
@@ -8436,9 +8593,11 @@ fn lower_host_expr_kind(
             } else {
                 explicit_ty
             };
+            let cond_id = preflight_child(id, 0, program);
             HostExpr::new(HostExprKind::If {
                 cond: Box::new(try_ok!(lower_host_expr(
                     &kids[0],
+                    cond_id,
                     program,
                     scope,
                     tensor_helpers
@@ -8451,6 +8610,7 @@ fn lower_host_expr_kind(
         Expr::List(list, _) if tag(list) == Some(DeepTag::Match) => {
             try_ok!(lower_match_host_expr(
                 list,
+                id,
                 program,
                 scope,
                 tensor_helpers,
@@ -8472,7 +8632,14 @@ fn lower_host_expr_kind(
             };
             let mut bindings = Vec::new();
             for (index, child) in init.iter().enumerate() {
-                let value = try_ok!(lower_host_expr(child, program, scope, tensor_helpers)?);
+                let child_id = preflight_child(id, index, program);
+                let value = try_ok!(lower_host_expr(
+                    child,
+                    child_id,
+                    program,
+                    scope,
+                    tensor_helpers
+                )?);
                 let ty = host_expr_type(&value);
                 bindings.push(HostBinding {
                     name: format!("__chelis_block_{index}"),
@@ -8482,7 +8649,14 @@ fn lower_host_expr_kind(
                     value,
                 });
             }
-            let body = try_ok!(lower_host_expr(last, program, scope, tensor_helpers)?);
+            let last_id = preflight_child(id, init.len(), program);
+            let body = try_ok!(lower_host_expr(
+                last,
+                last_id,
+                program,
+                scope,
+                tensor_helpers
+            )?);
             let body_ty = host_expr_type(&body);
             HostExpr::new(HostExprKind::Let {
                 bindings,
@@ -8495,7 +8669,7 @@ fn lower_host_expr_kind(
             let mut scoped = scope.clone();
             let mut bindings = Vec::new();
             let checked_lowering = cached_subexpr_lowering_context(program);
-            let flattened = sequential_host_let_chain(expr, program, scope)?;
+            let flattened = sequential_host_let_chain(expr, id, program, scope)?;
             let flattened_regions = if let Some(chain) = flattened.as_ref() {
                 checked_lowering.local_ascription_binding_regions(
                     &chain.bind_expr,
@@ -8514,12 +8688,14 @@ fn lower_host_expr_kind(
                 })
             });
 
-            let (let_bindings, bind_expr, body_expr, nested_layers) = if crosses_nested_let {
+            let (let_bindings, bind_expr, body_expr, body_id, nested_layers) = if crosses_nested_let
+            {
                 let chain = flattened.expect("cross-layer region requires a flattened let chain");
                 (
                     chain.bindings,
                     Cow::Owned(chain.bind_expr),
                     chain.body,
+                    chain.body_id,
                     Some(chain.layers),
                 )
             } else {
@@ -8536,13 +8712,16 @@ fn lower_host_expr_kind(
                     )));
                 }
                 let bind_span = bind_first.span_id();
+                let bind_id = preflight_child(id, 0, program);
                 let current = children(bind_list)
                     .as_chunks::<2>()
                     .0
                     .iter()
-                    .map(|pair| SequentialHostLetBinding {
+                    .enumerate()
+                    .map(|(pair_index, pair)| SequentialHostLetBinding {
                         binding: &pair[0],
                         initializer: &pair[1],
+                        initializer_id: preflight_child(bind_id, pair_index * 2 + 1, program),
                         bind_span,
                         layer: 0,
                     })
@@ -8553,6 +8732,7 @@ fn lower_host_expr_kind(
                     try_ok!(kids.get(1).ok_or_else(|| {
                         host_expr_lowering_error(expr, "a `let` node has no body")
                     })),
+                    preflight_child(id, 1, program),
                     None,
                 )
             };
@@ -8584,6 +8764,7 @@ fn lower_host_expr_kind(
                     } else {
                         try_ok!(lower_host_expr(
                             initializer,
+                            binding.initializer_id,
                             program,
                             &scoped,
                             tensor_helpers
@@ -8611,6 +8792,7 @@ fn lower_host_expr_kind(
             }
             let mut body = try_ok!(lower_host_expr(
                 body_expr,
+                body_id,
                 program,
                 &scoped,
                 tensor_helpers
@@ -8651,6 +8833,7 @@ fn lower_host_expr_kind(
         Expr::List(list, _) if tag(list) == Some(DeepTag::TupleGet) => {
             try_ok!(lower_tuple_get_host_expr(
                 list,
+                id,
                 program,
                 scope,
                 tensor_helpers
@@ -8659,6 +8842,7 @@ fn lower_host_expr_kind(
         Expr::List(list, _) if tag(list) == Some(DeepTag::Access) => {
             try_ok!(lower_access_host_expr(
                 list,
+                id,
                 program,
                 scope,
                 tensor_helpers
@@ -8734,7 +8918,14 @@ fn lower_host_expr_kind(
                     .first()
                     .ok_or_else(|| host_expr_lowering_error(expr, "a `cast` node has no operand"))
             );
-            let mut value = try_ok!(lower_host_expr(operand, program, scope, tensor_helpers)?);
+            let operand_id = preflight_child(id, 0, program);
+            let mut value = try_ok!(lower_host_expr(
+                operand,
+                operand_id,
+                program,
+                scope,
+                tensor_helpers
+            )?);
             if binder_float_literal_keeps_f32_source(operand, &ty) {
                 value = HostExpr::new(HostExprKind::Builtin {
                     name: "cast".to_string(),
@@ -8762,6 +8953,7 @@ fn lower_host_expr_kind(
         Expr::List(list, _) if tag(list) == Some(DeepTag::App) => {
             try_ok!(lower_app_host_expr(
                 expr,
+                id,
                 list,
                 program,
                 scope,
@@ -8817,16 +9009,31 @@ fn lower_host_expr_kind(
                 )
                 .fatal()
             }));
-            let body = try_ok!(kids.get(1).or_else(|| kids.first()).ok_or_else(|| {
+            let body_index = if kids.len() > 1 { 1 } else { 0 };
+            let body = try_ok!(kids.get(body_index).ok_or_else(|| {
                 host_expr_lowering_error(expr, "a `handle-effect` node has no body")
             }));
+            let body_id = preflight_child(id, body_index, program);
             match effect_kind {
                 EffectKind::Random => {
                     let seed_expr = try_ok!(kids.first().ok_or_else(|| {
                         host_expr_lowering_error(expr, "a random handler has no seed")
                     }));
-                    let seed = try_ok!(lower_host_expr(seed_expr, program, scope, tensor_helpers)?);
-                    let body = try_ok!(lower_host_expr(body, program, scope, tensor_helpers)?);
+                    let seed_id = preflight_child(id, 0, program);
+                    let seed = try_ok!(lower_host_expr(
+                        seed_expr,
+                        seed_id,
+                        program,
+                        scope,
+                        tensor_helpers
+                    )?);
+                    let body = try_ok!(lower_host_expr(
+                        body,
+                        body_id,
+                        program,
+                        scope,
+                        tensor_helpers
+                    )?);
                     let ty = host_expr_type(&body);
                     return Ok(Ok(HostExpr::new(HostExprKind::WithSeed {
                         seed: Box::new(seed),
@@ -8835,13 +9042,21 @@ fn lower_host_expr_kind(
                     })));
                 }
                 EffectKind::Resource => {
-                    try_ok!(lower_host_expr(body, program, scope, tensor_helpers)?)
+                    try_ok!(lower_host_expr(
+                        body,
+                        body_id,
+                        program,
+                        scope,
+                        tensor_helpers
+                    )?)
                 }
             }
         }
         Expr::MetaExpr(meta, _) => {
+            let inner_id = preflight_child(id, 0, program);
             try_ok!(lower_host_expr_with_expected(
                 &meta.expr,
+                inner_id,
                 program,
                 scope,
                 tensor_helpers,
@@ -8868,6 +9083,7 @@ fn lower_host_expr_kind(
                 try_ok!(children(list).first().ok_or_else(|| {
                     host_expr_lowering_error(expr, "a `copy` node has no operand")
                 })),
+                preflight_child(id, 0, program),
                 program,
                 scope,
                 tensor_helpers,
@@ -8892,6 +9108,7 @@ fn lower_host_expr_kind(
                 try_ok!(children(list).first().ok_or_else(|| {
                     host_expr_lowering_error(expr, "a `realize` node has no operand")
                 })),
+                preflight_child(id, 0, program),
                 program,
                 scope,
                 tensor_helpers,
@@ -8916,6 +9133,7 @@ fn lower_host_expr_kind(
                             "a `jit` node has no operand"
                         ))
                 ),
+                preflight_child(id, 0, program),
                 program,
                 scope,
                 tensor_helpers,
@@ -8939,9 +9157,11 @@ fn lower_host_expr_kind(
             // PR #51).
             let kids = children(list);
             let mut last: Option<HostExpr> = None;
-            for child in kids {
+            for (index, child) in kids.iter().enumerate() {
+                let child_id = preflight_child(id, index, program);
                 last = Some(try_ok!(lower_host_expr(
                     child,
+                    child_id,
                     program,
                     scope,
                     tensor_helpers
@@ -9937,8 +10157,10 @@ fn should_keep_tensor_expr_in_host_lane(expr: &Expr) -> bool {
     )
 }
 
+/// `id` is the preflight identity of the `match` expression `list` forms.
 fn lower_match_host_expr(
     list: &List,
+    id: PreflightId,
     program: &mut HostCx<'_>,
     scope: &UnordMap<String, HostTypeTerm>,
     tensor_helpers: &mut TensorHelperSink,
@@ -9957,8 +10179,10 @@ fn lower_match_host_expr(
             &match_expr,
             "a `match` node has no scrutinee"
         )));
+    let scrutinee_id = preflight_child(id, 0, program);
     let scrutinee = try_ok!(lower_host_expr(
         scrutinee_node,
+        scrutinee_id,
         program,
         scope,
         tensor_helpers
@@ -9974,6 +10198,7 @@ fn lower_match_host_expr(
     ) {
         return lower_literal_match_host_expr(
             list,
+            id,
             program,
             scope,
             tensor_helpers,
@@ -9988,7 +10213,7 @@ fn lower_match_host_expr(
     let mut generic_default = None;
     let option_match = matches!(&scrutinee_ty, HostTypeTerm::Option(_));
 
-    for arm in kids.iter().skip(1) {
+    for (arm_index, arm) in kids.iter().enumerate().skip(1) {
         let Some(arm_list) = as_list(arm) else {
             continue;
         };
@@ -9996,6 +10221,7 @@ fn lower_match_host_expr(
             continue;
         }
         let arm_kids = children(arm_list);
+        let arm_body_id = preflight_descendant(id, &[arm_index, 2], program);
         let Some(pattern) = arm_kids.first().and_then(as_list) else {
             continue;
         };
@@ -10005,6 +10231,7 @@ fn lower_match_host_expr(
             }));
             generic_default = Some(Box::new(try_ok!(lower_host_expr_with_expected_opt(
                 body,
+                arm_body_id,
                 program,
                 scope,
                 tensor_helpers,
@@ -10032,6 +10259,7 @@ fn lower_match_host_expr(
                     }));
                     some_expr = Some(try_ok!(lower_host_expr_with_expected_opt(
                         body,
+                        arm_body_id,
                         program,
                         &scoped,
                         tensor_helpers,
@@ -10044,6 +10272,7 @@ fn lower_match_host_expr(
                     }));
                     none_expr = Some(try_ok!(lower_host_expr_with_expected_opt(
                         body,
+                        arm_body_id,
                         program,
                         scope,
                         tensor_helpers,
@@ -10135,6 +10364,7 @@ fn lower_match_host_expr(
                                     "an ADT match arm has no body",
                                 )
                             })),
+                            arm_body_id,
                             program,
                             &scoped,
                             tensor_helpers,
@@ -10218,6 +10448,7 @@ fn lower_match_host_expr(
 
 fn lower_literal_match_host_expr(
     list: &List,
+    id: PreflightId,
     program: &mut HostCx<'_>,
     scope: &UnordMap<String, HostTypeTerm>,
     tensor_helpers: &mut TensorHelperSink,
@@ -10228,7 +10459,7 @@ fn lower_literal_match_host_expr(
     let mut literal_arms = Vec::new();
     let mut default_expr = None;
     let match_expr = Expr::List(list.clone(), list_span(list));
-    for arm in kids.iter().skip(1) {
+    for (arm_index, arm) in kids.iter().enumerate().skip(1) {
         let Some(arm_list) = as_list(arm) else {
             continue;
         };
@@ -10243,6 +10474,7 @@ fn lower_literal_match_host_expr(
             try_ok!(arm_kids.get(2).ok_or_else(|| {
                 host_expr_lowering_error(&match_expr, "a literal match arm has no body")
             })),
+            preflight_descendant(id, &[arm_index, 2], program),
             program,
             scope,
             tensor_helpers,
@@ -10316,8 +10548,10 @@ fn host_literal_expr(expr: &Expr, expected_ty: &HostTypeTerm) -> Option<HostExpr
     }
 }
 
+/// `id` is the preflight identity of the `record` expression `list` forms.
 fn lower_record_host_expr(
     list: &List,
+    id: PreflightId,
     program: &mut HostCx<'_>,
     scope: &UnordMap<String, HostTypeTerm>,
     tensor_helpers: &mut TensorHelperSink,
@@ -10378,7 +10612,7 @@ fn lower_record_host_expr(
         })
     );
     let mut supplied = UnordMap::new();
-    for field in kids.iter().skip(1) {
+    for (field_index, field) in kids.iter().enumerate().skip(1) {
         let kv_list = try_ok!(as_list(field).ok_or_else(|| {
             host_expr_lowering_error(&record_expr, "a record field is not a `kv` node")
         }));
@@ -10421,6 +10655,7 @@ fn lower_record_host_expr(
                     format!("record field `{name}` has no value"),
                 )
             })),
+            preflight_descendant(id, &[field_index, 1], program),
             program,
             scope,
             tensor_helpers,
@@ -10467,8 +10702,10 @@ fn lower_record_host_expr(
     })))
 }
 
+/// `id` is the preflight identity of the `access` expression `list` forms.
 fn lower_access_host_expr(
     list: &List,
+    id: PreflightId,
     program: &mut HostCx<'_>,
     scope: &UnordMap<String, HostTypeTerm>,
     tensor_helpers: &mut TensorHelperSink,
@@ -10479,6 +10716,7 @@ fn lower_access_host_expr(
         try_ok!(kids.first().ok_or_else(|| {
             host_expr_lowering_error(&access_expr, "an `access` node has no base expression")
         })),
+        preflight_child(id, 0, program),
         program,
         scope,
         tensor_helpers,
@@ -10558,8 +10796,10 @@ fn pattern_field_bindings<'a>(
     }
 }
 
+/// `id` is the preflight identity of the `tuple-get` expression `list` forms.
 fn lower_tuple_get_host_expr(
     list: &List,
+    id: PreflightId,
     program: &mut HostCx<'_>,
     scope: &UnordMap<String, HostTypeTerm>,
     tensor_helpers: &mut TensorHelperSink,
@@ -10575,9 +10815,23 @@ fn lower_tuple_get_host_expr(
             ),
         )));
     }
+    let tuple_id = preflight_child(id, 0, program);
+    let index_id = preflight_child(id, 1, program);
     let args = vec![
-        try_ok!(lower_host_expr(&kids[0], program, scope, tensor_helpers)?),
-        try_ok!(lower_host_expr(&kids[1], program, scope, tensor_helpers)?),
+        try_ok!(lower_host_expr(
+            &kids[0],
+            tuple_id,
+            program,
+            scope,
+            tensor_helpers
+        )?),
+        try_ok!(lower_host_expr(
+            &kids[1],
+            index_id,
+            program,
+            scope,
+            tensor_helpers
+        )?),
     ];
     let explicit_ty = expr_host_type(
         &Expr::List(list.clone(), chelis_deep::Span::new(0, 0)),
@@ -10729,6 +10983,7 @@ fn resolve_scalar_def<'a>(
 /// to the existing unresolved-callable-marker rejection path).
 fn try_lower_scalar_grad_app(
     list: &List,
+    id: PreflightId,
     program: &mut HostCx<'_>,
     scope: &UnordMap<String, HostTypeTerm>,
     tensor_helpers: &mut TensorHelperSink,
@@ -10787,10 +11042,13 @@ fn try_lower_scalar_grad_app(
     if call_args.len() != param_names.len() {
         return Ok(Ok(None));
     }
-    let arg_values: Vec<HostExpr> =
-        try_ok!(try_collect_results(call_args.iter().map(|arg| {
-            lower_host_expr(arg, program, scope, tensor_helpers)
-        }))?);
+    let arg_values: Vec<HostExpr> = try_ok!(try_collect_results(
+        call_args.iter().enumerate().map(|(index, arg)| {
+            // Call arguments follow the callee at semantic index 0.
+            let arg_id = preflight_child(id, index + 1, program);
+            lower_host_expr(arg, arg_id, program, scope, tensor_helpers)
+        })
+    )?);
 
     // One forward pass per `wrt` parameter.
     let mut derivs = Vec::new();
@@ -11869,8 +12127,10 @@ fn is_zero_float(expr: &HostExpr) -> bool {
         || matches!(&expr.kind, HostExprKind::Int(0))
 }
 
+/// `id` is the preflight identity of `app_expr`, whose list is `list`.
 fn lower_app_host_expr(
     app_expr: &Expr,
+    id: PreflightId,
     list: &List,
     program: &mut HostCx<'_>,
     scope: &UnordMap<String, HostTypeTerm>,
@@ -11897,6 +12157,7 @@ fn lower_app_host_expr(
     // unsupported op).
     if let Some(grad_lowered) = try_ok!(try_lower_scalar_grad_app(
         list,
+        id,
         program,
         scope,
         tensor_helpers
@@ -11911,6 +12172,7 @@ fn lower_app_host_expr(
     // app whose callee is that inline function.
     if let Some(lowered) = try_ok!(lower_inline_host_invocation(
         app_expr,
+        id,
         program,
         scope,
         tensor_helpers,
@@ -11987,7 +12249,14 @@ fn lower_app_host_expr(
             )
         })
     {
-        let entries = try_ok!(lower_host_expr(&kids[1], program, scope, tensor_helpers)?);
+        let entries_id = preflight_child(id, 1, program);
+        let entries = try_ok!(lower_host_expr(
+            &kids[1],
+            entries_id,
+            program,
+            scope,
+            tensor_helpers
+        )?);
         return Ok(Ok(HostExpr::new(HostExprKind::Builtin {
             name: "__json_canonical_object_entries".to_string(),
             args: vec![entries],
@@ -12052,6 +12321,7 @@ fn lower_app_host_expr(
                 canonicalize_representation_erased_adt_args(explicit_ty.clone(), &definitions);
             Ok(lower_host_expr_with_expected(
                 &specialized,
+                None,
                 program,
                 scope,
                 tensor_helpers,
@@ -12068,9 +12338,11 @@ fn lower_app_host_expr(
         return Ok(lowered);
     }
     if active_compiler_name == Some("Cons") && kids.len() == 3 {
+        // `expr` clones the application: no frame analyzed the copy.
         let expr = Expr::List(list.clone(), chelis_deep::Span::new(0, 0));
         if let Some(items) = try_ok!(lower_list_literal_items(
             &expr,
+            None,
             program,
             scope,
             tensor_helpers
@@ -12094,7 +12366,14 @@ fn lower_app_host_expr(
     // spelling but lowers through the generic ADT path below; raw-name
     // dispatch would contradict the checker's nominal result type.
     if active_compiler_name == Some("Some") && kids.len() == 2 && ctor_definition.is_none() {
-        let arg = try_ok!(lower_host_expr(&kids[1], program, scope, tensor_helpers)?);
+        let arg_id = preflight_child(id, 1, program);
+        let arg = try_ok!(lower_host_expr(
+            &kids[1],
+            arg_id,
+            program,
+            scope,
+            tensor_helpers
+        )?);
         return Ok(Ok(HostExpr::new(HostExprKind::Builtin {
             name,
             args: vec![arg.clone()],
@@ -12109,6 +12388,7 @@ fn lower_app_host_expr(
         let callback = try_ok!(
             try_ok!(lower_host_callback(
                 &kids[1],
+                preflight_child(id, 1, program),
                 program,
                 scope,
                 tensor_helpers
@@ -12117,7 +12397,13 @@ fn lower_app_host_expr(
                 host_expr_lowering_error(app_expr, "`map` requires a lowerable callback")
             })
         );
-        let list_expr = try_ok!(lower_host_expr(&kids[2], program, scope, tensor_helpers)?);
+        let list_expr = try_ok!(lower_host_expr(
+            &kids[2],
+            preflight_child(id, 2, program),
+            program,
+            scope,
+            tensor_helpers
+        )?);
         let ty = expr_host_type(app_expr, program, scope)?;
         let ty = if ty.is_unresolved() {
             HostTypeTerm::List(Box::new(callback.ret_ty.clone()))
@@ -12134,6 +12420,7 @@ fn lower_app_host_expr(
         let callback = try_ok!(
             try_ok!(lower_host_callback(
                 &kids[1],
+                preflight_child(id, 1, program),
                 program,
                 scope,
                 tensor_helpers
@@ -12142,7 +12429,13 @@ fn lower_app_host_expr(
                 host_expr_lowering_error(app_expr, "`filter` requires a lowerable callback")
             })
         );
-        let list_expr = try_ok!(lower_host_expr(&kids[2], program, scope, tensor_helpers)?);
+        let list_expr = try_ok!(lower_host_expr(
+            &kids[2],
+            preflight_child(id, 2, program),
+            program,
+            scope,
+            tensor_helpers
+        )?);
         let ty = expr_host_type(app_expr, program, scope)?;
         let ty = if ty.is_unresolved() {
             host_expr_type(&list_expr)
@@ -12159,6 +12452,7 @@ fn lower_app_host_expr(
         let callback = try_ok!(
             try_ok!(lower_host_callback(
                 &kids[1],
+                preflight_child(id, 1, program),
                 program,
                 scope,
                 tensor_helpers
@@ -12177,13 +12471,25 @@ fn lower_app_host_expr(
         }
         .filter(|ty| !ty.is_unresolved())
         .unwrap_or_else(|| callback.ret_ty.clone());
-        let init_expr = try_ok!(lower_host_expr(&kids[2], program, scope, tensor_helpers)?);
+        let init_expr = try_ok!(lower_host_expr(
+            &kids[2],
+            preflight_child(id, 2, program),
+            program,
+            scope,
+            tensor_helpers
+        )?);
         let init_expr = if accumulator_ty.is_unresolved() {
             init_expr
         } else {
             force_host_expr_type(init_expr, accumulator_ty.clone())
         };
-        let list_expr = try_ok!(lower_host_expr(&kids[3], program, scope, tensor_helpers)?);
+        let list_expr = try_ok!(lower_host_expr(
+            &kids[3],
+            preflight_child(id, 3, program),
+            program,
+            scope,
+            tensor_helpers
+        )?);
         let ty = expr_host_type(app_expr, program, scope)?;
         let ty = if ty.is_unresolved() {
             accumulator_ty
@@ -12201,6 +12507,7 @@ fn lower_app_host_expr(
         let callback = try_ok!(
             try_ok!(lower_host_callback(
                 &kids[1],
+                preflight_child(id, 1, program),
                 program,
                 scope,
                 tensor_helpers
@@ -12209,8 +12516,20 @@ fn lower_app_host_expr(
                 host_expr_lowering_error(app_expr, "`scan` requires a lowerable callback")
             })
         );
-        let init_expr = try_ok!(lower_host_expr(&kids[2], program, scope, tensor_helpers)?);
-        let list_expr = try_ok!(lower_host_expr(&kids[3], program, scope, tensor_helpers)?);
+        let init_expr = try_ok!(lower_host_expr(
+            &kids[2],
+            preflight_child(id, 2, program),
+            program,
+            scope,
+            tensor_helpers
+        )?);
+        let list_expr = try_ok!(lower_host_expr(
+            &kids[3],
+            preflight_child(id, 3, program),
+            program,
+            scope,
+            tensor_helpers
+        )?);
         let ty = expr_host_type(app_expr, program, scope)?;
         let ty = if ty.is_unresolved() {
             HostTypeTerm::List(Box::new(host_expr_type(&init_expr)))
@@ -12228,6 +12547,7 @@ fn lower_app_host_expr(
         let callback = try_ok!(
             try_ok!(lower_host_callback(
                 &kids[1],
+                preflight_child(id, 1, program),
                 program,
                 scope,
                 tensor_helpers
@@ -12236,7 +12556,13 @@ fn lower_app_host_expr(
                 host_expr_lowering_error(app_expr, "`partition` requires a lowerable callback")
             })
         );
-        let list_expr = try_ok!(lower_host_expr(&kids[2], program, scope, tensor_helpers)?);
+        let list_expr = try_ok!(lower_host_expr(
+            &kids[2],
+            preflight_child(id, 2, program),
+            program,
+            scope,
+            tensor_helpers
+        )?);
         let ty = expr_host_type(app_expr, program, scope)?;
         let ty = if ty.is_unresolved() {
             let list_ty = host_expr_type(&list_expr);
@@ -12254,6 +12580,7 @@ fn lower_app_host_expr(
         let callback = try_ok!(
             try_ok!(lower_host_callback(
                 &kids[1],
+                preflight_child(id, 1, program),
                 program,
                 scope,
                 tensor_helpers
@@ -12262,7 +12589,13 @@ fn lower_app_host_expr(
                 host_expr_lowering_error(app_expr, "`flat_map` requires a lowerable callback")
             })
         );
-        let list_expr = try_ok!(lower_host_expr(&kids[2], program, scope, tensor_helpers)?);
+        let list_expr = try_ok!(lower_host_expr(
+            &kids[2],
+            preflight_child(id, 2, program),
+            program,
+            scope,
+            tensor_helpers
+        )?);
         let ty = expr_host_type(app_expr, program, scope)?;
         let ty = if ty.is_unresolved() {
             match callback.ret_ty.clone() {
@@ -12306,11 +12639,18 @@ fn lower_app_host_expr(
     };
     let (helper_expr, helper_scope, helper_bindings) = try_ok!(hoist_host_lane_tensor_bindings(
         app_expr,
+        id,
         program,
         scope,
         fn_sig.as_ref(),
         tensor_helpers
     )?);
+    // A borrowed helper expression is `app_expr` itself; an owned one is the
+    // rewrite the hoist built, which no frame analyzed.
+    let helper_id = match &helper_expr {
+        Cow::Borrowed(_) => id,
+        Cow::Owned(_) => None,
+    };
     // Local callable params (e.g. `f` in `def apply(f: fn, x) = f(x)`) are
     // not representable in the tensor-helper DAG — the DAG path would box
     // the fn pointer into `chelis_scalar_tensor_from_f64` and emit C that
@@ -12363,6 +12703,7 @@ fn lower_app_host_expr(
         && !should_keep_tensor_expr_in_host_lane(app_expr)
         && let Some(tensor_call) = try_lower_tensor_helper_call(
             helper_expr.as_ref(),
+            helper_id,
             program,
             helper_scope.as_ref(),
             tensor_helpers,
@@ -12389,7 +12730,14 @@ fn lower_app_host_expr(
         && let Some(specialized) = inline_top_level_host_call(app_expr, program)
     {
         let lowered = with_inlining(Some(&name), program, |program| {
-            try_lower_tensor_helper_call(&specialized, program, scope, tensor_helpers, tensor_ty)
+            try_lower_tensor_helper_call(
+                &specialized,
+                None,
+                program,
+                scope,
+                tensor_helpers,
+                tensor_ty,
+            )
         })?;
         if let Some(tensor_call) = lowered {
             return Ok(Ok(tensor_call));
@@ -12424,6 +12772,7 @@ fn lower_app_host_expr(
                 canonicalize_representation_erased_adt_args(explicit_ty.clone(), &definitions);
             lower_host_expr_with_expected(
                 &specialized,
+                None,
                 program,
                 scope,
                 tensor_helpers,
@@ -12435,6 +12784,7 @@ fn lower_app_host_expr(
     if has_callable_params
         && let Some(guarded) = try_ok!(lower_guarded_host_invocation(
             app_expr,
+            id,
             &name,
             &explicit_ty,
             program,
@@ -12458,6 +12808,7 @@ fn lower_app_host_expr(
                 canonicalize_representation_erased_adt_args(explicit_ty.clone(), &definitions);
             lower_host_expr_with_expected(
                 &specialized,
+                None,
                 program,
                 scope,
                 tensor_helpers,
@@ -12488,6 +12839,7 @@ fn lower_app_host_expr(
     {
         return lower_recursive_generic_call(
             app_expr,
+            id,
             &name,
             &kids[1..],
             &explicit_ty,
@@ -12497,10 +12849,12 @@ fn lower_app_host_expr(
             tensor_helpers,
         );
     }
-    let args =
-        try_ok!(try_collect_results(kids[1..].iter().map(|arg| {
-            lower_host_expr(arg, program, scope, tensor_helpers)
-        }))?);
+    let args = try_ok!(try_collect_results(kids[1..].iter().enumerate().map(
+        |(index, arg)| {
+            let arg_id = preflight_child(id, index + 1, program);
+            lower_host_expr(arg, arg_id, program, scope, tensor_helpers)
+        }
+    ))?);
     let construct_ty = if let Some(definition) = &ctor_definition {
         if matches!(explicit_ty, HostTypeTerm::Adt(_, _)) {
             explicit_ty.clone()
@@ -12925,6 +13279,7 @@ fn retain_callable_entry_contract(
 /// own signature. The AST-only reducer above is reserved for shape evidence.
 fn lower_inline_host_invocation(
     expr: &Expr,
+    id: PreflightId,
     program: &mut HostCx<'_>,
     scope: &UnordMap<String, HostTypeTerm>,
     tensor_helpers: &mut TensorHelperSink,
@@ -12989,6 +13344,7 @@ fn lower_inline_host_invocation(
     }
     Ok(lower_retained_host_invocation(
         expr,
+        id,
         RetainedHostInvocation::new(&params, body),
         expected,
         program,
@@ -13001,6 +13357,7 @@ fn lower_inline_host_invocation(
 /// Keep the signature boundary which named body substitution otherwise erases.
 fn lower_guarded_host_invocation(
     expr: &Expr,
+    id: PreflightId,
     name: &str,
     expected: &HostTypeTerm,
     program: &mut HostCx<'_>,
@@ -13023,6 +13380,7 @@ fn lower_guarded_host_invocation(
     invocation.name = Some(name);
     Ok(lower_retained_host_invocation(
         expr,
+        id,
         invocation,
         Some(expected),
         program,
@@ -13035,8 +13393,10 @@ fn lower_guarded_host_invocation(
 /// Evaluate payload actuals once in caller order, then execute the complete
 /// entry plan before the substituted body. Callable actuals remain syntax,
 /// wrapped in their formal checked adapter when that formal owns entry guards.
+/// `id` is the preflight identity of the application `expr`.
 fn lower_retained_host_invocation(
     expr: &Expr,
+    id: PreflightId,
     invocation: RetainedHostInvocation<'_>,
     expected: Option<&HostTypeTerm>,
     program: &mut HostCx<'_>,
@@ -13101,7 +13461,15 @@ fn lower_retained_host_invocation(
             substitutions.insert(formal.name.clone(), arg.clone());
             continue;
         }
-        let value = try_ok!(lower_host_expr(arg, program, scope, tensor_helpers)?);
+        // Actuals follow the callee at semantic index 0.
+        let arg_id = preflight_child(id, index + 1, program);
+        let value = try_ok!(lower_host_expr(
+            arg,
+            arg_id,
+            program,
+            scope,
+            tensor_helpers
+        )?);
         let ty = host_expr_type(&value);
         let mut serial = index;
         let local = loop {
@@ -13165,9 +13533,11 @@ fn lower_retained_host_invocation(
     let expected = expected.map(|expected| {
         canonicalize_representation_erased_adt_args(expected.clone(), &definitions)
     });
+    // `specialized` is the substituted body this function built.
     let lowered = with_inlining(invocation.name, program, |program| {
         lower_host_expr_with_expected(
             &specialized,
+            None,
             program,
             &local_scope,
             tensor_helpers,
@@ -13233,8 +13603,11 @@ fn inline_top_level_host_call(expr: &Expr, program: &mut HostCx<'_>) -> Option<E
 /// the boundedness precondition, which this stage assumes and does not
 /// re-litigate).
 #[allow(clippy::too_many_arguments)]
+/// `id` is the preflight identity of `app_expr`; `args` are its actuals,
+/// its semantic children after the callee.
 fn lower_recursive_generic_call(
     app_expr: &Expr,
+    id: PreflightId,
     name: &str,
     args: &[Expr],
     explicit_ty: &HostTypeTerm,
@@ -13416,18 +13789,23 @@ fn lower_recursive_generic_call(
             program,
             tensor_helpers,
         )?);
-        let lowered_args = try_ok!(try_collect_results(args.iter().zip(param_tys.iter()).map(
-            |(arg, param_ty)| {
-                Ok(lower_host_expr_with_expected(
-                    arg,
-                    program,
-                    scope,
-                    tensor_helpers,
-                    Some(param_ty),
-                )?
-                .map(|lowered| force_host_expr_type(lowered, param_ty.clone())))
-            }
-        ))?);
+        let lowered_args = try_ok!(try_collect_results(
+            args.iter()
+                .zip(param_tys.iter())
+                .enumerate()
+                .map(|(index, (arg, param_ty))| {
+                    let arg_id = preflight_child(id, index + 1, program);
+                    Ok(lower_host_expr_with_expected(
+                        arg,
+                        arg_id,
+                        program,
+                        scope,
+                        tensor_helpers,
+                        Some(param_ty),
+                    )?
+                    .map(|lowered| force_host_expr_type(lowered, param_ty.clone())))
+                })
+        )?);
         return Ok(Ok(HostExpr::new(HostExprKind::Call {
             function: symbol,
             args: lowered_args,
@@ -13455,6 +13833,7 @@ fn lower_recursive_generic_call(
             with_inlining(spelled, program, |program| {
                 lower_host_expr_with_expected(
                     &specialized,
+                    None,
                     program,
                     scope,
                     tensor_helpers,
@@ -13854,9 +14233,11 @@ fn lower_mono_specialized_function(
     }
     // The substitution stays bound only for the body; spans, parameter
     // refinement and the product assembly below read no checked types.
+    // `body_expr` is a tree `inline_local_callable_lets` just built.
     let host_body = with_type_subst(subst, program, |program| {
         lower_host_expr_with_expected(
             &body_expr,
+            None,
             program,
             spec_scope,
             &mut fn_tensor_helpers,
@@ -14892,6 +15273,7 @@ type HoistedHostLaneBindings<'expr, 'scope> = (
 
 fn hoist_host_lane_tensor_bindings<'expr, 'scope>(
     expr: &'expr Expr,
+    id: PreflightId,
     program: &mut HostCx<'_>,
     scope: &'scope UnordMap<String, HostTypeTerm>,
     fn_sig: Option<&(Vec<HostTypeTerm>, HostTypeTerm)>,
@@ -14935,7 +15317,14 @@ fn hoist_host_lane_tensor_bindings<'expr, 'scope>(
 
     for (index, arg) in kids.iter().enumerate().skip(1) {
         if hoist_matmul_operands || should_keep_tensor_expr_in_host_lane(arg) {
-            let value = try_ok!(lower_host_expr(arg, program, scope, tensor_helpers)?);
+            let arg_id = preflight_child(id, index, program);
+            let value = try_ok!(lower_host_expr(
+                arg,
+                arg_id,
+                program,
+                scope,
+                tensor_helpers
+            )?);
             let preferred_ty = fn_sig
                 .and_then(|(param_tys, _)| param_tys.get(index - 1))
                 // The generic declaration is not an argument actualization.
@@ -15190,14 +15579,19 @@ fn checker_type_has_erased_adt_variable(
     }
 }
 
+/// `id` is the preflight identity of `expr`.
 fn lower_host_callback(
     expr: &Expr,
+    id: PreflightId,
     program: &mut HostCx<'_>,
     scope: &UnordMap<String, HostTypeTerm>,
     tensor_helpers: &mut TensorHelperSink,
 ) -> LowerResult<Result<Option<HostCallback>, crate::lower::LowerDiagnostic>> {
     Ok(match expr {
-        Expr::MetaExpr(meta, _) => lower_host_callback(&meta.expr, program, scope, tensor_helpers)?,
+        Expr::MetaExpr(meta, _) => {
+            let inner_id = preflight_child(id, 0, program);
+            lower_host_callback(&meta.expr, inner_id, program, scope, tensor_helpers)?
+        }
         Expr::List(list, _) if tag(list) == Some(DeepTag::Fn) => {
             let kids = children(list);
             let Some(params_list) = kids.first().and_then(as_list) else {
@@ -15233,8 +15627,10 @@ fn lower_host_callback(
             let Some(body_expr) = kids.get(1) else {
                 return Ok(Ok(None));
             };
+            let body_id = preflight_child(id, 1, program);
             let mut body = try_ok!(lower_host_expr(
                 body_expr,
+                body_id,
                 program,
                 &callback_scope,
                 tensor_helpers
@@ -15354,15 +15750,18 @@ fn lower_host_callback(
     })
 }
 
+/// `id` is the preflight identity of `expr`.
 fn lower_list_literal_items(
     expr: &Expr,
+    id: PreflightId,
     program: &mut HostCx<'_>,
     scope: &UnordMap<String, HostTypeTerm>,
     tensor_helpers: &mut TensorHelperSink,
 ) -> LowerResult<Result<Option<Vec<HostExpr>>, crate::lower::LowerDiagnostic>> {
     Ok(match expr {
         Expr::MetaExpr(meta, _) => {
-            lower_list_literal_items(&meta.expr, program, scope, tensor_helpers)?
+            let inner_id = preflight_child(id, 0, program);
+            lower_list_literal_items(&meta.expr, inner_id, program, scope, tensor_helpers)?
         }
         Expr::List(list, _) if tag(list) == Some(DeepTag::Var) => {
             Ok((children(list).first().and_then(symbol_name) == Some("Nil")).then(Vec::new))
@@ -15380,9 +15779,18 @@ fn lower_list_literal_items(
             if func_name != Some("Cons") {
                 return Ok(Ok(None));
             }
-            let head = try_ok!(lower_host_expr(&kids[1], program, scope, tensor_helpers)?);
+            let head_id = preflight_child(id, 1, program);
+            let head = try_ok!(lower_host_expr(
+                &kids[1],
+                head_id,
+                program,
+                scope,
+                tensor_helpers
+            )?);
+            let tail_id = preflight_child(id, 2, program);
             let Some(mut tail) = try_ok!(lower_list_literal_items(
                 &kids[2],
+                tail_id,
                 program,
                 scope,
                 tensor_helpers
@@ -16586,19 +16994,29 @@ fn collect_dynamic_to_tensor_def_refs(
     directly_dynamic
 }
 
+/// Analyze `expr` as a frame root into `out`, whose root node it records.
 fn analyze_tensor_helper_preflight(
     expr: &Expr,
     def_summaries: &BTreeMap<String, bool>,
-    out: &mut UnordMap<usize, TensorHelperPreflightFacts>,
+    out: &mut PreflightFacts,
 ) -> TensorHelperPreflightFacts {
-    analyze_tensor_helper_preflight_scoped(expr, def_summaries, &mut CallableScope::default(), out)
+    analyze_tensor_helper_preflight_scoped(
+        expr,
+        0,
+        def_summaries,
+        &mut CallableScope::default(),
+        out,
+    )
 }
 
+/// Record the facts of `expr`, interned in `out` as `node`, and of every node
+/// the analysis reaches below it, each under its structural child path.
 fn analyze_tensor_helper_preflight_scoped(
     expr: &Expr,
+    node: usize,
     def_summaries: &BTreeMap<String, bool>,
     callable_scope: &mut CallableScope,
-    out: &mut UnordMap<usize, TensorHelperPreflightFacts>,
+    out: &mut PreflightFacts,
 ) -> TensorHelperPreflightFacts {
     record_host_work(|profile| profile.tensor_helper_preflight_nodes += 1);
     let mut facts = TensorHelperPreflightFacts {
@@ -16615,20 +17033,27 @@ fn analyze_tensor_helper_preflight_scoped(
         facts.reaches_dynamic_to_tensor |= def_summaries.get(&target).copied().unwrap_or(false);
     }
 
-    let merge_child =
-        |facts: &mut TensorHelperPreflightFacts,
-         child: &Expr,
-         callable_scope: &mut CallableScope,
-         out: &mut UnordMap<usize, TensorHelperPreflightFacts>| {
-            let child_facts =
-                analyze_tensor_helper_preflight_scoped(child, def_summaries, callable_scope, out);
-            facts.reaches_dynamic_to_tensor |= child_facts.reaches_dynamic_to_tensor;
-            facts.contains_grad_like |= child_facts.contains_grad_like;
-        };
+    // `(parent, index)` is the child's structural path step.
+    let merge_child = |facts: &mut TensorHelperPreflightFacts,
+                       child: &Expr,
+                       (parent, index): (usize, usize),
+                       callable_scope: &mut CallableScope,
+                       out: &mut PreflightFacts| {
+        let child_node = out.intern_child(parent, index);
+        let child_facts = analyze_tensor_helper_preflight_scoped(
+            child,
+            child_node,
+            def_summaries,
+            callable_scope,
+            out,
+        );
+        facts.reaches_dynamic_to_tensor |= child_facts.reaches_dynamic_to_tensor;
+        facts.contains_grad_like |= child_facts.contains_grad_like;
+    };
     match stamped_parts(expr) {
         Some((DeepTag::Fn, _, kids)) => {
             if let Some(params) = kids.first() {
-                merge_child(&mut facts, params, callable_scope, out);
+                merge_child(&mut facts, params, (node, 0), callable_scope, out);
             }
             let mut undos = Vec::new();
             if let Some(params) = kids.first().and_then(as_list) {
@@ -16639,7 +17064,7 @@ fn analyze_tensor_helper_preflight_scoped(
                 }
             }
             if let Some(body) = kids.get(1) {
-                merge_child(&mut facts, body, callable_scope, out);
+                merge_child(&mut facts, body, (node, 1), callable_scope, out);
             }
             callable_scope.restore(undos.into_iter().rev());
         }
@@ -16648,6 +17073,9 @@ fn analyze_tensor_helper_preflight_scoped(
             if let Some(bind_list) = kids.first().and_then(as_list)
                 && tag(bind_list) == Some(DeepTag::Bind)
             {
+                // The binding list is passed through, not analyzed: it gets
+                // a path, so its values do, but no facts.
+                let bind_node = out.intern_child(node, 0);
                 let bind_kids = children(bind_list);
                 for index in (0..bind_kids.len()).step_by(2) {
                     let Some(name) = bind_kids.get(index).and_then(symbol_name) else {
@@ -16657,7 +17085,13 @@ fn analyze_tensor_helper_preflight_scoped(
                         undos.push(callable_scope.bind(name.to_string(), None));
                         continue;
                     };
-                    merge_child(&mut facts, value, callable_scope, out);
+                    merge_child(
+                        &mut facts,
+                        value,
+                        (bind_node, index + 1),
+                        callable_scope,
+                        out,
+                    );
                     let target = direct_var_name(value).and_then(|target| {
                         resolve_top_level_callable_from_summaries(
                             target,
@@ -16668,21 +17102,23 @@ fn analyze_tensor_helper_preflight_scoped(
                     undos.push(callable_scope.bind(name.to_string(), target));
                 }
             } else if let Some(bindings) = kids.first() {
-                merge_child(&mut facts, bindings, callable_scope, out);
+                merge_child(&mut facts, bindings, (node, 0), callable_scope, out);
             }
             if let Some(body) = kids.get(1) {
-                merge_child(&mut facts, body, callable_scope, out);
+                merge_child(&mut facts, body, (node, 1), callable_scope, out);
             }
             callable_scope.restore(undos.into_iter().rev());
         }
         _ => {
+            let mut index = 0;
             let Ok(()) = visit_semantic_expr_children(expr, |child| -> Result<(), Infallible> {
-                merge_child(&mut facts, child, callable_scope, out);
+                merge_child(&mut facts, child, (node, index), callable_scope, out);
+                index += 1;
                 Ok(())
             });
         }
     }
-    out.insert(expr as *const Expr as usize, facts);
+    out.facts[node] = Some(facts);
     facts
 }
 
@@ -16791,22 +17227,19 @@ fn expr_is_runtime_shaped_to_tensor(expr: &Expr) -> bool {
 /// lexical shadowing of the name and for the program's call graph?
 ///
 /// This is the extractor's `reaches_dynamic_to_tensor` fact asked about one
-/// body directly, rather than through the pointer-keyed preflight stack, so a
+/// body directly, rather than through the preflight frame stack, so a
 /// decision taken before that stack exists can read the same signal.
 /// chelis#1779.
 fn expr_reaches_dynamic_to_tensor(expr: &Expr, program: &mut HostCx<'_>) -> bool {
     let summaries = cached_dynamic_to_tensor_def_summaries(program);
-    let mut facts = UnordMap::new();
-    analyze_tensor_helper_preflight(expr, &summaries, &mut facts).reaches_dynamic_to_tensor
+    analyze_tensor_helper_preflight(expr, &summaries, &mut PreflightFacts::new())
+        .reaches_dynamic_to_tensor
 }
 
-fn tensor_helper_preflight_rejects(expr: &Expr, program: &mut HostCx<'_>) -> bool {
-    let key = expr as *const Expr as usize;
-    let stack = &program.state.invocation.preflight;
-    let facts = stack
-        .iter()
-        .rev()
-        .find_map(|facts| facts.get(&key).copied());
+/// Whether the facts a live frame recorded for `id` reject the tensor-helper
+/// route; an uncovered `id` misses and does not reject.
+fn tensor_helper_preflight_rejects(id: PreflightId, program: &HostCx<'_>) -> bool {
+    let facts = preflight_facts(id, program);
     record_host_work(|profile| {
         if facts.is_some() {
             profile.tensor_helper_preflight_lookup_hits += 1;
@@ -20855,6 +21288,7 @@ mod tests {
                     inline_top_level_host_call(&call, program).expect("fresh inline scope");
                 let lowered = lower_host_expr(
                     &expanded,
+                    None,
                     program,
                     &UnordMap::new(),
                     &mut TensorHelperSink::new(false, false),
@@ -20902,48 +21336,62 @@ mod tests {
             let mut outer = HostLoweringSession::new(&dynamic);
             let mut inner = HostLoweringSession::new(&scalar);
             let call = parse_one_expr("(app {} (var {} bc) (lit {type: (t-prim {} f32)} 1.0))");
-            with_preflight(&call, &mut outer.cx(runtime, &mut native), |program| {
-                assert!(tensor_helper_preflight_rejects(&call, program));
-                let diagnostic = crate::lower::LowerDiagnostic::new(
-                    "preflight scope unwind",
-                    None,
-                    Some("scope:bc".into()),
-                )
-                .fatal();
-                let caught: Result<(), _> = program.catch_lowering(|program| {
-                    let HostCx {
-                        checked,
-                        state,
-                        runtime,
-                        native,
-                    } = program;
-                    let checked: &CheckedProgram = checked;
-                    with_preflight_if_uncovered(
-                        &call,
-                        &mut inner.cx(runtime, native),
-                        |inner_program| {
-                            assert!(!tensor_helper_preflight_rejects(&call, inner_program));
-                            assert!(tensor_helper_preflight_rejects(
-                                &call,
-                                &mut HostCx {
-                                    checked,
-                                    state,
-                                    runtime: inner_program.runtime,
-                                    native: inner_program.native,
-                                },
-                            ));
-                            Err(inner_program
-                                .runtime
-                                .raise_fatal_lowering_diagnostic(diagnostic.clone()))
-                        },
-                    )
-                });
-                assert_eq!(caught, Err(diagnostic));
-                assert!(tensor_helper_preflight_rejects(&call, program));
-            });
-            assert!(!tensor_helper_preflight_rejects(
+            // The inner session is handed the outer frame's identity of the
+            // same node: frame ids are thread-unique, so it is uncovered there.
+            let outer_id = with_preflight(
                 &call,
-                &mut outer.cx(runtime, &mut native)
+                &mut outer.cx(runtime, &mut native),
+                |program, outer_id| {
+                    let outer_id = Some(outer_id);
+                    assert!(tensor_helper_preflight_rejects(outer_id, program));
+                    let diagnostic = crate::lower::LowerDiagnostic::new(
+                        "preflight scope unwind",
+                        None,
+                        Some("scope:bc".into()),
+                    )
+                    .fatal();
+                    let caught: Result<(), _> = program.catch_lowering(|program| {
+                        let HostCx {
+                            checked,
+                            state,
+                            runtime,
+                            native,
+                        } = program;
+                        let checked: &CheckedProgram = checked;
+                        with_preflight_if_uncovered(
+                            &call,
+                            outer_id,
+                            &mut inner.cx(runtime, native),
+                            |inner_program, inner_id| {
+                                assert_ne!(Some(inner_id), outer_id);
+                                assert!(!tensor_helper_preflight_rejects(
+                                    Some(inner_id),
+                                    inner_program
+                                ));
+                                assert!(!tensor_helper_preflight_rejects(outer_id, inner_program));
+                                assert!(tensor_helper_preflight_rejects(
+                                    outer_id,
+                                    &HostCx {
+                                        checked,
+                                        state,
+                                        runtime: inner_program.runtime,
+                                        native: inner_program.native,
+                                    },
+                                ));
+                                Err(inner_program
+                                    .runtime
+                                    .raise_fatal_lowering_diagnostic(diagnostic.clone()))
+                            },
+                        )
+                    });
+                    assert_eq!(caught, Err(diagnostic));
+                    assert!(tensor_helper_preflight_rejects(outer_id, program));
+                    outer_id
+                },
+            );
+            assert!(!tensor_helper_preflight_rejects(
+                outer_id,
+                &outer.cx(runtime, &mut native)
             ));
         })
     }
@@ -21760,6 +22208,41 @@ mod tests {
         }
     }
 
+    /// The semantic child path from `root` to the node `target` borrows.
+    fn semantic_path_to(root: &Expr, target: &Expr) -> Option<Vec<usize>> {
+        if std::ptr::eq(root, target) {
+            return Some(Vec::new());
+        }
+        let mut index = 0;
+        let mut found = None;
+        let Ok(()) = visit_semantic_expr_children(root, |child| -> Result<(), Infallible> {
+            if found.is_none()
+                && let Some(mut path) = semantic_path_to(child, target)
+            {
+                path.insert(0, index);
+                found = Some(path);
+            }
+            index += 1;
+            Ok(())
+        });
+        found
+    }
+
+    /// The facts `facts`, analyzed from `root`, recorded for its descendant
+    /// `target`; panics when the analysis did not reach it.
+    fn preflight_facts_of(
+        facts: &PreflightFacts,
+        root: &Expr,
+        target: &Expr,
+    ) -> TensorHelperPreflightFacts {
+        let path = semantic_path_to(root, target).expect("target lies below root");
+        let node = path
+            .iter()
+            .try_fold(0, |node, index| facts.child(node, *index))
+            .expect("the analysis interned the target's path");
+        facts.facts[node].expect("the analysis reached the target")
+    }
+
     #[test]
     fn issue_1205_host_lowering_work_is_linear() {
         for flat in [false, true] {
@@ -21866,9 +22349,11 @@ mod tests {
                             + summary_profile.callable_scope_work;
 
                         reset_host_work_profile();
-                        let mut facts = UnordMap::new();
-                        let nested_facts =
-                            analyze_tensor_helper_preflight(nested_body, &summaries, &mut facts);
+                        let nested_facts = analyze_tensor_helper_preflight(
+                            nested_body,
+                            &summaries,
+                            &mut PreflightFacts::new(),
+                        );
                         assert!(nested_facts.reaches_dynamic_to_tensor);
                         let expression_profile = take_host_work_profile();
                         let expression_work = expression_profile.tensor_helper_preflight_nodes
@@ -21948,14 +22433,14 @@ mod tests {
                     lookup_program_def(&defs, definition).expect("fixture definition exists");
                 let final_app = issue_1205_find_named_app(body, final_callee)
                     .expect("fixture contains its final named application");
-                let mut facts = UnordMap::new();
+                let mut facts = PreflightFacts::new();
                 let body_facts = analyze_tensor_helper_preflight(body, &summaries, &mut facts);
                 assert!(
                     body_facts.reaches_dynamic_to_tensor,
                     "per-expression analysis must preserve the final call in {definition}"
                 );
                 assert!(
-                    facts[&(final_app as *const Expr as usize)].reaches_dynamic_to_tensor,
+                    preflight_facts_of(&facts, body, final_app).reaches_dynamic_to_tensor,
                     "the final {final_callee} application in {definition} must inherit its dynamic summary"
                 );
             }
@@ -22044,8 +22529,8 @@ mod tests {
                 .iter()
                 .find_map(|expr| issue_1205_find_named_app(expr, "add"))
                 .expect("fixture contains the twice body");
-            let mut facts = UnordMap::new();
-            let add_facts = analyze_tensor_helper_preflight(add, &summaries, &mut facts);
+            let add_facts =
+                analyze_tensor_helper_preflight(add, &summaries, &mut PreflightFacts::new());
             assert!(
                 !add_facts.reaches_dynamic_to_tensor,
                 "a tensor operand named bc is not a call to the top-level bc definition"
@@ -22077,10 +22562,11 @@ mod tests {
             );
             let local_body = lookup_program_def(&shadowed_defs, "local").expect("local definition");
             let local_call = issue_1205_find_named_app(local_body, "bc").expect("local bc call");
-            let mut shadowed_facts = UnordMap::new();
+            let mut shadowed_facts = PreflightFacts::new();
             analyze_tensor_helper_preflight(local_body, &shadowed_summaries, &mut shadowed_facts);
             assert!(
-                !shadowed_facts[&(local_call as *const Expr as usize)].reaches_dynamic_to_tensor,
+                !preflight_facts_of(&shadowed_facts, local_body, local_call)
+                    .reaches_dynamic_to_tensor,
                 "the local bc call must not inherit the top-level bc summary"
             );
 
@@ -22105,10 +22591,11 @@ mod tests {
             let aliased_body =
                 lookup_program_def(&aliased_defs, "aliased").expect("aliased definition");
             let alias_call = issue_1205_find_named_app(aliased_body, "f").expect("local f call");
-            let mut aliased_facts = UnordMap::new();
+            let mut aliased_facts = PreflightFacts::new();
             analyze_tensor_helper_preflight(aliased_body, &aliased_summaries, &mut aliased_facts);
             assert!(
-                aliased_facts[&(alias_call as *const Expr as usize)].reaches_dynamic_to_tensor,
+                preflight_facts_of(&aliased_facts, aliased_body, alias_call)
+                    .reaches_dynamic_to_tensor,
                 "the local f call must inherit the aliased top-level bc summary"
             );
 
@@ -24559,9 +25046,15 @@ mod tests {
             let mut session = HostLoweringSession::new(program);
             let program = &mut session.cx(runtime, &mut native);
             let mut helpers = TensorHelperSink::new(false, false);
-            lower_host_expr(&deep_expr(source), program, &UnordMap::new(), &mut helpers)
-                .unwrap()
-                .map_err(|diagnostic| diagnostic.message)
+            lower_host_expr(
+                &deep_expr(source),
+                None,
+                program,
+                &UnordMap::new(),
+                &mut helpers,
+            )
+            .unwrap()
+            .map_err(|diagnostic| diagnostic.message)
         })
     }
 
