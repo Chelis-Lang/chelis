@@ -492,9 +492,6 @@ scrutinee type at all.
 > an unsuffixed float pattern against every float primitive, and §5.3's literal
 > default does not apply in pattern position.
 
-(Matching a float pattern at the scrutinee's width is not yet fully
-implemented: chelis#2438.)
-
 > **[04-PAT-2]** A `match` evaluates its scrutinee once and tries its arms in
 > declaration order. An arm is selected when its pattern matches the scrutinee
 > and its guard, if it has one, evaluates to `true`; the `match` evaluates to
