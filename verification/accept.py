@@ -61,7 +61,13 @@ JUSTIFIED_UNEMITTED = frozenset({
     "synthetic",         # compiler-synthesized items without a source definition
     "generic_template",  # generic items whose instances are emitted instead
     "model_provided",    # items bound to a checked library model
+    "native_shell",      # FCIS imperative shell listed in verification/native_shell.json
 })
+# Kinds of verification/native_shell.json entries. Primitives and shell types are the
+# boundary the extracted core calls, so each must resolve to a Lean model; the other
+# kinds must be unreachable from every extracted (non-shell) item.
+SHELL_BOUNDARY = frozenset({"primitive", "shell_type"})
+SHELL_INTERNAL = frozenset({"shell_state", "shell_entry", "shell_helper"})
 
 
 class AcceptanceFailure(RuntimeError):
@@ -331,7 +337,28 @@ def validate_coverage(chain: str, coverage: dict) -> dict:
                 f"{chain}/{crate}: {entry.get('local_items')} local items but {accounted} accounted for"
             )
         totals[crate] = {"local_items": entry["local_items"], "emitted": entry["emitted"], **unemitted}
+    validate_shell(chain, coverage.get("native_shell", {}))
     return totals
+
+
+def validate_shell(chain: str, shell: dict) -> None:
+    """The shell report must list exactly verification/native_shell.json, bind every
+    boundary item to a Lean model, and show no extracted item reaching shell internals."""
+    declared = json.loads((VERIFICATION / "native_shell.json").read_text())["items"]
+    reported = shell.get("items", {})
+    if set(reported) != {item["pattern"] for item in declared}:
+        raise AcceptanceFailure(f"{chain}: native shell report differs from native_shell.json")
+    for item in declared:
+        entry = reported[item["pattern"]]
+        if item["kind"] in SHELL_BOUNDARY and not entry.get("lean_model"):
+            raise AcceptanceFailure(f"{chain}: shell boundary item {item['pattern']} has no Lean model")
+        if item["kind"] in SHELL_INTERNAL and entry.get("core_dependents"):
+            raise AcceptanceFailure(
+                f"{chain}: extracted items depend on shell internal {item['pattern']}: "
+                f"{entry['core_dependents'][:5]}"
+            )
+        if item["kind"] not in SHELL_BOUNDARY | SHELL_INTERNAL:
+            raise AcceptanceFailure(f"{chain}: unknown shell kind {item['kind']} for {item['pattern']}")
 
 
 def stage_coverage(context: Run):
