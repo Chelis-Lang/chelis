@@ -517,11 +517,11 @@ variable {dt : DType} {Γ Δ : Context}
 
 /-- Input binding by name: the `Load` node of entry `j` names an input whose buffer decodes
 row-major (bitwise) to the entry value. -/
-def InputsOK (dt : DType) (dag : Model.Dag) (entries : List Nat)
+def InputsOK (dt : DType) (dag : Model.Dag) (ids : List (Option Nat))
     (inputs : Model.LoadStoreName → Option (List (BinaryFloat dt.format)))
     (ρ : Values (BinaryFloat dt.format) Γ) : Prop :=
   ∀ (j : Nat) (n : Model.DagNode) (label : Model.LoadStoreName) {s : Shape} (u : Var Γ s),
-    n ∈ dag.nodes.val → n.op = .Load label → entries[j]? = some n.id.val → u.offset = j →
+    n ∈ dag.nodes.val → n.op = .Load label → ids[j]? = some (some n.id.val) → u.offset = j →
       ∃ xs, inputs label = some xs ∧ Tensor.ofList s xs = some (u.get ρ)
 
 /-- The live mask is closed under inputs (as `live_mask_for_roots` makes it). -/
@@ -558,17 +558,17 @@ theorem Inv.update_live {live : Nat → Bool} {V : Values (BinaryFloat dt.format
     obtain ⟨d', hd', hok'⟩ := h x sl this hlive
     exact ⟨d', by simp [hx, hd'], hok'⟩
 
-theorem runF_simulates {entries : List Nat} {dag : Model.Dag} {live : Nat → Bool}
+theorem runF_simulates {ids : List (Option Nat)} {dag : Model.Dag} {live : Nat → Bool}
     {inputs : Model.LoadStoreName → Option (List (BinaryFloat dt.format))}
-    {ρ : Values (BinaryFloat dt.format) Γ} {opsF : List (GraphSyntax.Operation (BinaryFloat dt.format))}
+    {ρ : Values (BinaryFloat dt.format) Γ} {opsF zsF : List (GraphSyntax.Operation (BinaryFloat dt.format))}
     {p : Prefix (BinaryFloat dt.format) Γ Δ}
-    (hdp : GraphSyntax.decodePrefix Γ opsF = some ⟨Δ, p⟩)
-    (hinputs : InputsOK dt dag entries inputs ρ) (hclosed : LiveClosed dag live) :
+    (hdp : GraphSyntax.decodePrefix Γ (opsF ++ zsF) = some ⟨Δ, p⟩)
+    (hinputs : InputsOK dt dag ids inputs ρ) (hclosed : LiveClosed dag live) :
     ∀ {nodes : List Model.DagNode} {i : Nat} {st : State}
       {acc : List (GraphSyntax.Operation (BinaryFloat dt.format))} {stF : State}
       {vals : Nat → Option (FlatValue dt.format)},
       (∀ n ∈ nodes, n ∈ dag.nodes.val) →
-      runF dt (entries.map some) Γ i st acc nodes = some (stF, opsF) →
+      runF dt ids Γ i st acc nodes = some (stF, opsF) →
       acc.map (mapData value) = st.ops → st.len = Γ.length + acc.length →
       Inv live (prefixEval p ρ) st vals →
         ∃ vals', specRun dt inputs live nodes vals = some vals' ∧
@@ -582,7 +582,7 @@ theorem runF_simulates {entries : List Nat} {dag : Model.Dag} {live : Nat → Bo
       have hsub' : ∀ n ∈ rest, n ∈ dag.nodes.val := fun n hn => hsub n (by simp [hn])
       simp only [runF, Option.bind_eq_bind, Option.bind_eq_some_iff] at h
       obtain ⟨st1, h1, acc1, hacc1, h2⟩ := h
-      have hΔ := (decodePrefix_spec opsF ⟨Δ, p⟩ hdp).1
+      have hΔ := (decodePrefix_spec (opsF ++ zsF) ⟨Δ, p⟩ hdp).1
       by_cases hl : ∃ l, node.op = .Load l
       · obtain ⟨l, hl⟩ := hl
         obtain ⟨j, out, hout, hid, hfind, hΓj, rfl⟩ := step_load h1 hl
@@ -592,10 +592,10 @@ theorem runF_simulates {entries : List Nat} {dag : Model.Dag} {live : Nat → Bo
         subst hacc1'
         by_cases hlv : live node.id.val = true
         · obtain ⟨u, hu⟩ := var_decode_of_getElem? hΓj
-          have hj : entries[j]? = some node.id.val := by
+          have hj : ids[j]? = some (some node.id.val) := by
             obtain ⟨hjlt, hpj, _⟩ := List.findIdx?_eq_some_iff_getElem.mp hfind
-            simp only [List.getElem_map, beq_iff_eq, Option.some.injEq] at hpj
-            simp [List.getElem?_eq_getElem (by simpa using hjlt), hpj]
+            simp only [beq_iff_eq] at hpj
+            rw [List.getElem?_eq_getElem hjlt, hpj]
           obtain ⟨xs, hxs, hdec⟩ := hinputs j node l u hmem hl hj hu
           have hjlt : j < Γ.length := (List.getElem?_eq_some_iff.mp hΓj).1
           have hle := prefix_length_le p
@@ -624,12 +624,12 @@ theorem runF_simulates {entries : List Nat} {dag : Model.Dag} {live : Nat → Bo
         have hlen' : st.len + 1 = Γ.length + (acc ++ [of]).length := by
           simp only [hlen, List.length_append, List.length_singleton]; omega
         have hpre := runF_prefix h2
-        have hk : acc.length < opsF.length := by
-          have := hpre.length_le; simp at this; omega
-        have hkof : opsF[acc.length] = of := by
+        have hk : acc.length < (opsF ++ zsF).length := by
+          have := hpre.length_le; simp at this ⊢; omega
+        have hkof : (opsF ++ zsF)[acc.length] = of := by
           obtain ⟨tl, htl⟩ := hpre
           simp [← htl]
-        obtain ⟨t, op', v, hb, henc, hv⟩ := bindings_decode opsF p hdp acc.length hk
+        obtain ⟨t, op', v, hb, henc, hv⟩ := bindings_decode (opsF ++ zsF) p hdp acc.length hk
         rw [hkof] at henc
         have hop : GraphSyntax.Operation.decode Δ
             (shiftPorts (Δ.length - (Γ.length + acc.length)) of) = some ⟨t, op'⟩ := by
@@ -684,7 +684,7 @@ corresponding root of `ieeeEval`. -/
 theorem specRun_simulates {dag : Model.Dag} {entries : List Nat} {Ω Γ : Context}
     {cf : Circuit (BinaryFloat dt.format) Γ Ω} (h : decodeCircuitF dt dag entries Ω = some ⟨Γ, cf⟩)
     {live : Nat → Bool} {inputs : Model.LoadStoreName → Option (List (BinaryFloat dt.format))}
-    {ρ : Values (BinaryFloat dt.format) Γ} (hinputs : InputsOK dt dag entries inputs ρ)
+    {ρ : Values (BinaryFloat dt.format) Γ} (hinputs : InputsOK dt dag (entries.map some) inputs ρ)
     (hclosed : LiveClosed dag live) (hroots : ∀ r ∈ dag.roots.val, live r.val = true) :
     ∃ vals, specRun dt inputs live dag.nodes.val (fun _ => none) = some vals ∧
       ∀ {s : Shape} (w : Var Ω s) (r : Usize), dag.roots.val[w.offset]? = some r →
@@ -698,7 +698,8 @@ theorem specRun_simulates {dag : Model.Dag} {entries : List Nat} {Ω Γ : Contex
   obtain ⟨Δ, code, σ, hdp, hσ, rfl⟩ := Target.decode_spec hc
   have hlenF := runF_len (by rfl) (by simp [State.init]) hrunF
   have hΔ := (decodePrefix_spec _ ⟨Δ, code⟩ hdp).1
-  obtain ⟨vals, hrun, hinv⟩ := runF_simulates (inputs := inputs) (live := live) (ρ := ρ) hdp
+  obtain ⟨vals, hrun, hinv⟩ := runF_simulates (inputs := inputs) (live := live) (ρ := ρ)
+    (zsF := []) (by rw [List.append_nil]; exact hdp)
     hinputs hclosed (fun n hn => hn) hrunF (by rfl) (by simp [State.init]) Inv.init
   refine ⟨vals, hrun, fun {s} w r hr => ?_⟩
   obtain ⟨i, hi, sl, hsl, hrel⟩ := forall₂_getElem? (decodeRootOffsets_spec hoffs) hr
@@ -753,7 +754,7 @@ theorem specRun_realize {dag : Model.Dag} {entries : List Nat} {Ω Γ : Context}
     ∃ cf, decodeCircuitF dt dag entries Ω = some ⟨Γ, cf⟩ ∧ ratCircuit cf = c ∧
       ∀ {live : Nat → Bool} {inputs : Model.LoadStoreName → Option (List (BinaryFloat dt.format))}
         {ρf : Values (BinaryFloat dt.format) Γ} {ρq : Values ℚ Γ},
-        InputsOK dt dag entries inputs ρf → Realizes ρf ρq → ExactRun cf ρf →
+        InputsOK dt dag (entries.map some) inputs ρf → Realizes ρf ρq → ExactRun cf ρf →
         LiveClosed dag live → (∀ r ∈ dag.roots.val, live r.val = true) →
         ∃ vals, specRun dt inputs live dag.nodes.val (fun _ => none) = some vals ∧
           ∀ {s : Shape} (w : Var Ω s) (r : Usize), dag.roots.val[w.offset]? = some r →

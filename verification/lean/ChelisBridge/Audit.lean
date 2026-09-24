@@ -16,6 +16,7 @@ import ChelisBridge.Numeric.Decode
 import ChelisBridge.Numeric.Primal
 import ChelisBridge.Numeric.Bindings
 import ChelisBridge.Numeric.Loop
+import ChelisBridge.Numeric.Gradient
 import ChelisBridge.Numeric.Examples
 import Lean.Util.CollectAxioms
 
@@ -308,7 +309,17 @@ def accepted : List Name := [
   ``ChelisBridge.Numeric.runF_len,
   ``ChelisBridge.Numeric.specRun_simulates,
   ``ChelisBridge.Numeric.decodeTensor_of_ofList,
-  ``ChelisBridge.Numeric.specRun_realize
+  ``ChelisBridge.Numeric.specRun_realize,
+  ``ChelisBridge.Numeric.value_zero,
+  ``ChelisBridge.Numeric.liftZero_sound,
+  ``ChelisBridge.Numeric.forall₂_liftZero,
+  ``ChelisBridge.Numeric.mapM_liftZero_sound,
+  ``ChelisBridge.Numeric.totalizeAux_zeros,
+  ``ChelisBridge.Numeric.mapM_liftZero_complete,
+  ``ChelisBridge.Numeric.artifactParts_unfold,
+  ``ChelisBridge.Numeric.artifactRootsF_complete,
+  ``ChelisBridge.Numeric.artifact_simulates,
+  ``ChelisBridge.Numeric.grad_observation
 ]
 
 def allowedAxioms : List Name := [``propext, ``Classical.choice, ``Quot.sound]

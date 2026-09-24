@@ -2,6 +2,7 @@ import ChelisBridge.Examples
 import ChelisBridge.Numeric.Primal
 import ChelisBridge.Numeric.Decode
 import ChelisBridge.Numeric.Loop
+import ChelisBridge.Numeric.Gradient
 
 /-!
 # Executable checks for the numeric bridge
@@ -76,5 +77,16 @@ def squareRoot : Option (Option ℚ) :=
 -- The loop and the IEEE reference agree on the pairwise order of `sum [1e16, -1e16, 1]`.
 #guard ((specRun .f64 (fun _ => none) (fun _ => true) sumDag.nodes.val (fun _ => none)).map
   fun vals => (vals 1).bind fun v => v.data.head?.bind realize) == some (some 1)
+
+-- The flat loop on the post-AD graph actually returned by the extracted `grad_dag_checked`
+-- for `sum₀ (x * x)`, `x = [1, 2, 3]`: its Rust roots are the primal `14` and the gradient
+-- `[2, 4, 6]`.
+def gradRun : Option (List (Option (List ℚ))) := do
+  let r ← extractedResult (Model.gradDagChecked square (usize 2) (slice [usize 0]))
+  let vals ← specRun .f64 (fun l => if l = "x" then some [f64 1, f64 2, f64 3] else none)
+    (fun _ => true) r.dag.nodes.val (fun _ => none)
+  pure ((artifactRootIds r).map fun g => (vals g).bind fun v => realizeList v.data)
+
+#guard gradRun == some [some [14], some [2, 4, 6]]
 
 end ChelisBridge.Numeric.Examples
