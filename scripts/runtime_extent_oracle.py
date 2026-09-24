@@ -345,6 +345,48 @@ def generated_phase_b_corpus() -> tuple[CorpusRow, ...]:
 
     rows = (
         _row(
+            "producer.insert.earlier_trap.eval",
+            "executes_exactly",
+            EXECUTES,
+            "cli_producer_guard_order.eval_earlier_trap_precedes_insert_result_guard",
+        ),
+        _row(
+            "producer.insert.earlier_trap.c",
+            "lane_divergent",
+            EXECUTES,
+            "cli_producer_guard_order.c_earlier_trap_precedes_insert_result_guard",
+        ),
+        _row(
+            "producer.insert.claim_effects.eval",
+            "executes_exactly",
+            EXECUTES,
+            "cli_producer_guard_order.eval_insert_result_guard_owns_attribution_and_effect_order",
+        ),
+        _row(
+            "producer.insert.claim_effects.c",
+            "lane_divergent",
+            EXECUTES,
+            "cli_producer_guard_order.c_insert_result_guard_owns_attribution_and_effect_order",
+        ),
+        _row(
+            "producer.input_entry.eval_c",
+            "executes_exactly",
+            EXECUTES,
+            "cli_producer_guard_order.input_axis_claim_still_precedes_body_on_both_lanes",
+        ),
+        _row(
+            "producer.insert.site",
+            "lane_divergent",
+            EXECUTES,
+            "ir_producer_guard_sites.interface_sized_insert_has_one_local_result_claim",
+        ),
+        _row(
+            "producer.missing_axis",
+            "ice",
+            TERMINAL_CONTROL,
+            "ir_producer_guard_sites.missing_result_axis_is_a_checked_error",
+        ),
+        _row(
             "class.load_load.c",
             "silent_unguarded",
             EXECUTES,

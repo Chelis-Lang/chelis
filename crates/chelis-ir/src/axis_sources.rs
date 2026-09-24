@@ -2977,6 +2977,42 @@ pub fn result_extent_sites(dag: &Dag, root: NodeId) -> Vec<ResultExtentSite> {
         .collect()
 }
 
+/// Check the exact axis relationship before following administrative edges.
+/// Raw evaluator graphs can reach this derivation before ownership verification;
+/// a missing axis, missing input or cyclic alias must be an error, not a panic.
+fn checked_result_extent_site(
+    dag: &Dag,
+    root: NodeId,
+    axis: usize,
+) -> Result<ResultExtentSite, String> {
+    let invalid = || format!("missing or invalid producer axis {axis} at node {}", root.0);
+    let mut current = root;
+    loop {
+        let node = dag.get(current).ok_or_else(invalid)?;
+        if axis >= node.output_type.dims.len() {
+            return Err(invalid());
+        }
+        if !matches!(
+            node.op,
+            RiscOp::Copy | RiscOp::Cast { .. } | RiscOp::CastTrunc { .. }
+        ) {
+            break;
+        }
+        let [input] = node.inputs.as_slice() else {
+            return Err(invalid());
+        };
+        if input.0 >= current.0 {
+            return Err(invalid());
+        }
+        current = *input;
+    }
+    let output_axis = i32::try_from(axis).map_err(|_| invalid())?;
+    result_extent_sites(dag, root)
+        .into_iter()
+        .find(|site| site.output_axis == RtAxis::Lit(output_axis))
+        .ok_or_else(invalid)
+}
+
 /// Nodes any producer-owned extent claim requires semantic rewrites to preserve.
 ///
 /// Named `ResultClaim`, authored `LiteralResultClaim`, and local
@@ -3095,28 +3131,6 @@ fn caller_witness_for_axis(
     })
 }
 
-/// A scalar parameter witness through administrative movement only.
-///
-/// `copy` preserves identity, and section 4.7 says a cast takes the placement
-/// of the value it casts. Any arithmetic or shape-producing operation ends
-/// the walk and keeps the result obligation local to its producer.
-fn caller_witness_through_movement(dag: &Dag, mut value: NodeId) -> Option<NodeId> {
-    for _ in 0..dag.len() {
-        let node = dag.get(value)?;
-        match node.op {
-            RiscOp::ExtentWitness {
-                site: crate::dag::ExtentWitnessSite::Caller,
-                ..
-            } => return Some(value),
-            RiscOp::Copy | RiscOp::Cast { .. } | RiscOp::CastTrunc { .. } => {
-                value = *node.inputs.first()?;
-            }
-            _ => return None,
-        }
-    }
-    None
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum LiteralResultInterfaceObservation {
     Witness(NodeId),
@@ -3152,8 +3166,9 @@ impl LiteralResultInterfaceObservation {
 /// terminal [`ExtentOrigin`]. Resolving to an origin loses which invocation's
 /// witness supplied an `InputAxis`, which changed alias diagnostics and could
 /// select the wrong parameter when two inputs had the same runtime extent.
-/// Arithmetic and locally computed movement extents remain producer
-/// obligations even when their inputs are parameters.
+/// Only an actual parameter or its administrative copy/cast is an interface
+/// result. A body operation owns its result claim even when its extent can be
+/// read from parameter metadata before that operation runs (spec/04 §4.7).
 fn literal_result_interface_observation(
     dag: &Dag,
     owner: NodeId,
@@ -3174,10 +3189,6 @@ fn literal_result_interface_observation(
         }
         let node = dag.get(node_id)?;
         match output_axis_sources(dag, node_id).get(axis)? {
-            AxisSource::ScalarInput { input } => {
-                caller_witness_through_movement(dag, *node.inputs.get(*input)?)
-                    .map(LiteralResultInterfaceObservation::Witness)
-            }
             AxisSource::ExternalAxis { load, axis } => {
                 caller_witness_for_axis(dag, *load, *axis, not_after)
                     .map(LiteralResultInterfaceObservation::Witness)
@@ -3191,11 +3202,8 @@ fn literal_result_interface_observation(
                 axis: RtAxis::Lit(read),
             } if matches!(
                 node.op,
-                RiscOp::Copy
-                    | RiscOp::Cast { .. }
-                    | RiscOp::CastTrunc { .. }
-                    | RiscOp::Expand { .. }
-            ) || sets_axis(&node.op, axis) =>
+                RiscOp::Copy | RiscOp::Cast { .. } | RiscOp::CastTrunc { .. }
+            ) =>
             {
                 walk(
                     dag,
@@ -3205,7 +3213,7 @@ fn literal_result_interface_observation(
                     remaining - 1,
                 )
             }
-            AxisSource::InputAxis { .. } => None,
+            AxisSource::InputAxis { .. } | AxisSource::ScalarInput { .. } => None,
             AxisSource::Literal { .. }
             | AxisSource::OpComputed { .. }
             | AxisSource::ClassSupplied { .. } => None,
@@ -3342,7 +3350,7 @@ pub fn literal_result_witness_requirements(
 /// node produces its value. A second answer computed in either lane could
 /// disagree with the first, and the point of deriving it here is that it
 /// cannot.
-pub fn local_dim_guard_sites(dag: &Dag) -> Vec<(LocalGuardSite, LocalGuardClaim)> {
+pub fn local_dim_guard_sites(dag: &Dag) -> Result<Vec<(LocalGuardSite, LocalGuardClaim)>, String> {
     let mut sites = Vec::new();
     // Explicit result obligations have graph identity, independently of any
     // labels the checked caller retains on its result. Their producer owns
@@ -3363,11 +3371,9 @@ pub fn local_dim_guard_sites(dag: &Dag) -> Vec<(LocalGuardSite, LocalGuardClaim)
                 ..
             }) = dag.get(*required)
             {
-                let axis = usize::try_from(*axis).expect("verified local ascription axis");
-                let site = result_extent_sites(dag, node.id)
-                    .into_iter()
-                    .find(|site| site.output_axis == RtAxis::Lit(axis as i32))
-                    .expect("verified local ascription producer");
+                let axis = usize::try_from(*axis)
+                    .map_err(|_| format!("invalid producer axis {axis} at node {}", node.id.0))?;
+                let site = checked_result_extent_site(dag, node.id, axis)?;
                 let (producer, observed) = if required.0 < site.producer.0 {
                     (site.producer, site.observation)
                 } else {
@@ -3386,8 +3392,7 @@ pub fn local_dim_guard_sites(dag: &Dag) -> Vec<(LocalGuardSite, LocalGuardClaim)
                         canonical: CanonicalExtent::Witness(*required),
                         op: site.operation,
                         observed,
-                        activation: local_ascription_guard_activation(dag, node.id, *required)
-                            .expect("verified local ascription activation"),
+                        activation: local_ascription_guard_activation(dag, node.id, *required)?,
                     },
                 ));
                 continue;
@@ -3403,16 +3408,14 @@ pub fn local_dim_guard_sites(dag: &Dag) -> Vec<(LocalGuardSite, LocalGuardClaim)
                 ..
             }) = dag.get(*required)
             {
-                let axis = usize::try_from(*axis).expect("verified literal result axis");
+                let axis = usize::try_from(*axis)
+                    .map_err(|_| format!("invalid producer axis {axis} at node {}", node.id.0))?;
                 if literal_result_interface_observation(dag, node.id, axis).is_some() {
                     // This exact token is an entry obligation or a proven
                     // named restatement, never a second local producer guard.
                     continue;
                 }
-                let site = result_extent_sites(dag, node.id)
-                    .into_iter()
-                    .find(|site| site.output_axis == RtAxis::Lit(axis as i32))
-                    .expect("verified literal result producer");
+                let site = checked_result_extent_site(dag, node.id, axis)?;
                 // A claim captured after an existing value's production belongs
                 // to this invocation's carrier; never add a backward dependency.
                 let (producer, observed) = if required.0 < site.producer.0 {
@@ -3456,11 +3459,9 @@ pub fn local_dim_guard_sites(dag: &Dag) -> Vec<(LocalGuardSite, LocalGuardClaim)
             else {
                 continue;
             };
-            let axis = usize::try_from(*axis).expect("verified result axis");
-            let site = result_extent_sites(dag, node.id)
-                .into_iter()
-                .find(|site| site.output_axis == RtAxis::Lit(axis as i32))
-                .expect("verified result producer");
+            let axis = usize::try_from(*axis)
+                .map_err(|_| format!("invalid producer axis {axis} at node {}", node.id.0))?;
+            let site = checked_result_extent_site(dag, node.id, axis)?;
             let RtAxis::Lit(producer_axis) = site.producer_axis;
             let producer_axis =
                 usize::try_from(producer_axis).expect("verified result producer axis");
@@ -3650,7 +3651,7 @@ pub fn local_dim_guard_sites(dag: &Dag) -> Vec<(LocalGuardSite, LocalGuardClaim)
             },
         ));
     }
-    sites
+    Ok(sites)
 }
 
 /// The one scalar Bool dependency that activates a path-local ascription.

@@ -1619,6 +1619,7 @@ fn a_cast_of_computed_arithmetic_takes_the_arithmetics_placement() {
 /// The guard sites of `dag`, as `(node, axis, claim, op)`.
 fn guard_sites(dag: &Dag) -> Vec<(usize, usize, String, &'static str)> {
     chelis_ir::axis_sources::local_dim_guard_sites(dag)
+        .unwrap()
         .into_iter()
         .map(|((node, axis), claim)| (node, axis, claim.claim, claim.op))
         .collect()
@@ -1750,6 +1751,7 @@ fn an_expand_sized_from_a_computed_tensor_is_a_local_guard_site() {
     // states it in the site, which is the point of the unification. So the
     // assertion reads the site's own read instruction.
     let observed = chelis_ir::axis_sources::local_dim_guard_sites(&dag)
+        .unwrap()
         .into_iter()
         .find(|((node, axis), _)| *node == inserted.0 && *axis == 0)
         .map(|(_, claim)| claim.observed)
@@ -1816,7 +1818,7 @@ fn every_local_class_site_carries_the_carrier_its_source_names() {
         ty(vec![named("n")], Prim::F32),
         None,
     );
-    let sites = chelis_ir::axis_sources::local_dim_guard_sites(&dag);
+    let sites = chelis_ir::axis_sources::local_dim_guard_sites(&dag).unwrap();
     assert!(
         !sites.is_empty(),
         "the fixture must produce sites for the property to say anything",
@@ -1881,7 +1883,7 @@ fn a_resolved_canonical_traps_on_eval_against_its_literal() {
         ty(vec![named("n")], Prim::F32),
         None,
     );
-    let sites = chelis_ir::axis_sources::local_dim_guard_sites(&dag);
+    let sites = chelis_ir::axis_sources::local_dim_guard_sites(&dag).unwrap();
     assert_eq!(
         sites
             .iter()

@@ -400,7 +400,17 @@ impl CEmitter {
             usize,
             Vec<(usize, chelis_ir::ownership::LocalGuardClaim)>,
         > = chelis_unord::UnordMap::new();
-        for ((node, axis), claim) in dag.local_dim_guard_sites() {
+        for ((node, axis), claim) in dag.local_dim_guard_sites().map_err(|reason| {
+            Unsupported::new(
+                UnsupportedKind::Construct("producer extent guard".into()),
+                reason,
+                Stage::Codegen("c"),
+                chelis_types::deliberate_rejection!(
+                    "[04-TOT-2]",
+                    "a producer extent claim requires its exact checked output axis"
+                ),
+            )
+        })? {
             let claims = local_dim_guard_sites.entry(node).or_default();
             let entry = (axis, claim);
             if !claims.contains(&entry) {

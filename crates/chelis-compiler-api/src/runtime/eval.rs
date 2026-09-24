@@ -2195,7 +2195,7 @@ impl<'a> EvalContext<'a> {
                     .to_string(),
             );
         }
-        let producer_operation = chelis_ir::axis_sources::local_dim_guard_sites(dag)
+        let producer_operation = chelis_ir::axis_sources::local_dim_guard_sites(dag)?
             .first()
             .map(|(_, claim)| claim.op)
             .ok_or_else(|| {

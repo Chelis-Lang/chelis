@@ -1683,6 +1683,14 @@ claim on the input tensor axis itself, whose guard runs at entry. Both lanes
 must consume that same classification, not whichever failure they currently
 report first.
 
+The #2377 receipts execute the earlier-overflow control, mismatching and
+agreeing inserts with scalar-only f64 precision evidence, effects on both sides
+of the producer, and an independent wrong input-axis claim. Tensor lowering
+retains discarded eager initializers through exact dependencies on its return
+carrier, omitting already reachable values and inert literal/copy subgraphs.
+These receipts establish the enrolled insert/result-order cases; they do not
+close general movement coverage or host-builder ascription admission (#2374).
+
 Both lanes represent a movement failure by its operation, trap kind, dtype,
 axis, bound/observed values and source labels before rendering. Eval must not
 replace spec/05 §2.4.1's `shrink` Domain failure with a private node-id or
@@ -1699,7 +1707,7 @@ negative that would detect loss or conflation of its witness. The required
 lane is Eval plus compiled, linked and executed C unless the issue explicitly
 records a narrower existing boundary. Add the exact cells to the appropriate
 phase-B or issue-owned target manifest before calling an issue closed. Merely
-running `runtime_extent_oracle.py --phase final` against its current 206 rows
+running `runtime_extent_oracle.py --phase final` against already registered rows
 does not enroll a new case.
 
 | Leaf | Structural exit and discriminating control |

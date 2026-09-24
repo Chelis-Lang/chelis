@@ -1251,6 +1251,40 @@
         "literal_role_rejects_observations_entry_claims_and_malformed_requirements"
       ],
       "note": "Literal declarations retain distinct token identities, inner-before-outer guard order and primitive attribution through rebuilds; malformed role payloads and observing inputs are refused."
+    },
+    {
+      "phase": "b",
+      "id": "cli_producer_guard_order",
+      "package": "chelis-cli",
+      "kind": "test",
+      "file": "crates/chelis-cli/tests/issue_2377_producer_guards.rs",
+      "selector": {
+        "mode": "all"
+      },
+      "expected": [
+        "c_earlier_trap_precedes_insert_result_guard",
+        "c_insert_result_guard_owns_attribution_and_effect_order",
+        "eval_earlier_trap_precedes_insert_result_guard",
+        "eval_insert_result_guard_owns_attribution_and_effect_order",
+        "input_axis_claim_still_precedes_body_on_both_lanes"
+      ],
+      "note": "Bounded #2377 insert result placement, exact traps, precision and effect order with independent input guard controls."
+    },
+    {
+      "phase": "b",
+      "id": "ir_producer_guard_sites",
+      "package": "chelis-ir",
+      "kind": "test",
+      "file": "crates/chelis-ir/tests/producer_guard_sites.rs",
+      "selector": {
+        "mode": "all"
+      },
+      "expected": [
+        "interface_sized_insert_has_one_local_result_claim",
+        "malformed_administrative_producer_is_a_checked_error",
+        "missing_result_axis_is_a_checked_error"
+      ],
+      "note": "Producer-site relationship and malformed-axis rejection."
     }
   ]
 }

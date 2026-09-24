@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "corpus_sha256": "7706f0cf26ab3308aeed1acddacdd5702f719d265b940dd523c881fe896e9c45",
+  "corpus_sha256": "d705ed2f61f5e3944d269a1ced2f6a33aabe8763dcfd21c640c4341fdbc73530",
   "rows": [
     {
       "id": "claim.literal.identity_root.c",
@@ -1711,6 +1711,48 @@
       "baseline": "nonconforming_rejection",
       "phase_b": "executes_exactly",
       "receipt": "cli_slice_b.a_bare_name_pipe_stage_upstream_of_sum_checks_and_runs"
+    },
+    {
+      "id": "producer.input_entry.eval_c",
+      "baseline": "executes_exactly",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_producer_guard_order.input_axis_claim_still_precedes_body_on_both_lanes"
+    },
+    {
+      "id": "producer.insert.claim_effects.c",
+      "baseline": "lane_divergent",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_producer_guard_order.c_insert_result_guard_owns_attribution_and_effect_order"
+    },
+    {
+      "id": "producer.insert.claim_effects.eval",
+      "baseline": "executes_exactly",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_producer_guard_order.eval_insert_result_guard_owns_attribution_and_effect_order"
+    },
+    {
+      "id": "producer.insert.earlier_trap.c",
+      "baseline": "lane_divergent",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_producer_guard_order.c_earlier_trap_precedes_insert_result_guard"
+    },
+    {
+      "id": "producer.insert.earlier_trap.eval",
+      "baseline": "executes_exactly",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_producer_guard_order.eval_earlier_trap_precedes_insert_result_guard"
+    },
+    {
+      "id": "producer.insert.site",
+      "baseline": "lane_divergent",
+      "phase_b": "executes_exactly",
+      "receipt": "ir_producer_guard_sites.interface_sized_insert_has_one_local_result_claim"
+    },
+    {
+      "id": "producer.missing_axis",
+      "baseline": "ice",
+      "phase_b": "rejects_exactly",
+      "receipt": "ir_producer_guard_sites.missing_result_axis_is_a_checked_error"
     },
     {
       "id": "rebuild.classes_after_each_pass",

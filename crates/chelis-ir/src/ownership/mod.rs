@@ -247,7 +247,7 @@ impl<'a> VerifiedDagView<'a> {
     /// values. The view asks it here rather than handing a backend a raw
     /// [`Dag`], under the same chelis#1538 discipline as
     /// [`Self::member_load_axis`].
-    pub fn local_dim_guard_sites(self) -> Vec<(LocalGuardSite, LocalGuardClaim)> {
+    pub fn local_dim_guard_sites(self) -> Result<Vec<(LocalGuardSite, LocalGuardClaim)>, String> {
         crate::axis_sources::local_dim_guard_sites(self.dag)
     }
 
