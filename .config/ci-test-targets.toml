@@ -2042,6 +2042,15 @@ reason = "the dtype oracle executes the native census under the project-owned in
 tracking_issue = "chelis#2287"
 
 [[path_rule]]
+prefix = "scripts/test_capacity_census_native_execution.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "script-unit executes the native execution evidence-rejection controls; script-nightly runs the NativeExecutionIntegration class"
+tracking_issue = "chelis#2287"
+
+[[path_rule]]
 prefix = "scripts/test_capacity_census_python_environment.py"
 disposition = "owner"
 workflow = "ci.yml"
