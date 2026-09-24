@@ -3,6 +3,7 @@
 
 use assert_cmd::Command;
 use serde_json::Value;
+use std::process::Command as StdCommand;
 use tempfile::tempdir;
 
 #[path = "common/mod.rs"]
@@ -160,4 +161,55 @@ fn vocabulary_named_typed_macro_parameter_does_not_capture_caller_argument() {
          out = run(10.0f32)\n",
         "out = 11.0",
     );
+}
+
+#[test]
+fn typed_macro_binding_executes_identically_in_eval_and_c() {
+    let source = "macro add_one(v) = (fn (record: f32) -> add(record, v))(1.0f32)\n\
+                  def run(record: f32) -> f32 = {\n\
+                    result: f32 = add_one(record)\n\
+                    result\n\
+                  }\n\
+                  out = run(10.0f32)\n";
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("macro.ch");
+    write_file(&path, source);
+    let checked = Command::cargo_bin("chelis")
+        .expect("chelis")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .arg("check")
+        .arg(&path)
+        .output()
+        .expect("check runs");
+    assert!(checked.status.success(), "{checked:?}");
+    let report: Value = serde_json::from_slice(&checked.stdout).expect("check JSON");
+    assert_eq!(report["score"], 1.0, "{report:#}");
+    assert_eq!(report["errors"], serde_json::json!([]), "{report:#}");
+
+    let evaluated = Command::cargo_bin("chelis")
+        .expect("chelis")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .args(["eval", "--file"])
+        .arg(&path)
+        .output()
+        .expect("eval runs");
+    assert!(evaluated.status.success(), "{evaluated:?}");
+    assert_eq!(evaluated.stdout, b"out = 11.0\n");
+
+    let built = Command::cargo_bin("chelis")
+        .expect("chelis")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .arg("build")
+        .arg(&path)
+        .args(["--target", "c", "--output"])
+        .arg(dir.path())
+        .output()
+        .expect("C build runs");
+    assert!(built.status.success(), "{built:?}");
+    assert!(common::link_generated(dir.path(), "macro.c", "macro").success());
+    let native = StdCommand::new(dir.path().join("macro"))
+        .output()
+        .expect("compiled program runs");
+    assert!(native.status.success(), "{native:?}");
+    assert_eq!(native.stdout, evaluated.stdout);
 }

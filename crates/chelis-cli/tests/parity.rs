@@ -625,11 +625,6 @@ fn parity_integer_functions() {
     drive_parity(&examples_root().join("integer_functions.ch"), true);
 }
 
-#[test]
-fn parity_macro_typed_binding() {
-    drive_parity(&examples_root().join("macro_typed_binding.ch"), true);
-}
-
 /// chelis#1266: the record-projection broadcast a multi-input forward writes.
 #[test]
 fn parity_record_input_broadcast() {
