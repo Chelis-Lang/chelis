@@ -812,9 +812,11 @@ fn prune_to_requested_outputs(
         // own pruner, separate from `optimize::dead_code_eliminate`, so the
         // seed has to be repeated here — the definition is shared even where
         // the loop is not. A forward draw key advances its handler whether or
-        // not the pruned gradient reads its key.
+        // not the pruned gradient reads its key, and a key-sourced draw or a
+        // runtime-count `SplitN` can trap by itself (chelis#2413).
         if matches!(node.op, RiscOp::Store { .. } | RiscOp::DrawKey { .. })
             || node.op.is_unconditional_effect()
+            || dag.random_node_may_trap(node)
         {
             live[node.id.0] = true;
         }

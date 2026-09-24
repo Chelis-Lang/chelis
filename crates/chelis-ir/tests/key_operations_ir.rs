@@ -15,7 +15,7 @@ use chelis_ir::dag::{
 };
 use chelis_ir::eval::{RandomFrame, TensorValue, eval_tensor_roots_with_frame};
 use chelis_ir::grad::grad_dag_checked;
-use chelis_ir::optimize::{common_subexpr_eliminate, constant_fold};
+use chelis_ir::optimize::{common_subexpr_eliminate, constant_fold, dead_code_eliminate};
 use chelis_ir::verify::verify;
 use chelis_ir::vmap::vectorize_axis0;
 use chelis_types::dtype_semantics::{RawTensor, StorageView, TensorStorage, finalize_tensor};
@@ -591,6 +591,200 @@ fn a_negative_runtime_split_count_traps_and_zero_is_empty() {
             }
         }
     }
+}
+
+// ---- trap liveness: spec/06 §5.2, "purity alone does not make a possible
+// trap dead" ----
+
+/// A key-sourced draw validates its own rate, so a discarded one with an
+/// invalid rate still traps; with a valid rate the same graph succeeds.
+#[test]
+fn a_discarded_key_sourced_draw_with_an_invalid_rate_still_traps() {
+    for (rate, traps) in [(1.5, true), (0.5, false)] {
+        let mut dag = Dag::new();
+        let key = root_key(&mut dag);
+        let x = load(&mut dag, "x", &[4], Prim::F32);
+        let bad = float_const(&mut dag, Prim::F32, rate);
+        node(
+            &mut dag,
+            RiscOp::Dropout,
+            vec![x, bad, key],
+            &[4],
+            Prim::F32,
+        );
+        let out = node(&mut dag, RiscOp::Neg, vec![x], &[4], Prim::F32);
+        dag.add_root(out);
+        assert_eq!(verify(&dag), Vec::<String>::new());
+        let result =
+            eval_tensor_roots_with_frame(&dag, &[out], &mut RandomFrame::unhandled(), |_| {
+                Some(floats(Prim::F32, vec![4], vec![1.0, 2.0, 3.0, 4.0]))
+            });
+        assert_eq!(result.is_err(), traps, "rate {rate}: {result:?}");
+        if traps {
+            assert!(
+                result.unwrap_err().contains("numeric trap: domain"),
+                "rate {rate}"
+            );
+        }
+    }
+}
+
+/// Dead-code elimination keeps exactly the random nodes that can trap by
+/// themselves: a key-sourced draw and a runtime-count `SplitN`. A draw keyed
+/// by a `DrawKey` leaves its trap to that `DrawKey`, and a literal-count
+/// `SplitN` and a `FoldIn` cannot trap, so all three are removed when dead.
+/// The verifier draws the same line: only those three are dangling.
+#[test]
+fn dead_code_elimination_keeps_only_the_random_nodes_that_can_trap() {
+    let mut dag = Dag::new();
+    let x = load(&mut dag, "x", &[4], Prim::F32);
+    let rate = float_const(&mut dag, Prim::F32, 0.5);
+    let keyed = root_key(&mut dag);
+    node(
+        &mut dag,
+        RiscOp::Dropout,
+        vec![x, rate, keyed],
+        &[4],
+        Prim::F32,
+    );
+    let n = load(&mut dag, "n", &[], Prim::Int64);
+    let counted = root_key(&mut dag);
+    dag.add_node(
+        RiscOp::SplitN {
+            count: RtDim::Node(1),
+        },
+        vec![counted, n],
+        TensorType {
+            dims: vec![DimInfo::Named("keys".into(), None)],
+            precision: Prim::Key,
+        },
+        None,
+    );
+    let literal = root_key(&mut dag);
+    let literal_split = node(
+        &mut dag,
+        RiscOp::SplitN {
+            count: RtDim::Lit(2),
+        },
+        vec![literal],
+        &[2],
+        Prim::Key,
+    );
+    let folded = root_key(&mut dag);
+    let three = i64_const(&mut dag, 3);
+    let fold = node(
+        &mut dag,
+        RiscOp::FoldIn,
+        vec![folded, three],
+        &[],
+        Prim::Key,
+    );
+    let drawn = node(
+        &mut dag,
+        RiscOp::DrawKey {
+            handler: RandomHandler::Inherited,
+            draw: RandomDraw::Dropout,
+            dtype: Prim::F32,
+        },
+        vec![rate],
+        &[],
+        Prim::Key,
+    );
+    let bridged = node(
+        &mut dag,
+        RiscOp::Dropout,
+        vec![x, rate, drawn],
+        &[4],
+        Prim::F32,
+    );
+    let out = node(&mut dag, RiscOp::Neg, vec![x], &[4], Prim::F32);
+    dag.add_root(out);
+    let dangling = |id: NodeId| {
+        format!(
+            "node {} is dangling: it has no consumers and is not a DAG root",
+            id.0
+        )
+    };
+    assert_eq!(
+        verify(&dag),
+        vec![dangling(literal_split), dangling(fold), dangling(bridged)]
+    );
+
+    let kept = dead_code_eliminate(&dag);
+    assert_eq!(verify(&kept), Vec::<String>::new());
+    let count =
+        |matches: fn(&RiscOp) -> bool| kept.nodes().iter().filter(|n| matches(&n.op)).count();
+    assert_eq!(count(|op| matches!(op, RiscOp::Dropout)), 1);
+    assert_eq!(
+        count(|op| matches!(
+            op,
+            RiscOp::SplitN {
+                count: RtDim::Node(_)
+            }
+        )),
+        1
+    );
+    assert_eq!(
+        count(|op| matches!(
+            op,
+            RiscOp::SplitN {
+                count: RtDim::Lit(_)
+            }
+        )),
+        0
+    );
+    assert_eq!(count(|op| matches!(op, RiscOp::FoldIn)), 0);
+    let draw = kept
+        .nodes()
+        .iter()
+        .find(|n| matches!(n.op, RiscOp::Dropout))
+        .unwrap();
+    assert!(matches!(
+        kept.nodes()[draw.inputs[2].0].op,
+        RiscOp::KeyFromSeed
+    ));
+}
+
+/// The gradient pruner seeds the same random nodes: a discarded key-sourced
+/// draw with an invalid rate survives `grad` and still traps there.
+#[test]
+fn grad_keeps_a_discarded_key_sourced_draw_that_can_trap() {
+    let prim = Prim::F32;
+    let mut dag = Dag::new();
+    let key = root_key(&mut dag);
+    let x = load(&mut dag, "x", &[4], prim);
+    let bad = float_const(&mut dag, prim, 1.5);
+    node(&mut dag, RiscOp::Dropout, vec![x, bad, key], &[4], prim);
+    let total = node(
+        &mut dag,
+        RiscOp::Sum {
+            axis: 0,
+            accumulator: prim,
+        },
+        vec![x],
+        &[],
+        prim,
+    );
+    dag.add_root(total);
+    let grad = grad_dag_checked(&dag, total, &[x]).unwrap();
+    assert!(
+        grad.dag
+            .nodes()
+            .iter()
+            .any(|n| matches!(n.op, RiscOp::Dropout)),
+        "the discarded draw was pruned"
+    );
+    let gradient = grad.grad_nodes[&x];
+    let result = eval_tensor_roots_with_frame(
+        &grad.dag,
+        &[gradient],
+        &mut RandomFrame::unhandled(),
+        |_| Some(floats(prim, vec![4], vec![1.0, 2.0, 3.0, 4.0])),
+    );
+    assert!(
+        result.unwrap_err().contains("numeric trap: domain"),
+        "the retained draw must trap"
+    );
 }
 
 // ---- oracle (d): the verifier's key rules ----

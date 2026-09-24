@@ -2275,6 +2275,30 @@ impl Dag {
             .collect()
     }
 
+    /// chelis#2413: whether a random node can trap by itself, and so is an
+    /// observable root for dead-code elimination (`spec/06-transformations.md`
+    /// §5.2, "purity alone does not make a possible trap dead").
+    ///
+    /// A draw validates its own rate or bounds ([05-OP-37]/[05-OP-8]) unless
+    /// its key is a `DrawKey`'s output: that `DrawKey` validates the same
+    /// controls first, and whether it runs is the counter stream's own
+    /// liveness rule, so the draw adds no trap of its own. A `SplitN` traps
+    /// on a negative runtime count ([05-OP-71]); a literal count cannot be
+    /// negative. The other key operations are total.
+    pub fn random_node_may_trap(&self, node: &DagNode) -> bool {
+        let key_slot = match &node.op {
+            RiscOp::Dropout => 2,
+            RiscOp::UniformLike => 3,
+            RiscOp::SplitN { count } => return count.as_lit().is_none(),
+            _ => return false,
+        };
+        !node
+            .inputs
+            .get(key_slot)
+            .and_then(|key| self.get(*key))
+            .is_some_and(|key| matches!(key.op, RiscOp::DrawKey { .. }))
+    }
+
     pub fn set_roots(&mut self, roots: Vec<NodeId>) {
         self.roots = roots;
     }

@@ -3367,7 +3367,9 @@ fn verify_with_dangling_policy(dag: &Dag, reject_dangling: bool) -> Vec<String> 
             // force it back into the value graph, which is exactly the
             // reachability criterion that let DCE sweep it. A draw key is an
             // effect for the same reason: an unused draw still advances its
-            // handler.
+            // handler. chelis#2413: a random node that can trap by itself is
+            // an observable root that DCE keeps (spec/06 §5.2), so it may
+            // dangle too.
             && !matches!(
                 node.op,
                 RiscOp::Store { .. }
@@ -3375,6 +3377,7 @@ fn verify_with_dangling_policy(dag: &Dag, reject_dangling: bool) -> Vec<String> 
                     | RiscOp::GuardedFail { .. }
                     | RiscOp::DrawKey { .. }
             )
+            && !dag.random_node_may_trap(node)
         {
             errors.push(format!(
                 "node {} is dangling: it has no consumers and is not a DAG root",
