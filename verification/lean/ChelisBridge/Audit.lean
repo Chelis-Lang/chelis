@@ -17,6 +17,7 @@ import ChelisBridge.Numeric.Primal
 import ChelisBridge.Numeric.Bindings
 import ChelisBridge.Numeric.Loop
 import ChelisBridge.Numeric.Gradient
+import ChelisBridge.Numeric.Cast
 import ChelisBridge.Numeric.Examples
 import Lean.Util.CollectAxioms
 
@@ -320,7 +321,11 @@ def accepted : List Name := [
   ``ChelisBridge.Numeric.artifactRootsF_complete,
   ``ChelisBridge.Numeric.artifact_simulates,
   ``ChelisBridge.Numeric.grad_observation,
-  ``ChelisBridge.Numeric.compileGrad_real
+  ``ChelisBridge.Numeric.compileGrad_real,
+  ``ChelisBridge.Numeric.representable_value,
+  ``ChelisBridge.Numeric.realize_cast_of_representable,
+  ``ChelisBridge.Numeric.representable_f32_in_f64,
+  ``ChelisBridge.Numeric.f32_roundtrip_realize
 ]
 
 def allowedAxioms : List Name := [``propext, ``Classical.choice, ``Quot.sound]
