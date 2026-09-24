@@ -1016,6 +1016,8 @@ pub trait KeyGraph {
     /// The nodes `node` depends on without reading their values.
     fn dependencies(&self, node: usize) -> impl Iterator<Item = usize> + '_;
     fn roots(&self) -> impl Iterator<Item = usize> + '_;
+    /// The parameter a `Load` at `node` reads, or `None` for any other node.
+    fn load_name(&self, node: usize) -> Option<&str>;
 }
 
 impl KeyGraph for Dag {
@@ -1075,6 +1077,13 @@ impl KeyGraph for Dag {
     fn roots(&self) -> impl Iterator<Item = usize> + '_ {
         Dag::roots(self).iter().map(|root| root.0)
     }
+
+    fn load_name(&self, node: usize) -> Option<&str> {
+        match &self.get(NodeId(node))?.op {
+            RiscOp::Load { name } => Some(name.as_ref()),
+            _ => None,
+        }
+    }
 }
 
 /// The nodes an activation implies: the activation itself and, through
@@ -1114,15 +1123,25 @@ fn activations_exclusive(graph: &impl KeyGraph, left: usize, right: usize) -> bo
 ///
 /// - V1: a key is produced by a key operation, a `DrawKey`, or a key-typed
 ///   `Load`, and a key may be a graph root.
-/// - V2: a key's consumers are exactly one draw, one `FoldIn`, or one
-///   `SplitN`, or at most one `Split` of each branch. A `DrawKey`'s key
-///   validates exactly its draw's controls, dtype and activation.
+/// - V2: a key's uses are exactly one draw, one `FoldIn`, one `SplitN`, or
+///   one root, or at most one `Split` of each branch. Every `Load` of one
+///   parameter is one key. A `DrawKey`'s key has one use, a draw, and
+///   validates exactly that draw's controls, dtype and activation.
 /// - V3: two draws may consume one key only when each carries an activation
 ///   and every pair of their activations is structurally exclusive.
 /// - V4: a key reaching any other operation or a dependency list is
 ///   rejected; replays read their forward draw's key without consuming it.
 pub fn verify_key_rules(graph: &impl KeyGraph, errors: &mut Vec<String>) {
     let is_key = |node: usize| graph.dtype(node) == Some(Prim::Key);
+    // The key a node's value is: every key `Load` of one parameter is the
+    // first such `Load`, and any other key is its own node.
+    let identity = |node: usize| match graph.load_name(node) {
+        Some(name) if is_key(node) => (0..node)
+            .find(|earlier| is_key(*earlier) && graph.load_name(*earlier) == Some(name))
+            .unwrap_or(node),
+        _ => node,
+    };
+    let is_draw_key = |node: usize| matches!(graph.role(node), KeyRole::DrawKey { .. });
     let mut consumers = vec![Vec::<usize>::new(); graph.node_count()];
     for node in 0..graph.node_count() {
         let role = graph.role(node);
@@ -1152,9 +1171,13 @@ pub fn verify_key_rules(graph: &impl KeyGraph, errors: &mut Vec<String>) {
                 continue;
             }
             if role.consumes() {
-                consumers[input].push(node);
+                consumers[identity(input)].push(node);
                 if role.is_draw() {
                     verify_key_matches_consumer(graph, input, node, role, errors);
+                } else if is_draw_key(input) {
+                    errors.push(format!(
+                        "draw key {input} reaches node {node}; a draw key's key feeds only its draw"
+                    ));
                 }
             }
         }
@@ -1162,6 +1185,29 @@ pub fn verify_key_rules(graph: &impl KeyGraph, errors: &mut Vec<String>) {
     for (key, consuming) in consumers.iter().enumerate() {
         if consuming.len() > 1 {
             verify_shared_key(graph, key, consuming, errors);
+        }
+    }
+    // A root is a use: returning a key hands it to the caller.
+    let mut rooted = vec![0usize; graph.node_count()];
+    for root in graph.roots().filter(|root| is_key(*root)) {
+        if is_draw_key(root) {
+            errors.push(format!(
+                "draw key {root} is a graph root; a draw key's key feeds only its draw"
+            ));
+        }
+        let Some(uses) = rooted.get_mut(identity(root)) else {
+            continue;
+        };
+        *uses += 1;
+        if *uses == 2 {
+            errors.push(format!("key {} is a graph root twice", identity(root)));
+        }
+    }
+    for (key, uses) in rooted.iter().enumerate() {
+        if let (true, Some(consumer)) = (*uses > 0, consumers[key].first()) {
+            errors.push(format!(
+                "key {key} is a graph root and is also consumed by node {consumer}"
+            ));
         }
     }
     // Replay reads: each must read a key that a forward draw of the matching
@@ -1176,7 +1222,7 @@ pub fn verify_key_rules(graph: &impl KeyGraph, errors: &mut Vec<String>) {
             continue;
         };
         let forwards = consumers
-            .get(key)
+            .get(identity(key))
             .into_iter()
             .flatten()
             .copied()

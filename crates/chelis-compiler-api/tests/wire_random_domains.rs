@@ -169,6 +169,17 @@ fn a_key_is_consumed_once_and_only_by_a_key_consumer() {
     let rate = input(&dag, dropout, 1);
     not_a_key["nodes"][dropout]["inputs"][2] = json!(rate);
     rejects_domain(&not_a_key, "requires a rank-zero key or a key batch");
+
+    // A draw key's key derived from: only its draw consumes it.
+    let mut derived = dag.clone();
+    let id = derived["nodes"].as_array().unwrap().len();
+    derived["nodes"].as_array_mut().unwrap().push(
+        json!({"shape_deps":[],"span_id":null,"merged_spans":[],"id":id,
+        "op":{"kind":"split","branch":"left"},"inputs":[dropout_key],
+        "output_type":{"dims":[],"precision":"key"}}),
+    );
+    derived["roots"].as_array_mut().unwrap().push(json!(id));
+    rejects_domain(&derived, "a draw key's key feeds only its draw");
 }
 
 /// spec/10 §3.2 (v18): a key enters a graph as a key operation's or draw
@@ -190,13 +201,14 @@ fn a_key_may_be_loaded_or_rooted_and_is_never_a_dependency_or_a_constant() {
     );
     accepts(&loaded);
 
-    // The loaded key as a root, and a consumed draw key as a root.
+    // The loaded key as a root. A draw key's key is its draw's alone, so a
+    // consumed draw key is no root.
     let mut loaded_root = loaded.clone();
     loaded_root["roots"].as_array_mut().unwrap().push(json!(id));
     accepts(&loaded_root);
     let mut key_root = dag.clone();
     key_root["roots"].as_array_mut().unwrap().push(json!(key));
-    accepts(&key_root);
+    rejects_domain(&key_root, "a draw key's key feeds only its draw");
 
     // A key as a shape dependency of its own consumer.
     let mut key_dependency = dag.clone();
@@ -347,6 +359,34 @@ fn the_codec_admits_the_key_chain_and_rejects_every_malformed_key_form() {
     let mut declared = key_chain();
     declared["nodes"][6]["output_type"]["dims"] = json!([{"kind":"lit","size":4}]);
     assert!(WireDag::from_validated_json(&declared.to_string()).is_err());
+
+    // V2 counts uses of a key: a root is one, and every Load of one
+    // parameter is the same key.
+    let mut rooted = key_chain();
+    rooted["roots"].as_array_mut().unwrap().push(json!(6));
+    rejects_domain(&rooted, "is a graph root and is also consumed");
+    let mut reloaded = key_chain();
+    let y = push(
+        &mut reloaded,
+        json!({"kind":"load","name":"y"}),
+        &[],
+        &[4],
+        "f32",
+    );
+    let mut roots = vec![json!(9), json!(11)];
+    for _ in 0..2 {
+        let k = push(
+            &mut reloaded,
+            json!({"kind":"load","name":"k"}),
+            &[],
+            &[],
+            "key",
+        );
+        let drawn = push(&mut reloaded, json!({"kind":"dropout"}), &[y, 8, k], &[4], "f32");
+        roots.push(json!(drawn));
+    }
+    reloaded["roots"] = json!(roots);
+    rejects_domain(&reloaded, "is consumed twice");
 
     // The same disagreement against a named count axis whose extent is
     // known; the batched draw's data declares that axis too.

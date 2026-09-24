@@ -682,12 +682,13 @@ fn the_verifier_rejects_a_key_fed_to_another_operation() {
         &dag,
         "only a key operation or a random primitive consumes a key",
     );
-    // chelis#2413 step 1, rule V1: a key may be a graph root. Reading it as
-    // a root is not a second consumption.
+    // chelis#2413 step 1, rule V2: a root is a use of its key, and a draw
+    // key's key is its draw's alone, so a consumed draw key is no root.
     let (mut dag, _, _, key, out) = dropout_graph();
     dag.add_root(out);
     dag.add_root(key);
-    assert_eq!(verify(&dag), Vec::<String>::new());
+    assert_rejected(&dag, "is a graph root and is also consumed");
+    assert_rejected(&dag, "a draw key's key feeds only its draw");
 }
 
 #[test]

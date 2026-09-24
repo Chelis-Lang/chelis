@@ -1052,8 +1052,108 @@ fn one_split_per_branch_a_key_root_and_a_key_load_are_accepted() {
     let loaded = load(&mut dag, "k", &[], Prim::Key);
     let drawn = draw(&mut dag, loaded, None);
     dag.add_root(drawn);
+    assert_eq!(verify(&dag), Vec::<String>::new());
+    let mut dag = Dag::new();
+    let loaded = load(&mut dag, "k", &[], Prim::Key);
     dag.add_root(loaded);
     assert_eq!(verify(&dag), Vec::<String>::new());
+}
+
+/// V2 counts uses of a key, not consumers of a node: returning a key is a
+/// use, and two `Load`s of one parameter are one key.
+#[test]
+fn a_root_and_every_load_of_one_parameter_count_as_uses_of_one_key() {
+    // A loaded key that is returned and drawn with.
+    let mut dag = Dag::new();
+    let loaded = load(&mut dag, "k", &[], Prim::Key);
+    let drawn = draw(&mut dag, loaded, None);
+    dag.add_root(drawn);
+    dag.add_root(loaded);
+    assert_rejected(&dag, "is a graph root and is also consumed");
+    // A derived key that is returned and split.
+    let mut dag = Dag::new();
+    let key = root_key(&mut dag);
+    let left = split(&mut dag, key, KeyBranch::Left);
+    dag.add_root(key);
+    dag.add_root(left);
+    assert_rejected(&dag, "is a graph root and is also consumed");
+    // A key returned twice.
+    let mut dag = Dag::new();
+    let key = root_key(&mut dag);
+    dag.set_roots(vec![key, key]);
+    assert_rejected(&dag, "is a graph root twice");
+    // Two loads of one parameter, each drawn with.
+    let mut dag = Dag::new();
+    for _ in 0..2 {
+        let loaded = load(&mut dag, "k", &[], Prim::Key);
+        let drawn = draw(&mut dag, loaded, None);
+        dag.add_root(drawn);
+    }
+    assert_rejected(&dag, "is consumed twice");
+    // Two loads of one parameter, one drawn with and one returned.
+    let mut dag = Dag::new();
+    let first = load(&mut dag, "k", &[], Prim::Key);
+    let second = load(&mut dag, "k", &[], Prim::Key);
+    let drawn = draw(&mut dag, first, None);
+    dag.add_root(drawn);
+    dag.add_root(second);
+    assert_rejected(&dag, "is a graph root and is also consumed");
+    // Loads of two parameters are two keys.
+    let mut dag = Dag::new();
+    for name in ["k", "j"] {
+        let loaded = load(&mut dag, name, &[], Prim::Key);
+        let drawn = draw(&mut dag, loaded, None);
+        dag.add_root(drawn);
+    }
+    assert_eq!(verify(&dag), Vec::<String>::new());
+}
+
+/// A `DrawKey`'s key is the counter bridge's word for exactly its draw, and
+/// neither lane derives from it or returns it, so only a draw consumes it.
+#[test]
+fn a_draw_keys_key_feeds_only_a_draw() {
+    for consumer in ["split", "fold_in", "split_n", "root"] {
+        let mut dag = Dag::new();
+        let rate = float_const(&mut dag, Prim::F32, 0.5);
+        let bridged = node(
+            &mut dag,
+            RiscOp::DrawKey {
+                handler: RandomHandler::Inherited,
+                draw: RandomDraw::Dropout,
+                dtype: Prim::F32,
+            },
+            vec![rate],
+            &[],
+            Prim::Key,
+        );
+        match consumer {
+            "split" => {
+                let left = split(&mut dag, bridged, KeyBranch::Left);
+                let drawn = draw(&mut dag, left, None);
+                dag.add_root(drawn);
+            }
+            "fold_in" => {
+                let three = i64_const(&mut dag, 3);
+                let folded = node(&mut dag, RiscOp::FoldIn, vec![bridged, three], &[], Prim::Key);
+                let drawn = draw(&mut dag, folded, None);
+                dag.add_root(drawn);
+            }
+            "split_n" => {
+                let rows = node(
+                    &mut dag,
+                    RiscOp::SplitN {
+                        count: RtDim::Lit(4),
+                    },
+                    vec![bridged],
+                    &[4],
+                    Prim::Key,
+                );
+                dag.add_root(rows);
+            }
+            _ => dag.add_root(bridged),
+        }
+        assert_rejected(&dag, "a draw key's key feeds only its draw");
+    }
 }
 
 #[test]

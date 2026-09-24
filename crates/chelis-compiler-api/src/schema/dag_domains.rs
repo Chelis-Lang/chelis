@@ -434,6 +434,13 @@ impl KeyGraph for DecodedKeys<'_> {
     fn roots(&self) -> impl Iterator<Item = usize> + '_ {
         self.0.roots.iter().copied().filter_map(wire_position)
     }
+
+    fn load_name(&self, node: usize) -> Option<&str> {
+        match &self.0.nodes.get(node)?.op {
+            WireRiscOp::Load { name } => Some(name),
+            _ => None,
+        }
+    }
 }
 
 fn input_rank(dag: &WireDag, node: &WireDagNode, slot: usize) -> Option<usize> {
