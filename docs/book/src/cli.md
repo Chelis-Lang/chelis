@@ -27,6 +27,8 @@ Chelis ships one CLI with machine-facing and human-facing subcommands.
 - `chelis prove` discovers and runs executable properties.
 - `chelis validate` runs the executable-grammar validator on the input.
 - `chelis build` emits C or HIP source plus runtime artifacts and compile flags.
+  Experimental HIP builds reject `pad` and `shrink` when their selected helper
+  would execute on the C host; device execution remains tracked in #2493.
 - `chelis tide` exposes the HTTP/MCP tooling surface.
 
 ## Lint Traversal Policy

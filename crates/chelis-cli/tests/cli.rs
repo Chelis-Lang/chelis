@@ -5213,8 +5213,10 @@ fn build_hip_accepts_symbolic_dims_and_binds_them_from_input_metadata() {
         .stdout(predicate::str::contains("Peak device memory formula:"));
 
     let source = fs::read_to_string(out_dir.join("symbolic_hip.cpp")).expect("generated source");
-    assert!(source.contains("int64_t batch = chelis_tensor_shape(inputs[0], 0);"));
-    assert!(source.contains("int64_t features = chelis_tensor_shape(inputs[0], 1);"));
+    assert!(source.contains("chelis_device_metadata batch = chelis_tensor_shape(inputs[0], 0);"));
+    assert!(
+        source.contains("chelis_device_metadata features = chelis_tensor_shape(inputs[0], 1);")
+    );
 }
 
 #[test]
@@ -5279,8 +5281,12 @@ fn build_symbolic_matmul_succeeds_on_c_and_hip_targets() {
 
     let hip_source =
         fs::read_to_string(hip_out.join("symbolic_matmul_hip.cpp")).expect("generated hip");
-    assert!(hip_source.contains("int64_t batch = chelis_tensor_shape(inputs[0], 0);"));
-    assert!(hip_source.contains("int64_t in_dim = chelis_tensor_shape(inputs[0], 1);"));
+    assert!(
+        hip_source.contains("chelis_device_metadata batch = chelis_tensor_shape(inputs[0], 0);")
+    );
+    assert!(
+        hip_source.contains("chelis_device_metadata in_dim = chelis_tensor_shape(inputs[0], 1);")
+    );
     assert!(hip_source.contains("chelis_tensor_shape(inputs[1], 0) != in_dim"));
 }
 
@@ -5310,8 +5316,8 @@ fn build_hip_accepts_symbolic_softmax() {
 
     let source =
         fs::read_to_string(out_dir.join("symbolic_softmax_hip.cpp")).expect("generated source");
-    assert!(source.contains("int64_t batch = chelis_tensor_shape(inputs[0], 0);"));
-    assert!(source.contains("int64_t seq = chelis_tensor_shape(inputs[0], 1);"));
+    assert!(source.contains("chelis_device_metadata batch = chelis_tensor_shape(inputs[0], 0);"));
+    assert!(source.contains("chelis_device_metadata seq = chelis_tensor_shape(inputs[0], 1);"));
     assert!(source.contains("kernel_maxred_ax1"));
     assert!(source.contains("kernel_sum_ax1"));
 }
@@ -5342,8 +5348,8 @@ fn build_hip_accepts_symbolic_row_sum() {
 
     let source =
         fs::read_to_string(out_dir.join("symbolic_sum_hip.cpp")).expect("generated source");
-    assert!(source.contains("int64_t batch = chelis_tensor_shape(inputs[0], 0);"));
-    assert!(source.contains("int64_t seq = chelis_tensor_shape(inputs[0], 1);"));
+    assert!(source.contains("chelis_device_metadata batch = chelis_tensor_shape(inputs[0], 0);"));
+    assert!(source.contains("chelis_device_metadata seq = chelis_tensor_shape(inputs[0], 1);"));
     assert!(source.contains("kernel_sum_ax1"));
 }
 
@@ -5373,7 +5379,7 @@ fn build_hip_accepts_symbolic_leading_dims_for_layer_norm() {
 
     let source =
         fs::read_to_string(out_dir.join("symbolic_layer_norm_hip.cpp")).expect("generated source");
-    assert!(source.contains("int64_t batch = chelis_tensor_shape(inputs[0], 0);"));
+    assert!(source.contains("chelis_device_metadata batch = chelis_tensor_shape(inputs[0], 0);"));
     assert!(source.contains("kernel_sum_ax1"));
 }
 
@@ -5395,6 +5401,98 @@ fn build_hip_rejects_symbolic_normalized_axis_for_layer_norm() {
         .stderr(predicate::str::contains(
             "layer_norm requires a concrete extent for axis 1 in IR lowering",
         ));
+}
+
+#[test]
+fn build_hip_rejects_pad_host_fallback() {
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("pad.ch");
+    let hip_out = dir.path().join("hip-pad-out");
+    let c_out = dir.path().join("c-pad-out");
+    write_file(
+        &path,
+        "def f(x: tensor[4, f32]) -> tensor[6, f32] = pad(&x, [[1i64, 1i64]], 0.0)\n",
+    );
+
+    let json = run_json_check(&path);
+    assert_eq!(json["score"].as_f64(), Some(1.0));
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .args([
+            "build",
+            path.to_str().unwrap(),
+            "--target",
+            "c",
+            "--output",
+            c_out.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .args([
+            "build",
+            path.to_str().unwrap(),
+            "--target",
+            "hip",
+            "--output",
+            hip_out.to_str().unwrap(),
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "HIP pad host fallback is unsupported",
+        ));
+    assert!(!hip_out.join("pad_hip.cpp").exists());
+}
+
+#[test]
+fn build_hip_rejects_shrink_host_fallback() {
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("shrink.ch");
+    let hip_out = dir.path().join("hip-shrink-out");
+    let c_out = dir.path().join("c-shrink-out");
+    write_file(
+        &path,
+        "def f(x: tensor[6, f32]) -> tensor[4, f32] = shrink(&x, [[1i64, 5i64]])\n",
+    );
+
+    let json = run_json_check(&path);
+    assert_eq!(json["score"].as_f64(), Some(1.0));
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .args([
+            "build",
+            path.to_str().unwrap(),
+            "--target",
+            "c",
+            "--output",
+            c_out.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .args([
+            "build",
+            path.to_str().unwrap(),
+            "--target",
+            "hip",
+            "--output",
+            hip_out.to_str().unwrap(),
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "HIP shrink host fallback is unsupported",
+        ));
+    assert!(!hip_out.join("shrink_hip.cpp").exists());
 }
 
 #[test]
