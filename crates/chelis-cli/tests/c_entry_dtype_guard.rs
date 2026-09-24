@@ -43,7 +43,9 @@ def record_sum(r: IntRecord) -> tensor[3, i64] = r.twice + r.square\n\
 type Choice =\n  | Ints(tensor[3, i64])\n  | Floats(tensor[2, f64])\n\
 def choice_total(c: Choice) -> i64 = match c with {\n  | Ints(t) => tensor_to_scalar(sum(t, 0))\n  | Floats(u) => cast(0, i64)\n}\n\
 def named_pair[n](p: (tensor[n, i64], tensor[n, i64])) -> tensor[n, i64] = p.0 + p.1\n\
-def list_count(xs: List[tensor[3, i64]]) -> i64 = len(xs)\n";
+def list_count(xs: List[tensor[3, i64]]) -> i64 = len(xs)\n\
+type Tree =\n  | Leaf(tensor[3, i64])\n  | Node(Tree, Tree)\n\
+def tree_leaves(t: Tree) -> i64 = match t with {\n  | Leaf(x) => 1i64\n  | Node(l, r) => tree_leaves(l) + tree_leaves(r)\n}\n";
 
 /// How the harness hands one supplied tensor to one entry and releases the
 /// result. The C local `x` is the supplied tensor.
@@ -218,6 +220,9 @@ enum Carrier {
     List,
     /// `named_pair(p)` with `p = (good, supplied)`, whose axes share `n`.
     NamedPair,
+    /// `tree_leaves(t)` with `t = Node(Leaf(good), Leaf(supplied))`, a
+    /// recursive data type.
+    Tree,
 }
 
 impl Carrier {
@@ -227,6 +232,7 @@ impl Carrier {
             Carrier::Record => "r.square",
             Carrier::DataType => "c.Ints.0",
             Carrier::List => "xs[1]",
+            Carrier::Tree => "t.Node.1.Leaf.0",
         }
     }
 
@@ -272,6 +278,22 @@ impl Carrier {
                  printf(\"count %lld\\n\", (long long){}(xs));\n\
                  chelis_list_release(xs);",
                 authored_c_symbol("list_count")
+            ),
+            Carrier::Tree => format!(
+                "chelis_string leaf = chelis_string_from_cstr(\"Leaf\");\n\
+                 chelis_string node = chelis_string_from_cstr(\"Node\");\n\
+                 chelis_value first = chelis_value_take_tensor(good);\n\
+                 chelis_value second = chelis_value_take_tensor(supplied);\n\
+                 chelis_value leaves[2] = {{\n\
+                 chelis_value_take_adt(chelis_adt_construct(leaf, &first, 1)),\n\
+                 chelis_value_take_adt(chelis_adt_construct(leaf, &second, 1)) }};\n\
+                 chelis_value_release(first); chelis_value_release(second);\n\
+                 chelis_adt *t = chelis_adt_construct(node, leaves, 2);\n\
+                 chelis_value_release(leaves[0]); chelis_value_release(leaves[1]);\n\
+                 chelis_string_release(leaf); chelis_string_release(node);\n\
+                 printf(\"leaves %lld\\n\", (long long){}(t));\n\
+                 chelis_adt_release(t);",
+                authored_c_symbol("tree_leaves")
             ),
         }
     }
@@ -322,7 +344,8 @@ fn run_nested(
 /// tuple, record, data-type or list parameter was validated only if it later
 /// reached a kernel entry, which named `__host_tensor_arg_N`; the rows below
 /// that reach no kernel ran to completion on a wrong dtype, rank or extent.
-/// Every row now stops at the host entry with the parameter path.
+/// Every row now stops at the host entry with the parameter path, including
+/// one two levels down a recursive data type.
 #[test]
 fn a_mismatched_nested_tensor_stops_at_the_entry_with_its_parameter_path() {
     if !gcc_available() {
@@ -336,6 +359,7 @@ fn a_mismatched_nested_tensor_stops_at_the_entry_with_its_parameter_path() {
         Carrier::Record,
         Carrier::DataType,
         Carrier::List,
+        Carrier::Tree,
     ] {
         let path = carrier.path();
         for (kind, dtype, shape, expected) in [
@@ -397,6 +421,7 @@ fn a_matching_nested_tensor_runs_at_every_carrier() {
         ("data_type", Carrier::DataType, Some("total 0")),
         ("list", Carrier::List, Some("count 2")),
         ("named_pair", Carrier::NamedPair, None),
+        ("tree", Carrier::Tree, Some("leaves 2")),
     ] {
         let (succeeded, output) =
             run_nested(&out, &format!("matching_{name}"), carrier, "I64", &[3]);

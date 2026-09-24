@@ -102,6 +102,7 @@ INVENTORY_SOURCES: tuple[str, ...] = (
     "crates/chelis-backend-c/src/host_abi_tests.rs",
     "crates/chelis-backend-c/src/host_emit.rs",
     "crates/chelis-backend-c/src/host_emit/entry.rs",
+    "crates/chelis-backend-c/src/host_emit/entry_walk.rs",
     "crates/chelis-backend-c/src/lib.rs",
     "crates/chelis-backend-c/src/memory.rs",
     "crates/chelis-backend-c/src/random_observer.rs",

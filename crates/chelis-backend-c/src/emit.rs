@@ -2531,7 +2531,7 @@ impl CEmitter {
 
     /// The C type of a rank-0 value of `prim`, from the element-type
     /// authority `elem_type`.
-    fn prim_elem_type(prim: Prim) -> &'static str {
+    pub(crate) fn prim_elem_type(prim: Prim) -> &'static str {
         Self::elem_type(&TensorType {
             dims: vec![],
             precision: prim,

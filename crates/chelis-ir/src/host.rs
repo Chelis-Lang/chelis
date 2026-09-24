@@ -1864,9 +1864,10 @@ fn resolve_host_program(
             .map(resolve_host_function)
             .collect::<Result<Vec<_>, _>>()?,
         summary_rejections: program.summary_rejections,
-        // A layout whose field types do not resolve is absent rather than
-        // fatal here: the backend that walks a parameter refuses the ADT it
-        // cannot find, so no program gains a rejection it does not need.
+        // A layout whose field types do not resolve is dropped rather than
+        // failing the whole program here: only a backend that validates a
+        // parameter of that ADT needs it, and that backend refuses the
+        // parameter by name.
         adt_layouts: program
             .adt_layouts
             .into_iter()

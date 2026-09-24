@@ -386,12 +386,13 @@ impl<'a> EntryWalkers<'a> {
         if self.types.is_empty() {
             return;
         }
+        // A path segment's list index is an `i64` extent position.
+        let index_type = CEmitter::prim_elem_type(Prim::Int64);
+        out.push(format!(
+            "typedef struct __chelis_entry_path {{\n    const struct __chelis_entry_path *parent;\n    const char *segment;\n    {index_type} index;\n}} __chelis_entry_path;"
+        ));
         out.push(
-            r#"typedef struct __chelis_entry_path {
-    const struct __chelis_entry_path *parent;
-    const char *segment;
-    int64_t index;
-} __chelis_entry_path;
+            r#"
 
 static void __chelis_entry_path_append(const __chelis_entry_path *path, char *buffer, size_t size, size_t *used) {
     if (path->parent != NULL) __chelis_entry_path_append(path->parent, buffer, size, used);
@@ -522,10 +523,9 @@ static const char *__chelis_entry_path_text(const __chelis_entry_path *path) {
                     let HostAbiType::List(item) = ty else {
                         unreachable!("list shape")
                     };
-                    out.push(
-                        "    for (int64_t index = 0; index < chelis_list_len(value); ++index) {"
-                            .to_string(),
-                    );
+                    out.push(format!(
+                        "    for ({index_type} index = 0; index < chelis_list_len(value); ++index) {{"
+                    ));
                     out.extend(
                         child(
                             "{ path, NULL, index }".to_string(),
@@ -560,10 +560,9 @@ static const char *__chelis_entry_path_text(const __chelis_entry_path *path) {
                         unreachable!("dictionary shape")
                     };
                     out.push("    chelis_list *values = chelis_dict_values(value);".to_string());
-                    out.push(
-                        "    for (int64_t index = 0; index < chelis_list_len(values); ++index) {"
-                            .to_string(),
-                    );
+                    out.push(format!(
+                        "    for ({index_type} index = 0; index < chelis_list_len(values); ++index) {{"
+                    ));
                     out.extend(
                         child(
                             "{ path, NULL, index }".to_string(),
