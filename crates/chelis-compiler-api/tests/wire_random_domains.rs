@@ -7,6 +7,9 @@ use chelis_compiler_api::schema::{
     CheckRequest, LowerRequest, SourceKind, WIRE_DAG_SCHEMA_VERSION, WireDag, WireDagDecodeError,
     WireDagNode,
 };
+use chelis_ir::dag::{Dag, DimInfo, KeyBranch, NodeId, RiscOp, RtDim, TensorType, UniformBound};
+use chelis_types::scalar_from_i64;
+use chelis_types::types::Prim;
 use serde_json::{Value, json};
 
 fn construct(value: &Value) -> WireDag {
@@ -762,4 +765,221 @@ fn gradient_random_lowering_preserves_scalar_bool_activation() {
     malformed["nodes"][activation]["op"] = json!({"kind":"load","name":"bad_activation"});
     malformed["nodes"][activation]["output_type"]["precision"] = json!("f32");
     rejects_domain(&malformed, "exactly one Bool activation");
+}
+
+// ---- one operand rule on both sides of the codec ----
+
+/// Axis `name` of unknown extent, or a literal extent.
+enum Axis {
+    Named(&'static str),
+    Lit(usize),
+}
+
+fn tensor(axes: &[Axis], precision: Prim) -> TensorType {
+    TensorType {
+        dims: axes
+            .iter()
+            .map(|axis| match axis {
+                Axis::Named(name) => DimInfo::Named((*name).into(), None),
+                Axis::Lit(extent) => DimInfo::Lit(*extent),
+            })
+            .collect(),
+        precision,
+    }
+}
+
+fn ir_node(dag: &mut Dag, op: RiscOp, inputs: Vec<NodeId>, ty: TensorType) -> NodeId {
+    dag.add_node(op, inputs, ty, None)
+}
+
+/// The wire form of the loads, constants, key operations and draws below.
+fn wire_of(dag: &Dag) -> Value {
+    let nodes = dag
+        .nodes()
+        .iter()
+        .map(|node| {
+            let op = match &node.op {
+                RiscOp::Load { name } => json!({"kind":"load","name":name.as_str()}),
+                RiscOp::Const { value } if value.prim() == Prim::Int64 => {
+                    json!({"kind":"const","value":{"dtype":"int64","value":value.as_i64_exact().unwrap()}})
+                }
+                RiscOp::Const { value } => json!({"kind":"const","value":{"dtype":"f32",
+                    "bits":format!("{:08x}", (value.as_f64_lossy() as f32).to_bits())}}),
+                RiscOp::KeyFromSeed => json!({"kind":"key_from_seed"}),
+                RiscOp::Split { branch } => json!({"kind":"split","branch":match branch {
+                    KeyBranch::Left => "left",
+                    KeyBranch::Right => "right",
+                }}),
+                RiscOp::SplitN {
+                    count: RtDim::Lit(count),
+                } => json!({"kind":"split_n","count":{"bound":"lit","value":count}}),
+                RiscOp::UniformLike => json!({"kind":"uniform_like"}),
+                RiscOp::UniformBoundAdjoint { .. } => {
+                    json!({"kind":"uniform_bound_adjoint","bound":"high"})
+                }
+                other => panic!("no wire form here for {other:?}"),
+            };
+            let dims = node
+                .output_type
+                .dims
+                .iter()
+                .map(|dim| match dim {
+                    DimInfo::Named(name, None) => json!({"kind":"named","name":name,"size":null}),
+                    DimInfo::Lit(size) => json!({"kind":"lit","size":size}),
+                    other => panic!("no wire form here for {other:?}"),
+                })
+                .collect::<Vec<_>>();
+            json!({"shape_deps":[],"span_id":null,"merged_spans":[],"id":node.id.0,"op":op,
+                "inputs":node.inputs.iter().map(|input| input.0).collect::<Vec<_>>(),
+                "output_type":{"dims":dims,"precision":node.output_type.precision.interchange_name()}})
+        })
+        .collect::<Vec<_>>();
+    let roots = dag.roots().iter().map(|root| root.0).collect::<Vec<_>>();
+    json!({"schema_version": WIRE_DAG_SCHEMA_VERSION, "nodes": nodes, "roots": roots})
+}
+
+/// Keys `split_n(key(7), 3)`: nodes 0 to 2.
+fn three_keys(dag: &mut Dag) -> NodeId {
+    let seed = ir_node(
+        dag,
+        RiscOp::Const {
+            value: scalar_from_i64("test", Prim::Int64, 7).unwrap(),
+        },
+        vec![],
+        tensor(&[], Prim::Int64),
+    );
+    let key = ir_node(dag, RiscOp::KeyFromSeed, vec![seed], tensor(&[], Prim::Key));
+    ir_node(
+        dag,
+        RiscOp::SplitN {
+            count: RtDim::Lit(3),
+        },
+        vec![key],
+        tensor(&[Axis::Lit(3)], Prim::Key),
+    )
+}
+
+fn f32_bound(dag: &mut Dag, value: f64) -> NodeId {
+    ir_node(
+        dag,
+        RiscOp::synth_const(Prim::F32, value),
+        vec![],
+        tensor(&[], Prim::F32),
+    )
+}
+
+/// Round 3's witness: a `UniformLike` over `t: [3, 4]` declared `[rows, 4]`.
+fn uniform_declaring(rows: usize) -> Dag {
+    let mut dag = Dag::new();
+    let keys = three_keys(&mut dag);
+    let t = ir_node(
+        &mut dag,
+        RiscOp::Load { name: "t".into() },
+        vec![],
+        tensor(&[Axis::Lit(3), Axis::Lit(4)], Prim::F32),
+    );
+    let low = f32_bound(&mut dag, 0.0);
+    let high = f32_bound(&mut dag, 1.0);
+    let drawn = ir_node(
+        &mut dag,
+        RiscOp::UniformLike,
+        vec![t, low, high, keys],
+        tensor(&[Axis::Lit(rows), Axis::Lit(4)], Prim::F32),
+    );
+    dag.add_root(drawn);
+    dag
+}
+
+/// A `Split` of `k: [n]` declared `[out]`.
+fn split_declaring(out: &'static str) -> Dag {
+    let mut dag = Dag::new();
+    let k = ir_node(
+        &mut dag,
+        RiscOp::Load { name: "k".into() },
+        vec![],
+        tensor(&[Axis::Named("n")], Prim::Key),
+    );
+    let split = ir_node(
+        &mut dag,
+        RiscOp::Split {
+            branch: KeyBranch::Left,
+        },
+        vec![k],
+        tensor(&[Axis::Named(out)], Prim::Key),
+    );
+    dag.add_root(split);
+    dag
+}
+
+/// A forward `UniformLike` over `t: [3, 5]` and its bound adjoint over a
+/// cotangent `g: [3, trailing]`.
+fn adjoint_over(trailing: usize) -> Dag {
+    let mut dag = Dag::new();
+    let keys = three_keys(&mut dag);
+    let t = ir_node(
+        &mut dag,
+        RiscOp::Load { name: "t".into() },
+        vec![],
+        tensor(&[Axis::Lit(3), Axis::Lit(5)], Prim::F32),
+    );
+    let low = f32_bound(&mut dag, 0.0);
+    let high = f32_bound(&mut dag, 1.0);
+    let forward = ir_node(
+        &mut dag,
+        RiscOp::UniformLike,
+        vec![t, low, high, keys],
+        tensor(&[Axis::Lit(3), Axis::Lit(5)], Prim::F32),
+    );
+    let g = ir_node(
+        &mut dag,
+        RiscOp::Load { name: "g".into() },
+        vec![],
+        tensor(&[Axis::Lit(3), Axis::Lit(trailing)], Prim::F32),
+    );
+    let adjoint = ir_node(
+        &mut dag,
+        RiscOp::UniformBoundAdjoint {
+            bound: UniformBound::High,
+        },
+        vec![t, g, keys],
+        tensor(&[], Prim::F32),
+    );
+    dag.add_root(forward);
+    dag.add_root(adjoint);
+    dag
+}
+
+/// Round 3 found the IR verifier and the wire decoder applying different
+/// operand rules in three places. Both now call `verify_random_operands`,
+/// so each divergent graph gets the same sentence, node number included,
+/// from `verify` and from the decoder, and each agreeing graph passes both.
+///
+/// Evidentiary status: REGRESSION TEST. At c23ec448a `verify` accepted all
+/// three divergent graphs, and the decoder's reports named no node.
+#[test]
+fn the_verifier_and_the_codec_share_one_operand_rule() {
+    let cases = [
+        (
+            uniform_declaring(2),
+            uniform_declaring(3),
+            "node 6: uniform_like must preserve its float template's exact shape and dtype",
+        ),
+        (
+            split_declaring("m"),
+            split_declaring("n"),
+            "node 1: key operation must be element-wise over one exact shape, with a split's count axis appended last",
+        ),
+        (
+            adjoint_over(7),
+            adjoint_over(5),
+            "node 8: a uniform bound adjoint is a value of its template's dtype, shaped like a leading part of its key's shape, over a cotangent of its template's exact type",
+        ),
+    ];
+    for (divergent, agreeing, sentence) in cases {
+        let errors = chelis_ir::verify::verify(&divergent);
+        assert!(errors.iter().any(|error| error == sentence), "{errors:?}");
+        rejects_domain(&wire_of(&divergent), sentence);
+        assert_eq!(chelis_ir::verify::verify(&agreeing), Vec::<String>::new());
+        accepts(&wire_of(&agreeing));
+    }
 }

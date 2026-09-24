@@ -700,8 +700,11 @@ fn a_split_count_that_disagrees_with_its_declared_extent_traps() {
     assert_eq!(eval_split(&dag, 0).unwrap()[&rows].shape, vec![4]);
 }
 
-/// The key's axes are the leading extents of a split's result, and a
-/// declared leading axis bound elsewhere is checked against them too.
+/// The key's axes are the leading extents of a split's result. The verifier
+/// requires the result to declare the key's own dims, so a leading axis
+/// named for another extent is rejected; the evaluator, handed that graph
+/// unverified, still checks the declared axis against the key before any key
+/// exists.
 #[test]
 fn a_split_whose_declared_leading_axis_disagrees_with_its_key_traps() {
     let mut dag = Dag::new();
@@ -736,7 +739,7 @@ fn a_split_whose_declared_leading_axis_disagrees_with_its_key_traps() {
     );
     dag.add_root(rows);
     dag.add_root(e);
-    assert_eq!(verify(&dag), Vec::<String>::new());
+    assert_rejected(&dag, "with a split's count axis appended last");
     let one = RandomKey::from_seed(scalar_from_i64("test", Prim::Int64, 1).unwrap()).unwrap();
     let run = |b: usize| {
         let inputs = UnordMap::from_iter([
@@ -1470,14 +1473,14 @@ fn key_operation_operands_and_batched_shapes_are_checked() {
     );
     let key = node(&mut dag, RiscOp::KeyFromSeed, vec![seed], &[], Prim::Key);
     dag.add_root(key);
-    assert_rejected(&dag, "takes a i64 operand");
+    assert_rejected(&dag, "reads the wrong operand dtype");
     // fold_in with unequal shapes: no broadcasting.
     let mut dag = Dag::new();
     let keys = load(&mut dag, "k", &[3], Prim::Key);
     let n = i64_const(&mut dag, 1);
     let folded = node(&mut dag, RiscOp::FoldIn, vec![keys, n], &[3], Prim::Key);
     dag.add_root(folded);
-    assert_rejected(&dag, "there is no broadcasting");
+    assert_rejected(&dag, "element-wise over one exact shape");
     // split_keys whose declared count disagrees with its literal.
     let mut dag = Dag::new();
     let key = root_key(&mut dag);
@@ -1491,7 +1494,7 @@ fn key_operation_operands_and_batched_shapes_are_checked() {
         Prim::Key,
     );
     dag.add_root(rows);
-    assert_rejected(&dag, "must append its");
+    assert_rejected(&dag, "with a split's count axis appended last");
     // V5: a key batch whose shape is not the data's leading shape, and a
     // control whose shape is no leading part of the key's.
     let mut dag = Dag::new();
@@ -1506,7 +1509,10 @@ fn key_operation_operands_and_batched_shapes_are_checked() {
         Prim::F32,
     );
     dag.add_root(drawn);
-    assert_rejected(&dag, "must match its data's leading axes");
+    assert_rejected(
+        &dag,
+        "requires a key batch matching its data's leading axes",
+    );
     let mut dag = Dag::new();
     let keys = load(&mut dag, "k", &[3], Prim::Key);
     let x = load(&mut dag, "x", &[3, 4], Prim::F32);
@@ -1519,7 +1525,7 @@ fn key_operation_operands_and_batched_shapes_are_checked() {
         Prim::F32,
     );
     dag.add_root(drawn);
-    assert_rejected(&dag, "requires a rate of its data dtype");
+    assert_rejected(&dag, "random control must be a value of the draw's dtype");
     // A rank-2 key batch is its data's leading two axes, in order.
     let mut dag = Dag::new();
     let keys = load(&mut dag, "k", &[3, 2], Prim::Key);
@@ -1533,7 +1539,10 @@ fn key_operation_operands_and_batched_shapes_are_checked() {
         Prim::F32,
     );
     dag.add_root(drawn);
-    assert_rejected(&dag, "must match its data's leading axes");
+    assert_rejected(
+        &dag,
+        "requires a key batch matching its data's leading axes",
+    );
     // A control shaped like the key's trailing axis, not a leading part.
     let mut dag = Dag::new();
     let keys = load(&mut dag, "k", &[3, 2], Prim::Key);
@@ -1547,7 +1556,7 @@ fn key_operation_operands_and_batched_shapes_are_checked() {
         Prim::F32,
     );
     dag.add_root(drawn);
-    assert_rejected(&dag, "requires a rate of its data dtype");
+    assert_rejected(&dag, "random control must be a value of the draw's dtype");
     // A bound adjoint's result shaped like no leading part of its key.
     let mut dag = Dag::new();
     let keys = load(&mut dag, "k", &[3, 2], Prim::Key);
@@ -1574,6 +1583,206 @@ fn key_operation_operands_and_batched_shapes_are_checked() {
     dag.add_root(forward);
     dag.add_root(adjoint);
     assert_rejected(&dag, "a leading part of its key's shape");
+}
+
+/// Dims of named axes followed by literal ones.
+fn named_ty(names: &[&str], trailing: &[usize], prim: Prim) -> TensorType {
+    TensorType {
+        dims: names
+            .iter()
+            .map(|name| DimInfo::Named((*name).into(), None))
+            .chain(trailing.iter().map(|extent| DimInfo::Lit(*extent)))
+            .collect(),
+        precision: prim,
+    }
+}
+
+/// Round 3's witness: keys `split_n(key(7), 3)`, a template `t: [3, 4]`, and
+/// a `UniformLike` of them declared `[rows, 4]`.
+fn uniform_declaring_rows(rows: usize) -> Dag {
+    let mut dag = Dag::new();
+    let key = root_key(&mut dag);
+    let keys = node(
+        &mut dag,
+        RiscOp::SplitN {
+            count: RtDim::Lit(3),
+        },
+        vec![key],
+        &[3],
+        Prim::Key,
+    );
+    let t = load(&mut dag, "t", &[3, 4], Prim::F32);
+    let low = float_const(&mut dag, Prim::F32, 0.0);
+    let high = float_const(&mut dag, Prim::F32, 1.0);
+    let drawn = node(
+        &mut dag,
+        RiscOp::UniformLike,
+        vec![t, low, high, keys],
+        &[rows, 4],
+        Prim::F32,
+    );
+    dag.add_root(drawn);
+    dag
+}
+
+/// A forward `UniformLike` over `t: [3, 5]` keyed by `split_n(key(7), 3)`,
+/// and its high-bound adjoint over the cotangent `g` of type `cotangent`.
+fn bound_adjoint_over(cotangent: TensorType) -> Dag {
+    let mut dag = Dag::new();
+    let key = root_key(&mut dag);
+    let keys = node(
+        &mut dag,
+        RiscOp::SplitN {
+            count: RtDim::Lit(3),
+        },
+        vec![key],
+        &[3],
+        Prim::Key,
+    );
+    let t = load(&mut dag, "t", &[3, 5], Prim::F32);
+    let low = float_const(&mut dag, Prim::F32, 0.0);
+    let high = float_const(&mut dag, Prim::F32, 1.0);
+    let forward = node(
+        &mut dag,
+        RiscOp::UniformLike,
+        vec![t, low, high, keys],
+        &[3, 5],
+        Prim::F32,
+    );
+    let g = dag.add_node(RiscOp::Load { name: "g".into() }, vec![], cotangent, None);
+    let adjoint = node(
+        &mut dag,
+        RiscOp::UniformBoundAdjoint {
+            bound: UniformBound::High,
+        },
+        vec![t, g, keys],
+        &[],
+        Prim::F32,
+    );
+    dag.add_root(forward);
+    dag.add_root(adjoint);
+    dag
+}
+
+/// spec/10 §3.2: a draw preserves its first input's exact shape, a bound
+/// adjoint's cotangent has its template's exact type, and each key operation
+/// preserves its operands' exact dims (a split appending its count). The
+/// verifier checks them through `verify_random_operands`, which the wire
+/// decoder shares, so a declared result or cotangent whose rank agrees but
+/// whose dims differ is rejected, and the agreeing graphs verify and run.
+///
+/// Evidentiary status: REGRESSION TEST. At c23ec448a `verify` accepted every
+/// rejected graph here: it compared ranks for the draw and the cotangent,
+/// and, for the key operations, extents that might agree.
+#[test]
+fn a_declared_result_or_cotangent_unlike_its_operand_is_rejected() {
+    let uniform = "uniform_like must preserve its float template's exact shape and dtype";
+    for rows in [2, 5] {
+        assert_rejected(&uniform_declaring_rows(rows), uniform);
+    }
+    let dag = uniform_declaring_rows(3);
+    let t = floats(Prim::F32, vec![3, 4], vec![0.0; 12]);
+    let out = run(&dag, &UnordMap::from_iter([("t", t)]));
+    assert_eq!(out[&dag.roots()[0]].shape, vec![3, 4]);
+
+    // The same disagreement between named axes: keys and template `[n]`,
+    // result `[m]`.
+    let named = |out: &str| {
+        let mut dag = Dag::new();
+        let keys = dag.add_node(
+            RiscOp::Load { name: "k".into() },
+            vec![],
+            named_ty(&["n"], &[], Prim::Key),
+            None,
+        );
+        let t = dag.add_node(
+            RiscOp::Load { name: "t".into() },
+            vec![],
+            named_ty(&["n"], &[4], Prim::F32),
+            None,
+        );
+        let low = float_const(&mut dag, Prim::F32, 0.0);
+        let high = float_const(&mut dag, Prim::F32, 1.0);
+        let drawn = dag.add_node(
+            RiscOp::UniformLike,
+            vec![t, low, high, keys],
+            named_ty(&[out], &[4], Prim::F32),
+            None,
+        );
+        dag.add_root(drawn);
+        dag
+    };
+    assert_rejected(&named("m"), uniform);
+    assert_eq!(verify(&named("n")), Vec::<String>::new());
+
+    // A key operation's declared result against its operands: `Split` and
+    // `KeyFromSeed` from `[n]` to `[m]`, and `FoldIn` of `[n]` keys by `[n]`
+    // indices to `[m]` or by `[m]` indices to `[n]`.
+    let key_op = "key operation must be element-wise over one exact shape";
+    let unary = |op: RiscOp, operand: Prim, out: &str| {
+        let mut dag = Dag::new();
+        let input = dag.add_node(
+            RiscOp::Load { name: "k".into() },
+            vec![],
+            named_ty(&["n"], &[], operand),
+            None,
+        );
+        let result = dag.add_node(op, vec![input], named_ty(&[out], &[], Prim::Key), None);
+        dag.add_root(result);
+        dag
+    };
+    let split = || RiscOp::Split {
+        branch: KeyBranch::Left,
+    };
+    assert_rejected(&unary(split(), Prim::Key, "m"), key_op);
+    assert_eq!(
+        verify(&unary(split(), Prim::Key, "n")),
+        Vec::<String>::new()
+    );
+    assert_rejected(&unary(RiscOp::KeyFromSeed, Prim::Int64, "m"), key_op);
+    assert_eq!(
+        verify(&unary(RiscOp::KeyFromSeed, Prim::Int64, "n")),
+        Vec::<String>::new()
+    );
+    let fold = |indices: &str, out: &str| {
+        let mut dag = Dag::new();
+        let keys = dag.add_node(
+            RiscOp::Load { name: "k".into() },
+            vec![],
+            named_ty(&["n"], &[], Prim::Key),
+            None,
+        );
+        let ns = dag.add_node(
+            RiscOp::Load { name: "i".into() },
+            vec![],
+            named_ty(&[indices], &[], Prim::Int64),
+            None,
+        );
+        let result = dag.add_node(
+            RiscOp::FoldIn,
+            vec![keys, ns],
+            named_ty(&[out], &[], Prim::Key),
+            None,
+        );
+        dag.add_root(result);
+        dag
+    };
+    assert_rejected(&fold("n", "m"), key_op);
+    assert_rejected(&fold("m", "n"), key_op);
+    assert_eq!(verify(&fold("n", "n")), Vec::<String>::new());
+
+    // A bound adjoint's cotangent against its template `[3, 5]`: another
+    // extent, or another dtype.
+    let adjoint = "over a cotangent of its template's exact type";
+    assert_rejected(&bound_adjoint_over(ty(&[3, 7], Prim::F32)), adjoint);
+    assert_rejected(&bound_adjoint_over(ty(&[3, 5], Prim::F64)), adjoint);
+    let dag = bound_adjoint_over(ty(&[3, 5], Prim::F32));
+    let inputs = UnordMap::from_iter([
+        ("t", floats(Prim::F32, vec![3, 5], vec![0.0; 15])),
+        ("g", floats(Prim::F32, vec![3, 5], vec![1.0; 15])),
+    ]);
+    let out = run(&dag, &inputs);
+    assert_eq!(out[&dag.roots()[1]].shape, Vec::<usize>::new());
 }
 
 // ---- V5 at every key rank: `vmap` composes over draws ----

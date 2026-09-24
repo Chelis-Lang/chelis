@@ -795,7 +795,7 @@ fn the_verifier_rejects_a_constant_key_and_mismatched_controls() {
         None,
     );
     dag.add_root(out);
-    assert_rejected(&dag, "literal i64 seed");
+    assert_rejected(&dag, "literal seed");
 }
 
 #[test]

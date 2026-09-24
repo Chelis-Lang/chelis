@@ -653,273 +653,254 @@ pub(crate) fn verify_mapped_gradient_closure(
     Ok(())
 }
 
-fn is_rank0(ty: &crate::dag::TensorType, prim: Prim) -> bool {
-    ty.dims.is_empty() && ty.precision == prim
-}
-
-/// Operand shape of one [05-OP-69..72] key operation. Every form is
-/// element-wise over its key operand's shape, except that `SplitN` appends
-/// its count axis last.
-fn verify_key_operands(dag: &Dag, node: &crate::dag::DagNode, errors: &mut Vec<String>) {
-    let id = node.id.0;
-    let input = |slot: usize| node.inputs.get(slot).and_then(|input| dag.get(*input));
-    let (name, operand, arity) = match &node.op {
-        RiscOp::KeyFromSeed => ("key_from_seed", Prim::Int64, 1),
-        RiscOp::Split { .. } => ("split_key", Prim::Key, 1),
-        RiscOp::FoldIn => ("fold_in", Prim::Key, 2),
-        RiscOp::SplitN { count } => (
-            "split_keys",
-            Prim::Key,
-            if matches!(count, RtDim::Node(_)) {
-                2
-            } else {
-                1
-            },
-        ),
-        _ => unreachable!("verify_key_operands is called only for key operations"),
-    };
-    if node.inputs.len() != arity {
-        errors.push(format!(
-            "{name} at node {id} expects {arity} inputs, got {}",
-            node.inputs.len()
-        ));
-        return;
-    }
-    let Some(first) = input(0) else {
-        return;
-    };
-    if first.output_type.precision != operand || node.output_type.precision != Prim::Key {
-        errors.push(format!(
-            "{name} at node {id} takes a {} operand and produces keys",
-            operand.name()
-        ));
-    }
-    match &node.op {
-        RiscOp::SplitN { count } => {
-            let key_rank = first.output_type.dims.len();
-            let dims = &node.output_type.dims;
-            let leading_ok = dims.len() == key_rank + 1
-                && dims[..key_rank]
-                    .iter()
-                    .zip(&first.output_type.dims)
-                    .all(|(out, key)| dims_compatible(out, key));
-            let count_ok = match count {
-                RtDim::Lit(value) => dims
-                    .last()
-                    .and_then(dim_known_size)
-                    .is_none_or(|extent| extent == *value),
-                RtDim::Node(1) => true,
-                _ => false,
-            };
-            if !leading_ok || !count_ok {
-                errors.push(format!(
-                    "split_keys at node {id} must append its {count:?} count axis to its key's shape, from a literal or input slot 1"
-                ));
-            }
-            check_bound_source(
-                dag,
-                node,
-                count,
-                &format!("split_keys at node {id}"),
-                errors,
-            );
-        }
-        _ => {
-            let mut participants = node.inputs.clone();
-            participants.push(node.id);
-            let shapes_ok = node.inputs.iter().all(|input| {
-                node_shapes_semantically_equivalent(dag, *input, node.id, &participants)
-            });
-            if !shapes_ok {
-                errors.push(format!(
-                    "{name} at node {id} requires every operand and its result to have exactly one shape; there is no broadcasting"
-                ));
-            }
-            if let (RiscOp::FoldIn, Some(ns)) = (&node.op, input(1))
-                && ns.output_type.precision != Prim::Int64
-            {
-                errors.push(format!("fold_in at node {id} takes i64 indices"));
-            }
+/// The operand and result rules of the key operations ([05-OP-69..72]) and
+/// the key-operand random nodes (spec/10 §3.2), rule V5 among them. The IR
+/// verifier and the wire decoder both call this one implementation, as they
+/// call [`verify_key_rules`], so the two sides of the codec cannot differ on
+/// a shape.
+///
+/// - A key operation is element-wise over one exact shape: `KeyFromSeed`,
+///   `Split` and `FoldIn` produce their operands' dims, and `SplitN` appends
+///   its count axis, from a literal or input slot 1, to its key's dims.
+/// - `Dropout` and `DropoutReplay` produce their data input's exact type, and
+///   `UniformLike` its template's. `UniformBoundAdjoint`'s cotangent has its
+///   template's exact type, and its result has that dtype.
+/// - V5: a random primitive's key has any rank `r`, and its dims are its
+///   data's leading `r` dims (a bound adjoint's data is its cotangent). Each
+///   control, the activation and a bound adjoint's result has the dims of
+///   the key's leading `c` axes for some `c <= r`. Row `b` of the data, the
+///   elements whose leading `r` indices are key index `b` in row-major
+///   order, draws with `key[b]` and reads the element of each such operand
+///   that its leading `c` indices name.
+/// - A draw key produces one rank-0 key for an active float draw from rank-0
+///   controls of that dtype (f32 bounds admitted), after a scoped handler's
+///   rank-0 i64 literal seed.
+///
+/// Dims compare exactly, name and extent alike. The messages are the wire
+/// decoder's, each naming its node.
+pub fn verify_random_operands(graph: &impl KeyGraph, errors: &mut Vec<String>) {
+    for node in 0..graph.node_count() {
+        match graph.role(node) {
+            role @ (KeyRole::KeyFromSeed
+            | KeyRole::Split { .. }
+            | KeyRole::FoldIn
+            | KeyRole::SplitN { .. }) => key_operation_operands(graph, node, role, errors),
+            role @ (KeyRole::Dropout
+            | KeyRole::DropoutReplay
+            | KeyRole::UniformLike
+            | KeyRole::UniformBoundAdjoint
+            | KeyRole::DrawKey { .. }) => random_node_operands(graph, node, role, errors),
+            _ => {}
         }
     }
 }
 
-/// Operand shape of one key-operand random node: arity, the data and control
-/// dtypes, the key slot, and the optional activation.
-fn verify_random_operands(dag: &Dag, node: &crate::dag::DagNode, errors: &mut Vec<String>) {
-    let id = node.id.0;
-    let input = |slot: usize| node.inputs.get(slot).and_then(|input| dag.get(*input));
-    let (fixed, key_slot) = match &node.op {
-        RiscOp::Dropout | RiscOp::DropoutReplay => (3, Some(2)),
-        RiscOp::UniformLike => (4, Some(3)),
-        RiscOp::UniformBoundAdjoint { .. } => (3, Some(2)),
-        RiscOp::DrawKey { handler, draw, .. } => {
-            let seed = usize::from(matches!(handler, crate::dag::RandomHandler::Scoped { .. }));
-            (seed + draw.control_count(), None)
-        }
-        _ => unreachable!("verify_random_operands is called only for key-operand random ops"),
+fn key_operation_operands(
+    graph: &impl KeyGraph,
+    node: usize,
+    role: KeyRole,
+    errors: &mut Vec<String>,
+) {
+    let (operand, arity) = match role {
+        KeyRole::KeyFromSeed => (Prim::Int64, 1),
+        KeyRole::FoldIn => (Prim::Key, 2),
+        KeyRole::SplitN {
+            count: SplitCount::Input(_),
+        } => (Prim::Key, 2),
+        _ => (Prim::Key, 1),
     };
-    let arity = node.inputs.len();
-    if arity != fixed && arity != fixed + 1 {
+    let inputs = (0..)
+        .map_while(|slot| graph.input(node, slot))
+        .collect::<Vec<_>>();
+    if inputs.len() != arity {
         errors.push(format!(
-            "{:?} at node {id} expects {fixed} inputs and an optional activation, got {arity}",
-            node.op
+            "node {node}: key operation has the wrong number of inputs"
         ));
         return;
     }
-    // Rule V5: a draw's key has any rank `r`, and its shape is its data's
-    // leading `r` axes (a bound adjoint's data is its cotangent). Row `b` of
-    // the data, the elements whose leading `r` indices are key index `b` in
-    // row-major order, draws with `key[b]`. Each control, the activation and
-    // a bound adjoint's result has the shape of the key's leading `c` axes
-    // for some `c <= r`, and row `b` reads the element those `c` indices
-    // name: rank 0 serves every row and the key's own shape serves one each.
-    let batch: &[crate::dag::DimInfo] = match key_slot.and_then(input) {
-        Some(key) if key.output_type.precision == Prim::Key => &key.output_type.dims,
-        // Without a key batch every operand is rank 0; a missing or
-        // non-key key is its own error below.
-        _ => &[],
+    if graph.dtype(inputs[0]) != Some(operand) || graph.dtype(node) != Some(Prim::Key) {
+        errors.push(format!(
+            "node {node}: key operation reads the wrong operand dtype or does not produce keys"
+        ));
+    }
+    let (Some(key), Some(dims)) = (graph.dims(inputs[0]), graph.dims(node)) else {
+        errors.push(format!(
+            "node {node}: key operation has an operand without dims"
+        ));
+        return;
     };
-    let per_row = |ty: &crate::dag::TensorType| batch.starts_with(&ty.dims);
-    if arity == fixed + 1
-        && !input(fixed).is_some_and(|active| {
-            active.output_type.precision == Prim::Bool && per_row(&active.output_type)
-        })
+    let valid = match role {
+        KeyRole::SplitN { count } => {
+            dims.len() == key.len() + 1
+                && dims.starts_with(&key)
+                && match count {
+                    // A named axis with a known extent claims that extent;
+                    // an unresolved one is checked when the split runs.
+                    SplitCount::Lit(value) => dims.last().is_some_and(|axis| match axis {
+                        DimInfo::Lit(size) | DimInfo::Named(_, Some(size)) => *size == value,
+                        DimInfo::Named(_, None) => true,
+                    }),
+                    SplitCount::Input(slot) => slot == 1,
+                    SplitCount::Other => false,
+                }
+        }
+        KeyRole::FoldIn => {
+            graph.dtype(inputs[1]) == Some(Prim::Int64)
+                && key == dims
+                && graph.dims(inputs[1]).is_some_and(|indices| indices == dims)
+        }
+        _ => key == dims,
+    };
+    if !valid {
+        errors.push(format!(
+            "node {node}: key operation must be element-wise over one exact shape, with a split's count axis appended last"
+        ));
+    }
+}
+
+fn random_node_operands(
+    graph: &impl KeyGraph,
+    node: usize,
+    role: KeyRole,
+    errors: &mut Vec<String>,
+) {
+    let fixed = match role {
+        KeyRole::UniformLike => 4,
+        KeyRole::DrawKey { scoped, draw, .. } => usize::from(scoped) + draw.control_count(),
+        _ => 3,
+    };
+    let arity = (0..)
+        .take_while(|slot| graph.input(node, *slot).is_some())
+        .count();
+    if arity < fixed {
+        errors.push(format!("node {node}: random operation is missing an input"));
+        return;
+    }
+    let input = |slot: usize| graph.input(node, slot);
+    let dtype = |slot: usize| input(slot).and_then(|input| graph.dtype(input));
+    let dims = |slot: usize| input(slot).and_then(|input| graph.dims(input));
+    let key_slot = role.key_slot();
+    // The key batch's dims, when the primitive draws a key batch. A draw
+    // key's operands are rank 0, and so is every operand of a primitive
+    // whose key is missing or no key, which is its own error below.
+    let batch = match key_slot
+        .filter(|slot| dtype(*slot) == Some(Prim::Key))
+        .and_then(dims)
     {
+        Some(batch) => batch,
+        None => std::borrow::Cow::Borrowed(&[][..]),
+    };
+    let per_row = |value: Option<std::borrow::Cow<'_, [DimInfo]>>| {
+        value.is_some_and(|value| batch.starts_with(&value))
+    };
+    let active_ok = match arity - fixed {
+        0 => true,
+        1 => dtype(fixed) == Some(Prim::Bool) && per_row(dims(fixed)),
+        _ => false,
+    };
+    if !active_ok {
         errors.push(format!(
-            "{:?} at node {id} requires a Bool activation shaped like a leading part of its key's shape",
-            node.op
+            "node {node}: random operation may end with exactly one Bool activation, shaped like a leading part of its key's shape"
         ));
     }
     if let Some(slot) = key_slot {
-        if !input(slot).is_some_and(|key| key.output_type.precision == Prim::Key) {
+        let data = usize::from(role == KeyRole::UniformBoundAdjoint);
+        if dtype(slot) != Some(Prim::Key)
+            || !dims(data).is_some_and(|data| data.starts_with(&batch))
+        {
             errors.push(format!(
-                "{:?} at node {id} requires a key at input {slot}",
-                node.op
-            ));
-        }
-        let data_slot = match &node.op {
-            RiscOp::UniformBoundAdjoint { .. } => 1,
-            _ => 0,
-        };
-        if !input(data_slot).is_some_and(|data| data.output_type.dims.starts_with(batch)) {
-            errors.push(format!(
-                "{:?} at node {id}: its key batch must match its data's leading axes",
-                node.op
+                "node {node}: random operation requires a key batch matching its data's leading axes"
             ));
         }
     }
-    let float_control = |slot: usize, expected: &[Prim]| {
-        input(slot).is_some_and(|control| {
-            per_row(&control.output_type) && expected.contains(&control.output_type.precision)
-        })
+    let output = graph.dtype(node);
+    let float = |prim: Option<Prim>| prim.is_some_and(|prim| prim.is_float());
+    // Whether input `slot` is a control of dtype `draw` (or f32, for a
+    // uniform draw's bound), shaped like a leading part of the key.
+    let control = |slot: usize, draw: Option<Prim>, uniform: bool| {
+        per_row(dims(slot))
+            && dtype(slot).is_some_and(|prim| Some(prim) == draw || (uniform && prim == Prim::F32))
     };
-    match &node.op {
-        RiscOp::Dropout | RiscOp::DropoutReplay => {
-            let Some(data) = input(0) else {
-                return;
-            };
-            let prim = data.output_type.precision;
-            if !prim.is_float() || node.output_type != data.output_type {
+    let control_error = || {
+        format!(
+            "node {node}: random control must be a value of the draw's dtype (f32 bounds admitted), shaped like a leading part of its key's shape"
+        )
+    };
+    let bounds_error = || format!("node {node}: uniform_like bounds must share one dtype");
+    let same_as = |slot: usize| {
+        dtype(slot) == output && dims(slot).is_some_and(|dims| graph.dims(node) == Some(dims))
+    };
+    match role {
+        KeyRole::UniformLike => {
+            if !float(output) || !same_as(0) {
                 errors.push(format!(
-                    "{:?} at node {id} must preserve the exact float type of its data input",
-                    node.op
+                    "node {node}: uniform_like must preserve its float template's exact shape and dtype"
                 ));
             }
-            if !float_control(1, &[prim]) {
+            if !control(1, output, true) || !control(2, output, true) {
+                errors.push(control_error());
+            }
+            if dtype(1) != dtype(2) {
+                errors.push(bounds_error());
+            }
+        }
+        KeyRole::Dropout | KeyRole::DropoutReplay => {
+            if !float(output) || !same_as(0) {
                 errors.push(format!(
-                    "{:?} at node {id} requires a rate of its data dtype, shaped like a leading part of its key's shape",
-                    node.op
+                    "node {node}: dropout must preserve its float data input's exact shape and dtype"
+                ));
+            }
+            if !control(1, output, false) {
+                errors.push(control_error());
+            }
+        }
+        KeyRole::UniformBoundAdjoint => {
+            let cotangent_ok = dtype(1) == dtype(0) && dims(1).is_some_and(|g| dims(0) == Some(g));
+            if !float(output) || !per_row(graph.dims(node)) || dtype(0) != output || !cotangent_ok {
+                errors.push(format!(
+                    "node {node}: a uniform bound adjoint is a value of its template's dtype, shaped like a leading part of its key's shape, over a cotangent of its template's exact type"
                 ));
             }
         }
-        RiscOp::UniformLike => {
-            let Some(template) = input(0) else {
-                return;
-            };
-            let prim = template.output_type.precision;
-            if !prim.is_float()
-                || node.output_type.precision != prim
-                || node.output_type.dims.len() != template.output_type.dims.len()
-            {
-                errors.push(format!(
-                    "uniform_like at node {id} must preserve its template's float dtype and rank"
-                ));
-            }
-            let bounds = [prim, Prim::F32];
-            let low = input(1).map(|low| low.output_type.precision);
-            if !float_control(1, &bounds)
-                || !float_control(2, &bounds)
-                || low != input(2).map(|high| high.output_type.precision)
-            {
-                errors.push(format!(
-                    "uniform_like at node {id} requires bounds of one dtype, its template's or f32, shaped like a leading part of its key's shape"
-                ));
-            }
-        }
-        RiscOp::UniformBoundAdjoint { .. } => {
-            let (Some(template), Some(cotangent)) = (input(0), input(1)) else {
-                return;
-            };
-            let prim = template.output_type.precision;
-            if !prim.is_float()
-                || cotangent.output_type.precision != prim
-                || cotangent.output_type.dims.len() != template.output_type.dims.len()
-                || node.output_type.precision != prim
-                || !per_row(&node.output_type)
-            {
-                errors.push(format!(
-                    "uniform bound adjoint at node {id} requires a float template, a cotangent of its type, and a result of its dtype shaped like a leading part of its key's shape"
-                ));
-            }
-        }
-        RiscOp::DrawKey {
-            handler,
+        KeyRole::DrawKey {
+            scoped,
             draw,
-            dtype,
+            dtype: draw_dtype,
         } => {
-            // A draw key reads rank-0 controls only: batching is a key
-            // operation's result, never the counter bridge's.
-            let float_control = |slot: usize, expected: &[Prim]| {
-                input(slot).is_some_and(|control| {
-                    control.output_type.dims.is_empty()
-                        && expected.contains(&control.output_type.precision)
-                })
-            };
-            if !is_rank0(&node.output_type, Prim::Key) || !dtype.is_float() {
+            if !draw_dtype.is_float() {
                 errors.push(format!(
-                    "draw key at node {id} must produce a rank-0 key for an active float draw"
+                    "node {node}: draw key requires an active float draw dtype"
                 ));
             }
-            let seed = usize::from(matches!(handler, crate::dag::RandomHandler::Scoped { .. }));
-            if seed == 1
-                && !input(0).is_some_and(|seed| {
-                    matches!(seed.op, RiscOp::Const { .. })
-                        && is_rank0(&seed.output_type, Prim::Int64)
-                })
+            if output != Some(Prim::Key) || !graph.dims(node).is_some_and(|dims| dims.is_empty()) {
+                errors.push(format!("node {node}: draw key produces one rank-zero key"));
+            }
+            let seed = usize::from(scoped);
+            if scoped
+                && !(input(0).is_some_and(|seed| graph.is_const(seed))
+                    && dtype(0) == Some(Prim::Int64)
+                    && dims(0).is_some_and(|dims| dims.is_empty()))
             {
                 errors.push(format!(
-                    "draw key at node {id} requires its scoped handler's literal i64 seed"
+                    "node {node}: a scoped draw key's first input is its rank-zero int64 literal seed"
                 ));
             }
-            let controls_ok = match draw {
-                crate::dag::RandomDraw::Dropout => float_control(seed, &[*dtype]),
-                crate::dag::RandomDraw::UniformLike => {
-                    let bounds = [*dtype, Prim::F32];
-                    float_control(seed, &bounds)
-                        && float_control(seed + 1, &bounds)
-                        && input(seed).map(|low| low.output_type.precision)
-                            == input(seed + 1).map(|high| high.output_type.precision)
-                }
-            };
-            if !controls_ok {
+            let uniform = draw == crate::dag::RandomDraw::UniformLike;
+            let controls = || seed..seed + draw.control_count();
+            // Batching is a key operation's result, never the counter
+            // bridge's: a draw key's controls are rank 0.
+            if !controls().all(|slot| dims(slot).is_some_and(|dims| dims.is_empty())) {
                 errors.push(format!(
-                    "draw key at node {id} requires {draw:?} controls for a {} draw",
-                    dtype.name()
+                    "node {node}: a draw key's controls are rank-zero values"
                 ));
+            } else if !controls().all(|slot| control(slot, Some(draw_dtype), uniform)) {
+                errors.push(control_error());
+            }
+            if uniform && dtype(seed) != dtype(seed + 1) {
+                errors.push(bounds_error());
             }
         }
-        _ => {}
+        _ => unreachable!("random_node_operands reads only random operations"),
     }
 }
 
@@ -939,8 +920,8 @@ pub enum KeyRole {
     Split { branch: crate::dag::KeyBranch },
     /// `FoldIn`, which consumes the key at input 0.
     FoldIn,
-    /// `SplitN`, which consumes the key at input 0.
-    SplitN,
+    /// `SplitN`, which consumes the key at input 0 and appends `count`.
+    SplitN { count: SplitCount },
     /// A `Load`, which may enter a key into the graph.
     Load,
     /// `Dropout`, which consumes the key at input 2.
@@ -966,7 +947,7 @@ pub enum KeyRole {
 impl KeyRole {
     fn key_slot(self) -> Option<usize> {
         match self {
-            Self::Split { .. } | Self::FoldIn | Self::SplitN => Some(0),
+            Self::Split { .. } | Self::FoldIn | Self::SplitN { .. } => Some(0),
             Self::Dropout | Self::DropoutReplay | Self::UniformBoundAdjoint => Some(2),
             Self::UniformLike => Some(3),
             Self::DrawKey { .. }
@@ -987,7 +968,7 @@ impl KeyRole {
                 | Self::KeyFromSeed
                 | Self::Split { .. }
                 | Self::FoldIn
-                | Self::SplitN
+                | Self::SplitN { .. }
         )
     }
 
@@ -998,14 +979,32 @@ impl KeyRole {
     /// Whether reading the key at [`Self::key_slot`] consumes it. A replay
     /// reads its forward draw's key without consuming it.
     fn consumes(self) -> bool {
-        self.is_draw() || matches!(self, Self::Split { .. } | Self::FoldIn | Self::SplitN)
+        self.is_draw()
+            || matches!(
+                self,
+                Self::Split { .. } | Self::FoldIn | Self::SplitN { .. }
+            )
     }
 }
 
-/// The view of a graph that [`verify_key_rules`] reads. The IR [`Dag`]
-/// implements it, and so does the compiler API's decoded wire graph, so the
-/// key rules have one implementation on both sides of the codec. A node is
-/// named by its position; a position that names no node has no dtype.
+/// A `SplitN` count as the operand rules of [`verify_random_operands`] read
+/// it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SplitCount {
+    /// A literal count.
+    Lit(usize),
+    /// A runtime count read from the given input slot.
+    Input(usize),
+    /// A bound no split takes.
+    Other,
+}
+
+/// The view of a graph that [`verify_key_rules`] and
+/// [`verify_random_operands`] read. The IR [`Dag`] implements it, and so
+/// does the compiler API's decoded wire graph, so the key rules and the
+/// random operand rules each have one implementation on both sides of the
+/// codec. A node is named by its position; a position that names no node
+/// has no dtype and no dims.
 pub trait KeyGraph {
     fn node_count(&self) -> usize;
     fn role(&self, node: usize) -> KeyRole;
@@ -1021,6 +1020,11 @@ pub trait KeyGraph {
     fn roots(&self) -> impl Iterator<Item = usize> + '_;
     /// The parameter a `Load` at `node` reads, or `None` for any other node.
     fn load_name(&self, node: usize) -> Option<&str>;
+    /// The dims `node` produces, or `None` when no node or when its dims
+    /// have no IR reading.
+    fn dims(&self, node: usize) -> Option<std::borrow::Cow<'_, [DimInfo]>>;
+    /// Whether `node` is a literal constant.
+    fn is_const(&self, node: usize) -> bool;
 }
 
 impl KeyGraph for Dag {
@@ -1042,7 +1046,13 @@ impl KeyGraph for Dag {
             Some(RiscOp::KeyFromSeed) => KeyRole::KeyFromSeed,
             Some(RiscOp::Split { branch }) => KeyRole::Split { branch: *branch },
             Some(RiscOp::FoldIn) => KeyRole::FoldIn,
-            Some(RiscOp::SplitN { .. }) => KeyRole::SplitN,
+            Some(RiscOp::SplitN { count }) => KeyRole::SplitN {
+                count: match count {
+                    RtDim::Lit(value) => SplitCount::Lit(*value),
+                    RtDim::Node(slot) => SplitCount::Input(*slot),
+                    _ => SplitCount::Other,
+                },
+            },
             Some(RiscOp::Load { .. }) => KeyRole::Load,
             Some(RiscOp::Dropout) => KeyRole::Dropout,
             Some(RiscOp::UniformLike) => KeyRole::UniformLike,
@@ -1087,6 +1097,18 @@ impl KeyGraph for Dag {
             RiscOp::Load { name } => Some(name.as_ref()),
             _ => None,
         }
+    }
+
+    fn dims(&self, node: usize) -> Option<std::borrow::Cow<'_, [DimInfo]>> {
+        self.get(NodeId(node))
+            .map(|node| std::borrow::Cow::Borrowed(node.output_type.dims.as_slice()))
+    }
+
+    fn is_const(&self, node: usize) -> bool {
+        matches!(
+            self.get(NodeId(node)).map(|node| &node.op),
+            Some(RiscOp::Const { .. })
+        )
     }
 }
 
@@ -2121,14 +2143,24 @@ fn verify_with_dangling_policy(dag: &Dag, reject_dangling: bool) -> Vec<String> 
                     ));
                 }
             }
+            // The random and key operations' operand rules are
+            // `verify_random_operands`, which the wire decoder shares; only
+            // the IR's own bound carrier is checked here.
+            RiscOp::SplitN { count } => check_bound_source(
+                dag,
+                node,
+                count,
+                &format!("split_keys at node {}", node.id.0),
+                &mut errors,
+            ),
             RiscOp::UniformLike
             | RiscOp::Dropout
             | RiscOp::DropoutReplay
             | RiscOp::UniformBoundAdjoint { .. }
-            | RiscOp::DrawKey { .. } => verify_random_operands(dag, node, &mut errors),
-            RiscOp::KeyFromSeed | RiscOp::Split { .. } | RiscOp::FoldIn | RiscOp::SplitN { .. } => {
-                verify_key_operands(dag, node, &mut errors)
-            }
+            | RiscOp::DrawKey { .. }
+            | RiscOp::KeyFromSeed
+            | RiscOp::Split { .. }
+            | RiscOp::FoldIn => {}
             // chelis#616: movement ops (and `Reshape`, whose runtime target
             // extents work the same way) carry a tensor at `inputs[0]` plus zero
             // or more rank-0 integer bound scalars at `inputs[1..]` (node-valued
@@ -3452,6 +3484,7 @@ fn verify_with_dangling_policy(dag: &Dag, reject_dangling: bool) -> Vec<String> 
         }
     }
 
+    verify_random_operands(dag, &mut errors);
     verify_key_rules(dag, &mut errors);
 
     // chelis#1277 C4.1: every realized output axis has one checked extent
@@ -5179,11 +5212,9 @@ mod tests {
             None,
         );
         keyed_uniform(&mut dag, template, None);
-        assert!(
-            verify(&dag)
-                .iter()
-                .any(|error| error.contains("must preserve its template's float dtype and rank"))
-        );
+        assert!(verify(&dag).iter().any(|error| {
+            error.contains("must preserve its float template's exact shape and dtype")
+        }));
     }
 
     #[test]
@@ -5213,7 +5244,7 @@ mod tests {
         assert!(
             verify(&dag)
                 .iter()
-                .any(|error| error.contains("requires a Bool activation"))
+                .any(|error| error.contains("exactly one Bool activation"))
         );
     }
 
