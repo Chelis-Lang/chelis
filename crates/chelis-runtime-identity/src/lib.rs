@@ -10,8 +10,8 @@ pub use derive::{compare, derive_descriptor};
 pub use input::{decode_provenance, encode_provenance, normalize_paths, plan_inputs};
 pub use model::*;
 pub use record::{
-    RECORD_LENGTH, decode_archive, decode_archive_provenance, decode_image,
-    decode_image_provenance, decode_record, encode_record,
+    MACHO_RECORD_SEGMENT, RECORD_LENGTH, decode_archive, decode_archive_provenance, decode_image,
+    decode_image_provenance, decode_record, encode_record, provenance_names, section_names,
 };
 
 #[cfg(test)]

@@ -2,6 +2,7 @@ use crate::*;
 use object::{Object, ObjectSection};
 
 pub const RECORD_LENGTH: usize = 248;
+pub const MACHO_RECORD_SEGMENT: &str = "__DATA";
 const MAGIC: &[u8; 16] = b"CHELIS-RT-ID\0\0\0\0";
 
 fn kind_byte(kind: RecordKind) -> u8 {
@@ -99,7 +100,7 @@ pub fn decode_record(bytes: &[u8], kind: RecordKind) -> Result<Descriptor, Recor
     })
 }
 
-fn section_names(kind: RecordKind) -> (&'static str, &'static str) {
+pub fn section_names(kind: RecordKind) -> (&'static str, &'static str) {
     match kind {
         RecordKind::Runtime => (".chelis.runtime.id", "__ch_rt_id"),
         RecordKind::Cli => (".chelis.runtime.expect.cli", "__ch_rt_cli"),
@@ -107,7 +108,7 @@ fn section_names(kind: RecordKind) -> (&'static str, &'static str) {
     }
 }
 
-fn provenance_names(kind: RecordKind) -> (&'static str, &'static str) {
+pub fn provenance_names(kind: RecordKind) -> (&'static str, &'static str) {
     match kind {
         RecordKind::Runtime => (".chelis.runtime.provenance", "__ch_rt_prov"),
         RecordKind::Cli => (".chelis.runtime.provenance.cli", "__ch_prv_cli"),
@@ -255,6 +256,11 @@ fn native_bounds(bytes: &[u8], macho: bool, minimum: usize) -> Result<(), Record
 fn archive_bounds(bytes: &[u8]) -> Result<(), RecordError> {
     let mut offset = 8usize;
     while offset < bytes.len() {
+        if bytes.len() - offset < 60 && bytes[offset..].iter().all(u8::is_ascii_whitespace) {
+            return Err(RecordError::Malformed {
+                reason: "archive has trailing bytes".into(),
+            });
+        }
         bounded_range(bytes, offset as u64, 60, "archive member header")?;
         let header = &bytes[offset..offset + 60];
         if &header[58..] != b"`\n" {
@@ -283,9 +289,29 @@ fn native_record(
     kind: RecordKind,
     retained: &mut NativeRecords,
 ) -> Result<(), RecordError> {
+    if bytes.starts_with(b"BC\xc0\xde") || bytes.starts_with(b"\xde\xc0\x17\x0b") {
+        return Err(RecordError::Unsupported {
+            reason: "LLVM bitcode member".into(),
+        });
+    }
     if bytes.len() < 16 {
-        return Err(RecordError::Truncated {
-            reason: "native file header".into(),
+        let native_prefix = [
+            b"\x7fELF".as_slice(),
+            b"\xfe\xed\xfa\xce".as_slice(),
+            b"\xce\xfa\xed\xfe".as_slice(),
+            b"\xfe\xed\xfa\xcf".as_slice(),
+            b"\xcf\xfa\xed\xfe".as_slice(),
+        ]
+        .iter()
+        .any(|magic| !bytes.is_empty() && (magic.starts_with(bytes) || bytes.starts_with(magic)));
+        return Err(if native_prefix {
+            RecordError::Truncated {
+                reason: "native file header".into(),
+            }
+        } else {
+            RecordError::Unsupported {
+                reason: "non-native archive member".into(),
+            }
         });
     }
     let format = object::FileKind::parse(bytes).map_err(object_error)?;
@@ -329,7 +355,7 @@ fn native_record(
         {
             return Err(RecordError::Duplicate);
         }
-        if macho && section.segment_name().map_err(object_error)? != Some("__DATA") {
+        if macho && section.segment_name().map_err(object_error)? != Some(MACHO_RECORD_SEGMENT) {
             return Err(RecordError::Malformed {
                 reason: "identity section is outside __DATA".into(),
             });
