@@ -325,6 +325,44 @@ class ReceiptTests(unittest.TestCase):
                 ):
                     oracle.require_frozen_selection(selected, stale_required)
 
+    def test_runtime_manifest_rejects_stale_replaced_native_identities(self):
+        # The oracle's nextest listing proves the replacements are current;
+        # here the leg's reviewed floor stands in for that listing.
+        packet = oracle.frozen_manifest(
+            oracle.MANIFEST.read_bytes(),
+            oracle.MANIFEST_SHA256,
+        )
+        replacements = (
+            (
+                'chelis-backend-c::emit::tests::'
+                'path_sensitive_uniform_reads_uint8_bool_and_gates_counter',
+                'chelis-backend-c::emit::tests::'
+                'path_sensitive_uniform_reads_float_backed_bool_and_gates_counter',
+            ),
+            (
+                'chelis-cli::capacity_census_tripwire::'
+                'prepared_random_kernel_boundaries_have_exact_semantic_authority',
+                'chelis-cli::capacity_census_tripwire::'
+                'prepared_dropout_kernel_boundaries_have_exact_semantic_authority',
+            ),
+        )
+        for current, stale in replacements:
+            with self.subTest(stale=stale):
+                legs = [row['required'] for row in packet['legs']]
+                self.assertFalse(any(stale in required for required in legs))
+                owners = [required for required in legs if current in required]
+                self.assertTrue(owners)
+                for required in owners:
+                    stale_required = sorted(
+                        stale if identity == current else identity
+                        for identity in required
+                    )
+                    with self.assertRaisesRegex(
+                        oracle.OracleFailure,
+                        re.escape(stale),
+                    ):
+                        oracle.require_frozen_selection(required, stale_required)
+
     def test_native_and_mutation_selections_remain_exact(self):
         expected = ['p::contract::negative']
         oracle.require_exact_selection(expected, expected)

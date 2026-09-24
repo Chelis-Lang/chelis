@@ -9230,9 +9230,42 @@ mod tests {
             c.contains(&format!("int t{}_active = {gate};", key.0)),
             "{c}"
         );
-        assert!(c.contains("__chelis_scoped_counter_0++"), "{c}");
         assert!(!c.contains(&format!("((float*)t{}_data)[0] != 0.0f", activation.0)));
         assert!(!c.contains(&format!("((bool*)t{}_data)", activation.0)));
+        // An inactive draw neither takes the scoped counter's next ordinal
+        // nor reads its key (chelis#2410): both sit only inside their gates.
+        let counter = "__chelis_scoped_counter_0++";
+        assert_eq!(c.matches(counter).count(), 1, "{c}");
+        let key_gate = format!("if (t{}_active) {{", key.0);
+        assert!(guarded_block(&c, &key_gate).contains(counter), "{c}");
+        let sample = format!("chelis_uniform_sample_f32(t{}_key,", key.0);
+        assert_eq!(c.matches(&sample).count(), 1, "{c}");
+        let draw_gate = format!("if ({gate}) {{");
+        assert!(guarded_block(&c, &draw_gate).contains(&sample), "{c}");
+    }
+
+    /// The body of the one block `header` opens, up to its matching brace.
+    fn guarded_block<'a>(c: &'a str, header: &str) -> &'a str {
+        assert_eq!(
+            c.matches(header).count(),
+            1,
+            "{header} opens one block:\n{c}"
+        );
+        let start = c.find(header).unwrap() + header.len();
+        let mut depth = 1usize;
+        for (offset, byte) in c[start..].bytes().enumerate() {
+            match byte {
+                b'{' => depth += 1,
+                b'}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return &c[start..start + offset];
+                    }
+                }
+                _ => {}
+            }
+        }
+        panic!("{header} is never closed:\n{c}");
     }
 
     #[test]
