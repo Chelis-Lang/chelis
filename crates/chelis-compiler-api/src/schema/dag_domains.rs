@@ -76,9 +76,10 @@ fn is_rank_zero(node: &WireDagNode, precision: &str) -> bool {
 /// A random node's operand layout (spec/10 §3.2, v18): the data or template,
 /// the controls, the key and one optional Bool activation for the primitives
 /// and their adjoints; the optional literal seed, the controls and the
-/// optional activation for a draw key. A primitive's key is rank zero, or a
-/// rank-1 batch whose extent is its data's leading extent; its controls and
-/// activation are then rank zero or that same shape. Control values are
+/// optional activation for a draw key. A primitive's key has any rank, and
+/// its shape is its data's leading axes (a bound adjoint's data is its
+/// cotangent); its controls, its activation and a bound adjoint's result are
+/// each shaped like a leading part of the key's shape. Control values are
 /// checked at execution under [05-OP-8]/[05-OP-37], never here; the key rules
 /// check where each key comes from.
 fn random_node(dag: &WireDag, node: &WireDagNode, dtype: Prim) -> Result<()> {
@@ -90,24 +91,27 @@ fn random_node(dag: &WireDag, node: &WireDagNode, dtype: Prim) -> Result<()> {
         | WireRiscOp::UniformBoundAdjoint { .. } => Some(2),
         _ => None,
     };
-    // The key batch's one axis, when the primitive draws a rank-1 key batch.
+    // The key batch's axes, when the primitive draws a key batch.
     let batch = match key_slot {
         Some(slot) => {
             let key = input_at(dag, node, slot)?;
-            match key.output_type.dims.as_slice() {
-                [axis] if key.output_type.precision == "key" => Some(axis.clone()),
-                _ => None,
+            if key.output_type.precision == "key" {
+                key.output_type.dims.as_slice()
+            } else {
+                &[]
             }
         }
-        None => None,
+        None => &[],
     };
-    let per_row = |value: &WireDagNode| match value.output_type.dims.as_slice() {
-        [] => true,
-        [axis] => batch
-            .as_ref()
-            .is_some_and(|batch| wire_dim_info_equal(axis, batch)),
-        _ => false,
+    // Whether `dims` begins with `leading`, axis by axis.
+    let starts_with = |dims: &[WireDimInfo], leading: &[WireDimInfo]| {
+        dims.len() >= leading.len()
+            && dims
+                .iter()
+                .zip(leading)
+                .all(|(axis, leading)| wire_dim_info_equal(axis, leading))
     };
+    let per_row = |value: &WireDagNode| starts_with(batch, &value.output_type.dims);
     let control = |slot: usize, draw_dtype: Prim, uniform: bool| -> Result<()> {
         let value = input_at(dag, node, slot)?;
         let admitted = per_row(value)
@@ -117,7 +121,7 @@ fn random_node(dag: &WireDag, node: &WireDagNode, dtype: Prim) -> Result<()> {
             Ok(())
         } else {
             Err(reject(
-                "random control must be a rank-zero value of the draw's dtype (f32 bounds admitted), or one per key row",
+                "random control must be a value of the draw's dtype (f32 bounds admitted), shaped like a leading part of its key's shape",
             ))
         }
     };
@@ -133,25 +137,19 @@ fn random_node(dag: &WireDag, node: &WireDagNode, dtype: Prim) -> Result<()> {
                 Ok(())
             }
             _ => Err(reject(
-                "random operation may end with exactly one rank-zero Bool activation, or one per key row",
+                "random operation may end with exactly one Bool activation, shaped like a leading part of its key's shape",
             )),
         }
     };
     let key = |slot: usize| -> Result<()> {
         let key = input_at(dag, node, slot)?;
         let data_slot = usize::from(matches!(node.op, WireRiscOp::UniformBoundAdjoint { .. }));
-        let leading = input_at(dag, node, data_slot)?.output_type.dims.first();
-        let admitted = key.output_type.precision == "key"
-            && match key.output_type.dims.as_slice() {
-                [] => true,
-                [axis] => leading.is_some_and(|leading| wire_dim_info_equal(axis, leading)),
-                _ => false,
-            };
-        if admitted {
+        let data = &input_at(dag, node, data_slot)?.output_type.dims;
+        if key.output_type.precision == "key" && starts_with(data, &key.output_type.dims) {
             Ok(())
         } else {
             Err(reject(
-                "random operation requires a rank-zero key or a key batch matching its data's leading axis",
+                "random operation requires a key batch matching its data's leading axes",
             ))
         }
     };
@@ -200,7 +198,7 @@ fn random_node(dag: &WireDag, node: &WireDagNode, dtype: Prim) -> Result<()> {
                 || !same_as_data_shape(template, input_at(dag, node, 1)?)
             {
                 return Err(reject(
-                    "a uniform bound adjoint is a value of its template's dtype, rank zero or one per key row, over a same-shaped cotangent",
+                    "a uniform bound adjoint is a value of its template's dtype, shaped like a leading part of its key's shape, over a same-shaped cotangent",
                 ));
             }
             key(2)?;
@@ -512,7 +510,7 @@ fn same_shape_result_relation_is_supported(dag: &WireDag, node: &WireDagNode) ->
     }
     let mut members = std::collections::BTreeSet::new();
     // A draw's data operand is its only same-shape operand; its controls, key
-    // and activation are rank zero or one value per key row.
+    // and activation are shaped like leading parts of the data.
     let operands = match node.op {
         WireRiscOp::UniformLike {} | WireRiscOp::Dropout {} | WireRiscOp::DropoutReplay {} => {
             &node.inputs[..node.inputs.len().min(1)]

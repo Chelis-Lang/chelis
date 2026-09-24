@@ -767,33 +767,34 @@ fn verify_random_operands(dag: &Dag, node: &crate::dag::DagNode, errors: &mut Ve
         ));
         return;
     }
-    // Rule V5: a draw's key is rank 0, or a rank-1 batch whose extent is its
-    // data's leading extent. Its controls and activation are then each rank
-    // 0 or that same rank-1 shape, and row `b` draws with `key[b]`.
-    let batch = key_slot
-        .and_then(input)
-        .filter(|key| key.output_type.precision == Prim::Key && key.output_type.dims.len() == 1)
-        .map(|key| key.output_type.dims.clone());
-    let per_row = |ty: &crate::dag::TensorType| {
-        ty.dims.is_empty() || batch.as_ref().is_some_and(|batch| &ty.dims == batch)
+    // Rule V5: a draw's key has any rank `r`, and its shape is its data's
+    // leading `r` axes (a bound adjoint's data is its cotangent). Row `b` of
+    // the data, the elements whose leading `r` indices are key index `b` in
+    // row-major order, draws with `key[b]`. Each control, the activation and
+    // a bound adjoint's result has the shape of the key's leading `c` axes
+    // for some `c <= r`, and row `b` reads the element those `c` indices
+    // name: rank 0 serves every row and the key's own shape serves one each.
+    let batch: &[crate::dag::DimInfo] = match key_slot.and_then(input) {
+        Some(key) if key.output_type.precision == Prim::Key => &key.output_type.dims,
+        // Without a key batch every operand is rank 0; a missing or
+        // non-key key is its own error below.
+        _ => &[],
     };
+    let per_row = |ty: &crate::dag::TensorType| batch.starts_with(&ty.dims);
     if arity == fixed + 1
         && !input(fixed).is_some_and(|active| {
             active.output_type.precision == Prim::Bool && per_row(&active.output_type)
         })
     {
         errors.push(format!(
-            "{:?} at node {id} requires a rank-0 Bool activation, or one per key row",
+            "{:?} at node {id} requires a Bool activation shaped like a leading part of its key's shape",
             node.op
         ));
     }
     if let Some(slot) = key_slot {
-        let key_ok = input(slot).is_some_and(|key| {
-            key.output_type.precision == Prim::Key && key.output_type.dims.len() <= 1
-        });
-        if !key_ok {
+        if !input(slot).is_some_and(|key| key.output_type.precision == Prim::Key) {
             errors.push(format!(
-                "{:?} at node {id} requires a rank-0 key or a rank-1 key batch at input {slot}",
+                "{:?} at node {id} requires a key at input {slot}",
                 node.op
             ));
         }
@@ -801,11 +802,9 @@ fn verify_random_operands(dag: &Dag, node: &crate::dag::DagNode, errors: &mut Ve
             RiscOp::UniformBoundAdjoint { .. } => 1,
             _ => 0,
         };
-        if let Some(batch) = &batch
-            && !input(data_slot).is_some_and(|data| data.output_type.dims.first() == batch.first())
-        {
+        if !input(data_slot).is_some_and(|data| data.output_type.dims.starts_with(batch)) {
             errors.push(format!(
-                "{:?} at node {id}: its key batch must match its data's leading axis",
+                "{:?} at node {id}: its key batch must match its data's leading axes",
                 node.op
             ));
         }
@@ -829,7 +828,7 @@ fn verify_random_operands(dag: &Dag, node: &crate::dag::DagNode, errors: &mut Ve
             }
             if !float_control(1, &[prim]) {
                 errors.push(format!(
-                    "{:?} at node {id} requires a rank-0 rate of its data dtype",
+                    "{:?} at node {id} requires a rate of its data dtype, shaped like a leading part of its key's shape",
                     node.op
                 ));
             }
@@ -854,7 +853,7 @@ fn verify_random_operands(dag: &Dag, node: &crate::dag::DagNode, errors: &mut Ve
                 || low != input(2).map(|high| high.output_type.precision)
             {
                 errors.push(format!(
-                    "uniform_like at node {id} requires rank-0 bounds of one dtype, its template's or f32"
+                    "uniform_like at node {id} requires bounds of one dtype, its template's or f32, shaped like a leading part of its key's shape"
                 ));
             }
         }
@@ -870,7 +869,7 @@ fn verify_random_operands(dag: &Dag, node: &crate::dag::DagNode, errors: &mut Ve
                 || !per_row(&node.output_type)
             {
                 errors.push(format!(
-                    "uniform bound adjoint at node {id} requires a float template, a cotangent of its type, and a result of its dtype that is rank 0 or one per key row"
+                    "uniform bound adjoint at node {id} requires a float template, a cotangent of its type, and a result of its dtype shaped like a leading part of its key's shape"
                 ));
             }
         }
@@ -5196,7 +5195,7 @@ mod tests {
         assert!(
             verify(&dag)
                 .iter()
-                .any(|error| error.contains("requires a rank-0 Bool activation"))
+                .any(|error| error.contains("requires a Bool activation"))
         );
     }
 

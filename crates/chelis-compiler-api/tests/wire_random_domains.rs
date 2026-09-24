@@ -168,7 +168,10 @@ fn a_key_is_consumed_once_and_only_by_a_key_consumer() {
     let mut not_a_key = dag.clone();
     let rate = input(&dag, dropout, 1);
     not_a_key["nodes"][dropout]["inputs"][2] = json!(rate);
-    rejects_domain(&not_a_key, "requires a rank-zero key or a key batch");
+    rejects_domain(
+        &not_a_key,
+        "requires a key batch matching its data's leading axes",
+    );
 
     // A draw key's key derived from: only its draw consumes it.
     let mut derived = dag.clone();
@@ -353,7 +356,60 @@ fn the_codec_admits_the_key_chain_and_rejects_every_malformed_key_form() {
     let mut batch = key_chain();
     batch["nodes"][6]["op"]["count"] = json!({"bound":"lit","value":2});
     batch["nodes"][6]["output_type"]["dims"] = json!([{"kind":"lit","size":2}]);
-    rejects_domain(&batch, "key batch matching its data's leading axis");
+    rejects_domain(&batch, "key batch matching its data's leading axes");
+
+    // V5 at rank 2: G split into [3] and then [3, 2] keys batch a draw over
+    // [3, 2, 4] data, with a rate shaped like the key's leading axis.
+    let rank_two = |data: &[u64], rate: &[u64]| {
+        let mut graph = key_chain();
+        let rows = push(
+            &mut graph,
+            json!({"kind":"split_n","count":{"bound":"lit","value":3}}),
+            &[11],
+            &[3],
+            "key",
+        );
+        let keys = push(
+            &mut graph,
+            json!({"kind":"split_n","count":{"bound":"lit","value":2}}),
+            &[rows],
+            &[3, 2],
+            "key",
+        );
+        let x = push(
+            &mut graph,
+            json!({"kind":"load","name":"x2"}),
+            &[],
+            data,
+            "f32",
+        );
+        let rates = push(
+            &mut graph,
+            json!({"kind":"load","name":"r"}),
+            &[],
+            rate,
+            "f32",
+        );
+        let drawn = push(
+            &mut graph,
+            json!({"kind":"dropout"}),
+            &[x, rates, keys],
+            data,
+            "f32",
+        );
+        graph["roots"] = json!([9, drawn]);
+        graph
+    };
+    accepts(&rank_two(&[3, 2, 4], &[3]));
+    accepts(&rank_two(&[3, 2, 4], &[3, 2]));
+    rejects_domain(
+        &rank_two(&[3, 2, 4], &[2]),
+        "shaped like a leading part of its key's shape",
+    );
+    rejects_domain(
+        &rank_two(&[2, 3, 4], &[]),
+        "key batch matching its data's leading axes",
+    );
 
     // A declared count axis that disagrees with its literal count.
     let mut declared = key_chain();
@@ -382,7 +438,13 @@ fn the_codec_admits_the_key_chain_and_rejects_every_malformed_key_form() {
             &[],
             "key",
         );
-        let drawn = push(&mut reloaded, json!({"kind":"dropout"}), &[y, 8, k], &[4], "f32");
+        let drawn = push(
+            &mut reloaded,
+            json!({"kind":"dropout"}),
+            &[y, 8, k],
+            &[4],
+            "f32",
+        );
         roots.push(json!(drawn));
     }
     reloaded["roots"] = json!(roots);
@@ -590,7 +652,10 @@ fn random_controls_seeds_and_keys_keep_their_structural_types() {
     // The rate is a rank-zero value of the data dtype, never an integer.
     let mut integer_rate = dag.clone();
     integer_rate["nodes"][dropout]["inputs"][1] = json!(seed);
-    rejects_domain(&integer_rate, "random control must be a rank-zero value");
+    rejects_domain(
+        &integer_rate,
+        "random control must be a value of the draw's dtype",
+    );
 
     // A scoped draw key's first input is its literal int64 seed.
     let mut runtime_seed = dag.clone();
@@ -649,5 +714,5 @@ fn gradient_random_lowering_preserves_scalar_bool_activation() {
     let mut malformed = dag.clone();
     malformed["nodes"][activation]["op"] = json!({"kind":"load","name":"bad_activation"});
     malformed["nodes"][activation]["output_type"]["precision"] = json!("f32");
-    rejects_domain(&malformed, "rank-zero Bool activation");
+    rejects_domain(&malformed, "exactly one Bool activation");
 }

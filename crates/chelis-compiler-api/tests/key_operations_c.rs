@@ -556,6 +556,199 @@ fn per_row_controls_activations_and_bound_adjoints_agree_in_c_and_eval() {
     }
 }
 
+/// `split_keys(split_keys(key(seed), 2)[i], 3)`: the `tensor[2, 3, key]`
+/// whose element `(i, j)` is key_ref.py's
+/// `split_n(split_n(key(seed), 2)[i], 3)[j]`.
+fn rank_two_keys(dag: &mut Dag, seed: i64) -> NodeId {
+    let seed = i64_const(dag, seed);
+    let root = node(dag, RiscOp::KeyFromSeed, vec![seed], &[], Prim::Key);
+    let rows = node(
+        dag,
+        RiscOp::SplitN {
+            count: RtDim::Lit(2),
+        },
+        vec![root],
+        &[2],
+        Prim::Key,
+    );
+    node(
+        dag,
+        RiscOp::SplitN {
+            count: RtDim::Lit(3),
+        },
+        vec![rows],
+        &[2, 3],
+        Prim::Key,
+    )
+}
+
+/// key_ref_ext.py's `uniform01(K7[i][j], 4, "f32")`, row-major over `(i, j)`.
+const RANK_TWO_UNIFORM_F32: [u64; 24] = [
+    0x3f64_799a,
+    0x3ed8_0a73,
+    0x3dd4_668c,
+    0x3f7f_4030,
+    0x3f0f_6914,
+    0x3bfe_1697,
+    0x3f40_d9de,
+    0x3f5b_136f,
+    0x3f75_04eb,
+    0x3f4e_767a,
+    0x3dc5_4695,
+    0x3ea5_d879,
+    0x3f56_4547,
+    0x3f5a_3cbc,
+    0x3ebc_4ac1,
+    0x3e25_d5fd,
+    0x3f57_ebf1,
+    0x3e5a_cd04,
+    0x3e27_5c0a,
+    0x3ddd_e418,
+    0x3ef0_8b68,
+    0x3f5d_2d1f,
+    0x3f67_7f50,
+    0x3ee4_1732,
+];
+
+/// V5 at rank 2 in C: row `(i, j)` draws with key `(i, j)`; a rate and an
+/// activation shaped like the key's leading axis serve rows `(i, *)`; and a
+/// bound adjoint of that shape folds the rows that share each bound.
+#[test]
+fn a_rank_two_key_batch_agrees_in_c_and_eval() {
+    let prim = Prim::F32;
+    let mut dag = Dag::new();
+    let uniform_keys = rank_two_keys(&mut dag, 7);
+    let template = load(&mut dag, "t", &[2, 3, 4], prim);
+    let low = float_const(&mut dag, prim, 0.0);
+    let high = float_const(&mut dag, prim, 1.0);
+    let sampled = node(
+        &mut dag,
+        RiscOp::UniformLike,
+        vec![template, low, high, uniform_keys],
+        &[2, 3, 4],
+        prim,
+    );
+    let dropout_keys = rank_two_keys(&mut dag, 8);
+    let x = load(&mut dag, "x", &[2, 3, 4], prim);
+    let rates = load(&mut dag, "rates", &[2], prim);
+    let active = load(&mut dag, "active", &[2], Prim::Bool);
+    let dropped = node(
+        &mut dag,
+        RiscOp::Dropout,
+        vec![x, rates, dropout_keys, active],
+        &[2, 3, 4],
+        prim,
+    );
+    dag.add_root(sampled);
+    dag.add_root(dropped);
+    let data: Vec<f64> = (1..=24).map(f64::from).collect();
+    let inputs = [
+        ("t", Input::Floats(prim, vec![2, 3, 4], vec![0.0; 24])),
+        ("x", Input::Floats(prim, vec![2, 3, 4], data.clone())),
+        ("rates", Input::Floats(prim, vec![2], vec![0.5, 0.0])),
+        ("active", Input::Bools(vec![2], vec![0, 1])),
+    ];
+    let eval = run_eval(&dag, &inputs).unwrap();
+    assert_eq!(eval[0], RANK_TWO_UNIFORM_F32);
+    // Rows (0, *) are inactive; rows (1, *) draw at rate 0 and keep x.
+    let mut kept = vec![0.0; 12];
+    kept.extend(&data[12..]);
+    assert_eq!(eval[1], float_bits(prim, &kept));
+    assert_eq!(run_c(dag, &inputs), eval);
+
+    for out_dims in [&[][..], &[2][..], &[2, 3][..]] {
+        let mut dag = Dag::new();
+        let keys = rank_two_keys(&mut dag, 7);
+        let template = load(&mut dag, "t", &[2, 3, 4], prim);
+        let g = load(&mut dag, "g", &[2, 3, 4], prim);
+        let (low, high) = if out_dims.is_empty() {
+            (
+                float_const(&mut dag, prim, -1.0),
+                float_const(&mut dag, prim, 3.0),
+            )
+        } else {
+            (
+                load(&mut dag, "lo", out_dims, prim),
+                load(&mut dag, "hi", out_dims, prim),
+            )
+        };
+        let forward = node(
+            &mut dag,
+            RiscOp::UniformLike,
+            vec![template, low, high, keys],
+            &[2, 3, 4],
+            prim,
+        );
+        let adjoints = [UniformBound::Low, UniformBound::High].map(|bound| {
+            node(
+                &mut dag,
+                RiscOp::UniformBoundAdjoint { bound },
+                vec![template, g, keys],
+                out_dims,
+                prim,
+            )
+        });
+        dag.add_root(forward);
+        for adjoint in adjoints {
+            dag.add_root(adjoint);
+        }
+        let groups: usize = out_dims.iter().product();
+        let inputs = [
+            ("t", Input::Floats(prim, vec![2, 3, 4], vec![0.0; 24])),
+            ("g", Input::Floats(prim, vec![2, 3, 4], data.clone())),
+            (
+                "lo",
+                Input::Floats(prim, out_dims.to_vec(), vec![-1.0; groups]),
+            ),
+            (
+                "hi",
+                Input::Floats(prim, out_dims.to_vec(), vec![3.0; groups]),
+            ),
+        ];
+        let eval = run_eval(&dag, &inputs).unwrap();
+        assert_eq!(eval[1].len(), groups.max(1), "{out_dims:?}");
+        assert_eq!(run_c(dag, &inputs), eval, "{out_dims:?}");
+    }
+}
+
+/// `vmap` twice over a draw keyed by a scalar key compiles to a rank-2 key
+/// batch whose rows draw key_ref_ext.py's words in C as in eval.
+#[test]
+fn vmap_of_vmap_of_a_draw_agrees_in_c_and_eval() {
+    let prim = Prim::F32;
+    let mut dag = Dag::new();
+    let key = load(&mut dag, "k", &[], Prim::Key);
+    let template = load(&mut dag, "t", &[4], prim);
+    let low = float_const(&mut dag, prim, 0.0);
+    let high = float_const(&mut dag, prim, 1.0);
+    let sampled = node(
+        &mut dag,
+        RiscOp::UniformLike,
+        vec![template, low, high, key],
+        &[4],
+        prim,
+    );
+    dag.add_root(sampled);
+    let once = chelis_ir::vmap::vectorize_axis0(&dag, DimInfo::Lit(3)).unwrap();
+    let twice = chelis_ir::vmap::vectorize_axis0(&once, DimInfo::Lit(2)).unwrap();
+    // key_ref.py's split_n(split_n(key(7), 2)[i], 3)[j].
+    let keys = [
+        0x3460_149a_1d8e_2fa2,
+        0x832c_74f4_3998_a706,
+        0x1f97_59f0_1867_fc24,
+        0xa587_cbf4_1f03_a05f,
+        0x4cab_8638_d3ee_2fba,
+        0xb3cc_d76d_1f33_866a,
+    ];
+    let inputs = [
+        ("k", Input::Keys(vec![2, 3], keys.to_vec())),
+        ("t", Input::Floats(prim, vec![2, 3, 4], vec![0.0; 24])),
+    ];
+    let eval = run_eval(&twice, &inputs).unwrap();
+    assert_eq!(eval[0], RANK_TWO_UNIFORM_F32);
+    assert_eq!(run_c(twice, &inputs), eval);
+}
+
 #[test]
 fn a_negative_runtime_split_count_traps_in_c_as_in_eval() {
     let build = || {

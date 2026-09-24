@@ -4849,13 +4849,23 @@ impl CEmitter {
         )
     }
 
-    /// A draw control at row `row`: its one element when rank 0, or element
-    /// `row` of a per-row control, at its exact arithmetic reading.
-    fn row_float_expr(dag: VerifiedDagView<'_>, input: NodeId, row: &str) -> String {
+    /// The element row `b` of draw `id` reads from an operand shaped like
+    /// its key's leading axes: `b / (rows / size)`, which is `b` itself for
+    /// an operand of the key's own shape. A row exists only for a nonempty
+    /// key batch, whose leading part is nonempty too.
+    fn leading_row_expr(id: usize, input: NodeId) -> String {
+        format!("b / (t{id}_rows / t{}_size)", input.0)
+    }
+
+    /// Draw `id`'s control at row `b`: its one element when rank 0, or the
+    /// row's element of a control shaped like the key's leading axes, at its
+    /// exact arithmetic reading.
+    fn row_float_expr(dag: VerifiedDagView<'_>, input: NodeId, id: usize) -> String {
         let ty = &dag.get(input).expect("verified random control").output_type;
         if ty.dims.is_empty() {
             return Self::rank0_float_expr(dag, input);
         }
+        let row = Self::leading_row_expr(id, input);
         let stored = format!("((const {}*)t{}_data)[{row}]", Self::elem_type(ty), input.0);
         match ty.precision {
             Prim::F64 | Prim::F32 => stored,
@@ -4869,9 +4879,10 @@ impl CEmitter {
         }
     }
 
-    /// A draw's activation at row `row`: absent is active, a rank-0 Bool is
-    /// its byte, and a per-row Bool is its byte `row`.
-    fn row_bool_expr(dag: VerifiedDagView<'_>, input: Option<&NodeId>, row: &str) -> String {
+    /// Draw `id`'s activation at row `b`: absent is active, a rank-0 Bool is
+    /// its byte, and a Bool shaped like the key's leading axes is the row's
+    /// byte.
+    fn row_bool_expr(dag: VerifiedDagView<'_>, input: Option<&NodeId>, id: usize) -> String {
         match input {
             Some(input)
                 if !dag
@@ -4882,9 +4893,10 @@ impl CEmitter {
                     .is_empty() =>
             {
                 format!(
-                    "(((const {}*)t{}_data)[{row}] != 0)",
+                    "(((const {}*)t{}_data)[{}] != 0)",
                     Self::prim_elem_type(Prim::Bool),
-                    input.0
+                    input.0,
+                    Self::leading_row_expr(id, *input)
                 )
             }
             other => Self::rank0_bool_expr(other),
@@ -4936,8 +4948,8 @@ impl CEmitter {
         let binary64 = Self::prim_elem_type(Prim::F64);
         let binary32 = Self::prim_elem_type(Prim::F32);
         let storage = Self::elem_type(ty);
-        let rate = Self::row_float_expr(dag, node.inputs[1], "b");
-        let active = Self::row_bool_expr(dag, node.inputs.get(3), "b");
+        let rate = Self::row_float_expr(dag, node.inputs[1], id);
+        let active = Self::row_bool_expr(dag, node.inputs.get(3), id);
         let trap = NumericTrap::Domain {
             op: "dropout",
             prim,
@@ -5008,9 +5020,9 @@ impl CEmitter {
         let index = Self::prim_elem_type(Prim::Int64);
         let binary64 = Self::prim_elem_type(Prim::F64);
         let storage = Self::elem_type(ty);
-        let low = Self::row_float_expr(dag, node.inputs[1], "b");
-        let high = Self::row_float_expr(dag, node.inputs[2], "b");
-        let active = Self::row_bool_expr(dag, node.inputs.get(4), "b");
+        let low = Self::row_float_expr(dag, node.inputs[1], id);
+        let high = Self::row_float_expr(dag, node.inputs[2], id);
+        let active = Self::row_bool_expr(dag, node.inputs.get(4), id);
         let trap = NumericTrap::Domain {
             op: "uniform_like",
             prim,
@@ -5075,8 +5087,10 @@ impl CEmitter {
 
     /// [05-OP-8]'s bound adjoint under an explicit key. Row `b`'s leaves are
     /// `g_i * (1 - u_i)` or `g_i * u_i` with `u_i` from `word(key[b], e)`, and
-    /// positive zero for an inactive row. A rank-0 result folds every leaf in
-    /// one canonical adjacent-pair tree; a per-row result folds each row's.
+    /// positive zero for an inactive row. The result is shaped like the key's
+    /// leading axes, and each element folds the leaves of the rows that share
+    /// it in one canonical adjacent-pair tree: a rank-0 result folds every
+    /// leaf, and a result of the key's shape folds each row's.
     fn emit_explicitly_keyed_bound_adjoint(
         &mut self,
         node: &DagNode,
@@ -5088,7 +5102,7 @@ impl CEmitter {
         let prim = ty.precision;
         let cotangent = node.inputs[1].0;
         let key = node.inputs[2];
-        let active = Self::row_bool_expr(dag, node.inputs.get(3), "b");
+        let active = Self::row_bool_expr(dag, node.inputs.get(3), id);
         let arithmetic_ty = TensorType {
             dims: vec![],
             precision: if prim == Prim::F64 {
@@ -5123,14 +5137,15 @@ impl CEmitter {
         let per_row = !ty.dims.is_empty();
         self.emit_slot_wrapper(id, ty);
         self.emit_draw_rows(id, key, dag, cotangent);
-        // One output per row, or one for the whole draw.
+        // One output per group of rows sharing a bound element, or one for
+        // the whole draw; each group's leaves are contiguous.
         let outputs = if per_row {
-            format!("t{id}_rows")
+            format!("t{id}_size")
         } else {
             "1".to_string()
         };
         let segment = if per_row {
-            format!("t{id}_row_len")
+            format!("(t{cotangent}_size / t{id}_size)")
         } else {
             format!("t{cotangent}_size")
         };

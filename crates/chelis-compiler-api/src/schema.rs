@@ -2100,7 +2100,8 @@ pub struct WireRecordPatternField {
 /// - `18`: the explicit key operations `KeyFromSeed`, `Split`, `FoldIn` and
 ///   `SplitN` ([05-OP-69..72], chelis#2413). `key` is a precision at any
 ///   rank; a key may enter as a `Load` and be a root; a draw may take a
-///   rank-1 key batch, with rank-zero or per-row controls and activation. A
+///   key batch of any rank shaped like its data's leading axes, with
+///   controls and activation shaped like a leading part of the batch. A
 ///   version-17 graph holds no key operation and is rejected like every
 ///   other earlier version.
 pub const WIRE_DAG_SCHEMA_VERSION: u32 = 18;
@@ -3313,7 +3314,7 @@ fn wire_axis_origin(
         | WireRiscOp::Split { .. }
         | WireRiscOp::FoldIn {} => same_shape_input_origin(),
         // A draw's data operand is its only same-shape operand: its controls,
-        // key and activation are rank zero or one value per key row.
+        // key and activation are shaped like leading parts of the data.
         WireRiscOp::UniformLike {} | WireRiscOp::Dropout {} | WireRiscOp::DropoutReplay {} => {
             input_axis(0, axis)
         }
@@ -3846,10 +3847,10 @@ pub enum WireRiscOp {
     Ceil,
     Round,
     /// `[05-OP-8]`. Inputs are `[template, low, high, key]`, optionally
-    /// followed by one rank-zero Bool activation.
+    /// followed by one Bool activation, shaped as spec/10 §3.2 fixes.
     UniformLike {},
     /// `[05-OP-37]`. Inputs are `[x, rate, key]`, optionally followed by one
-    /// rank-zero Bool activation.
+    /// Bool activation, shaped as spec/10 §3.2 fixes.
     Dropout {},
     /// The `[05-OP-37]` pathwise adjoint. Inputs are `[g, rate, key]`,
     /// optionally followed by the forward draw's activation; it reads its

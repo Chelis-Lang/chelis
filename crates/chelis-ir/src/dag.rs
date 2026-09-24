@@ -731,16 +731,19 @@ pub enum RiscOp {
     /// `1.0f / x` (or the f64 / mixed-precision analog).
     Recip,
     /// `[05-OP-8]` with operand controls. Inputs are `[template, low, high,
-    /// key]`, optionally followed by one rank-0 Bool activation. The template
-    /// supplies only the shape and dtype `p`; `low` and `high` are rank-0
-    /// floats of dtype `p`, or f32 while the checker's bound signature is f32
-    /// (chelis#1295); `key` is this draw's `Prim::Key`, consumed here. An
-    /// inactive draw validates nothing and produces positive zeros.
+    /// key]`, optionally followed by one Bool activation. The template
+    /// supplies only the shape and dtype `p`; `low` and `high` are floats of
+    /// dtype `p`, or f32 while the checker's bound signature is f32
+    /// (chelis#1295); `key` is this draw's `Prim::Key`, consumed here. Under
+    /// spec/10 §3.2's rule V5 the key's shape is the template's leading axes
+    /// and the bounds and activation are shaped like leading parts of the
+    /// key's shape. An inactive draw validates nothing and produces positive
+    /// zeros.
     UniformLike,
     /// `[05-OP-37]` with an operand rate. Inputs are `[x, rate, key]`,
-    /// optionally followed by one rank-0 Bool activation; `rate` is a rank-0
-    /// value of `x`'s dtype and `key` is consumed here. An inactive draw
-    /// validates nothing and produces positive zeros.
+    /// optionally followed by one Bool activation, shaped as for
+    /// `UniformLike`; `rate` is a value of `x`'s dtype and `key` is consumed
+    /// here. An inactive draw validates nothing and produces positive zeros.
     Dropout,
     /// AD-only `[05-OP-37]` pathwise input adjoint. Inputs are `[g, rate,
     /// key]`, optionally followed by the forward draw's activation. It reads
@@ -749,8 +752,9 @@ pub enum RiscOp {
     DropoutReplay,
     /// AD-only `[05-OP-8]` bound adjoint. Inputs are `[template, g, key]`,
     /// optionally followed by the forward draw's activation; the result is a
-    /// rank-0 value of the template's dtype. It reads its forward
-    /// `UniformLike`'s key without consuming it.
+    /// value of the template's dtype shaped like a leading part of the key's
+    /// shape (rule V5). It reads its forward `UniformLike`'s key without
+    /// consuming it.
     UniformBoundAdjoint {
         bound: UniformBound,
     },

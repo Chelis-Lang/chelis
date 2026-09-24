@@ -262,31 +262,36 @@ numeric fields: their controls and their key are operand nodes.
 and at most one Bool path activation. `Dropout.inputs` is its data input, its
 rate, its key, and at most one activation. The bounds and the rate are
 operands of the template's or input's exact active float dtype.
-(Not fully implemented; chelis#1295.) A draw's key is rank zero, or a rank-1
-key batch whose extent equals its first input's leading extent. Under a
-rank-zero key every control and the activation are rank zero. Under a batch
-each is rank zero or has the batch's shape, and row `b` of the draw, the
-first input's elements whose leading index is `b`, draws with `key[b]`, with
-row `b` of each per-row control and activation, and with its elements'
-row-major indices within the row as [05-RNG-2]'s element indices.
+(Not fully implemented; chelis#1295.) A draw's key has any rank `r`, and its
+shape equals the leading `r` axes of the draw's data: the first input of
+`UniformLike`, `Dropout` and `DropoutReplay`, and the cotangent, input 1, of
+`UniformBoundAdjoint`. Row `b` of the draw, the data elements whose leading
+`r` indices are the key's row-major index `b`, draws with `key[b]`, with its
+elements' row-major indices within the row as [05-RNG-2]'s element indices.
+Each control and the activation has the shape of the key's leading `c` axes
+for some `c <= r`, and row `b` reads the element that `b`'s leading `c`
+indices name, so under a rank-zero key every control and the activation are
+rank zero.
 Both operations preserve the first input's exact shape and dtype. Their
 value-domain checks remain [05-OP-8/37], before Random consumption; the codec
 neither inserts casts nor implements an adjoint. `DropoutReplay.inputs` is
 its cotangent, its rate, its forward draw's key and that draw's activation
 when it has one. `UniformBoundAdjoint.inputs` is its template, its
 cotangent, its forward draw's key and that draw's activation when it has one;
-its result is rank zero, one canonical tree over every row's contributions, or
-has a key batch's shape, one value per row. Each reads the key without
-consuming it. A `DrawKey`'s controls and activation are rank zero. An activation is an earlier-node
+its result has the shape of the key's leading `c` axes for some `c <= r`, and
+each element is one canonical tree over the contributions, in row-major
+order, of the rows whose leading `c` indices name it. Each reads the key
+without consuming it. A `DrawKey`'s controls and activation are rank zero. An activation is an earlier-node
 reference under §3.4, not another template.
 
 `key` is a structural precision with no literal or storage carrier in a
 graph, at any rank: no `Const`, `ConstTensor` or `Pad.fill` holds a key. Every
 key is produced by `KeyFromSeed`, `Split`, `FoldIn`, `SplitN` or a `DrawKey`,
-or enters as a key-precision `Load`, and a key may be a root. A key is
-consumed by at most one `UniformLike`, `Dropout`, `FoldIn` or `SplitN`, or by
-at most one `Split` of each branch, and is otherwise read only by its draw's
-replays. Two draws may consume one key only when each carries an activation
+or enters as a key-precision `Load`, and every `Load` of one parameter is one
+key. A key has at most one use: one `UniformLike`, `Dropout`, `FoldIn` or
+`SplitN`, one place among the roots, or at most one `Split` of each branch.
+It is otherwise read only by its draw's replays, and a `DrawKey`'s key is used
+only by a draw. Two draws may consume one key only when each carries an activation
 and, for every pair, one activation's `And` conjuncts include a node `X` and
 the other's include `Not(X)`. A key reaching any other operation or a shape
 dependency is a decode error.

@@ -331,9 +331,9 @@ pub fn same_shape_result_agreement(
     let result_rank = owner.output_type.dims.len();
     let mut members = Vec::new();
     // A random primitive's data operand is its only same-shape operand. Its
-    // controls, key and activation are rank zero, or one value per key row
-    // of a batched draw (spec/10 §3.2), whose agreement with the data's
-    // leading axis the draw checks itself.
+    // key, controls and activation are shaped like leading parts of the data
+    // (spec/10 §3.2), whose agreement with the data's leading axes the draw
+    // checks itself.
     let operands = match owner.op {
         RiscOp::UniformLike | RiscOp::Dropout | RiscOp::DropoutReplay => {
             &owner.inputs[..owner.inputs.len().min(1)]

@@ -1134,7 +1134,13 @@ fn a_draw_keys_key_feeds_only_a_draw() {
             }
             "fold_in" => {
                 let three = i64_const(&mut dag, 3);
-                let folded = node(&mut dag, RiscOp::FoldIn, vec![bridged, three], &[], Prim::Key);
+                let folded = node(
+                    &mut dag,
+                    RiscOp::FoldIn,
+                    vec![bridged, three],
+                    &[],
+                    Prim::Key,
+                );
                 let drawn = draw(&mut dag, folded, None);
                 dag.add_root(drawn);
             }
@@ -1377,8 +1383,8 @@ fn key_operation_operands_and_batched_shapes_are_checked() {
     );
     dag.add_root(rows);
     assert_rejected(&dag, "must append its");
-    // V5: a key batch whose extent is not the data's leading extent, and a
-    // control that is neither rank 0 nor one per row.
+    // V5: a key batch whose shape is not the data's leading shape, and a
+    // control whose shape is no leading part of the key's.
     let mut dag = Dag::new();
     let keys = load(&mut dag, "k", &[3], Prim::Key);
     let x = load(&mut dag, "x", &[2, 4], Prim::F32);
@@ -1391,7 +1397,7 @@ fn key_operation_operands_and_batched_shapes_are_checked() {
         Prim::F32,
     );
     dag.add_root(drawn);
-    assert_rejected(&dag, "must match its data's leading axis");
+    assert_rejected(&dag, "must match its data's leading axes");
     let mut dag = Dag::new();
     let keys = load(&mut dag, "k", &[3], Prim::Key);
     let x = load(&mut dag, "x", &[3, 4], Prim::F32);
@@ -1404,21 +1410,313 @@ fn key_operation_operands_and_batched_shapes_are_checked() {
         Prim::F32,
     );
     dag.add_root(drawn);
-    assert_rejected(&dag, "rank-0 rate");
-    // A rank-2 key is not a batch.
+    assert_rejected(&dag, "requires a rate of its data dtype");
+    // A rank-2 key batch is its data's leading two axes, in order.
     let mut dag = Dag::new();
     let keys = load(&mut dag, "k", &[3, 2], Prim::Key);
-    let x = load(&mut dag, "x", &[3, 2], Prim::F32);
+    let x = load(&mut dag, "x", &[2, 3], Prim::F32);
     let rate = float_const(&mut dag, Prim::F32, 0.5);
     let drawn = node(
         &mut dag,
         RiscOp::Dropout,
         vec![x, rate, keys],
-        &[3, 2],
+        &[2, 3],
         Prim::F32,
     );
     dag.add_root(drawn);
-    assert_rejected(&dag, "rank-1 key batch");
+    assert_rejected(&dag, "must match its data's leading axes");
+    // A control shaped like the key's trailing axis, not a leading part.
+    let mut dag = Dag::new();
+    let keys = load(&mut dag, "k", &[3, 2], Prim::Key);
+    let x = load(&mut dag, "x", &[3, 2, 4], Prim::F32);
+    let rates = load(&mut dag, "r", &[2], Prim::F32);
+    let drawn = node(
+        &mut dag,
+        RiscOp::Dropout,
+        vec![x, rates, keys],
+        &[3, 2, 4],
+        Prim::F32,
+    );
+    dag.add_root(drawn);
+    assert_rejected(&dag, "requires a rate of its data dtype");
+    // A bound adjoint's result shaped like no leading part of its key.
+    let mut dag = Dag::new();
+    let keys = load(&mut dag, "k", &[3, 2], Prim::Key);
+    let t = load(&mut dag, "t", &[3, 2, 4], Prim::F32);
+    let g = load(&mut dag, "g", &[3, 2, 4], Prim::F32);
+    let low = float_const(&mut dag, Prim::F32, 0.0);
+    let high = float_const(&mut dag, Prim::F32, 1.0);
+    let forward = node(
+        &mut dag,
+        RiscOp::UniformLike,
+        vec![t, low, high, keys],
+        &[3, 2, 4],
+        Prim::F32,
+    );
+    let adjoint = node(
+        &mut dag,
+        RiscOp::UniformBoundAdjoint {
+            bound: UniformBound::High,
+        },
+        vec![t, g, keys],
+        &[2],
+        Prim::F32,
+    );
+    dag.add_root(forward);
+    dag.add_root(adjoint);
+    assert_rejected(&dag, "a leading part of its key's shape");
+}
+
+// ---- V5 at every key rank: `vmap` composes over draws ----
+
+/// `[05-OP-71]` twice: `split_keys(split_keys(key(seed), 2)[i], 3)`, the
+/// `tensor[2, 3, key]` whose element `(i, j)` is key_ref.py's
+/// `split_n(split_n(key(seed), 2)[i], 3)[j]`.
+fn rank_two_keys(dag: &mut Dag, seed: i64) -> NodeId {
+    let seed = i64_const(dag, seed);
+    let root = node(dag, RiscOp::KeyFromSeed, vec![seed], &[], Prim::Key);
+    let rows = node(
+        dag,
+        RiscOp::SplitN {
+            count: RtDim::Lit(2),
+        },
+        vec![root],
+        &[2],
+        Prim::Key,
+    );
+    node(
+        dag,
+        RiscOp::SplitN {
+            count: RtDim::Lit(3),
+        },
+        vec![rows],
+        &[2, 3],
+        Prim::Key,
+    )
+}
+
+/// key_ref.py's `split_n(split_n(key(seed), 2)[i], 3)[j]` as key values.
+fn rank_two_key_values(seed: i64) -> Vec<RandomKey> {
+    RandomKey::from_seed(scalar_from_i64("test", Prim::Int64, seed).unwrap())
+        .unwrap()
+        .split_n(2)
+        .iter()
+        .flat_map(|row| row.split_n(3))
+        .collect()
+}
+
+/// key_ref_ext.py's `uniform01(K7[i][j], 4, "f32")`, row-major over `(i, j)`.
+const RANK_TWO_UNIFORM_F32: [[u32; 4]; 6] = [
+    [0x3f64_799a, 0x3ed8_0a73, 0x3dd4_668c, 0x3f7f_4030],
+    [0x3f0f_6914, 0x3bfe_1697, 0x3f40_d9de, 0x3f5b_136f],
+    [0x3f75_04eb, 0x3f4e_767a, 0x3dc5_4695, 0x3ea5_d879],
+    [0x3f56_4547, 0x3f5a_3cbc, 0x3ebc_4ac1, 0x3e25_d5fd],
+    [0x3f57_ebf1, 0x3e5a_cd04, 0x3e27_5c0a, 0x3ddd_e418],
+    [0x3ef0_8b68, 0x3f5d_2d1f, 0x3f67_7f50, 0x3ee4_1732],
+];
+
+/// key_ref_ext.py's `dropout_half(K8[i][j], x)` over `x = 1..=24` row-major.
+const RANK_TWO_DROPOUT_HALF: [[f64; 4]; 6] = [
+    [2.0, 4.0, 6.0, 8.0],
+    [0.0, 12.0, 0.0, 16.0],
+    [0.0, 0.0, 0.0, 24.0],
+    [0.0, 0.0, 30.0, 32.0],
+    [0.0, 0.0, 38.0, 40.0],
+    [0.0, 0.0, 46.0, 48.0],
+];
+
+fn rank_two_uniform_bits() -> Vec<u64> {
+    RANK_TWO_UNIFORM_F32
+        .iter()
+        .flatten()
+        .map(|bits| u64::from(*bits))
+        .collect()
+}
+
+/// V5 at rank 2: row `(i, j)` of the data draws with key `(i, j)`, and a
+/// control of the key's leading shape `[2]` gives every row `(i, *)` its
+/// element `i`.
+#[test]
+fn a_rank_two_key_batch_draws_each_row_with_its_own_key() {
+    let prim = Prim::F32;
+    let mut dag = Dag::new();
+    let uniform_keys = rank_two_keys(&mut dag, 7);
+    let template = load(&mut dag, "t", &[2, 3, 4], prim);
+    let low = float_const(&mut dag, prim, 0.0);
+    let high = float_const(&mut dag, prim, 1.0);
+    let sampled = node(
+        &mut dag,
+        RiscOp::UniformLike,
+        vec![template, low, high, uniform_keys],
+        &[2, 3, 4],
+        prim,
+    );
+    let dropout_keys = rank_two_keys(&mut dag, 8);
+    let x = load(&mut dag, "x", &[2, 3, 4], prim);
+    let rates = load(&mut dag, "rates", &[2], prim);
+    let dropped = node(
+        &mut dag,
+        RiscOp::Dropout,
+        vec![x, rates, dropout_keys],
+        &[2, 3, 4],
+        prim,
+    );
+    dag.add_root(sampled);
+    dag.add_root(dropped);
+    let data: Vec<f64> = (1..=24).map(f64::from).collect();
+    let inputs = UnordMap::from_iter([
+        ("t", floats(prim, vec![2, 3, 4], vec![0.0; 24])),
+        ("x", floats(prim, vec![2, 3, 4], data.clone())),
+        ("rates", floats(prim, vec![2], vec![0.0, 0.5])),
+    ]);
+    let out = run(&dag, &inputs);
+    assert_eq!(stored_bits(&out[&sampled]), rank_two_uniform_bits());
+    // Rows (0, *) draw at rate 0 and keep x; rows (1, *) at 0.5 keep
+    // key_ref_ext.py's pattern.
+    let mut expected = data[..12].to_vec();
+    expected.extend(RANK_TWO_DROPOUT_HALF[3..].iter().flatten());
+    assert_eq!(out[&dropped].to_f64_lossy_vec(), expected);
+}
+
+/// `vmap` over a draw keyed by a scalar key, twice, gives a rank-2 key
+/// batch that verifies and draws each row with its own key.
+#[test]
+fn vmap_of_vmap_of_a_draw_verifies_and_draws_each_row_with_its_key() {
+    let prim = Prim::F32;
+    let mut dag = Dag::new();
+    let key = load(&mut dag, "k", &[], Prim::Key);
+    let template = load(&mut dag, "t", &[4], prim);
+    let low = float_const(&mut dag, prim, 0.0);
+    let high = float_const(&mut dag, prim, 1.0);
+    let sampled = node(
+        &mut dag,
+        RiscOp::UniformLike,
+        vec![template, low, high, key],
+        &[4],
+        prim,
+    );
+    dag.add_root(sampled);
+    let once = vectorize_axis0(&dag, DimInfo::Lit(3)).unwrap();
+    let twice = vectorize_axis0(&once, DimInfo::Lit(2)).unwrap();
+    assert_eq!(verify(&twice), Vec::<String>::new());
+    let inputs = UnordMap::from_iter([
+        ("k", keys_value(vec![2, 3], rank_two_key_values(7))),
+        ("t", floats(prim, vec![2, 3, 4], vec![0.0; 24])),
+    ]);
+    let out = run(&twice, &inputs);
+    let root = twice.roots()[0];
+    assert_eq!(out[&root].shape, vec![2, 3, 4]);
+    assert_eq!(stored_bits(&out[&root]), rank_two_uniform_bits());
+}
+
+/// `vmap` over a draw that is already batched keeps its rank-0 rate as one
+/// value per mapped row: the key's leading shape.
+#[test]
+fn vmap_of_a_batched_draw_verifies_and_keeps_each_rows_rate() {
+    let prim = Prim::F32;
+    let mut dag = Dag::new();
+    let keys = load(&mut dag, "k", &[3], Prim::Key);
+    let x = load(&mut dag, "x", &[3, 4], prim);
+    let rate = float_const(&mut dag, prim, 0.5);
+    let dropped = node(
+        &mut dag,
+        RiscOp::Dropout,
+        vec![x, rate, keys],
+        &[3, 4],
+        prim,
+    );
+    dag.add_root(dropped);
+    let batched = vectorize_axis0(&dag, DimInfo::Lit(2)).unwrap();
+    assert_eq!(verify(&batched), Vec::<String>::new());
+    let inputs = UnordMap::from_iter([
+        ("k", keys_value(vec![2, 3], rank_two_key_values(8))),
+        (
+            "x",
+            floats(prim, vec![2, 3, 4], (1..=24).map(f64::from).collect()),
+        ),
+    ]);
+    let out = run(&batched, &inputs);
+    let expected: Vec<f64> = RANK_TWO_DROPOUT_HALF.iter().flatten().copied().collect();
+    assert_eq!(out[&batched.roots()[0]].to_f64_lossy_vec(), expected);
+}
+
+/// A bound adjoint over a rank-2 key batch folds each group of rows that
+/// shares one bound element: all rows for a rank-0 result, rows `(i, *)`
+/// for a `[2]` result, and each row alone for a `[2, 3]` result, every group
+/// in one canonical tree over its contributions in row-major order.
+#[test]
+fn a_rank_two_bound_adjoint_folds_each_group_of_rows_sharing_a_bound() {
+    let prim = Prim::F32;
+    let units: Vec<f32> = RANK_TWO_UNIFORM_F32
+        .iter()
+        .flatten()
+        .map(|bits| f32::from_bits(*bits))
+        .collect();
+    let pair_sum = |values: &[f32]| -> f32 {
+        let mut level = values.to_vec();
+        while level.len() > 1 {
+            level = level
+                .chunks(2)
+                .map(|pair| {
+                    if pair.len() == 2 {
+                        pair[0] + pair[1]
+                    } else {
+                        pair[0]
+                    }
+                })
+                .collect();
+        }
+        level.first().copied().unwrap_or(0.0)
+    };
+    for out_dims in [&[][..], &[2][..], &[2, 3][..]] {
+        let mut dag = Dag::new();
+        let keys = rank_two_keys(&mut dag, 7);
+        let template = load(&mut dag, "t", &[2, 3, 4], prim);
+        let g = load(&mut dag, "g", &[2, 3, 4], prim);
+        let (low, high) = if out_dims.is_empty() {
+            (
+                float_const(&mut dag, prim, 0.0),
+                float_const(&mut dag, prim, 1.0),
+            )
+        } else {
+            (
+                load(&mut dag, "lo", out_dims, prim),
+                load(&mut dag, "hi", out_dims, prim),
+            )
+        };
+        let forward = node(
+            &mut dag,
+            RiscOp::UniformLike,
+            vec![template, low, high, keys],
+            &[2, 3, 4],
+            prim,
+        );
+        let adjoint = node(
+            &mut dag,
+            RiscOp::UniformBoundAdjoint {
+                bound: UniformBound::High,
+            },
+            vec![template, g, keys],
+            out_dims,
+            prim,
+        );
+        dag.add_root(forward);
+        dag.add_root(adjoint);
+        let groups: usize = out_dims.iter().product();
+        let inputs = UnordMap::from_iter([
+            ("t", floats(prim, vec![2, 3, 4], vec![0.0; 24])),
+            ("g", floats(prim, vec![2, 3, 4], vec![1.0; 24])),
+            ("lo", floats(prim, out_dims.to_vec(), vec![0.0; groups])),
+            ("hi", floats(prim, out_dims.to_vec(), vec![1.0; groups])),
+        ]);
+        let out = run(&dag, &inputs);
+        let expected: Vec<f64> = units
+            .chunks(24 / groups)
+            .map(|group| f64::from(pair_sum(group)))
+            .collect();
+        assert_eq!(out[&adjoint].shape, out_dims.to_vec());
+        assert_eq!(out[&adjoint].to_f64_lossy_vec(), expected, "{out_dims:?}");
+    }
 }
 
 #[test]

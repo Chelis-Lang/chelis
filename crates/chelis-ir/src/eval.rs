@@ -503,10 +503,13 @@ enum DrawKeys<'a> {
     Inactive,
     /// A rank-0 key.
     Scalar(RandomKey),
-    /// A rank-1 key batch: row `b` of the data draws with `keys[b]`, and
-    /// only when `active` is absent or its element `b` is true.
+    /// A key batch of `shape`, any positive rank: row `b` of the data, the
+    /// elements whose leading indices are the key index `b` in row-major
+    /// order, draws with `keys[b]`, and only when `active` is absent or its
+    /// element for row `b` is true.
     Rows {
         keys: &'a [RandomKey],
+        shape: &'a [usize],
         active: Option<&'a TensorValue>,
     },
 }
@@ -515,12 +518,24 @@ impl DrawKeys<'_> {
     fn row_active(&self, row: usize) -> bool {
         match self {
             Self::Rows {
+                keys,
                 active: Some(active),
                 ..
-            } => active.storage().scalar_at(row).as_bool_exact() == Some(true),
+            } => {
+                let element = leading_row(row, keys.len(), active.len());
+                active.storage().scalar_at(element).as_bool_exact() == Some(true)
+            }
             _ => true,
         }
     }
+}
+
+/// The element that row `row` of `rows` reads from an operand of `len`
+/// elements shaped like the keys' leading axes: the row's index over those
+/// axes. A nonempty key batch has a nonempty leading part, so `len > 0`
+/// whenever a row exists.
+fn leading_row(row: usize, rows: usize, len: usize) -> usize {
+    row / (rows / len)
 }
 
 /// A key-operand random primitive's keys. A key an inactive `DrawKey`
@@ -559,50 +574,55 @@ fn draw_keys<'a>(
         .storage()
         .keys()
         .ok_or_else(|| format!("random primitive at node {} has a non-key key", node.id.0))?;
-    match key.shape.as_slice() {
-        [] => Ok(DrawKeys::Scalar(keys[0])),
-        [rows] => {
-            let active = activation.filter(|activation| !activation.shape.is_empty());
-            if active.is_some_and(|active| active.shape != [*rows]) {
-                return Err(format!(
-                    "random primitive at node {}: a batched activation must match its {rows} keys",
-                    node.id.0
-                ));
-            }
-            Ok(DrawKeys::Rows { keys, active })
-        }
-        _ => Err(format!(
-            "random primitive at node {} takes a rank-0 key or a rank-1 key batch",
-            node.id.0
-        )),
+    if key.shape.is_empty() {
+        return Ok(DrawKeys::Scalar(keys[0]));
     }
+    let active = activation.filter(|activation| !activation.shape.is_empty());
+    if active.is_some_and(|active| !key.shape.starts_with(&active.shape)) {
+        return Err(format!(
+            "random primitive at node {}: a batched activation must be shaped like a leading part of its keys' shape {:?}",
+            node.id.0, key.shape
+        ));
+    }
+    Ok(DrawKeys::Rows {
+        keys,
+        shape: &key.shape,
+        active,
+    })
 }
 
 /// Row `row` of a batched draw's control: the one scalar of a rank-0
-/// control, or element `row` of a rank-1 control over the `rows` keys.
+/// control, or the element a control shaped like the keys' leading axes
+/// holds for the row.
 fn row_control(
     value: &TensorValue,
     row: usize,
-    rows: usize,
+    shape: &[usize],
     what: &str,
 ) -> Result<chelis_types::ScalarValue, String> {
-    match value.shape.as_slice() {
-        [] => rank0_scalar(value, what),
-        [extent] if *extent == rows => Ok(value.storage().scalar_at(row)),
-        _ => Err(format!("{what} must be rank 0 or one value per key row")),
+    if value.shape.is_empty() {
+        return rank0_scalar(value, what);
     }
+    if !shape.starts_with(&value.shape) {
+        return Err(format!(
+            "{what} must be rank 0 or shaped like a leading part of its keys' shape {shape:?}"
+        ));
+    }
+    Ok(value
+        .storage()
+        .scalar_at(leading_row(row, numel(shape), value.len())))
 }
 
-/// The element count of each of `rows` equal rows of `data`, which a
-/// batched draw splits by its leading axis.
-fn batched_row_len(data: &TensorValue, rows: usize, node: &DagNode) -> Result<usize, String> {
-    if data.shape.first() != Some(&rows) {
+/// The element count of each row of `data` that a batch of keys of `shape`
+/// splits it into: the data's leading axes are the keys' shape.
+fn batched_row_len(data: &TensorValue, shape: &[usize], node: &DagNode) -> Result<usize, String> {
+    if !data.shape.starts_with(shape) {
         return Err(format!(
-            "random primitive at node {}: its {rows} keys must match its data's leading axis",
+            "random primitive at node {}: its keys of shape {shape:?} must match its data's leading axes",
             node.id.0
         ));
     }
-    Ok(data.shape[1..].iter().product())
+    Ok(data.shape[shape.len()..].iter().product())
 }
 
 fn row_of(storage: &TensorStorage, row: usize, row_len: usize) -> TensorStorage {
@@ -641,15 +661,23 @@ fn eval_dropout(
                 .and_then(|prepared| prepared.apply(key))
                 .map_err(|error| error.to_string())?
         }
-        DrawKeys::Rows { keys: rows, active } => {
-            let row_len = batched_row_len(data, rows.len(), node)?;
+        DrawKeys::Rows {
+            keys: rows,
+            shape,
+            active,
+        } => {
+            let row_len = batched_row_len(data, shape, node)?;
             if active.is_none() && rate.shape.is_empty() {
                 let rate = rank0_scalar(rate, "dropout rate")?;
                 PreparedDropout::new(data.storage(), rate)
                     .and_then(|prepared| prepared.apply_rows(rows))
                     .map_err(|error| error.to_string())?
             } else {
-                let keys = DrawKeys::Rows { keys: rows, active };
+                let keys = DrawKeys::Rows {
+                    keys: rows,
+                    shape,
+                    active,
+                };
                 let mut out = Vec::with_capacity(rows.len());
                 for (row, key) in rows.iter().enumerate() {
                     if !keys.row_active(row) {
@@ -657,7 +685,7 @@ fn eval_dropout(
                         continue;
                     }
                     let input = row_of(data.storage(), row, row_len);
-                    let rate = row_control(rate, row, rows.len(), "dropout rate")?;
+                    let rate = row_control(rate, row, shape, "dropout rate")?;
                     out.push(
                         PreparedDropout::new(&input, rate)
                             .and_then(|prepared| prepared.apply(*key))
@@ -690,8 +718,12 @@ fn eval_uniform_like(
                 .and_then(|prepared| prepared.apply(key))
                 .map_err(|error| error.to_string())?
         }
-        DrawKeys::Rows { keys: rows, active } => {
-            let row_len = batched_row_len(template, rows.len(), node)?;
+        DrawKeys::Rows {
+            keys: rows,
+            shape: key_shape,
+            active,
+        } => {
+            let row_len = batched_row_len(template, key_shape, node)?;
             if active.is_none() && low.shape.is_empty() && high.shape.is_empty() {
                 let low = rank0_scalar(low, "uniform_like low bound")?;
                 let high = rank0_scalar(high, "uniform_like high bound")?;
@@ -699,15 +731,19 @@ fn eval_uniform_like(
                     .and_then(|prepared| prepared.apply_rows(rows))
                     .map_err(|error| error.to_string())?
             } else {
-                let keys = DrawKeys::Rows { keys: rows, active };
+                let keys = DrawKeys::Rows {
+                    keys: rows,
+                    shape: key_shape,
+                    active,
+                };
                 let mut out = Vec::with_capacity(rows.len());
                 for (row, key) in rows.iter().enumerate() {
                     if !keys.row_active(row) {
                         out.push(zero_storage(prim, row_len)?);
                         continue;
                     }
-                    let low = row_control(low, row, rows.len(), "uniform_like low bound")?;
-                    let high = row_control(high, row, rows.len(), "uniform_like high bound")?;
+                    let low = row_control(low, row, key_shape, "uniform_like low bound")?;
+                    let high = row_control(high, row, key_shape, "uniform_like high bound")?;
                     out.push(
                         PreparedUniformLike::new(prim, row_len, low, high)
                             .and_then(|prepared| prepared.apply(*key))
@@ -722,9 +758,10 @@ fn eval_uniform_like(
 }
 
 /// `[05-OP-8]`'s bound adjoint of the cotangent `g` under `keys`. A batched
-/// draw's adjoint is rank 0 when its rows share the bound, one balanced tree
-/// over every row's contributions in row-major order, and rank 1 when each
-/// row has its own bound.
+/// draw's adjoint has its bound's shape, the keys' leading `c` axes: each
+/// element is one balanced tree over the contributions, in row-major order,
+/// of the rows that share that bound element. Rank 0 folds every row, and
+/// the keys' own shape folds each row alone.
 fn eval_uniform_bound_adjoint(
     node: &DagNode,
     g: &TensorValue,
@@ -736,7 +773,6 @@ fn eval_uniform_bound_adjoint(
         crate::dag::UniformBound::Low => chelis_types::UniformBound::Low,
         crate::dag::UniformBound::High => chelis_types::UniformBound::High,
     };
-    let per_row = !node.output_type.dims.is_empty();
     match keys {
         DrawKeys::Inactive => zero_tensor(&concrete_shape(&node.output_type)?, prim),
         DrawKeys::Scalar(key) => {
@@ -747,9 +783,17 @@ fn eval_uniform_bound_adjoint(
                 tensor_from_scalars(prim, &[value]),
             ))
         }
-        DrawKeys::Rows { keys: rows, active } => {
-            let row_len = batched_row_len(g, rows.len(), node)?;
-            let keys = DrawKeys::Rows { keys: rows, active };
+        DrawKeys::Rows {
+            keys: rows,
+            shape,
+            active,
+        } => {
+            let row_len = batched_row_len(g, shape, node)?;
+            let keys = DrawKeys::Rows {
+                keys: rows,
+                shape,
+                active,
+            };
             let masked = (0..rows.len())
                 .map(|row| {
                     if keys.row_active(row) {
@@ -759,28 +803,34 @@ fn eval_uniform_bound_adjoint(
                     }
                 })
                 .collect::<Result<Vec<_>, String>>()?;
-            if per_row {
-                let values = masked
-                    .iter()
-                    .zip(rows)
-                    .map(|(row, key)| {
-                        uniform_like_bound_adjoint(row, *key, bound)
-                            .map_err(|error| error.to_string())
-                    })
-                    .collect::<Result<Vec<_>, String>>()?;
-                Ok(TensorValue::from_storage(
-                    vec![rows.len()],
-                    tensor_from_scalars(prim, &values),
-                ))
-            } else {
-                let value =
-                    uniform_like_bound_adjoint_rows(&concat_rows(prim, &masked), rows, bound)
-                        .map_err(|error| error.to_string())?;
-                Ok(TensorValue::from_storage(
-                    Vec::new(),
-                    tensor_from_scalars(prim, &[value]),
-                ))
+            let out_shape = shape.get(..node.output_type.dims.len()).ok_or_else(|| {
+                format!(
+                    "uniform bound adjoint at node {}: its result is not a leading part of its keys' shape {shape:?}",
+                    node.id.0
+                )
+            })?;
+            // Row `b` joins the group of the result element it would read as
+            // a control of the result's shape; each group is contiguous.
+            let mut groups = vec![Vec::new(); numel(out_shape)];
+            for row in 0..rows.len() {
+                groups[leading_row(row, rows.len(), numel(out_shape))].push(row);
             }
+            let values = groups
+                .iter()
+                .map(|group| {
+                    let cotangent = group
+                        .iter()
+                        .map(|row| masked[*row].clone())
+                        .collect::<Vec<_>>();
+                    let keys = group.iter().map(|row| rows[*row]).collect::<Vec<_>>();
+                    uniform_like_bound_adjoint_rows(&concat_rows(prim, &cotangent), &keys, bound)
+                        .map_err(|error| error.to_string())
+                })
+                .collect::<Result<Vec<_>, String>>()?;
+            Ok(TensorValue::from_storage(
+                out_shape.to_vec(),
+                tensor_from_scalars(prim, &values),
+            ))
         }
     }
 }
