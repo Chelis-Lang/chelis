@@ -2354,7 +2354,10 @@ fn signature_entry_lines(
 ) -> Result<Vec<String>, Unsupported> {
     use chelis_ir::axis_sources::EntryExtentGuard;
     if args.len() != plan.observations().nodes().len()
-        || work.is_some_and(|work| work.owners.len() != args.len())
+        || work.is_some_and(|work| {
+            work.owners.len() != args.len()
+                || work.owners.iter().any(|owner| *owner >= work.params.len())
+        })
     {
         return Err(invalid_abi_shape(
             "signature entry lost an input observation".into(),
@@ -2363,7 +2366,7 @@ fn signature_entry_lines(
     }
     let owners = work.map_or_else(|| (0..args.len()).collect(), |work| work.owners.clone());
     let params = work.map_or(&[][..], |work| work.params.as_slice());
-    let param_count = params.len().max(owners.last().map_or(0, |last| last + 1));
+    let param_count = work.map_or(args.len(), |work| work.params.len());
     let label_of = |node: &chelis_ir::dag::DagNode| {
         let RiscOp::Load { name } = &node.op else {
             unreachable!("signature observation")
