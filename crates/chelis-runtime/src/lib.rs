@@ -622,10 +622,27 @@ unsafe fn tensor_metadata_dtype(tensor: *const chelis_tensor, context: &str) -> 
 /// Validate a complete operation input set before any caller reads shape or
 /// data fields. Public [05-OP-33] entries use this route so adding a second or
 /// third operand cannot accidentally reintroduce validate-after-dereference.
+/// No [05-OP-33] data operation names `key`, so a key tensor is a forbidden
+/// carrier here.
 unsafe fn validate_tensor_inputs<const N: usize>(
     inputs: [(*const chelis_tensor, &str); N],
 ) -> [RuntimeDType; N] {
-    std::array::from_fn(|index| unsafe { tensor_dtype(inputs[index].0, inputs[index].1) })
+    std::array::from_fn(|index| {
+        let (tensor, context) = inputs[index];
+        require_data_element_dtype(unsafe { tensor_dtype(tensor, context) }, context)
+    })
+}
+
+/// spec/04 §1.1: an operation admits `key` elements only where its own atom
+/// names `key`. [05-OP-31] names it for storage, views and copies, which
+/// carry a key tensor's words; the [05-OP-33] data operations name it
+/// nowhere, so each rejects a key tensor at entry rather than copying or
+/// duplicating its keys by width.
+fn require_data_element_dtype(dtype: RuntimeDType, context: &str) -> RuntimeDType {
+    if dtype == RuntimeDType::Key {
+        runtime_fail!("Domain: {context}: key is not an active data element dtype");
+    }
+    dtype
 }
 
 fn require_signed_integer_dtype(dtype: RuntimeDType, context: &str) -> RuntimeDType {
@@ -3521,6 +3538,15 @@ fn reduction_exemplar(value: chelis_scalar, op: &str) -> RuntimeDType {
             .map_err(|_| MetadataError::Domain("unknown scalar dtype".into())),
         op,
     );
+    if dtype == RuntimeDType::Key {
+        // [05-OP-31]: a `chelis_scalar` never carries a key.
+        affine_result::<()>(
+            Err(MetadataError::Domain(
+                "a key is not a scalar carrier".into(),
+            )),
+            op,
+        );
+    }
     let width = scalar_used_bits(dtype);
     if value.reserved != [0; 7]
         || (width < 64 && value.bits >> width != 0)
@@ -3856,7 +3882,7 @@ pub unsafe extern "C" fn chelis_tensor_reshape(
     shape: *const chelis_list,
 ) -> *mut chelis_tensor {
     let context = "chelis_tensor_reshape";
-    let dtype = tensor_dtype(tensor, context);
+    let [dtype] = validate_tensor_inputs([(tensor, context)]);
     require_live_kind(shape.cast(), ownership_ledger::Kind::List, context);
     let items = (*shape).live();
     metadata_or_fail(ShapeMetadata::checked_rank(items.len()), context);
@@ -5169,7 +5195,10 @@ pub unsafe extern "C" fn chelis_dict_get_scalar(
     key: chelis_value,
     dtype: chelis_dtype,
 ) -> *mut chelis_option {
-    let dtype = require_runtime_dtype(dtype, "chelis_dict_get_scalar dtype");
+    let dtype = require_data_element_dtype(
+        require_runtime_dtype(dtype, "chelis_dict_get_scalar dtype"),
+        "chelis_dict_get_scalar dtype",
+    );
     let option = chelis_dict_get(dict, key);
     let Some(value) = (*option).value else {
         return option;
@@ -5534,7 +5563,10 @@ pub unsafe extern "C" fn chelis_tensor_from_values(
     list: *const chelis_list,
     dtype: chelis_dtype,
 ) -> *mut chelis_tensor {
-    let dtype = require_runtime_dtype(dtype, "chelis_tensor_from_values dtype");
+    let dtype = require_data_element_dtype(
+        require_runtime_dtype(dtype, "chelis_tensor_from_values dtype"),
+        "chelis_tensor_from_values dtype",
+    );
     let shape = nested_list_shape(list);
     let rank = i32::try_from(shape.len())
         .unwrap_or_else(|_| runtime_fail!("Overflow: chelis_tensor_from_values rank exceeds i32"));
@@ -5726,7 +5758,9 @@ pub unsafe extern "C" fn chelis_tensor_concat(
         .collect::<Vec<_>>();
     let dtypes = tensors
         .iter()
-        .map(|tensor| tensor_dtype(*tensor, "concat input"))
+        .map(|tensor| {
+            require_data_element_dtype(tensor_dtype(*tensor, "concat input"), "concat input")
+        })
         .collect::<Vec<_>>();
     let first = tensors[0];
     let dtype = dtypes[0];
@@ -5786,7 +5820,7 @@ pub unsafe extern "C" fn chelis_tensor_split(
     axis: i32,
     sizes: *const chelis_list,
 ) -> *mut chelis_list {
-    let dtype = tensor_dtype(tensor, "split input");
+    let [dtype] = validate_tensor_inputs([(tensor, "split input")]);
     let axis_i = tensor_normalize_axis(tensor, axis, "split");
     // [05-OP-33]: split takes "nonnegative i64 sizes whose checked sum
     // equals the selected extent". Both halves matter. An unchecked `+=`
@@ -6333,7 +6367,7 @@ pub unsafe extern "C" fn chelis_tensor_diagonal(
     axis1: i32,
     axis2: i32,
 ) -> *mut chelis_tensor {
-    let dtype = tensor_dtype(tensor, "diagonal input");
+    let [dtype] = validate_tensor_inputs([(tensor, "diagonal input")]);
     let axis1_i = tensor_normalize_axis(tensor, axis1, "diagonal");
     let axis2_i = tensor_normalize_axis(tensor, axis2, "diagonal");
     if axis1_i == axis2_i {
