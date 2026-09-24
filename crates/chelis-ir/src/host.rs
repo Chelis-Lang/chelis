@@ -19477,7 +19477,8 @@ fn adt_constructor_definitions(program: &HostLoweringSession<'_>) -> Vec<Generic
 /// The layout of every ADT a function parameter carries, directly or nested
 /// in a tuple, list, option, dictionary, or another ADT's field.
 ///
-/// An ADT the checker registers no constructor for gets a layout with none.
+/// A checker-native nominal type the registry carries no constructor for
+/// (`Result`) gets a layout with none.
 /// An ADT whose name matches several registered ADTs, or whose constructors
 /// do not all instantiate at the carried type, gets no layout; the backend
 /// that would walk it refuses it by name rather than skipping its tensors.
@@ -19521,11 +19522,13 @@ fn parameter_adt_layouts(
                     exact
                 };
                 // Lowering builds, matches and reads a field of an ADT only
-                // through a constructor of this table. A type the checker
-                // registers no constructor for, such as the checker-native
-                // `Result`, therefore has no field a body can read, and its
-                // layout is exactly that: no constructors.
-                if candidates.is_empty() {
+                // through a constructor of this table. A checker-native
+                // nominal type the registry carries no constructor for, such
+                // as `Result`, therefore has no field a body can read, and its
+                // layout is exactly that: no constructors. Any other name with
+                // no definition is a failed lookup, which gets no layout, so
+                // the backend refuses it by name.
+                if candidates.is_empty() && chelis_types::is_checker_native_nominal(name) {
                     layouts.push(HostAdtLayout {
                         ty: ty.clone(),
                         constructors: Vec::new(),
@@ -19535,7 +19538,7 @@ fn parameter_adt_layouts(
                 let one_adt = candidates
                     .windows(2)
                     .all(|pair| pair[0].adt_name == pair[1].adt_name);
-                if !one_adt {
+                if candidates.is_empty() || !one_adt {
                     continue;
                 }
                 let canonical =
