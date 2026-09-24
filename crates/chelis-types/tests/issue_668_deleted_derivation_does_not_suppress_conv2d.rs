@@ -20,14 +20,22 @@ fn messages(errors: &[CheckError]) -> Vec<String> {
 }
 
 fn ir_diagnostics(source: &str) -> Vec<String> {
-    match check_ir_program(&deep(source), chelis_types::ProgramOrigin::Unlinked) {
+    match check_ir_program(
+        &deep(source),
+        chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
+    ) {
         Ok(_) => Vec::new(),
         Err(result) => messages(&result.errors),
     }
 }
 
 fn typed_diagnostics(source: &str) -> Vec<String> {
-    match check_typed_program(&deep(source), chelis_types::ProgramOrigin::Unlinked) {
+    match check_typed_program(
+        &deep(source),
+        chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
+    ) {
         Ok(_) => Vec::new(),
         Err(result) => messages(&result.errors),
     }

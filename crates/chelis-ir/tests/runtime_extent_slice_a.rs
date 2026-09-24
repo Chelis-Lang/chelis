@@ -49,11 +49,16 @@ fn input_axis_expand_verifies_and_evaluates_from_shape_metadata() {
     dag.add_root(expanded);
 
     assert!(verify::verify(&dag).is_empty());
-    let values = eval_tensor_roots_with_strict(&dag, &[expanded], |name| match name {
-        "value" => Some(TensorValue::from_vec(vec![], vec![2.0])),
-        "source" => Some(TensorValue::from_vec(vec![3], vec![4.0, 5.0, 6.0])),
-        _ => None,
-    })
+    let values = eval_tensor_roots_with_strict(
+        &dag,
+        &[expanded],
+        |name| match name {
+            "value" => Some(TensorValue::from_vec(vec![], vec![2.0])),
+            "source" => Some(TensorValue::from_vec(vec![3], vec![4.0, 5.0, 6.0])),
+            _ => None,
+        },
+        &mut chelis_types::NativeServices::new(None),
+    )
     .expect("InputAxis expansion must evaluate");
     assert_eq!(values[&expanded].shape, vec![3]);
     assert_eq!(values[&expanded].to_f64_lossy_vec(), vec![2.0; 3]);
@@ -90,11 +95,16 @@ fn node_expand_verifies_and_evaluates_from_int64_scalar_input() {
     dag.add_root(expanded);
 
     assert!(verify::verify(&dag).is_empty());
-    let values = eval_tensor_roots_with_strict(&dag, &[expanded], |name| match name {
-        "value" => Some(TensorValue::from_vec(vec![], vec![7.0])),
-        "extent" => Some(TensorValue::from_vec(vec![], vec![3.0])),
-        _ => None,
-    })
+    let values = eval_tensor_roots_with_strict(
+        &dag,
+        &[expanded],
+        |name| match name {
+            "value" => Some(TensorValue::from_vec(vec![], vec![7.0])),
+            "extent" => Some(TensorValue::from_vec(vec![], vec![3.0])),
+            _ => None,
+        },
+        &mut chelis_types::NativeServices::new(None),
+    )
     .expect("node-valued expansion must evaluate");
     assert_eq!(values[&expanded].shape, vec![3]);
     assert_eq!(values[&expanded].to_f64_lossy_vec(), vec![7.0; 3]);
@@ -123,9 +133,12 @@ fn zero_literal_expand_is_valid_and_empty() {
     dag.add_root(expanded);
 
     assert!(verify::verify(&dag).is_empty());
-    let values = eval_tensor_roots_with_strict(&dag, &[expanded], |name| {
-        (name == "value").then(|| TensorValue::from_vec(vec![], vec![1.0]))
-    })
+    let values = eval_tensor_roots_with_strict(
+        &dag,
+        &[expanded],
+        |name| (name == "value").then(|| TensorValue::from_vec(vec![], vec![1.0])),
+        &mut chelis_types::NativeServices::new(None),
+    )
     .expect("zero expansion must evaluate");
     assert_eq!(values[&expanded].shape, vec![0]);
     assert!(values[&expanded].is_empty());
@@ -247,9 +260,15 @@ fn vmap_keeps_shape_bound_shared_and_shifts_its_axis() {
     assert!(verify::verify(&vmapped).is_empty());
 
     let root = vmapped.roots()[0];
-    let values = eval_tensor_roots_with_strict(&vmapped, &[root], |name| {
-        (name == "x").then(|| TensorValue::from_vec(vec![2, 3], vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0]))
-    })
+    let values = eval_tensor_roots_with_strict(
+        &vmapped,
+        &[root],
+        |name| {
+            (name == "x")
+                .then(|| TensorValue::from_vec(vec![2, 3], vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0]))
+        },
+        &mut chelis_types::NativeServices::new(None),
+    )
     .expect("vmapped shape bound must evaluate");
     assert_eq!(values[&root].shape, vec![2, 2]);
     assert_eq!(values[&root].to_f64_lossy_vec(), vec![2.0, 3.0, 5.0, 6.0]);
@@ -299,9 +318,12 @@ fn vmap_shares_shape_extent_across_bound_and_ordinary_uses() {
     );
 
     let roots = vmapped.roots();
-    let values = eval_tensor_roots_with_strict(&vmapped, roots, |name| {
-        (name == "x").then(|| TensorValue::from_vec(vec![2, 3], vec![1.0; 6]))
-    })
+    let values = eval_tensor_roots_with_strict(
+        &vmapped,
+        roots,
+        |name| (name == "x").then(|| TensorValue::from_vec(vec![2, 3], vec![1.0; 6])),
+        &mut chelis_types::NativeServices::new(None),
+    )
     .expect("vmapped shared extent must evaluate");
     assert_eq!(values[&roots[0]].shape, vec![2, 3]);
     assert_eq!(values[&roots[1]].shape, vec![2]);

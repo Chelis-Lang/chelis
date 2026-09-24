@@ -26,10 +26,12 @@ fn check(name: &str, args: &[&str], expected: Option<CheckErrorKind>) {
     let ir = kinds(check_ir_program(
         &program,
         chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
     ));
     let typed = kinds(check_typed_program(
         &program,
         chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
     ));
     assert_eq!(ir, typed, "ingress parity: {name}, {args:?}");
     match expected {

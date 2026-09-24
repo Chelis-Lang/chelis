@@ -104,7 +104,12 @@ fn errors_for_stamped_body(tag: DeepTag) -> Vec<chelis_types::errors::CheckError
         ],
         zero(),
     );
-    infer_program(&[def], chelis_types::ProgramOrigin::Unlinked).errors
+    infer_program(
+        &[def],
+        chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
+    )
+    .errors
 }
 
 // ── Negative polarity: no-disposition tags are rejected loudly ──────────────
@@ -142,7 +147,12 @@ fn in_vocabulary_tags_without_expression_disposition_are_rejected_loudly() {
 #[test]
 fn unknown_tag_outside_the_vocabulary_keeps_the_raw_string_loud_arm() {
     let exprs = parse_str("(def {} f (bogus_wrapper {}))").expect("lenient Deep parse");
-    let errors = infer_program(&exprs, chelis_types::ProgramOrigin::Unlinked).errors;
+    let errors = infer_program(
+        &exprs,
+        chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
+    )
+    .errors;
     let unknown_form = errors
         .iter()
         .find(|e| matches!(e.kind, CheckErrorKind::UnknownForm))
@@ -173,7 +183,12 @@ fn untagged_list_in_expression_position_is_rejected_loudly() {
         vec![Expr::Atom(Atom::Name("f".to_string()), zero()), untagged],
         zero(),
     );
-    let errors = infer_program(&[def], chelis_types::ProgramOrigin::Unlinked).errors;
+    let errors = infer_program(
+        &[def],
+        chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
+    )
+    .errors;
     assert!(
         errors
             .iter()
@@ -191,7 +206,11 @@ fn block_types_as_its_last_child() {
          (lit {type: (t-prim {} f32)} 2.0)))",
     )
     .expect("lenient Deep parse");
-    let result = infer_program(&exprs, chelis_types::ProgramOrigin::Unlinked);
+    let result = infer_program(
+        &exprs,
+        chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
+    );
     assert!(
         result.errors.is_empty(),
         "a well-typed block must check cleanly; got {:?}",
@@ -208,7 +227,11 @@ fn block_checks_every_child_not_only_the_last() {
          (lit {type: (t-prim {} i64)} 2)) (lit {type: (t-prim {} f32)} 3.0)))",
     )
     .expect("lenient Deep parse");
-    let result = infer_program(&exprs, chelis_types::ProgramOrigin::Unlinked);
+    let result = infer_program(
+        &exprs,
+        chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
+    );
     assert!(
         !result.errors.is_empty(),
         "an ill-typed discarded block child must be reported"
@@ -229,6 +252,7 @@ fn childless_block_is_malformed() {
     let errors = infer_program(
         &support::parse_unchecked_legacy("(def {} f (block {}))"),
         chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
     )
     .errors;
     assert!(
@@ -247,7 +271,11 @@ fn dispatched_tags_still_check_cleanly() {
                   (def {} g (if {} (lit {type: (t-prim {} bool)} true) \
                   (var {} f) (lit {type: (t-prim {} f32)} 2.0)))";
     let exprs = parse_str(source).expect("lenient Deep parse");
-    let result = infer_program(&exprs, chelis_types::ProgramOrigin::Unlinked);
+    let result = infer_program(
+        &exprs,
+        chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
+    );
     assert!(
         result.errors.is_empty(),
         "the well-typed control must stay clean; got {:?}",

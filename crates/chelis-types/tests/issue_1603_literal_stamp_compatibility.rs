@@ -85,11 +85,19 @@ fn messages(errors: &[CheckError]) -> Vec<String> {
 /// is checked for every cell including the recorded-only ones.
 fn both_ingresses(source: &str) -> Vec<String> {
     let exprs = stamped(source);
-    let typed = match check_typed_program(&exprs, chelis_types::ProgramOrigin::Unlinked) {
+    let typed = match check_typed_program(
+        &exprs,
+        chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
+    ) {
         Ok(_) => Vec::new(),
         Err(result) => messages(&result.errors),
     };
-    let ir = match check_ir_program(&exprs, chelis_types::ProgramOrigin::Unlinked) {
+    let ir = match check_ir_program(
+        &exprs,
+        chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
+    ) {
         Ok(_) => Vec::new(),
         Err(result) => messages(&result.errors),
     };
@@ -235,12 +243,28 @@ fn an_explicit_axis_adds_one_real_inference_visit() {
     let explicit = stamped(&vmap_program(INT32_0));
     for (without_axis, with_axis) in [
         (
-            check_ir_program(&omitted, chelis_types::ProgramOrigin::Unlinked),
-            check_ir_program(&explicit, chelis_types::ProgramOrigin::Unlinked),
+            check_ir_program(
+                &omitted,
+                chelis_types::ProgramOrigin::Unlinked,
+                &mut chelis_types::NativeServices::new(None),
+            ),
+            check_ir_program(
+                &explicit,
+                chelis_types::ProgramOrigin::Unlinked,
+                &mut chelis_types::NativeServices::new(None),
+            ),
         ),
         (
-            check_typed_program(&omitted, chelis_types::ProgramOrigin::Unlinked),
-            check_typed_program(&explicit, chelis_types::ProgramOrigin::Unlinked),
+            check_typed_program(
+                &omitted,
+                chelis_types::ProgramOrigin::Unlinked,
+                &mut chelis_types::NativeServices::new(None),
+            ),
+            check_typed_program(
+                &explicit,
+                chelis_types::ProgramOrigin::Unlinked,
+                &mut chelis_types::NativeServices::new(None),
+            ),
         ),
     ] {
         let without_axis = without_axis.expect("the default axis remains accepted");

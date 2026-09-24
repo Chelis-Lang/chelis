@@ -21,7 +21,11 @@ fn matrix_trace_typechecks_as_rank_zero_tensor() {
         "fixtures/core/tests/issue_1148_trace_rank_zero/matrix_trace_typechecks_as_rank_zero_tensor.0.deep"
     ));
 
-    if let Err(report) = check_ir_program(&deep, chelis_types::ProgramOrigin::Unlinked) {
+    if let Err(report) = check_ir_program(
+        &deep,
+        chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
+    ) {
         panic!(
             "matrix trace must type-check as rank-zero tensor[f32], got {:?}",
             report.errors
@@ -35,8 +39,12 @@ fn matrix_trace_rejects_scalar_return_signature() {
         "fixtures/core/tests/issue_1148_trace_rank_zero/matrix_trace_rejects_scalar_return_signature.0.deep"
     ));
 
-    let report = check_ir_program(&deep, chelis_types::ProgramOrigin::Unlinked)
-        .expect_err("matrix trace must not satisfy a scalar f32 return signature");
+    let report = check_ir_program(
+        &deep,
+        chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
+    )
+    .expect_err("matrix trace must not satisfy a scalar f32 return signature");
     let [error] = report.errors.as_slice() else {
         panic!(
             "expected exactly one declared-signature mismatch, got {:?}",
@@ -52,8 +60,12 @@ fn wrong_trace_input_type_mismatch_is_not_signature_evidence() {
         "fixtures/core/tests/issue_1148_trace_rank_zero/wrong_trace_input_type_mismatch_is_not_signature_evidence.0.deep"
     ));
 
-    let report = check_ir_program(&deep, chelis_types::ProgramOrigin::Unlinked)
-        .expect_err("trace must reject a scalar input");
+    let report = check_ir_program(
+        &deep,
+        chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
+    )
+    .expect_err("trace must reject a scalar input");
     let [error] = report.errors.as_slice() else {
         panic!(
             "expected exactly one wrong-input TypeMismatch, got {:?}",

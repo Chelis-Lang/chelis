@@ -251,7 +251,7 @@ pub(super) fn reject_inadmissible_operand_dtypes(
             }
 
             if let Some(expr) = kids.get(index + 1)
-                && !is_static_numeric_bound(expr)
+                && !is_static_numeric_bound(expr, &mut errors.stack())
             {
                 return reject(
                     errors,

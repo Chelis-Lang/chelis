@@ -8,39 +8,75 @@ fn verdicts(source: &str) -> Vec<Vec<chelis_types::errors::CheckError>> {
 fn verdicts_for(exprs: &[chelis_deep::Expr]) -> Vec<Vec<chelis_types::errors::CheckError>> {
     use chelis_types::*;
     let library = chelis_deep::parser::parse_str("(def {} library_value (lit {} 1))").unwrap();
-    let context =
-        build_type_env_from_library(&library, chelis_types::ProgramOrigin::Unlinked).unwrap();
+    let context = build_type_env_from_library(
+        &library,
+        chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
+    )
+    .unwrap();
     vec![
-        check_ir_program(exprs, chelis_types::ProgramOrigin::Unlinked)
-            .err()
-            .map(|e| e.errors)
-            .unwrap_or_default(),
-        check_typed_program(exprs, chelis_types::ProgramOrigin::Unlinked)
-            .err()
-            .map(|e| e.errors)
-            .unwrap_or_default(),
-        build_type_env_from_library(exprs, chelis_types::ProgramOrigin::Unlinked)
-            .err()
-            .map(|e| e.errors)
-            .unwrap_or_default(),
-        build_compiled_library_context(exprs, chelis_types::ProgramOrigin::Unlinked)
-            .err()
-            .map(|e| e.errors)
-            .unwrap_or_default(),
-        build_compiled_library_context_with_base(
-            &context,
+        check_ir_program(
             exprs,
             chelis_types::ProgramOrigin::Unlinked,
+            &mut chelis_types::NativeServices::new(None),
         )
         .err()
         .map(|e| e.errors)
         .unwrap_or_default(),
-        check_ir_with_context(&context, exprs, chelis_types::ProgramOrigin::Unlinked)
-            .err()
-            .map(|e| e.errors)
-            .unwrap_or_default(),
-        infer_ir_program(exprs, chelis_types::ProgramOrigin::Unlinked).errors,
-        infer_program(exprs, chelis_types::ProgramOrigin::Unlinked).errors,
+        check_typed_program(
+            exprs,
+            chelis_types::ProgramOrigin::Unlinked,
+            &mut chelis_types::NativeServices::new(None),
+        )
+        .err()
+        .map(|e| e.errors)
+        .unwrap_or_default(),
+        build_type_env_from_library(
+            exprs,
+            chelis_types::ProgramOrigin::Unlinked,
+            &mut chelis_types::NativeServices::new(None),
+        )
+        .err()
+        .map(|e| e.errors)
+        .unwrap_or_default(),
+        build_compiled_library_context(
+            exprs,
+            chelis_types::ProgramOrigin::Unlinked,
+            &mut chelis_types::NativeServices::new(None),
+        )
+        .err()
+        .map(|e| e.errors)
+        .unwrap_or_default(),
+        build_compiled_library_context_with_base(
+            &context,
+            exprs,
+            chelis_types::ProgramOrigin::Unlinked,
+            &mut chelis_types::NativeServices::new(None),
+        )
+        .err()
+        .map(|e| e.errors)
+        .unwrap_or_default(),
+        check_ir_with_context(
+            &context,
+            exprs,
+            chelis_types::ProgramOrigin::Unlinked,
+            &mut chelis_types::NativeServices::new(None),
+        )
+        .err()
+        .map(|e| e.errors)
+        .unwrap_or_default(),
+        infer_ir_program(
+            exprs,
+            chelis_types::ProgramOrigin::Unlinked,
+            &mut chelis_types::NativeServices::new(None),
+        )
+        .errors,
+        infer_program(
+            exprs,
+            chelis_types::ProgramOrigin::Unlinked,
+            &mut chelis_types::NativeServices::new(None),
+        )
+        .errors,
     ]
 }
 
@@ -49,10 +85,17 @@ fn checked_effect_replacement_also_checks_metadata_before_publication() {
     let original =
         chelis_deep::parser::parse_str("(def {doc: \"keep\"} f (fn {} (params {}) (lit {} 1)))")
             .unwrap();
-    let checked =
-        chelis_types::check_ir_program(&original, chelis_types::ProgramOrigin::Unlinked).unwrap();
+    let checked = chelis_types::check_ir_program(
+        &original,
+        chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
+    )
+    .unwrap();
     checked
-        .try_with_effect_annotations(checked.exprs().to_vec())
+        .try_with_effect_annotations(
+            checked.exprs().to_vec(),
+            &mut chelis_types::NativeServices::new(None),
+        )
         .unwrap();
     let mut changed = checked.exprs().to_vec();
     match &mut changed[0] {
@@ -70,7 +113,7 @@ fn checked_effect_replacement_also_checks_metadata_before_publication() {
         _ => panic!("declaration"),
     }
     checked
-        .try_with_effect_annotations(changed)
+        .try_with_effect_annotations(changed, &mut chelis_types::NativeServices::new(None))
         .expect_err("derived-effect rewrite cannot discard source annotations");
     let malformed = serde_json::json!({"entries": [["effects", Expr::Atom(Atom::Int(1), SPAN)]]});
     assert!(serde_json::from_value::<Metadata>(malformed).is_err());

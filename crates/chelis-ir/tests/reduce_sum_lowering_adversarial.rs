@@ -16,7 +16,12 @@ use chelis_types::check_ir_program;
 
 fn lower_deep(src: &str) -> Result<chelis_ir::dag::Dag, String> {
     let exprs = chelis_deep::parser::parse_str(src).expect("parse Deep fixture");
-    let checked = check_ir_program(&exprs, chelis_types::ProgramOrigin::Unlinked).map_err(|r| {
+    let checked = check_ir_program(
+        &exprs,
+        chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
+    )
+    .map_err(|r| {
         format!(
             "check: {:?}",
             r.errors
@@ -25,8 +30,12 @@ fn lower_deep(src: &str) -> Result<chelis_ir::dag::Dag, String> {
                 .collect::<Vec<_>>()
         )
     })?;
-    let checked = chelis_effects::check_program(&checked).expect("fixture effects");
-    let checked = chelis_types::check_linearity(&checked).expect("fixture linearity");
+    let checked =
+        chelis_effects::check_program(&checked, &mut chelis_types::NativeServices::new(None))
+            .expect("fixture effects");
+    let checked =
+        chelis_types::check_linearity(&checked, &mut chelis_types::NativeServices::new(None))
+            .expect("fixture linearity");
     Ok(chelis_ir::lowering_runtime::with_native_lowering_runtime(
         |runtime| lower_program(&checked, runtime),
     ))

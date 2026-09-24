@@ -24,12 +24,20 @@ fn diagnostics(source: &str) -> Vec<CheckError> {
 }
 
 fn deep_diagnostics(deep: &[chelis_deep::Expr]) -> Vec<CheckError> {
-    let ir = check_ir_program(deep, chelis_types::ProgramOrigin::Unlinked)
-        .err()
-        .map_or(vec![], |r| r.errors);
-    let typed = check_typed_program(deep, chelis_types::ProgramOrigin::Unlinked)
-        .err()
-        .map_or(vec![], |r| r.errors);
+    let ir = check_ir_program(
+        deep,
+        chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
+    )
+    .err()
+    .map_or(vec![], |r| r.errors);
+    let typed = check_typed_program(
+        deep,
+        chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
+    )
+    .err()
+    .map_or(vec![], |r| r.errors);
     let render = |errors: &[CheckError]| {
         errors
             .iter()
@@ -295,9 +303,12 @@ fn declaration_binders_stay_independent_and_rigid() {
 #[test]
 fn cached_library_bounds_and_lexical_aliases_preserve_the_boundary() {
     let library = chelis_deep::parse_and_stamp_file(include_str!("fixtures/core/tests/issue_1621_scalar_surface/cached_library_bounds_and_lexical_aliases_preserve_the_boundary_1.deep")).expect("Deep fixture");
-    let context =
-        chelis_types::build_type_env_from_library(&library, chelis_types::ProgramOrigin::Unlinked)
-            .unwrap();
+    let context = chelis_types::build_type_env_from_library(
+        &library,
+        chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
+    )
+    .unwrap();
     let bytes = bincode::serialize(&context).unwrap();
     let context: chelis_types::TypeEnv = bincode::deserialize(&bytes).unwrap();
     for (operand, mixed) in [("(var {} xs)", true), ("(var {} c)", false)] {
@@ -308,6 +319,7 @@ fn cached_library_bounds_and_lexical_aliases_preserve_the_boundary() {
             &context,
             &deep,
             chelis_types::ProgramOrigin::Unlinked,
+            &mut chelis_types::NativeServices::new(None),
         )
         .err()
         .map_or(vec![], |r| r.errors);

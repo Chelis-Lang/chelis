@@ -152,7 +152,12 @@ fn gather_via_section_3_5_lowering_accumulates_duplicate_indices() {
         "table".to_string(),
         TensorValue::from_vec(vec![2, 2], vec![1.0, 2.0, 3.0, 4.0]),
     );
-    let fwd_vals = eval_tensor_with(&dag, |n| inputs.get(n).cloned()).expect("forward eval");
+    let fwd_vals = eval_tensor_with(
+        &dag,
+        |n| inputs.get(n).cloned(),
+        &mut chelis_types::NativeServices::new(None),
+    )
+    .expect("forward eval");
     let fwd_out = &fwd_vals[&s2];
     assert!(
         (fwd_out.to_f64_lossy_vec()[0] - 9.0).abs() < 1e-6,
@@ -163,7 +168,12 @@ fn gather_via_section_3_5_lowering_accumulates_duplicate_indices() {
     // Backward: differentiate the scalar w.r.t. table.
     let grad = grad_dag_checked(&dag, s2, &[table]).expect("grad must succeed");
     let grad_node = grad.grad_nodes[&table];
-    let bwd_vals = eval_tensor_with(&grad.dag, |n| inputs.get(n).cloned()).expect("backward eval");
+    let bwd_vals = eval_tensor_with(
+        &grad.dag,
+        |n| inputs.get(n).cloned(),
+        &mut chelis_types::NativeServices::new(None),
+    )
+    .expect("backward eval");
     let dtable = &bwd_vals[&grad_node];
 
     // Expected: every token contributed +1 to dout/dtable[0,*]. Three tokens
@@ -237,7 +247,12 @@ fn first_class_gather_adjoint_scatter_add_accumulates_duplicate_indices() {
     );
     let grad = grad_dag_checked(&dag, s2, &[table]).expect("grad through gather must succeed");
     let grad_node = grad.grad_nodes[&table];
-    let vals = eval_tensor_with(&grad.dag, |n| inputs.get(n).cloned()).expect("backward eval");
+    let vals = eval_tensor_with(
+        &grad.dag,
+        |n| inputs.get(n).cloned(),
+        &mut chelis_types::NativeServices::new(None),
+    )
+    .expect("backward eval");
     let dtable = &vals[&grad_node];
 
     assert_eq!(dtable.shape, vec![2, 2]);
@@ -306,7 +321,12 @@ fn first_class_gather_axis1_adjoint_scatter_add_accumulates_duplicate_indices() 
     );
     let grad = grad_dag_checked(&dag, s2, &[table]).expect("grad through axis-1 gather");
     let grad_node = grad.grad_nodes[&table];
-    let vals = eval_tensor_with(&grad.dag, |n| inputs.get(n).cloned()).expect("backward eval");
+    let vals = eval_tensor_with(
+        &grad.dag,
+        |n| inputs.get(n).cloned(),
+        &mut chelis_types::NativeServices::new(None),
+    )
+    .expect("backward eval");
     let dtable = &vals[&grad_node];
 
     assert_eq!(dtable.shape, vec![2, 3]);

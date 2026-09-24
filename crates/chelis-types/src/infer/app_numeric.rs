@@ -297,7 +297,7 @@ pub(super) fn precision_variable_verdict(
     fname: &str,
     var: TypeVar,
     name: &str,
-    subst: &Subst,
+    subst: &mut Subst,
 ) -> PrecisionVerdict {
     let Some(required) = operand_family_policy(fname) else {
         return PrecisionVerdict::Admit;
@@ -330,7 +330,7 @@ pub(super) fn decide_precision_variable_operand(
     fname: &str,
     var: TypeVar,
     env: &Env,
-    subst: &Subst,
+    subst: &mut Subst,
     errors: &mut DiagnosticSink<'_>,
 ) -> Option<Type> {
     let authored = env
@@ -554,7 +554,7 @@ pub(super) fn validate_numeric_and_reduction_arguments(
     func_name: &Option<String>,
     arg_tys: &[Type],
     env: &Env,
-    subst: &Subst,
+    subst: &mut Subst,
     errors: &mut DiagnosticSink<'_>,
     route_observed: &mut bool,
     suspension: Option<&DtypeAdmissibilitySite<'_>>,
@@ -719,7 +719,9 @@ pub(super) fn validate_numeric_and_reduction_arguments(
         if fname == "softmax"
             && let Some(first_arg) = arg_tys.first()
             && let Type::Tensor(dims, _) = type_for_readonly_check(first_arg, subst)
-            && let Some(raw) = kids.get(2).and_then(extract_int_for_dim)
+            && let Some(raw) = kids
+                .get(2)
+                .and_then(|expr| extract_int_for_dim(expr, &mut errors.stack()))
             && normalize_static_axis(dims.len(), raw).is_none()
         {
             reject!(

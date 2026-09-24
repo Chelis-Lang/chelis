@@ -30,14 +30,24 @@ fn deep_of_dp(source: &str) -> Vec<chelis_deep::Expr> {
 /// Errors from the executable check pipeline (the path `chelis check`
 /// uses for `.dp` ingestion and the fitness scorer).
 fn errors_ir(exprs: &[chelis_deep::Expr]) -> Vec<CheckError> {
-    infer_ir_program(exprs, ProgramOrigin::Unlinked).errors
+    infer_ir_program(
+        exprs,
+        ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
+    )
+    .errors
 }
 
 /// Errors from the plain program driver. D-CHECK installs the
 /// `OpacityContext` in BOTH drivers; the parity tests below exercise
 /// this one explicitly.
 fn errors_plain(exprs: &[chelis_deep::Expr]) -> Vec<CheckError> {
-    infer_program(exprs, ProgramOrigin::Unlinked).errors
+    infer_program(
+        exprs,
+        ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
+    )
+    .errors
 }
 
 fn kind_name(err: &CheckError) -> String {
@@ -806,7 +816,12 @@ fn stem_collision_belt_fires_even_when_linker_name_check_is_off() {
       (record {} Pkg__foo__bar__Secret (kv {} value (var {} x))))))
 "#;
     let exprs = deep_of_dp(program);
-    let errors = infer_ir_program(&exprs, ProgramOrigin::Linked).errors;
+    let errors = infer_ir_program(
+        &exprs,
+        ProgramOrigin::Linked,
+        &mut chelis_types::NativeServices::new(None),
+    )
+    .errors;
     assert!(
         reserved_name_violations(&errors).is_empty(),
         "with Linked origin, the reserved-name check is off: {errors:?}"
@@ -836,8 +851,22 @@ fn linked_acceptance_is_per_input_and_preserves_opacity() {
     (record {} Pkg__foo__Secret (kv {} value (var {} x)))))
 "#;
     let exprs = deep_of_dp(program);
-    assert_clean(&infer_ir_program(&exprs, ProgramOrigin::Linked).errors);
-    assert_clean(&infer_program(&exprs, ProgramOrigin::Linked).errors);
+    assert_clean(
+        &infer_ir_program(
+            &exprs,
+            ProgramOrigin::Linked,
+            &mut chelis_types::NativeServices::new(None),
+        )
+        .errors,
+    );
+    assert_clean(
+        &infer_program(
+            &exprs,
+            ProgramOrigin::Linked,
+            &mut chelis_types::NativeServices::new(None),
+        )
+        .errors,
+    );
 
     for errors in [errors_ir(&exprs), errors_plain(&exprs)] {
         assert!(
@@ -852,8 +881,22 @@ fn linked_acceptance_is_per_input_and_preserves_opacity() {
            (fn {{}} (params {{}} (x {{type: (t-prim {{}} f32)}})) \
              (record {{}} Pkg__foo__Secret (kv {{}} value (var {{}} x)))))"
     ));
-    assert_single_violation(&infer_ir_program(&outside, ProgramOrigin::Linked).errors);
-    assert_single_violation(&infer_program(&outside, ProgramOrigin::Linked).errors);
+    assert_single_violation(
+        &infer_ir_program(
+            &outside,
+            ProgramOrigin::Linked,
+            &mut chelis_types::NativeServices::new(None),
+        )
+        .errors,
+    );
+    assert_single_violation(
+        &infer_program(
+            &outside,
+            ProgramOrigin::Linked,
+            &mut chelis_types::NativeServices::new(None),
+        )
+        .errors,
+    );
 }
 
 // ── Exhaustiveness over opaque scrutinees ────────────────────────

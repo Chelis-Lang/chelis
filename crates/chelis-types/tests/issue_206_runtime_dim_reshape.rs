@@ -36,7 +36,11 @@ use chelis_types::errors::CheckError;
 fn typecheck_core(source: &str) -> Vec<CheckError> {
     let deep: Vec<chelis_deep::Expr> =
         chelis_deep::parse_and_stamp_file(source).expect("valid core fixture");
-    match check_typed_program(&deep, chelis_types::ProgramOrigin::Unlinked) {
+    match check_typed_program(
+        &deep,
+        chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
+    ) {
         Ok(_) => Vec::new(),
         Err(prog_errors) => prog_errors.errors,
     }
@@ -45,8 +49,12 @@ fn typecheck_core(source: &str) -> Vec<CheckError> {
 fn typecheck_core_program(source: &str) -> Result<CheckedProgram, Vec<CheckError>> {
     let deep: Vec<chelis_deep::Expr> =
         chelis_deep::parse_and_stamp_file(source).expect("valid core fixture");
-    check_typed_program(&deep, chelis_types::ProgramOrigin::Unlinked)
-        .map_err(|prog_errors| prog_errors.errors)
+    check_typed_program(
+        &deep,
+        chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
+    )
+    .map_err(|prog_errors| prog_errors.errors)
 }
 
 fn errors_summary(errors: &[CheckError]) -> String {

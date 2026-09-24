@@ -19,12 +19,12 @@ use chelis_types::infer::{
     SignatureInferenceMetadata, build_compiled_library_context,
     build_compiled_library_context_with_base, build_type_env_from_library, check_ir_program,
     check_ir_with_context, check_ir_with_signature_context, check_typed_program, infer_ir_program,
-    infer_program, run_on_grown_stack, set_grow_segment_bytes_for_test, type_to_deep_expr,
+    infer_program, type_to_deep_expr,
 };
 
 use chelis_deep::ast as deep;
 use chelis_types::types::Type;
-use chelis_types::{ProgramOrigin, TypeEnv};
+use chelis_types::{NativeServices, ProgramOrigin, TypeEnv};
 
 type CompiledLibraryContextResult = Result<(TypeEnv, CheckedProgram), InferResult>;
 
@@ -33,53 +33,63 @@ type CompiledLibraryContextResult = Result<(TypeEnv, CheckedProgram), InferResul
 // Binding each function to a `const` of its written-out type pins the
 // signature. A changed parameter or return type fails to compile here.
 
-const _INFER_PROGRAM: fn(&[deep::Expr], ProgramOrigin) -> InferResult = infer_program;
+const _INFER_PROGRAM: fn(&[deep::Expr], ProgramOrigin, &mut NativeServices) -> InferResult =
+    infer_program;
 
-const _CHECK_IR_PROGRAM: fn(&[deep::Expr], ProgramOrigin) -> Result<CheckedProgram, InferResult> =
-    check_ir_program;
+const _CHECK_IR_PROGRAM: fn(
+    &[deep::Expr],
+    ProgramOrigin,
+    &mut NativeServices,
+) -> Result<CheckedProgram, InferResult> = check_ir_program;
 
 const _CHECK_TYPED_PROGRAM: fn(
     &[deep::Expr],
     ProgramOrigin,
+    &mut NativeServices,
 ) -> Result<CheckedProgram, InferResult> = check_typed_program;
 
-const _INFER_IR_PROGRAM: fn(&[deep::Expr], ProgramOrigin) -> InferResult = infer_ir_program;
+const _INFER_IR_PROGRAM: fn(&[deep::Expr], ProgramOrigin, &mut NativeServices) -> InferResult =
+    infer_ir_program;
 
 const _BUILD_TYPE_ENV_FROM_LIBRARY: fn(
     &[deep::Expr],
     ProgramOrigin,
+    &mut NativeServices,
 ) -> Result<TypeEnv, InferResult> = build_type_env_from_library;
 
 const _TYPE_TO_DEEP_EXPR: fn(&Type) -> deep::Expr = type_to_deep_expr;
 
-const _SET_GROW_SEGMENT_BYTES_FOR_TEST: fn(usize) = set_grow_segment_bytes_for_test;
-
 const _BUILD_COMPILED_LIBRARY_CONTEXT: fn(
     &[deep::Expr],
     ProgramOrigin,
+    &mut NativeServices,
 ) -> CompiledLibraryContextResult = build_compiled_library_context;
 
 const _BUILD_COMPILED_LIBRARY_CONTEXT_WITH_BASE: fn(
     &TypeEnv,
     &[deep::Expr],
     ProgramOrigin,
+    &mut NativeServices,
 ) -> CompiledLibraryContextResult = build_compiled_library_context_with_base;
 
 const _CHECK_IR_WITH_CONTEXT: fn(
     &TypeEnv,
     &[deep::Expr],
     ProgramOrigin,
+    &mut NativeServices,
 ) -> Result<CheckedProgram, InferResult> = check_ir_with_context;
 
+#[allow(clippy::type_complexity)]
 const _CHECK_IR_WITH_SIGNATURE_CONTEXT: fn(
     &TypeEnv,
     &SignatureInferenceMetadata,
     &[deep::Expr],
     ProgramOrigin,
+    &mut NativeServices,
 ) -> Result<CheckedProgram, InferResult> = check_ir_with_signature_context;
 
-// `run_on_grown_stack` is generic over its closure, so it is exercised by a
-// call below rather than pinned as a function pointer.
+// `NativeServices::with_grown_stack` is generic over its closure, so it is
+// exercised by a call below rather than pinned as a function pointer.
 
 // ── Types ───────────────────────────────────────────────────────────────────
 
@@ -117,13 +127,21 @@ fn _name_function_signature_inference(value: &FunctionSignatureInference) -> &Ty
 fn public_result_shape_is_reachable() {
     let empty: Vec<deep::Expr> = Vec::new();
 
-    let report: InferResult = infer_program(&empty, chelis_types::ProgramOrigin::Unlinked);
+    let report: InferResult = infer_program(
+        &empty,
+        chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
+    );
     let _errors: &Vec<chelis_types::errors::CheckError> = &report.errors;
     let _typed: usize = report.typed_nodes;
     let _total: usize = report.total_nodes;
 
-    let checked: CheckedProgram = check_ir_program(&empty, chelis_types::ProgramOrigin::Unlinked)
-        .expect("empty program checks");
+    let checked: CheckedProgram = check_ir_program(
+        &empty,
+        chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
+    )
+    .expect("empty program checks");
     let _exprs: &[deep::Expr] = checked.exprs();
     let _annotated: &[deep::Expr] = checked.annotated_exprs();
     let _type_env: &BTreeMap<String, deep::Expr> = checked.type_env();
@@ -144,19 +162,27 @@ fn public_result_shape_is_reachable() {
 fn public_context_entry_points_are_reachable() {
     let empty: Vec<deep::Expr> = Vec::new();
 
-    let context: CompiledLibraryContextResult =
-        build_compiled_library_context(&empty, chelis_types::ProgramOrigin::Unlinked);
+    let context: CompiledLibraryContextResult = build_compiled_library_context(
+        &empty,
+        chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
+    );
     let (env, library) = context.expect("empty library context builds");
 
     let (based_env, _based): (TypeEnv, CheckedProgram) = build_compiled_library_context_with_base(
         &env,
         &empty,
         chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
     )
     .expect("empty based library context builds");
 
-    let _with_context: Result<CheckedProgram, InferResult> =
-        check_ir_with_context(&based_env, &empty, chelis_types::ProgramOrigin::Unlinked);
+    let _with_context: Result<CheckedProgram, InferResult> = check_ir_with_context(
+        &based_env,
+        &empty,
+        chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
+    );
 
     let _with_signature_context: Result<CheckedProgram, InferResult> =
         check_ir_with_signature_context(
@@ -164,21 +190,22 @@ fn public_context_entry_points_are_reachable() {
             library.signature_inference(),
             &empty,
             chelis_types::ProgramOrigin::Unlinked,
+            &mut chelis_types::NativeServices::new(None),
         );
 
-    let _env: Result<TypeEnv, InferResult> =
-        build_type_env_from_library(&empty, chelis_types::ProgramOrigin::Unlinked);
+    let _env: Result<TypeEnv, InferResult> = build_type_env_from_library(
+        &empty,
+        chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
+    );
 }
 
-/// `run_on_grown_stack` stays generic over its closure and returns the
-/// closure's value.
+/// `NativeServices::with_grown_stack` stays generic over its closure and
+/// returns the closure's value.
 #[test]
 fn public_grown_stack_runner_is_reachable() {
-    let value: u32 = run_on_grown_stack(|| 7u32);
-    assert_eq!(
-        value, 7,
-        "run_on_grown_stack must return the closure's value"
-    );
+    let value: u32 = NativeServices::new(None).with_grown_stack(|_| 7u32);
+    assert_eq!(value, 7, "with_grown_stack must return the closure's value");
 }
 
 /// The crate root keeps re-exporting the inference surface it exported
@@ -194,30 +221,59 @@ fn crate_root_reexports_are_reachable() {
         check_ir_with_context as root_check_with_context,
         check_ir_with_signature_context as root_check_with_sig_context,
         check_typed_program as root_check_typed, infer_ir_program as root_infer_ir,
-        infer_program as root_infer, run_on_grown_stack as root_grown,
-        set_grow_segment_bytes_for_test as root_set_grow,
+        infer_program as root_infer,
     };
 
     let empty: Vec<deep::Expr> = Vec::new();
-    let _: RootResult = root_infer(&empty, chelis_types::ProgramOrigin::Unlinked);
-    let _: RootResult = root_infer_ir(&empty, chelis_types::ProgramOrigin::Unlinked);
-    let _: Result<RootChecked, RootResult> =
-        root_check(&empty, chelis_types::ProgramOrigin::Unlinked);
-    let _: Result<RootChecked, RootResult> =
-        root_check_typed(&empty, chelis_types::ProgramOrigin::Unlinked);
-    let _: Result<TypeEnv, RootResult> =
-        root_build_env(&empty, chelis_types::ProgramOrigin::Unlinked);
+    let _: RootResult = root_infer(
+        &empty,
+        chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
+    );
+    let _: RootResult = root_infer_ir(
+        &empty,
+        chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
+    );
+    let _: Result<RootChecked, RootResult> = root_check(
+        &empty,
+        chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
+    );
+    let _: Result<RootChecked, RootResult> = root_check_typed(
+        &empty,
+        chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
+    );
+    let _: Result<TypeEnv, RootResult> = root_build_env(
+        &empty,
+        chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
+    );
 
-    let (env, library) = root_build_context(&empty, chelis_types::ProgramOrigin::Unlinked)
-        .expect("root context builds");
-    let _ = root_build_context_with_base(&env, &empty, chelis_types::ProgramOrigin::Unlinked);
-    let _ = root_check_with_context(&env, &empty, chelis_types::ProgramOrigin::Unlinked);
+    let (env, library) = root_build_context(
+        &empty,
+        chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
+    )
+    .expect("root context builds");
+    let _ = root_build_context_with_base(
+        &env,
+        &empty,
+        chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
+    );
+    let _ = root_check_with_context(
+        &env,
+        &empty,
+        chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
+    );
     let _ = root_check_with_sig_context(
         &env,
         library.signature_inference(),
         &empty,
         chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
     );
-    let _: u8 = root_grown(|| 1u8);
-    let _: fn(usize) = root_set_grow;
 }

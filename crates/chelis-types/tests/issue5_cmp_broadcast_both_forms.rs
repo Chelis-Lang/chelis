@@ -58,11 +58,19 @@ fn diagnostics(source: &str) -> (Vec<String>, Vec<String>) {
         out.sort();
         out
     };
-    let ir = match check_ir_program(&deep, chelis_types::ProgramOrigin::Unlinked) {
+    let ir = match check_ir_program(
+        &deep,
+        chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
+    ) {
         Ok(_) => Vec::new(),
         Err(r) => render(&r.errors),
     };
-    let typed = match check_typed(&deep, chelis_types::ProgramOrigin::Unlinked) {
+    let typed = match check_typed(
+        &deep,
+        chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
+    ) {
         Ok(_) => Vec::new(),
         Err(r) => render(&r.errors),
     };
@@ -292,7 +300,11 @@ use chelis_types::errors::CheckError;
 
 fn check_core(source: &str) -> Result<String, Vec<CheckError>> {
     let deep = parse_core(source);
-    match check_typed_program(&deep, chelis_types::ProgramOrigin::Unlinked) {
+    match check_typed_program(
+        &deep,
+        chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
+    ) {
         Ok(checked) => Ok(print_canonical(checked.annotated_exprs())),
         Err(report) => Err(report.errors),
     }

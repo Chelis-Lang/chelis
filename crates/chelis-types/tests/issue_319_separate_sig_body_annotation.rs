@@ -114,7 +114,12 @@ fn is_named_def(expr: &Expr, def_name: &str) -> bool {
 
 fn checked_def(src: &str, def_name: &str) -> Expr {
     let deep: Vec<chelis_deep::Expr> = serde_json::from_str(src).expect("lossless core fixture");
-    let checked = check_ir_program(&deep, chelis_types::ProgramOrigin::Unlinked).expect("check");
+    let checked = check_ir_program(
+        &deep,
+        chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
+    )
+    .expect("check");
     checked
         .exprs()
         .iter()

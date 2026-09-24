@@ -1216,7 +1216,9 @@ mod tests {
                 crate::eval::TensorValue::from_vec(vec![3, 4], vec![1.0; 12]),
             ),
         ]);
-        let before = crate::eval::eval_tensor(&dag, &inputs).unwrap_err();
+        let before =
+            crate::eval::eval_tensor(&dag, &inputs, &mut chelis_types::NativeServices::new(None))
+                .unwrap_err();
         assert!(before.contains("extent `3`: claimed = 3"), "{before}");
 
         let specialized = specialize_for_blas(&dag);
@@ -1229,7 +1231,12 @@ mod tests {
                 }
             )
         }));
-        let after = crate::eval::eval_tensor(&specialized, &inputs).unwrap_err();
+        let after = crate::eval::eval_tensor(
+            &specialized,
+            &inputs,
+            &mut chelis_types::NativeServices::new(None),
+        )
+        .unwrap_err();
         assert!(after.contains("extent `3`: claimed = 3"), "{after}");
     }
 
@@ -1537,8 +1544,15 @@ mod tests {
                 crate::eval::TensorValue::from_vec(vec![4], vec![0.0, 1.0, 0.0, 1.0]),
             ),
         ]);
-        let before = crate::eval::eval_tensor(&dag, &inputs).expect("dense gather eval");
-        let after = crate::eval::eval_tensor(&specialized, &inputs).expect("specialized eval");
+        let before =
+            crate::eval::eval_tensor(&dag, &inputs, &mut chelis_types::NativeServices::new(None))
+                .expect("dense gather eval");
+        let after = crate::eval::eval_tensor(
+            &specialized,
+            &inputs,
+            &mut chelis_types::NativeServices::new(None),
+        )
+        .expect("specialized eval");
         assert_eq!(
             before[&gathered].to_f64_lossy_vec(),
             after[specialized.roots().first().expect("root")].to_f64_lossy_vec()
@@ -1616,7 +1630,9 @@ mod tests {
                 crate::eval::TensorValue::from_vec(vec![4], vec![0.0, 1.0, 0.0, 1.0]),
             ),
         ]);
-        let before = crate::eval::eval_tensor(&dag, &inputs).unwrap_err();
+        let before =
+            crate::eval::eval_tensor(&dag, &inputs, &mut chelis_types::NativeServices::new(None))
+                .unwrap_err();
         assert!(before.contains("extent `5`: claimed = 5"), "{before}");
 
         let specialized = specialize_for_exact_arithmetic(&dag);
@@ -1629,7 +1645,12 @@ mod tests {
                 }
             )
         }));
-        let after = crate::eval::eval_tensor(&specialized, &inputs).unwrap_err();
+        let after = crate::eval::eval_tensor(
+            &specialized,
+            &inputs,
+            &mut chelis_types::NativeServices::new(None),
+        )
+        .unwrap_err();
         assert!(after.contains("extent `5`: claimed = 5"), "{after}");
     }
 
@@ -1749,8 +1770,15 @@ mod tests {
             "indices".to_string(),
             crate::eval::TensorValue::from_vec(vec![3], vec![2.0, 0.0, 1.0]),
         )]);
-        let before = crate::eval::eval_tensor(&dag, &inputs).expect("one_hot eval");
-        let after = crate::eval::eval_tensor(&specialized, &inputs).expect("lowered eval");
+        let before =
+            crate::eval::eval_tensor(&dag, &inputs, &mut chelis_types::NativeServices::new(None))
+                .expect("one_hot eval");
+        let after = crate::eval::eval_tensor(
+            &specialized,
+            &inputs,
+            &mut chelis_types::NativeServices::new(None),
+        )
+        .expect("lowered eval");
         assert_eq!(
             before[&one_hot].to_f64_lossy_vec(),
             after[specialized.roots().first().expect("root")].to_f64_lossy_vec()
@@ -1790,7 +1818,9 @@ mod tests {
             "indices".to_string(),
             crate::eval::TensorValue::from_vec(vec![3], vec![2.0, 0.0, 1.0]),
         )]);
-        let before = crate::eval::eval_tensor(&dag, &inputs).unwrap_err();
+        let before =
+            crate::eval::eval_tensor(&dag, &inputs, &mut chelis_types::NativeServices::new(None))
+                .unwrap_err();
         assert!(before.contains("extent `4`: claimed = 4"), "{before}");
 
         let specialized = specialize_for_exact_arithmetic(&dag);
@@ -1803,7 +1833,12 @@ mod tests {
                 }
             )
         }));
-        let after = crate::eval::eval_tensor(&specialized, &inputs).unwrap_err();
+        let after = crate::eval::eval_tensor(
+            &specialized,
+            &inputs,
+            &mut chelis_types::NativeServices::new(None),
+        )
+        .unwrap_err();
         assert!(after.contains("extent `4`: claimed = 4"), "{after}");
     }
 }

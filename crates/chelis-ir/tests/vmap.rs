@@ -77,9 +77,14 @@ fn vmap_ordinary_shape_roots_and_consumers_keep_the_scalar_operation() {
             chelis_types::unsupported::Stage::Runtime,
         )
         .unwrap();
-        let values = eval_tensor_roots_with_strict(&mapped, mapped.roots(), |name| {
-            (name == "x").then(|| TensorValue::from_vec(vec![count, 3], vec![2.0; count * 3]))
-        })
+        let values = eval_tensor_roots_with_strict(
+            &mapped,
+            mapped.roots(),
+            |name| {
+                (name == "x").then(|| TensorValue::from_vec(vec![count, 3], vec![2.0; count * 3]))
+            },
+            &mut chelis_types::NativeServices::new(None),
+        )
         .unwrap();
         for (root, precision, expected) in [
             (mapped.roots()[0], Prim::Int64, 3.0),
@@ -130,8 +135,13 @@ fn mat_f32(m: usize, n: usize) -> TensorType {
 
 fn eval_root(dag: &Dag, inputs: &UnordMap<String, TensorValue>) -> TensorValue {
     let root = dag.roots()[0];
-    let values = eval_tensor_roots_with_strict(dag, &[root], |name| inputs.get(name).cloned())
-        .expect("evaluation should succeed");
+    let values = eval_tensor_roots_with_strict(
+        dag,
+        &[root],
+        |name| inputs.get(name).cloned(),
+        &mut chelis_types::NativeServices::new(None),
+    )
+    .expect("evaluation should succeed");
     values[&root].clone()
 }
 
@@ -509,18 +519,33 @@ const VMAP_CONST_AXIS_DEEP: &str = r#"
 
 fn check_effects_linearity_deep(deep_src: &str) -> chelis_types::CheckedProgram {
     let exprs = chelis_deep::parser::parse_str(deep_src).expect("deep parse");
-    let checked = check_ir_program(&exprs, chelis_types::ProgramOrigin::Unlinked)
-        .unwrap_or_else(|r| panic!("deep program must check clean: {:?}", r.errors));
-    let checked = chelis_effects::check_program(&checked).expect("effects");
-    chelis_types::check_linearity(&checked).expect("linearity")
+    let checked = check_ir_program(
+        &exprs,
+        chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
+    )
+    .unwrap_or_else(|r| panic!("deep program must check clean: {:?}", r.errors));
+    let checked =
+        chelis_effects::check_program(&checked, &mut chelis_types::NativeServices::new(None))
+            .expect("effects");
+    chelis_types::check_linearity(&checked, &mut chelis_types::NativeServices::new(None))
+        .expect("linearity")
 }
 
 fn lower_deep_program(src: &str) -> Result<Dag, chelis_ir::lower::LowerDiagnostic> {
     let exprs = chelis_deep::parser::parse_str(src).expect("Deep fixture");
-    let checked = check_ir_program(&exprs, chelis_types::ProgramOrigin::Unlinked)
-        .unwrap_or_else(|r| panic!("Deep program must check clean: {:?}", r.errors));
-    let checked = chelis_effects::check_program(&checked).expect("effects");
-    let checked = chelis_types::check_linearity(&checked).expect("linearity");
+    let checked = check_ir_program(
+        &exprs,
+        chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
+    )
+    .unwrap_or_else(|r| panic!("Deep program must check clean: {:?}", r.errors));
+    let checked =
+        chelis_effects::check_program(&checked, &mut chelis_types::NativeServices::new(None))
+            .expect("effects");
+    let checked =
+        chelis_types::check_linearity(&checked, &mut chelis_types::NativeServices::new(None))
+            .expect("linearity");
     chelis_ir::lowering_runtime::with_native_lowering_runtime(|runtime| {
         chelis_ir::lower::try_lower_program(&checked, runtime)
     })
@@ -573,7 +598,11 @@ fn lower_deep_program(src: &str) -> Result<Dag, chelis_ir::lower::LowerDiagnosti
 #[test]
 fn issue524_runtime_vmap_axis_is_rejected_at_check_time() {
     let exprs = chelis_deep::parser::parse_str(VMAP_RUNTIME_AXIS_DEEP).expect("deep parse");
-    let Err(result) = check_ir_program(&exprs, chelis_types::ProgramOrigin::Unlinked) else {
+    let Err(result) = check_ir_program(
+        &exprs,
+        chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
+    ) else {
         panic!("a runtime vmap axis must REJECT at check, not check clean and default to 0");
     };
     let malformed: Vec<&chelis_types::errors::CheckError> = result
@@ -762,9 +791,18 @@ fn vmap_grad_records_the_batched_forward_activation_as_a_shape_dep() {
     );
 
     let exprs = chelis_deep::parser::parse_str(source).expect("Deep fixture");
-    let checked = check_ir_program(&exprs, chelis_types::ProgramOrigin::Unlinked).expect("check");
-    let checked = chelis_effects::check_program(&checked).expect("effects");
-    let checked = chelis_types::check_linearity(&checked).expect("linearity");
+    let checked = check_ir_program(
+        &exprs,
+        chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
+    )
+    .expect("check");
+    let checked =
+        chelis_effects::check_program(&checked, &mut chelis_types::NativeServices::new(None))
+            .expect("effects");
+    let checked =
+        chelis_types::check_linearity(&checked, &mut chelis_types::NativeServices::new(None))
+            .expect("linearity");
     let dag = chelis_ir::lowering_runtime::with_native_lowering_runtime(|runtime| {
         chelis_ir::lower::try_lower_program(&checked, runtime)
     })

@@ -169,7 +169,8 @@ fn issue_288_forward_expand_scalar_evaluates() {
         let (dag, _x, out) = build_expand_scalar_forward(2, 2.5, shape);
         let mut inputs: UnordMap<String, TensorValue> = UnordMap::new();
         inputs.insert("x".into(), TensorValue::from_vec(vec![2], vec![3.0, 4.0]));
-        let vals = eval_tensor(&dag, &inputs).expect("forward eval must succeed");
+        let vals = eval_tensor(&dag, &inputs, &mut chelis_types::NativeServices::new(None))
+            .expect("forward eval must succeed");
         // 2.5 * (3 + 4) = 17.5
         assert_close(
             &format!("forward source={shape:?}"),
@@ -215,7 +216,12 @@ fn issue_288_grad_through_expand_scalar_is_correct() {
             .expect("gradient w.r.t. x must be present");
         let mut inputs: UnordMap<String, TensorValue> = UnordMap::new();
         inputs.insert("x".into(), TensorValue::from_vec(vec![2], vec![3.0, 4.0]));
-        let vals = eval_tensor(&result.dag, &inputs).expect("grad DAG eval");
+        let vals = eval_tensor(
+            &result.dag,
+            &inputs,
+            &mut chelis_types::NativeServices::new(None),
+        )
+        .expect("grad DAG eval");
         assert_close(
             &format!("grad_x source={shape:?}"),
             &vals[&grad_x].to_f64_lossy_vec(),
@@ -243,7 +249,12 @@ fn issue_288_grad_matches_finite_difference() {
         let base = TensorValue::from_vec(vec![2], vec![0.7, -1.3]);
         let mut inputs: UnordMap<String, TensorValue> = UnordMap::new();
         inputs.insert("x".into(), base.clone());
-        let analytic = eval_tensor(&result.dag, &inputs).expect("analytic eval")[&grad_x]
+        let analytic = eval_tensor(
+            &result.dag,
+            &inputs,
+            &mut chelis_types::NativeServices::new(None),
+        )
+        .expect("analytic eval")[&grad_x]
             .to_f64_lossy_vec()
             .clone();
 
@@ -260,8 +271,12 @@ fn issue_288_grad_matches_finite_difference() {
             ip.insert("x".into(), plus);
             let mut im = UnordMap::new();
             im.insert("x".into(), minus);
-            let fp = eval_tensor(&dag, &ip).expect("plus eval")[&out].to_f64_lossy_vec()[0];
-            let fm = eval_tensor(&dag, &im).expect("minus eval")[&out].to_f64_lossy_vec()[0];
+            let fp = eval_tensor(&dag, &ip, &mut chelis_types::NativeServices::new(None))
+                .expect("plus eval")[&out]
+                .to_f64_lossy_vec()[0];
+            let fm = eval_tensor(&dag, &im, &mut chelis_types::NativeServices::new(None))
+                .expect("minus eval")[&out]
+                .to_f64_lossy_vec()[0];
             *slot = (fp - fm) / (2.0 * h);
         }
         for (i, (a, n)) in analytic.iter().zip(numerical.iter()).enumerate() {
@@ -301,7 +316,12 @@ fn issue_288_control_sum_mul_x_x() {
     let grad_x = result.grad_nodes[&x];
     let mut inputs = UnordMap::new();
     inputs.insert("x".into(), TensorValue::from_vec(vec![2], vec![3.0, -4.0]));
-    let vals = eval_tensor(&result.dag, &inputs).expect("control eval");
+    let vals = eval_tensor(
+        &result.dag,
+        &inputs,
+        &mut chelis_types::NativeServices::new(None),
+    )
+    .expect("control eval");
     assert_close(
         "control_sum_mul_x_x",
         &vals[&grad_x].to_f64_lossy_vec(),
@@ -345,7 +365,12 @@ fn issue_288_control_mul_by_real_tensor() {
     let mut inputs = UnordMap::new();
     inputs.insert("x".into(), TensorValue::from_vec(vec![2], vec![3.0, 4.0]));
     inputs.insert("t".into(), TensorValue::from_vec(vec![2], vec![1.5, -2.0]));
-    let vals = eval_tensor(&result.dag, &inputs).expect("control eval");
+    let vals = eval_tensor(
+        &result.dag,
+        &inputs,
+        &mut chelis_types::NativeServices::new(None),
+    )
+    .expect("control eval");
     assert_close(
         "control_mul_by_real_tensor",
         &vals[&grad_x].to_f64_lossy_vec(),
@@ -398,7 +423,12 @@ fn issue_288_grad_wrt_rank0_expand_source() {
     let mut inputs = UnordMap::new();
     inputs.insert("s".into(), TensorValue::from_vec(vec![], vec![2.5]));
     inputs.insert("x".into(), TensorValue::from_vec(vec![2], vec![3.0, 4.0]));
-    let vals = eval_tensor(&result.dag, &inputs).expect("probe eval");
+    let vals = eval_tensor(
+        &result.dag,
+        &inputs,
+        &mut chelis_types::NativeServices::new(None),
+    )
+    .expect("probe eval");
     assert_close(
         "grad_wrt_rank0_source",
         &vals[&grad_s].to_f64_lossy_vec(),
@@ -454,7 +484,12 @@ fn issue_288_grad_wrt_size1_expand_source() {
     let mut inputs = UnordMap::new();
     inputs.insert("s".into(), TensorValue::from_vec(vec![1], vec![2.5]));
     inputs.insert("x".into(), TensorValue::from_vec(vec![2], vec![3.0, 4.0]));
-    let vals = eval_tensor(&result.dag, &inputs).expect("probe eval");
+    let vals = eval_tensor(
+        &result.dag,
+        &inputs,
+        &mut chelis_types::NativeServices::new(None),
+    )
+    .expect("probe eval");
     assert_close(
         "grad_wrt_size1_source",
         &vals[&grad_s].to_f64_lossy_vec(),
@@ -542,7 +577,12 @@ fn issue_288_grad_wrt_size1_expand_source_nonzero_axis() {
         "x".into(),
         TensorValue::from_vec(vec![3, 2], vec![10.0, 20.0, 30.0, 40.0, 50.0, 60.0]),
     );
-    let vals = eval_tensor(&result.dag, &inputs).expect("probe eval");
+    let vals = eval_tensor(
+        &result.dag,
+        &inputs,
+        &mut chelis_types::NativeServices::new(None),
+    )
+    .expect("probe eval");
     // df/ds[i,0] = x[i,0] + x[i,1]: row sums of x = [30, 70, 110].
     assert_close(
         "grad_wrt_size1_source_axis1",

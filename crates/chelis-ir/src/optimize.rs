@@ -897,6 +897,7 @@ mod tests {
             optimized.roots(),
             0,
             |_| None,
+            &mut chelis_types::NativeServices::new(None),
         )
         .unwrap();
         assert_eq!(

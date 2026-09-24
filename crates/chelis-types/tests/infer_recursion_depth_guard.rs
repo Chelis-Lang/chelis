@@ -7,19 +7,20 @@
 //! applications. The recursion is finite but `chelis check` runs the checker
 //! on a bounded stack, so deep input overflowed and aborted the process. A
 //! shared `stacker::remaining_stack()` budget guard at each walker converts
-//! that abort into a clean, located typed diagnostic, and a thread-local
-//! exhaustion flag drained at every public check entry makes the bail ALWAYS
+//! that abort into a clean, located typed diagnostic, and a per-session
+//! exhaustion record drained at every public check entry makes the bail ALWAYS
 //! surface as a hard check failure -- never a silent green or partial result
 //! (covered-or-rejected).
 //!
 //! Scope: these tests cover the per-site guard (the safety net) AND the WI-1
 //! stack-growing follow-up. The follow-up runs the whole check pipeline on a
-//! freshly-grown stack segment (`with_grown_stack` -> `stacker::grow`), so a
+//! freshly-grown stack segment (`NativeServices::with_grown_stack` ->
+//! `stacker::grow`), so a
 //! legitimately deep-but-finite program checks end-to-end -- covering not just
 //! the checker's own inference recursion but the validate / annotate passes and
 //! the foundational `chelis_deep::Expr` derived `Clone`/`Drop`, all of which run
 //! inside that one grown segment. The safety-net tests shrink the segment (via
-//! the test-only `set_grow_segment_bytes_for_test`) to confirm the per-site
+//! the test-only `NativeServices::with_grow_segment_bytes_for_test`) to confirm the per-site
 //! guard still converts an overflow of even a grown segment into a located
 //! diagnostic rather than a SIGSEGV (see the investigation note).
 //!
@@ -106,8 +107,8 @@ fn program_with_body(body: Expr) -> Vec<Expr> {
 /// follow-up grows the stack at the check entry, so the per-site guard fires
 /// only when the recursion exhausts the GROWN segment, not the worker thread.
 /// `grow_segment_bytes` overrides that grown-segment size (via the test-only
-/// `set_grow_segment_bytes_for_test`, installed on this worker thread before
-/// the check), so the safety-net tests can shrink it and drive a chain deep
+/// `NativeServices::with_grow_segment_bytes_for_test` on the services handed
+/// to the check), so the safety-net tests can shrink it and drive a chain deep
 /// enough to overflow it -- `None` keeps the production 512 MiB segment, used
 /// by the capability test that must check a deep program cleanly.
 ///
@@ -123,10 +124,15 @@ fn check_deep_on_bounded_stack(
         .name("infer-depth-guard-test".to_string())
         .stack_size(stack_mib * 1024 * 1024)
         .spawn(move || {
+            let mut native = chelis_types::NativeServices::new(None);
             if let Some(bytes) = grow_segment_bytes {
-                chelis_types::set_grow_segment_bytes_for_test(bytes);
+                native = native.with_grow_segment_bytes_for_test(bytes);
             }
-            let messages = match check_ir_program(&program, chelis_types::ProgramOrigin::Unlinked) {
+            let messages = match check_ir_program(
+                &program,
+                chelis_types::ProgramOrigin::Unlinked,
+                &mut native,
+            ) {
                 Ok(_) => Vec::new(),
                 Err(result) => result
                     .errors
@@ -141,8 +147,7 @@ fn check_deep_on_bounded_stack(
             // that teardown inside a fresh production-sized segment instead
             // of letting it overflow the deliberately bounded worker stack
             // and disguising a successful checker rejection as SIGBUS.
-            chelis_types::reset_grow_segment_bytes_for_test();
-            chelis_types::run_on_grown_stack(|| drop(program));
+            chelis_types::NativeServices::new(None).with_grown_stack(|_| drop(program));
             messages
         })
         .expect("spawn checker worker thread")
@@ -226,7 +231,7 @@ fn moderate_depth_chain_does_not_trip_stack_guard() {
 /// chain at the pricer's true nesting depth -- now `check`s cleanly end-to-end.
 /// A chain deep enough to model the pricer (4000) used to trip the stack-budget
 /// guard on an 8 MiB stack; the public check entries now run the WHOLE pipeline
-/// on a freshly-grown stack segment (`with_grown_stack` -> `stacker::grow` in
+/// on a freshly-grown stack segment (`NativeServices::with_grown_stack` -> `stacker::grow` in
 /// `chelis-types/src/infer.rs`), so inference AND every validate / annotate
 /// pass (plus the deep `Expr` clones and the final drop) run with room and the
 /// per-site guard never fires for a legitimately deep-but-finite program. The

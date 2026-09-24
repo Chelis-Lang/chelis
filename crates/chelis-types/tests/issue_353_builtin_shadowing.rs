@@ -41,7 +41,11 @@ fn parse_core_fixture(source: &str) -> Vec<chelis_deep::Expr> {
 }
 
 fn shadowing_errors(exprs: &[chelis_deep::Expr]) -> Vec<chelis_types::errors::CheckError> {
-    match check_ir_program(exprs, chelis_types::ProgramOrigin::Unlinked) {
+    match check_ir_program(
+        exprs,
+        chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
+    ) {
         Ok(_) => Vec::new(),
         Err(report) => report
             .errors
@@ -182,7 +186,11 @@ fn near_miss_names_still_check_clean() {
             (var {{}} Nil)))))))
 "###
         ));
-        let res = check_ir_program(&deep, chelis_types::ProgramOrigin::Unlinked);
+        let res = check_ir_program(
+            &deep,
+            chelis_types::ProgramOrigin::Unlinked,
+            &mut chelis_types::NativeServices::new(None),
+        );
         assert!(
             res.is_ok(),
             "near-miss `{def_name}` must check clean; got {:?}",
@@ -205,7 +213,12 @@ fn value_params_and_locals_may_reuse_builtin_names() {
         "fixtures/core/tests/issue_353_builtin_shadowing/value_params_and_locals_may_reuse_builtin_names_226.deep"
     ));
     assert!(
-        check_ir_program(&param_case, chelis_types::ProgramOrigin::Unlinked).is_ok(),
+        check_ir_program(
+            &param_case,
+            chelis_types::ProgramOrigin::Unlinked,
+            &mut chelis_types::NativeServices::new(None)
+        )
+        .is_ok(),
         "a value parameter named `sum` must stay accepted"
     );
 
@@ -213,7 +226,12 @@ fn value_params_and_locals_may_reuse_builtin_names() {
         "fixtures/core/tests/issue_353_builtin_shadowing/value_params_and_locals_may_reuse_builtin_names_236.deep"
     ));
     assert!(
-        check_ir_program(&local_case, chelis_types::ProgramOrigin::Unlinked).is_ok(),
+        check_ir_program(
+            &local_case,
+            chelis_types::ProgramOrigin::Unlinked,
+            &mut chelis_types::NativeServices::new(None)
+        )
+        .is_ok(),
         "a block-local named `sum` must stay accepted"
     );
 }
@@ -243,7 +261,11 @@ fn builtin_named_param_called_in_body_is_accepted() {
     let called = parse_core_fixture(include_str!(
         "fixtures/core/tests/issue_353_builtin_shadowing/builtin_named_param_called_in_body_is_accepted_274.deep"
     ));
-    let called_result = check_ir_program(&called, chelis_types::ProgramOrigin::Unlinked);
+    let called_result = check_ir_program(
+        &called,
+        chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
+    );
     assert!(
         called_result.is_ok(),
         "calling a builtin-named parameter must follow lexical scope; got {:?}",
@@ -254,7 +276,11 @@ fn builtin_named_param_called_in_body_is_accepted() {
     let lambda = parse_core_fixture(include_str!(
         "fixtures/core/tests/issue_353_builtin_shadowing/builtin_named_param_called_in_body_is_accepted_286.deep"
     ));
-    let lambda_result = check_ir_program(&lambda, chelis_types::ProgramOrigin::Unlinked);
+    let lambda_result = check_ir_program(
+        &lambda,
+        chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
+    );
     assert!(
         lambda_result.is_ok(),
         "calling a builtin-named lambda parameter must follow lexical scope; got {:?}",
@@ -267,7 +293,12 @@ fn builtin_named_param_called_in_body_is_accepted() {
         "fixtures/core/tests/issue_353_builtin_shadowing/builtin_named_param_called_in_body_is_accepted_299.deep"
     ));
     assert!(
-        check_ir_program(&value_only, chelis_types::ProgramOrigin::Unlinked).is_ok(),
+        check_ir_program(
+            &value_only,
+            chelis_types::ProgramOrigin::Unlinked,
+            &mut chelis_types::NativeServices::new(None)
+        )
+        .is_ok(),
         "value-position builtin-named params must stay accepted"
     );
 }
@@ -277,8 +308,12 @@ fn builtin_named_non_callable_local_still_rejects_as_a_type_error() {
     let deep = parse_core_fixture(include_str!(
         "fixtures/core/tests/issue_353_builtin_shadowing/builtin_named_non_callable_local_still_rejects_as_a_type_error_312.deep"
     ));
-    let err = check_ir_program(&deep, chelis_types::ProgramOrigin::Unlinked)
-        .expect_err("a scalar local is not callable");
+    let err = check_ir_program(
+        &deep,
+        chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
+    )
+    .expect_err("a scalar local is not callable");
     assert!(
         err.errors.iter().any(|error| {
             matches!(error.kind, CheckErrorKind::TypeMismatch)

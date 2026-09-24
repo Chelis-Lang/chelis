@@ -170,7 +170,7 @@ pub fn format_element(prim: Prim, value: ElementRef) -> String {
             ElementRef::F16(v) => format_half(
                 f64::from(v),
                 u64::from(v.to_bits()),
-                &|x| u64::from(crate::dtype_semantics::f16_from_f64_rne(x).to_bits()),
+                |x| u64::from(crate::dtype_semantics::f16_from_f64_rne(x).to_bits()),
                 "f16",
             ),
             other => mismatch(prim, &other),
@@ -179,7 +179,7 @@ pub fn format_element(prim: Prim, value: ElementRef) -> String {
             ElementRef::Bf16(v) => format_half(
                 f64::from(v),
                 u64::from(v.to_bits()),
-                &|x| u64::from(crate::dtype_semantics::bf16_from_f64_rne(x).to_bits()),
+                |x| u64::from(crate::dtype_semantics::bf16_from_f64_rne(x).to_bits()),
                 "bf16",
             ),
             other => mismatch(prim, &other),
@@ -212,7 +212,7 @@ pub fn format_element(prim: Prim, value: ElementRef) -> String {
 /// normative grammar. `image` is the exact f64 widening of the stored
 /// value, `stored_bits` its bit pattern (widened to u64), and `narrow`
 /// the parse-back narrowing (f64 -> half bits) for the width.
-fn format_half(image: f64, stored_bits: u64, narrow: &dyn Fn(f64) -> u64, width: &str) -> String {
+fn format_half(image: f64, stored_bits: u64, narrow: impl Fn(f64) -> u64, width: &str) -> String {
     if image.is_nan() {
         // NaN round-trips at the class level: exit text carries no payload
         // (spec/05 section 8.1; matches the harness's canonical-NaN rule).
@@ -235,7 +235,7 @@ fn format_half(image: f64, stored_bits: u64, narrow: &dyn Fn(f64) -> u64, width:
         let parsed: f64 = text.parse().expect("candidate text is a valid float");
         narrow(if neg { -parsed } else { parsed }) == stored_bits
     };
-    let (digits, sci_exp) = shortest_digits(abs, &round_trips, width);
+    let (digits, sci_exp) = shortest_digits(abs, round_trips, width);
     assemble(neg, &digits, sci_exp)
 }
 
@@ -249,7 +249,7 @@ fn format_half(image: f64, stored_bits: u64, narrow: &dyn Fn(f64) -> u64, width:
 /// shortest in digits. Among same-length hits the numerically closest to
 /// `abs` wins; an exact tie prefers the even mantissa (deterministic,
 /// spec/05 section 8.1).
-fn shortest_digits(abs: f64, round_trips: &dyn Fn(&str) -> bool, width: &str) -> (String, i32) {
+fn shortest_digits(abs: f64, round_trips: impl Fn(&str) -> bool, width: &str) -> (String, i32) {
     for p in 1..=17u32 {
         // Correctly rounded p-digit scientific form "d.ddd...e<exp>".
         let sci = format!("{:.*e}", (p - 1) as usize, abs);
@@ -619,7 +619,7 @@ mod tests {
     /// Independent shortest-ness check: no decimal with fewer significant
     /// digits parses back to `stored_bits`. Scans the full 3-candidate
     /// neighborhood at every shorter digit count.
-    fn no_shorter_rendering(image: f64, stored_bits: u64, narrow: &dyn Fn(f64) -> u64, p: u32) {
+    fn no_shorter_rendering(image: f64, stored_bits: u64, narrow: impl Fn(f64) -> u64, p: u32) {
         let neg = image < 0.0;
         let abs = image.abs();
         for shorter in 1..p {
@@ -695,7 +695,7 @@ mod tests {
                 no_shorter_rendering(
                     f64::from(v),
                     u64::from(bits),
-                    &|x| u64::from(crate::dtype_semantics::f16_from_f64_rne(x).to_bits()),
+                    |x| u64::from(crate::dtype_semantics::f16_from_f64_rne(x).to_bits()),
                     significant_digits(&text),
                 );
                 assert_form_matches_rendered_magnitude(&text, bits);
@@ -726,7 +726,7 @@ mod tests {
                 no_shorter_rendering(
                     f64::from(v),
                     u64::from(bits),
-                    &|x| u64::from(crate::dtype_semantics::bf16_from_f64_rne(x).to_bits()),
+                    |x| u64::from(crate::dtype_semantics::bf16_from_f64_rne(x).to_bits()),
                     significant_digits(&text),
                 );
                 assert_form_matches_rendered_magnitude(&text, bits);

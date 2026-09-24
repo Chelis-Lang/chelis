@@ -28,7 +28,7 @@ fn declared_result_literal(
     env: &Env,
     vg: &mut VarGen,
     adt_reg: &AdtRegistry,
-    subst: &Subst,
+    subst: &mut Subst,
     errors: &mut DiagnosticSink<'_>,
 ) -> Option<i64> {
     // The rank-equality precondition matters as much as the literal does. A
@@ -38,7 +38,7 @@ fn declared_result_literal(
     // at most 4", which names a repair that would not fix the program, and the
     // `Type::Error` this path returns then suppresses the accurate diagnostic
     // (round 1 P2). Rank belongs to unification; the bound stands down.
-    let literal_at = |ty: &Type| -> Option<i64> {
+    let literal_at = |ty: &Type, subst: &mut Subst| -> Option<i64> {
         let Type::Tensor(dims, _) = ty else {
             return None;
         };
@@ -51,7 +51,7 @@ fn declared_result_literal(
     if let Some(found) = expected_result
         .map(|expected| subst.apply(expected))
         .as_ref()
-        .and_then(&literal_at)
+        .and_then(|ty| literal_at(ty, subst))
     {
         return Some(found);
     }
@@ -69,7 +69,7 @@ fn declared_result_literal(
         errors,
     );
     errors.retain_since(checkpoint, |_| false);
-    literal_at(&resolved.ok()?)
+    literal_at(&resolved.ok()?, subst)
 }
 
 /// chelis#1739. `[05-OP-33]` replaces the retained axis extent with the smaller
@@ -91,7 +91,7 @@ fn reject_unreachable_diagonal_extent(
     env: &Env,
     vg: &mut VarGen,
     adt_reg: &AdtRegistry,
-    subst: &Subst,
+    subst: &mut Subst,
     errors: &mut DiagnosticSink<'_>,
     expected_result: Option<&Type>,
 ) -> Option<Type> {
@@ -353,7 +353,7 @@ pub(super) fn finish_unified_app(
                 // rejection (a check-clean program must build).
                 let size_class = kids
                     .get(3)
-                    .map(|arg| classify_expand_size(arg, env, adt_reg, subst))
+                    .map(|arg| classify_expand_size(arg, env, adt_reg, subst, &mut errors.stack()))
                     .unwrap_or(SizeClass::Unknown);
                 if owes_shape_replay {
                     product.defer_shape_check(
@@ -651,7 +651,7 @@ pub(super) fn finish_unified_app(
                 // reshape) surfaces the same diagnostic as the bare-
                 // literal form.
                 if let Some(axis_expr) = kids.get(2)
-                    && let Some(axis) = extract_int_for_dim(axis_expr)
+                    && let Some(axis) = extract_int_for_dim(axis_expr, &mut errors.stack())
                 {
                     if axis < 0 {
                         return report(
@@ -869,7 +869,9 @@ pub(super) fn finish_unified_app(
                 let route = ShapeRoute::Gather {
                     op: "gather".to_string(),
                     indices: Box::new(type_for_readonly_check(&arg_tys[1], subst)),
-                    raw_axis: kids.get(3).and_then(extract_int_for_dim),
+                    raw_axis: kids
+                        .get(3)
+                        .and_then(|expr| extract_int_for_dim(expr, &mut errors.stack())),
                     updates: None,
                     mode: None,
                 };
@@ -1062,8 +1064,12 @@ pub(super) fn finish_unified_app(
                     }
                 }
                 let route = ShapeRoute::Trace {
-                    raw_axis1: kids.get(2).and_then(extract_int_for_dim),
-                    raw_axis2: kids.get(3).and_then(extract_int_for_dim),
+                    raw_axis1: kids
+                        .get(2)
+                        .and_then(|expr| extract_int_for_dim(expr, &mut errors.stack())),
+                    raw_axis2: kids
+                        .get(3)
+                        .and_then(|expr| extract_int_for_dim(expr, &mut errors.stack())),
                 };
                 return decide_shape_route(
                     route,
@@ -1188,7 +1194,9 @@ pub(super) fn finish_unified_app(
                 let route = ShapeRoute::Gather {
                     op: "scatter".to_string(),
                     indices: Box::new(subst.apply(&arg_tys[1])),
-                    raw_axis: kids.get(4).and_then(extract_int_for_dim),
+                    raw_axis: kids
+                        .get(4)
+                        .and_then(|expr| extract_int_for_dim(expr, &mut errors.stack())),
                     updates: Some(Box::new(subst.apply(&arg_tys[2]))),
                     mode: Some(
                         kids.get(5)
@@ -1220,7 +1228,9 @@ pub(super) fn finish_unified_app(
                 let route = ShapeRoute::Gather {
                     op: "scatter_replace".to_string(),
                     indices: Box::new(subst.apply(&arg_tys[1])),
-                    raw_axis: kids.get(4).and_then(extract_int_for_dim),
+                    raw_axis: kids
+                        .get(4)
+                        .and_then(|expr| extract_int_for_dim(expr, &mut errors.stack())),
                     updates: Some(Box::new(subst.apply(&arg_tys[2]))),
                     mode: None,
                 };
@@ -1514,7 +1524,9 @@ pub(super) fn finish_unified_app(
                         // Issue #216: cast-aware so a
                         // `cast(N, i32)`-wrapped split axis still
                         // surfaces the bounds diagnostic at infer.
-                        let raw_axis = kids.get(2).and_then(extract_int_for_dim);
+                        let raw_axis = kids
+                            .get(2)
+                            .and_then(|expr| extract_int_for_dim(expr, &mut errors.stack()));
                         let axis = match raw_axis {
                             Some(raw) => match normalize_static_axis(dims.len(), raw) {
                                 Some(axis) => axis,
@@ -2549,7 +2561,9 @@ pub(super) fn finish_unified_app(
                             // back to the legacy wildcard rank.
                             let dims = kids
                                 .get(1)
-                                .and_then(|arg| static_to_tensor_shape(arg, rank))
+                                .and_then(|arg| {
+                                    static_to_tensor_shape(arg, rank, &mut errors.stack())
+                                })
                                 .unwrap_or_else(|| vec![Dim::Wildcard; rank]);
                             return Type::Tensor(dims, TensorPrec::Concrete(precision));
                         }
@@ -2768,7 +2782,7 @@ pub(super) fn finish_unified_app(
                 // is the cast-aware extractor used for dim contexts.
                 let width_dim = children(list)
                     .get(2)
-                    .and_then(extract_int_for_dim)
+                    .and_then(|expr| extract_int_for_dim(expr, &mut errors.stack()))
                     .filter(|width| *width > 0)
                     .map_or(Dim::Wildcard, Dim::Lit);
                 match seqs_ty {

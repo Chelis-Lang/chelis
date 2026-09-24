@@ -121,7 +121,12 @@ fn scatter_replace_forward_last_write_wins_with_deterministic_order() {
             vec![10.0, 11.0, 20.0, 21.0, 30.0, 31.0, 40.0, 41.0],
         ),
     );
-    let vals = eval_tensor_with(&dag, |n| inputs.get(n).cloned()).expect("scatter_replace eval");
+    let vals = eval_tensor_with(
+        &dag,
+        |n| inputs.get(n).cloned(),
+        &mut chelis_types::NativeServices::new(None),
+    )
+    .expect("scatter_replace eval");
     let out = &vals[&scatter];
 
     // target was [[100,200],[300,400],[500,600]]; row 0 + row 2
@@ -192,7 +197,12 @@ fn scatter_replace_forward_distinct_indices_writes_each_cell_once() {
         "updates".to_string(),
         TensorValue::from_vec(vec![3, 2], vec![10.0, 11.0, 20.0, 21.0, 30.0, 31.0]),
     );
-    let vals = eval_tensor_with(&dag, |n| inputs.get(n).cloned()).expect("scatter_replace eval");
+    let vals = eval_tensor_with(
+        &dag,
+        |n| inputs.get(n).cloned(),
+        &mut chelis_types::NativeServices::new(None),
+    )
+    .expect("scatter_replace eval");
     let out = &vals[&scatter];
 
     // updates[0] → target[2,:], updates[1] → target[0,:], updates[2] → target[1,:]
@@ -456,8 +466,12 @@ fn scatter_add_ad_path_unchanged_after_scatter_landed() {
         "table".to_string(),
         TensorValue::from_vec(vec![2, 2], vec![1.0, 2.0, 3.0, 4.0]),
     );
-    let vals =
-        eval_tensor_with(&grad.dag, |n| inputs.get(n).cloned()).expect("backward eval succeeded");
+    let vals = eval_tensor_with(
+        &grad.dag,
+        |n| inputs.get(n).cloned(),
+        &mut chelis_types::NativeServices::new(None),
+    )
+    .expect("backward eval succeeded");
     let dtable = &vals[&grad_node];
     assert_eq!(dtable.shape, vec![2, 2]);
     let expected = [3.0, 3.0, 0.0, 0.0];

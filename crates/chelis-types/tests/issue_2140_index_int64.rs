@@ -18,15 +18,23 @@ fn whole_program(source: &str) -> [(&'static str, Result<(), Vec<CheckError>>); 
     [
         (
             "typed",
-            check_typed_program(&desugared, chelis_types::ProgramOrigin::Unlinked)
-                .map(|_| ())
-                .map_err(|report| report.errors),
+            check_typed_program(
+                &desugared,
+                chelis_types::ProgramOrigin::Unlinked,
+                &mut chelis_types::NativeServices::new(None),
+            )
+            .map(|_| ())
+            .map_err(|report| report.errors),
         ),
         (
             "IR",
-            check_ir_program(&desugared, chelis_types::ProgramOrigin::Unlinked)
-                .map(|_| ())
-                .map_err(|report| report.errors),
+            check_ir_program(
+                &desugared,
+                chelis_types::ProgramOrigin::Unlinked,
+                &mut chelis_types::NativeServices::new(None),
+            )
+            .map(|_| ())
+            .map_err(|report| report.errors),
         ),
     ]
 }

@@ -48,8 +48,13 @@ fn pair_roots(selection: &str, batched: bool) -> Vec<Vec<f64>> {
         )
     })
     .expect("valid direct grad lowers");
-    let values =
-        eval_tensor_roots_with_strict(&dag, dag.roots(), |name| inputs.get(name).cloned()).unwrap();
+    let values = eval_tensor_roots_with_strict(
+        &dag,
+        dag.roots(),
+        |name| inputs.get(name).cloned(),
+        &mut chelis_types::NativeServices::new(None),
+    )
+    .unwrap();
     dag.roots()
         .iter()
         .map(|root| {

@@ -71,7 +71,7 @@ fn render_declared_rank(rank_names: &UnordMap<RankVar, String>, rv: RankVar) -> 
 pub(super) fn check_declared_tvars_rigid(
     declaration: &str,
     type_names: &UnordMap<TypeVar, String>,
-    subst: &Subst,
+    subst: &mut Subst,
     errors: &mut DiagnosticSink<'_>,
 ) {
     if type_names.is_empty() {
@@ -147,7 +147,7 @@ pub(super) fn check_declared_tvars_rigid(
 pub(super) fn check_declared_rvars_rigid(
     declaration: &str,
     rank_names: &UnordMap<RankVar, String>,
-    subst: &Subst,
+    subst: &mut Subst,
     errors: &mut DiagnosticSink<'_>,
 ) {
     let mut binders = rank_names
@@ -211,7 +211,7 @@ pub(super) fn check_declared_dtype_bounds(
     declaration: &str,
     type_names: &UnordMap<TypeVar, String>,
     declared_bounds: &UnordMap<TypeVar, Option<TypeVarRestriction>>,
-    subst: &Subst,
+    subst: &mut Subst,
     errors: &mut DiagnosticSink<'_>,
 ) {
     for (binder, _) in type_names.to_sorted() {

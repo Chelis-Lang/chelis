@@ -21,8 +21,13 @@ fn load(dag: &mut Dag, name: &str, ty: TensorType) -> NodeId {
 
 fn eval_dag(dag: &Dag, inputs: &UnordMap<String, TensorValue>) -> Vec<TensorValue> {
     let roots: Vec<NodeId> = dag.roots().to_vec();
-    let vals = eval_tensor_roots_with_strict(dag, &roots, |name| inputs.get(name).cloned())
-        .expect("evaluation should succeed");
+    let vals = eval_tensor_roots_with_strict(
+        dag,
+        &roots,
+        |name| inputs.get(name).cloned(),
+        &mut chelis_types::NativeServices::new(None),
+    )
+    .expect("evaluation should succeed");
     roots.iter().map(|id| vals[id].clone()).collect()
 }
 

@@ -7,7 +7,12 @@ use chelis_types::{
 fn checked_core(source: &str) -> CheckedProgram {
     let decls = parse_str(source).expect("Deep fixture parse");
     let deep = decls;
-    check_typed_program(&deep, chelis_types::ProgramOrigin::Unlinked).expect("type check")
+    check_typed_program(
+        &deep,
+        chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
+    )
+    .expect("type check")
 }
 
 #[test]
@@ -199,8 +204,12 @@ fn module_wrapped_unknown_helper_reports_exactly_one_unbound_root() {
     )
     .expect("Deep fixture parse");
     let deep = decls;
-    let result = check_typed_program(&deep, chelis_types::ProgramOrigin::Unlinked)
-        .expect_err("unknown helper must reject");
+    let result = check_typed_program(
+        &deep,
+        chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
+    )
+    .expect_err("unknown helper must reject");
     assert_eq!(result.errors.len(), 1, "unknown helper owns one diagnostic");
     assert!(matches!(
         result.errors[0].kind,
@@ -253,9 +262,12 @@ fn context_signature_metadata_makes_imported_call_read_only() {
     )
     .expect("library Deep fixture parse");
     let library_deep = library_decls;
-    let (type_env, library_checked) =
-        build_compiled_library_context(&library_deep, chelis_types::ProgramOrigin::Unlinked)
-            .expect("library context");
+    let (type_env, library_checked) = build_compiled_library_context(
+        &library_deep,
+        chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
+    )
+    .expect("library context");
 
     let app_decls = parse_str(
         include_str!("fixtures/core/tests/signature_inference/context_signature_metadata_makes_imported_call_read_only_309.deep"),
@@ -267,6 +279,7 @@ fn context_signature_metadata_makes_imported_call_read_only() {
         library_checked.signature_inference(),
         &app_deep,
         chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
     )
     .expect("app check");
 
@@ -289,9 +302,12 @@ fn imported_rank_generic_adt_signatures_instantiate_independently() {
     )
     .expect("library Deep fixture parse");
     let library_deep = library_decls;
-    let (type_env, library_checked) =
-        build_compiled_library_context(&library_deep, chelis_types::ProgramOrigin::Unlinked)
-            .expect("library context");
+    let (type_env, library_checked) = build_compiled_library_context(
+        &library_deep,
+        chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
+    )
+    .expect("library context");
 
     for (first_extent, second_extent) in [(3, 2), (2, 3)] {
         let vector = |extent| {
@@ -326,6 +342,7 @@ fn imported_rank_generic_adt_signatures_instantiate_independently() {
             library_checked.signature_inference(),
             &app_deep,
             chelis_types::ProgramOrigin::Unlinked,
+            &mut chelis_types::NativeServices::new(None),
         )
         .unwrap_or_else(|err| {
             panic!(
@@ -346,9 +363,12 @@ fn imported_fixed_rank_signature_still_rejects_a_different_extent() {
     )
     .expect("library Deep fixture parse");
     let library_deep = library_decls;
-    let (type_env, library_checked) =
-        build_compiled_library_context(&library_deep, chelis_types::ProgramOrigin::Unlinked)
-            .expect("library context");
+    let (type_env, library_checked) = build_compiled_library_context(
+        &library_deep,
+        chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
+    )
+    .expect("library context");
     let app_decls = parse_str(
         include_str!("fixtures/core/tests/signature_inference/imported_fixed_rank_signature_still_rejects_a_different_extent_405.deep"),
     )
@@ -359,6 +379,7 @@ fn imported_fixed_rank_signature_still_rejects_a_different_extent() {
         library_checked.signature_inference(),
         &app_deep,
         chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
     )
     .expect_err("fixed tensor extent must remain enforced");
     assert!(

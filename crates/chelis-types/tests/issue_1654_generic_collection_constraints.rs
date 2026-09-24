@@ -30,15 +30,23 @@ fn whole_program(source: &str) -> [(&'static str, Result<(), Vec<CheckError>>); 
     [
         (
             "typed",
-            check_typed_program(&desugared, chelis_types::ProgramOrigin::Unlinked)
-                .map(|_| ())
-                .map_err(|report| report.errors),
+            check_typed_program(
+                &desugared,
+                chelis_types::ProgramOrigin::Unlinked,
+                &mut chelis_types::NativeServices::new(None),
+            )
+            .map(|_| ())
+            .map_err(|report| report.errors),
         ),
         (
             "IR",
-            check_ir_program(&expanded, chelis_types::ProgramOrigin::Unlinked)
-                .map(|_| ())
-                .map_err(|report| report.errors),
+            check_ir_program(
+                &expanded,
+                chelis_types::ProgramOrigin::Unlinked,
+                &mut chelis_types::NativeServices::new(None),
+            )
+            .map(|_| ())
+            .map_err(|report| report.errors),
         ),
     ]
 }
@@ -57,13 +65,22 @@ fn serialized_context(source: &str) -> Result<(), Vec<CheckError>> {
         })
         .count();
     let (library, caller) = declarations.split_at(boundary);
-    let context = build_type_env_from_library(library, chelis_types::ProgramOrigin::Unlinked)
-        .map_err(|report| report.errors)?;
+    let context = build_type_env_from_library(
+        library,
+        chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
+    )
+    .map_err(|report| report.errors)?;
     let encoded = bincode::serialize(&context).expect("checked context serializes");
     let restored: TypeEnv = bincode::deserialize(&encoded).expect("checked context restores");
-    check_ir_with_context(&restored, caller, chelis_types::ProgramOrigin::Unlinked)
-        .map(|_| ())
-        .map_err(|report| report.errors)
+    check_ir_with_context(
+        &restored,
+        caller,
+        chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
+    )
+    .map(|_| ())
+    .map_err(|report| report.errors)
 }
 
 fn accepts(label: &str, source: &str) {

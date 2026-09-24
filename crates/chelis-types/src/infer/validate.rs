@@ -8,8 +8,8 @@ use super::*;
 
 #[cfg(test)]
 thread_local! {
-    static CANCEL_BEFORE_DECLARATION_VALIDATION: std::cell::Cell<bool> =
-        const { std::cell::Cell::new(false) };
+    static CANCEL_BEFORE_DECLARATION_VALIDATION: std::cell::RefCell<Option<CancelToken>> =
+        const { std::cell::RefCell::new(None) };
 }
 
 #[cfg(test)]
@@ -18,15 +18,17 @@ struct DeclarationValidationCancellationHook;
 #[cfg(test)]
 impl Drop for DeclarationValidationCancellationHook {
     fn drop(&mut self) {
-        CANCEL_BEFORE_DECLARATION_VALIDATION.with(|armed| armed.set(false));
+        CANCEL_BEFORE_DECLARATION_VALIDATION.with(|armed| *armed.borrow_mut() = None);
     }
 }
 
 #[cfg(test)]
-fn cancel_before_declaration_validation_for_test() -> DeclarationValidationCancellationHook {
+fn cancel_before_declaration_validation_for_test(
+    token: CancelToken,
+) -> DeclarationValidationCancellationHook {
     CANCEL_BEFORE_DECLARATION_VALIDATION.with(|armed| {
         assert!(
-            !armed.replace(true),
+            armed.replace(Some(token)).is_none(),
             "the declaration-validation cancellation hook is already armed"
         );
     });
@@ -36,10 +38,8 @@ fn cancel_before_declaration_validation_for_test() -> DeclarationValidationCance
 #[cfg(test)]
 fn trip_declaration_validation_cancellation_for_test() {
     CANCEL_BEFORE_DECLARATION_VALIDATION.with(|armed| {
-        if armed.replace(false) {
-            crate::cancel::current_cancel_token()
-                .expect("the declaration-validation hook requires an installed token")
-                .cancel();
+        if let Some(token) = armed.borrow_mut().take() {
+            token.cancel();
         }
     });
 }
@@ -61,7 +61,8 @@ pub(super) fn validate_semantic_program(
     validate_vmap_extent_dependencies(exprs, type_env, errors);
     let mut static_env = UnordMap::new();
     let shape_env = shape_type_env(type_env);
-    let declared_signatures = collect_declared_sig_metadata(top_level_decl_items(exprs));
+    let declared_signatures =
+        collect_declared_sig_metadata(top_level_decl_items(exprs), &mut errors.stack());
     // chelis#930: per-top-level-declaration cancellation, same grain as
     // inference. Without it this validator is one uninterruptible step whose
     // cost grows with the program, and interrupt latency is bounded by the
@@ -69,9 +70,8 @@ pub(super) fn validate_semantic_program(
     // truncated walk.
     #[cfg(test)]
     trip_declaration_validation_cancellation_for_test();
-    let cancel = crate::cancel::current_cancel_token();
     for expr in top_level_decl_items(exprs) {
-        if cancel.as_ref().is_some_and(CancelToken::is_cancelled) {
+        if errors.cancellation_observed() {
             break;
         }
         validate_ir_expr(
@@ -113,7 +113,8 @@ fn validate_core_transform_fragment(exprs: &[deep::Expr], errors: &mut Diagnosti
     }
     for (_, items) in module_items.to_sorted() {
         let top_level_functions = collect_top_level_function_names(items);
-        let module_values = collect_top_level_transform_values(items, &top_level_functions);
+        let module_values =
+            collect_top_level_transform_values(items, &top_level_functions, &mut errors.stack());
         let lexical_scope = CoreTransformScope::default();
         for expr in items {
             walk_core_transform_targets(
@@ -198,10 +199,23 @@ fn bind_core_transform_pattern(
     pattern: &deep::Expr,
     value: &CoreTransformValue,
     scope: &mut CoreTransformScope,
+    stack: &mut StackBudget<'_>,
 ) {
-    stack_guard!("bind_core_transform_pattern", pattern);
+    if stack.frame_exhausted("bind_core_transform_pattern", || pattern.span_id()) {
+        return;
+    }
+    bind_core_transform_pattern_frame(pattern, value, scope, stack);
+    stack.exit_frame();
+}
+
+fn bind_core_transform_pattern_frame(
+    pattern: &deep::Expr,
+    value: &CoreTransformValue,
+    scope: &mut CoreTransformScope,
+    stack: &mut StackBudget<'_>,
+) {
     if let deep::Expr::MetaExpr(meta, _) = pattern {
-        bind_core_transform_pattern(&meta.expr, value, scope);
+        bind_core_transform_pattern(&meta.expr, value, scope, stack);
         return;
     }
     let Some((tag, _, children)) = stamped_parts(pattern) else {
@@ -218,11 +232,11 @@ fn bind_core_transform_pattern(
                 && elements.len() == children.len()
             {
                 for (child, element) in children.iter().zip(elements) {
-                    bind_core_transform_pattern(child, element, scope);
+                    bind_core_transform_pattern(child, element, scope, stack);
                 }
             } else {
                 for child in children {
-                    bind_core_transform_pattern(child, &CoreTransformValue::Ordinary, scope);
+                    bind_core_transform_pattern(child, &CoreTransformValue::Ordinary, scope, stack);
                 }
             }
         }
@@ -230,7 +244,7 @@ fn bind_core_transform_pattern(
             let carried = children
                 .get(1)
                 .map_or(CoreTransformValue::Ordinary, |inner| {
-                    if core_transform_value_matches_pattern(value, inner) {
+                    if core_transform_value_matches_pattern(value, inner, stack) {
                         value.clone()
                     } else {
                         CoreTransformValue::Ordinary
@@ -240,17 +254,17 @@ fn bind_core_transform_pattern(
                 scope.bind_local(name.to_string(), carried.clone());
             }
             if let Some(inner) = children.get(1) {
-                bind_core_transform_pattern(inner, &carried, scope);
+                bind_core_transform_pattern(inner, &carried, scope, stack);
             }
         }
         DeepTag::PatCtor | DeepTag::PatRecord => {
             for child in children.iter().skip(1) {
-                bind_core_transform_pattern(child, &CoreTransformValue::Ordinary, scope);
+                bind_core_transform_pattern(child, &CoreTransformValue::Ordinary, scope, stack);
             }
         }
         DeepTag::PatWild | DeepTag::PatLit => {}
         _ => {
-            for name in pattern_names_for_signature(pattern).to_sorted() {
+            for name in pattern_names_for_signature(pattern, stack).to_sorted() {
                 scope.bind_local(name.clone(), CoreTransformValue::Ordinary);
             }
         }
@@ -261,13 +275,29 @@ fn bind_core_transform_pattern(
 /// value. `Ordinary` deliberately matches every pattern because it carries no
 /// transform provenance; the answer only matters for preventing a known
 /// callable or tuple from crossing incompatible pattern structure.
-fn core_transform_value_matches_pattern(value: &CoreTransformValue, pattern: &deep::Expr) -> bool {
-    stack_guard!("core_transform_value_matches_pattern", pattern, false);
+fn core_transform_value_matches_pattern(
+    value: &CoreTransformValue,
+    pattern: &deep::Expr,
+    stack: &mut StackBudget<'_>,
+) -> bool {
+    if stack.frame_exhausted("core_transform_value_matches_pattern", || pattern.span_id()) {
+        return false;
+    }
+    let result = core_transform_value_matches_pattern_frame(value, pattern, stack);
+    stack.exit_frame();
+    result
+}
+
+fn core_transform_value_matches_pattern_frame(
+    value: &CoreTransformValue,
+    pattern: &deep::Expr,
+    stack: &mut StackBudget<'_>,
+) -> bool {
     if matches!(value, CoreTransformValue::Ordinary) {
         return true;
     }
     if let deep::Expr::MetaExpr(meta, _) = pattern {
-        return core_transform_value_matches_pattern(value, &meta.expr);
+        return core_transform_value_matches_pattern(value, &meta.expr, stack);
     }
     let Some((tag, _, children)) = stamped_parts(pattern) else {
         return false;
@@ -276,16 +306,15 @@ fn core_transform_value_matches_pattern(value: &CoreTransformValue, pattern: &de
         DeepTag::PatVar | DeepTag::PatWild => true,
         DeepTag::PatAs => children
             .get(1)
-            .is_some_and(|inner| core_transform_value_matches_pattern(value, inner)),
+            .is_some_and(|inner| core_transform_value_matches_pattern(value, inner, stack)),
         DeepTag::PatTuple => {
             let CoreTransformValue::Tuple(elements) = value else {
                 return false;
             };
             elements.len() == children.len()
-                && children
-                    .iter()
-                    .zip(elements)
-                    .all(|(child, element)| core_transform_value_matches_pattern(element, child))
+                && children.iter().zip(elements).all(|(child, element)| {
+                    core_transform_value_matches_pattern(element, child, stack)
+                })
         }
         DeepTag::PatLit | DeepTag::PatCtor | DeepTag::PatRecord => false,
         _ => false,
@@ -315,6 +344,7 @@ fn collect_top_level_function_names(exprs: &[&deep::Expr]) -> UnordSet<String> {
 fn collect_top_level_transform_values(
     exprs: &[&deep::Expr],
     top_level_functions: &UnordSet<String>,
+    stack: &mut StackBudget<'_>,
 ) -> UnordMap<String, CoreTransformValue> {
     let mut module_values = UnordMap::new();
     let lexical_scope = CoreTransformScope::default();
@@ -331,6 +361,7 @@ fn collect_top_level_transform_values(
             top_level_functions,
             &module_values,
             &lexical_scope,
+            stack,
         );
         module_values.insert(name.to_string(), value);
     }
@@ -344,7 +375,26 @@ fn walk_core_transform_targets(
     lexical_scope: &CoreTransformScope,
     errors: &mut DiagnosticSink<'_>,
 ) {
-    stack_guard!("walk_core_transform_targets", expr);
+    if errors.frame_exhausted("walk_core_transform_targets", || expr.span_id()) {
+        return;
+    }
+    walk_core_transform_targets_frame(
+        expr,
+        top_level_functions,
+        module_values,
+        lexical_scope,
+        errors,
+    );
+    errors.exit_frame();
+}
+
+fn walk_core_transform_targets_frame(
+    expr: &deep::Expr,
+    top_level_functions: &UnordSet<String>,
+    module_values: &UnordMap<String, CoreTransformValue>,
+    lexical_scope: &CoreTransformScope,
+    errors: &mut DiagnosticSink<'_>,
+) {
     if let deep::Expr::MetaExpr(meta, _) = expr {
         walk_core_transform_targets(
             &meta.expr,
@@ -376,7 +426,7 @@ fn walk_core_transform_targets(
                 && let Some((DeepTag::Params, _, params)) = stamped_parts(params)
             {
                 for param in params {
-                    if let Some(name) = param_name_for_refs(param) {
+                    if let Some(name) = param_name_for_refs(param, &mut errors.stack()) {
                         scoped.bind_local(name, CoreTransformValue::Ordinary);
                     }
                 }
@@ -435,6 +485,7 @@ fn walk_core_transform_targets(
                         top_level_functions,
                         module_values,
                         &scoped,
+                        &mut errors.stack(),
                     );
                     scoped.bind_local(name.to_string(), value);
                 }
@@ -451,6 +502,7 @@ fn walk_core_transform_targets(
                             top_level_functions,
                             module_values,
                             lexical_scope,
+                            &mut errors.stack(),
                         )
                     });
             if let Some(scrutinee) = children.first() {
@@ -475,7 +527,12 @@ fn walk_core_transform_targets(
                 };
                 let mut scoped = lexical_scope.clone();
                 if let Some(pattern) = arm_children.first() {
-                    bind_core_transform_pattern(pattern, &scrutinee_value, &mut scoped);
+                    bind_core_transform_pattern(
+                        pattern,
+                        &scrutinee_value,
+                        &mut scoped,
+                        &mut errors.stack(),
+                    );
                 }
                 for child in arm_children.iter().skip(1) {
                     walk_core_transform_targets(
@@ -535,18 +592,36 @@ fn classify_core_transform_value(
     top_level_functions: &UnordSet<String>,
     module_values: &UnordMap<String, CoreTransformValue>,
     lexical_scope: &CoreTransformScope,
+    stack: &mut StackBudget<'_>,
 ) -> CoreTransformValue {
-    stack_guard!(
-        "classify_core_transform_value",
+    if stack.frame_exhausted("classify_core_transform_value", || value.span_id()) {
+        return CoreTransformValue::Ordinary;
+    }
+    let result = classify_core_transform_value_frame(
         value,
-        CoreTransformValue::Ordinary
+        top_level_functions,
+        module_values,
+        lexical_scope,
+        stack,
     );
+    stack.exit_frame();
+    result
+}
+
+fn classify_core_transform_value_frame(
+    value: &deep::Expr,
+    top_level_functions: &UnordSet<String>,
+    module_values: &UnordMap<String, CoreTransformValue>,
+    lexical_scope: &CoreTransformScope,
+    stack: &mut StackBudget<'_>,
+) -> CoreTransformValue {
     if let deep::Expr::MetaExpr(meta, _) = value {
         return classify_core_transform_value(
             &meta.expr,
             top_level_functions,
             module_values,
             lexical_scope,
+            stack,
         );
     }
     let Some((tag, _, children)) = stamped_parts(value) else {
@@ -554,7 +629,7 @@ fn classify_core_transform_value(
     };
     match tag {
         DeepTag::Fn => {
-            if vmap_lambda_has_untyped_parameter(Some(value)) {
+            if vmap_lambda_has_untyped_parameter(Some(value), stack) {
                 CoreTransformValue::UntypedVmapLambda
             } else {
                 CoreTransformValue::ConstrainedVmapLambda
@@ -585,6 +660,7 @@ fn classify_core_transform_value(
                         top_level_functions,
                         module_values,
                         lexical_scope,
+                        stack,
                     )
                 })
                 .collect(),
@@ -600,6 +676,7 @@ fn classify_core_transform_value(
                 top_level_functions,
                 module_values,
                 lexical_scope,
+                stack,
             ) else {
                 return CoreTransformValue::Ordinary;
             };
@@ -624,10 +701,11 @@ fn classify_core_transform_value(
                     top_level_functions,
                     module_values,
                     &scoped,
+                    stack,
                 );
                 scoped.bind_local(name.to_string(), bound_value);
             }
-            classify_core_transform_value(body, top_level_functions, module_values, &scoped)
+            classify_core_transform_value(body, top_level_functions, module_values, &scoped, stack)
         }
         DeepTag::Block => children
             .last()
@@ -637,6 +715,7 @@ fn classify_core_transform_value(
                     top_level_functions,
                     module_values,
                     lexical_scope,
+                    stack,
                 )
             }),
         DeepTag::Match => {
@@ -648,6 +727,7 @@ fn classify_core_transform_value(
                 top_level_functions,
                 module_values,
                 lexical_scope,
+                stack,
             );
             let mut result: Option<CoreTransformValue> = None;
             for arm in children.iter().skip(1) {
@@ -659,12 +739,13 @@ fn classify_core_transform_value(
                     return CoreTransformValue::Ordinary;
                 };
                 let mut scoped = lexical_scope.clone();
-                bind_core_transform_pattern(pattern, &scrutinee_value, &mut scoped);
+                bind_core_transform_pattern(pattern, &scrutinee_value, &mut scoped, stack);
                 let arm_value = classify_core_transform_value(
                     body,
                     top_level_functions,
                     module_values,
                     &scoped,
+                    stack,
                 );
                 result =
                     Some(result.map_or_else(|| arm_value.clone(), |known| known.join(&arm_value)));
@@ -691,10 +772,21 @@ fn classify_core_transform_value(
 /// transformed. Named rank binders remain owned by ordinary binder rules.
 /// Nominal and function types are shared, non-mapped values, so the transform
 /// does not recurse into their arguments.
-fn vmap_parameter_type_has_unmapped_hole(ty: &deep::Expr) -> bool {
-    stack_guard!("vmap_parameter_type_has_unmapped_hole", ty, true);
+fn vmap_parameter_type_has_unmapped_hole(ty: &deep::Expr, stack: &mut StackBudget<'_>) -> bool {
+    if stack.frame_exhausted("vmap_parameter_type_has_unmapped_hole", || ty.span_id()) {
+        return true;
+    }
+    let result = vmap_parameter_type_has_unmapped_hole_frame(ty, stack);
+    stack.exit_frame();
+    result
+}
+
+fn vmap_parameter_type_has_unmapped_hole_frame(
+    ty: &deep::Expr,
+    stack: &mut StackBudget<'_>,
+) -> bool {
     if let deep::Expr::MetaExpr(meta, _) = ty {
-        return vmap_parameter_type_has_unmapped_hole(&meta.expr);
+        return vmap_parameter_type_has_unmapped_hole(&meta.expr, stack);
     }
     let Some((tag, _, children)) = stamped_parts(ty) else {
         return false;
@@ -705,8 +797,10 @@ fn vmap_parameter_type_has_unmapped_hole(ty: &deep::Expr) -> bool {
         }
         DeepTag::TRef => children
             .first()
-            .is_some_and(vmap_parameter_type_has_unmapped_hole),
-        DeepTag::TTuple => children.iter().any(vmap_parameter_type_has_unmapped_hole),
+            .is_some_and(|expr| vmap_parameter_type_has_unmapped_hole(expr, stack)),
+        DeepTag::TTuple => children
+            .iter()
+            .any(|expr| vmap_parameter_type_has_unmapped_hole(expr, stack)),
         DeepTag::TTensor => children.split_last().is_some_and(|(_, dimensions)| {
             dimensions.iter().any(|dimension| {
                 matches!(
@@ -727,7 +821,10 @@ fn vmap_parameter_type_has_unmapped_hole(ty: &deep::Expr) -> bool {
 /// unifies remaining dimension or precision variables with the operands.
 /// Without an annotation, or with an unmapped type/rank hole, the lambda can
 /// instead bind to the unsliced operand (#1887, #2109).
-fn vmap_lambda_has_untyped_parameter(target: Option<&deep::Expr>) -> bool {
+fn vmap_lambda_has_untyped_parameter(
+    target: Option<&deep::Expr>,
+    stack: &mut StackBudget<'_>,
+) -> bool {
     let Some((DeepTag::Fn, _, children)) = target.and_then(stamped_parts) else {
         return false;
     };
@@ -735,19 +832,19 @@ fn vmap_lambda_has_untyped_parameter(target: Option<&deep::Expr>) -> bool {
         return false;
     };
     if let Some((effective_params, _)) = target
-        .and_then(|target| expr_type_expr(target, &IrTypeEnv::new()))
+        .and_then(|target| expr_type_expr(target, &IrTypeEnv::new(), stack))
         .as_ref()
         .and_then(parse_t_fn_parts)
         && effective_params.len() == params.len()
     {
         return effective_params
             .iter()
-            .any(vmap_parameter_type_has_unmapped_hole);
+            .any(|expr| vmap_parameter_type_has_unmapped_hole(expr, stack));
     }
     params
         .iter()
         .any(|param| match param_name_and_inline_type(param) {
-            Some((_, Some(ty))) => vmap_parameter_type_has_unmapped_hole(&ty),
+            Some((_, Some(ty))) => vmap_parameter_type_has_unmapped_hole(&ty, stack),
             _ => true,
         })
 }
@@ -773,7 +870,13 @@ fn validate_core_transform_target(
         top_level_functions.contains(name) && !lexical_scope.local_values.contains_key(name)
     });
     let target_value = target.map_or(CoreTransformValue::Ordinary, |target| {
-        classify_core_transform_value(target, top_level_functions, module_values, lexical_scope)
+        classify_core_transform_value(
+            target,
+            top_level_functions,
+            module_values,
+            lexical_scope,
+            &mut errors.stack(),
+        )
     });
     let aliases_top_level_function =
         !direct_unshadowed_top_level && target_value.aliases_top_level_function();
@@ -1015,7 +1118,7 @@ pub(super) fn declaration_diagnostic_owner_plan(
 
 pub(super) fn validate_tensor_precisions_in_program(
     exprs: &[deep::Expr],
-    errors: &mut impl DiagnosticOutput,
+    errors: &mut DiagnosticSink<'_>,
 ) {
     let mut seen: UnordSet<(TensorPrecisionOwner, String)> = UnordSet::new();
     let items = tensor_precision_items(exprs);
@@ -1027,20 +1130,32 @@ pub(super) fn validate_tensor_precisions_in_program(
 
 fn walk_for_tensor_precision(
     expr: &deep::Expr,
-    errors: &mut impl DiagnosticOutput,
+    errors: &mut DiagnosticSink<'_>,
     seen: &mut UnordSet<(TensorPrecisionOwner, String)>,
     owner: &TensorPrecisionOwner,
 ) {
     // Bail before this walker's own unbounded recursion exhausts the
     // native stack (gdb confirmed this is a real SIGSEGV site on deep `app`
-    // trees, distinct from `infer_expr`). The bail records into
-    // `STACK_EXHAUSTED`; the check entry boundary turns that into a single
+    // trees, distinct from `infer_expr`). The bail records into the sink's
+    // stack bail record; the check entry boundary turns that into a single
     // located failure, so we just stop recursing here. See
     // `STACK_RED_ZONE_BYTES`.
-    stack_guard!(
+    if errors.frame_exhausted(
         "validate_tensor_precisions (walk_for_tensor_precision)",
-        expr
-    );
+        || expr.span_id(),
+    ) {
+        return;
+    }
+    walk_for_tensor_precision_frame(expr, errors, seen, owner);
+    errors.exit_frame();
+}
+
+fn walk_for_tensor_precision_frame(
+    expr: &deep::Expr,
+    errors: &mut DiagnosticSink<'_>,
+    seen: &mut UnordSet<(TensorPrecisionOwner, String)>,
+    owner: &TensorPrecisionOwner,
+) {
     match expr.carrier() {
         deep::ExprCarrier::DecodedNode(tag, metadata, kids) => {
             // The shared Deep resolver is the sole owner for declaration
@@ -1170,6 +1285,7 @@ fn walk_for_tensor_precision(
 pub(super) fn build_def_param_scope(
     expr: &deep::Expr,
     sigs: &IrTypeEnv,
+    stack: &mut StackBudget<'_>,
 ) -> BTreeMap<String, deep::Expr> {
     let mut scope = BTreeMap::new();
     // chelis#1107: preserve stamped and ordinary carriers alike. A List-only
@@ -1186,7 +1302,7 @@ pub(super) fn build_def_param_scope(
     let Some(body_expr) = kids.get(1) else {
         return scope;
     };
-    let Some((param_names, _)) = extract_fn_params_and_body(body_expr) else {
+    let Some((param_names, _)) = extract_fn_params_and_body(body_expr, stack) else {
         return scope;
     };
     // Prefer the def's surrounding sig if any; fall back to inline
@@ -1265,7 +1381,10 @@ pub(super) fn param_name_and_inline_type(
     }
 }
 
-pub(super) fn extract_fn_params_and_body(expr: &deep::Expr) -> Option<(Vec<String>, deep::Expr)> {
+pub(super) fn extract_fn_params_and_body(
+    expr: &deep::Expr,
+    stack: &mut StackBudget<'_>,
+) -> Option<(Vec<String>, deep::Expr)> {
     let (DeepTag::Fn, _, kids) = stamped_parts(expr)? else {
         return None;
     };
@@ -1281,7 +1400,7 @@ pub(super) fn extract_fn_params_and_body(expr: &deep::Expr) -> Option<(Vec<Strin
     };
     let mut names = Vec::new();
     for param in params {
-        if let Some(name) = param_name_for_refs(param) {
+        if let Some(name) = param_name_for_refs(param, stack) {
             names.push(name);
         }
     }
@@ -1308,7 +1427,21 @@ pub(super) fn validate_ir_expr(
     declared_signatures: &UnordMap<String, DeclaredSigMetadata>,
     errors: &mut DiagnosticSink<'_>,
 ) -> StaticValue {
-    stack_guard!("validate_ir_expr", expr, StaticValue::Unknown);
+    if errors.frame_exhausted("validate_ir_expr", || expr.span_id()) {
+        return StaticValue::Unknown;
+    }
+    let result = validate_ir_expr_frame(expr, type_env, static_env, declared_signatures, errors);
+    errors.exit_frame();
+    result
+}
+
+fn validate_ir_expr_frame(
+    expr: &deep::Expr,
+    type_env: &ShapeTypeEnv,
+    static_env: &mut UnordMap<String, StaticValue>,
+    declared_signatures: &UnordMap<String, DeclaredSigMetadata>,
+    errors: &mut DiagnosticSink<'_>,
+) -> StaticValue {
     match expr {
         deep::Expr::List(list, _) => {
             if get_tag(list) == Some(DeepTag::Module) {
@@ -1339,6 +1472,7 @@ pub(super) fn validate_ir_expr(
                         value_expr,
                         &signature.param_types,
                         type_env,
+                        &mut errors.stack(),
                     )
                 });
                 let value = validate_ir_expr(
@@ -1417,6 +1551,7 @@ pub(super) fn validate_ir_expr(
                                 value_expr,
                                 &mut scoped_type_env,
                                 &scoped_static_env,
+                                &mut errors.stack(),
                             );
                         }
                         index += 2;
@@ -1575,7 +1710,14 @@ fn validate_expression_metadata(
 /// so this role-owned preflight supplies the otherwise missing disposition
 /// without duplicating diagnostics for ordinary bodies.
 fn reject_unknown_metadata_forms(expr: &deep::Expr, errors: &mut DiagnosticSink<'_>) {
-    stack_guard!("reject_unknown_metadata_forms", expr);
+    if errors.frame_exhausted("reject_unknown_metadata_forms", || expr.span_id()) {
+        return;
+    }
+    reject_unknown_metadata_forms_frame(expr, errors);
+    errors.exit_frame();
+}
+
+fn reject_unknown_metadata_forms_frame(expr: &deep::Expr, errors: &mut DiagnosticSink<'_>) {
     match expr.carrier() {
         deep::ExprCarrier::DecodedNode(_, metadata, children) => {
             metadata.visit_expressions(&mut |value, role| {
@@ -1834,8 +1976,24 @@ pub(super) fn is_ir_shape_sensitive_builtin(name: &str) -> bool {
     )
 }
 
-pub(super) fn expr_type_expr(expr: &deep::Expr, type_env: &IrTypeEnv) -> Option<deep::Expr> {
-    stack_guard!("expr_type_expr", expr, None);
+pub(super) fn expr_type_expr(
+    expr: &deep::Expr,
+    type_env: &IrTypeEnv,
+    stack: &mut StackBudget<'_>,
+) -> Option<deep::Expr> {
+    if stack.frame_exhausted("expr_type_expr", || expr.span_id()) {
+        return None;
+    }
+    let result = expr_type_expr_frame(expr, type_env, stack);
+    stack.exit_frame();
+    result
+}
+
+fn expr_type_expr_frame(
+    expr: &deep::Expr,
+    type_env: &IrTypeEnv,
+    stack: &mut StackBudget<'_>,
+) -> Option<deep::Expr> {
     match expr {
         deep::Expr::Node(node, _) => {
             if let Some(ty) = node.meta().ty() {
@@ -1861,7 +2019,7 @@ pub(super) fn expr_type_expr(expr: &deep::Expr, type_env: &IrTypeEnv) -> Option<
             }
             None
         }
-        deep::Expr::MetaExpr(meta, _) => expr_type_expr(&meta.expr, type_env),
+        deep::Expr::MetaExpr(meta, _) => expr_type_expr(&meta.expr, type_env, stack),
         _ => None,
     }
 }
@@ -2000,10 +2158,10 @@ pub(super) fn validate_conv_semantic_requirements(
     let [_, _, _, input, kernel, strides, padding] = list.elements.as_slice() else {
         return;
     };
-    let input_dims =
-        arg_tensor_type_expr(input, type_env).and_then(|ty| tensor_dims_from_type_expr(&ty));
-    let kernel_dims =
-        arg_tensor_type_expr(kernel, type_env).and_then(|ty| tensor_dims_from_type_expr(&ty));
+    let input_dims = arg_tensor_type_expr(input, type_env, &mut errors.stack())
+        .and_then(|ty| tensor_dims_from_type_expr(&ty));
+    let kernel_dims = arg_tensor_type_expr(kernel, type_env, &mut errors.stack())
+        .and_then(|ty| tensor_dims_from_type_expr(&ty));
     let spatial_rank = input_dims
         .as_ref()
         .or(kernel_dims.as_ref())
@@ -2017,7 +2175,7 @@ pub(super) fn validate_conv_semantic_requirements(
     let Some(spatial_rank) = spatial_rank else {
         return;
     };
-    let params = match conv_parameters(strides, padding, spatial_rank) {
+    let params = match conv_parameters(strides, padding, spatial_rank, &mut errors.stack()) {
         Ok(Some(params)) => params,
         Ok(None) => return,
         Err(message) => {
@@ -2114,6 +2272,7 @@ pub(super) fn derive_ir_builtin_output_type(
     expr: &deep::Expr,
     type_env: &ShapeTypeEnv,
     static_env: &UnordMap<String, StaticValue>,
+    stack: &mut StackBudget<'_>,
 ) -> Option<deep::Expr> {
     // chelis#1107 amendment: carrier-preserving entry. The `derive_*` helpers
     // below take `&deep::List`, so bridge a stamped Node once here.
@@ -2124,11 +2283,11 @@ pub(super) fn derive_ir_builtin_output_type(
     }
     let func_name = active_ir_builtin_name(list, static_env)?;
     match func_name {
-        "conv" => derive_conv_output_type(list, type_env),
+        "conv" => derive_conv_output_type(list, type_env, stack),
         // softmax takes a (tensor, axis) tuple but its output shape
         // equals the input tensor's shape, but it is intentionally not in the
         // rank-polymorphism Identity class because its axis is positional.
-        "softmax" => derive_unary_shape_passthrough(list, type_env, static_env),
+        "softmax" => derive_unary_shape_passthrough(list, type_env, static_env, stack),
         // The central shape registry owns every shape-identity builtin. This
         // resolver must consume that registry directly: a second manual
         // allowlist omitted floor_div/mod/clamp/where/bitwise identities and
@@ -2137,7 +2296,7 @@ pub(super) fn derive_ir_builtin_output_type(
         // registry-owned path preserves their inferred shapes without
         // restoring a second spelling list here.
         _ if crate::shape_class(func_name) == crate::ShapeClass::Identity => {
-            derive_identity_shape_passthrough(list, type_env, static_env)
+            derive_identity_shape_passthrough(list, type_env, static_env, stack)
         }
         _ => None,
     }
@@ -2152,9 +2311,10 @@ pub(super) fn derive_unary_shape_passthrough(
     list: &deep::List,
     type_env: &ShapeTypeEnv,
     static_env: &UnordMap<String, StaticValue>,
+    stack: &mut StackBudget<'_>,
 ) -> Option<deep::Expr> {
     let arg = list.elements.get(3)?;
-    resolve_let_value_tensor_type(arg, type_env, static_env)
+    resolve_let_value_tensor_type(arg, type_env, static_env, stack)
 }
 
 /// Derive the output tensor type of any centrally classified identity op from
@@ -2168,11 +2328,12 @@ pub(super) fn derive_identity_shape_passthrough(
     list: &deep::List,
     type_env: &ShapeTypeEnv,
     static_env: &UnordMap<String, StaticValue>,
+    stack: &mut StackBudget<'_>,
 ) -> Option<deep::Expr> {
     list.elements
         .iter()
         .skip(3)
-        .find_map(|argument| resolve_let_value_tensor_type(argument, type_env, static_env))
+        .find_map(|argument| resolve_let_value_tensor_type(argument, type_env, static_env, stack))
 }
 
 /// Resolve the tensor type an identity op publishes for its own consumers.
@@ -2180,12 +2341,13 @@ fn resolve_let_value_tensor_type(
     expr: &deep::Expr,
     type_env: &ShapeTypeEnv,
     static_env: &UnordMap<String, StaticValue>,
+    stack: &mut StackBudget<'_>,
 ) -> Option<deep::Expr> {
     // Peek through borrow before recursing in case a wrapper op
     // appears under an `&` borrow (uncommon but cheap).
-    let inner = peel_borrow(expr);
-    derive_ir_builtin_output_type(inner, type_env, static_env)
-        .or_else(|| expr_shape_type_fact(inner, type_env))
+    let inner = peel_borrow(expr, stack);
+    derive_ir_builtin_output_type(inner, type_env, static_env, stack)
+        .or_else(|| expr_shape_type_fact(inner, type_env, stack))
 }
 
 /// Derive all convolution spatial extents, preserving the batch dimension's
@@ -2193,9 +2355,10 @@ fn resolve_let_value_tensor_type(
 pub(super) fn derive_conv_output_type(
     list: &deep::List,
     type_env: &ShapeTypeEnv,
+    stack: &mut StackBudget<'_>,
 ) -> Option<deep::Expr> {
-    let input_ty = arg_tensor_type_expr(list.elements.get(3)?, type_env)?;
-    let kernel_ty = arg_tensor_type_expr(list.elements.get(4)?, type_env)?;
+    let input_ty = arg_tensor_type_expr(list.elements.get(3)?, type_env, stack)?;
+    let kernel_ty = arg_tensor_type_expr(list.elements.get(4)?, type_env, stack)?;
     let input_dims = tensor_dims_from_type_expr(&input_ty)?;
     let kernel_dims = tensor_dims_from_type_expr(&kernel_ty)?;
     if input_dims.len() < 3 || input_dims.len() != kernel_dims.len() {
@@ -2205,6 +2368,7 @@ pub(super) fn derive_conv_output_type(
         list.elements.get(5)?,
         list.elements.get(6)?,
         input_dims.len() - 2,
+        stack,
     )
     .ok()??;
     let mut trailing = vec![match kernel_dims[0] {
@@ -2457,10 +2621,14 @@ mod core_transform_fragment_tests {
         parsed.remove(0)
     }
 
-    fn pattern_scope(source: &str, value: CoreTransformValue) -> CoreTransformScope {
+    fn pattern_scope(
+        source: &str,
+        value: CoreTransformValue,
+        stack: &mut StackBudget<'_>,
+    ) -> CoreTransformScope {
         let pattern = deep_type(source);
         let mut scope = CoreTransformScope::default();
-        bind_core_transform_pattern(&pattern, &value, &mut scope);
+        bind_core_transform_pattern(&pattern, &value, &mut scope, stack);
         scope
     }
 
@@ -2513,6 +2681,10 @@ mod core_transform_fragment_tests {
                     &top_level_functions,
                     &module_values,
                     &lexical_scope,
+                    &mut StackBudget::new(
+                        &mut NativeServices::new(None),
+                        &mut StackBailRecord::default()
+                    ),
                 ),
                 CoreTransformValue::UntypedVmapLambda,
                 "{name}: {source}"
@@ -2528,7 +2700,14 @@ mod core_transform_fragment_tests {
         .expect("core module values fixture");
         let items = program.iter().collect::<Vec<_>>();
         let top_level_functions = collect_top_level_function_names(&items);
-        let module_values = collect_top_level_transform_values(&items, &top_level_functions);
+        let module_values = collect_top_level_transform_values(
+            &items,
+            &top_level_functions,
+            &mut StackBudget::new(
+                &mut NativeServices::new(None),
+                &mut StackBailRecord::default(),
+            ),
+        );
         assert!(
             module_values
                 .get("mapped")
@@ -2554,6 +2733,10 @@ mod core_transform_fragment_tests {
                 &top_level_functions,
                 &module_values,
                 &lexical_scope,
+                &mut StackBudget::new(
+                    &mut NativeServices::new(None),
+                    &mut StackBailRecord::default()
+                ),
             ),
             CoreTransformValue::ConstrainedVmapLambda,
             "a local ascription supplies the pre-transform function structure"
@@ -2569,6 +2752,10 @@ mod core_transform_fragment_tests {
                 &top_level_functions,
                 &module_values,
                 &lexical_scope,
+                &mut StackBudget::new(
+                    &mut NativeServices::new(None),
+                    &mut StackBailRecord::default()
+                ),
             ),
             CoreTransformValue::UntypedVmapLambda,
             "an ascription containing a mapped type hole remains fenced"
@@ -2593,7 +2780,11 @@ mod core_transform_fragment_tests {
                       (var {} v))) \
                   (vmap {} (var {} reduce))))))";
         let program = chelis_deep::parser::parse_str(source).expect("canonical module program");
-        let result = crate::infer_program(&program, crate::ProgramOrigin::Unlinked);
+        let result = crate::infer_program(
+            &program,
+            crate::ProgramOrigin::Unlinked,
+            &mut crate::NativeServices::new(None),
+        );
         assert!(
             result
                 .errors
@@ -2654,7 +2845,14 @@ mod core_transform_fragment_tests {
 
     #[test]
     fn match_pattern_provenance_transfer_is_structural_and_conservative() {
-        let direct = pattern_scope("(pat-var {} mapped)", CoreTransformValue::UntypedVmapLambda);
+        let direct = pattern_scope(
+            "(pat-var {} mapped)",
+            CoreTransformValue::UntypedVmapLambda,
+            &mut StackBudget::new(
+                &mut NativeServices::new(None),
+                &mut StackBailRecord::default(),
+            ),
+        );
         assert_eq!(
             binding(&direct, "mapped"),
             &CoreTransformValue::UntypedVmapLambda
@@ -2671,6 +2869,10 @@ mod core_transform_fragment_tests {
                     CoreTransformValue::UntypedVmapLambda,
                 ]),
             ]),
+            &mut StackBudget::new(
+                &mut NativeServices::new(None),
+                &mut StackBailRecord::default(),
+            ),
         );
         assert_eq!(
             binding(&nested, "alias"),
@@ -2688,6 +2890,10 @@ mod core_transform_fragment_tests {
                 CoreTransformValue::UntypedVmapLambda,
                 CoreTransformValue::Ordinary,
             ]),
+            &mut StackBudget::new(
+                &mut NativeServices::new(None),
+                &mut StackBailRecord::default(),
+            ),
         );
         assert_eq!(
             binding(&siblings, "left"),
@@ -2698,6 +2904,10 @@ mod core_transform_fragment_tests {
         let as_pattern = pattern_scope(
             "(pat-as {} whole (pat-var {} mapped))",
             CoreTransformValue::UntypedVmapLambda,
+            &mut StackBudget::new(
+                &mut NativeServices::new(None),
+                &mut StackBailRecord::default(),
+            ),
         );
         assert_eq!(
             binding(&as_pattern, "whole"),
@@ -2714,7 +2924,14 @@ mod core_transform_fragment_tests {
             "(pat-ctor {} Box (pat-var {} mapped))",
             "(pat-record {} Box (kv {} value (pat-var {} mapped)))",
         ] {
-            let mismatched = pattern_scope(pattern, CoreTransformValue::UntypedVmapLambda);
+            let mismatched = pattern_scope(
+                pattern,
+                CoreTransformValue::UntypedVmapLambda,
+                &mut StackBudget::new(
+                    &mut NativeServices::new(None),
+                    &mut StackBailRecord::default(),
+                ),
+            );
             for (_, value) in mismatched.local_values.to_sorted() {
                 assert_eq!(
                     value,
@@ -2726,9 +2943,16 @@ mod core_transform_fragment_tests {
 
         for pattern in ["(pat-wild {})", "(pat-lit {} 0)"] {
             assert!(
-                pattern_scope(pattern, CoreTransformValue::UntypedVmapLambda)
-                    .local_values
-                    .is_empty(),
+                pattern_scope(
+                    pattern,
+                    CoreTransformValue::UntypedVmapLambda,
+                    &mut StackBudget::new(
+                        &mut NativeServices::new(None),
+                        &mut StackBailRecord::default()
+                    )
+                )
+                .local_values
+                .is_empty(),
                 "{pattern} binds no value"
             );
         }
@@ -2779,7 +3003,13 @@ mod core_transform_fragment_tests {
 
         for (name, source, expected) in cases {
             assert_eq!(
-                vmap_parameter_type_has_unmapped_hole(&deep_type(source)),
+                vmap_parameter_type_has_unmapped_hole(
+                    &deep_type(source),
+                    &mut StackBudget::new(
+                        &mut NativeServices::new(None),
+                        &mut StackBailRecord::default()
+                    )
+                ),
                 expected,
                 "{name}: {source}"
             );
@@ -2792,7 +3022,11 @@ mod core_transform_fragment_tests {
             "../../tests/fixtures/core/src/validate/undeclared_type.deep"
         ))
         .expect("core undeclared type fixture");
-        let result = crate::infer_program(&program, crate::ProgramOrigin::Unlinked);
+        let result = crate::infer_program(
+            &program,
+            crate::ProgramOrigin::Unlinked,
+            &mut crate::NativeServices::new(None),
+        );
         assert!(
             result.errors.iter().any(|error| {
                 matches!(error.kind, CheckErrorKind::TypeMismatch)
@@ -2824,7 +3058,7 @@ mod cancellation_tests {
         messages: Vec<String>,
     }
 
-    type Entry = fn(&[deep::Expr]) -> Observation;
+    type Entry = fn(&[deep::Expr], &mut NativeServices) -> Observation;
 
     fn validation_only_failure_fixture() -> Vec<deep::Expr> {
         chelis_deep::parser::parse_str(include_str!(
@@ -2863,38 +3097,44 @@ mod cancellation_tests {
 
     fn run_with_validator_cancellation(
         exprs: &[deep::Expr],
-        run: impl FnOnce(&[deep::Expr]) -> Observation,
+        run: impl FnOnce(&[deep::Expr], &mut NativeServices) -> Observation,
     ) -> Observation {
         let token = crate::cancel::CancelToken::new();
-        let _cancel_guard = crate::cancel::install_cancel_token(token);
-        let _hook_guard = cancel_before_declaration_validation_for_test();
-        run(exprs)
+        let _hook_guard = cancel_before_declaration_validation_for_test(token.clone());
+        run(exprs, &mut NativeServices::new(Some(token)))
     }
 
     #[test]
     fn cancellation_inside_shared_semantic_validation_is_hard_at_every_public_entry() {
         let exprs = validation_only_failure_fixture();
         let entries: [(&str, Entry); 4] = [
-            ("check_ir_program", |exprs| {
+            ("check_ir_program", |exprs, native| {
                 observe_check(crate::check_ir_program(
                     exprs,
                     crate::ProgramOrigin::Unlinked,
+                    native,
                 ))
             }),
-            ("check_typed_program", |exprs| {
+            ("check_typed_program", |exprs, native| {
                 observe_check(crate::check_typed_program(
                     exprs,
                     crate::ProgramOrigin::Unlinked,
+                    native,
                 ))
             }),
-            ("infer_ir_program", |exprs| {
+            ("infer_ir_program", |exprs, native| {
                 observe_infer(crate::infer_ir_program(
                     exprs,
                     crate::ProgramOrigin::Unlinked,
+                    native,
                 ))
             }),
-            ("infer_program", |exprs| {
-                observe_infer(crate::infer_program(exprs, crate::ProgramOrigin::Unlinked))
+            ("infer_program", |exprs, native| {
+                observe_infer(crate::infer_program(
+                    exprs,
+                    crate::ProgramOrigin::Unlinked,
+                    native,
+                ))
             }),
         ];
 

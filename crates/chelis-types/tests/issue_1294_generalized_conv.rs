@@ -56,9 +56,13 @@ fn convolution(
 
 fn check(source: &str) -> Result<(), String> {
     let program = parse_str(source).expect("valid Deep fixture");
-    check_ir_program(&program, chelis_types::ProgramOrigin::Unlinked)
-        .map(|_| ())
-        .map_err(|e| format!("{e:?}"))
+    check_ir_program(
+        &program,
+        chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
+    )
+    .map(|_| ())
+    .map_err(|e| format!("{e:?}"))
 }
 
 #[test]

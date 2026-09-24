@@ -17,8 +17,16 @@ fn symbolic_conv_chain_is_accepted_without_cascade_state() {
         "fixtures/core/tests/issue_212_cascade_suppression_depth/symbolic_conv_chain_is_accepted_without_cascade_state.deep"
     );
     let expressions = core_fixture(source);
-    check_ir_program(&expressions, chelis_types::ProgramOrigin::Unlinked)
-        .expect("IR checker accepts symbolic conv metadata");
-    check_typed_program(&expressions, chelis_types::ProgramOrigin::Unlinked)
-        .expect("typed checker accepts symbolic conv metadata");
+    check_ir_program(
+        &expressions,
+        chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
+    )
+    .expect("IR checker accepts symbolic conv metadata");
+    check_typed_program(
+        &expressions,
+        chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
+    )
+    .expect("typed checker accepts symbolic conv metadata");
 }

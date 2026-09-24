@@ -48,9 +48,13 @@ fn messages(rep: &InferResult) -> Vec<String> {
 /// vector) cannot masquerade as the intended reject.
 fn assert_rejects_naming(source: &str, needles: &[&str], label: &str) {
     let deep = parse_core(source);
-    let rep = check_ir_program(&deep, chelis_types::ProgramOrigin::Unlinked)
-        .err()
-        .unwrap_or_else(|| panic!("{label}: expected a check rejection, but it passed"));
+    let rep = check_ir_program(
+        &deep,
+        chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
+    )
+    .err()
+    .unwrap_or_else(|| panic!("{label}: expected a check rejection, but it passed"));
     let msgs = messages(&rep);
     assert!(
         msgs.iter()
@@ -64,11 +68,20 @@ fn assert_rejects_naming(source: &str, needles: &[&str], label: &str) {
 fn assert_checks(source: &str, label: &str) {
     let deep = parse_core(source);
     assert!(
-        check_ir_program(&deep, chelis_types::ProgramOrigin::Unlinked).is_ok(),
+        check_ir_program(
+            &deep,
+            chelis_types::ProgramOrigin::Unlinked,
+            &mut chelis_types::NativeServices::new(None)
+        )
+        .is_ok(),
         "{label}: expected a clean check, got {:?}",
-        check_ir_program(&parse_core(source), chelis_types::ProgramOrigin::Unlinked)
-            .err()
-            .map(|r| messages(&r)),
+        check_ir_program(
+            &parse_core(source),
+            chelis_types::ProgramOrigin::Unlinked,
+            &mut chelis_types::NativeServices::new(None)
+        )
+        .err()
+        .map(|r| messages(&r)),
     );
 }
 

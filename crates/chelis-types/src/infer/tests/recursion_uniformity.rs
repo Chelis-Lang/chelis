@@ -7,12 +7,21 @@ use super::*;
 
 fn legacy_errors(src: &str) -> Vec<CheckError> {
     let exprs: Vec<deep::Expr> = serde_json::from_str(src).expect("lossless AST fixture");
-    infer_program(&exprs, crate::ProgramOrigin::Unlinked).errors
+    infer_program(
+        &exprs,
+        crate::ProgramOrigin::Unlinked,
+        &mut crate::NativeServices::new(None),
+    )
+    .errors
 }
 
 fn legacy_ir_errors(src: &str) -> Vec<CheckError> {
     let exprs: Vec<deep::Expr> = serde_json::from_str(src).expect("lossless AST fixture");
-    match check_ir_program(&exprs, crate::ProgramOrigin::Unlinked) {
+    match check_ir_program(
+        &exprs,
+        crate::ProgramOrigin::Unlinked,
+        &mut crate::NativeServices::new(None),
+    ) {
         Ok(_) => Vec::new(),
         Err(result) => result.errors,
     }
@@ -100,14 +109,22 @@ fn inferred_recursive_members_generalize_after_both_driver_scc_boundaries() {
             (app {} (var {} left) (lit {type: (t-prim {} bool)} true)
               (lit {type: (t-prim {} bool)} false)))";
     let exprs = chelis_deep::parser::parse_str(source).expect("Deep fixture parses");
-    let inferred = infer_program(&exprs, crate::ProgramOrigin::Unlinked);
+    let inferred = infer_program(
+        &exprs,
+        crate::ProgramOrigin::Unlinked,
+        &mut crate::NativeServices::new(None),
+    );
     assert!(
         inferred.errors.is_empty(),
         "primary driver must generalize inferred SCC members: {:?}",
         inferred.errors
     );
-    check_ir_program(&exprs, crate::ProgramOrigin::Unlinked)
-        .expect("IR driver must generalize inferred SCC members");
+    check_ir_program(
+        &exprs,
+        crate::ProgramOrigin::Unlinked,
+        &mut crate::NativeServices::new(None),
+    )
+    .expect("IR driver must generalize inferred SCC members");
 }
 
 #[test]

@@ -179,10 +179,11 @@ these effect obligations.
 Full-core extraction must model a thread-indexed TLS store, shared cancellation flags,
 process-global state, and exit outcomes separately from graph values. At minimum:
 
-- `CancelTokenGuard` restores the previous per-thread token on normal return and
-  unwinding. Checker opacity and recursive scopes restore state owned by their
-  session. Link provenance instead arrives as immutable input, with no ambient
-  state to restore. A TLS read cannot be replaced by a fresh unrelated global value.
+- Checker cancellation, stack probes, stack growth and profiling are primitives on an
+  explicit per-invocation `chelis_types::NativeServices` passed by `&mut` to every
+  public checker entry; no checker thread-local token remains. Checker opacity and
+  recursive scopes restore state owned by their session. Link provenance instead
+  arrives as immutable input, with no ambient state to restore.
 - Cancellation uses shared `Arc<AtomicBool>` identity and relaxed atomic accesses;
   a concurrent model must account for permitted observations, not assume an immediately
   synchronized ordinary Boolean.
@@ -361,9 +362,9 @@ remain inputs with their existing seals; an invocation state must not mint them.
 | Former `INLINING_STACK`, tensor-helper preflight stack, `ACTIVE_TYPE_SUBST` | `HostLoweringSession::invocation` and scoped guards (implemented) | Preserve scope order and the current specialization's bindings. Nested sessions do not share mutable frames. |
 | Former `MONO_SPECIALIZATIONS` and `MonoProbeGuard` | Host invocation state plus scoped probe snapshot (implemented) | Preserve entry initialization, completion order, and rollback of speculative definitions and in-progress entries. Rollback restores the outer snapshot; it does not clear it. |
 | Former lowering-module panic-suppression flags | Explicit borrowed `LoweringRuntime`; per-thread storage and hook bridge confined to `lowering_runtime` (implemented). Rejection returns `LowerResult` (implemented) | Preserve shared thread state, clear-to-false behavior, and explicit fatal re-enable. The hook observes each raise once before finalizers. Native hook/unwind primitives still require a wrapper relation. |
-| Cancellation token identity and relaxed loads | Native runtime services | Keep shared token identity and the original polling points. A frozen entry Boolean is not equivalent to cancellation arriving during a check. |
+| Cancellation token identity and relaxed loads | `NativeServices::cancellation_observed` on the shell-supplied services (implemented) | Keep shared token identity and the original polling points; every poll is a fresh relaxed load. A frozen entry Boolean is not equivalent to cancellation arriving during a check. |
 | Atomic host-inference IDs, persistent thread counters, panic hook | Native runtime services | Preserve allocation/observation order and lifetime across invocations, including native ID wrapping or an explicit no-wrap bound. Resetting a global ID supply per run can invalidate identity comparisons. |
-| Stack growth, depth guards, first stack-bail record | Native resource boundary | Preserve the first reported site/span and normal-versus-abort behavior. Arbitrary Lean fuel is not a replacement for native stack availability. |
+| Stack growth, depth guards, first stack-bail record | `NativeServices` stack primitives; first bail and check-unit scope depth in the `DiagnosticSink`'s `StackBailRecord` (implemented) | Preserve the first reported site/span and normal-versus-abort behavior. Frame exits are explicit; the outermost check-unit entry resets the bail and the frame depth, so a caught unwind cannot leak depth into the next check. Arbitrary Lean fuel is not a replacement for native stack availability. |
 
 Remaining runtime migration and verification:
 

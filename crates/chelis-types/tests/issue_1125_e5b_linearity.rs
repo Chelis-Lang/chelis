@@ -52,16 +52,24 @@ fn checked_program(source: &str, legacy: bool) -> CheckedProgram {
         chelis_deep::parse_and_stamp_file(source).expect("valid core fixture");
     if legacy {
         let legacy = successor.iter().map(legacy_expr).collect::<Vec<_>>();
-        check_ir_program(&legacy, chelis_types::ProgramOrigin::Unlinked)
-            .expect("legacy fixture type-checks")
+        check_ir_program(
+            &legacy,
+            chelis_types::ProgramOrigin::Unlinked,
+            &mut chelis_types::NativeServices::new(None),
+        )
+        .expect("legacy fixture type-checks")
     } else {
-        check_typed_program(&successor, chelis_types::ProgramOrigin::Unlinked)
-            .expect("successor fixture type-checks")
+        check_typed_program(
+            &successor,
+            chelis_types::ProgramOrigin::Unlinked,
+            &mut chelis_types::NativeServices::new(None),
+        )
+        .expect("successor fixture type-checks")
     }
 }
 
 fn ordered_linearity_diagnostics(program: &CheckedProgram) -> Vec<String> {
-    match check_linearity(program) {
+    match check_linearity(program, &mut chelis_types::NativeServices::new(None)) {
         Ok(_) => Vec::new(),
         Err(errors) => errors
             .into_iter()

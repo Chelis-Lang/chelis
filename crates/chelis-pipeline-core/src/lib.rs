@@ -136,7 +136,10 @@ mod tests {
     }
 
     fn accepted_analysis(source: &str) -> PreparedTypeAnalysis {
-        match analyze_prepared(prepared(source)) {
+        match analyze_prepared(
+            prepared(source),
+            &mut chelis_types::NativeServices::new(None),
+        ) {
             PreparedTypeAnalysisOutcome::Accepted(analysis) => *analysis,
             PreparedTypeAnalysisOutcome::Rejected { fitness } => {
                 panic!("the fixture must type-check: {:?}", fitness.errors)
@@ -150,6 +153,7 @@ mod tests {
                 accepted_analysis(source),
                 SemanticContext::Isolated,
                 runtime,
+                &mut chelis_types::NativeServices::new(None),
             )
         })
         .expect("the fixture must pass semantic checks")
@@ -167,8 +171,14 @@ mod tests {
     fn context_checked(library: &CheckedLibrary) -> ContextCheckedCompilation<'_> {
         chelis_ir::lowering_runtime::with_native_lowering_runtime(|runtime| {
             complete_context_checks(
-                analyze_prepared_with_library(prepared(CONTEXT_EXTENSION), library).unwrap(),
+                analyze_prepared_with_library(
+                    prepared(CONTEXT_EXTENSION),
+                    library,
+                    &mut chelis_types::NativeServices::new(None),
+                )
+                .unwrap(),
                 runtime,
+                &mut chelis_types::NativeServices::new(None),
             )
         })
         .unwrap()
@@ -183,15 +193,16 @@ mod tests {
     #[test]
     fn monolithic_origin_distinguishes_linked_interfaces_from_forged_source() {
         assert!(matches!(
-            analyze_prepared(prepared_with_origin(
-                LINKED_INTERFACE,
-                ProgramOrigin::Linked
-            )),
+            analyze_prepared(
+                prepared_with_origin(LINKED_INTERFACE, ProgramOrigin::Linked),
+                &mut chelis_types::NativeServices::new(None)
+            ),
             PreparedTypeAnalysisOutcome::Accepted(_)
         ));
-        let PreparedTypeAnalysisOutcome::Rejected { fitness } =
-            analyze_prepared(prepared(LINKED_INTERFACE))
-        else {
+        let PreparedTypeAnalysisOutcome::Rejected { fitness } = analyze_prepared(
+            prepared(LINKED_INTERFACE),
+            &mut chelis_types::NativeServices::new(None),
+        ) else {
             panic!("identical unlinked input must not gain dependency-interface authority");
         };
         assert!(
@@ -213,12 +224,17 @@ mod tests {
             check_prepared_library(
                 prepared_with_origin(LINKED_LIBRARY, ProgramOrigin::Linked),
                 runtime,
+                &mut chelis_types::NativeServices::new(None),
             )
         })
         .expect("trusted linked declarations must pass the library semantic entry point");
         let LibraryRejection::Type { report } =
             chelis_ir::lowering_runtime::with_native_lowering_runtime(|runtime| {
-                check_prepared_library(prepared(LINKED_LIBRARY), runtime)
+                check_prepared_library(
+                    prepared(LINKED_LIBRARY),
+                    runtime,
+                    &mut chelis_types::NativeServices::new(None),
+                )
             })
             .expect_err("identical unlinked declarations must be rejected")
         else {
@@ -238,21 +254,31 @@ mod tests {
             check_prepared_library(
                 prepared_with_origin(LINKED_LIBRARY, ProgramOrigin::Linked),
                 runtime,
+                &mut chelis_types::NativeServices::new(None),
             )
         })
         .unwrap();
         let linked = analyze_prepared_with_library(
             prepared_with_origin(LINKED_EXTENSION, ProgramOrigin::Linked),
             &library,
+            &mut chelis_types::NativeServices::new(None),
         )
         .expect("a separately trusted linked extension must type-check");
         chelis_ir::lowering_runtime::with_native_lowering_runtime(|runtime| {
-            complete_context_checks(linked, runtime)
+            complete_context_checks(
+                linked,
+                runtime,
+                &mut chelis_types::NativeServices::new(None),
+            )
         })
         .expect("linked extension must pass semantic checks");
 
-        let rejection = analyze_prepared_with_library(prepared(LINKED_EXTENSION), &library)
-            .expect_err("a linked base must not authorize new unlinked declarations");
+        let rejection = analyze_prepared_with_library(
+            prepared(LINKED_EXTENSION),
+            &library,
+            &mut chelis_types::NativeServices::new(None),
+        )
+        .expect_err("a linked base must not authorize new unlinked declarations");
         assert!(
             rejection
                 .errors
@@ -260,10 +286,18 @@ mod tests {
                 .any(|error| matches!(error.kind, CheckErrorKind::ReservedLinkerName))
         );
 
-        let unlinked = analyze_prepared_with_library(prepared(UNLINKED_EXTENSION), &library)
-            .expect("unlinked code may reference already-checked linked declarations");
+        let unlinked = analyze_prepared_with_library(
+            prepared(UNLINKED_EXTENSION),
+            &library,
+            &mut chelis_types::NativeServices::new(None),
+        )
+        .expect("unlinked code may reference already-checked linked declarations");
         chelis_ir::lowering_runtime::with_native_lowering_runtime(|runtime| {
-            complete_context_checks(unlinked, runtime)
+            complete_context_checks(
+                unlinked,
+                runtime,
+                &mut chelis_types::NativeServices::new(None),
+            )
         })
         .expect("ordinary unlinked extension must remain valid");
     }
@@ -274,21 +308,31 @@ mod tests {
             check_prepared_library(
                 prepared_with_origin(LINKED_LIBRARY, ProgramOrigin::Linked),
                 runtime,
+                &mut chelis_types::NativeServices::new(None),
             )
         })
         .unwrap();
         let linked = analyze_prepared_library_with_base(
             prepared_with_origin(LINKED_EXTENSION, ProgramOrigin::Linked),
             &library,
+            &mut chelis_types::NativeServices::new(None),
         )
         .expect("a separately trusted linked library layer must type-check");
         chelis_ir::lowering_runtime::with_native_lowering_runtime(|runtime| {
-            complete_context_library_checks(linked, runtime)
+            complete_context_library_checks(
+                linked,
+                runtime,
+                &mut chelis_types::NativeServices::new(None),
+            )
         })
         .expect("linked library layer must compose with its checked base");
 
-        let rejection = analyze_prepared_library_with_base(prepared(LINKED_EXTENSION), &library)
-            .expect_err("a linked base must not authorize an unlinked library layer");
+        let rejection = analyze_prepared_library_with_base(
+            prepared(LINKED_EXTENSION),
+            &library,
+            &mut chelis_types::NativeServices::new(None),
+        )
+        .expect_err("a linked base must not authorize an unlinked library layer");
         assert!(
             rejection
                 .errors
@@ -296,10 +340,18 @@ mod tests {
                 .any(|error| matches!(error.kind, CheckErrorKind::ReservedLinkerName))
         );
 
-        let unlinked = analyze_prepared_library_with_base(prepared(UNLINKED_EXTENSION), &library)
-            .expect("an unlinked layer may reference already-checked linked declarations");
+        let unlinked = analyze_prepared_library_with_base(
+            prepared(UNLINKED_EXTENSION),
+            &library,
+            &mut chelis_types::NativeServices::new(None),
+        )
+        .expect("an unlinked layer may reference already-checked linked declarations");
         chelis_ir::lowering_runtime::with_native_lowering_runtime(|runtime| {
-            complete_context_library_checks(unlinked, runtime)
+            complete_context_library_checks(
+                unlinked,
+                runtime,
+                &mut chelis_types::NativeServices::new(None),
+            )
         })
         .expect("ordinary unlinked layer must compose with its checked base");
     }
@@ -364,6 +416,7 @@ mod tests {
             lowered.dag(),
             &[root],
             injected_library_input,
+            &mut chelis_types::NativeServices::new(None),
         )
         .unwrap();
         assert_eq!(values[&root].to_f64_lossy_vec(), vec![21.0]);
@@ -384,6 +437,7 @@ mod tests {
             selected.plan(),
             &mut context,
             injected_library_input,
+            &mut chelis_types::NativeServices::new(None),
         )
         .unwrap();
         assert_eq!(
@@ -395,7 +449,11 @@ mod tests {
     #[test]
     fn detached_context_extensions_reject_every_isolated_lowering_entrypoint() {
         let library = chelis_ir::lowering_runtime::with_native_lowering_runtime(|runtime| {
-            check_prepared_library(prepared(CONTEXT_LIBRARY), runtime)
+            check_prepared_library(
+                prepared(CONTEXT_LIBRARY),
+                runtime,
+                &mut chelis_types::NativeServices::new(None),
+            )
         })
         .unwrap();
         let contextual = context_checked(&library);
@@ -409,7 +467,11 @@ mod tests {
     #[test]
     fn contextual_lowered_products_cannot_be_relowered_without_their_library() {
         let library = chelis_ir::lowering_runtime::with_native_lowering_runtime(|runtime| {
-            check_prepared_library(prepared(CONTEXT_LIBRARY), runtime)
+            check_prepared_library(
+                prepared(CONTEXT_LIBRARY),
+                runtime,
+                &mut chelis_types::NativeServices::new(None),
+            )
         })
         .unwrap();
         let lowered_library =
@@ -435,7 +497,11 @@ mod tests {
     #[test]
     fn bound_and_composed_programs_keep_library_values_sealed() {
         let library = chelis_ir::lowering_runtime::with_native_lowering_runtime(|runtime| {
-            check_prepared_library(prepared(CONTEXT_LIBRARY), runtime)
+            check_prepared_library(
+                prepared(CONTEXT_LIBRARY),
+                runtime,
+                &mut chelis_types::NativeServices::new(None),
+            )
         })
         .unwrap();
         let evaluation_library =
@@ -506,26 +572,42 @@ mod tests {
     #[test]
     fn library_extensions_require_composition_before_library_lowering() {
         let library = chelis_ir::lowering_runtime::with_native_lowering_runtime(|runtime| {
-            check_prepared_library(prepared(CONTEXT_LIBRARY), runtime)
+            check_prepared_library(
+                prepared(CONTEXT_LIBRARY),
+                runtime,
+                &mut chelis_types::NativeServices::new(None),
+            )
         })
         .unwrap();
-        let extension =
-            analyze_prepared_library_with_base(prepared(CONTEXT_EXTENSION), &library).unwrap();
+        let extension = analyze_prepared_library_with_base(
+            prepared(CONTEXT_EXTENSION),
+            &library,
+            &mut chelis_types::NativeServices::new(None),
+        )
+        .unwrap();
         assert!(matches!(
             validate_cached_library(
                 extension.type_env().clone(),
                 extension.analysis().program().clone(),
+                &mut chelis_types::NativeServices::new(None),
             ),
             Err(LibraryRejection::ContextMismatch)
         ));
 
         let composed = chelis_ir::lowering_runtime::with_native_lowering_runtime(|runtime| {
-            complete_context_library_checks(extension, runtime)
+            complete_context_library_checks(
+                extension,
+                runtime,
+                &mut chelis_types::NativeServices::new(None),
+            )
         })
         .unwrap();
-        let composed =
-            validate_cached_library(composed.type_env().clone(), composed.program().clone())
-                .unwrap();
+        let composed = validate_cached_library(
+            composed.type_env().clone(),
+            composed.program().clone(),
+            &mut chelis_types::NativeServices::new(None),
+        )
+        .unwrap();
         let lowered = chelis_ir::lowering_runtime::with_native_lowering_runtime(|runtime| {
             lower_library(&composed, runtime)
         })
@@ -534,6 +616,7 @@ mod tests {
             lowered.dag(),
             lowered.dag().roots(),
             injected_library_input,
+            &mut chelis_types::NativeServices::new(None),
         )
         .unwrap();
         let root = lowered.dag().roots().last().unwrap();
@@ -543,7 +626,11 @@ mod tests {
     #[test]
     fn shadowed_host_declaration_retains_its_new_tensor_root() {
         let library = chelis_ir::lowering_runtime::with_native_lowering_runtime(|runtime| {
-            check_prepared_library(prepared(r#"(def {} value (lit {} "host"))"#), runtime)
+            check_prepared_library(
+                prepared(r#"(def {} value (lit {} "host"))"#),
+                runtime,
+                &mut chelis_types::NativeServices::new(None),
+            )
         })
         .unwrap();
         let lowered_library =
@@ -557,12 +644,17 @@ mod tests {
                  (def {} value (lit {type: (t-prim {} i32)} 2))",
             ),
             &library,
+            &mut chelis_types::NativeServices::new(None),
         )
         .unwrap();
         let lowered = chelis_ir::lowering_runtime::with_native_lowering_runtime(|runtime| {
             lower_checked_with_context(
                 chelis_ir::lowering_runtime::with_native_lowering_runtime(|runtime| {
-                    complete_context_checks(analysis, runtime)
+                    complete_context_checks(
+                        analysis,
+                        runtime,
+                        &mut chelis_types::NativeServices::new(None),
+                    )
                 })
                 .unwrap(),
                 &lowered_library,
@@ -573,9 +665,13 @@ mod tests {
         .unwrap();
         let root = *lowered.named_roots().get(&IrName::new("value")).unwrap();
         assert_eq!(lowered.dag().roots(), &[root]);
-        let values =
-            chelis_ir::eval::eval_tensor_roots_with_strict(lowered.dag(), &[root], |_| None)
-                .unwrap();
+        let values = chelis_ir::eval::eval_tensor_roots_with_strict(
+            lowered.dag(),
+            &[root],
+            |_| None,
+            &mut chelis_types::NativeServices::new(None),
+        )
+        .unwrap();
         assert_eq!(values[&root].to_f64_lossy_vec(), vec![2.0]);
     }
 
@@ -585,6 +681,7 @@ mod tests {
             check_prepared_library(
                 prepared("(def {} one (lit {type: (t-prim {} i32)} 1))"),
                 runtime,
+                &mut chelis_types::NativeServices::new(None),
             )
         })
         .expect("the first library must pass all checks");
@@ -592,13 +689,22 @@ mod tests {
             check_prepared_library(
                 prepared("(def {} one (lit {type: (t-prim {} i32)} 2))"),
                 runtime,
+                &mut chelis_types::NativeServices::new(None),
             )
         })
         .expect("the replacement library must pass all checks");
-        let analysis = analyze_prepared_with_library(prepared(""), &first)
-            .expect("the empty extension must type-check");
+        let analysis = analyze_prepared_with_library(
+            prepared(""),
+            &first,
+            &mut chelis_types::NativeServices::new(None),
+        )
+        .expect("the empty extension must type-check");
         let checked = chelis_ir::lowering_runtime::with_native_lowering_runtime(|runtime| {
-            complete_context_checks(analysis, runtime)
+            complete_context_checks(
+                analysis,
+                runtime,
+                &mut chelis_types::NativeServices::new(None),
+            )
         })
         .expect("the empty extension must pass semantic checks");
 
@@ -655,6 +761,7 @@ mod tests {
              (def {} value (lit {type: (t-prim {} i32)} 1)))",
                 ),
                 runtime,
+                &mut chelis_types::NativeServices::new(None),
             )
         })
         .expect("the exported library must pass all checks");
@@ -665,6 +772,7 @@ mod tests {
              (def {} value (lit {type: (t-prim {} i32)} 1)))",
                 ),
                 runtime,
+                &mut chelis_types::NativeServices::new(None),
             )
         })
         .expect("the private library must pass all checks");
@@ -675,9 +783,12 @@ mod tests {
                 .matches_checked_program(exported.program())
         );
 
-        let rejection =
-            validate_cached_library(private.type_env().clone(), exported.program().clone())
-                .expect_err("a same-shape foreign context must fail at the cache boundary");
+        let rejection = validate_cached_library(
+            private.type_env().clone(),
+            exported.program().clone(),
+            &mut chelis_types::NativeServices::new(None),
+        )
+        .expect_err("a same-shape foreign context must fail at the cache boundary");
 
         assert!(matches!(rejection, LibraryRejection::ContextMismatch));
     }
@@ -688,13 +799,17 @@ mod tests {
             check_prepared_library(
                 prepared("(def {} one (lit {type: (t-prim {} i32)} 1))"),
                 runtime,
+                &mut chelis_types::NativeServices::new(None),
             )
         })
         .expect("the library must pass all checks");
 
-        let rejection =
-            validate_cached_library(chelis_types::TypeEnv::empty(), library.program().clone())
-                .expect_err("a foreign type environment must fail at the cache boundary");
+        let rejection = validate_cached_library(
+            chelis_types::TypeEnv::empty(),
+            library.program().clone(),
+            &mut chelis_types::NativeServices::new(None),
+        )
+        .expect_err("a foreign type environment must fail at the cache boundary");
 
         assert!(matches!(rejection, LibraryRejection::ContextMismatch));
     }
@@ -758,9 +873,10 @@ mod tests {
     #[test]
     fn type_rejection_has_no_checked_product() {
         assert!(matches!(
-            analyze_prepared(prepared(include_str!(
-                "../tests/fixtures/type_rejection.dp"
-            ))),
+            analyze_prepared(
+                prepared(include_str!("../tests/fixtures/type_rejection.dp")),
+                &mut chelis_types::NativeServices::new(None)
+            ),
             PreparedTypeAnalysisOutcome::Rejected { .. }
         ));
     }
@@ -772,6 +888,7 @@ mod tests {
                 accepted_analysis(include_str!("../tests/fixtures/effect_rejection.dp")),
                 SemanticContext::Isolated,
                 runtime,
+                &mut chelis_types::NativeServices::new(None),
             )),
             Err(SemanticRejection::Effects { .. })
         ));
@@ -784,6 +901,7 @@ mod tests {
                 accepted_analysis(include_str!("../tests/fixtures/linearity_rejection.dp")),
                 SemanticContext::Isolated,
                 runtime,
+                &mut chelis_types::NativeServices::new(None),
             )),
             Err(SemanticRejection::Linearity { .. })
         ));

@@ -47,12 +47,17 @@ use chelis_types::{check_linearity, check_typed_program};
 /// Returns a stage-tagged error so linearity regressions remain observable.
 fn deep_to_dag(source: &str) -> Result<Dag, String> {
     let deep = chelis_deep::parser::parse_str(source).map_err(|e| format!("Deep parse: {e:?}"))?;
-    let checked = check_typed_program(&deep, chelis_types::ProgramOrigin::Unlinked)
-        .map_err(|errs| format!("typecheck failed: {:?}", errs.errors))?;
-    let checked = chelis_effects::check_program(&checked)
-        .map_err(|errs| format!("effects failed: {errs:?}"))?;
+    let checked = check_typed_program(
+        &deep,
+        chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
+    )
+    .map_err(|errs| format!("typecheck failed: {:?}", errs.errors))?;
     let checked =
-        check_linearity(&checked).map_err(|errs| format!("linearity failed: {errs:?}"))?;
+        chelis_effects::check_program(&checked, &mut chelis_types::NativeServices::new(None))
+            .map_err(|errs| format!("effects failed: {errs:?}"))?;
+    let checked = check_linearity(&checked, &mut chelis_types::NativeServices::new(None))
+        .map_err(|errs| format!("linearity failed: {errs:?}"))?;
     chelis_ir::lowering_runtime::with_native_lowering_runtime(|runtime| {
         try_lower_program(&checked, runtime)
     })
@@ -94,8 +99,12 @@ fn tv_3(data: [f64; 3]) -> TensorValue {
 fn eval_fanout(dag: &Dag, root: NodeId, input_name: &str, input_value: TensorValue) -> TensorValue {
     let mut inputs: UnordMap<String, TensorValue> = UnordMap::new();
     inputs.insert(input_name.to_string(), input_value);
-    let values =
-        eval_tensor_with(dag, |name| inputs.get(name).cloned()).expect("forward eval succeeds");
+    let values = eval_tensor_with(
+        dag,
+        |name| inputs.get(name).cloned(),
+        &mut chelis_types::NativeServices::new(None),
+    )
+    .expect("forward eval succeeds");
     values
         .get(&root)
         .cloned()
@@ -207,10 +216,18 @@ fn var_rhs_let_alias_then_borrow_use_lowers_without_explicit_copy() {
 
     let mut inputs: UnordMap<String, TensorValue> = UnordMap::new();
     inputs.insert("x".to_string(), x);
-    let target_vals = eval_tensor_with(&target_grad.dag, |n| inputs.get(n).cloned())
-        .expect("target backward eval");
-    let workaround_vals = eval_tensor_with(&workaround_grad.dag, |n| inputs.get(n).cloned())
-        .expect("workaround backward eval");
+    let target_vals = eval_tensor_with(
+        &target_grad.dag,
+        |n| inputs.get(n).cloned(),
+        &mut chelis_types::NativeServices::new(None),
+    )
+    .expect("target backward eval");
+    let workaround_vals = eval_tensor_with(
+        &workaround_grad.dag,
+        |n| inputs.get(n).cloned(),
+        &mut chelis_types::NativeServices::new(None),
+    )
+    .expect("workaround backward eval");
 
     let target_dx = &target_vals[&target_grad_node];
     let workaround_dx = &workaround_vals[&workaround_grad_node];
@@ -340,10 +357,18 @@ fn fn_body_cross_statement_var_rhs_aliased_fan_out_lowers_without_explicit_copy(
 
     let mut inputs: UnordMap<String, TensorValue> = UnordMap::new();
     inputs.insert("x".to_string(), x);
-    let target_vals = eval_tensor_with(&target_grad.dag, |n| inputs.get(n).cloned())
-        .expect("target backward eval");
-    let workaround_vals = eval_tensor_with(&workaround_grad.dag, |n| inputs.get(n).cloned())
-        .expect("workaround backward eval");
+    let target_vals = eval_tensor_with(
+        &target_grad.dag,
+        |n| inputs.get(n).cloned(),
+        &mut chelis_types::NativeServices::new(None),
+    )
+    .expect("target backward eval");
+    let workaround_vals = eval_tensor_with(
+        &workaround_grad.dag,
+        |n| inputs.get(n).cloned(),
+        &mut chelis_types::NativeServices::new(None),
+    )
+    .expect("workaround backward eval");
 
     let target_dx = &target_vals[&target_grad_node];
     let workaround_dx = &workaround_vals[&workaround_grad_node];

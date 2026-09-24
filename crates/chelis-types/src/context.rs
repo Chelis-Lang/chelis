@@ -69,11 +69,11 @@ use std::sync::Arc;
 
 use chelis_deep::ast as deep;
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 
 use crate::adt::AdtRegistry;
 use crate::builtins;
 use crate::env::Env;
+use crate::native::sha256_concat;
 use crate::types::VarGen;
 use crate::unify::Subst;
 
@@ -85,20 +85,16 @@ pub struct LibraryProofId {
 
 impl LibraryProofId {
     pub(crate) fn for_library(annotated_exprs: &[deep::Expr], context: Option<Self>) -> Self {
-        let mut hasher = Sha256::new();
-        hasher.update(b"chelis-library-proof-v1");
-        if let Some(context) = context {
-            hasher.update([1]);
-            hasher.update(context.digest);
-        } else {
-            hasher.update([0]);
-        }
+        const PREFIX: &[u8] = b"chelis-library-proof-v1";
         let canonical = chelis_deep::printer::print_canonical_flat(annotated_exprs);
-        hasher.update((canonical.len() as u64).to_le_bytes());
-        hasher.update(canonical.as_bytes());
-        Self {
-            digest: hasher.finalize().into(),
-        }
+        let length = (canonical.len() as u64).to_le_bytes();
+        let digest = match context {
+            Some(context) => {
+                sha256_concat(&[PREFIX, &[1], &context.digest, &length, canonical.as_bytes()])
+            }
+            None => sha256_concat(&[PREFIX, &[0], &length, canonical.as_bytes()]),
+        };
+        Self { digest }
     }
 }
 
@@ -289,6 +285,33 @@ mod tests {
     use crate::types::{Dim, Prim, Scheme, TensorPrec, Type, TypeVarRestriction};
     use crate::unify::unify;
 
+    /// A library's proof identity is persisted in cache envelopes and compared
+    /// across builds, so the digest of a fixed library (alone and layered on a
+    /// base) is a stable contract.
+    #[test]
+    fn library_proof_id_digest_is_stable() {
+        let exprs = chelis_deep::parser::parse_str(
+            "(def {} answer (lit {type: (t-prim {} i64)} 42))\n\
+             (def {} twice (fn {} (params {} x) (app {} (var {} add) (var {} x) (var {} x))))",
+        )
+        .expect("fixed library parses");
+        let base = LibraryProofId::for_library(&exprs, None);
+        assert_eq!(
+            base.digest,
+            [
+                52, 101, 74, 50, 108, 52, 77, 3, 169, 119, 248, 140, 139, 97, 67, 3, 185, 163, 206,
+                120, 15, 71, 41, 67, 244, 140, 225, 171, 217, 9, 191, 69,
+            ]
+        );
+        assert_eq!(
+            LibraryProofId::for_library(&exprs, Some(base)).digest,
+            [
+                252, 90, 11, 182, 68, 160, 198, 126, 141, 162, 151, 224, 198, 176, 40, 53, 137, 29,
+                61, 167, 221, 250, 173, 248, 27, 148, 72, 50, 51, 166, 16, 144,
+            ]
+        );
+    }
+
     #[test]
     fn dimension_snapshot_rejects_obsolete_direct_encoding_and_missing_summary() {
         let context = TypeEnv::empty();
@@ -369,7 +392,7 @@ mod tests {
         let imported =
             resumed
                 .env
-                .generalize(&Type::Var(child_tvar), &resumed.subst, &UnordSet::new());
+                .generalize(&Type::Var(child_tvar), &mut resumed.subst, &UnordSet::new());
         assert!(imported.tvars.is_empty());
 
         for cycle in 0..4 {
@@ -389,7 +412,7 @@ mod tests {
             let imported =
                 resumed
                     .env
-                    .generalize(&Type::Var(fresh), &resumed.subst, &UnordSet::new());
+                    .generalize(&Type::Var(fresh), &mut resumed.subst, &UnordSet::new());
             assert!(imported.tvars.is_empty());
         }
     }
@@ -429,7 +452,7 @@ mod tests {
             let Type::Fn(params, _) =
                 resumed
                     .env
-                    .instantiate(&scheme, &mut resumed.var_gen, &resumed.subst)
+                    .instantiate(&scheme, &mut resumed.var_gen, &mut resumed.subst)
             else {
                 panic!("operation remains callable");
             };
@@ -486,9 +509,10 @@ mod tests {
             scheme.tvar_restrictions,
             vec![(scheme.tvars[0], TypeVarRestriction::ActiveFloat)]
         );
-        let instantiated = resumed
-            .env
-            .instantiate(&scheme, &mut resumed.var_gen, &resumed.subst);
+        let instantiated =
+            resumed
+                .env
+                .instantiate(&scheme, &mut resumed.var_gen, &mut resumed.subst);
         let Type::Fn(params, _) = instantiated else {
             panic!("assert-close scheme must remain callable");
         };

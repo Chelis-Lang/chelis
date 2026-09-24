@@ -78,9 +78,11 @@ fn distinct_literal_tokens_keep_declaration_order_and_primitive_through_rebuilds
                         .count(),
                     2
                 );
-                let result = eval_tensor_with(&rebuilt, |_| {
-                    Some(TensorValue::from_vec(vec![2], vec![1.0, 2.0]))
-                });
+                let result = eval_tensor_with(
+                    &rebuilt,
+                    |_| Some(TensorValue::from_vec(vec![2], vec![1.0, 2.0])),
+                    &mut chelis_types::NativeServices::new(None),
+                );
                 if let Some(required) = required {
                     let operation = if cast { "cast" } else { "add" };
                     assert_eq!(
@@ -204,9 +206,11 @@ fn administrative_copies_preserve_literal_producer_through_fusion() {
                 folded,
             ] {
                 assert!(chelis_ir::verify::verify(&rebuilt).is_empty());
-                let result = eval_tensor_with(&rebuilt, |_| {
-                    Some(TensorValue::from_vec(vec![2], vec![1.0, 2.0]))
-                });
+                let result = eval_tensor_with(
+                    &rebuilt,
+                    |_| Some(TensorValue::from_vec(vec![2], vec![1.0, 2.0])),
+                    &mut chelis_types::NativeServices::new(None),
+                );
                 if required == 2 {
                     let values = result.unwrap();
                     assert_eq!(

@@ -207,7 +207,8 @@ fn issue_318_forward_shape_derived_expand_evaluates() {
         let (dag, _x, out) = build_forward(Extent::ShapeDerived, shape);
         let mut inputs: UnordMap<String, TensorValue> = UnordMap::new();
         inputs.insert("x".into(), TensorValue::from_vec(vec![2], vec![5.0, 6.0]));
-        let vals = eval_tensor(&dag, &inputs).expect("forward eval must succeed");
+        let vals = eval_tensor(&dag, &inputs, &mut chelis_types::NativeServices::new(None))
+            .expect("forward eval must succeed");
         // 3.0 * (5 + 6) = 33.0
         assert_close(
             &format!("forward shape-derived source={shape:?}"),
@@ -254,7 +255,12 @@ fn issue_318_grad_through_shape_derived_expand_is_correct() {
             .expect("gradient w.r.t. x must be present");
         let mut inputs: UnordMap<String, TensorValue> = UnordMap::new();
         inputs.insert("x".into(), TensorValue::from_vec(vec![2], vec![5.0, 6.0]));
-        let vals = eval_tensor(&result.dag, &inputs).expect("grad DAG eval");
+        let vals = eval_tensor(
+            &result.dag,
+            &inputs,
+            &mut chelis_types::NativeServices::new(None),
+        )
+        .expect("grad DAG eval");
         assert_close(
             &format!("grad_x shape-derived source={shape:?}"),
             &vals[&grad_x].to_f64_lossy_vec(),
@@ -284,7 +290,12 @@ fn issue_318_literal_and_shape_derived_agree() {
             let grad_x = result.grad_nodes[&x];
             let mut inputs = UnordMap::new();
             inputs.insert("x".into(), TensorValue::from_vec(vec![2], vec![5.0, 6.0]));
-            let vals = eval_tensor(&result.dag, &inputs).expect("grad eval");
+            let vals = eval_tensor(
+                &result.dag,
+                &inputs,
+                &mut chelis_types::NativeServices::new(None),
+            )
+            .expect("grad eval");
             grads.push(vals[&grad_x].to_f64_lossy_vec().clone());
         }
         assert_close(
@@ -309,7 +320,12 @@ fn issue_318_grad_matches_finite_difference() {
         let base = TensorValue::from_vec(vec![2], vec![0.7, -1.3]);
         let mut inputs: UnordMap<String, TensorValue> = UnordMap::new();
         inputs.insert("x".into(), base.clone());
-        let analytic = eval_tensor(&result.dag, &inputs).expect("analytic eval")[&grad_x]
+        let analytic = eval_tensor(
+            &result.dag,
+            &inputs,
+            &mut chelis_types::NativeServices::new(None),
+        )
+        .expect("analytic eval")[&grad_x]
             .to_f64_lossy_vec()
             .clone();
 
@@ -326,8 +342,12 @@ fn issue_318_grad_matches_finite_difference() {
             ip.insert("x".into(), plus);
             let mut im = UnordMap::new();
             im.insert("x".into(), minus);
-            let fp = eval_tensor(&dag, &ip).expect("plus eval")[&out].to_f64_lossy_vec()[0];
-            let fm = eval_tensor(&dag, &im).expect("minus eval")[&out].to_f64_lossy_vec()[0];
+            let fp = eval_tensor(&dag, &ip, &mut chelis_types::NativeServices::new(None))
+                .expect("plus eval")[&out]
+                .to_f64_lossy_vec()[0];
+            let fm = eval_tensor(&dag, &im, &mut chelis_types::NativeServices::new(None))
+                .expect("minus eval")[&out]
+                .to_f64_lossy_vec()[0];
             *slot = (fp - fm) / (2.0 * h);
         }
         for (i, (a, n)) in analytic.iter().zip(numerical.iter()).enumerate() {

@@ -36,9 +36,14 @@ use chelis_types::{check_linearity, check_typed_program};
 fn linearity_errors(source: &str) -> Vec<chelis_types::errors::CheckError> {
     let deep: Vec<chelis_deep::Expr> =
         chelis_deep::parse_and_stamp_file(source).expect("valid core fixture");
-    let checked = check_typed_program(&deep, chelis_types::ProgramOrigin::Unlinked)
-        .expect("type check should succeed");
-    check_linearity(&checked).expect_err("linearity check must error")
+    let checked = check_typed_program(
+        &deep,
+        chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
+    )
+    .expect("type check should succeed");
+    check_linearity(&checked, &mut chelis_types::NativeServices::new(None))
+        .expect_err("linearity check must error")
 }
 
 /// Run linearity and assert no errors. Used by positive controls
@@ -46,9 +51,14 @@ fn linearity_errors(source: &str) -> Vec<chelis_types::errors::CheckError> {
 fn assert_linearity_clean(source: &str) {
     let deep: Vec<chelis_deep::Expr> =
         chelis_deep::parse_and_stamp_file(source).expect("valid core fixture");
-    let checked = check_typed_program(&deep, chelis_types::ProgramOrigin::Unlinked)
-        .expect("type check should succeed");
-    check_linearity(&checked).expect("linearity check should not error");
+    let checked = check_typed_program(
+        &deep,
+        chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
+    )
+    .expect("type check should succeed");
+    check_linearity(&checked, &mut chelis_types::NativeServices::new(None))
+        .expect("linearity check should not error");
 }
 
 /// Fixture 1: aliasing-consume control. `y = w` is an aliasing consume;

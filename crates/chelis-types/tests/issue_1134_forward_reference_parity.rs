@@ -43,10 +43,12 @@ fn diagnostics(program: &[chelis_deep::Expr]) -> (Diagnostics, Diagnostics) {
         summarize(check_ir_program(
             program,
             chelis_types::ProgramOrigin::Unlinked,
+            &mut chelis_types::NativeServices::new(None),
         )),
         summarize(check_typed_program(
             program,
             chelis_types::ProgramOrigin::Unlinked,
+            &mut chelis_types::NativeServices::new(None),
         )),
     )
 }
@@ -507,16 +509,25 @@ fn a_separated_defsig_does_not_publish_a_future_eager_value() {
 #[test]
 fn a_separated_defsig_preserves_a_prior_context_binding_until_its_def() {
     let library = deep_program("(def {} value (lit {type: (t-prim {} f32)} 1.0))\n");
-    let context = build_type_env_from_library(&library, chelis_types::ProgramOrigin::Unlinked)
-        .expect("library context checks cleanly");
+    let context = build_type_env_from_library(
+        &library,
+        chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
+    )
+    .expect("library context checks cleanly");
     let program = deep_program(
         "(defsig {} value (t-prim {} i32))\n\n\
          (defsig {} capture (t-prim {} f32))\n\n\
          (def {} capture (var {} value))\n\n\
          (def {} value (lit {type: (t-prim {} i32)} 7))\n",
     );
-    check_ir_with_context(&context, &program, chelis_types::ProgramOrigin::Unlinked)
-        .expect("the prior f32 binding must remain visible until the new value def");
+    check_ir_with_context(
+        &context,
+        &program,
+        chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
+    )
+    .expect("the prior f32 binding must remain visible until the new value def");
 }
 
 #[test]
@@ -534,6 +545,7 @@ fn context_check_cannot_prebind_a_later_external_input_globally() {
             &TypeEnv::empty(),
             &program,
             chelis_types::ProgramOrigin::Unlinked,
+            &mut chelis_types::NativeServices::new(None),
         )
         .expect_err("later external input must remain unavailable in context checks");
         assert!(

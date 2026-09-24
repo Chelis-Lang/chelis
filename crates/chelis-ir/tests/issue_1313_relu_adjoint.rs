@@ -88,7 +88,12 @@ fn relu_adjoint_uses_dedicated_identity_and_direct_max_keeps_its_tie_rule() {
         "x".to_string(),
         value(Prim::F64, vec![nan, -0.0, 0.0, -1.0, f64::from_bits(1)]),
     )]);
-    let values = eval_tensor(&differentiated.dag, &inputs).unwrap();
+    let values = eval_tensor(
+        &differentiated.dag,
+        &inputs,
+        &mut chelis_types::NativeServices::new(None),
+    )
+    .unwrap();
     let actual = values[&dx].to_f64_lossy_vec();
     assert_eq!(actual, vec![0.0, 0.0, 0.0, 0.0, 1.0]);
     assert!(actual[..4].iter().all(|v| v.to_bits() == 0));
@@ -128,7 +133,12 @@ fn relu_adjoint_uses_dedicated_identity_and_direct_max_keeps_its_tie_rule() {
         ("left".to_string(), value(Prim::F64, vec![0.0; 5])),
         ("right".to_string(), value(Prim::F64, vec![0.0; 5])),
     ]);
-    let values = eval_tensor(&direct.dag, &inputs).unwrap();
+    let values = eval_tensor(
+        &direct.dag,
+        &inputs,
+        &mut chelis_types::NativeServices::new(None),
+    )
+    .unwrap();
     assert_eq!(
         values[&direct.grad_nodes[&left]].to_f64_lossy_vec(),
         vec![1.0; 5]
@@ -167,7 +177,12 @@ fn relu_adjoint_preserves_non_unit_cotangent_bits_and_is_second_order_in_g_only(
             value(Prim::F64, vec![payload, f64::INFINITY, -0.0, payload]),
         ),
     ]);
-    let values = eval_tensor(&differentiated.dag, &inputs).unwrap();
+    let values = eval_tensor(
+        &differentiated.dag,
+        &inputs,
+        &mut chelis_types::NativeServices::new(None),
+    )
+    .unwrap();
     assert!(
         values[&differentiated.grad_nodes[&x]]
             .to_f64_lossy_vec()
@@ -236,7 +251,8 @@ fn scalar_relu_matrix_covers_every_float_width_and_boundary_class() {
                     value_with_shape(precision, vec![], vec![g_value]),
                 ),
             ]);
-            let values = eval_tensor(&dag, &inputs).unwrap();
+            let values =
+                eval_tensor(&dag, &inputs, &mut chelis_types::NativeServices::new(None)).unwrap();
             assert!(values[&relu].shape.is_empty(), "{precision:?}");
             assert!(values[&adjoint].shape.is_empty(), "{precision:?}");
             let forward = values[&relu].to_f64_lossy_vec()[0];

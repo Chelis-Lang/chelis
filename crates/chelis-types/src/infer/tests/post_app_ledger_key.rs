@@ -18,7 +18,11 @@ use super::*;
 fn check_and_take_keys(source: &str) -> Vec<(usize, bool)> {
     let _ = take_post_app_key_log();
     let exprs: Vec<deep::Expr> = serde_json::from_str(source).expect("lossless AST fixture");
-    let _ = crate::check_typed_program(&exprs, crate::ProgramOrigin::Unlinked);
+    let _ = crate::check_typed_program(
+        &exprs,
+        crate::ProgramOrigin::Unlinked,
+        &mut crate::NativeServices::new(None),
+    );
     take_post_app_key_log()
 }
 

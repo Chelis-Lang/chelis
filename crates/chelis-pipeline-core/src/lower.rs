@@ -410,14 +410,20 @@ mod tests {
         let expressions = chelis_deep::parser::parse_str(source).expect("test Deep must parse");
         let prepared =
             PreparedProgram::from_expanded_deep(expressions, chelis_types::ProgramOrigin::Unlinked);
-        let analysis = match analyze_prepared(prepared) {
-            PreparedTypeAnalysisOutcome::Accepted(analysis) => *analysis,
-            PreparedTypeAnalysisOutcome::Rejected { fitness } => {
-                panic!("test Deep must type-check: {:?}", fitness.errors)
-            }
-        };
+        let analysis =
+            match analyze_prepared(prepared, &mut chelis_types::NativeServices::new(None)) {
+                PreparedTypeAnalysisOutcome::Accepted(analysis) => *analysis,
+                PreparedTypeAnalysisOutcome::Rejected { fitness } => {
+                    panic!("test Deep must type-check: {:?}", fitness.errors)
+                }
+            };
         chelis_ir::lowering_runtime::with_native_lowering_runtime(|runtime| {
-            complete_checks(analysis, SemanticContext::Isolated, runtime)
+            complete_checks(
+                analysis,
+                SemanticContext::Isolated,
+                runtime,
+                &mut chelis_types::NativeServices::new(None),
+            )
         })
         .expect("test Deep must pass semantic checks")
     }

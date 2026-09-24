@@ -34,9 +34,10 @@ pub(super) fn validate_vmap_extent_dependencies(
     type_env: &IrTypeEnv,
     errors: &mut DiagnosticSink<'_>,
 ) {
-    let declared_signatures = collect_declared_sig_metadata(top_level_decl_items(exprs));
-    let defs = collect_functions(exprs, type_env, &declared_signatures);
-    let summaries = summarize_functions(&defs);
+    let declared_signatures =
+        collect_declared_sig_metadata(top_level_decl_items(exprs), &mut errors.stack());
+    let defs = collect_functions(exprs, type_env, &declared_signatures, &mut errors.stack());
+    let summaries = summarize_functions(&defs, &mut errors.stack());
     for expr in exprs {
         walk_vmap_sites(expr, &defs, &summaries, errors);
     }
@@ -46,6 +47,7 @@ fn collect_functions(
     exprs: &[deep::Expr],
     type_env: &IrTypeEnv,
     declared_signatures: &UnordMap<String, DeclaredSigMetadata>,
+    stack: &mut StackBudget<'_>,
 ) -> BTreeMap<String, FunctionDef> {
     let mut defs = BTreeMap::new();
     for expr in top_level_decl_items(exprs) {
@@ -55,10 +57,13 @@ fn collect_functions(
         let Some(name) = kids.first().and_then(symbol_name) else {
             continue;
         };
-        let Some((params, body)) = kids.get(1).and_then(extract_fn_params_and_body) else {
+        let Some((params, body)) = kids
+            .get(1)
+            .and_then(|expr| extract_fn_params_and_body(expr, stack))
+        else {
             continue;
         };
-        let param_types = build_def_param_scope(expr, type_env);
+        let param_types = build_def_param_scope(expr, type_env, stack);
         let declared_param_types = declared_signatures
             .get(name)
             .map(|signature| signature.param_types.as_slice());
@@ -127,7 +132,10 @@ fn type_expr_contains_tensor(expr: &deep::Expr) -> bool {
     }
 }
 
-fn summarize_functions(defs: &BTreeMap<String, FunctionDef>) -> BTreeMap<String, FunctionSummary> {
+fn summarize_functions(
+    defs: &BTreeMap<String, FunctionDef>,
+    stack: &mut StackBudget<'_>,
+) -> BTreeMap<String, FunctionSummary> {
     let mut summaries = defs
         .keys()
         .map(|name| (name.clone(), FunctionSummary::default()))
@@ -135,7 +143,7 @@ fn summarize_functions(defs: &BTreeMap<String, FunctionDef>) -> BTreeMap<String,
     loop {
         let mut changed = false;
         for (name, def) in defs {
-            let next = summarize_function(def, &summaries);
+            let next = summarize_function(def, &summaries, stack);
             if summaries.get(name) != Some(&next) {
                 summaries.insert(name.clone(), next);
                 changed = true;
@@ -150,6 +158,7 @@ fn summarize_functions(defs: &BTreeMap<String, FunctionDef>) -> BTreeMap<String,
 fn summarize_function(
     def: &FunctionDef,
     summaries: &BTreeMap<String, FunctionSummary>,
+    stack: &mut StackBudget<'_>,
 ) -> FunctionSummary {
     let mut locals = def
         .params
@@ -158,7 +167,7 @@ fn summarize_function(
         .map(|(index, name)| (name.clone(), ParamDeps::from([index])))
         .collect::<UnordMap<_, _>>();
     let mut movement_deps = BTreeMap::new();
-    let return_deps = analyze_expr(&def.body, &mut locals, summaries, &mut movement_deps);
+    let return_deps = analyze_expr(&def.body, &mut locals, summaries, &mut movement_deps, stack);
     FunctionSummary {
         return_deps,
         movement_deps,
@@ -170,24 +179,38 @@ fn analyze_expr(
     locals: &mut UnordMap<String, ParamDeps>,
     summaries: &BTreeMap<String, FunctionSummary>,
     movement_deps: &mut BTreeMap<usize, MovementWitness>,
+    stack: &mut StackBudget<'_>,
 ) -> ParamDeps {
-    stack_guard!("analyze_vmap_extent_dependencies", expr, ParamDeps::new());
+    if stack.frame_exhausted("analyze_vmap_extent_dependencies", || expr.span_id()) {
+        return ParamDeps::new();
+    }
+    let result = analyze_expr_frame(expr, locals, summaries, movement_deps, stack);
+    stack.exit_frame();
+    result
+}
 
+fn analyze_expr_frame(
+    expr: &deep::Expr,
+    locals: &mut UnordMap<String, ParamDeps>,
+    summaries: &BTreeMap<String, FunctionSummary>,
+    movement_deps: &mut BTreeMap<usize, MovementWitness>,
+    stack: &mut StackBudget<'_>,
+) -> ParamDeps {
     let Some((tag, _, kids)) = stamped_parts(expr) else {
         return match expr {
             deep::Expr::BareList(elements, _) => {
-                union_children(elements, locals, summaries, movement_deps)
+                union_children(elements, locals, summaries, movement_deps, stack)
             }
             deep::Expr::MetaExpr(meta, _) => {
-                analyze_expr(&meta.expr, locals, summaries, movement_deps)
+                analyze_expr(&meta.expr, locals, summaries, movement_deps, stack)
             }
             deep::Expr::Map(map, _) => {
                 let mut values = Vec::new();
                 map.visit_syntax(&mut |_, value| values.push(value.clone()));
-                union_children(&values, locals, summaries, movement_deps)
+                union_children(&values, locals, summaries, movement_deps, stack)
             }
             deep::Expr::UnknownForm(data) => {
-                union_children(&data.children, locals, summaries, movement_deps)
+                union_children(&data.children, locals, summaries, movement_deps, stack)
             }
             deep::Expr::Atom(_, _) => ParamDeps::new(),
             deep::Expr::List(_, _) | deep::Expr::Node(_, _) => ParamDeps::new(),
@@ -202,10 +225,10 @@ fn analyze_expr(
             .cloned()
             .unwrap_or_default(),
         DeepTag::Lit | DeepTag::Quote => ParamDeps::new(),
-        DeepTag::Let => analyze_let(kids, locals, summaries, movement_deps),
+        DeepTag::Let => analyze_let(kids, locals, summaries, movement_deps, stack),
         DeepTag::Fn => ParamDeps::new(),
-        DeepTag::App => analyze_app(expr, kids, locals, summaries, movement_deps),
-        _ => union_children(kids, locals, summaries, movement_deps),
+        DeepTag::App => analyze_app(expr, kids, locals, summaries, movement_deps, stack),
+        _ => union_children(kids, locals, summaries, movement_deps, stack),
     }
 }
 
@@ -214,6 +237,7 @@ fn analyze_let(
     locals: &mut UnordMap<String, ParamDeps>,
     summaries: &BTreeMap<String, FunctionSummary>,
     movement_deps: &mut BTreeMap<usize, MovementWitness>,
+    stack: &mut StackBudget<'_>,
 ) -> ParamDeps {
     let mut let_locals = locals.clone();
     if let Some(bindings) = kids.first()
@@ -221,15 +245,15 @@ fn analyze_let(
     {
         let (pairs, _) = binding_kids.as_chunks::<2>();
         for pair in pairs {
-            let Some(name) = param_name_for_refs(&pair[0]) else {
+            let Some(name) = param_name_for_refs(&pair[0], stack) else {
                 continue;
             };
-            let deps = analyze_expr(&pair[1], &mut let_locals, summaries, movement_deps);
+            let deps = analyze_expr(&pair[1], &mut let_locals, summaries, movement_deps, stack);
             let_locals.insert(name, deps);
         }
     }
     kids.get(1)
-        .map(|body| analyze_expr(body, &mut let_locals, summaries, movement_deps))
+        .map(|body| analyze_expr(body, &mut let_locals, summaries, movement_deps, stack))
         .unwrap_or_default()
 }
 
@@ -239,12 +263,13 @@ fn analyze_app(
     locals: &mut UnordMap<String, ParamDeps>,
     summaries: &BTreeMap<String, FunctionSummary>,
     movement_deps: &mut BTreeMap<usize, MovementWitness>,
+    stack: &mut StackBudget<'_>,
 ) -> ParamDeps {
     let callee = kids.first().and_then(var_expr_name);
     let arg_deps = kids
         .iter()
         .skip(1)
-        .map(|arg| analyze_expr(arg, locals, summaries, movement_deps))
+        .map(|arg| analyze_expr(arg, locals, summaries, movement_deps, stack))
         .collect::<Vec<_>>();
 
     if callee == Some("shape") {
@@ -296,13 +321,13 @@ fn movement_operation(name: &str) -> Option<&str> {
 }
 
 fn movement_bound_dependencies(operation: &str, args: &[ParamDeps]) -> ParamDeps {
-    let selected: Box<dyn Iterator<Item = &ParamDeps> + '_> = match operation {
-        "expand" | "insert" => Box::new(args.get(2).into_iter()),
-        "reshape" => Box::new(args.get(1).into_iter()),
-        "shrink" | "pad" | "stride" => Box::new(args.iter().skip(1)),
-        _ => Box::new(std::iter::empty()),
+    let selected: &[ParamDeps] = match operation {
+        "expand" | "insert" => args.get(2..3).unwrap_or_default(),
+        "reshape" => args.get(1..2).unwrap_or_default(),
+        "shrink" | "pad" | "stride" => args.get(1..).unwrap_or_default(),
+        _ => &[],
     };
-    selected.flatten().copied().collect()
+    selected.iter().flatten().copied().collect()
 }
 
 fn union_children(
@@ -310,10 +335,11 @@ fn union_children(
     locals: &mut UnordMap<String, ParamDeps>,
     summaries: &BTreeMap<String, FunctionSummary>,
     movement_deps: &mut BTreeMap<usize, MovementWitness>,
+    stack: &mut StackBudget<'_>,
 ) -> ParamDeps {
     children
         .iter()
-        .flat_map(|child| analyze_expr(child, locals, summaries, movement_deps))
+        .flat_map(|child| analyze_expr(child, locals, summaries, movement_deps, stack))
         .collect()
 }
 
@@ -330,12 +356,24 @@ fn walk_vmap_sites(
     summaries: &BTreeMap<String, FunctionSummary>,
     errors: &mut DiagnosticSink<'_>,
 ) {
-    stack_guard!("walk_vmap_extent_sites", expr);
+    if errors.frame_exhausted("walk_vmap_extent_sites", || expr.span_id()) {
+        return;
+    }
+    walk_vmap_sites_frame(expr, defs, summaries, errors);
+    errors.exit_frame();
+}
+
+fn walk_vmap_sites_frame(
+    expr: &deep::Expr,
+    defs: &BTreeMap<String, FunctionDef>,
+    summaries: &BTreeMap<String, FunctionSummary>,
+    errors: &mut DiagnosticSink<'_>,
+) {
     if let Some((tag, _, kids)) = stamped_parts(expr) {
         if tag == DeepTag::Vmap
             && let Some((def, summary)) = kids
                 .first()
-                .and_then(|callee| transformed_callee(callee, defs, summaries))
+                .and_then(|callee| transformed_callee(callee, defs, summaries, &mut errors.stack()))
             && let Some((param_index, witness)) = summary
                 .movement_deps
                 .iter()
@@ -378,9 +416,9 @@ fn walk_vmap_sites(
         }
 
         if tag == DeepTag::Let
-            && let Some(scoped_defs) = extend_function_scope(kids, defs)
+            && let Some(scoped_defs) = extend_function_scope(kids, defs, &mut errors.stack())
         {
-            let scoped_summaries = summarize_functions(&scoped_defs);
+            let scoped_summaries = summarize_functions(&scoped_defs, &mut errors.stack());
             for child in kids {
                 walk_vmap_sites(child, &scoped_defs, &scoped_summaries, errors);
             }
@@ -422,6 +460,7 @@ fn walk_vmap_sites(
 fn extend_function_scope(
     let_kids: &[deep::Expr],
     defs: &BTreeMap<String, FunctionDef>,
+    stack: &mut StackBudget<'_>,
 ) -> Option<BTreeMap<String, FunctionDef>> {
     let Some((DeepTag::Bind, _, binding_kids)) = let_kids.first().and_then(stamped_parts) else {
         return None;
@@ -429,11 +468,11 @@ fn extend_function_scope(
     let (pairs, _) = binding_kids.as_chunks::<2>();
     let mut scoped = None;
     for pair in pairs {
-        let Some(name) = param_name_for_refs(&pair[0]) else {
+        let Some(name) = param_name_for_refs(&pair[0], stack) else {
             continue;
         };
         let current = scoped.as_ref().unwrap_or(defs);
-        let replacement = transformed_function_def(&pair[1], current);
+        let replacement = transformed_function_def(&pair[1], current, stack);
         if replacement.is_none() && !current.contains_key(&name) {
             continue;
         }
@@ -449,8 +488,21 @@ fn extend_function_scope(
 fn transformed_function_def(
     expr: &deep::Expr,
     defs: &BTreeMap<String, FunctionDef>,
+    stack: &mut StackBudget<'_>,
 ) -> Option<FunctionDef> {
-    stack_guard!("transformed_vmap_extent_function_def", expr, None);
+    if stack.frame_exhausted("transformed_vmap_extent_function_def", || expr.span_id()) {
+        return None;
+    }
+    let result = transformed_function_def_frame(expr, defs, stack);
+    stack.exit_frame();
+    result
+}
+
+fn transformed_function_def_frame(
+    expr: &deep::Expr,
+    defs: &BTreeMap<String, FunctionDef>,
+    stack: &mut StackBudget<'_>,
+) -> Option<FunctionDef> {
     if let Some(name) = var_expr_name(expr) {
         return defs.get(name).cloned();
     }
@@ -464,7 +516,7 @@ fn transformed_function_def(
     ) {
         return kids
             .first()
-            .and_then(|callee| transformed_function_def(callee, defs));
+            .and_then(|callee| transformed_function_def(callee, defs, stack));
     }
     None
 }
@@ -473,15 +525,29 @@ fn transformed_callee(
     expr: &deep::Expr,
     defs: &BTreeMap<String, FunctionDef>,
     summaries: &BTreeMap<String, FunctionSummary>,
+    stack: &mut StackBudget<'_>,
 ) -> Option<(FunctionDef, FunctionSummary)> {
-    stack_guard!("transformed_vmap_extent_callee", expr, None);
+    if stack.frame_exhausted("transformed_vmap_extent_callee", || expr.span_id()) {
+        return None;
+    }
+    let result = transformed_callee_frame(expr, defs, summaries, stack);
+    stack.exit_frame();
+    result
+}
+
+fn transformed_callee_frame(
+    expr: &deep::Expr,
+    defs: &BTreeMap<String, FunctionDef>,
+    summaries: &BTreeMap<String, FunctionSummary>,
+    stack: &mut StackBudget<'_>,
+) -> Option<(FunctionDef, FunctionSummary)> {
     if let Some(name) = var_expr_name(expr) {
         return Some((defs.get(name)?.clone(), summaries.get(name)?.clone()));
     }
     let (tag, _, kids) = stamped_parts(expr)?;
     if tag == DeepTag::Fn {
         let def = inline_function(expr)?;
-        let summary = summarize_function(&def, summaries);
+        let summary = summarize_function(&def, summaries, stack);
         return Some((def, summary));
     }
     if matches!(
@@ -490,7 +556,7 @@ fn transformed_callee(
     ) {
         return kids
             .first()
-            .and_then(|callee| transformed_callee(callee, defs, summaries));
+            .and_then(|callee| transformed_callee(callee, defs, summaries, stack));
     }
     None
 }

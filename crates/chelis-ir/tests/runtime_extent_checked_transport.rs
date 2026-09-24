@@ -186,12 +186,16 @@ fn result_claim_witnesses_survive_rebuilds_without_joining_same_labels() {
                     }
                 }
             }
-            let result = eval_tensor_with(&rebuilt, |name| {
-                let width = if name == "left" { 2 } else { 3 };
-                let shape = if batched { vec![2, width] } else { vec![width] };
-                let count = if batched { 2 * width } else { width };
-                Some(TensorValue::from_vec(shape, vec![0.0; count]))
-            });
+            let result = eval_tensor_with(
+                &rebuilt,
+                |name| {
+                    let width = if name == "left" { 2 } else { 3 };
+                    let shape = if batched { vec![2, width] } else { vec![width] };
+                    let count = if batched { 2 * width } else { width };
+                    Some(TensorValue::from_vec(shape, vec![0.0; count]))
+                },
+                &mut chelis_types::NativeServices::new(None),
+            );
             if actual == 3 {
                 let values = result.unwrap();
                 assert_eq!(
@@ -232,10 +236,14 @@ fn result_claim_witnesses_survive_rebuilds_without_joining_same_labels() {
             .shape_deps
             .insert(0, first_token);
         assert!(chelis_ir::verify::verify(&dag).is_empty());
-        let result = eval_tensor_with(&dag, |name| {
-            let width = if name == "left" { first } else { second };
-            Some(TensorValue::from_vec(vec![width], vec![0.0; width]))
-        });
+        let result = eval_tensor_with(
+            &dag,
+            |name| {
+                let width = if name == "left" { first } else { second };
+                Some(TensorValue::from_vec(vec![width], vec![0.0; width]))
+            },
+            &mut chelis_types::NativeServices::new(None),
+        );
         if let Some(required) = failure {
             let error = result.unwrap_err();
             assert!(
@@ -256,7 +264,11 @@ fn result_claim_witnesses_survive_rebuilds_without_joining_same_labels() {
         dag.node_mut(producer).unwrap().output_type.dims[0] = DimInfo::Lit(literal);
         let errors = chelis_ir::verify::verify(&dag);
         assert!(errors.is_empty(), "{errors:?}");
-        let result = eval_tensor_with(&dag, |_| Some(TensorValue::from_vec(vec![2], vec![0.0; 2])));
+        let result = eval_tensor_with(
+            &dag,
+            |_| Some(TensorValue::from_vec(vec![2], vec![0.0; 2])),
+            &mut chelis_types::NativeServices::new(None),
+        );
         if literal == 2 {
             assert_eq!(result.unwrap()[&producer].shape, [2]);
         } else {
@@ -316,7 +328,7 @@ fn computed_claim_checks_independent_values_before_returning_a_scalar() {
         let checked = checked_extent(&mut dag, actual, 2);
         dag.add_root(checked);
         assert!(chelis_ir::verify::verify(&dag).is_empty());
-        let result = eval_tensor_with(&dag, |_| None);
+        let result = eval_tensor_with(&dag, |_| None, &mut chelis_types::NativeServices::new(None));
         if actual == 2 {
             let values = result.unwrap();
             assert!(values[&checked].shape.is_empty());
@@ -359,7 +371,11 @@ fn multiple_claims_keep_each_requirement_and_reject_missing_edges() {
         constant_fold(&mut rewritten);
         let rewritten = dead_code_eliminate(&rewritten);
         for graph in [dag.clone(), rewritten] {
-            let result = eval_tensor_with(&graph, |_| None);
+            let result = eval_tensor_with(
+                &graph,
+                |_| None,
+                &mut chelis_types::NativeServices::new(None),
+            );
             if second == 2 {
                 let root = graph.roots()[0];
                 assert_eq!(
@@ -398,9 +414,11 @@ fn checked_unit_refinement_requires_the_same_observed_tensor_axis() {
         let (_, _, checked) = unit_axis(&mut dag);
         dag.add_root(checked);
         assert!(chelis_ir::verify::verify(&dag).is_empty());
-        let result = eval_tensor_with(&dag, |_| {
-            Some(TensorValue::from_vec(vec![actual], vec![5.0; actual]))
-        });
+        let result = eval_tensor_with(
+            &dag,
+            |_| Some(TensorValue::from_vec(vec![actual], vec![5.0; actual])),
+            &mut chelis_types::NativeServices::new(None),
+        );
         if actual == 1 {
             let values = result.unwrap();
             assert_eq!(values[&checked].shape, [1]);
@@ -495,7 +513,10 @@ fn rewriting_preserves_discarded_checks_and_separate_call_provenance() {
         assert_eq!(checks.len(), 2);
         assert_eq!(checks[0].span_id.as_deref(), Some("reshape-call"));
         assert_eq!(checks[1].span_id.as_deref(), Some("second-call"));
-        assert_eq!(eval_tensor_with(&dag, |_| None).is_ok(), actual == 2);
+        assert_eq!(
+            eval_tensor_with(&dag, |_| None, &mut chelis_types::NativeServices::new(None)).is_ok(),
+            actual == 2
+        );
     }
 }
 
@@ -546,12 +567,16 @@ fn vectorization_transports_checked_shapes_and_shifts_observed_axes() {
         dag.add_root(checked);
         let mapped = chelis_ir::vmap::vectorize_axis0(&dag, DimInfo::Lit(2)).unwrap();
         assert!(chelis_ir::verify::verify(&mapped).is_empty());
-        let result = eval_tensor_with(&mapped, |_| {
-            Some(TensorValue::from_vec(
-                vec![2, actual],
-                vec![5.0; 2 * actual],
-            ))
-        });
+        let result = eval_tensor_with(
+            &mapped,
+            |_| {
+                Some(TensorValue::from_vec(
+                    vec![2, actual],
+                    vec![5.0; 2 * actual],
+                ))
+            },
+            &mut chelis_types::NativeServices::new(None),
+        );
         if actual == 1 {
             let values = result.unwrap();
             let result = &values[&mapped.roots()[0]];
@@ -565,12 +590,16 @@ fn vectorization_transports_checked_shapes_and_shifts_observed_axes() {
         let (dag, _, _) = computed_reshape();
         let mapped = chelis_ir::vmap::vectorize_axis0(&dag, DimInfo::Lit(2)).unwrap();
         assert!(chelis_ir::verify::verify(&mapped).is_empty());
-        let result = eval_tensor_with(&mapped, |_| {
-            Some(TensorValue::from_vec(
-                vec![2, actual],
-                vec![7.0; 2 * actual],
-            ))
-        });
+        let result = eval_tensor_with(
+            &mapped,
+            |_| {
+                Some(TensorValue::from_vec(
+                    vec![2, actual],
+                    vec![7.0; 2 * actual],
+                ))
+            },
+            &mut chelis_types::NativeServices::new(None),
+        );
         if actual == 4 {
             let values = result.unwrap();
             let result = &values[&mapped.roots()[0]];
@@ -598,12 +627,16 @@ fn vectorization_keeps_local_unit_failure_at_the_observed_node() {
         dag.add_root(checked);
         let mapped = chelis_ir::vmap::vectorize_axis0(&dag, DimInfo::Lit(2)).unwrap();
         assert!(chelis_ir::verify::verify(&mapped).is_empty());
-        let result = eval_tensor_with(&mapped, |_| {
-            Some(TensorValue::from_vec(
-                vec![2, actual],
-                vec![5.0; 2 * actual],
-            ))
-        });
+        let result = eval_tensor_with(
+            &mapped,
+            |_| {
+                Some(TensorValue::from_vec(
+                    vec![2, actual],
+                    vec![5.0; 2 * actual],
+                ))
+            },
+            &mut chelis_types::NativeServices::new(None),
+        );
         if actual == 1 {
             let values = result.unwrap();
             assert_eq!(values[&mapped.roots()[0]].shape, [2, 1]);
@@ -668,9 +701,12 @@ fn masked_gradients_keep_unit_and_computed_primal_checks() {
                 (false, true) => 4,
                 (false, false) => 6,
             };
-            let result = eval_tensor_roots_with_strict(&gradient.dag, &[root], |_| {
-                Some(TensorValue::from_vec(vec![actual], vec![7.0; actual]))
-            });
+            let result = eval_tensor_roots_with_strict(
+                &gradient.dag,
+                &[root],
+                |_| Some(TensorValue::from_vec(vec![actual], vec![7.0; actual])),
+                &mut chelis_types::NativeServices::new(None),
+            );
             if good {
                 let values = result.unwrap();
                 assert_eq!(values[&root].shape, [actual]);
@@ -706,7 +742,12 @@ fn remainder_rebuild_retains_exact_values_and_rejects_invalid_types() {
     ] {
         constant_fold(&mut rebuilt);
         assert!(chelis_ir::verify::verify(&rebuilt).is_empty());
-        let values = eval_tensor_with(&rebuilt, |_| None).unwrap();
+        let values = eval_tensor_with(
+            &rebuilt,
+            |_| None,
+            &mut chelis_types::NativeServices::new(None),
+        )
+        .unwrap();
         assert_eq!(
             values[&rebuilt.roots()[0]]
                 .storage()
@@ -717,7 +758,12 @@ fn remainder_rebuild_retains_exact_values_and_rejects_invalid_types() {
     }
     let mapped = chelis_ir::vmap::vectorize_axis0(&dag, DimInfo::Lit(2)).unwrap();
     assert!(chelis_ir::verify::verify(&mapped).is_empty());
-    let values = eval_tensor_with(&mapped, |_| None).unwrap();
+    let values = eval_tensor_with(
+        &mapped,
+        |_| None,
+        &mut chelis_types::NativeServices::new(None),
+    )
+    .unwrap();
     assert_eq!(values[&mapped.roots()[0]].shape, vec![2]);
     assert_eq!(
         values[&mapped.roots()[0]].to_f64_lossy_vec(),
@@ -808,14 +854,22 @@ fn an_entry_result_claim_keeps_its_later_declaring_witness() {
             ),
         ])
     };
-    let error = eval_tensor_with(&dag, |name| inputs(3).get(name).cloned())
-        .expect_err("later declaration must reject an earlier foreign extent");
+    let error = eval_tensor_with(
+        &dag,
+        |name| inputs(3).get(name).cloned(),
+        &mut chelis_types::NativeServices::new(None),
+    )
+    .expect_err("later declaration must reject an earlier foreign extent");
     assert_eq!(
         error,
         "extent `cols`: y axis 0 = 3, x axis 0 = 2\nnumeric trap: domain in load at i64"
     );
-    let output = eval_tensor_with(&dag, |name| inputs(2).get(name).cloned())
-        .expect("agreeing claim executes");
+    let output = eval_tensor_with(
+        &dag,
+        |name| inputs(2).get(name).cloned(),
+        &mut chelis_types::NativeServices::new(None),
+    )
+    .expect("agreeing claim executes");
     assert_eq!(output[&result].shape, vec![2]);
     assert_eq!(output[&result].to_f64_lossy_vec(), vec![1.0, 2.0]);
 }

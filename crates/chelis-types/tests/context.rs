@@ -15,8 +15,12 @@ fn parse(src: &str) -> Vec<chelis_deep::Expr> {
 
 fn build_ctx(library_src: &str) -> TypeEnv {
     let library = parse(library_src);
-    build_type_env_from_library(&library, chelis_types::ProgramOrigin::Unlinked)
-        .expect("library checks clean")
+    build_type_env_from_library(
+        &library,
+        chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
+    )
+    .expect("library checks clean")
 }
 
 fn checker_messages(
@@ -51,11 +55,13 @@ fn adt_variant_and_field_readers_match_both_carriers() {
         assert_eq!(
             checker_messages(check_typed_program(
                 &program,
-                chelis_types::ProgramOrigin::Unlinked
+                chelis_types::ProgramOrigin::Unlinked,
+                &mut chelis_types::NativeServices::new(None)
             )),
             checker_messages(check_ir_program(
                 &program,
-                chelis_types::ProgramOrigin::Unlinked
+                chelis_types::ProgramOrigin::Unlinked,
+                &mut chelis_types::NativeServices::new(None)
             )),
             "{source}"
         );
@@ -75,10 +81,12 @@ fn assert_mutated_adt_rejects_on_both_ingresses(program: &[chelis_deep::Expr], l
     let typed = checker_messages(check_typed_program(
         program,
         chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
     ));
     let ir = checker_messages(check_ir_program(
         program,
         chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
     ));
     assert!(!typed.is_empty(), "{label}: malformed ADT must reject");
     assert_eq!(typed, ir, "{label}: carrier mutation must preserve parity");
@@ -153,9 +161,12 @@ fn adt_variant_and_field_readers_fail_closed_on_malformed_legacy_carriers() {
 #[test]
 fn type_environment_matches_its_checked_library_program() {
     let library = parse("(def {} one (lit {type: (t-prim {} i32)} 1))");
-    let (type_env, checked) =
-        build_compiled_library_context(&library, chelis_types::ProgramOrigin::Unlinked)
-            .expect("the library must type-check");
+    let (type_env, checked) = build_compiled_library_context(
+        &library,
+        chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
+    )
+    .expect("the library must type-check");
 
     assert!(type_env.matches_checked_program(&checked));
 }
@@ -164,12 +175,18 @@ fn type_environment_matches_its_checked_library_program() {
 fn type_environment_rejects_another_checked_library_program() {
     let first = parse("(def {} one (lit {type: (t-prim {} i32)} 1))");
     let second = parse("(def {} two (lit {type: (t-prim {} i32)} 2))");
-    let (type_env, _) =
-        build_compiled_library_context(&first, chelis_types::ProgramOrigin::Unlinked)
-            .expect("the first library must type-check");
-    let (_, checked) =
-        build_compiled_library_context(&second, chelis_types::ProgramOrigin::Unlinked)
-            .expect("the second library must type-check");
+    let (type_env, _) = build_compiled_library_context(
+        &first,
+        chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
+    )
+    .expect("the first library must type-check");
+    let (_, checked) = build_compiled_library_context(
+        &second,
+        chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
+    )
+    .expect("the second library must type-check");
 
     assert!(!type_env.matches_checked_program(&checked));
 }
@@ -177,9 +194,12 @@ fn type_environment_rejects_another_checked_library_program() {
 #[test]
 fn serialized_context_resumes_through_library_and_signature_layers() {
     let base_library = parse("(def {} library_id (fn {} (params {} value) (var {} value)))");
-    let (base, _) =
-        build_compiled_library_context(&base_library, chelis_types::ProgramOrigin::Unlinked)
-            .expect("base library type-checks");
+    let (base, _) = build_compiled_library_context(
+        &base_library,
+        chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
+    )
+    .expect("base library type-checks");
     let encoded = bincode::serialize(&base).expect("base TypeEnv serializes");
     let decoded: TypeEnv = bincode::deserialize(&encoded).expect("base TypeEnv deserializes");
 
@@ -194,6 +214,7 @@ fn serialized_context_resumes_through_library_and_signature_layers() {
         &decoded,
         &layer,
         chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
     )
     .expect("a serialized base resumes before the added library layer");
 
@@ -207,6 +228,7 @@ fn serialized_context_resumes_through_library_and_signature_layers() {
         &layer_context,
         &new_code,
         chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
     )
     .expect("signature-context checking resumes imported IDs before minting new ones");
 }
@@ -228,8 +250,13 @@ fn adt_probe_library_option_exhaustive_match_in_new_code() {
              (arm {} (pat-ctor {} MyNone) () (lit {type: (t-prim {} i32)} 0))))",
     );
 
-    check_ir_with_context(&ctx, &new_exprs, chelis_types::ProgramOrigin::Unlinked)
-        .expect("exhaustive match against library ADT must pass");
+    check_ir_with_context(
+        &ctx,
+        &new_exprs,
+        chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
+    )
+    .expect("exhaustive match against library ADT must pass");
 }
 
 #[test]
@@ -247,7 +274,12 @@ fn adt_probe_library_option_non_exhaustive_match_is_rejected() {
              (arm {} (pat-ctor {} MySome (pat-var {} v)) () (var {} v))))",
     );
 
-    let res = check_ir_with_context(&ctx, &new_exprs, chelis_types::ProgramOrigin::Unlinked);
+    let res = check_ir_with_context(
+        &ctx,
+        &new_exprs,
+        chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
+    );
     let err = res.expect_err("non-exhaustive match against library ADT must be rejected");
     let mentions_missing_none = err.errors.iter().any(|e| {
         format!("{:?}", e.kind).contains("NonExhaustiveMatch") && e.message.contains("MyNone")
@@ -278,8 +310,13 @@ fn adt_probe_new_code_adt_does_not_inherit_library_variants() {
              (arm {} (pat-ctor {} Circle) () (lit {type: (t-prim {} i32)} 1))
              (arm {} (pat-ctor {} Square) () (lit {type: (t-prim {} i32)} 2))))",
     );
-    check_ir_with_context(&ctx, &new_ok, chelis_types::ProgramOrigin::Unlinked)
-        .expect("new ADT exhaustively matched must pass without library variants leaking in");
+    check_ir_with_context(
+        &ctx,
+        &new_ok,
+        chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
+    )
+    .expect("new ADT exhaustively matched must pass without library variants leaking in");
 
     // Same Shape definition but only Circle arm — must still be non-exhaustive
     // (missing Square), not silently accepted.
@@ -290,8 +327,13 @@ fn adt_probe_new_code_adt_does_not_inherit_library_variants() {
            (match {} (var {} v)
              (arm {} (pat-ctor {} Circle) () (lit {type: (t-prim {} i32)} 1))))",
     );
-    let err = check_ir_with_context(&ctx, &new_bad, chelis_types::ProgramOrigin::Unlinked)
-        .expect_err("non-exhaustive new ADT match must be rejected");
+    let err = check_ir_with_context(
+        &ctx,
+        &new_bad,
+        chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
+    )
+    .expect_err("non-exhaustive new ADT match must be rejected");
     let cites_square = err.errors.iter().any(|e| {
         format!("{:?}", e.kind).contains("NonExhaustiveMatch") && e.message.contains("Square")
     });
@@ -315,8 +357,12 @@ fn with_context_equals_monolithic_for_five_snippets() {
         (def {} library_id (fn {} (params {} y) (var {} y)))";
 
     let library = parse(library_src);
-    let ctx = build_type_env_from_library(&library, chelis_types::ProgramOrigin::Unlinked)
-        .expect("library OK");
+    let ctx = build_type_env_from_library(
+        &library,
+        chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
+    )
+    .expect("library OK");
 
     let snippets = [
         "(def {} a (app {} (var {} double) (lit {type: (t-prim {} i32)} 7)))",
@@ -331,17 +377,22 @@ fn with_context_equals_monolithic_for_five_snippets() {
 
     for snippet in snippets {
         let new_exprs = parse(snippet);
-        let with_ctx =
-            check_ir_with_context(&ctx, &new_exprs, chelis_types::ProgramOrigin::Unlinked)
-                .unwrap_or_else(|e| {
-                    panic!("with_context failed on snippet {snippet}: {:?}", e.errors)
-                });
+        let with_ctx = check_ir_with_context(
+            &ctx,
+            &new_exprs,
+            chelis_types::ProgramOrigin::Unlinked,
+            &mut chelis_types::NativeServices::new(None),
+        )
+        .unwrap_or_else(|e| panic!("with_context failed on snippet {snippet}: {:?}", e.errors));
 
         let combined_src = format!("{library_src}\n{snippet}");
         let combined = parse(&combined_src);
-        let monolithic =
-            chelis_types::check_ir_program(&combined, chelis_types::ProgramOrigin::Unlinked)
-                .unwrap_or_else(|e| panic!("monolithic failed on combined: {:?}", e.errors));
+        let monolithic = chelis_types::check_ir_program(
+            &combined,
+            chelis_types::ProgramOrigin::Unlinked,
+            &mut chelis_types::NativeServices::new(None),
+        )
+        .unwrap_or_else(|e| panic!("monolithic failed on combined: {:?}", e.errors));
 
         // The new-code's annotated decls should equal the tail of monolithic
         // result (post-library prefix).
@@ -371,14 +422,24 @@ fn no_leak_between_snippets_against_same_context() {
 
     // Snippet A defines `secret_a`.
     let snippet_a = parse("(def {} secret_a (lit {type: (t-prim {} i32)} 42))");
-    check_ir_with_context(&ctx, &snippet_a, chelis_types::ProgramOrigin::Unlinked)
-        .expect("snippet A clean");
+    check_ir_with_context(
+        &ctx,
+        &snippet_a,
+        chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
+    )
+    .expect("snippet A clean");
 
     // Snippet B references `secret_a`. If A leaked into ctx, this would pass.
     // It must fail with UnboundVariable.
     let snippet_b = parse("(def {} use_b (var {} secret_a))");
-    let err = check_ir_with_context(&ctx, &snippet_b, chelis_types::ProgramOrigin::Unlinked)
-        .expect_err("snippet A's binding must not leak into ctx");
+    let err = check_ir_with_context(
+        &ctx,
+        &snippet_b,
+        chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
+    )
+    .expect_err("snippet A's binding must not leak into ctx");
     let mentions_unbound = err
         .errors
         .iter()
@@ -404,10 +465,19 @@ fn empty_context_matches_check_ir_program() {
     );
 
     let empty_ctx = TypeEnv::empty();
-    let with_ctx = check_ir_with_context(&empty_ctx, &exprs, chelis_types::ProgramOrigin::Unlinked)
-        .expect("empty-context check must succeed on standalone program");
-    let mono = chelis_types::check_ir_program(&exprs, chelis_types::ProgramOrigin::Unlinked)
-        .expect("monolithic must succeed");
+    let with_ctx = check_ir_with_context(
+        &empty_ctx,
+        &exprs,
+        chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
+    )
+    .expect("empty-context check must succeed on standalone program");
+    let mono = chelis_types::check_ir_program(
+        &exprs,
+        chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
+    )
+    .expect("monolithic must succeed");
     assert_eq!(
         with_ctx.annotated_exprs().len(),
         mono.annotated_exprs().len()
@@ -432,6 +502,7 @@ fn type_env_surfaces_library_declared_types() {
         &ctx,
         &parse("(def {} call (app {} (var {} double) (lit {type: (t-prim {} i32)} 5)))"),
         chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
     )
     .expect("check OK");
 
@@ -453,6 +524,7 @@ fn type_env_surfaces_library_declared_types() {
          (def {} call (app {} (var {} double) (lit {type: (t-prim {} i32)} 5)))",
         ),
         chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
     )
     .expect("mono OK");
     assert!(mono.type_env().contains_key("double"));
@@ -469,7 +541,12 @@ fn type_env_new_code_shadows_library_on_name_conflict() {
     // and `foo` should resolve to a type_env entry (not panic / not absent).
     let new_exprs =
         parse("(def {} foo (fn {} (params {} (x {type: (t-prim {} i32)})) (var {} x)))");
-    let res = check_ir_with_context(&ctx, &new_exprs, chelis_types::ProgramOrigin::Unlinked);
+    let res = check_ir_with_context(
+        &ctx,
+        &new_exprs,
+        chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
+    );
     if let Ok(checked) = res {
         assert!(
             checked.type_env().contains_key("foo"),

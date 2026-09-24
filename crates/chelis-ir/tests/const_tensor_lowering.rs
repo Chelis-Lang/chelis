@@ -10,12 +10,17 @@ use chelis_types::{check_linearity, check_typed_program};
 fn deep_to_dag(source: &str) -> Result<Dag, String> {
     let deep =
         chelis_deep::parser::parse_and_stamp(source).map_err(|e| format!("deep parse: {e:?}"))?;
-    let checked = check_typed_program(&deep, chelis_types::ProgramOrigin::Unlinked)
-        .map_err(|errs| format!("typecheck failed: {:?}", errs.errors))?;
-    let checked = chelis_effects::check_program(&checked)
-        .map_err(|errs| format!("effects failed: {errs:?}"))?;
+    let checked = check_typed_program(
+        &deep,
+        chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
+    )
+    .map_err(|errs| format!("typecheck failed: {:?}", errs.errors))?;
     let checked =
-        check_linearity(&checked).map_err(|errs| format!("linearity failed: {errs:?}"))?;
+        chelis_effects::check_program(&checked, &mut chelis_types::NativeServices::new(None))
+            .map_err(|errs| format!("effects failed: {errs:?}"))?;
+    let checked = check_linearity(&checked, &mut chelis_types::NativeServices::new(None))
+        .map_err(|errs| format!("linearity failed: {errs:?}"))?;
     chelis_ir::lowering_runtime::with_native_lowering_runtime(|runtime| {
         try_lower_program(&checked, runtime)
     })
@@ -163,7 +168,13 @@ fn const_tensor_evaluates_correctly() {
     let dag = deep_to_dag(source).expect("pipeline succeeds");
 
     let roots: Vec<NodeId> = dag.roots().to_vec();
-    let values = eval_tensor_roots_with(&dag, &roots, |_name| None).expect("eval succeeds");
+    let values = eval_tensor_roots_with(
+        &dag,
+        &roots,
+        |_name| None,
+        &mut chelis_types::NativeServices::new(None),
+    )
+    .expect("eval succeeds");
 
     assert_eq!(roots.len(), 1);
     let result = &values[&roots[0]];
@@ -260,7 +271,13 @@ fn const_tensor_negative_values_evaluate_correctly() {
     let dag = deep_to_dag(source).expect("pipeline succeeds");
 
     let roots: Vec<NodeId> = dag.roots().to_vec();
-    let values = eval_tensor_roots_with(&dag, &roots, |_name| None).expect("eval succeeds");
+    let values = eval_tensor_roots_with(
+        &dag,
+        &roots,
+        |_name| None,
+        &mut chelis_types::NativeServices::new(None),
+    )
+    .expect("eval succeeds");
 
     assert_eq!(roots.len(), 1);
     let result = &values[&roots[0]];
@@ -277,7 +294,13 @@ fn const_tensor_materializes_f32_values_at_f32_width() {
     let dag = deep_to_dag(source).expect("pipeline succeeds");
 
     let roots: Vec<NodeId> = dag.roots().to_vec();
-    let values = eval_tensor_roots_with(&dag, &roots, |_name| None).expect("eval succeeds");
+    let values = eval_tensor_roots_with(
+        &dag,
+        &roots,
+        |_name| None,
+        &mut chelis_types::NativeServices::new(None),
+    )
+    .expect("eval succeeds");
 
     let result = &values[&roots[0]];
     assert_eq!(result.shape, vec![3]);
@@ -303,7 +326,13 @@ fn const_tensor_widens_f32_suffixed_leaves_from_their_stored_width() {
     let dag = deep_to_dag(source).expect("pipeline succeeds");
 
     let roots: Vec<NodeId> = dag.roots().to_vec();
-    let values = eval_tensor_roots_with(&dag, &roots, |_name| None).expect("eval succeeds");
+    let values = eval_tensor_roots_with(
+        &dag,
+        &roots,
+        |_name| None,
+        &mut chelis_types::NativeServices::new(None),
+    )
+    .expect("eval succeeds");
 
     assert_eq!(
         values[&roots[0]].to_f64_lossy_vec(),
@@ -321,7 +350,13 @@ fn const_tensor_widens_explicit_inner_f32_casts_from_their_stored_width() {
     let dag = deep_to_dag(source).expect("pipeline succeeds");
 
     let roots: Vec<NodeId> = dag.roots().to_vec();
-    let values = eval_tensor_roots_with(&dag, &roots, |_name| None).expect("eval succeeds");
+    let values = eval_tensor_roots_with(
+        &dag,
+        &roots,
+        |_name| None,
+        &mut chelis_types::NativeServices::new(None),
+    )
+    .expect("eval succeeds");
 
     assert_eq!(
         values[&roots[0]].to_f64_lossy_vec(),
@@ -338,7 +373,13 @@ fn const_tensor_preserves_explicit_f64_values() {
     let dag = deep_to_dag(source).expect("pipeline succeeds");
 
     let roots: Vec<NodeId> = dag.roots().to_vec();
-    let values = eval_tensor_roots_with(&dag, &roots, |_name| None).expect("eval succeeds");
+    let values = eval_tensor_roots_with(
+        &dag,
+        &roots,
+        |_name| None,
+        &mut chelis_types::NativeServices::new(None),
+    )
+    .expect("eval succeeds");
 
     let result = &values[&roots[0]];
     assert_eq!(result.shape, vec![3]);
@@ -364,7 +405,13 @@ fn to_tensor_2d_non_uniform_lowers_to_const_tensor() {
 
     // Verify correct eval
     let roots: Vec<NodeId> = dag.roots().to_vec();
-    let values = eval_tensor_roots_with(&dag, &roots, |_name| None).expect("eval succeeds");
+    let values = eval_tensor_roots_with(
+        &dag,
+        &roots,
+        |_name| None,
+        &mut chelis_types::NativeServices::new(None),
+    )
+    .expect("eval succeeds");
     let result = &values[&roots[0]];
     assert_eq!(result.shape, vec![2, 3]);
     assert_eq!(
@@ -391,13 +438,18 @@ fn const_tensor_through_grad_is_zero() {
     // Evaluate the gradient and confirm no NaN.
     let roots: Vec<NodeId> = dag.roots().to_vec();
     assert!(!roots.is_empty(), "should have at least one root");
-    let values = eval_tensor_roots_with(&dag, &roots, |name| {
-        if name == "x" {
-            Some(TensorValue::from_vec(vec![3], vec![1.0, 1.0, 1.0]))
-        } else {
-            None
-        }
-    })
+    let values = eval_tensor_roots_with(
+        &dag,
+        &roots,
+        |name| {
+            if name == "x" {
+                Some(TensorValue::from_vec(vec![3], vec![1.0, 1.0, 1.0]))
+            } else {
+                None
+            }
+        },
+        &mut chelis_types::NativeServices::new(None),
+    )
     .expect("eval succeeds");
 
     // Check that results contain no NaN.
@@ -442,7 +494,13 @@ fn const_tensor_integer_values() {
     );
 
     let roots: Vec<NodeId> = dag.roots().to_vec();
-    let values = eval_tensor_roots_with(&dag, &roots, |_name| None).expect("eval succeeds");
+    let values = eval_tensor_roots_with(
+        &dag,
+        &roots,
+        |_name| None,
+        &mut chelis_types::NativeServices::new(None),
+    )
+    .expect("eval succeeds");
     let result = &values[&roots[0]];
     assert_eq!(result.to_f64_lossy_vec(), vec![10.0, 20.0, 30.0, 40.0]);
 }

@@ -142,8 +142,12 @@ fn pat_as_wrapping_pat_record_stamps_both_outer_and_inner_types() {
           (lit {type: (t-prim {} i32)} 0))))))
 "#;
     let exprs = deep(src);
-    let checked = check_typed_program(&exprs, chelis_types::ProgramOrigin::Unlinked)
-        .expect("type check should succeed");
+    let checked = check_typed_program(
+        &exprs,
+        chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
+    )
+    .expect("type check should succeed");
 
     // The annotated tree should contain a `pat-as` node whose meta
     // carries `:type (t-adt FooState (t-tensor ...))`.

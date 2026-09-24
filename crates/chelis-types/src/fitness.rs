@@ -5,6 +5,7 @@
 
 use crate::errors::CheckError;
 use crate::infer::{CheckedProgram, InferResult, InferStats, ProgramOrigin};
+use crate::native::NativeServices;
 
 /// Weights for each fitness component (spec section 6.1).
 const W_PARSE: f64 = 0.1;
@@ -162,9 +163,13 @@ pub enum TypeAnalysisOutcome {
 
 /// Type-check a Deep program and produce a fitness report.
 /// Runs tag validation to compute the structure component.
-pub fn check_program(exprs: &[chelis_deep::Expr], origin: ProgramOrigin) -> FitnessReport {
+pub fn check_program(
+    exprs: &[chelis_deep::Expr],
+    origin: ProgramOrigin,
+    native: &mut NativeServices,
+) -> FitnessReport {
     let structure = structure_score(exprs);
-    let result = crate::infer::infer_program(exprs, origin);
+    let result = crate::infer::infer_program(exprs, origin, native);
     FitnessReport::from_infer_result_with_structure(&result, structure)
 }
 
@@ -172,10 +177,11 @@ pub fn check_program(exprs: &[chelis_deep::Expr], origin: ProgramOrigin) -> Fitn
 pub fn analyze_ir_program(
     exprs: &[chelis_deep::Expr],
     origin: ProgramOrigin,
+    native: &mut NativeServices,
 ) -> TypeAnalysisOutcome {
     let structural = structural_stats(exprs);
     let structure = structure_score_from_stats(structural);
-    match crate::infer::check_ir_program(exprs, origin) {
+    match crate::infer::check_ir_program(exprs, origin, native) {
         Ok(program) => TypeAnalysisOutcome::Accepted {
             fitness: clean_fitness_from_stats(structural, program.infer_stats()),
             program: Box::new(program),
@@ -213,8 +219,12 @@ pub fn clean_fitness_from_stats(structural: StructuralStats, infer: InferStats) 
 ///
 /// The report now comes from the same inference product as
 /// [`analyze_ir_program`].
-pub fn check_ir_program(exprs: &[chelis_deep::Expr], origin: ProgramOrigin) -> FitnessReport {
-    match analyze_ir_program(exprs, origin) {
+pub fn check_ir_program(
+    exprs: &[chelis_deep::Expr],
+    origin: ProgramOrigin,
+    native: &mut NativeServices,
+) -> FitnessReport {
+    match analyze_ir_program(exprs, origin, native) {
         TypeAnalysisOutcome::Rejected { fitness }
         | TypeAnalysisOutcome::Accepted { fitness, .. } => fitness,
     }
@@ -352,6 +362,7 @@ mod tests {
         FitnessReport::from_infer_result(&crate::infer::infer_program(
             &exprs,
             crate::ProgramOrigin::Unlinked,
+            &mut crate::NativeServices::new(None),
         ))
     }
 
@@ -460,7 +471,11 @@ mod tests {
     fn check_program_fn_works() {
         let exprs =
             chelis_deep::parser::parse_str("(def {} x (lit {type: (t-prim {} i32)} 42))").unwrap();
-        let r = check_program(&exprs, crate::ProgramOrigin::Unlinked);
+        let r = check_program(
+            &exprs,
+            crate::ProgramOrigin::Unlinked,
+            &mut crate::NativeServices::new(None),
+        );
         assert!((r.score - 1.0).abs() < 1e-9);
     }
 
@@ -470,7 +485,11 @@ mod tests {
             "(def {} x (var {type: (t-tensor {} (d-lit {} 32) (d-lit {} 784) (t-prim {} f32))} x))",
         )
         .unwrap();
-        let r = check_ir_program(&exprs, crate::ProgramOrigin::Unlinked);
+        let r = check_ir_program(
+            &exprs,
+            crate::ProgramOrigin::Unlinked,
+            &mut crate::NativeServices::new(None),
+        );
         assert!((r.score - 1.0).abs() < 1e-9, "{}", r.score);
         assert!(r.errors.is_empty());
     }
@@ -481,7 +500,11 @@ mod tests {
             "(def {} f (app {} (var {} add) (lit {type: (t-prim {} i32)} 1) (lit {type: (t-prim {} bool)} true)))",
         )
         .unwrap();
-        let r = check_ir_program(&exprs, crate::ProgramOrigin::Unlinked);
+        let r = check_ir_program(
+            &exprs,
+            crate::ProgramOrigin::Unlinked,
+            &mut crate::NativeServices::new(None),
+        );
         assert!(!r.errors.is_empty(), "{r:?}");
         assert!(r.score < 1.0, "{r:?}");
         assert!(r.untyped_nodes > 0, "{r:?}");
@@ -497,7 +520,11 @@ mod tests {
             "(deftype {} Foo () (variant {} Foo)) (deftype {} Foo () (variant {} Foo))",
         )
         .unwrap();
-        let r = check_ir_program(&exprs, crate::ProgramOrigin::Unlinked);
+        let r = check_ir_program(
+            &exprs,
+            crate::ProgramOrigin::Unlinked,
+            &mut crate::NativeServices::new(None),
+        );
         assert!(!r.errors.is_empty(), "duplicate deftype must report: {r:?}");
         assert_eq!(
             r.total_nodes, 0,
@@ -520,7 +547,11 @@ mod tests {
             "(deftype {} Foo () (variant {} Foo)) (deftype {} Foo () (variant {} Foo))",
         )
         .unwrap();
-        let r = check_program(&exprs, crate::ProgramOrigin::Unlinked);
+        let r = check_program(
+            &exprs,
+            crate::ProgramOrigin::Unlinked,
+            &mut crate::NativeServices::new(None),
+        );
         assert!(!r.errors.is_empty(), "{r:?}");
         assert!(r.score < 0.5, "got {}", r.score);
     }
@@ -530,7 +561,11 @@ mod tests {
     #[test]
     fn clean_declaration_only_program_still_scores_one() {
         let exprs = chelis_deep::parser::parse_str("(deftype {} Foo () (variant {} Foo))").unwrap();
-        let r = check_ir_program(&exprs, crate::ProgramOrigin::Unlinked);
+        let r = check_ir_program(
+            &exprs,
+            crate::ProgramOrigin::Unlinked,
+            &mut crate::NativeServices::new(None),
+        );
         assert!(r.errors.is_empty(), "{r:?}");
         assert!((r.score - 1.0).abs() < 1e-9, "got {}", r.score);
     }
@@ -545,7 +580,11 @@ mod tests {
             "(def {} f (app {} (var {} add) (lit {type: (t-prim {} i32)} 1) (lit {type: (t-prim {} bool)} true)))",
         )
         .unwrap();
-        let r = check_ir_program(&exprs, crate::ProgramOrigin::Unlinked);
+        let r = check_ir_program(
+            &exprs,
+            crate::ProgramOrigin::Unlinked,
+            &mut crate::NativeServices::new(None),
+        );
         assert!(!r.errors.is_empty(), "{r:?}");
         assert!(r.total_nodes > 0, "{r:?}");
         assert!(

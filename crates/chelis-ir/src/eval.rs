@@ -2284,6 +2284,7 @@ fn eval_tensor_internal<F>(
     random_counter: u64,
     execution: Option<&mut crate::evaluation::ExecutionFrame<'_>>,
     load_input: F,
+    native: &mut chelis_types::NativeServices,
 ) -> Result<(UnordMap<NodeId, TensorValue>, u64), String>
 where
     F: FnMut(&str) -> Option<TensorValue>,
@@ -2296,9 +2297,11 @@ where
         execution,
         &[],
         load_input,
+        native,
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn eval_tensor_internal_with_result_claims<F>(
     dag: &Dag,
     live: Option<&[bool]>,
@@ -2307,6 +2310,7 @@ fn eval_tensor_internal_with_result_claims<F>(
     mut execution: Option<&mut crate::evaluation::ExecutionFrame<'_>>,
     result_claims: &[crate::TensorType],
     mut load_input: F,
+    native: &mut chelis_types::NativeServices,
 ) -> Result<(UnordMap<NodeId, TensorValue>, u64), String>
 where
     F: FnMut(&str) -> Option<TensorValue>,
@@ -2508,10 +2512,8 @@ where
     // chelis#914: cooperative cancellation. `eval_compiled` runs two lanes —
     // this tensor-DAG lane and the host runtime's `EvalContext::eval_expr` —
     // so guarding only the host lane would leave a tensor-heavy program
-    // uninterruptible. Captured once here; the per-node cost is one relaxed
-    // load behind an `Option` test.
-    let cancel = chelis_types::current_cancel_token();
-
+    // uninterruptible. The per-node cost is one relaxed load of the
+    // invocation's token behind an `Option` test.
     let order = match execution.as_ref() {
         Some(frame) => frame.steps().to_vec(),
         None => bound_dag
@@ -2534,9 +2536,7 @@ where
         let node = bound_dag
             .get(id)
             .ok_or("evaluation schedule references a missing node")?;
-        if let Some(cancel) = &cancel
-            && cancel.is_cancelled()
-        {
+        if native.cancellation_observed() {
             return Err(chelis_types::EVAL_CANCELLED_MSG.to_string());
         }
         if let Some(mask) = live
@@ -3538,6 +3538,7 @@ pub fn eval_tensor_plan_with_strict<F>(
     plan: &crate::evaluation::EvaluationPlan,
     context: &mut crate::evaluation::RandomExecutionContext,
     load_input: F,
+    native: &mut chelis_types::NativeServices,
 ) -> Result<UnordMap<NodeId, TensorValue>, String>
 where
     F: FnMut(&str) -> Option<TensorValue>,
@@ -3555,6 +3556,7 @@ where
         starting_counter,
         Some(&mut frame),
         load_input,
+        native,
     )
     .map(|(values, _)| values)
 }
@@ -3566,6 +3568,7 @@ pub fn eval_tensor_plan_with_result_claims<F>(
     context: &mut crate::evaluation::RandomExecutionContext,
     result_claims: &[crate::TensorType],
     load_input: F,
+    native: &mut chelis_types::NativeServices,
 ) -> Result<UnordMap<NodeId, TensorValue>, String>
 where
     F: FnMut(&str) -> Option<TensorValue>,
@@ -3582,6 +3585,7 @@ where
         Some(&mut frame),
         result_claims,
         load_input,
+        native,
     )
     .map(|(values, _)| values)
 }
@@ -3678,11 +3682,13 @@ pub(crate) fn eval_tensor_segment_with_strict<F>(
     dag: &Dag,
     frame: &mut crate::evaluation::ExecutionFrame<'_>,
     load_input: F,
+    native: &mut chelis_types::NativeServices,
 ) -> Result<UnordMap<NodeId, TensorValue>, String>
 where
     F: FnMut(&str) -> Option<TensorValue>,
 {
-    eval_tensor_internal(dag, None, true, 0, Some(frame), load_input).map(|(values, _)| values)
+    eval_tensor_internal(dag, None, true, 0, Some(frame), load_input, native)
+        .map(|(values, _)| values)
 }
 
 /// The extent an op-computed axis is about to produce, read from the site
@@ -3824,6 +3830,7 @@ fn computed_axis_extent_value(
 pub fn eval_tensor_with<F>(
     dag: &Dag,
     load_input: F,
+    native: &mut chelis_types::NativeServices,
 ) -> Result<UnordMap<NodeId, TensorValue>, String>
 where
     F: FnMut(&str) -> Option<TensorValue>,
@@ -3835,6 +3842,7 @@ where
         INITIAL_RANDOM_STREAM_ORDINAL,
         None,
         load_input,
+        native,
     )
     .map(|(values, _)| values)
 }
@@ -3842,6 +3850,7 @@ where
 pub fn eval_tensor_with_strict<F>(
     dag: &Dag,
     load_input: F,
+    native: &mut chelis_types::NativeServices,
 ) -> Result<UnordMap<NodeId, TensorValue>, String>
 where
     F: FnMut(&str) -> Option<TensorValue>,
@@ -3853,6 +3862,7 @@ where
         INITIAL_RANDOM_STREAM_ORDINAL,
         None,
         load_input,
+        native,
     )
     .map(|(values, _)| values)
 }
@@ -3861,6 +3871,7 @@ pub fn eval_tensor_roots_with<F>(
     dag: &Dag,
     roots: &[NodeId],
     load_input: F,
+    native: &mut chelis_types::NativeServices,
 ) -> Result<UnordMap<NodeId, TensorValue>, String>
 where
     F: FnMut(&str) -> Option<TensorValue>,
@@ -3873,6 +3884,7 @@ where
             INITIAL_RANDOM_STREAM_ORDINAL,
             None,
             load_input,
+            native,
         )
         .map(|(values, _)| values);
     }
@@ -3885,6 +3897,7 @@ where
         INITIAL_RANDOM_STREAM_ORDINAL,
         None,
         load_input,
+        native,
     )
     .map(|(values, _)| values)
 }
@@ -3893,6 +3906,7 @@ pub fn eval_tensor_roots_with_strict<F>(
     dag: &Dag,
     roots: &[NodeId],
     load_input: F,
+    native: &mut chelis_types::NativeServices,
 ) -> Result<UnordMap<NodeId, TensorValue>, String>
 where
     F: FnMut(&str) -> Option<TensorValue>,
@@ -3905,6 +3919,7 @@ where
             INITIAL_RANDOM_STREAM_ORDINAL,
             None,
             load_input,
+            native,
         )
         .map(|(values, _)| values);
     }
@@ -3917,6 +3932,7 @@ where
         INITIAL_RANDOM_STREAM_ORDINAL,
         None,
         load_input,
+        native,
     )
     .map(|(values, _)| values)
 }
@@ -3929,16 +3945,25 @@ pub fn eval_tensor_roots_with_strict_random_progress<F>(
     roots: &[NodeId],
     random_counter: u64,
     load_input: F,
+    native: &mut chelis_types::NativeServices,
 ) -> Result<(UnordMap<NodeId, TensorValue>, u64), String>
 where
     F: FnMut(&str) -> Option<TensorValue>,
 {
     if roots.is_empty() {
-        return eval_tensor_internal(dag, None, true, random_counter, None, load_input);
+        return eval_tensor_internal(dag, None, true, random_counter, None, load_input, native);
     }
     reject_drop_roots(dag, roots)?;
     let live = live_mask_for_roots(dag, roots);
-    eval_tensor_internal(dag, Some(&live), true, random_counter, None, load_input)
+    eval_tensor_internal(
+        dag,
+        Some(&live),
+        true,
+        random_counter,
+        None,
+        load_input,
+        native,
+    )
 }
 
 /// Evaluate roots with the caller's literal result obligations at their
@@ -3949,6 +3974,7 @@ pub fn eval_tensor_roots_with_result_claims<F>(
     random_counter: u64,
     result_claims: &[crate::TensorType],
     load_input: F,
+    native: &mut chelis_types::NativeServices,
 ) -> Result<(UnordMap<NodeId, TensorValue>, u64), String>
 where
     F: FnMut(&str) -> Option<TensorValue>,
@@ -3963,6 +3989,7 @@ where
         None,
         result_claims,
         load_input,
+        native,
     )
 }
 
@@ -3983,18 +4010,23 @@ fn reject_drop_roots(dag: &Dag, roots: &[NodeId]) -> Result<(), String> {
 pub fn eval_tensor(
     dag: &Dag,
     inputs: &UnordMap<String, TensorValue>,
+    native: &mut chelis_types::NativeServices,
 ) -> Result<UnordMap<NodeId, TensorValue>, String> {
-    eval_tensor_with(dag, |name| inputs.get(name).cloned())
+    eval_tensor_with(dag, |name| inputs.get(name).cloned(), native)
 }
 
 /// Evaluate a DAG on scalar inputs. Each node produces a single f64.
-pub fn eval_scalar(dag: &Dag, inputs: &UnordMap<String, f64>) -> UnordMap<NodeId, f64> {
+pub fn eval_scalar(
+    dag: &Dag,
+    inputs: &UnordMap<String, f64>,
+    native: &mut chelis_types::NativeServices,
+) -> UnordMap<NodeId, f64> {
     let tensor_inputs: UnordMap<String, TensorValue> = inputs
         .to_sorted()
         .into_iter()
         .map(|(name, value)| (name.clone(), TensorValue::scalar(*value)))
         .collect();
-    eval_tensor(dag, &tensor_inputs)
+    eval_tensor(dag, &tensor_inputs, native)
         .expect("scalar evaluation should not fail")
         .into_sorted()
         .into_iter()
@@ -4076,11 +4108,14 @@ mod tests {
         dag.add_root(executed);
 
         let roots = dag.roots().to_vec();
-        let (values, next) =
-            eval_tensor_roots_with_strict_random_progress(&dag, &roots, 7, |name| {
-                (name == "template").then(|| TensorValue::from_vec(vec![2], vec![0.0; 2]))
-            })
-            .expect("path-sensitive Random DAG evaluates");
+        let (values, next) = eval_tensor_roots_with_strict_random_progress(
+            &dag,
+            &roots,
+            7,
+            |name| (name == "template").then(|| TensorValue::from_vec(vec![2], vec![0.0; 2])),
+            &mut chelis_types::NativeServices::new(None),
+        )
+        .expect("path-sensitive Random DAG evaluates");
         assert_eq!(next, 8, "only the active draw consumes an ordinal");
         let expected_seed = 17 ^ 7_u64.wrapping_mul(0x9E37_79B9_7F4A_7C15);
         let expected = uniform_like(&[2], 0.0, 1.0, expected_seed, Prim::F32).unwrap();
@@ -4088,11 +4123,14 @@ mod tests {
         let skipped_expected = uniform_like(&[2], 0.0, 1.0, 17, Prim::F32).unwrap();
         assert_eq!(values[&skipped], skipped_expected);
 
-        let (values, next) =
-            eval_tensor_roots_with_strict_random_progress(&dag, &roots, u64::MAX, |name| {
-                (name == "template").then(|| TensorValue::from_vec(vec![2], vec![0.0; 2]))
-            })
-            .expect("legacy Random progress retains its saturation boundary");
+        let (values, next) = eval_tensor_roots_with_strict_random_progress(
+            &dag,
+            &roots,
+            u64::MAX,
+            |name| (name == "template").then(|| TensorValue::from_vec(vec![2], vec![0.0; 2])),
+            &mut chelis_types::NativeServices::new(None),
+        )
+        .expect("legacy Random progress retains its saturation boundary");
         assert_eq!(next, u64::MAX);
         let expected_seed = 17 ^ u64::MAX.wrapping_mul(0x9E37_79B9_7F4A_7C15);
         assert_eq!(
@@ -4239,10 +4277,15 @@ mod tests {
             },
             None,
         );
-        let err = eval_tensor_roots_with_strict(&dag, &[shr], |name| match name {
-            "x" => Some(TensorValue::from_vec(vec![4], vec![1.0, 2.0, 3.0, 4.0])),
-            _ => None,
-        })
+        let err = eval_tensor_roots_with_strict(
+            &dag,
+            &[shr],
+            |name| match name {
+                "x" => Some(TensorValue::from_vec(vec![4], vec![1.0, 2.0, 3.0, 4.0])),
+                _ => None,
+            },
+            &mut chelis_types::NativeServices::new(None),
+        )
         .unwrap_err();
         assert!(
             err.contains("chelis#523") && err.contains("end 10 > input extent 4"),
@@ -4272,10 +4315,15 @@ mod tests {
             },
             None,
         );
-        let vals = eval_tensor_roots_with_strict(&dag, &[shr], |name| match name {
-            "x" => Some(TensorValue::from_vec(vec![4], vec![1.0, 2.0, 3.0, 4.0])),
-            _ => None,
-        })
+        let vals = eval_tensor_roots_with_strict(
+            &dag,
+            &[shr],
+            |name| match name {
+                "x" => Some(TensorValue::from_vec(vec![4], vec![1.0, 2.0, 3.0, 4.0])),
+                _ => None,
+            },
+            &mut chelis_types::NativeServices::new(None),
+        )
         .unwrap();
         assert_eq!(vals[&shr], TensorValue::from_vec(vec![2], vec![2.0, 3.0]));
     }
@@ -4453,7 +4501,11 @@ mod tests {
             None,
         );
         let c = dag.add_node(RiscOp::Add, vec![a, b], scalar_f32(), None);
-        let vals = eval_scalar(&dag, &UnordMap::new());
+        let vals = eval_scalar(
+            &dag,
+            &UnordMap::new(),
+            &mut chelis_types::NativeServices::new(None),
+        );
         assert!((vals[&c] - 3.0).abs() < 1e-10);
     }
 
@@ -4472,7 +4524,8 @@ mod tests {
             "b".into(),
             TensorValue::from_vec(vec![3], vec![4.0, 5.0, 6.0]),
         );
-        let vals = eval_tensor(&dag, &inputs).unwrap();
+        let vals =
+            eval_tensor(&dag, &inputs, &mut chelis_types::NativeServices::new(None)).unwrap();
         assert_eq!(
             vals[&c],
             TensorValue::from_vec(vec![3], vec![5.0, 7.0, 9.0])
@@ -4500,7 +4553,8 @@ mod tests {
             "b".into(),
             TensorValue::finalize_from_wide_int("test", Prim::Int64, vec![2], vec![1, -1]).unwrap(),
         );
-        let values = eval_tensor(&dag, &inputs).expect("exact i64 add");
+        let values = eval_tensor(&dag, &inputs, &mut chelis_types::NativeServices::new(None))
+            .expect("exact i64 add");
         assert_eq!(
             values[&dag.roots()[0]].storage().to_i64_exact_vec(),
             Some(vec![(1_i64 << 53) + 2, (1_i64 << 53) + 1])
@@ -4522,7 +4576,8 @@ mod tests {
             TensorValue::finalize_from_wide_int("test", Prim::Int8, vec![2], vec![1, 1]).unwrap(),
         );
         assert_eq!(
-            eval_tensor(&dag, &inputs).expect_err("i8 overflow must trap"),
+            eval_tensor(&dag, &inputs, &mut chelis_types::NativeServices::new(None))
+                .expect_err("i8 overflow must trap"),
             "numeric trap: overflow in add at i8"
         );
     }
@@ -4559,7 +4614,8 @@ mod tests {
             )
             .unwrap(),
         );
-        let values = eval_tensor(&dag, &inputs).expect("exact i64 comparison");
+        let values = eval_tensor(&dag, &inputs, &mut chelis_types::NativeServices::new(None))
+            .expect("exact i64 comparison");
         assert_eq!(values[&out].storage().to_i64_exact_vec(), Some(vec![1, 0]));
     }
 
@@ -4602,7 +4658,12 @@ mod tests {
             "one".into(),
             TensorValue::finalize_from_wide_int("test", Prim::Int64, vec![1], vec![1]).unwrap(),
         );
-        let values = eval_tensor(&fused, &inputs).expect("exact fused i64 arithmetic");
+        let values = eval_tensor(
+            &fused,
+            &inputs,
+            &mut chelis_types::NativeServices::new(None),
+        )
+        .expect("exact fused i64 arithmetic");
         let root = fused.roots()[0];
         assert_eq!(
             values[&root].storage().to_i64_exact_vec(),
@@ -4647,7 +4708,8 @@ mod tests {
                 TensorValue::from_vec(vec![3], vec![2.0, 0.0, 3.0]),
             ),
         ]);
-        let vals = eval_tensor(&dag, &inputs).unwrap();
+        let vals =
+            eval_tensor(&dag, &inputs, &mut chelis_types::NativeServices::new(None)).unwrap();
         assert_eq!(
             vals[&out],
             TensorValue::from_vec(
@@ -4714,7 +4776,8 @@ mod tests {
                 ),
             ),
         ]);
-        let vals = eval_tensor(&dag, &inputs).unwrap();
+        let vals =
+            eval_tensor(&dag, &inputs, &mut chelis_types::NativeServices::new(None)).unwrap();
         assert_eq!(
             vals[&out],
             TensorValue::from_vec(
@@ -4749,7 +4812,8 @@ mod tests {
         );
         let mut inputs = UnordMap::new();
         inputs.insert("x".into(), TensorValue::from_vec(vec![1], vec![2.5]));
-        let vals = eval_tensor(&dag, &inputs).unwrap();
+        let vals =
+            eval_tensor(&dag, &inputs, &mut chelis_types::NativeServices::new(None)).unwrap();
         assert_eq!(
             vals[&y],
             TensorValue::from_vec(vec![4], vec![2.5, 2.5, 2.5, 2.5])
@@ -4767,10 +4831,15 @@ mod tests {
         dag.add_root(sum);
         dag.add_root(dead);
 
-        let vals = eval_tensor_roots_with(&dag, &[sum], |name| match name {
-            "x" => Some(TensorValue::from_vec(vec![3], vec![1.0, 2.0, 3.0])),
-            _ => None,
-        })
+        let vals = eval_tensor_roots_with(
+            &dag,
+            &[sum],
+            |name| match name {
+                "x" => Some(TensorValue::from_vec(vec![3], vec![1.0, 2.0, 3.0])),
+                _ => None,
+            },
+            &mut chelis_types::NativeServices::new(None),
+        )
         .unwrap();
 
         assert_eq!(
@@ -4787,7 +4856,9 @@ mod tests {
     fn eval_strict_missing_input_is_error() {
         let mut dag = Dag::new();
         let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec3_f32(), None);
-        let err = eval_tensor_with_strict(&dag, |_| None).unwrap_err();
+        let err =
+            eval_tensor_with_strict(&dag, |_| None, &mut chelis_types::NativeServices::new(None))
+                .unwrap_err();
         assert!(err.contains("missing required input `x`"));
         assert_eq!(x, NodeId(0));
     }
@@ -4801,10 +4872,15 @@ mod tests {
         let live = dag.add_node(RiscOp::Add, vec![x, x], ty.clone(), None);
         let _dead = dag.add_node(RiscOp::Add, vec![y, y], ty, None);
 
-        let vals = eval_tensor_roots_with_strict(&dag, &[live], |name| match name {
-            "x" => Some(TensorValue::from_vec(vec![3], vec![1.0, 2.0, 3.0])),
-            _ => None,
-        })
+        let vals = eval_tensor_roots_with_strict(
+            &dag,
+            &[live],
+            |name| match name {
+                "x" => Some(TensorValue::from_vec(vec![3], vec![1.0, 2.0, 3.0])),
+                _ => None,
+            },
+            &mut chelis_types::NativeServices::new(None),
+        )
         .unwrap();
         assert_eq!(
             vals[&live],
@@ -4830,8 +4906,13 @@ mod tests {
             None,
         );
 
-        let values = eval_tensor_roots_with_strict(&dag, &[live], |_| None)
-            .expect("dead generic dependency input must not escape into root-scoped eval");
+        let values = eval_tensor_roots_with_strict(
+            &dag,
+            &[live],
+            |_| None,
+            &mut chelis_types::NativeServices::new(None),
+        )
+        .expect("dead generic dependency input must not escape into root-scoped eval");
         assert_eq!(values[&live], TensorValue::scalar(7.0));
     }
 
@@ -4850,9 +4931,12 @@ mod tests {
         );
         let live = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], symbolic, None);
 
-        let values = eval_tensor_roots_with_strict(&dag, &[live], |name| {
-            (name == "x").then(|| TensorValue::from_vec(vec![2], vec![3.0, 4.0]))
-        })
+        let values = eval_tensor_roots_with_strict(
+            &dag,
+            &[live],
+            |name| (name == "x").then(|| TensorValue::from_vec(vec![2], vec![3.0, 4.0])),
+            &mut chelis_types::NativeServices::new(None),
+        )
         .expect("dead same-named symbolic source must not override the live input");
         assert_eq!(values[&live].to_f64_lossy_vec(), vec![3.0, 4.0]);
     }
@@ -4891,10 +4975,15 @@ mod tests {
             None,
         );
 
-        let vals = eval_tensor_roots_with_strict(&dag, &[ones], |name| match name {
-            "x" => Some(TensorValue::from_vec(vec![3], vec![5.0, 6.0, 7.0])),
-            _ => None,
-        })
+        let vals = eval_tensor_roots_with_strict(
+            &dag,
+            &[ones],
+            |name| match name {
+                "x" => Some(TensorValue::from_vec(vec![3], vec![5.0, 6.0, 7.0])),
+                _ => None,
+            },
+            &mut chelis_types::NativeServices::new(None),
+        )
         .unwrap();
         assert_eq!(
             vals[&ones],
@@ -4937,7 +5026,13 @@ mod tests {
             None,
         );
 
-        let err = eval_tensor_roots_with_strict(&dag, &[ones], |_| None).unwrap_err();
+        let err = eval_tensor_roots_with_strict(
+            &dag,
+            &[ones],
+            |_| None,
+            &mut chelis_types::NativeServices::new(None),
+        )
+        .unwrap_err();
         assert!(
             err.contains("missing required input `x`"),
             "expected the structural input error, got: {err}"
@@ -4982,15 +5077,21 @@ mod tests {
             None,
         );
 
-        let values = eval_tensor_roots_with_strict(&dag, &[ones], |name| {
-            (name == "x").then(|| TensorValue::from_vec(vec![2], vec![3.0, 4.0]))
-        })
+        let values = eval_tensor_roots_with_strict(
+            &dag,
+            &[ones],
+            |name| (name == "x").then(|| TensorValue::from_vec(vec![2], vec![3.0, 4.0])),
+            &mut chelis_types::NativeServices::new(None),
+        )
         .expect("the exact x witness must resolve without consulting same-named a");
         assert_eq!(values[&ones].shape, vec![2]);
 
-        let err = eval_tensor_roots_with_strict(&dag, &[ones], |name| {
-            (name == "a").then(|| TensorValue::from_vec(vec![2], vec![3.0, 4.0]))
-        })
+        let err = eval_tensor_roots_with_strict(
+            &dag,
+            &[ones],
+            |name| (name == "a").then(|| TensorValue::from_vec(vec![2], vec![3.0, 4.0])),
+            &mut chelis_types::NativeServices::new(None),
+        )
         .unwrap_err();
         assert!(err.contains("missing required input `x`"), "{err}");
     }
@@ -5029,9 +5130,12 @@ mod tests {
             None,
         );
 
-        let values = eval_tensor_roots_with_strict(&dag, &[ones], |name| {
-            (name == "x").then(|| TensorValue::from_vec(vec![2, 2], vec![0.0; 4]))
-        })
+        let values = eval_tensor_roots_with_strict(
+            &dag,
+            &[ones],
+            |name| (name == "x").then(|| TensorValue::from_vec(vec![2, 2], vec![0.0; 4])),
+            &mut chelis_types::NativeServices::new(None),
+        )
         .expect("one explicit source may expose the same extent on multiple axes");
         assert_eq!(
             values[&ones],
@@ -5045,12 +5149,18 @@ mod tests {
 
     fn lower_library(src: &str) -> LoweredLibrary {
         let exprs = parse_str(src).expect("parse failed");
-        let checked = chelis_types::check_ir_program(&exprs, chelis_types::ProgramOrigin::Unlinked)
-            .unwrap_or_else(|result| panic!("IR check failed: {:?}", result.errors));
-        let checked = chelis_effects::check_program(&checked)
-            .unwrap_or_else(|errors| panic!("effect check failed: {errors:?}"));
-        let checked = chelis_types::check_linearity(&checked)
-            .unwrap_or_else(|errors| panic!("linearity check failed: {errors:?}"));
+        let checked = chelis_types::check_ir_program(
+            &exprs,
+            chelis_types::ProgramOrigin::Unlinked,
+            &mut chelis_types::NativeServices::new(None),
+        )
+        .unwrap_or_else(|result| panic!("IR check failed: {:?}", result.errors));
+        let checked =
+            chelis_effects::check_program(&checked, &mut chelis_types::NativeServices::new(None))
+                .unwrap_or_else(|errors| panic!("effect check failed: {errors:?}"));
+        let checked =
+            chelis_types::check_linearity(&checked, &mut chelis_types::NativeServices::new(None))
+                .unwrap_or_else(|errors| panic!("linearity check failed: {errors:?}"));
         crate::lowering_runtime::with_native_lowering_runtime(|runtime| {
             lower_program_to_library(&checked, runtime)
         })
@@ -5068,7 +5178,8 @@ mod tests {
             "x".into(),
             TensorValue::from_vec(vec![3], vec![-2.0, 0.5, 4.0]),
         );
-        let vals = eval_tensor(&dag, &inputs).unwrap();
+        let vals =
+            eval_tensor(&dag, &inputs, &mut chelis_types::NativeServices::new(None)).unwrap();
         let last = vals.get(dag.roots().last().expect("DAG root")).unwrap();
         assert_eq!(*last, TensorValue::from_vec(vec![3], vec![0.0, 0.5, 4.0]));
     }
@@ -5092,7 +5203,8 @@ mod tests {
             "x".into(),
             TensorValue::from_vec(vec![3], vec![2.7, -2.7, 3.0]),
         );
-        let err = eval_tensor(&dag, &inputs).unwrap_err();
+        let err =
+            eval_tensor(&dag, &inputs, &mut chelis_types::NativeServices::new(None)).unwrap_err();
         assert_eq!(
             err, "numeric trap: domain in cast at i32",
             "fractional cast to i32 must trap in the DAG evaluator (#380)",
@@ -5116,7 +5228,8 @@ mod tests {
         let dag = lower(src);
         let mut inputs = UnordMap::new();
         inputs.insert("x".into(), TensorValue::from_vec(vec![2], vec![7.0, -3.0]));
-        let vals = eval_tensor(&dag, &inputs).unwrap();
+        let vals =
+            eval_tensor(&dag, &inputs, &mut chelis_types::NativeServices::new(None)).unwrap();
         let last = vals.get(dag.roots().last().expect("DAG root")).unwrap();
         assert_eq!(
             *last,
@@ -5144,7 +5257,8 @@ mod tests {
             "b".into(),
             TensorValue::from_vec(vec![3, 2], vec![7.0, 8.0, 9.0, 10.0, 11.0, 12.0]),
         );
-        let vals = eval_tensor(&dag, &inputs).unwrap();
+        let vals =
+            eval_tensor(&dag, &inputs, &mut chelis_types::NativeServices::new(None)).unwrap();
         let last = vals.get(dag.roots().last().expect("DAG root")).unwrap();
         assert_eq!(
             *last,
@@ -5166,7 +5280,8 @@ mod tests {
             "x".into(),
             TensorValue::from_vec(vec![3], vec![1.0, 2.0, 3.0]),
         );
-        let vals = eval_tensor(&dag, &inputs).unwrap();
+        let vals =
+            eval_tensor(&dag, &inputs, &mut chelis_types::NativeServices::new(None)).unwrap();
         let last = vals.get(dag.roots().last().expect("DAG root")).unwrap();
         let expected = [0.09003057, 0.24472847, 0.66524096];
         for (actual, target) in last.to_f64_lossy_vec().iter().zip(expected.iter()) {
@@ -5198,7 +5313,8 @@ mod tests {
             "beta".into(),
             TensorValue::from_vec(vec![2], vec![0.5, -0.5]),
         );
-        let vals = eval_tensor(&dag, &inputs).unwrap();
+        let vals =
+            eval_tensor(&dag, &inputs, &mut chelis_types::NativeServices::new(None)).unwrap();
         let last = vals.get(dag.roots().last().expect("DAG root")).unwrap();
         let expected = [-0.49998, 0.99997, -0.499995, 0.99998875];
         for (actual, target) in last.to_f64_lossy_vec().iter().zip(expected.iter()) {
@@ -5226,7 +5342,7 @@ mod tests {
             "k".into(),
             TensorValue::from_vec(vec![1, 1, 1, 1], vec![2.0]),
         );
-        let vals = eval_tensor(dag, &inputs).unwrap();
+        let vals = eval_tensor(dag, &inputs, &mut chelis_types::NativeServices::new(None)).unwrap();
         let root = library
             .symbol_table()
             .get("y")
@@ -5261,7 +5377,7 @@ mod tests {
             "k".into(),
             TensorValue::from_vec(vec![1, 1, 2, 2], vec![1.0, 1.0, 1.0, 1.0]),
         );
-        let vals = eval_tensor(dag, &inputs).unwrap();
+        let vals = eval_tensor(dag, &inputs, &mut chelis_types::NativeServices::new(None)).unwrap();
         let root = library
             .symbol_table()
             .get("y")
@@ -5283,8 +5399,18 @@ mod tests {
                 (app {} (var {} dropout) (var {} x) (lit {type: (t-prim {} f32)} 0.5))))
         "#;
         let dag = lower(src);
-        let vals_a = eval_tensor(&dag, &UnordMap::new()).unwrap();
-        let vals_b = eval_tensor(&dag, &UnordMap::new()).unwrap();
+        let vals_a = eval_tensor(
+            &dag,
+            &UnordMap::new(),
+            &mut chelis_types::NativeServices::new(None),
+        )
+        .unwrap();
+        let vals_b = eval_tensor(
+            &dag,
+            &UnordMap::new(),
+            &mut chelis_types::NativeServices::new(None),
+        )
+        .unwrap();
         let out_a = vals_a.get(dag.roots().last().expect("DAG root")).unwrap();
         let out_b = vals_b.get(dag.roots().last().expect("DAG root")).unwrap();
         assert_eq!(out_a, out_b);
@@ -5310,14 +5436,22 @@ mod tests {
         "#;
         let dag_a = lower(src_a);
         let dag_b = lower(src_b);
-        let out_a = eval_tensor(&dag_a, &UnordMap::new())
-            .unwrap()
-            .remove(&NodeId(dag_a.len() - 1))
-            .unwrap();
-        let out_b = eval_tensor(&dag_b, &UnordMap::new())
-            .unwrap()
-            .remove(&NodeId(dag_b.len() - 1))
-            .unwrap();
+        let out_a = eval_tensor(
+            &dag_a,
+            &UnordMap::new(),
+            &mut chelis_types::NativeServices::new(None),
+        )
+        .unwrap()
+        .remove(&NodeId(dag_a.len() - 1))
+        .unwrap();
+        let out_b = eval_tensor(
+            &dag_b,
+            &UnordMap::new(),
+            &mut chelis_types::NativeServices::new(None),
+        )
+        .unwrap()
+        .remove(&NodeId(dag_b.len() - 1))
+        .unwrap();
         assert_ne!(out_a, out_b);
     }
 
@@ -5501,7 +5635,12 @@ mod tests {
     #[test]
     fn adv_min_reduce_axis0() {
         let (dag, y) = build_2x3_with(RiscOp::MinReduce { axis: 0 });
-        let vals = eval_tensor(&dag, &inputs_2x3()).unwrap();
+        let vals = eval_tensor(
+            &dag,
+            &inputs_2x3(),
+            &mut chelis_types::NativeServices::new(None),
+        )
+        .unwrap();
         // column-wise min: min(1,3)=1, min(4,-1)=-1, min(-2,5)=-2
         assert_eq!(
             vals[&y],
@@ -5512,14 +5651,24 @@ mod tests {
     #[test]
     fn adv_min_reduce_axis1() {
         let (dag, y) = build_2x3_with(RiscOp::MinReduce { axis: 1 });
-        let vals = eval_tensor(&dag, &inputs_2x3()).unwrap();
+        let vals = eval_tensor(
+            &dag,
+            &inputs_2x3(),
+            &mut chelis_types::NativeServices::new(None),
+        )
+        .unwrap();
         assert_eq!(vals[&y], TensorValue::from_vec(vec![2], vec![-2.0, -1.0]));
     }
 
     #[test]
     fn adv_prod_reduce_axis0() {
         let (dag, y) = build_2x3_with(RiscOp::ProdReduce { axis: 0 });
-        let vals = eval_tensor(&dag, &inputs_2x3()).unwrap();
+        let vals = eval_tensor(
+            &dag,
+            &inputs_2x3(),
+            &mut chelis_types::NativeServices::new(None),
+        )
+        .unwrap();
         // column-wise product: 1*3=3, 4*-1=-4, -2*5=-10
         assert_eq!(
             vals[&y],
@@ -5530,7 +5679,12 @@ mod tests {
     #[test]
     fn adv_prod_reduce_axis1() {
         let (dag, y) = build_2x3_with(RiscOp::ProdReduce { axis: 1 });
-        let vals = eval_tensor(&dag, &inputs_2x3()).unwrap();
+        let vals = eval_tensor(
+            &dag,
+            &inputs_2x3(),
+            &mut chelis_types::NativeServices::new(None),
+        )
+        .unwrap();
         // row-wise product: 1*4*-2=-8, 3*-1*5=-15
         assert_eq!(vals[&y], TensorValue::from_vec(vec![2], vec![-8.0, -15.0]));
     }
@@ -5538,7 +5692,12 @@ mod tests {
     #[test]
     fn adv_argmax_axis0() {
         let (dag, y) = build_2x3_with(RiscOp::Argmax { axis: 0 });
-        let vals = eval_tensor(&dag, &inputs_2x3()).unwrap();
+        let vals = eval_tensor(
+            &dag,
+            &inputs_2x3(),
+            &mut chelis_types::NativeServices::new(None),
+        )
+        .unwrap();
         // column-wise argmax: max(1,3)@1, max(4,-1)@0, max(-2,5)@1
         assert_eq!(
             vals[&y],
@@ -5549,7 +5708,12 @@ mod tests {
     #[test]
     fn adv_argmax_axis1() {
         let (dag, y) = build_2x3_with(RiscOp::Argmax { axis: 1 });
-        let vals = eval_tensor(&dag, &inputs_2x3()).unwrap();
+        let vals = eval_tensor(
+            &dag,
+            &inputs_2x3(),
+            &mut chelis_types::NativeServices::new(None),
+        )
+        .unwrap();
         // row 0: max at col 1 (4.0); row 1: max at col 2 (5.0)
         assert_eq!(vals[&y], TensorValue::from_vec(vec![2], vec![1.0, 2.0]));
     }
@@ -5557,7 +5721,12 @@ mod tests {
     #[test]
     fn adv_argmin_axis0() {
         let (dag, y) = build_2x3_with(RiscOp::Argmin { axis: 0 });
-        let vals = eval_tensor(&dag, &inputs_2x3()).unwrap();
+        let vals = eval_tensor(
+            &dag,
+            &inputs_2x3(),
+            &mut chelis_types::NativeServices::new(None),
+        )
+        .unwrap();
         // col-wise argmin: min(1,3)@0, min(4,-1)@1, min(-2,5)@0
         assert_eq!(
             vals[&y],
@@ -5568,7 +5737,12 @@ mod tests {
     #[test]
     fn adv_argmin_axis1() {
         let (dag, y) = build_2x3_with(RiscOp::Argmin { axis: 1 });
-        let vals = eval_tensor(&dag, &inputs_2x3()).unwrap();
+        let vals = eval_tensor(
+            &dag,
+            &inputs_2x3(),
+            &mut chelis_types::NativeServices::new(None),
+        )
+        .unwrap();
         // row 0 min at col 2 (-2.0); row 1 min at col 1 (-1.0)
         assert_eq!(vals[&y], TensorValue::from_vec(vec![2], vec![2.0, 1.0]));
     }
@@ -5580,7 +5754,12 @@ mod tests {
     #[test]
     fn adv_argmax_output_stores_integer_valued_floats() {
         let (dag, y) = build_2x3_with(RiscOp::Argmax { axis: 1 });
-        let vals = eval_tensor(&dag, &inputs_2x3()).unwrap();
+        let vals = eval_tensor(
+            &dag,
+            &inputs_2x3(),
+            &mut chelis_types::NativeServices::new(None),
+        )
+        .unwrap();
         let v = &vals[&y];
         for x in &v.to_f64_lossy_vec() {
             assert!(
@@ -5668,7 +5847,8 @@ mod tests {
             let mut inputs = UnordMap::new();
             inputs.insert("a".into(), TensorValue::from_vec(vec![2], vec![-7.0, 7.0]));
             inputs.insert("b".into(), TensorValue::from_vec(vec![2], vec![2.0, -2.0]));
-            let values = eval_tensor(&dag, &inputs).unwrap();
+            let values =
+                eval_tensor(&dag, &inputs, &mut chelis_types::NativeServices::new(None)).unwrap();
             assert_eq!(values[&dag.roots()[0]].to_f64_lossy_vec(), vec![-1.0, 1.0]);
             let exact = |values: &[i64]| {
                 TensorValue::from_storage(
@@ -5684,9 +5864,15 @@ mod tests {
             };
             inputs.insert("a".into(), exact(&[minimum, minimum + 1]));
             inputs.insert("b".into(), exact(&[-1, 2]));
-            let values = eval_tensor(&dag, &inputs).unwrap();
+            let values =
+                eval_tensor(&dag, &inputs, &mut chelis_types::NativeServices::new(None)).unwrap();
             assert_eq!(values[&dag.roots()[0]].to_f64_lossy_vec(), vec![0.0, -1.0]);
-            let error = eval_tensor(&dag, &divisor_inputs(vec![0.0, 2.0])).unwrap_err();
+            let error = eval_tensor(
+                &dag,
+                &divisor_inputs(vec![0.0, 2.0]),
+                &mut chelis_types::NativeServices::new(None),
+            )
+            .unwrap_err();
             assert_eq!(
                 error,
                 format!("numeric trap: division by zero in mod at {}", prim.name())
@@ -5697,8 +5883,12 @@ mod tests {
     #[test]
     fn floor_div_integer_traps_on_zero_divisor() {
         let dag = int_div_dag(RiscOp::FloorDiv, Prim::Int32);
-        let err = eval_tensor(&dag, &divisor_inputs(vec![2.0, 0.0]))
-            .expect_err("integer floor_div by zero must trap");
+        let err = eval_tensor(
+            &dag,
+            &divisor_inputs(vec![2.0, 0.0]),
+            &mut chelis_types::NativeServices::new(None),
+        )
+        .expect_err("integer floor_div by zero must trap");
         assert_eq!(
             err, "numeric trap: division by zero in floor_div at i32",
             "trap diagnostic must match the shared message exactly"
@@ -5708,8 +5898,12 @@ mod tests {
     #[test]
     fn trunc_div_integer_traps_on_zero_divisor() {
         let dag = int_div_dag(RiscOp::TruncDiv, Prim::Int64);
-        let err = eval_tensor(&dag, &divisor_inputs(vec![0.0, 2.0]))
-            .expect_err("integer trunc_div by zero must trap");
+        let err = eval_tensor(
+            &dag,
+            &divisor_inputs(vec![0.0, 2.0]),
+            &mut chelis_types::NativeServices::new(None),
+        )
+        .expect_err("integer trunc_div by zero must trap");
         assert_eq!(err, "numeric trap: division by zero in trunc_div at i64");
     }
 
@@ -5721,7 +5915,8 @@ mod tests {
         let mut inputs = UnordMap::new();
         inputs.insert("a".into(), TensorValue::from_vec(vec![2], vec![10.0, 7.0]));
         inputs.insert("b".into(), TensorValue::from_vec(vec![2], vec![4.0, -2.0]));
-        let vals = eval_tensor(&dag, &inputs).expect("non-zero divisor must not trap");
+        let vals = eval_tensor(&dag, &inputs, &mut chelis_types::NativeServices::new(None))
+            .expect("non-zero divisor must not trap");
         let root = dag.roots()[0];
         assert_eq!(vals[&root].to_f64_lossy_vec(), vec![2.0, -4.0]);
     }
@@ -5734,7 +5929,8 @@ mod tests {
         let mut inputs = UnordMap::new();
         inputs.insert("a".into(), TensorValue::from_vec(vec![2], vec![10.0, 7.0]));
         inputs.insert("b".into(), TensorValue::from_vec(vec![2], vec![4.0, -2.0]));
-        let vals = eval_tensor(&dag, &inputs).expect("non-zero divisor must not trap");
+        let vals = eval_tensor(&dag, &inputs, &mut chelis_types::NativeServices::new(None))
+            .expect("non-zero divisor must not trap");
         let root = dag.roots()[0];
         assert_eq!(vals[&root].to_f64_lossy_vec(), vec![2.0, -3.0]);
     }
@@ -5745,8 +5941,12 @@ mod tests {
         // guarded; `floor(x / 0.0)` yields ±inf (or NaN for 0/0), never a
         // trap. This pins that the integer trap does not bleed into floats.
         let dag = int_div_dag(RiscOp::FloorDiv, Prim::F32);
-        let vals = eval_tensor(&dag, &divisor_inputs(vec![0.0, 2.0]))
-            .expect("float floor_div by zero must NOT trap");
+        let vals = eval_tensor(
+            &dag,
+            &divisor_inputs(vec![0.0, 2.0]),
+            &mut chelis_types::NativeServices::new(None),
+        )
+        .expect("float floor_div by zero must NOT trap");
         let root = dag.roots()[0];
         assert!(
             vals[&root].to_f64_lossy_vec()[0].is_infinite()
@@ -5795,8 +5995,12 @@ mod tests {
                 .any(|n| matches!(n.op, RiscOp::FusedElem { .. })),
             "the floor_div -> add chain must fuse for this test to exercise the fused path"
         );
-        let err = eval_tensor(&fused, &divisor_inputs(vec![2.0, 0.0]))
-            .expect_err("fused integer floor_div by zero must trap");
+        let err = eval_tensor(
+            &fused,
+            &divisor_inputs(vec![2.0, 0.0]),
+            &mut chelis_types::NativeServices::new(None),
+        )
+        .expect_err("fused integer floor_div by zero must trap");
         assert_eq!(err, "numeric trap: division by zero in floor_div at i32");
     }
 

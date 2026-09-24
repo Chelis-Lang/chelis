@@ -26,7 +26,7 @@ pub struct BuiltinCaseObligation {
 impl BuiltinCaseSelection {
     /// Apply the owner's ordinary substitution, preserving any still-symbolic
     /// dependency. Each concrete instantiation selects one declared identity.
-    pub fn resolve(&self, subst: &Subst) -> Result<Self, String> {
+    pub fn resolve(&self, subst: &mut Subst) -> Result<Self, String> {
         match self {
             Self::Resolved(_) => Ok(self.clone()),
             Self::ByOperand(obligation) => crate::builtins::builtin_decl(obligation.builtin)
@@ -66,7 +66,7 @@ impl BuiltinDecl {
     /// Classification does not grant language acceptance: rejected shapes
     /// retain exact identities governed by the same operation atom.
     pub fn semantic_case(&self, arguments: &[Type]) -> Result<String, String> {
-        match self.semantic_selection(arguments, &Subst::new())? {
+        match self.semantic_selection(arguments, &mut Subst::new())? {
             BuiltinCaseSelection::Resolved(identity) => Ok(identity),
             BuiltinCaseSelection::ByOperand(_) => {
                 Err("semantic case requires operand substitution".into())
@@ -78,7 +78,7 @@ impl BuiltinDecl {
     pub fn semantic_selection(
         &self,
         arguments: &[Type],
-        subst: &Subst,
+        subst: &mut Subst,
     ) -> Result<BuiltinCaseSelection, String> {
         self.capability.validate()?;
         let arguments: Vec<_> = arguments.iter().map(|ty| subst.apply(ty)).collect();
@@ -249,7 +249,7 @@ mod tests {
             let builtin = crate::builtins::builtin_decl("to_string").unwrap();
             assert!(matches!(
                 builtin
-                    .semantic_selection(&[Type::Var(variable)], &subst)
+                    .semantic_selection(&[Type::Var(variable)], &mut subst)
                     .unwrap(),
                 BuiltinCaseSelection::ByOperand(_)
             ));
@@ -266,7 +266,7 @@ mod tests {
             .unwrap();
             assert_eq!(
                 builtin
-                    .semantic_selection(&[Type::Var(variable)], &subst)
+                    .semantic_selection(&[Type::Var(variable)], &mut subst)
                     .unwrap(),
                 BuiltinCaseSelection::Resolved("Boundary:to_string:ToStringTensor".into())
             );
@@ -292,7 +292,7 @@ mod tests {
                 assert_eq!(
                     crate::builtins::builtin_decl(name)
                         .unwrap()
-                        .semantic_selection(&[Type::Var(variable)], &subst)
+                        .semantic_selection(&[Type::Var(variable)], &mut subst)
                         .unwrap(),
                     BuiltinCaseSelection::Resolved(expected)
                 );
@@ -300,7 +300,7 @@ mod tests {
             assert!(
                 crate::builtins::builtin_decl("len")
                     .unwrap()
-                    .semantic_selection(&[Type::Var(variable)], &subst)
+                    .semantic_selection(&[Type::Var(variable)], &mut subst)
                     .is_err()
             );
             assert!(

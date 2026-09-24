@@ -72,11 +72,16 @@ fn an_elementwise_operand_shape_disagreement_is_a_typed_error_not_a_panic() {
         None,
     );
     dag.add_root(sum);
-    let err = eval_tensor_roots_with_strict(&dag, &[sum], |name| match name {
-        "a" => Some(f32_tensor(&[4], &[1.0, 2.0, 3.0, 4.0])),
-        "b" => Some(f32_tensor(&[3], &[1.0, 2.0, 3.0])),
-        _ => None,
-    })
+    let err = eval_tensor_roots_with_strict(
+        &dag,
+        &[sum],
+        |name| match name {
+            "a" => Some(f32_tensor(&[4], &[1.0, 2.0, 3.0, 4.0])),
+            "b" => Some(f32_tensor(&[3], &[1.0, 2.0, 3.0])),
+            _ => None,
+        },
+        &mut chelis_types::NativeServices::new(None),
+    )
     .expect_err("[4] against [3] must be rejected");
     assert!(
         err.contains("tensor shapes must match for elementwise op, got [4] vs [3]"),
@@ -111,14 +116,19 @@ fn a_runtime_shrink_that_selects_nothing_is_rejected_not_emptied() {
         None,
     );
     dag.add_root(shrunk);
-    let err = eval_tensor_roots_with_strict(&dag, &[shrunk], |name| match name {
-        "x" => Some(f32_tensor(&[4], &[1.0, 2.0, 3.0, 4.0])),
-        "k" => Some(
-            TensorValue::finalize_from_wide_int("test", Prim::Int64, vec![], vec![0])
-                .expect("finalize"),
-        ),
-        _ => None,
-    })
+    let err = eval_tensor_roots_with_strict(
+        &dag,
+        &[shrunk],
+        |name| match name {
+            "x" => Some(f32_tensor(&[4], &[1.0, 2.0, 3.0, 4.0])),
+            "k" => Some(
+                TensorValue::finalize_from_wide_int("test", Prim::Int64, vec![], vec![0])
+                    .expect("finalize"),
+            ),
+            _ => None,
+        },
+        &mut chelis_types::NativeServices::new(None),
+    )
     .expect_err("bounds [0, 0) select nothing and must be rejected");
     assert!(
         err.contains("is empty or inverted"),

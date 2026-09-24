@@ -40,7 +40,12 @@ use chelis_types::types::Prim;
 /// Returns the lowered DAG or a stage-tagged error.
 fn lower_deep(src: &str) -> Result<chelis_ir::dag::Dag, String> {
     let exprs = chelis_deep::parser::parse_str(src).expect("Deep fixture");
-    let checked = check_ir_program(&exprs, chelis_types::ProgramOrigin::Unlinked).map_err(|r| {
+    let checked = check_ir_program(
+        &exprs,
+        chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
+    )
+    .map_err(|r| {
         format!(
             "check: {:?}",
             r.errors
@@ -49,9 +54,12 @@ fn lower_deep(src: &str) -> Result<chelis_ir::dag::Dag, String> {
                 .collect::<Vec<_>>()
         )
     })?;
-    let checked = chelis_effects::check_program(&checked).map_err(|e| format!("effects: {e:?}"))?;
     let checked =
-        chelis_types::check_linearity(&checked).map_err(|e| format!("linearity: {e:?}"))?;
+        chelis_effects::check_program(&checked, &mut chelis_types::NativeServices::new(None))
+            .map_err(|e| format!("effects: {e:?}"))?;
+    let checked =
+        chelis_types::check_linearity(&checked, &mut chelis_types::NativeServices::new(None))
+            .map_err(|e| format!("linearity: {e:?}"))?;
     Ok(chelis_ir::lowering_runtime::with_native_lowering_runtime(
         |runtime| lower_program(&checked, runtime),
     ))
@@ -62,9 +70,13 @@ fn lower_deep(src: &str) -> Result<chelis_ir::dag::Dag, String> {
 /// pinned to agree.
 fn check_deep(src: &str) -> Result<(), Vec<String>> {
     let exprs = chelis_deep::parser::parse_str(src).expect("Deep fixture");
-    check_ir_program(&exprs, chelis_types::ProgramOrigin::Unlinked)
-        .map(|_| ())
-        .map_err(|r| r.errors.iter().map(|e| e.message.clone()).collect())
+    check_ir_program(
+        &exprs,
+        chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
+    )
+    .map(|_| ())
+    .map_err(|r| r.errors.iter().map(|e| e.message.clone()).collect())
 }
 
 // ---------------------------------------------------------------------

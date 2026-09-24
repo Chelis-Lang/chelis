@@ -95,8 +95,13 @@ mod tests {
 
     fn eval_roots(dag: &Dag, inputs: &UnordMap<String, TensorValue>) -> Vec<TensorValue> {
         let roots = dag.roots().to_vec();
-        let values = eval_tensor_roots_with_strict(dag, &roots, |name| inputs.get(name).cloned())
-            .expect("evaluation should succeed");
+        let values = eval_tensor_roots_with_strict(
+            dag,
+            &roots,
+            |name| inputs.get(name).cloned(),
+            &mut chelis_types::NativeServices::new(None),
+        )
+        .expect("evaluation should succeed");
         roots.iter().map(|root| values[root].clone()).collect()
     }
 

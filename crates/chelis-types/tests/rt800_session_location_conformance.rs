@@ -10,16 +10,24 @@ use chelis_types::errors::{CheckError, CheckErrorKind};
 
 fn deep_errors(source: &str) -> Vec<CheckError> {
     let exprs = parse_deep_lenient(source).expect("Deep fixture must parse");
-    check_ir_program(&exprs, chelis_types::ProgramOrigin::Unlinked)
-        .expect_err("adversarial Deep fixture must be rejected")
-        .errors
+    check_ir_program(
+        &exprs,
+        chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
+    )
+    .expect_err("adversarial Deep fixture must be rejected")
+    .errors
 }
 
 fn fixture_errors(source: &str) -> Vec<CheckError> {
     let exprs: Vec<chelis_deep::Expr> = serde_json::from_str(source).expect("core AST fixture");
-    check_ir_program(&exprs, chelis_types::ProgramOrigin::Unlinked)
-        .expect_err("adversarial core fixture must be rejected")
-        .errors
+    check_ir_program(
+        &exprs,
+        chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
+    )
+    .expect_err("adversarial core fixture must be rejected")
+    .errors
 }
 
 #[test]
@@ -48,9 +56,13 @@ fn cast_operand_and_target_failures_remain_two_independent_roots() {
     let exprs = support::parse_unchecked_legacy(
         "(def {} bad (cast {} (var {} missing_value) (t-prim {} f32 extra)))",
     );
-    let errors = check_ir_program(&exprs, chelis_types::ProgramOrigin::Unlinked)
-        .expect_err("adversarial Deep fixture must be rejected")
-        .errors;
+    let errors = check_ir_program(
+        &exprs,
+        chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
+    )
+    .expect_err("adversarial Deep fixture must be rejected")
+    .errors;
     assert_eq!(
         errors.len(),
         2,

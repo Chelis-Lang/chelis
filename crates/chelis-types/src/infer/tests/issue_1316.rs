@@ -160,8 +160,12 @@ fn generated_program(definitions: usize, shape: GraphShape) -> Vec<deep::Expr> {
 }
 
 fn plan_for(program: &[deep::Expr]) -> FunctionInferencePlan {
+    plan_for_with(program, &mut NativeServices::new(None))
+}
+
+fn plan_for_with(program: &[deep::Expr], native: &mut NativeServices) -> FunctionInferencePlan {
     let items = top_level_decl_items_with_modules(program);
-    FunctionInferencePlan::build(&items)
+    FunctionInferencePlan::build(&items, native)
 }
 
 fn component_names(plan: &FunctionInferencePlan) -> Vec<(Vec<String>, bool)> {
@@ -345,11 +349,10 @@ fn issue_1316_iterative_scc_handles_a_hundred_thousand_vertex_chain() {
 fn issue_1316_mid_scc_cancellation_returns_no_partial_plan() {
     let program = generated_program(64, GraphShape::Chain);
     let token = CancelToken::new();
-    let _cancel_guard = crate::cancel::install_cancel_token(token.clone());
-    let _plan_hook = cancel_function_plan_after_edges_for_test(17, token);
+    let _plan_hook = cancel_function_plan_after_edges_for_test(17, token.clone());
     reset_function_plan_profile();
 
-    let plan = plan_for(&program);
+    let plan = plan_for_with(&program, &mut NativeServices::new(Some(token)));
     let profile = take_function_plan_profile();
     assert!(!plan.complete);
     assert!(plan.components.is_empty());
@@ -385,15 +388,23 @@ fn issue_1316_each_public_driver_builds_one_shared_plan() {
     let program = generated_program(32, GraphShape::BoundedDag);
 
     reset_function_plan_profile();
-    check_typed_program(&program, crate::ProgramOrigin::Unlinked)
-        .expect("primary driver accepts generated DAG");
+    check_typed_program(
+        &program,
+        crate::ProgramOrigin::Unlinked,
+        &mut crate::NativeServices::new(None),
+    )
+    .expect("primary driver accepts generated DAG");
     let primary_profile = take_function_plan_profile();
     assert_eq!(primary_profile.plan_builds, 1);
     assert_eq!(primary_profile.reference_graph_builds, 1);
 
     reset_function_plan_profile();
-    check_ir_program(&program, crate::ProgramOrigin::Unlinked)
-        .expect("IR driver accepts generated DAG");
+    check_ir_program(
+        &program,
+        crate::ProgramOrigin::Unlinked,
+        &mut crate::NativeServices::new(None),
+    )
+    .expect("IR driver accepts generated DAG");
     let ir_profile = take_function_plan_profile();
     assert_eq!(ir_profile.plan_builds, 1);
     assert_eq!(ir_profile.reference_graph_builds, 1);
@@ -411,8 +422,22 @@ fn issue_1316_malformed_group_rejects_in_both_drivers() {
             ),
         ],
     )];
-    assert!(check_typed_program(&malformed, ProgramOrigin::Unlinked).is_err());
-    assert!(check_ir_program(&malformed, ProgramOrigin::Unlinked).is_err());
+    assert!(
+        check_typed_program(
+            &malformed,
+            ProgramOrigin::Unlinked,
+            &mut crate::NativeServices::new(None)
+        )
+        .is_err()
+    );
+    assert!(
+        check_ir_program(
+            &malformed,
+            ProgramOrigin::Unlinked,
+            &mut crate::NativeServices::new(None)
+        )
+        .is_err()
+    );
 }
 
 #[test]
@@ -434,8 +459,13 @@ fn issue_1316_unknown_call_diagnostic_order_is_stable_across_drivers() {
     let primary = messages(check_typed_program(
         &program,
         crate::ProgramOrigin::Unlinked,
+        &mut crate::NativeServices::new(None),
     ));
-    let ir = messages(check_ir_program(&program, crate::ProgramOrigin::Unlinked));
+    let ir = messages(check_ir_program(
+        &program,
+        crate::ProgramOrigin::Unlinked,
+        &mut crate::NativeServices::new(None),
+    ));
     assert_eq!(primary, ir);
     assert_eq!(primary.len(), 2);
     assert!(primary[0].contains("missing_first"));

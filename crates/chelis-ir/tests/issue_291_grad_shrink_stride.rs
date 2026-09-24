@@ -140,7 +140,12 @@ fn issue_291_grad_through_stride_is_exact_scatter() {
         "x".into(),
         TensorValue::from_vec(vec![4], vec![10.0, 20.0, 30.0, 40.0]),
     );
-    let vals = eval_tensor(&result.dag, &inputs).expect("grad DAG eval");
+    let vals = eval_tensor(
+        &result.dag,
+        &inputs,
+        &mut chelis_types::NativeServices::new(None),
+    )
+    .expect("grad DAG eval");
     assert_close(
         "grad_stride_2",
         &vals[&grad_x].to_f64_lossy_vec(),
@@ -186,7 +191,12 @@ fn issue_291_grad_stride_routes_nonuniform_cotangent() {
         "x".into(),
         TensorValue::from_vec(vec![4], vec![3.0, 99.0, 5.0, 99.0]),
     );
-    let vals = eval_tensor(&result.dag, &inputs).expect("grad eval");
+    let vals = eval_tensor(
+        &result.dag,
+        &inputs,
+        &mut chelis_types::NativeServices::new(None),
+    )
+    .expect("grad eval");
     // df/dx = [2*3, 0, 2*5, 0] = [6, 0, 10, 0].
     assert_close(
         "grad_stride_nonuniform",
@@ -211,7 +221,12 @@ fn issue_291_grad_stride_non_dividing_step() {
         "x".into(),
         TensorValue::from_vec(vec![5], vec![1.0, 2.0, 3.0, 4.0, 5.0]),
     );
-    let vals = eval_tensor(&result.dag, &inputs).expect("grad eval");
+    let vals = eval_tensor(
+        &result.dag,
+        &inputs,
+        &mut chelis_types::NativeServices::new(None),
+    )
+    .expect("grad eval");
     assert_close(
         "grad_stride_5_by_2",
         &vals[&grad_x].to_f64_lossy_vec(),
@@ -234,7 +249,12 @@ fn issue_291_grad_stride_step_three() {
         "x".into(),
         TensorValue::from_vec(vec![4], vec![1.0, 2.0, 3.0, 4.0]),
     );
-    let vals = eval_tensor(&result.dag, &inputs).expect("grad eval");
+    let vals = eval_tensor(
+        &result.dag,
+        &inputs,
+        &mut chelis_types::NativeServices::new(None),
+    )
+    .expect("grad eval");
     assert_close(
         "grad_stride_4_by_3",
         &vals[&grad_x].to_f64_lossy_vec(),
@@ -282,7 +302,12 @@ fn issue_291_grad_stride_two_axes() {
         "x".into(),
         TensorValue::from_vec(vec![4, 4], (0..16).map(|v| v as f64).collect()),
     );
-    let vals = eval_tensor(&result.dag, &inputs).expect("grad eval");
+    let vals = eval_tensor(
+        &result.dag,
+        &inputs,
+        &mut chelis_types::NativeServices::new(None),
+    )
+    .expect("grad eval");
     #[rustfmt::skip]
     let want = vec![
         1.0, 0.0, 1.0, 0.0,
@@ -332,7 +357,12 @@ fn issue_291_grad_stride_mixed_identity_axis() {
         "x".into(),
         TensorValue::from_vec(vec![3, 4], (0..12).map(|v| v as f64).collect()),
     );
-    let vals = eval_tensor(&result.dag, &inputs).expect("grad eval");
+    let vals = eval_tensor(
+        &result.dag,
+        &inputs,
+        &mut chelis_types::NativeServices::new(None),
+    )
+    .expect("grad eval");
     #[rustfmt::skip]
     let want = vec![
         1.0, 0.0, 1.0, 0.0,
@@ -374,7 +404,12 @@ fn issue_291_grad_stride_matches_finite_difference() {
     let base = TensorValue::from_vec(vec![4], vec![0.7, -1.3, 2.1, 0.4]);
     let mut inputs = UnordMap::new();
     inputs.insert("x".into(), base.clone());
-    let analytic = eval_tensor(&result.dag, &inputs).expect("analytic eval")[&grad_x]
+    let analytic = eval_tensor(
+        &result.dag,
+        &inputs,
+        &mut chelis_types::NativeServices::new(None),
+    )
+    .expect("analytic eval")[&grad_x]
         .to_f64_lossy_vec()
         .clone();
 
@@ -391,8 +426,12 @@ fn issue_291_grad_stride_matches_finite_difference() {
         ip.insert("x".into(), plus);
         let mut im = UnordMap::new();
         im.insert("x".into(), minus);
-        let fp = eval_tensor(&dag, &ip).expect("plus eval")[&out].to_f64_lossy_vec()[0];
-        let fm = eval_tensor(&dag, &im).expect("minus eval")[&out].to_f64_lossy_vec()[0];
+        let fp = eval_tensor(&dag, &ip, &mut chelis_types::NativeServices::new(None))
+            .expect("plus eval")[&out]
+            .to_f64_lossy_vec()[0];
+        let fm = eval_tensor(&dag, &im, &mut chelis_types::NativeServices::new(None))
+            .expect("minus eval")[&out]
+            .to_f64_lossy_vec()[0];
         *slot = (fp - fm) / (2.0 * h);
     }
     for (i, (a, n)) in analytic.iter().zip(numerical.iter()).enumerate() {
@@ -416,7 +455,12 @@ fn issue_291_grad_stride_step_exceeds_axis() {
     let grad_x = result.grad_nodes[&x];
     let mut inputs = UnordMap::new();
     inputs.insert("x".into(), TensorValue::from_vec(vec![2], vec![10.0, 20.0]));
-    let vals = eval_tensor(&result.dag, &inputs).expect("grad eval");
+    let vals = eval_tensor(
+        &result.dag,
+        &inputs,
+        &mut chelis_types::NativeServices::new(None),
+    )
+    .expect("grad eval");
     assert_close(
         "grad_stride_2_by_5",
         &vals[&grad_x].to_f64_lossy_vec(),
@@ -439,7 +483,12 @@ fn issue_291_grad_stride_step_equals_axis() {
         "x".into(),
         TensorValue::from_vec(vec![4], vec![1.0, 2.0, 3.0, 4.0]),
     );
-    let vals = eval_tensor(&result.dag, &inputs).expect("grad eval");
+    let vals = eval_tensor(
+        &result.dag,
+        &inputs,
+        &mut chelis_types::NativeServices::new(None),
+    )
+    .expect("grad eval");
     assert_close(
         "grad_stride_4_by_4",
         &vals[&grad_x].to_f64_lossy_vec(),
@@ -497,7 +546,12 @@ fn issue_291_grad_stride_supports_higher_order_ad() {
         "x".into(),
         TensorValue::from_vec(vec![4], vec![3.0, 99.0, 5.0, 99.0]),
     );
-    let vals = eval_tensor(&second.dag, &inputs).expect("second-grad eval");
+    let vals = eval_tensor(
+        &second.dag,
+        &inputs,
+        &mut chelis_types::NativeServices::new(None),
+    )
+    .expect("second-grad eval");
     // d/dx (2*x0 + 2*x2) = [2, 0, 2, 0]; independent of the skipped slots.
     assert_close(
         "grad_grad_stride_2",
@@ -547,9 +601,13 @@ fn issue_291_grad_stride_symbolic_axis_is_runtime_upsample() {
         "x".to_string(),
         TensorValue::from_vec(vec![4], vec![1.0, 2.0, 3.0, 4.0]),
     );
-    let vals =
-        eval_tensor_roots_with_strict(&grad.dag, &[grad_x], |name| inputs.get(name).cloned())
-            .expect("runtime strided adjoint evaluates");
+    let vals = eval_tensor_roots_with_strict(
+        &grad.dag,
+        &[grad_x],
+        |name| inputs.get(name).cloned(),
+        &mut chelis_types::NativeServices::new(None),
+    )
+    .expect("runtime strided adjoint evaluates");
     // f(x) = sum(stride(x, 2)) = x0 + x2, so df/dx = [1, 0, 1, 0].
     assert_eq!(vals[&grad_x].shape, vec![4]);
     assert_eq!(vals[&grad_x].to_f64_lossy_vec(), vec![1.0, 0.0, 1.0, 0.0]);
@@ -593,7 +651,12 @@ fn issue_291_grad_through_shrink_is_exact_pad() {
         "x".into(),
         TensorValue::from_vec(vec![4], vec![10.0, 20.0, 30.0, 40.0]),
     );
-    let vals = eval_tensor(&result.dag, &inputs).expect("grad eval");
+    let vals = eval_tensor(
+        &result.dag,
+        &inputs,
+        &mut chelis_types::NativeServices::new(None),
+    )
+    .expect("grad eval");
     assert_close(
         "grad_shrink_0_2",
         &vals[&grad_x].to_f64_lossy_vec(),
@@ -637,7 +700,12 @@ fn issue_291_grad_shrink_interior_nonuniform() {
         "x".into(),
         TensorValue::from_vec(vec![4], vec![99.0, 4.0, 6.0, 99.0]),
     );
-    let vals = eval_tensor(&result.dag, &inputs).expect("grad eval");
+    let vals = eval_tensor(
+        &result.dag,
+        &inputs,
+        &mut chelis_types::NativeServices::new(None),
+    )
+    .expect("grad eval");
     // df/dx = [0, 2*4, 2*6, 0] = [0, 8, 12, 0].
     assert_close(
         "grad_shrink_interior",

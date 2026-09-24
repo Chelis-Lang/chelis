@@ -68,7 +68,11 @@ fn tag_atom_in_expression_position_is_a_loud_malformed_form() {
             deep::Expr::Atom(deep::Atom::Tag(DeepTag::App), zero_span()),
         ],
     )];
-    let result = infer_program(&program, crate::ProgramOrigin::Unlinked);
+    let result = infer_program(
+        &program,
+        crate::ProgramOrigin::Unlinked,
+        &mut crate::NativeServices::new(None),
+    );
     assert!(
         result.errors.iter().any(|error| {
             matches!(error.kind, CheckErrorKind::MalformedForm)
@@ -86,7 +90,11 @@ fn tag_atom_in_expression_position_is_a_loud_malformed_form() {
 #[test]
 fn tag_atom_in_tag_position_is_not_a_malformed_form() {
     let program = vec![node_expr(DeepTag::App, vec![])];
-    let result = infer_program(&program, crate::ProgramOrigin::Unlinked);
+    let result = infer_program(
+        &program,
+        crate::ProgramOrigin::Unlinked,
+        &mut crate::NativeServices::new(None),
+    );
     assert!(
         !result
             .errors
@@ -99,12 +107,21 @@ fn tag_atom_in_tag_position_is_not_a_malformed_form() {
 
 fn check(src: &str) -> InferResult {
     let exprs = chelis_deep::parser::parse_str(src).unwrap();
-    infer_program(&exprs, crate::ProgramOrigin::Unlinked)
+    infer_program(
+        &exprs,
+        crate::ProgramOrigin::Unlinked,
+        &mut crate::NativeServices::new(None),
+    )
 }
 
 fn checked_deep(src: &str) -> CheckedProgram {
     let exprs = chelis_deep::parser::parse_str(src).expect("Deep fixture parses");
-    check_ir_program(&exprs, crate::ProgramOrigin::Unlinked).expect("IR check")
+    check_ir_program(
+        &exprs,
+        crate::ProgramOrigin::Unlinked,
+        &mut crate::NativeServices::new(None),
+    )
+    .expect("IR check")
 }
 
 #[test]
@@ -118,16 +135,24 @@ fn program_origin_is_independent_at_each_inference_ingress() {
     }
     let ingresses: [(&str, Ingress); 4] = [
         ("primary", |exprs, origin| {
-            infer_program(exprs, origin).errors
+            infer_program(exprs, origin, &mut crate::NativeServices::new(None)).errors
         }),
         ("IR inference", |exprs, origin| {
-            infer_ir_program(exprs, origin).errors
+            infer_ir_program(exprs, origin, &mut crate::NativeServices::new(None)).errors
         }),
         ("typed", |exprs, origin| {
-            checked_errors(check_typed_program(exprs, origin))
+            checked_errors(check_typed_program(
+                exprs,
+                origin,
+                &mut crate::NativeServices::new(None),
+            ))
         }),
         ("IR checked", |exprs, origin| {
-            checked_errors(check_ir_program(exprs, origin))
+            checked_errors(check_ir_program(
+                exprs,
+                origin,
+                &mut crate::NativeServices::new(None),
+            ))
         }),
     ];
     let interface = chelis_deep::parser::parse_and_stamp(
@@ -221,11 +246,17 @@ fn checked_program_preserves_alias_resolved_generic_adt_registry() {
         "checker-decoded authored signatures survive serialization"
     );
     let effects_reannotated = checked
-        .try_with_effect_annotations(checked.annotated_exprs().to_vec())
+        .try_with_effect_annotations(
+            checked.annotated_exprs().to_vec(),
+            &mut crate::NativeServices::new(None),
+        )
         .expect("effects-only rewrite preserves checked metadata");
     assert_checker_metadata("effects reannotation", &effects_reannotated);
-    let linearity_checked = crate::linearity::check_linearity(&effects_reannotated)
-        .expect("linearity preserves checked metadata");
+    let linearity_checked = crate::linearity::check_linearity(
+        &effects_reannotated,
+        &mut crate::NativeServices::new(None),
+    )
+    .expect("linearity preserves checked metadata");
     assert_checker_metadata("linearity", &linearity_checked);
     assert!(
         CheckedProgram::compose(&checked, &effects_reannotated).is_none(),
@@ -419,8 +450,8 @@ fn deep_app_chain_node(depth: usize) -> deep::Expr {
 /// chain deep enough to overflow an unguarded recursion, on a bounded
 /// stack. gdb showed this walker -- not `infer_expr` -- is the SIGSEGV
 /// site for this pass on deep input; reaching the assertion at all proves
-/// the guard prevented the overflow, and the recorded `STACK_EXHAUSTED`
-/// flag proves the bail surfaces.
+/// the guard prevented the overflow, and the sink's recorded stack bail
+/// proves the bail surfaces.
 #[test]
 fn walk_for_tensor_precision_sibling_is_guarded_not_sigsegv() {
     // Built and dropped on the main thread: the chain's unguarded drop
@@ -434,12 +465,18 @@ fn walk_for_tensor_precision_sibling_is_guarded_not_sigsegv() {
         // budget early, well inside the guard, with no risk of overflow.
         .stack_size(1024 * 1024)
         .spawn(move || {
-            let _scope = StackExhaustionScope::enter();
-            let mut errors = Vec::new();
-            // Drive ONLY the tensor-precision pass (whose deep walker is
-            // walk_for_tensor_precision), isolating it from infer_expr.
-            validate_tensor_precisions_in_program(&worker_program, &mut errors);
-            STACK_EXHAUSTED.with(|cell| cell.borrow().clone())
+            let (flagged, _errors) =
+                crate::session::run_test_session(&mut NativeServices::new(None), |sink| {
+                    sink.enter_stack_scope();
+                    // Drive ONLY the tensor-precision pass (whose deep walker
+                    // is walk_for_tensor_precision), isolating it from
+                    // infer_expr.
+                    validate_tensor_precisions_in_program(&worker_program, sink);
+                    let flagged = sink.recorded_stack_bail().cloned();
+                    sink.exit_stack_scope();
+                    flagged
+                });
+            flagged
         })
         .expect("spawn sibling-guard worker")
         .join()
@@ -457,8 +494,8 @@ fn walk_for_tensor_precision_sibling_is_guarded_not_sigsegv() {
 }
 
 /// The funnel is sound: a walker that bails with NO error vector (here the
-/// tensor-precision pass is driven in isolation) still makes the flag set,
-/// and `StackExhaustionScope::drain_into` turns it into a hard located
+/// tensor-precision pass is driven in isolation) still records the bail,
+/// and `DiagnosticSink::drain_stack_bail` turns it into a hard located
 /// error -- never a silent empty result.
 #[test]
 fn stack_exhaustion_drains_into_a_located_error() {
@@ -469,19 +506,23 @@ fn stack_exhaustion_drains_into_a_located_error() {
     // fit). The worker thread exists to exercise the GUARDED walker on a
     // small stack; the unguarded collateral must not share it.
     // (Production runs construction, walkers, and drops on the
-    // `with_grown_stack` segment, so this is a test-harness concern.)
+    // `NativeServices::with_grown_stack` segment, so this is a test-harness
+    // concern.)
     let program = std::sync::Arc::new(vec![deep_app_chain_node(4000)]);
     let worker_program = std::sync::Arc::clone(&program);
     let errors = std::thread::Builder::new()
         .stack_size(1024 * 1024)
         .spawn(move || {
-            let scope = StackExhaustionScope::enter();
-            let mut errors = Vec::new();
-            validate_tensor_precisions_in_program(&worker_program, &mut errors);
-            // Before drain: the precision pass carries no error vector of
-            // its own for the bail, so `errors` may be empty here ...
-            scope.drain_into(&mut errors);
-            // ... but after drain the exhaustion is a hard error.
+            let ((), errors) =
+                crate::session::run_test_session(&mut NativeServices::new(None), |sink| {
+                    sink.enter_stack_scope();
+                    validate_tensor_precisions_in_program(&worker_program, sink);
+                    // Before drain: the precision pass carries no error vector
+                    // of its own for the bail, so the sink may be empty here
+                    // ... but after drain the exhaustion is a hard error.
+                    sink.drain_stack_bail();
+                    sink.exit_stack_scope();
+                });
             drop(worker_program);
             errors
         })
@@ -506,10 +547,15 @@ fn moderate_chain_does_not_trip_sibling_guard() {
         .stack_size(8 * 1024 * 1024)
         .spawn(|| {
             let program = vec![deep_app_chain_node(20)];
-            let _scope = StackExhaustionScope::enter();
-            let mut errors = Vec::new();
-            validate_tensor_precisions_in_program(&program, &mut errors);
-            STACK_EXHAUSTED.with(|cell| cell.borrow().is_some())
+            let (flagged, _errors) =
+                crate::session::run_test_session(&mut NativeServices::new(None), |sink| {
+                    sink.enter_stack_scope();
+                    validate_tensor_precisions_in_program(&program, sink);
+                    let flagged = sink.recorded_stack_bail().is_some();
+                    sink.exit_stack_scope();
+                    flagged
+                });
+            flagged
         })
         .expect("spawn worker")
         .join()
@@ -1083,7 +1129,11 @@ fn deep_source_accepts_f64_tensor_ascription() {
     ))
     .expect("Deep fixture parses");
 
-    let result = infer_program(&exprs, crate::ProgramOrigin::Unlinked);
+    let result = infer_program(
+        &exprs,
+        crate::ProgramOrigin::Unlinked,
+        &mut crate::NativeServices::new(None),
+    );
     assert!(
         !result
             .errors
@@ -1102,7 +1152,11 @@ fn deep_source_accepts_cast_to_f64_tensor() {
     ))
     .expect("Deep fixture parses");
 
-    let result = infer_program(&exprs, crate::ProgramOrigin::Unlinked);
+    let result = infer_program(
+        &exprs,
+        crate::ProgramOrigin::Unlinked,
+        &mut crate::NativeServices::new(None),
+    );
     assert!(
         !result
             .errors
@@ -1157,7 +1211,12 @@ fn grad_non_float_param_is_ignored_by_default() {
          (def {} g (grad {} (var {} f)))",
     )
     .unwrap();
-    let checked = check_ir_program(&exprs, crate::ProgramOrigin::Unlinked).expect("IR check");
+    let checked = check_ir_program(
+        &exprs,
+        crate::ProgramOrigin::Unlinked,
+        &mut crate::NativeServices::new(None),
+    )
+    .expect("IR check");
     let ty = checked.type_env().get("g").expect("g type");
     assert_eq!(
         chelis_deep::printer::print_canonical_flat(std::slice::from_ref(ty))
@@ -1181,7 +1240,12 @@ fn grad_over_all_float_field_adt_types_as_same_adt() {
          (def {} g (grad {} (var {} f)))",
     )
     .unwrap();
-    let checked = check_ir_program(&exprs, crate::ProgramOrigin::Unlinked).expect("IR check");
+    let checked = check_ir_program(
+        &exprs,
+        crate::ProgramOrigin::Unlinked,
+        &mut crate::NativeServices::new(None),
+    )
+    .expect("IR check");
     let ty = checked.type_env().get("g").expect("g type");
     let printed = chelis_deep::printer::print_canonical_flat(std::slice::from_ref(ty))
         .trim()
@@ -1206,7 +1270,12 @@ fn grad_over_mixed_field_adt_preserves_the_nominal_cotangent_shape() {
          (def {} g (grad {} (var {} f)))",
     )
     .unwrap();
-    let checked = check_ir_program(&exprs, crate::ProgramOrigin::Unlinked).expect("IR check");
+    let checked = check_ir_program(
+        &exprs,
+        crate::ProgramOrigin::Unlinked,
+        &mut crate::NativeServices::new(None),
+    )
+    .expect("IR check");
     let ty = checked.type_env().get("g").expect("g type");
     let printed = chelis_deep::printer::print_canonical_flat(std::slice::from_ref(ty))
         .trim()
@@ -1233,7 +1302,12 @@ fn grad_over_adt_plus_tensor_multi_target_returns_tuple() {
          (def {} g (grad {} (var {} f)))",
     )
     .unwrap();
-    let checked = check_ir_program(&exprs, crate::ProgramOrigin::Unlinked).expect("IR check");
+    let checked = check_ir_program(
+        &exprs,
+        crate::ProgramOrigin::Unlinked,
+        &mut crate::NativeServices::new(None),
+    )
+    .expect("IR check");
     let ty = checked.type_env().get("g").expect("g type");
     let printed = chelis_deep::printer::print_canonical_flat(std::slice::from_ref(ty))
         .trim()
@@ -1262,7 +1336,12 @@ fn grad_wrt_adt_in_multi_arg_call_returns_struct() {
          (def {} g (grad {} (var {} f) (lit {type: (t-prim {} i32)} 0)))",
     )
     .unwrap();
-    let checked = check_ir_program(&exprs, crate::ProgramOrigin::Unlinked).expect("IR check");
+    let checked = check_ir_program(
+        &exprs,
+        crate::ProgramOrigin::Unlinked,
+        &mut crate::NativeServices::new(None),
+    )
+    .expect("IR check");
     let ty = checked.type_env().get("g").expect("g type");
     let printed = chelis_deep::printer::print_canonical_flat(std::slice::from_ref(ty))
         .trim()
@@ -1287,7 +1366,12 @@ fn grad_over_pure_enum_stays_unit() {
          (def {} g (grad {} (var {} f)))",
     )
     .unwrap();
-    let checked = check_ir_program(&exprs, crate::ProgramOrigin::Unlinked).expect("IR check");
+    let checked = check_ir_program(
+        &exprs,
+        crate::ProgramOrigin::Unlinked,
+        &mut crate::NativeServices::new(None),
+    )
+    .expect("IR check");
     let ty = checked.type_env().get("g").expect("g type");
     let printed = chelis_deep::printer::print_canonical_flat(std::slice::from_ref(ty))
         .trim()
@@ -1313,7 +1397,12 @@ fn grad_over_enum_plus_tensor_keeps_tensor_only_payload() {
          (def {} g (grad {} (var {} f)))",
     )
     .unwrap();
-    let checked = check_ir_program(&exprs, crate::ProgramOrigin::Unlinked).expect("IR check");
+    let checked = check_ir_program(
+        &exprs,
+        crate::ProgramOrigin::Unlinked,
+        &mut crate::NativeServices::new(None),
+    )
+    .expect("IR check");
     let ty = checked.type_env().get("g").expect("g type");
     let printed = chelis_deep::printer::print_canonical_flat(std::slice::from_ref(ty))
         .trim()
@@ -1353,7 +1442,12 @@ fn grad_with_explicit_wrt_returns_selected_gradient_only() {
             (grad {} (var {} loss) (lit {type: (t-prim {} i32)} 1)))",
     )
     .unwrap();
-    let checked = check_ir_program(&exprs, crate::ProgramOrigin::Unlinked).expect("IR check");
+    let checked = check_ir_program(
+        &exprs,
+        crate::ProgramOrigin::Unlinked,
+        &mut crate::NativeServices::new(None),
+    )
+    .expect("IR check");
     let ty = checked.type_env().get("dw").expect("dw type");
     assert_eq!(
         chelis_deep::printer::print_canonical_flat(std::slice::from_ref(ty))
@@ -1381,7 +1475,12 @@ fn grad_with_multiple_wrt_returns_flat_tuple() {
                     (lit {type: (t-prim {} i32)} 1))))",
     )
     .unwrap();
-    let checked = check_ir_program(&exprs, crate::ProgramOrigin::Unlinked).expect("IR check");
+    let checked = check_ir_program(
+        &exprs,
+        crate::ProgramOrigin::Unlinked,
+        &mut crate::NativeServices::new(None),
+    )
+    .expect("IR check");
     let ty = checked.type_env().get("grads").expect("grads type");
     assert_eq!(
         chelis_deep::printer::print_canonical_flat(std::slice::from_ref(ty))
@@ -1785,7 +1884,11 @@ fn typealias_resolves_in_literal_metadata() {
 
 fn deep_check_errors(src: &str) -> Vec<CheckError> {
     let exprs = chelis_deep::parser::parse_str(src).expect("Deep fixture parses");
-    match check_ir_program(&exprs, crate::ProgramOrigin::Unlinked) {
+    match check_ir_program(
+        &exprs,
+        crate::ProgramOrigin::Unlinked,
+        &mut crate::NativeServices::new(None),
+    ) {
         Ok(_) => Vec::new(),
         Err(result) => result.errors,
     }

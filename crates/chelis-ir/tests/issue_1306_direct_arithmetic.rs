@@ -161,7 +161,12 @@ fn extrema_adjoint_routes_ties_and_nan_cotangents_to_the_forward_selected_operan
                 ("left".to_string(), exact_f64(left_value)),
                 ("right".to_string(), exact_f64(right_value)),
             ]);
-            let values = eval_tensor(&differentiated.dag, &inputs).unwrap();
+            let values = eval_tensor(
+                &differentiated.dag,
+                &inputs,
+                &mut chelis_types::NativeServices::new(None),
+            )
+            .unwrap();
             assert_eq!(
                 values[&differentiated.grad_nodes[&left]].to_f64_lossy_vec(),
                 vec![expected_left]

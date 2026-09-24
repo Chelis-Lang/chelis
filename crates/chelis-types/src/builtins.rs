@@ -3510,8 +3510,8 @@ mod tests {
     fn instantiate_add_produces_fn_type() {
         let (env, mut vg) = builtin_env();
         let scheme = env.lookup("add").unwrap();
-        let subst = crate::unify::Subst::new();
-        let ty = env.instantiate(scheme, &mut vg, &subst);
+        let mut subst = crate::unify::Subst::new();
+        let ty = env.instantiate(scheme, &mut vg, &mut subst);
         match ty {
             Type::Fn(args, _ret) => assert_eq!(args.len(), 2),
             other => panic!("expected Fn, got {other:?}"),
@@ -3525,7 +3525,7 @@ mod tests {
         let (env, mut vg) = builtin_env();
         let add_scheme = env.lookup("add").unwrap();
         let mut subst = Subst::new();
-        let add_ty = env.instantiate(add_scheme, &mut vg, &subst);
+        let add_ty = env.instantiate(add_scheme, &mut vg, &mut subst);
 
         // add should accept two tensors of the same type
         let tensor_f32 = Type::Tensor(
@@ -3550,7 +3550,7 @@ mod tests {
         let (env, mut vg) = builtin_env();
         let add_scheme = env.lookup("add").unwrap();
         let mut subst = Subst::new();
-        let add_ty = env.instantiate(add_scheme, &mut vg, &subst);
+        let add_ty = env.instantiate(add_scheme, &mut vg, &mut subst);
 
         // add(tensor[batch,f32], tensor[batch,bf16]) should fail
         let t1 = Type::Tensor(
@@ -3576,7 +3576,7 @@ mod tests {
         let (env, mut vg) = builtin_env();
         let add_scheme = env.lookup("add").unwrap();
         let mut subst = Subst::new();
-        let add_ty = env.instantiate(add_scheme, &mut vg, &subst);
+        let add_ty = env.instantiate(add_scheme, &mut vg, &mut subst);
 
         // add(tensor[batch,f32], i32) should fail
         let t1 = Type::Tensor(

@@ -40,7 +40,11 @@ fn issue186_surf_conv_concrete_shapes_typechecks() {
         "fixtures/core/tests/issue_186_conv2d_validator/issue186_surf_conv_concrete_shapes_typechecks_1.deep"
     );
     let deep = core_program(src);
-    let res = check_ir_program(&deep, chelis_types::ProgramOrigin::Unlinked);
+    let res = check_ir_program(
+        &deep,
+        chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
+    );
     if let Err(rep) = res {
         for err in &rep.errors {
             eprintln!("unexpected error: {:?}: {}", err.kind, err.message);
@@ -66,7 +70,11 @@ fn issue186_surf_conv_borrowed_args_typechecks() {
         "fixtures/core/tests/issue_186_conv2d_validator/issue186_surf_conv_borrowed_args_typechecks_1.deep"
     );
     let deep = core_program(src);
-    let res = check_ir_program(&deep, chelis_types::ProgramOrigin::Unlinked);
+    let res = check_ir_program(
+        &deep,
+        chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
+    );
     if let Err(rep) = res {
         for err in &rep.errors {
             eprintln!("unexpected error: {:?}: {}", err.kind, err.message);
@@ -90,7 +98,11 @@ fn issue186_deep_conv_concrete_tensors_typechecks() {
                  (app {} (var {} conv) (var {} x) (var {} k) \
                    (app {} (var {} Cons) (lit {type: (t-prim {} i64)} 1) (app {} (var {} Cons) (lit {type: (t-prim {} i64)} 1) (var {} Nil))) (app {} (var {} Cons) (tuple {} (lit {type: (t-prim {} i64)} 0) (lit {type: (t-prim {} i64)} 0)) (app {} (var {} Cons) (tuple {} (lit {type: (t-prim {} i64)} 0) (lit {type: (t-prim {} i64)} 0)) (var {} Nil)))))";
     let deep = parse_deep(src).expect("deep parse");
-    let res = check_ir_program(&deep, chelis_types::ProgramOrigin::Unlinked);
+    let res = check_ir_program(
+        &deep,
+        chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
+    );
     if let Err(rep) = res {
         for err in &rep.errors {
             eprintln!("unexpected error: {:?}: {}", err.kind, err.message);
@@ -110,8 +122,12 @@ fn issue186_surf_conv_nonconcrete_input_dim_is_checker_legal() {
         "fixtures/core/tests/issue_186_conv2d_validator/issue186_surf_conv_nonconcrete_input_dim_is_checker_legal_1.deep"
     );
     let deep = core_program(src);
-    check_ir_program(&deep, chelis_types::ProgramOrigin::Unlinked)
-        .expect("symbolic conv metadata is not a type error");
+    check_ir_program(
+        &deep,
+        chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
+    )
+    .expect("symbolic conv metadata is not a type error");
 }
 
 /// PP9: a symbolic selected extent is not a `mean` type error.
@@ -121,8 +137,12 @@ fn issue186_surf_mean_borrowed_nonconcrete_axis_is_checker_legal() {
         "fixtures/core/tests/issue_186_conv2d_validator/issue186_surf_mean_borrowed_nonconcrete_axis_is_checker_legal_1.deep"
     );
     let deep = core_program(src);
-    check_ir_program(&deep, chelis_types::ProgramOrigin::Unlinked)
-        .expect("symbolic mean extent is not a type error");
+    check_ir_program(
+        &deep,
+        chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
+    )
+    .expect("symbolic mean extent is not a type error");
 }
 
 /// PP9: a symbolic normalized extent is not a `layer_norm` type error.
@@ -132,8 +152,12 @@ fn issue186_surf_layer_norm_borrowed_nonconcrete_axis_is_checker_legal() {
         "fixtures/core/tests/issue_186_conv2d_validator/issue186_surf_layer_norm_borrowed_nonconcrete_axis_is_checker_legal_1.deep"
     );
     let deep = core_program(src);
-    check_ir_program(&deep, chelis_types::ProgramOrigin::Unlinked)
-        .expect("symbolic layer_norm extent is not a type error");
+    check_ir_program(
+        &deep,
+        chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
+    )
+    .expect("symbolic layer_norm extent is not a type error");
 }
 
 // ─── Red Team #205 follow-up findings ────────────────────────────
@@ -150,7 +174,11 @@ fn red_team_205_f1_zero_stride_rejected() {
         "fixtures/core/tests/issue_186_conv2d_validator/red_team_205_f1_zero_stride_rejected_1.deep"
     );
     let deep = core_program(src);
-    let res = check_ir_program(&deep, chelis_types::ProgramOrigin::Unlinked);
+    let res = check_ir_program(
+        &deep,
+        chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
+    );
     let rep = res.expect_err("expected check failure for stride == 0");
     assert!(
         rep.errors
@@ -170,7 +198,11 @@ fn red_team_205_f2_negative_stride_rejected() {
         "fixtures/core/tests/issue_186_conv2d_validator/red_team_205_f2_negative_stride_rejected_1.deep"
     );
     let deep = core_program(src);
-    let res = check_ir_program(&deep, chelis_types::ProgramOrigin::Unlinked);
+    let res = check_ir_program(
+        &deep,
+        chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
+    );
     let rep = res.expect_err("expected check failure for negative stride");
     assert!(
         rep.errors
@@ -190,7 +222,11 @@ fn red_team_205_f3_negative_padding_rejected() {
         "fixtures/core/tests/issue_186_conv2d_validator/red_team_205_f3_negative_padding_rejected_1.deep"
     );
     let deep = core_program(src);
-    let res = check_ir_program(&deep, chelis_types::ProgramOrigin::Unlinked);
+    let res = check_ir_program(
+        &deep,
+        chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
+    );
     let rep = res.expect_err("expected check failure for negative padding");
     assert!(
         rep.errors
@@ -210,7 +246,11 @@ fn red_team_205_f1_f2_stride_one_padding_zero_accepted() {
         "fixtures/core/tests/issue_186_conv2d_validator/red_team_205_f1_f2_stride_one_padding_zero_accepted_1.deep"
     );
     let deep = core_program(src);
-    let res = check_ir_program(&deep, chelis_types::ProgramOrigin::Unlinked);
+    let res = check_ir_program(
+        &deep,
+        chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
+    );
     if let Err(rep) = res {
         for err in &rep.errors {
             eprintln!("unexpected error: {:?}: {}", err.kind, err.message);
@@ -233,7 +273,11 @@ fn red_team_205_f4_oversize_kernel_rejected() {
         "fixtures/core/tests/issue_186_conv2d_validator/red_team_205_f4_oversize_kernel_rejected_1.deep"
     );
     let deep = core_program(src);
-    let res = check_ir_program(&deep, chelis_types::ProgramOrigin::Unlinked);
+    let res = check_ir_program(
+        &deep,
+        chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
+    );
     let rep = res.expect_err("expected check failure for oversize kernel");
     assert!(
         rep.errors
@@ -255,7 +299,11 @@ fn red_team_205_f4_zero_output_rejected() {
         "fixtures/core/tests/issue_186_conv2d_validator/red_team_205_f4_zero_output_rejected_1.deep"
     );
     let deep = core_program(src);
-    let res = check_ir_program(&deep, chelis_types::ProgramOrigin::Unlinked);
+    let res = check_ir_program(
+        &deep,
+        chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
+    );
     let rep = res.expect_err("expected check failure for zero-extent output");
     assert!(
         rep.errors
@@ -275,7 +323,11 @@ fn red_team_205_f4_rank3_input_rejected() {
         "fixtures/core/tests/issue_186_conv2d_validator/red_team_205_f4_rank3_input_rejected_1.deep"
     );
     let deep = core_program(src);
-    let res = check_ir_program(&deep, chelis_types::ProgramOrigin::Unlinked);
+    let res = check_ir_program(
+        &deep,
+        chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
+    );
     let rep = res.expect_err("expected check failure for rank-3 input");
     assert!(
         rep.errors
@@ -294,7 +346,11 @@ fn red_team_205_f4_canonical_output_accepted() {
         "fixtures/core/tests/issue_186_conv2d_validator/red_team_205_f4_canonical_output_accepted_1.deep"
     );
     let deep = core_program(src);
-    let res = check_ir_program(&deep, chelis_types::ProgramOrigin::Unlinked);
+    let res = check_ir_program(
+        &deep,
+        chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
+    );
     if let Err(rep) = res {
         for err in &rep.errors {
             eprintln!("unexpected error: {:?}: {}", err.kind, err.message);
@@ -317,7 +373,11 @@ fn red_team_205_f5_chained_conv_via_let_typechecks() {
         "fixtures/core/tests/issue_186_conv2d_validator/red_team_205_f5_chained_conv_via_let_typechecks_1.deep"
     );
     let deep = core_program(src);
-    let res = check_ir_program(&deep, chelis_types::ProgramOrigin::Unlinked);
+    let res = check_ir_program(
+        &deep,
+        chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
+    );
     if let Err(rep) = res {
         for err in &rep.errors {
             eprintln!("unexpected error: {:?}: {}", err.kind, err.message);
@@ -341,7 +401,11 @@ fn red_team_205_f5_chained_conv_second_call_ill_formed_rejected() {
         "fixtures/core/tests/issue_186_conv2d_validator/red_team_205_f5_chained_conv_second_call_ill_formed_rejected_1.deep"
     );
     let deep = core_program(src);
-    let res = check_ir_program(&deep, chelis_types::ProgramOrigin::Unlinked);
+    let res = check_ir_program(
+        &deep,
+        chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
+    );
     let rep = res.expect_err("expected check failure for ill-formed second conv");
     assert!(
         rep.errors
@@ -363,7 +427,11 @@ fn red_team_205_f6_validator_error_uses_dimension_mismatch_kind() {
         "fixtures/core/tests/issue_186_conv2d_validator/red_team_205_f6_validator_error_uses_dimension_mismatch_kind_1.deep"
     );
     let deep = core_program(src);
-    let res = check_ir_program(&deep, chelis_types::ProgramOrigin::Unlinked);
+    let res = check_ir_program(
+        &deep,
+        chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
+    );
     let rep = res.expect_err("expected check failure for stride 0");
     let err = rep
         .errors
@@ -396,7 +464,11 @@ fn red_team_205_f8_wrong_declared_output_dims_rejected() {
         "fixtures/core/tests/issue_186_conv2d_validator/red_team_205_f8_wrong_declared_output_dims_rejected_1.deep"
     );
     let deep = core_program(src);
-    let res = check_ir_program(&deep, chelis_types::ProgramOrigin::Unlinked);
+    let res = check_ir_program(
+        &deep,
+        chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
+    );
     let rep = res.expect_err("expected check failure for wrong declared output dims");
     // Pin the EXACT computed-vs-declared shape so a future regression
     // that re-introduces the fresh-dvar placeholder is caught here.
@@ -418,7 +490,11 @@ fn red_team_205_f8_correct_declared_output_accepted() {
         "fixtures/core/tests/issue_186_conv2d_validator/red_team_205_f8_correct_declared_output_accepted_1.deep"
     );
     let deep = core_program(src);
-    let res = check_ir_program(&deep, chelis_types::ProgramOrigin::Unlinked);
+    let res = check_ir_program(
+        &deep,
+        chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
+    );
     if let Err(rep) = res {
         for err in &rep.errors {
             eprintln!("unexpected error: {:?}: {}", err.kind, err.message);
@@ -440,7 +516,11 @@ fn red_team_205_f8_off_by_one_output_rejected() {
         "fixtures/core/tests/issue_186_conv2d_validator/red_team_205_f8_off_by_one_output_rejected_1.deep"
     );
     let deep = core_program(src);
-    let res = check_ir_program(&deep, chelis_types::ProgramOrigin::Unlinked);
+    let res = check_ir_program(
+        &deep,
+        chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
+    );
     let rep = res.expect_err("expected check failure for off-by-one declared output");
     // Computed output is 3x3; declared is 4x4. Pin both values in
     // the error message so off-by-one regressions surface here.
@@ -482,7 +562,11 @@ fn red_team_205_round2_f1_padding_near_i64_max_does_not_panic() {
     let deep = parse_deep(src).expect("deep parse");
     // Must NOT panic. Result is allowed to be Err with the overflow
     // diagnostic.
-    let res = check_ir_program(&deep, chelis_types::ProgramOrigin::Unlinked);
+    let res = check_ir_program(
+        &deep,
+        chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
+    );
     let rep = res.expect_err("expected overflow rejection");
     assert!(
         rep.errors
@@ -516,7 +600,11 @@ fn red_team_205_round2_f1_input_plus_padding_overflow_does_not_panic() {
              (app {{}} (var {{}} Cons) (lit {{type: (t-prim {{}} i64)}} 1) (app {{}} (var {{}} Cons) (lit {{type: (t-prim {{}} i64)}} 1) (var {{}} Nil))) (app {{}} (var {{}} Cons) (tuple {{}} (lit {{type: (t-prim {{}} i64)}} 1) (lit {{type: (t-prim {{}} i64)}} 1)) (app {{}} (var {{}} Cons) (tuple {{}} (lit {{type: (t-prim {{}} i64)}} 1) (lit {{type: (t-prim {{}} i64)}} 1)) (var {{}} Nil)))))"
     );
     let deep = parse_deep(&src).expect("deep parse");
-    let res = check_ir_program(&deep, chelis_types::ProgramOrigin::Unlinked);
+    let res = check_ir_program(
+        &deep,
+        chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
+    );
     let rep = res.expect_err("expected overflow rejection");
     assert!(
         rep.errors
@@ -536,7 +624,11 @@ fn red_team_205_round2_f1_canonical_shape_still_accepted() {
         "fixtures/core/tests/issue_186_conv2d_validator/red_team_205_round2_f1_canonical_shape_still_accepted_1.deep"
     );
     let deep = core_program(src);
-    let res = check_ir_program(&deep, chelis_types::ProgramOrigin::Unlinked);
+    let res = check_ir_program(
+        &deep,
+        chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
+    );
     if let Err(rep) = res {
         for err in &rep.errors {
             eprintln!("unexpected error: {:?}: {}", err.kind, err.message);
@@ -559,7 +651,11 @@ fn red_team_205_round2_f2_relu_wrapped_chained_conv_typechecks() {
         "fixtures/core/tests/issue_186_conv2d_validator/red_team_205_round2_f2_relu_wrapped_chained_conv_typechecks_1.deep"
     );
     let deep = core_program(src);
-    let res = check_ir_program(&deep, chelis_types::ProgramOrigin::Unlinked);
+    let res = check_ir_program(
+        &deep,
+        chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
+    );
     if let Err(rep) = res {
         for err in &rep.errors {
             eprintln!("unexpected error: {:?}: {}", err.kind, err.message);
@@ -578,7 +674,11 @@ fn red_team_205_round2_f2_tanh_wrapped_chained_conv_typechecks() {
         "fixtures/core/tests/issue_186_conv2d_validator/red_team_205_round2_f2_tanh_wrapped_chained_conv_typechecks_1.deep"
     );
     let deep = core_program(src);
-    let res = check_ir_program(&deep, chelis_types::ProgramOrigin::Unlinked);
+    let res = check_ir_program(
+        &deep,
+        chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
+    );
     if let Err(rep) = res {
         for err in &rep.errors {
             eprintln!("unexpected error: {:?}: {}", err.kind, err.message);
@@ -600,7 +700,11 @@ fn red_team_205_round2_f2_add_wrapped_chained_conv_typechecks() {
         "fixtures/core/tests/issue_186_conv2d_validator/red_team_205_round2_f2_add_wrapped_chained_conv_typechecks_1.deep"
     );
     let deep = core_program(src);
-    let res = check_ir_program(&deep, chelis_types::ProgramOrigin::Unlinked);
+    let res = check_ir_program(
+        &deep,
+        chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
+    );
     if let Err(rep) = res {
         for err in &rep.errors {
             eprintln!("unexpected error: {:?}: {}", err.kind, err.message);
@@ -627,7 +731,11 @@ fn red_team_205_round2_f2_sum_wrapped_chained_conv_still_rejected() {
         "fixtures/core/tests/issue_186_conv2d_validator/red_team_205_round2_f2_sum_wrapped_chained_conv_still_rejected_1.deep"
     );
     let deep = core_program(src);
-    let res = check_ir_program(&deep, chelis_types::ProgramOrigin::Unlinked);
+    let res = check_ir_program(
+        &deep,
+        chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
+    );
     let rep = res.expect_err("expected check failure for sum-wrapped chain");
     assert!(
         rep.errors
@@ -647,8 +755,12 @@ fn red_team_205_round2_f3_symbolic_chain_is_checker_legal() {
         "fixtures/core/tests/issue_186_conv2d_validator/red_team_205_round2_f3_symbolic_chain_is_checker_legal_1.deep"
     );
     let deep = core_program(src);
-    check_ir_program(&deep, chelis_types::ProgramOrigin::Unlinked)
-        .expect("symbolic conv metadata is not a type error");
+    check_ir_program(
+        &deep,
+        chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
+    )
+    .expect("symbolic conv metadata is not a type error");
 }
 
 /// PP9: independent symbolic conv calls are both checker-legal.
@@ -658,8 +770,12 @@ fn red_team_205_round2_f3_independent_symbolic_calls_are_checker_legal() {
         "fixtures/core/tests/issue_186_conv2d_validator/red_team_205_round2_f3_independent_symbolic_calls_are_checker_legal_1.deep"
     );
     let deep = core_program(src);
-    check_ir_program(&deep, chelis_types::ProgramOrigin::Unlinked)
-        .expect("symbolic conv metadata is not a type error");
+    check_ir_program(
+        &deep,
+        chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
+    )
+    .expect("symbolic conv metadata is not a type error");
 }
 
 /// EXPECT (RT-205 round-2 F4): a rank-5 input tensor produces
@@ -674,7 +790,11 @@ fn red_team_205_round2_f4_rank5_input_single_diagnostic() {
         "fixtures/core/tests/issue_186_conv2d_validator/red_team_205_round2_f4_rank5_input_single_diagnostic_1.deep"
     );
     let deep = core_program(src);
-    let res = check_ir_program(&deep, chelis_types::ProgramOrigin::Unlinked);
+    let res = check_ir_program(
+        &deep,
+        chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
+    );
     let rep = res.expect_err("expected check failure for rank-5 input");
     let rank4_errors: Vec<_> = rep
         .errors
@@ -698,7 +818,11 @@ fn red_team_205_round2_f4_rank5_kernel_single_diagnostic() {
         "fixtures/core/tests/issue_186_conv2d_validator/red_team_205_round2_f4_rank5_kernel_single_diagnostic_1.deep"
     );
     let deep = core_program(src);
-    let res = check_ir_program(&deep, chelis_types::ProgramOrigin::Unlinked);
+    let res = check_ir_program(
+        &deep,
+        chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
+    );
     let rep = res.expect_err("expected check failure for rank-5 kernel");
     let rank4_errors: Vec<_> = rep
         .errors
@@ -723,8 +847,12 @@ fn red_team_205_round3_f_a_symbolic_conv_through_relu_is_checker_legal() {
         "fixtures/core/tests/issue_186_conv2d_validator/red_team_205_round3_f_a_symbolic_conv_through_relu_is_checker_legal_1.deep"
     );
     let deep = core_program(src);
-    check_ir_program(&deep, chelis_types::ProgramOrigin::Unlinked)
-        .expect("symbolic conv metadata is not a type error");
+    check_ir_program(
+        &deep,
+        chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
+    )
+    .expect("symbolic conv metadata is not a type error");
 }
 
 /// PP9: a symbolic conv stays checker-legal through the canonical conv+bias
@@ -735,8 +863,12 @@ fn red_team_205_round3_f_a_symbolic_conv_through_add_is_checker_legal() {
         "fixtures/core/tests/issue_186_conv2d_validator/red_team_205_round3_f_a_symbolic_conv_through_add_is_checker_legal_1.deep"
     );
     let deep = core_program(src);
-    check_ir_program(&deep, chelis_types::ProgramOrigin::Unlinked)
-        .expect("symbolic conv metadata is not a type error");
+    check_ir_program(
+        &deep,
+        chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
+    )
+    .expect("symbolic conv metadata is not a type error");
 }
 
 /// EXPECT (RT-205 round-3 F-A negative parity): when the
@@ -755,7 +887,11 @@ fn red_team_205_round3_f_a_independent_second_failure_not_suppressed() {
         "fixtures/core/tests/issue_186_conv2d_validator/red_team_205_round3_f_a_independent_second_failure_not_suppressed_1.deep"
     );
     let deep = core_program(src);
-    let res = check_ir_program(&deep, chelis_types::ProgramOrigin::Unlinked);
+    let res = check_ir_program(
+        &deep,
+        chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
+    );
     let rep = res.expect_err("expected check failure on second conv kernel rank");
     assert!(
         rep.errors
@@ -777,7 +913,11 @@ fn red_team_205_round3_f_b_max_elem_passthrough() {
         "fixtures/core/tests/issue_186_conv2d_validator/red_team_205_round3_f_b_max_elem_passthrough_1.deep"
     );
     let deep = core_program(src);
-    let res = check_ir_program(&deep, chelis_types::ProgramOrigin::Unlinked);
+    let res = check_ir_program(
+        &deep,
+        chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
+    );
     if let Err(rep) = res {
         for err in &rep.errors {
             eprintln!("unexpected error: {:?}: {}", err.kind, err.message);
@@ -797,7 +937,11 @@ fn red_team_205_round3_f_b_min_elem_passthrough() {
         "fixtures/core/tests/issue_186_conv2d_validator/red_team_205_round3_f_b_min_elem_passthrough_1.deep"
     );
     let deep = core_program(src);
-    let res = check_ir_program(&deep, chelis_types::ProgramOrigin::Unlinked);
+    let res = check_ir_program(
+        &deep,
+        chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
+    );
     if let Err(rep) = res {
         for err in &rep.errors {
             eprintln!("unexpected error: {:?}: {}", err.kind, err.message);
@@ -827,7 +971,11 @@ fn red_team_205_round3_f_b_unary_passthrough_audit() {
             include_str!("fixtures/core/tests/issue_186_conv2d_validator/operator_template_0.deep")
                 .replace("__fixture_op", op);
         let deep = core_program(&src);
-        let res = check_ir_program(&deep, chelis_types::ProgramOrigin::Unlinked);
+        let res = check_ir_program(
+            &deep,
+            chelis_types::ProgramOrigin::Unlinked,
+            &mut chelis_types::NativeServices::new(None),
+        );
         if let Err(rep) = res {
             for err in &rep.errors {
                 eprintln!("op={op} unexpected error: {:?}: {}", err.kind, err.message);
@@ -859,7 +1007,11 @@ fn red_team_205_round3_f_b_binary_passthrough_audit_arith() {
             include_str!("fixtures/core/tests/issue_186_conv2d_validator/operator_template_1.deep")
                 .replace("__fixture_op", op);
         let deep = core_program(&src);
-        let res = check_ir_program(&deep, chelis_types::ProgramOrigin::Unlinked);
+        let res = check_ir_program(
+            &deep,
+            chelis_types::ProgramOrigin::Unlinked,
+            &mut chelis_types::NativeServices::new(None),
+        );
         if let Err(rep) = res {
             for err in &rep.errors {
                 eprintln!("op={op} unexpected error: {:?}: {}", err.kind, err.message);
@@ -890,7 +1042,11 @@ fn red_team_205_round3_f_b_binary_compare_does_not_restore_metadata_rejection() 
             include_str!("fixtures/core/tests/issue_186_conv2d_validator/operator_template_2.deep")
                 .replace("__fixture_op", op);
         let deep = core_program(&src);
-        let messages = match check_ir_program(&deep, chelis_types::ProgramOrigin::Unlinked) {
+        let messages = match check_ir_program(
+            &deep,
+            chelis_types::ProgramOrigin::Unlinked,
+            &mut chelis_types::NativeServices::new(None),
+        ) {
             Ok(_) => Vec::new(),
             Err(report) => report
                 .errors
@@ -916,7 +1072,11 @@ fn red_team_205_round3_f_c_symbolic_batch_single_call() {
         "fixtures/core/tests/issue_186_conv2d_validator/red_team_205_round3_f_c_symbolic_batch_single_call_1.deep"
     );
     let deep = core_program(src);
-    let res = check_ir_program(&deep, chelis_types::ProgramOrigin::Unlinked);
+    let res = check_ir_program(
+        &deep,
+        chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
+    );
     if let Err(rep) = res {
         for err in &rep.errors {
             eprintln!("unexpected error: {:?}: {}", err.kind, err.message);
@@ -939,7 +1099,11 @@ fn red_team_205_round3_f_c_symbolic_batch_chained() {
         "fixtures/core/tests/issue_186_conv2d_validator/red_team_205_round3_f_c_symbolic_batch_chained_1.deep"
     );
     let deep = core_program(src);
-    let res = check_ir_program(&deep, chelis_types::ProgramOrigin::Unlinked);
+    let res = check_ir_program(
+        &deep,
+        chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
+    );
     if let Err(rep) = res {
         for err in &rep.errors {
             eprintln!("unexpected error: {:?}: {}", err.kind, err.message);
@@ -958,8 +1122,12 @@ fn red_team_205_round3_f_c_nonconcrete_spatial_is_checker_legal() {
         "fixtures/core/tests/issue_186_conv2d_validator/red_team_205_round3_f_c_nonconcrete_spatial_is_checker_legal_1.deep"
     );
     let deep = core_program(src);
-    check_ir_program(&deep, chelis_types::ProgramOrigin::Unlinked)
-        .expect("symbolic spatial metadata is not a type error");
+    check_ir_program(
+        &deep,
+        chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
+    )
+    .expect("symbolic spatial metadata is not a type error");
 }
 
 /// PP9: a symbolic channel extent is legal when the input/kernel equality
@@ -970,8 +1138,12 @@ fn red_team_205_round3_f_c_nonconcrete_in_channels_is_checker_legal() {
         "fixtures/core/tests/issue_186_conv2d_validator/red_team_205_round3_f_c_nonconcrete_in_channels_is_checker_legal_1.deep"
     );
     let deep = core_program(src);
-    check_ir_program(&deep, chelis_types::ProgramOrigin::Unlinked)
-        .expect("symbolic channel metadata is not a type error");
+    check_ir_program(
+        &deep,
+        chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
+    )
+    .expect("symbolic channel metadata is not a type error");
 }
 
 /// EXPECT (RT-205 round-3 F-C negative parity): a chained
@@ -989,7 +1161,11 @@ fn red_team_205_round3_f_c_batch_dim_mismatch_detected() {
         "fixtures/core/tests/issue_186_conv2d_validator/red_team_205_round3_f_c_batch_dim_mismatch_detected_1.deep"
     );
     let deep = core_program(src);
-    let res = check_ir_program(&deep, chelis_types::ProgramOrigin::Unlinked);
+    let res = check_ir_program(
+        &deep,
+        chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
+    );
     let rep = res.expect_err("expected rejection on batch dim mismatch");
     assert!(
         rep.errors.iter().any(
@@ -1017,6 +1193,10 @@ fn issue186_deep_conv_nonliteral_stride_is_checker_legal() {
                  (app {} (var {} conv) (var {} x) (var {} k) \
                    (app {} (var {} Cons) (var {} stride_v) (app {} (var {} Cons) (var {} stride_v) (var {} Nil))) (app {} (var {} Cons) (tuple {} (lit {type: (t-prim {} i64)} 0) (lit {type: (t-prim {} i64)} 0)) (app {} (var {} Cons) (tuple {} (lit {type: (t-prim {} i64)} 0) (lit {type: (t-prim {} i64)} 0)) (var {} Nil)))))";
     let deep = parse_deep(src).expect("deep parse");
-    check_ir_program(&deep, chelis_types::ProgramOrigin::Unlinked)
-        .expect("runtime stride metadata is not a type error");
+    check_ir_program(
+        &deep,
+        chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
+    )
+    .expect("runtime stride metadata is not a type error");
 }

@@ -115,12 +115,17 @@ fn bind(name: &str, extent: usize) -> Option<TensorValue> {
 #[test]
 fn a_disagreeing_class_traps_with_the_numeric_trap_line() {
     let (dag, root) = cross_tensor_claim_dag();
-    let result = eval_tensor_roots_with_strict(&dag, &[root], |name| match name {
-        "b" => Some(TensorValue::scalar(1.0)),
-        "x" => bind("x", 2),
-        "y" => bind("y", 3),
-        _ => None,
-    });
+    let result = eval_tensor_roots_with_strict(
+        &dag,
+        &[root],
+        |name| match name {
+            "b" => Some(TensorValue::scalar(1.0)),
+            "x" => bind("x", 2),
+            "y" => bind("y", 3),
+            _ => None,
+        },
+        &mut chelis_types::NativeServices::new(None),
+    );
     let err = result.expect_err("n = 2 claimed over a read of m = 3 must not evaluate");
     // `load`, not `expand`. Section 4.7 fixes the slot for this shape:
     // "for a guard whose operands are all interface values, the `load`
@@ -143,12 +148,17 @@ fn a_disagreeing_class_traps_with_the_numeric_trap_line() {
 #[test]
 fn a_disagreeing_class_conveys_its_sources_axis_and_values() {
     let (dag, root) = cross_tensor_claim_dag();
-    let err = eval_tensor_roots_with_strict(&dag, &[root], |name| match name {
-        "b" => Some(TensorValue::scalar(1.0)),
-        "x" => bind("x", 2),
-        "y" => bind("y", 3),
-        _ => None,
-    })
+    let err = eval_tensor_roots_with_strict(
+        &dag,
+        &[root],
+        |name| match name {
+            "b" => Some(TensorValue::scalar(1.0)),
+            "x" => bind("x", 2),
+            "y" => bind("y", 3),
+            _ => None,
+        },
+        &mut chelis_types::NativeServices::new(None),
+    )
     .expect_err("must trap");
     assert!(err.contains('n'), "the claim is named: {err}");
     assert!(err.contains('2'), "the claimed extent is reported: {err}");
@@ -162,12 +172,17 @@ fn a_disagreeing_class_conveys_its_sources_axis_and_values() {
 #[test]
 fn an_agreeing_class_evaluates() {
     let (dag, root) = cross_tensor_claim_dag();
-    let values = eval_tensor_roots_with_strict(&dag, &[root], |name| match name {
-        "b" => Some(TensorValue::scalar(1.0)),
-        "x" => bind("x", 3),
-        "y" => bind("y", 3),
-        _ => None,
-    })
+    let values = eval_tensor_roots_with_strict(
+        &dag,
+        &[root],
+        |name| match name {
+            "b" => Some(TensorValue::scalar(1.0)),
+            "x" => bind("x", 3),
+            "y" => bind("y", 3),
+            _ => None,
+        },
+        &mut chelis_types::NativeServices::new(None),
+    )
     .expect("n = m = 3 agrees and must evaluate");
     assert_eq!(values[&root].shape, vec![3]);
 }
@@ -188,12 +203,17 @@ fn an_agreeing_class_evaluates() {
 #[test]
 fn the_guard_precedes_the_allocation_it_protects() {
     let (dag, root) = cross_tensor_claim_dag();
-    let result = eval_tensor_roots_with_strict(&dag, &[root], |name| match name {
-        "b" => Some(TensorValue::scalar(1.0)),
-        "x" => bind("x", 2),
-        "y" => bind("y", 3),
-        _ => None,
-    });
+    let result = eval_tensor_roots_with_strict(
+        &dag,
+        &[root],
+        |name| match name {
+            "b" => Some(TensorValue::scalar(1.0)),
+            "x" => bind("x", 2),
+            "y" => bind("y", 3),
+            _ => None,
+        },
+        &mut chelis_types::NativeServices::new(None),
+    );
     match result {
         Err(err) => assert!(
             err.contains(&domain_trap_line("load")),
@@ -304,8 +324,13 @@ fn unit_extent_claim_dag() -> (Dag, NodeId) {
 #[test]
 fn a_non_unit_operand_extent_refutes_the_unit_claim_and_traps() {
     let (dag, root) = unit_extent_claim_dag();
-    let err = eval_tensor_roots_with_strict(&dag, &[root], |name| bind(name, 2))
-        .expect_err("an operand extent of 2 must not broadcast under a unit claim");
+    let err = eval_tensor_roots_with_strict(
+        &dag,
+        &[root],
+        |name| bind(name, 2),
+        &mut chelis_types::NativeServices::new(None),
+    )
+    .expect_err("an operand extent of 2 must not broadcast under a unit claim");
     assert!(
         err.contains(&domain_trap_line("load")),
         "the claim's failure is an [04-NUM-9] typed precondition guard, got: {err}",
@@ -325,8 +350,13 @@ fn a_non_unit_operand_extent_refutes_the_unit_claim_and_traps() {
 #[test]
 fn a_unit_operand_extent_satisfies_the_claim_and_broadcasts() {
     let (dag, root) = unit_extent_claim_dag();
-    let values = eval_tensor_roots_with_strict(&dag, &[root], |name| bind(name, 1))
-        .expect("a unit operand extent satisfies the claim");
+    let values = eval_tensor_roots_with_strict(
+        &dag,
+        &[root],
+        |name| bind(name, 1),
+        &mut chelis_types::NativeServices::new(None),
+    )
+    .expect("a unit operand extent satisfies the claim");
     let out = &values[&root];
     assert_eq!(out.shape, vec![3], "the broadcast sets the claimed axis");
     assert_eq!(
@@ -382,12 +412,17 @@ fn local_unit_extent_claim_dag(end_slot: usize) -> (Dag, NodeId) {
 #[test]
 fn a_locally_placed_unit_claim_traps_at_the_expand_that_makes_it() {
     let (dag, root) = local_unit_extent_claim_dag(1);
-    let err = eval_tensor_roots_with_strict(&dag, &[root], |name| match name {
-        "x" => Some(TensorValue::from_vec(vec![3], vec![7.0, 9.0, 11.0])),
-        // Shrink to two elements, which refutes the claim.
-        "end" => Some(TensorValue::scalar(2.0)),
-        _ => None,
-    })
+    let err = eval_tensor_roots_with_strict(
+        &dag,
+        &[root],
+        |name| match name {
+            "x" => Some(TensorValue::from_vec(vec![3], vec![7.0, 9.0, 11.0])),
+            // Shrink to two elements, which refutes the claim.
+            "end" => Some(TensorValue::scalar(2.0)),
+            _ => None,
+        },
+        &mut chelis_types::NativeServices::new(None),
+    )
     .expect_err("a computed operand extent of 2 must not broadcast under a unit claim");
     assert!(
         err.contains(&domain_trap_line("expand")),
@@ -404,11 +439,16 @@ fn a_locally_placed_unit_claim_traps_at_the_expand_that_makes_it() {
 #[test]
 fn a_locally_placed_unit_claim_that_holds_broadcasts() {
     let (dag, root) = local_unit_extent_claim_dag(1);
-    let values = eval_tensor_roots_with_strict(&dag, &[root], |name| match name {
-        "x" => Some(TensorValue::from_vec(vec![3], vec![7.0, 9.0, 11.0])),
-        "end" => Some(TensorValue::scalar(1.0)),
-        _ => None,
-    })
+    let values = eval_tensor_roots_with_strict(
+        &dag,
+        &[root],
+        |name| match name {
+            "x" => Some(TensorValue::from_vec(vec![3], vec![7.0, 9.0, 11.0])),
+            "end" => Some(TensorValue::scalar(1.0)),
+            _ => None,
+        },
+        &mut chelis_types::NativeServices::new(None),
+    )
     .expect("a computed operand extent of 1 satisfies the claim");
     let out = &values[&root];
     assert_eq!(out.shape, vec![3]);
@@ -461,11 +501,16 @@ fn two_signatures_spelling_one_binder_bind_independently_on_eval() {
     dag.add_root(from_x);
     dag.add_root(from_y);
 
-    let values = eval_tensor_roots_with_strict(&dag, &[from_x, from_y], |name| match name {
-        "x" => Some(TensorValue::from_vec(vec![3], vec![1.0, 2.0, 3.0])),
-        "y" => Some(TensorValue::from_vec(vec![2, 2], vec![1.0, 2.0, 3.0, 4.0])),
-        _ => None,
-    })
+    let values = eval_tensor_roots_with_strict(
+        &dag,
+        &[from_x, from_y],
+        |name| match name {
+            "x" => Some(TensorValue::from_vec(vec![3], vec![1.0, 2.0, 3.0])),
+            "y" => Some(TensorValue::from_vec(vec![2, 2], vec![1.0, 2.0, 3.0, 4.0])),
+            _ => None,
+        },
+        &mut chelis_types::NativeServices::new(None),
+    )
     .expect("two scopes spelling `seq` are two claims, not one extent");
     assert_eq!(
         values.get(&from_x).map(|value| value.shape.clone()),
@@ -501,11 +546,16 @@ fn one_scope_with_two_disagreeing_witnesses_of_a_binder_still_refuses_on_eval() 
     );
     dag.add_root(sum);
 
-    let err = eval_tensor_roots_with_strict(&dag, &[sum], |name| match name {
-        "x" => Some(TensorValue::from_vec(vec![3], vec![1.0, 2.0, 3.0])),
-        "y" => Some(TensorValue::from_vec(vec![2], vec![1.0, 2.0])),
-        _ => None,
-    })
+    let err = eval_tensor_roots_with_strict(
+        &dag,
+        &[sum],
+        |name| match name {
+            "x" => Some(TensorValue::from_vec(vec![3], vec![1.0, 2.0, 3.0])),
+            "y" => Some(TensorValue::from_vec(vec![2], vec![1.0, 2.0])),
+            _ => None,
+        },
+        &mut chelis_types::NativeServices::new(None),
+    )
     .expect_err("one claim with two disagreeing witnesses must refuse");
     assert!(
         err.contains("seq"),
@@ -552,11 +602,16 @@ fn two_disagreeing_scopes_refuse_when_a_live_node_reads_the_binder_by_value() {
     dag.add_root(from_x);
     dag.add_root(from_y);
 
-    let err = eval_tensor_roots_with_strict(&dag, &[from_x, from_y], |name| match name {
-        "x" => Some(TensorValue::from_vec(vec![3], vec![1.0, 2.0, 3.0])),
-        "y" => Some(TensorValue::from_vec(vec![2, 2], vec![1.0, 2.0, 3.0, 4.0])),
-        _ => None,
-    })
+    let err = eval_tensor_roots_with_strict(
+        &dag,
+        &[from_x, from_y],
+        |name| match name {
+            "x" => Some(TensorValue::from_vec(vec![3], vec![1.0, 2.0, 3.0])),
+            "y" => Some(TensorValue::from_vec(vec![2, 2], vec![1.0, 2.0, 3.0, 4.0])),
+            _ => None,
+        },
+        &mut chelis_types::NativeServices::new(None),
+    )
     .expect_err("a by-value read of a binder with two disagreeing scopes has no answer");
     assert!(
         err.contains("seq"),

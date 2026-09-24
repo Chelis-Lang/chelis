@@ -324,9 +324,12 @@ fn dimension_observations_cover_arithmetic_comparison_and_propagation() {
         } else {
             include_str!("fixtures/core/tests/issue_1875_callable_labels/labels_library.deep")
         };
-        let (live, _) =
-            build_compiled_library_context(&parse(library), chelis_types::ProgramOrigin::Unlinked)
-                .unwrap();
+        let (live, _) = build_compiled_library_context(
+            &parse(library),
+            chelis_types::ProgramOrigin::Unlinked,
+            &mut chelis_types::NativeServices::new(None),
+        )
+        .unwrap();
         let decoded: TypeEnv = bincode::deserialize(&bincode::serialize(&live).unwrap()).unwrap();
         let (layered, _) = build_compiled_library_context_with_base(
             &live,
@@ -334,6 +337,7 @@ fn dimension_observations_cover_arithmetic_comparison_and_propagation() {
                 "fixtures/core/tests/issue_1875_callable_labels/labels_extension.deep"
             )),
             chelis_types::ProgramOrigin::Unlinked,
+            &mut chelis_types::NativeServices::new(None),
         )
         .unwrap();
         for (name, expected, source) in cases {
@@ -342,16 +346,19 @@ fn dimension_observations_cover_arithmetic_comparison_and_propagation() {
                     0 => check_ir_program(
                         &parse(&format!("{library}\n{source}")),
                         chelis_types::ProgramOrigin::Unlinked,
+                        &mut chelis_types::NativeServices::new(None),
                     ),
                     1 => check_ir_with_context(
                         &live,
                         &parse(source),
                         chelis_types::ProgramOrigin::Unlinked,
+                        &mut chelis_types::NativeServices::new(None),
                     ),
                     2 => check_ir_with_context(
                         &decoded,
                         &parse(source),
                         chelis_types::ProgramOrigin::Unlinked,
+                        &mut chelis_types::NativeServices::new(None),
                     ),
                     _ => check_ir_with_context(
                         &layered,
@@ -363,6 +370,7 @@ fn dimension_observations_cover_arithmetic_comparison_and_propagation() {
                                 .replace(" square)", " forward_square)"),
                         ),
                         chelis_types::ProgramOrigin::Unlinked,
+                        &mut chelis_types::NativeServices::new(None),
                     ),
                 };
                 let correct = if expected {
@@ -418,11 +426,15 @@ fn concrete_instantiations_and_value_aliases_keep_names_without_coupling_calls()
         check_ir_program(
             &parse(&format!("{library}\n{consumer}")),
             chelis_types::ProgramOrigin::Unlinked,
+            &mut chelis_types::NativeServices::new(None),
         )
         .expect("whole: independent calls and aliases");
-        let (live, _) =
-            build_compiled_library_context(&parse(library), chelis_types::ProgramOrigin::Unlinked)
-                .unwrap();
+        let (live, _) = build_compiled_library_context(
+            &parse(library),
+            chelis_types::ProgramOrigin::Unlinked,
+            &mut chelis_types::NativeServices::new(None),
+        )
+        .unwrap();
         let bytes = bincode::serialize(&live).unwrap();
         let decoded: TypeEnv = bincode::deserialize(&bytes).unwrap();
         for context in [&live, &decoded] {
@@ -430,6 +442,7 @@ fn concrete_instantiations_and_value_aliases_keep_names_without_coupling_calls()
                 context,
                 &parse(consumer),
                 chelis_types::ProgramOrigin::Unlinked,
+                &mut chelis_types::NativeServices::new(None),
             )
             .expect("context: independent calls and aliases");
         }
@@ -449,9 +462,12 @@ fn concrete_labelled_list_join_preserves_ragged_and_uniformity_boundaries() {
         } else {
             include_str!("fixtures/core/tests/issue_1875_callable_labels/aligned_library.deep")
         };
-        let (live, _) =
-            build_compiled_library_context(&parse(library), chelis_types::ProgramOrigin::Unlinked)
-                .unwrap();
+        let (live, _) = build_compiled_library_context(
+            &parse(library),
+            chelis_types::ProgramOrigin::Unlinked,
+            &mut chelis_types::NativeServices::new(None),
+        )
+        .unwrap();
         let decoded: TypeEnv = bincode::deserialize(&bincode::serialize(&live).unwrap()).unwrap();
         let extension =
             include_str!("fixtures/core/tests/issue_1875_callable_labels/aligned_extension.deep");
@@ -459,6 +475,7 @@ fn concrete_labelled_list_join_preserves_ragged_and_uniformity_boundaries() {
             &live,
             &parse(extension),
             chelis_types::ProgramOrigin::Unlinked,
+            &mut chelis_types::NativeServices::new(None),
         )
         .unwrap();
         for reverse_list in [false, true] {
@@ -587,21 +604,25 @@ fn concrete_labelled_list_join_preserves_ragged_and_uniformity_boundaries() {
                         0 => check_ir_program(
                             &parse(&format!("{library}\n{source}")),
                             chelis_types::ProgramOrigin::Unlinked,
+                            &mut chelis_types::NativeServices::new(None),
                         ),
                         1 => check_ir_with_context(
                             &live,
                             &parse(&source),
                             chelis_types::ProgramOrigin::Unlinked,
+                            &mut chelis_types::NativeServices::new(None),
                         ),
                         2 => check_ir_with_context(
                             &decoded,
                             &parse(&source),
                             chelis_types::ProgramOrigin::Unlinked,
+                            &mut chelis_types::NativeServices::new(None),
                         ),
                         _ => check_ir_with_context(
                             &layered,
                             &parse(&source.replace(" aligned)", " forwarding)")),
                             chelis_types::ProgramOrigin::Unlinked,
+                            &mut chelis_types::NativeServices::new(None),
                         ),
                     };
                     let correct = if expected {
@@ -642,9 +663,12 @@ fn list_axis_classification_crosses_extent_label_rigidity_and_wildcard() {
                 "fixtures/core/tests/issue_1875_callable_labels/classification_library.deep"
             )
         };
-        let (live, _) =
-            build_compiled_library_context(&parse(library), chelis_types::ProgramOrigin::Unlinked)
-                .unwrap();
+        let (live, _) = build_compiled_library_context(
+            &parse(library),
+            chelis_types::ProgramOrigin::Unlinked,
+            &mut chelis_types::NativeServices::new(None),
+        )
+        .unwrap();
         let decoded: TypeEnv = bincode::deserialize(&bincode::serialize(&live).unwrap()).unwrap();
         let extension = include_str!(
             "fixtures/core/tests/issue_1875_callable_labels/classification_extension.deep"
@@ -653,6 +677,7 @@ fn list_axis_classification_crosses_extent_label_rigidity_and_wildcard() {
             &live,
             &parse(extension),
             chelis_types::ProgramOrigin::Unlinked,
+            &mut chelis_types::NativeServices::new(None),
         )
         .unwrap();
         let literal2 =
@@ -872,16 +897,19 @@ fn list_axis_classification_crosses_extent_label_rigidity_and_wildcard() {
                         0 => check_ir_program(
                             &parse(&format!("{library}\n{source}")),
                             chelis_types::ProgramOrigin::Unlinked,
+                            &mut chelis_types::NativeServices::new(None),
                         ),
                         1 => check_ir_with_context(
                             &live,
                             &parse(&source),
                             chelis_types::ProgramOrigin::Unlinked,
+                            &mut chelis_types::NativeServices::new(None),
                         ),
                         2 => check_ir_with_context(
                             &decoded,
                             &parse(&source),
                             chelis_types::ProgramOrigin::Unlinked,
+                            &mut chelis_types::NativeServices::new(None),
                         ),
                         _ => check_ir_with_context(
                             &layered,
@@ -891,6 +919,7 @@ fn list_axis_classification_crosses_extent_label_rigidity_and_wildcard() {
                                     .replace(" other_gain)", " forward_other)"),
                             ),
                             chelis_types::ProgramOrigin::Unlinked,
+                            &mut chelis_types::NativeServices::new(None),
                         ),
                     };
                     observations += 1;

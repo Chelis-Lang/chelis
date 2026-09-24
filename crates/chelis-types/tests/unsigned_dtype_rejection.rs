@@ -16,8 +16,12 @@ fn parse_core(source: &str) -> Vec<chelis_deep::Expr> {
 
 fn assert_unsigned_rejection(src: &str, dtype_name: &str) {
     let deep = parse_core(src);
-    let report = check_ir_program(&deep, chelis_types::ProgramOrigin::Unlinked)
-        .expect_err("a deferred dtype must reject");
+    let report = check_ir_program(
+        &deep,
+        chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
+    )
+    .expect_err("a deferred dtype must reject");
     assert!(
         report.errors.iter().any(|error| matches!(
             error.kind,
@@ -114,7 +118,11 @@ fn tensor_element_u8_rejected_with_spec_1_1_1_diagnostic() {
         "fixtures/core/tests/unsigned_dtype_rejection/tensor_element_u8_rejected_with_spec_1_1_1_diagnostic.0.deep"
     );
     let deep = parse_core(src);
-    let res = check_ir_program(&deep, chelis_types::ProgramOrigin::Unlinked);
+    let res = check_ir_program(
+        &deep,
+        chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
+    );
     let rep = res.expect_err("tensor[..., u8] must error per spec §1.1.1");
     let messages: Vec<&str> = rep.errors.iter().map(|e| e.message.as_str()).collect();
     assert!(
@@ -134,7 +142,11 @@ fn cast_scalar_to_int32_does_not_match_unsigned_family() {
         "fixtures/core/tests/unsigned_dtype_rejection/cast_scalar_to_int32_does_not_match_unsigned_family.0.deep"
     );
     let deep = parse_core(src);
-    let res = check_ir_program(&deep, chelis_types::ProgramOrigin::Unlinked);
+    let res = check_ir_program(
+        &deep,
+        chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
+    );
     assert!(
         res.is_ok(),
         "i32 cast must NOT match the unsigned family; got: {:?}",

@@ -281,7 +281,13 @@ fn eval_does_not_mutate_spans() {
         .map(|n| (n.span_id.clone(), n.merged_spans.clone()))
         .collect();
 
-    let result = eval_tensor_roots_with(&dag, &[sum], |_| None).expect("eval scalar");
+    let result = eval_tensor_roots_with(
+        &dag,
+        &[sum],
+        |_| None,
+        &mut chelis_types::NativeServices::new(None),
+    )
+    .expect("eval scalar");
     assert_eq!(result[&sum].to_f64_lossy_vec(), vec![7.0]);
 
     let post_spans: Vec<(Option<String>, Vec<String>)> = dag
@@ -1073,10 +1079,17 @@ fn s3_oracle_lowering_then_optimization_passes() {
         "fixture must carry many spans; got {input_spans:?}"
     );
 
+    let checked = check_ir_program(
+        &exprs,
+        chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
+    )
+    .expect("IR check");
     let checked =
-        check_ir_program(&exprs, chelis_types::ProgramOrigin::Unlinked).expect("IR check");
-    let checked = chelis_effects::check_program(&checked).expect("effects");
-    let checked = check_linearity(&checked).expect("linearity");
+        chelis_effects::check_program(&checked, &mut chelis_types::NativeServices::new(None))
+            .expect("effects");
+    let checked =
+        check_linearity(&checked, &mut chelis_types::NativeServices::new(None)).expect("linearity");
 
     // Stage 1: lowering (which already runs DCE inside lower_program_to_library).
     let mut dag = chelis_ir::lowering_runtime::with_native_lowering_runtime(|runtime| {

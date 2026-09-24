@@ -5,7 +5,11 @@ use chelis_types::{check_ir_program, check_typed_program};
 
 fn diagnostics(source: &str) -> Vec<String> {
     let exprs = parse_str(source).expect("Deep fixture must parse");
-    match check_ir_program(&exprs, chelis_types::ProgramOrigin::Unlinked) {
+    match check_ir_program(
+        &exprs,
+        chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
+    ) {
         Ok(_) => Vec::new(),
         Err(result) => result
             .errors
@@ -80,7 +84,11 @@ fn integer_spelled_float_suffix_is_marked_by_both_producers() {
     )
     .expect("Surf producer fixture must parse");
     let program = declarations;
-    let errors = match check_typed_program(&program, chelis_types::ProgramOrigin::Unlinked) {
+    let errors = match check_typed_program(
+        &program,
+        chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
+    ) {
         Ok(_) => Vec::new(),
         Err(result) => result.errors,
     };

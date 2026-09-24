@@ -34,7 +34,11 @@ fn issue187_surf_shrink_parameterized_typechecks() {
         "fixtures/core/tests/issue_187_shrink_stride_sig/issue187_surf_shrink_parameterized_typechecks_40.deep"
     );
     let deep = parse_core_fixture(src);
-    let res = check_ir_program(&deep, chelis_types::ProgramOrigin::Unlinked);
+    let res = check_ir_program(
+        &deep,
+        chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
+    );
     if let Err(rep) = res {
         for err in &rep.errors {
             eprintln!("unexpected error: {:?}: {}", err.kind, err.message);
@@ -55,7 +59,11 @@ fn issue187_surf_stride_parameterized_typechecks() {
         "fixtures/core/tests/issue_187_shrink_stride_sig/issue187_surf_stride_parameterized_typechecks_61.deep"
     );
     let deep = parse_core_fixture(src);
-    let res = check_ir_program(&deep, chelis_types::ProgramOrigin::Unlinked);
+    let res = check_ir_program(
+        &deep,
+        chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
+    );
     if let Err(rep) = res {
         for err in &rep.errors {
             eprintln!("unexpected error: {:?}: {}", err.kind, err.message);
@@ -82,7 +90,11 @@ fn issue187_surf_shrink_bare_no_bounds_is_arity_error() {
         "fixtures/core/tests/issue_187_shrink_stride_sig/issue187_surf_shrink_bare_no_bounds_is_arity_error_88.deep"
     );
     let deep = parse_core_fixture(src);
-    let res = check_ir_program(&deep, chelis_types::ProgramOrigin::Unlinked);
+    let res = check_ir_program(
+        &deep,
+        chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
+    );
     let rep = res.expect_err("expected check to fail on bare shrink(&x)");
     assert!(
         rep.errors
@@ -105,7 +117,11 @@ fn issue187_surf_shrink_out_of_range_bound_is_error() {
         "fixtures/core/tests/issue_187_shrink_stride_sig/issue187_surf_shrink_out_of_range_bound_is_error_111.deep"
     );
     let deep = parse_core_fixture(src);
-    let res = check_ir_program(&deep, chelis_types::ProgramOrigin::Unlinked);
+    let res = check_ir_program(
+        &deep,
+        chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
+    );
     let rep = res.expect_err("expected check to fail on out-of-range shrink bound");
     assert!(
         rep.errors
@@ -128,7 +144,11 @@ fn issue187_surf_shrink_wrong_rank_bounds_is_error() {
         "fixtures/core/tests/issue_187_shrink_stride_sig/issue187_surf_shrink_wrong_rank_bounds_is_error_134.deep"
     );
     let deep = parse_core_fixture(src);
-    let res = check_ir_program(&deep, chelis_types::ProgramOrigin::Unlinked);
+    let res = check_ir_program(
+        &deep,
+        chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
+    );
     let rep = res.expect_err("expected check to fail on rank-mismatched shrink bounds");
     assert!(
         rep.errors
@@ -152,7 +172,11 @@ fn issue187_surf_stride_zero_step_is_error() {
         "fixtures/core/tests/issue_187_shrink_stride_sig/issue187_surf_stride_zero_step_is_error_158.deep"
     );
     let deep = parse_core_fixture(src);
-    let res = check_ir_program(&deep, chelis_types::ProgramOrigin::Unlinked);
+    let res = check_ir_program(
+        &deep,
+        chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
+    );
     let rep = res.expect_err("expected check to fail on zero stride");
     assert!(
         rep.errors
@@ -175,7 +199,11 @@ fn issue187_surf_stride_wrong_rank_is_error() {
         "fixtures/core/tests/issue_187_shrink_stride_sig/issue187_surf_stride_wrong_rank_is_error_181.deep"
     );
     let deep = parse_core_fixture(src);
-    let res = check_ir_program(&deep, chelis_types::ProgramOrigin::Unlinked);
+    let res = check_ir_program(
+        &deep,
+        chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
+    );
     let rep = res.expect_err("expected check to fail on rank-mismatched stride");
     assert!(
         rep.errors
@@ -198,7 +226,11 @@ fn issue187_surf_stride_non_int_is_error() {
         "fixtures/core/tests/issue_187_shrink_stride_sig/issue187_surf_stride_non_int_is_error_204.deep"
     );
     let deep = parse_core_fixture(src);
-    let res = check_ir_program(&deep, chelis_types::ProgramOrigin::Unlinked);
+    let res = check_ir_program(
+        &deep,
+        chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
+    );
     let rep = res.expect_err("expected check to fail on non-int stride");
     assert!(
         rep.errors
@@ -229,7 +261,11 @@ fn issue187_sibling_pad_parameterized_typechecks() {
         "fixtures/core/tests/issue_187_shrink_stride_sig/issue187_sibling_pad_parameterized_typechecks_235.deep"
     );
     let deep = parse_core_fixture(src);
-    let res = check_ir_program(&deep, chelis_types::ProgramOrigin::Unlinked);
+    let res = check_ir_program(
+        &deep,
+        chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
+    );
     if let Err(rep) = res {
         for err in &rep.errors {
             eprintln!("unexpected error: {:?}: {}", err.kind, err.message);
@@ -248,7 +284,11 @@ fn issue187_sibling_pad_bare_is_arity_error() {
         "fixtures/core/tests/issue_187_shrink_stride_sig/issue187_sibling_pad_bare_is_arity_error_254.deep"
     );
     let deep = parse_core_fixture(src);
-    let res = check_ir_program(&deep, chelis_types::ProgramOrigin::Unlinked);
+    let res = check_ir_program(
+        &deep,
+        chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
+    );
     let rep = res.expect_err("expected check to fail on bare pad(&x)");
     assert!(
         rep.errors
@@ -271,7 +311,11 @@ fn issue187_sibling_pad_wrong_rank_is_error() {
         "fixtures/core/tests/issue_187_shrink_stride_sig/issue187_sibling_pad_wrong_rank_is_error_277.deep"
     );
     let deep = parse_core_fixture(src);
-    let res = check_ir_program(&deep, chelis_types::ProgramOrigin::Unlinked);
+    let res = check_ir_program(
+        &deep,
+        chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
+    );
     let rep = res.expect_err("expected check to fail on wrong-rank pad padding");
     assert!(
         rep.errors
@@ -302,7 +346,11 @@ fn red_team_214_r1_f1_shrink_triple_inner_pair_is_error() {
         "fixtures/core/tests/issue_187_shrink_stride_sig/red_team_214_r1_f1_shrink_triple_inner_pair_is_error_308.deep"
     );
     let deep = parse_core_fixture(src);
-    let res = check_ir_program(&deep, chelis_types::ProgramOrigin::Unlinked);
+    let res = check_ir_program(
+        &deep,
+        chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
+    );
     let rep = res.expect_err("expected check to fail on triple-element inner pair");
     assert!(
         rep.errors
@@ -326,7 +374,11 @@ fn red_team_214_r1_f1_shrink_singleton_inner_pair_is_error() {
         "fixtures/core/tests/issue_187_shrink_stride_sig/red_team_214_r1_f1_shrink_singleton_inner_pair_is_error_332.deep"
     );
     let deep = parse_core_fixture(src);
-    let res = check_ir_program(&deep, chelis_types::ProgramOrigin::Unlinked);
+    let res = check_ir_program(
+        &deep,
+        chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
+    );
     let rep = res.expect_err("expected check to fail on singleton inner pair");
     assert!(
         rep.errors
@@ -350,7 +402,11 @@ fn red_team_214_r1_f1_pad_singleton_inner_pair_is_error() {
         "fixtures/core/tests/issue_187_shrink_stride_sig/red_team_214_r1_f1_pad_singleton_inner_pair_is_error_356.deep"
     );
     let deep = parse_core_fixture(src);
-    let res = check_ir_program(&deep, chelis_types::ProgramOrigin::Unlinked);
+    let res = check_ir_program(
+        &deep,
+        chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
+    );
     let rep = res.expect_err("expected check to fail on singleton inner pair in pad");
     assert!(
         rep.errors
@@ -375,7 +431,11 @@ fn red_team_214_r1_f1_pad_triple_inner_pair_is_error() {
         "fixtures/core/tests/issue_187_shrink_stride_sig/red_team_214_r1_f1_pad_triple_inner_pair_is_error_381.deep"
     );
     let deep = parse_core_fixture(src);
-    let res = check_ir_program(&deep, chelis_types::ProgramOrigin::Unlinked);
+    let res = check_ir_program(
+        &deep,
+        chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
+    );
     let rep = res.expect_err("expected check to fail on triple inner pair in pad");
     assert!(
         rep.errors
@@ -406,7 +466,11 @@ fn red_team_214_r1_f2_pad_list_fill_is_error() {
         "fixtures/core/tests/issue_187_shrink_stride_sig/red_team_214_r1_f2_pad_list_fill_is_error_412.deep"
     );
     let deep = parse_core_fixture(src);
-    let res = check_ir_program(&deep, chelis_types::ProgramOrigin::Unlinked);
+    let res = check_ir_program(
+        &deep,
+        chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
+    );
     let rep = res.expect_err("expected check to fail on list pad fill");
     assert!(
         rep.errors
@@ -429,7 +493,11 @@ fn red_team_214_r1_f2_pad_bool_fill_is_error() {
         "fixtures/core/tests/issue_187_shrink_stride_sig/red_team_214_r1_f2_pad_bool_fill_is_error_435.deep"
     );
     let deep = parse_core_fixture(src);
-    let res = check_ir_program(&deep, chelis_types::ProgramOrigin::Unlinked);
+    let res = check_ir_program(
+        &deep,
+        chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
+    );
     let rep = res.expect_err("expected check to fail on bool pad fill");
     assert!(
         rep.errors
@@ -455,7 +523,11 @@ fn red_team_214_r1_f2_pad_matching_scalar_fill_still_typechecks() {
         "fixtures/core/tests/issue_187_shrink_stride_sig/red_team_214_r1_f2_pad_matching_scalar_fill_still_typechecks_461.deep"
     );
     let deep = parse_core_fixture(src);
-    let res = check_ir_program(&deep, chelis_types::ProgramOrigin::Unlinked);
+    let res = check_ir_program(
+        &deep,
+        chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
+    );
     if let Err(rep) = res {
         for err in &rep.errors {
             eprintln!("unexpected error: {:?}: {}", err.kind, err.message);
@@ -484,7 +556,11 @@ fn red_team_214_r2_m1_shrink_empty_inner_list_is_error() {
         "fixtures/core/tests/issue_187_shrink_stride_sig/red_team_214_r2_m1_shrink_empty_inner_list_is_error_490.deep"
     );
     let deep = parse_core_fixture(src);
-    let res = check_ir_program(&deep, chelis_types::ProgramOrigin::Unlinked);
+    let res = check_ir_program(
+        &deep,
+        chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
+    );
     let rep = res.expect_err("expected check to fail on empty inner list");
     assert!(
         rep.errors
@@ -506,7 +582,11 @@ fn red_team_214_r2_m1_pad_empty_inner_list_is_error() {
         "fixtures/core/tests/issue_187_shrink_stride_sig/red_team_214_r2_m1_pad_empty_inner_list_is_error_512.deep"
     );
     let deep = parse_core_fixture(src);
-    let res = check_ir_program(&deep, chelis_types::ProgramOrigin::Unlinked);
+    let res = check_ir_program(
+        &deep,
+        chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
+    );
     let rep = res.expect_err("expected check to fail on empty inner list in pad");
     assert!(
         rep.errors
@@ -532,7 +612,11 @@ fn red_team_214_r2_l1_shrink_cast_wrapped_negative_bound_is_error() {
         "fixtures/core/tests/issue_187_shrink_stride_sig/red_team_214_r2_l1_shrink_cast_wrapped_negative_bound_is_error_538.deep"
     );
     let deep = parse_core_fixture(src);
-    let res = check_ir_program(&deep, chelis_types::ProgramOrigin::Unlinked);
+    let res = check_ir_program(
+        &deep,
+        chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
+    );
     let rep = res.expect_err("expected check to fail on cast-wrapped negative bound");
     assert!(
         rep.errors
@@ -557,7 +641,11 @@ fn red_team_214_r2_l1_shrink_cast_wrapped_out_of_range_bound_is_error() {
         "fixtures/core/tests/issue_187_shrink_stride_sig/red_team_214_r2_l1_shrink_cast_wrapped_out_of_range_bound_is_error_563.deep"
     );
     let deep = parse_core_fixture(src);
-    let res = check_ir_program(&deep, chelis_types::ProgramOrigin::Unlinked);
+    let res = check_ir_program(
+        &deep,
+        chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
+    );
     let rep = res.expect_err("expected check to fail on cast-wrapped out-of-range bound");
     assert!(
         rep.errors
@@ -580,7 +668,11 @@ fn red_team_214_r2_l1_shrink_cast_wrapped_well_formed_typechecks() {
         "fixtures/core/tests/issue_187_shrink_stride_sig/red_team_214_r2_l1_shrink_cast_wrapped_well_formed_typechecks_586.deep"
     );
     let deep = parse_core_fixture(src);
-    let res = check_ir_program(&deep, chelis_types::ProgramOrigin::Unlinked);
+    let res = check_ir_program(
+        &deep,
+        chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
+    );
     if let Err(rep) = res {
         for err in &rep.errors {
             eprintln!("unexpected error: {:?}: {}", err.kind, err.message);
@@ -611,7 +703,11 @@ fn red_team_214_r3_high1_stride_cast_wrapped_zero_is_error() {
         "fixtures/core/tests/issue_187_shrink_stride_sig/red_team_214_r3_high1_stride_cast_wrapped_zero_is_error_617.deep"
     );
     let deep = parse_core_fixture(src);
-    let res = check_ir_program(&deep, chelis_types::ProgramOrigin::Unlinked);
+    let res = check_ir_program(
+        &deep,
+        chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
+    );
     let rep = res.expect_err("expected check to fail on cast-wrapped zero stride");
     assert!(
         rep.errors
@@ -633,7 +729,11 @@ fn red_team_214_r3_high1_stride_cast_wrapped_negative_is_error() {
         "fixtures/core/tests/issue_187_shrink_stride_sig/red_team_214_r3_high1_stride_cast_wrapped_negative_is_error_639.deep"
     );
     let deep = parse_core_fixture(src);
-    let res = check_ir_program(&deep, chelis_types::ProgramOrigin::Unlinked);
+    let res = check_ir_program(
+        &deep,
+        chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
+    );
     let rep = res.expect_err("expected check to fail on cast-wrapped negative stride");
     assert!(
         rep.errors
@@ -662,7 +762,11 @@ fn red_team_214_r3_high2_int32_cast_bound_rejected_at_unification() {
         "fixtures/core/tests/issue_187_shrink_stride_sig/red_team_214_r3_high2_int32_cast_bound_rejected_at_unification_668.deep"
     );
     let deep = parse_core_fixture(src);
-    let res = check_ir_program(&deep, chelis_types::ProgramOrigin::Unlinked);
+    let res = check_ir_program(
+        &deep,
+        chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
+    );
     let rep = res.expect_err("expected check to fail on i32 cast endpoints");
     // The diagnostic must come from the outer List[List[Int64]] unification
     // step, naming i64 as the demanded bound type.
@@ -691,7 +795,11 @@ fn red_team_214_r3_med1_neg_of_cast_int_is_error() {
         "fixtures/core/tests/issue_187_shrink_stride_sig/red_team_214_r3_med1_neg_of_cast_int_is_error_697.deep"
     );
     let deep = parse_core_fixture(src);
-    let res = check_ir_program(&deep, chelis_types::ProgramOrigin::Unlinked);
+    let res = check_ir_program(
+        &deep,
+        chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
+    );
     let rep = res.expect_err("expected check to fail on neg(cast(...))-wrapped negative bound");
     assert!(
         rep.errors
@@ -718,7 +826,11 @@ fn red_team_214_r3_med2_double_cast_negative_is_error() {
         "fixtures/core/tests/issue_187_shrink_stride_sig/red_team_214_r3_med2_double_cast_negative_is_error_724.deep"
     );
     let deep = parse_core_fixture(src);
-    let res = check_ir_program(&deep, chelis_types::ProgramOrigin::Unlinked);
+    let res = check_ir_program(
+        &deep,
+        chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
+    );
     let rep = res.expect_err("expected check to fail on doubly-nested cast negative bound");
     assert!(
         rep.errors
@@ -753,7 +865,11 @@ fn red_team_214_r3_permute_cast_wrapped_axes_typechecks() {
         "fixtures/core/tests/issue_187_shrink_stride_sig/red_team_214_r3_permute_cast_wrapped_axes_typechecks_759.deep"
     );
     let deep = parse_core_fixture(src);
-    let res = check_ir_program(&deep, chelis_types::ProgramOrigin::Unlinked);
+    let res = check_ir_program(
+        &deep,
+        chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
+    );
     if let Err(rep) = res {
         for err in &rep.errors {
             eprintln!("unexpected error: {:?}: {}", err.kind, err.message);
@@ -773,7 +889,11 @@ fn red_team_214_r3_permute_cast_wrapped_out_of_bounds_axis_is_error() {
         "fixtures/core/tests/issue_187_shrink_stride_sig/red_team_214_r3_permute_cast_wrapped_out_of_bounds_axis_is_error_779.deep"
     );
     let deep = parse_core_fixture(src);
-    let res = check_ir_program(&deep, chelis_types::ProgramOrigin::Unlinked);
+    let res = check_ir_program(
+        &deep,
+        chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
+    );
     let rep = res.expect_err("expected check to fail on cast-wrapped OOB permute axis");
     assert!(
         rep.errors
@@ -796,7 +916,11 @@ fn red_team_214_r3_expand_cast_wrapped_axis_and_size_typechecks() {
         "fixtures/core/tests/issue_187_shrink_stride_sig/red_team_214_r3_expand_cast_wrapped_axis_and_size_typechecks_802.deep"
     );
     let deep = parse_core_fixture(src);
-    let res = check_ir_program(&deep, chelis_types::ProgramOrigin::Unlinked);
+    let res = check_ir_program(
+        &deep,
+        chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
+    );
     if let Err(rep) = res {
         for err in &rep.errors {
             eprintln!("unexpected error: {:?}: {}", err.kind, err.message);
@@ -816,7 +940,11 @@ fn red_team_214_r3_expand_cast_wrapped_zero_size_typechecks() {
         "fixtures/core/tests/issue_187_shrink_stride_sig/red_team_214_r3_expand_cast_wrapped_zero_size_typechecks_822.deep"
     );
     let deep = parse_core_fixture(src);
-    if let Err(rep) = check_ir_program(&deep, chelis_types::ProgramOrigin::Unlinked) {
+    if let Err(rep) = check_ir_program(
+        &deep,
+        chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
+    ) {
         panic!(
             "cast-wrapped zero expand size must check cleanly, got {:?}",
             rep.errors

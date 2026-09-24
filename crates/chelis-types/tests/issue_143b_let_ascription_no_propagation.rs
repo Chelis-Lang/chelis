@@ -13,7 +13,11 @@ use chelis_types::errors::{CheckError, CheckErrorKind};
 
 fn typecheck_fixture(name: &str) -> Vec<CheckError> {
     let deep = fixture(name);
-    match check_typed_program(&deep, chelis_types::ProgramOrigin::Unlinked) {
+    match check_typed_program(
+        &deep,
+        chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
+    ) {
         Ok(_) => Vec::new(),
         Err(prog_errors) => prog_errors.errors,
     }

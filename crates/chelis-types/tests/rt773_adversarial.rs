@@ -17,9 +17,13 @@ fn messages(rep: &InferResult) -> Vec<String> {
 
 fn reject_messages(source: &str, label: &str) -> Vec<String> {
     let deep = parse_core(source);
-    let rep = check_ir_program(&deep, chelis_types::ProgramOrigin::Unlinked)
-        .err()
-        .unwrap_or_else(|| panic!("{label}: expected a check rejection, but it passed"));
+    let rep = check_ir_program(
+        &deep,
+        chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
+    )
+    .err()
+    .unwrap_or_else(|| panic!("{label}: expected a check rejection, but it passed"));
     messages(&rep)
 }
 
@@ -110,7 +114,12 @@ fn is_named_def(expr: &Expr, def_name: &str) -> bool {
 
 fn checked_def(src: &str, def_name: &str) -> Expr {
     let deep: Vec<chelis_deep::Expr> = serde_json::from_str(src).expect("lossless core fixture");
-    let checked = check_ir_program(&deep, chelis_types::ProgramOrigin::Unlinked).expect("check");
+    let checked = check_ir_program(
+        &deep,
+        chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
+    )
+    .expect("check");
     checked
         .exprs()
         .iter()
@@ -191,7 +200,11 @@ fn fresh_separate_sig_two_builtins_checks_clean() {
     // intermediates; three distinct builtins (matmul, permute, mul). Must
     // check clean — the var-ID-collision fix must not spuriously error.
     let deep: Vec<Expr> = serde_json::from_str(FRESH_SEPARATE_SIG).expect("lossless core fixture");
-    let rep = check_ir_program(&deep, chelis_types::ProgramOrigin::Unlinked);
+    let rep = check_ir_program(
+        &deep,
+        chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
+    );
     assert!(
         rep.is_ok(),
         "3b: fresh separate-sig def must check clean; got {:?}",

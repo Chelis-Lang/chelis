@@ -32,12 +32,17 @@ use chelis_types::{check_linearity, check_typed_program};
 fn fixture_to_dag(source: &str) -> Result<Dag, String> {
     let deep: Vec<chelis_deep::Expr> =
         serde_json::from_str(source).map_err(|e| format!("fixture JSON: {e}"))?;
-    let checked = check_typed_program(&deep, chelis_types::ProgramOrigin::Unlinked)
-        .map_err(|errs| format!("typecheck failed: {:?}", errs.errors))?;
-    let checked = chelis_effects::check_program(&checked)
-        .map_err(|errs| format!("effects failed: {errs:?}"))?;
+    let checked = check_typed_program(
+        &deep,
+        chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
+    )
+    .map_err(|errs| format!("typecheck failed: {:?}", errs.errors))?;
     let checked =
-        check_linearity(&checked).map_err(|errs| format!("linearity failed: {errs:?}"))?;
+        chelis_effects::check_program(&checked, &mut chelis_types::NativeServices::new(None))
+            .map_err(|errs| format!("effects failed: {errs:?}"))?;
+    let checked = check_linearity(&checked, &mut chelis_types::NativeServices::new(None))
+        .map_err(|errs| format!("linearity failed: {errs:?}"))?;
     chelis_ir::lowering_runtime::with_native_lowering_runtime(|runtime| {
         try_lower_program(&checked, runtime)
     })

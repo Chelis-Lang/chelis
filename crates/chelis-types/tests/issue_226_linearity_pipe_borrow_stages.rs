@@ -28,9 +28,13 @@ use chelis_types::{check_linearity, check_typed_program};
 
 fn check_deep(source: &str) -> Result<(), Vec<chelis_types::errors::CheckError>> {
     let deep = chelis_deep::parser::parse_str(source).expect("Deep fixture");
-    let checked = check_typed_program(&deep, chelis_types::ProgramOrigin::Unlinked)
-        .expect("type check should succeed");
-    check_linearity(&checked).map(|_| ())
+    let checked = check_typed_program(
+        &deep,
+        chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
+    )
+    .expect("type check should succeed");
+    check_linearity(&checked, &mut chelis_types::NativeServices::new(None)).map(|_| ())
 }
 
 #[test]

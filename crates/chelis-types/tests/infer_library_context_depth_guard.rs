@@ -7,7 +7,7 @@
 //! sibling `check_ir_with_signature_context` / `check_typed_program` /
 //! `infer_program` entries (inference, the tensor-precision / polymorphic-op
 //! validators, and the annotation pass), but originally never constructed a
-//! `StackExhaustionScope` nor drained the thread-local exhaustion flag. A
+//! check-unit stack scope nor drained the exhaustion record. A
 //! stack-budget bail in those passes set the flag, the empty-errors gate never
 //! saw it, and the function returned `Ok` with a partially-analyzed library
 //! context (the next check entry then cleared the stale flag). These tests
@@ -105,7 +105,11 @@ fn library_context_on_bounded_stack(library: Vec<Expr>, stack_mib: usize) -> Vec
         .name("infer-library-depth-guard-test".to_string())
         .stack_size(stack_mib * 1024 * 1024)
         .spawn(move || {
-            match build_compiled_library_context(&library, chelis_types::ProgramOrigin::Unlinked) {
+            match build_compiled_library_context(
+                &library,
+                chelis_types::ProgramOrigin::Unlinked,
+                &mut chelis_types::NativeServices::new(None),
+            ) {
                 Ok(_) => Vec::new(),
                 Err(result) => result.errors.iter().map(|e| e.message.clone()).collect(),
             }
@@ -126,6 +130,7 @@ fn library_context_with_base_on_bounded_stack(library: Vec<Expr>, stack_mib: usi
                 &base,
                 &library,
                 chelis_types::ProgramOrigin::Unlinked,
+                &mut chelis_types::NativeServices::new(None),
             ) {
                 Ok(_) => Vec::new(),
                 Err(result) => result.errors.iter().map(|e| e.message.clone()).collect(),

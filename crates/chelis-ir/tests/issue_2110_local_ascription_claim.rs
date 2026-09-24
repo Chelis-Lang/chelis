@@ -12,10 +12,14 @@ use chelis_types::types::Prim;
 
 fn lower(source: &str) -> chelis_ir::Dag {
     let decls = parse_str(source).expect("Deep fixture");
-    let checked =
-        check_ir_program(&decls, chelis_types::ProgramOrigin::Unlinked).unwrap_or_else(|report| {
-            panic!("type check failed: {:?}", report.errors);
-        });
+    let checked = check_ir_program(
+        &decls,
+        chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
+    )
+    .unwrap_or_else(|report| {
+        panic!("type check failed: {:?}", report.errors);
+    });
     chelis_ir::lowering_runtime::with_native_lowering_runtime(|runtime| {
         chelis_ir::host::lower_named_tensor_entry_dag(&checked, "f", runtime)
     })
@@ -24,7 +28,12 @@ fn lower(source: &str) -> chelis_ir::Dag {
 
 fn checked(source: &str) -> chelis_types::CheckedProgram {
     let decls = parse_str(source).expect("Deep fixture");
-    check_ir_program(&decls, chelis_types::ProgramOrigin::Unlinked).unwrap_or_else(|report| {
+    check_ir_program(
+        &decls,
+        chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
+    )
+    .unwrap_or_else(|report| {
         panic!("type check failed: {:?}", report.errors);
     })
 }
@@ -105,11 +114,15 @@ fn untaken_runtime_branch_does_not_execute_its_local_ascription_guard() {
         "{:?}",
         chelis_ir::verify::verify(&dag)
     );
-    let values = eval_tensor_with(&dag, |name| match name {
-        "flag" => Some(runtime_bool(false)),
-        "x" => Some(TensorValue::from_vec(vec![3], vec![1.0, 2.0, 3.0])),
-        _ => None,
-    })
+    let values = eval_tensor_with(
+        &dag,
+        |name| match name {
+            "flag" => Some(runtime_bool(false)),
+            "x" => Some(TensorValue::from_vec(vec![3], vec![1.0, 2.0, 3.0])),
+            _ => None,
+        },
+        &mut chelis_types::NativeServices::new(None),
+    )
     .expect("the untaken branch's disagreeing local claim is not observed");
     let root = *dag.roots().last().expect("entry root");
     assert_eq!(values[&root].shape, vec![3]);
@@ -119,11 +132,15 @@ fn untaken_runtime_branch_does_not_execute_its_local_ascription_guard() {
 #[test]
 fn selected_runtime_branch_executes_its_local_ascription_guard() {
     let dag = lower(runtime_branch_source());
-    let error = eval_tensor_with(&dag, |name| match name {
-        "flag" => Some(runtime_bool(true)),
-        "x" => Some(TensorValue::from_vec(vec![3], vec![1.0, 2.0, 3.0])),
-        _ => None,
-    })
+    let error = eval_tensor_with(
+        &dag,
+        |name| match name {
+            "flag" => Some(runtime_bool(true)),
+            "x" => Some(TensorValue::from_vec(vec![3], vec![1.0, 2.0, 3.0])),
+            _ => None,
+        },
+        &mut chelis_types::NativeServices::new(None),
+    )
     .expect_err("the selected branch's disagreeing local claim must trap");
     assert_eq!(
         error,
@@ -135,11 +152,15 @@ fn selected_runtime_branch_executes_its_local_ascription_guard() {
 #[test]
 fn untaken_runtime_branch_does_not_execute_an_inlined_helpers_local_ascription_guard() {
     let dag = lower(runtime_branch_inlined_helper_source());
-    let values = eval_tensor_with(&dag, |name| match name {
-        "flag" => Some(runtime_bool(false)),
-        "x" => Some(TensorValue::from_vec(vec![3], vec![1.0, 2.0, 3.0])),
-        _ => None,
-    })
+    let values = eval_tensor_with(
+        &dag,
+        |name| match name {
+            "flag" => Some(runtime_bool(false)),
+            "x" => Some(TensorValue::from_vec(vec![3], vec![1.0, 2.0, 3.0])),
+            _ => None,
+        },
+        &mut chelis_types::NativeServices::new(None),
+    )
     .expect("the untaken helper branch's disagreeing local claim is not observed");
     let root = *dag.roots().last().expect("entry root");
     assert_eq!(values[&root].shape, vec![3]);
@@ -149,11 +170,15 @@ fn untaken_runtime_branch_does_not_execute_an_inlined_helpers_local_ascription_g
 #[test]
 fn selected_runtime_branch_executes_an_inlined_helpers_local_ascription_guard() {
     let dag = lower(runtime_branch_inlined_helper_source());
-    let error = eval_tensor_with(&dag, |name| match name {
-        "flag" => Some(runtime_bool(true)),
-        "x" => Some(TensorValue::from_vec(vec![3], vec![1.0, 2.0, 3.0])),
-        _ => None,
-    })
+    let error = eval_tensor_with(
+        &dag,
+        |name| match name {
+            "flag" => Some(runtime_bool(true)),
+            "x" => Some(TensorValue::from_vec(vec![3], vec![1.0, 2.0, 3.0])),
+            _ => None,
+        },
+        &mut chelis_types::NativeServices::new(None),
+    )
     .expect_err("the selected helper branch's disagreeing local claim must trap");
     assert_eq!(
         error,
@@ -186,9 +211,11 @@ fn lowering_matches_the_authored_binding_and_attaches_one_exact_site_to_its_init
         "the pad initializer, not the later binding use, owns the guard: {:?}",
         owners[0]
     );
-    let error = eval_tensor_with(&dag, |name| {
-        (name == "x").then(|| TensorValue::from_vec(vec![3], vec![1.0, 2.0, 3.0]))
-    })
+    let error = eval_tensor_with(
+        &dag,
+        |name| (name == "x").then(|| TensorValue::from_vec(vec![3], vec![1.0, 2.0, 3.0])),
+        &mut chelis_types::NativeServices::new(None),
+    )
     .expect_err("the producer-owned local ascription must trap");
     assert_eq!(
         error,
@@ -315,9 +342,11 @@ fn fusion_preserves_the_exact_local_site_on_the_rebuilt_initializer() {
         "the claimed initializer must retain its primitive attribution: {:?}",
         owners[0]
     );
-    let error = eval_tensor_with(&fused, |name| {
-        (name == "x").then(|| TensorValue::from_vec(vec![3], vec![1.0, 2.0, 3.0]))
-    })
+    let error = eval_tensor_with(
+        &fused,
+        |name| (name == "x").then(|| TensorValue::from_vec(vec![3], vec![1.0, 2.0, 3.0])),
+        &mut chelis_types::NativeServices::new(None),
+    )
     .expect_err("fusion must not erase the local trap");
     assert_eq!(
         error,

@@ -2449,14 +2449,20 @@ mod tests {
         for &(name, val) in other_inputs {
             inputs.insert(name.to_string(), val);
         }
-        let vals = eval_scalar(&grad_result.dag, &inputs);
+        let vals = eval_scalar(
+            &grad_result.dag,
+            &inputs,
+            &mut chelis_types::NativeServices::new(None),
+        );
         let analytical = vals[&grad_result.grad_nodes[&wrt]];
 
         // Numerical gradient via central differences.
         inputs.insert(input_name.to_string(), x0 + h);
-        let f_plus = eval_scalar(dag, &inputs)[&output];
+        let f_plus =
+            eval_scalar(dag, &inputs, &mut chelis_types::NativeServices::new(None))[&output];
         inputs.insert(input_name.to_string(), x0 - h);
-        let f_minus = eval_scalar(dag, &inputs)[&output];
+        let f_minus =
+            eval_scalar(dag, &inputs, &mut chelis_types::NativeServices::new(None))[&output];
         let numerical = (f_plus - f_minus) / (2.0 * h);
 
         (analytical, numerical)
@@ -2660,7 +2666,11 @@ mod tests {
         inputs.insert("x".to_string(), 2.0);
         inputs.insert("y".to_string(), 3.0);
         inputs.insert("z".to_string(), 5.0);
-        let vals = eval_scalar(&grad_result.dag, &inputs);
+        let vals = eval_scalar(
+            &grad_result.dag,
+            &inputs,
+            &mut chelis_types::NativeServices::new(None),
+        );
 
         let dx = vals[&grad_result.grad_nodes[&x]];
         let dy = vals[&grad_result.grad_nodes[&y]];
@@ -2686,7 +2696,11 @@ mod tests {
         let grad_result = grad_dag(&dag, out, &[x]).unwrap();
         let mut inputs = UnordMap::new();
         inputs.insert("x".to_string(), 7.0);
-        let vals = eval_scalar(&grad_result.dag, &inputs);
+        let vals = eval_scalar(
+            &grad_result.dag,
+            &inputs,
+            &mut chelis_types::NativeServices::new(None),
+        );
         let dx = vals[&grad_result.grad_nodes[&x]];
         assert!((dx - 3.0).abs() < 1e-6);
     }
@@ -2716,7 +2730,11 @@ mod tests {
         let output = dag.add_node(RiscOp::Add, vec![left, right], ty, None);
 
         let grad_result = grad_dag(&dag, output, &[x]).expect("gradient");
-        let values = eval_scalar(&grad_result.dag, &UnordMap::from([("x".to_string(), 0.0)]));
+        let values = eval_scalar(
+            &grad_result.dag,
+            &UnordMap::from([("x".to_string(), 0.0)]),
+            &mut chelis_types::NativeServices::new(None),
+        );
 
         assert_eq!(values[&grad_result.grad_nodes[&x]], 1.0);
     }
@@ -2757,6 +2775,7 @@ mod tests {
                 "x".to_string(),
                 TensorValue::from_vec(vec![3], vec![1.0, 2.0, 3.0]),
             )]),
+            &mut chelis_types::NativeServices::new(None),
         )
         .expect("runtime-wildcard accumulation evaluates");
         let gradient = &values[&accumulated];
@@ -2834,7 +2853,12 @@ mod tests {
             "x".to_string(),
             TensorValue::from_vec(vec![3], vec![1.0, 2.0, 3.0]),
         );
-        let vals = eval_tensor(&grad_result.dag, &inputs).unwrap();
+        let vals = eval_tensor(
+            &grad_result.dag,
+            &inputs,
+            &mut chelis_types::NativeServices::new(None),
+        )
+        .unwrap();
         let grad = &vals[&grad_result.grad_nodes[&x]];
         assert_eq!(grad.to_f64_lossy_vec(), vec![1.0, 1.0, 1.0]);
     }
@@ -2861,7 +2885,11 @@ mod tests {
 
         let mut inputs = UnordMap::new();
         inputs.insert("x".to_string(), 5.0);
-        let vals = eval_scalar(&second.dag, &inputs);
+        let vals = eval_scalar(
+            &second.dag,
+            &inputs,
+            &mut chelis_types::NativeServices::new(None),
+        );
         let ddx = vals[&ddx_node];
         assert!((ddx - 2.0).abs() < 1e-4); // d^2(x^2)/dx^2 = 2
     }
@@ -2913,7 +2941,11 @@ mod tests {
         let grad_result = grad_dag(&dag, out, &[x]).unwrap();
         let mut inputs = UnordMap::new();
         inputs.insert("x".to_string(), 1.0);
-        let vals = eval_scalar(&grad_result.dag, &inputs);
+        let vals = eval_scalar(
+            &grad_result.dag,
+            &inputs,
+            &mut chelis_types::NativeServices::new(None),
+        );
         let dx = vals[&grad_result.grad_nodes[&x]];
         let expected = 1.0_f64.exp();
         assert!((dx - expected).abs() < 1e-4);
@@ -2953,7 +2985,11 @@ mod tests {
         let grad_result = grad_dag(&dag, out, &[x]).unwrap();
         let mut inputs = UnordMap::new();
         inputs.insert("x".to_string(), 1.0);
-        let vals = eval_scalar(&grad_result.dag, &inputs);
+        let vals = eval_scalar(
+            &grad_result.dag,
+            &inputs,
+            &mut chelis_types::NativeServices::new(None),
+        );
         let dx = vals[&grad_result.grad_nodes[&x]];
         assert!(
             dx.abs() < 1e-6,
@@ -3018,7 +3054,12 @@ mod tests {
             "x".to_string(),
             TensorValue::from_vec(vec![6], vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0]),
         );
-        let vals = eval_tensor(&grad_result.dag, &inputs).unwrap();
+        let vals = eval_tensor(
+            &grad_result.dag,
+            &inputs,
+            &mut chelis_types::NativeServices::new(None),
+        )
+        .unwrap();
         let grad = &vals[&grad_result.grad_nodes[&x]];
         // d(sum(reshape(x)))/dx = ones
         assert_eq!(grad.to_f64_lossy_vec(), vec![1.0, 1.0, 1.0, 1.0, 1.0, 1.0]);
@@ -3080,7 +3121,12 @@ mod tests {
             "x".to_string(),
             TensorValue::from_vec(vec![2, 3], vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0]),
         );
-        let vals = eval_tensor(&grad_result.dag, &inputs).unwrap();
+        let vals = eval_tensor(
+            &grad_result.dag,
+            &inputs,
+            &mut chelis_types::NativeServices::new(None),
+        )
+        .unwrap();
         let grad = &vals[&grad_result.grad_nodes[&x]];
         // d(sum(permute(x)))/dx = ones, shape should be 2x3
         assert_eq!(grad.to_f64_lossy_vec(), vec![1.0, 1.0, 1.0, 1.0, 1.0, 1.0]);
@@ -3168,6 +3214,7 @@ mod tests {
                     TensorValue::from_vec(vec![2], vec![23.0, 29.0]),
                 ),
             ]),
+            &mut chelis_types::NativeServices::new(None),
         )
         .expect("scatter-add adjoint evaluates");
 
@@ -3236,7 +3283,12 @@ mod tests {
             "x".to_string(),
             TensorValue::from_vec(vec![3], vec![1.0, 2.0, 3.0]),
         );
-        let vals = eval_tensor(&grad_result.dag, &inputs).unwrap();
+        let vals = eval_tensor(
+            &grad_result.dag,
+            &inputs,
+            &mut chelis_types::NativeServices::new(None),
+        )
+        .unwrap();
         let grad = &vals[&grad_result.grad_nodes[&x]];
         // expand by 2 then sum -> each element counted twice -> gradient = 2
         assert_eq!(grad.to_f64_lossy_vec(), vec![2.0, 2.0, 2.0]);
@@ -3322,7 +3374,12 @@ mod tests {
             "x".to_string(),
             TensorValue::from_vec(vec![2, 1], vec![5.0, 7.0]),
         );
-        let vals = eval_tensor(&grad_result.dag, &inputs).unwrap();
+        let vals = eval_tensor(
+            &grad_result.dag,
+            &inputs,
+            &mut chelis_types::NativeServices::new(None),
+        )
+        .unwrap();
         let grad = &vals[&grad_result.grad_nodes[&x]];
         assert_eq!(grad.to_f64_lossy_vec(), vec![3.0, 3.0]);
         assert_eq!(
@@ -3512,7 +3569,11 @@ mod tests {
         let mut inputs = UnordMap::new();
         inputs.insert("x".to_string(), 1.0);
         inputs.insert("y".to_string(), 2.0);
-        let vals = eval_scalar(&grad_result.dag, &inputs);
+        let vals = eval_scalar(
+            &grad_result.dag,
+            &inputs,
+            &mut chelis_types::NativeServices::new(None),
+        );
         let d_add = vals[&grad_result.grad_nodes[&add_node]];
         let expected = (1.0_f64 + 2.0).exp();
         assert!(
@@ -3615,7 +3676,11 @@ mod tests {
         let mut inputs = UnordMap::new();
         inputs.insert("x".to_string(), 2.0);
         inputs.insert("y".to_string(), 2.0);
-        let vals = eval_scalar(&grad_result.dag, &inputs);
+        let vals = eval_scalar(
+            &grad_result.dag,
+            &inputs,
+            &mut chelis_types::NativeServices::new(None),
+        );
         let dx = vals[&grad_result.grad_nodes[&x]];
         let dy = vals[&grad_result.grad_nodes[&y]];
         assert!(
@@ -3731,7 +3796,11 @@ mod tests {
         if let Some(&gx) = grad_result.grad_nodes.get(&x) {
             let mut inputs = UnordMap::new();
             inputs.insert("x".to_string(), 7.0);
-            let vals = eval_scalar(&grad_result.dag, &inputs);
+            let vals = eval_scalar(
+                &grad_result.dag,
+                &inputs,
+                &mut chelis_types::NativeServices::new(None),
+            );
             let dx = vals[&gx];
             assert!(
                 dx.abs() < 1e-10,
@@ -3759,7 +3828,11 @@ mod tests {
         let grad_result = grad_dag(&dag, out, &[x]).unwrap();
         let mut inputs = UnordMap::new();
         inputs.insert("x".to_string(), 2.7);
-        let vals = eval_scalar(&grad_result.dag, &inputs);
+        let vals = eval_scalar(
+            &grad_result.dag,
+            &inputs,
+            &mut chelis_types::NativeServices::new(None),
+        );
         let dx = vals[&grad_result.grad_nodes[&x]];
         assert!(
             (dx - 5.0).abs() < 1e-6,
@@ -3853,7 +3926,12 @@ mod tests {
             "x".to_string(),
             TensorValue::from_vec(vec![2, 3], input_data.clone()),
         );
-        let vals = eval_tensor(&grad_result.dag, &inputs).unwrap();
+        let vals = eval_tensor(
+            &grad_result.dag,
+            &inputs,
+            &mut chelis_types::NativeServices::new(None),
+        )
+        .unwrap();
         let grad = &vals[&grad_result.grad_nodes[&x]];
 
         let expected_grad = [0.0, 1.0, 0.0, 1.0, 0.0, 1.0];
@@ -3882,7 +3960,12 @@ mod tests {
                 "x".to_string(),
                 TensorValue::from_vec(vec![2, 3], data_plus),
             );
-            let vals_plus = eval_tensor(&dag, &inputs_plus).unwrap();
+            let vals_plus = eval_tensor(
+                &dag,
+                &inputs_plus,
+                &mut chelis_types::NativeServices::new(None),
+            )
+            .unwrap();
             let f_plus = vals_plus[&out].to_f64_lossy_vec()[0];
 
             let mut inputs_minus = UnordMap::new();
@@ -3890,7 +3973,12 @@ mod tests {
                 "x".to_string(),
                 TensorValue::from_vec(vec![2, 3], data_minus),
             );
-            let vals_minus = eval_tensor(&dag, &inputs_minus).unwrap();
+            let vals_minus = eval_tensor(
+                &dag,
+                &inputs_minus,
+                &mut chelis_types::NativeServices::new(None),
+            )
+            .unwrap();
             let f_minus = vals_minus[&out].to_f64_lossy_vec()[0];
 
             let numerical = (f_plus - f_minus) / (2.0 * h);
@@ -3950,7 +4038,12 @@ mod tests {
             "x".to_string(),
             TensorValue::from_vec(vec![2, 2], vec![3.0, 3.0, 3.0, 1.0]),
         );
-        let vals = eval_tensor(&grad_result.dag, &inputs).unwrap();
+        let vals = eval_tensor(
+            &grad_result.dag,
+            &inputs,
+            &mut chelis_types::NativeServices::new(None),
+        )
+        .unwrap();
         let grad = &vals[&grad_result.grad_nodes[&x]];
 
         // With ties, eq mask gives 1 for ALL elements equal to max.
@@ -4028,7 +4121,12 @@ mod tests {
             "x".to_string(),
             TensorValue::from_vec(vec![2, 3], input_data.clone()),
         );
-        let vals = eval_tensor(&grad_result.dag, &inputs).unwrap();
+        let vals = eval_tensor(
+            &grad_result.dag,
+            &inputs,
+            &mut chelis_types::NativeServices::new(None),
+        )
+        .unwrap();
         let grad = &vals[&grad_result.grad_nodes[&x]];
 
         let expected_grad = [0.0, 1.0, 0.0, 0.0, 0.0, 1.0];
@@ -4057,7 +4155,12 @@ mod tests {
                 "x".to_string(),
                 TensorValue::from_vec(vec![2, 3], data_plus),
             );
-            let vals_plus = eval_tensor(&dag, &inputs_plus).unwrap();
+            let vals_plus = eval_tensor(
+                &dag,
+                &inputs_plus,
+                &mut chelis_types::NativeServices::new(None),
+            )
+            .unwrap();
             let f_plus = vals_plus[&out].to_f64_lossy_vec()[0];
 
             let mut inputs_minus = UnordMap::new();
@@ -4065,7 +4168,12 @@ mod tests {
                 "x".to_string(),
                 TensorValue::from_vec(vec![2, 3], data_minus),
             );
-            let vals_minus = eval_tensor(&dag, &inputs_minus).unwrap();
+            let vals_minus = eval_tensor(
+                &dag,
+                &inputs_minus,
+                &mut chelis_types::NativeServices::new(None),
+            )
+            .unwrap();
             let f_minus = vals_minus[&out].to_f64_lossy_vec()[0];
 
             let numerical = (f_plus - f_minus) / (2.0 * h);
@@ -4086,7 +4194,11 @@ mod tests {
         let grad_result = grad_dag(&dag, out, &[x]).unwrap();
         let mut inputs = UnordMap::new();
         inputs.insert("x".to_string(), -1.0);
-        let vals = eval_scalar(&grad_result.dag, &inputs);
+        let vals = eval_scalar(
+            &grad_result.dag,
+            &inputs,
+            &mut chelis_types::NativeServices::new(None),
+        );
         let dx = vals[&grad_result.grad_nodes[&x]];
         // Should be NaN or -1 (1/x = 1/-1 = -1, but log(-1) is NaN so the
         // chain involves NaN). Just verify no crash.
@@ -4102,7 +4214,11 @@ mod tests {
         let grad_result = grad_dag(&dag, out, &[x]).unwrap();
         let mut inputs = UnordMap::new();
         inputs.insert("x".to_string(), 0.0);
-        let vals = eval_scalar(&grad_result.dag, &inputs);
+        let vals = eval_scalar(
+            &grad_result.dag,
+            &inputs,
+            &mut chelis_types::NativeServices::new(None),
+        );
         let dx = vals[&grad_result.grad_nodes[&x]];
         eprintln!("sqrt gradient at x=0: {dx} (expected inf)");
     }
@@ -4193,7 +4309,12 @@ mod tests {
             "x".to_string(),
             TensorValue::from_vec(vec![3], vec![1.0, 2.0, 3.0]),
         );
-        let vals = eval_tensor(&grad_result.dag, &inputs).unwrap();
+        let vals = eval_tensor(
+            &grad_result.dag,
+            &inputs,
+            &mut chelis_types::NativeServices::new(None),
+        )
+        .unwrap();
         let grad = &vals[&grad_result.grad_nodes[&x]];
         // d(sum(pad(x)))/dx = ones (pad adds zeros, but gradient only flows to original elements)
         assert_eq!(grad.to_f64_lossy_vec(), vec![1.0, 1.0, 1.0]);
@@ -4244,7 +4365,12 @@ mod tests {
             "x".to_string(),
             TensorValue::from_vec(vec![5], vec![1.0, 2.0, 3.0, 4.0, 5.0]),
         );
-        let vals = eval_tensor(&grad_result.dag, &inputs).unwrap();
+        let vals = eval_tensor(
+            &grad_result.dag,
+            &inputs,
+            &mut chelis_types::NativeServices::new(None),
+        )
+        .unwrap();
         let grad = &vals[&grad_result.grad_nodes[&x]];
         // d(sum(shrink(x, [1,4])))/dx = [0, 1, 1, 1, 0]
         assert_eq!(
@@ -4264,7 +4390,11 @@ mod tests {
         let mut inputs = UnordMap::new();
         inputs.insert("x".to_string(), 5.0);
         inputs.insert("y".to_string(), 3.0);
-        let vals = eval_scalar(&grad_result.dag, &inputs);
+        let vals = eval_scalar(
+            &grad_result.dag,
+            &inputs,
+            &mut chelis_types::NativeServices::new(None),
+        );
         let dx_gt = vals[&grad_result.grad_nodes[&x]];
         assert!(
             (dx_gt - 1.0).abs() < 1e-6,
@@ -4273,7 +4403,11 @@ mod tests {
 
         inputs.insert("x".to_string(), 3.0);
         inputs.insert("y".to_string(), 3.0);
-        let vals2 = eval_scalar(&grad_result.dag, &inputs);
+        let vals2 = eval_scalar(
+            &grad_result.dag,
+            &inputs,
+            &mut chelis_types::NativeServices::new(None),
+        );
         let dx_eq = vals2[&grad_result.grad_nodes[&x]];
         assert!(
             (dx_eq - 1.0).abs() < 1e-6,
@@ -4302,7 +4436,11 @@ mod tests {
 
         let mut inputs = UnordMap::new();
         inputs.insert("x".to_string(), 2.0);
-        let vals = eval_scalar(&second.dag, &inputs);
+        let vals = eval_scalar(
+            &second.dag,
+            &inputs,
+            &mut chelis_types::NativeServices::new(None),
+        );
         let ddx = vals[&ddx_node];
         let expected = -1.0 / 4.0; // -1/x^2 = -0.25
         assert!(
@@ -4359,7 +4497,12 @@ mod tests {
             "x".to_string(),
             TensorValue::from_vec(vec![4], vec![10.0, 20.0, 30.0, 40.0]),
         );
-        let vals = eval_tensor(&grad_result.dag, &inputs).unwrap();
+        let vals = eval_tensor(
+            &grad_result.dag,
+            &inputs,
+            &mut chelis_types::NativeServices::new(None),
+        )
+        .unwrap();
         let grad = &vals[&grad_result.grad_nodes[&x]];
         assert_eq!(
             grad.to_f64_lossy_vec(),
@@ -4444,7 +4587,12 @@ mod tests {
             "x".to_string(),
             TensorValue::from_vec(vec![2, 3], vec![1.0, 5.0, 3.0, 4.0, 2.0, 6.0]),
         );
-        let vals = eval_tensor(&grad_result.dag, &inputs).unwrap();
+        let vals = eval_tensor(
+            &grad_result.dag,
+            &inputs,
+            &mut chelis_types::NativeServices::new(None),
+        )
+        .unwrap();
         let grad = &vals[&grad_result.grad_nodes[&x]];
         let expected = [1.0, 0.0, 1.0, 0.0, 1.0, 0.0];
         for (i, (got, want)) in grad
@@ -4482,7 +4630,12 @@ mod tests {
             "x".to_string(),
             TensorValue::from_vec(vec![4], vec![2.0, 3.0, 4.0, 5.0]),
         );
-        let vals = eval_tensor(&grad_result.dag, &inputs).unwrap();
+        let vals = eval_tensor(
+            &grad_result.dag,
+            &inputs,
+            &mut chelis_types::NativeServices::new(None),
+        )
+        .unwrap();
         let grad = &vals[&grad_result.grad_nodes[&x]];
         let expected = [60.0, 40.0, 30.0, 24.0];
         for (i, (got, want)) in grad
@@ -4527,7 +4680,12 @@ mod tests {
             "x".to_string(),
             TensorValue::from_vec(vec![4], vec![2.0, 0.0, 4.0, 5.0]),
         );
-        let vals = eval_tensor(&grad_result.dag, &inputs).unwrap();
+        let vals = eval_tensor(
+            &grad_result.dag,
+            &inputs,
+            &mut chelis_types::NativeServices::new(None),
+        )
+        .unwrap();
         let grad = &vals[&grad_result.grad_nodes[&x]];
         for v in &grad.to_f64_lossy_vec() {
             assert!(v.is_finite(), "prod_reduce grad must be finite; got {v}");
@@ -4772,7 +4930,11 @@ mod tests {
         let grad_result = grad_dag(&dag, out, &[x]).unwrap();
         let mut inputs = UnordMap::new();
         inputs.insert("x".to_string(), 0.0_f64);
-        let vals = eval_scalar(&grad_result.dag, &inputs);
+        let vals = eval_scalar(
+            &grad_result.dag,
+            &inputs,
+            &mut chelis_types::NativeServices::new(None),
+        );
         let a = vals[&grad_result.grad_nodes[&x]];
         assert!(
             a.abs() < 1e-9,
@@ -4789,7 +4951,11 @@ mod tests {
         let grad_result = grad_dag(&dag, out, &[x]).unwrap();
         let mut inputs = UnordMap::new();
         inputs.insert("x".to_string(), -2.7_f64);
-        let vals = eval_scalar(&grad_result.dag, &inputs);
+        let vals = eval_scalar(
+            &grad_result.dag,
+            &inputs,
+            &mut chelis_types::NativeServices::new(None),
+        );
         let a = vals[&grad_result.grad_nodes[&x]];
         assert!(
             (a - (-1.0)).abs() < 1e-6,
@@ -4915,7 +5081,11 @@ mod tests {
         let grad_result = grad_dag(&dag, out, &[x]).unwrap();
         let mut inputs = UnordMap::new();
         inputs.insert("x".to_string(), 0.5_f64);
-        let vals = eval_scalar(&grad_result.dag, &inputs);
+        let vals = eval_scalar(
+            &grad_result.dag,
+            &inputs,
+            &mut chelis_types::NativeServices::new(None),
+        );
         let a = vals[&grad_result.grad_nodes[&x]];
         let expected = -(0.5_f64).sin(); // ≈ -0.4794
         assert!(
@@ -5063,11 +5233,13 @@ mod tests {
             TensorValue::from_vec(vec![5], vec![1.0, 2.0, 3.0, 4.0, 5.0]),
         );
         let grad_node = grad_result.grad_nodes[&x];
-        let values =
-            crate::eval::eval_tensor_roots_with_strict(&grad_result.dag, &[grad_node], |name| {
-                inputs.get(name).cloned()
-            })
-            .expect("runtime strided-axis adjoint must evaluate");
+        let values = crate::eval::eval_tensor_roots_with_strict(
+            &grad_result.dag,
+            &[grad_node],
+            |name| inputs.get(name).cloned(),
+            &mut chelis_types::NativeServices::new(None),
+        )
+        .expect("runtime strided-axis adjoint must evaluate");
         assert_eq!(values[&grad_node].shape, vec![5]);
         assert_eq!(
             values[&grad_node].to_f64_lossy_vec(),

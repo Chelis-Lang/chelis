@@ -18,19 +18,26 @@ use chelis_ir::host::{HostLoweringSession, host_def_kernel};
 
 fn checked_deep(src: &str) -> chelis_types::CheckedProgram {
     let exprs = chelis_deep::parser::parse_str(src).expect("parse Deep fixture");
-    let checked = chelis_types::check_ir_program(&exprs, chelis_types::ProgramOrigin::Unlinked)
-        .unwrap_or_else(|report| {
-            panic!(
-                "type check failed: {:?}",
-                report
-                    .errors
-                    .iter()
-                    .map(|error| error.message.clone())
-                    .collect::<Vec<_>>()
-            )
-        });
-    let checked = chelis_effects::check_program(&checked).expect("effects");
-    chelis_types::check_linearity(&checked).expect("linearity")
+    let checked = chelis_types::check_ir_program(
+        &exprs,
+        chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
+    )
+    .unwrap_or_else(|report| {
+        panic!(
+            "type check failed: {:?}",
+            report
+                .errors
+                .iter()
+                .map(|error| error.message.clone())
+                .collect::<Vec<_>>()
+        )
+    });
+    let checked =
+        chelis_effects::check_program(&checked, &mut chelis_types::NativeServices::new(None))
+            .expect("effects");
+    chelis_types::check_linearity(&checked, &mut chelis_types::NativeServices::new(None))
+        .expect("linearity")
 }
 
 fn decision(src: &str, name: &str) -> Result<bool, String> {

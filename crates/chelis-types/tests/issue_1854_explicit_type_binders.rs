@@ -58,10 +58,12 @@ fn assert_both_ingresses_reject_once(program: &[Expr], name: &str, nearest: Opti
     let ir = diagnostics(check_ir_program(
         program,
         chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
     ));
     let typed = diagnostics(check_typed_program(
         program,
         chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
     ));
     assert_eq!(
         typed, ir,
@@ -131,10 +133,12 @@ fn distinct_unknown_surf_scalar_names_keep_distinct_diagnostics() {
     let ir = diagnostics(check_ir_program(
         &program,
         chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
     ));
     let typed = diagnostics(check_typed_program(
         &program,
         chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
     ));
     assert_eq!(
         typed, ir,
@@ -160,10 +164,12 @@ fn assert_unknown_spelling_order(program: &[Expr], expected: &[&str]) {
     let ir = diagnostics(check_ir_program(
         program,
         chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
     ));
     let typed = diagnostics(check_typed_program(
         program,
         chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
     ));
     assert_eq!(
         typed, ir,
@@ -190,10 +196,12 @@ fn assert_unknown_spelling_order_amid_other_errors(program: &[Expr], expected: &
     let ir = diagnostics(check_ir_program(
         program,
         chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
     ));
     let typed = diagnostics(check_typed_program(
         program,
         chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
     ));
     assert_eq!(
         typed, ir,
@@ -367,10 +375,12 @@ fn undeclared_surf_dimension_and_rank_variables_reject_at_both_ingresses() {
         let ir = diagnostics(check_ir_program(
             &program,
             chelis_types::ProgramOrigin::Unlinked,
+            &mut chelis_types::NativeServices::new(None),
         ));
         let typed = diagnostics(check_typed_program(
             &program,
             chelis_types::ProgramOrigin::Unlinked,
+            &mut chelis_types::NativeServices::new(None),
         ));
         assert_eq!(typed, ir, "Surf ingress parity for undeclared `{name}`");
         assert_eq!(ir.len(), 1, "`{name}` must have one owner: {ir:?}");
@@ -405,10 +415,12 @@ fn repeated_undeclared_type_dimension_and_rank_names_share_declaration_owners() 
         let ir = diagnostics(check_ir_program(
             &program,
             chelis_types::ProgramOrigin::Unlinked,
+            &mut chelis_types::NativeServices::new(None),
         ));
         let typed = diagnostics(check_typed_program(
             &program,
             chelis_types::ProgramOrigin::Unlinked,
+            &mut chelis_types::NativeServices::new(None),
         ));
         assert_eq!(typed, ir, "ingress parity for repeated undeclared `{name}`");
         assert_eq!(
@@ -440,10 +452,12 @@ fn one_spelling_in_distinct_name_resolution_classes_keeps_distinct_diagnostics()
     let ir = diagnostics(check_ir_program(
         &program,
         chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
     ));
     let typed = diagnostics(check_typed_program(
         &program,
         chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
     ));
     assert_eq!(typed, ir, "diagnostic-class ingress parity");
     assert_eq!(
@@ -495,10 +509,12 @@ fn undeclared_dimension_owners_are_isolated_by_declaration_and_module() {
         let ir = diagnostics(check_ir_program(
             program,
             chelis_types::ProgramOrigin::Unlinked,
+            &mut chelis_types::NativeServices::new(None),
         ));
         let typed = diagnostics(check_typed_program(
             program,
             chelis_types::ProgramOrigin::Unlinked,
+            &mut chelis_types::NativeServices::new(None),
         ));
         assert_eq!(typed, ir, "{label} ingress parity");
         let owners = ir
@@ -559,12 +575,20 @@ fn explicit_surf_binders_and_active_primitives_check_clean() {
         ),
     ] {
         let program = parse_core_fixture(source);
-        check_ir_program(&program, chelis_types::ProgramOrigin::Unlinked).unwrap_or_else(
-            |report| panic!("IR ingress must accept `{source}`: {:?}", report.errors),
-        );
-        check_typed_program(&program, chelis_types::ProgramOrigin::Unlinked).unwrap_or_else(
-            |report| panic!("typed ingress must accept `{source}`: {:?}", report.errors),
-        );
+        check_ir_program(
+            &program,
+            chelis_types::ProgramOrigin::Unlinked,
+            &mut chelis_types::NativeServices::new(None),
+        )
+        .unwrap_or_else(|report| panic!("IR ingress must accept `{source}`: {:?}", report.errors));
+        check_typed_program(
+            &program,
+            chelis_types::ProgramOrigin::Unlinked,
+            &mut chelis_types::NativeServices::new(None),
+        )
+        .unwrap_or_else(|report| {
+            panic!("typed ingress must accept `{source}`: {:?}", report.errors)
+        });
     }
 }
 
@@ -607,16 +631,24 @@ fn declaration_body_annotations_preserve_one_explicit_binder_scope() {
             ("Surf-desugared Deep", legacy_program.as_slice()),
             ("canonical Deep", canonical_program.as_slice()),
         ] {
-            check_ir_program(program, chelis_types::ProgramOrigin::Unlinked).unwrap_or_else(
-                |report| {
-                    panic!(
-                        "normalized IR ingress must accept body binder use through {carrier} in \
+            check_ir_program(
+                program,
+                chelis_types::ProgramOrigin::Unlinked,
+                &mut chelis_types::NativeServices::new(None),
+            )
+            .unwrap_or_else(|report| {
+                panic!(
+                    "normalized IR ingress must accept body binder use through {carrier} in \
                      `{source}`: {:?}",
-                        report.errors
-                    )
-                },
-            );
-            check_typed_program(program, chelis_types::ProgramOrigin::Unlinked).unwrap_or_else(|report| {
+                    report.errors
+                )
+            });
+            check_typed_program(
+                program,
+                chelis_types::ProgramOrigin::Unlinked,
+                &mut chelis_types::NativeServices::new(None),
+            )
+            .unwrap_or_else(|report| {
                 panic!(
                     "typed ingress must accept body binder use through {carrier} in `{source}`: \
                      {:?}",
@@ -644,10 +676,12 @@ fn expression_tensor_ascriptions_preserve_rigid_dimension_identity() {
         let ir = diagnostics(check_ir_program(
             program,
             chelis_types::ProgramOrigin::Unlinked,
+            &mut chelis_types::NativeServices::new(None),
         ));
         let typed = diagnostics(check_typed_program(
             program,
             chelis_types::ProgramOrigin::Unlinked,
+            &mut chelis_types::NativeServices::new(None),
         ));
         assert_eq!(typed, ir, "{carrier} checker ingress parity");
         assert!(
@@ -687,10 +721,12 @@ fn contextual_literal_copies_share_one_unknown_precision_owner() {
         let ir = diagnostics(check_ir_program(
             &program,
             chelis_types::ProgramOrigin::Unlinked,
+            &mut chelis_types::NativeServices::new(None),
         ));
         let typed = diagnostics(check_typed_program(
             &program,
             chelis_types::ProgramOrigin::Unlinked,
+            &mut chelis_types::NativeServices::new(None),
         ));
         assert_eq!(typed, ir, "checker ingress parity for `{source}`");
         assert_eq!(
@@ -746,22 +782,28 @@ fn body_only_surf_binders_check_at_both_ingresses() {
         ),
     ] {
         let program = parse_core_fixture(source);
-        check_ir_program(&program, chelis_types::ProgramOrigin::Unlinked).unwrap_or_else(
-            |report| {
-                panic!(
-                    "normalized IR ingress must accept body-only binder in `{source}`: {:?}",
-                    report.errors
-                )
-            },
-        );
-        check_typed_program(&program, chelis_types::ProgramOrigin::Unlinked).unwrap_or_else(
-            |report| {
-                panic!(
-                    "typed ingress must accept body-only binder in `{source}`: {:?}",
-                    report.errors
-                )
-            },
-        );
+        check_ir_program(
+            &program,
+            chelis_types::ProgramOrigin::Unlinked,
+            &mut chelis_types::NativeServices::new(None),
+        )
+        .unwrap_or_else(|report| {
+            panic!(
+                "normalized IR ingress must accept body-only binder in `{source}`: {:?}",
+                report.errors
+            )
+        });
+        check_typed_program(
+            &program,
+            chelis_types::ProgramOrigin::Unlinked,
+            &mut chelis_types::NativeServices::new(None),
+        )
+        .unwrap_or_else(|report| {
+            panic!(
+                "typed ingress must accept body-only binder in `{source}`: {:?}",
+                report.errors
+            )
+        });
     }
 }
 
@@ -777,10 +819,12 @@ fn assert_non_function_binder_narrowing_rejects(source: &str, declaration: &str,
         let ir = diagnostics(check_ir_program(
             program,
             chelis_types::ProgramOrigin::Unlinked,
+            &mut chelis_types::NativeServices::new(None),
         ));
         let typed = diagnostics(check_typed_program(
             program,
             chelis_types::ProgramOrigin::Unlinked,
+            &mut chelis_types::NativeServices::new(None),
         ));
         assert_eq!(
             typed, ir,
@@ -852,22 +896,30 @@ fn unconstrained_polymorphic_non_function_value_remains_valid_at_both_ingresses(
         ("Surf-desugared Deep", legacy_program.as_slice()),
         ("canonical Deep", canonical_program.as_slice()),
     ] {
-        check_ir_program(program, chelis_types::ProgramOrigin::Unlinked).unwrap_or_else(|report| {
+        check_ir_program(
+            program,
+            chelis_types::ProgramOrigin::Unlinked,
+            &mut chelis_types::NativeServices::new(None),
+        )
+        .unwrap_or_else(|report| {
             panic!(
                 "normalized-IR ingress must preserve an unconstrained polymorphic value through \
                  {carrier}: {:?}",
                 report.errors
             )
         });
-        check_typed_program(program, chelis_types::ProgramOrigin::Unlinked).unwrap_or_else(
-            |report| {
-                panic!(
-                    "typed-Deep ingress must preserve an unconstrained polymorphic value through \
+        check_typed_program(
+            program,
+            chelis_types::ProgramOrigin::Unlinked,
+            &mut chelis_types::NativeServices::new(None),
+        )
+        .unwrap_or_else(|report| {
+            panic!(
+                "typed-Deep ingress must preserve an unconstrained polymorphic value through \
                  {carrier}: {:?}",
-                    report.errors
-                )
-            },
-        );
+                report.errors
+            )
+        });
     }
 }
 
@@ -876,10 +928,18 @@ fn body_only_type_binder_is_generalized_and_remains_rigid() {
     let polymorphic = parse_core_fixture(include_str!(
         "fixtures/core/tests/issue_1854_explicit_type_binders/body_only_type_binder_is_generalized_and_remains_rigid_708.json"
     ));
-    check_ir_program(&polymorphic, chelis_types::ProgramOrigin::Unlinked)
-        .expect("normalized IR ingress must generalize the body-only type binder");
-    check_typed_program(&polymorphic, chelis_types::ProgramOrigin::Unlinked)
-        .expect("typed ingress must generalize the body-only type binder");
+    check_ir_program(
+        &polymorphic,
+        chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
+    )
+    .expect("normalized IR ingress must generalize the body-only type binder");
+    check_typed_program(
+        &polymorphic,
+        chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
+    )
+    .expect("typed ingress must generalize the body-only type binder");
 
     let narrowed = parse_core_fixture(include_str!(
         "fixtures/core/tests/issue_1854_explicit_type_binders/body_only_type_binder_is_generalized_and_remains_rigid_717.json"
@@ -887,10 +947,12 @@ fn body_only_type_binder_is_generalized_and_remains_rigid() {
     let ir = diagnostics(check_ir_program(
         &narrowed,
         chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
     ));
     let typed = diagnostics(check_typed_program(
         &narrowed,
         chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
     ));
     assert_eq!(typed, ir, "body-only binder rigidity ingress parity");
     assert!(
@@ -920,10 +982,12 @@ fn assert_body_only_shape_binder_pin_rejects(
         let ir = diagnostics(check_ir_program(
             program,
             chelis_types::ProgramOrigin::Unlinked,
+            &mut chelis_types::NativeServices::new(None),
         ));
         let typed = diagnostics(check_typed_program(
             program,
             chelis_types::ProgramOrigin::Unlinked,
+            &mut chelis_types::NativeServices::new(None),
         ));
         assert_eq!(
             typed, ir,
@@ -1005,10 +1069,12 @@ fn assert_body_only_dimension_cannot_collapse_into_return_only(source: &str, dec
         let ir = diagnostics(check_ir_program(
             program,
             chelis_types::ProgramOrigin::Unlinked,
+            &mut chelis_types::NativeServices::new(None),
         ));
         let typed = diagnostics(check_typed_program(
             program,
             chelis_types::ProgramOrigin::Unlinked,
+            &mut chelis_types::NativeServices::new(None),
         ));
         assert_eq!(
             typed, ir,
@@ -1061,14 +1127,24 @@ fn distinct_return_only_dimensions_may_share_one_body_inferred_output() {
         ("Surf-desugared Deep", legacy_program.as_slice()),
         ("canonical Deep", canonical_program.as_slice()),
     ] {
-        check_ir_program(program, chelis_types::ProgramOrigin::Unlinked).unwrap_or_else(|report| {
+        check_ir_program(
+            program,
+            chelis_types::ProgramOrigin::Unlinked,
+            &mut chelis_types::NativeServices::new(None),
+        )
+        .unwrap_or_else(|report| {
             panic!(
                 "normalized IR ingress must preserve return-only output inference through \
                  {carrier}: {:?}",
                 report.errors
             )
         });
-        check_typed_program(program, chelis_types::ProgramOrigin::Unlinked).unwrap_or_else(|report| {
+        check_typed_program(
+            program,
+            chelis_types::ProgramOrigin::Unlinked,
+            &mut chelis_types::NativeServices::new(None),
+        )
+        .unwrap_or_else(|report| {
             panic!(
                 "typed ingress must preserve return-only output inference through {carrier}: {:?}",
                 report.errors
@@ -1113,10 +1189,12 @@ fn body_only_surf_annotations_cannot_introduce_undeclared_binders() {
         let ir = diagnostics(check_ir_program(
             &program,
             chelis_types::ProgramOrigin::Unlinked,
+            &mut chelis_types::NativeServices::new(None),
         ));
         let typed = diagnostics(check_typed_program(
             &program,
             chelis_types::ProgramOrigin::Unlinked,
+            &mut chelis_types::NativeServices::new(None),
         ));
         assert_eq!(typed, ir, "undeclared Surf body-binder parity for `{name}`");
         assert_eq!(ir.len(), 1, "`{name}` must have one owner: {ir:?}");
@@ -1160,22 +1238,28 @@ fn canonical_deep_body_only_binders_fill_a_wildcard_result_at_both_ingresses() {
                    (var {{}} x))))"
         ))
         .expect("canonical Deep fixture must parse");
-        check_ir_program(&program, chelis_types::ProgramOrigin::Unlinked).unwrap_or_else(
-            |report| {
-                panic!(
-                    "normalized IR ingress must let body-only `{binder}` fill the wildcard: {:?}",
-                    report.errors
-                )
-            },
-        );
-        check_typed_program(&program, chelis_types::ProgramOrigin::Unlinked).unwrap_or_else(
-            |report| {
-                panic!(
-                    "typed ingress must let body-only `{binder}` fill the wildcard: {:?}",
-                    report.errors
-                )
-            },
-        );
+        check_ir_program(
+            &program,
+            chelis_types::ProgramOrigin::Unlinked,
+            &mut chelis_types::NativeServices::new(None),
+        )
+        .unwrap_or_else(|report| {
+            panic!(
+                "normalized IR ingress must let body-only `{binder}` fill the wildcard: {:?}",
+                report.errors
+            )
+        });
+        check_typed_program(
+            &program,
+            chelis_types::ProgramOrigin::Unlinked,
+            &mut chelis_types::NativeServices::new(None),
+        )
+        .unwrap_or_else(|report| {
+            panic!(
+                "typed ingress must let body-only `{binder}` fill the wildcard: {:?}",
+                report.errors
+            )
+        });
     }
 }
 
@@ -1213,10 +1297,12 @@ fn body_annotations_cannot_introduce_undeclared_binders_at_either_ingress() {
         let ir = diagnostics(check_ir_program(
             &program,
             chelis_types::ProgramOrigin::Unlinked,
+            &mut chelis_types::NativeServices::new(None),
         ));
         let typed = diagnostics(check_typed_program(
             &program,
             chelis_types::ProgramOrigin::Unlinked,
+            &mut chelis_types::NativeServices::new(None),
         ));
         assert_eq!(
             typed, ir,
@@ -1239,10 +1325,18 @@ fn explicit_deep_t_var_nodes_remain_valid_binders() {
            (fn {} (params {} (x {type: (t-var {} float32)})) (var {} x)))",
     )
     .expect("Deep fixture must parse");
-    check_ir_program(&program, chelis_types::ProgramOrigin::Unlinked)
-        .expect("an authored Deep `t-var` is explicit");
-    check_typed_program(&program, chelis_types::ProgramOrigin::Unlinked)
-        .expect("typed ingress must agree");
+    check_ir_program(
+        &program,
+        chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
+    )
+    .expect("an authored Deep `t-var` is explicit");
+    check_typed_program(
+        &program,
+        chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
+    )
+    .expect("typed ingress must agree");
 }
 
 #[test]
@@ -1298,10 +1392,12 @@ fn forbidden_dtype_names_reject_once_at_the_deep_binder_list() {
         let ir = diagnostics(check_ir_program(
             &program,
             chelis_types::ProgramOrigin::Unlinked,
+            &mut chelis_types::NativeServices::new(None),
         ));
         let typed = diagnostics(check_typed_program(
             &program,
             chelis_types::ProgramOrigin::Unlinked,
+            &mut chelis_types::NativeServices::new(None),
         ));
         assert_eq!(typed, ir, "forbidden-binder rejection parity for `{name}`");
         assert_eq!(ir.len(), 1, "`{name}` must report once: {ir:?}");
@@ -1348,10 +1444,12 @@ fn distinct_unknown_deep_scalar_names_keep_distinct_diagnostics() {
     let ir = diagnostics(check_ir_program(
         &program,
         chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
     ));
     let typed = diagnostics(check_typed_program(
         &program,
         chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
     ));
     assert_eq!(
         typed, ir,
@@ -1396,10 +1494,18 @@ fn arbitrary_non_dtype_names_remain_legal_deep_binders() {
              (def {{}} ident {body})"
         ))
         .expect("Deep fixture must parse");
-        check_ir_program(&program, chelis_types::ProgramOrigin::Unlinked)
-            .expect("arbitrary Deep binder must remain legal");
-        check_typed_program(&program, chelis_types::ProgramOrigin::Unlinked)
-            .expect("typed ingress must agree");
+        check_ir_program(
+            &program,
+            chelis_types::ProgramOrigin::Unlinked,
+            &mut chelis_types::NativeServices::new(None),
+        )
+        .expect("arbitrary Deep binder must remain legal");
+        check_typed_program(
+            &program,
+            chelis_types::ProgramOrigin::Unlinked,
+            &mut chelis_types::NativeServices::new(None),
+        )
+        .expect("typed ingress must agree");
     }
 }
 
@@ -1430,10 +1536,12 @@ fn undeclared_deep_type_dimension_and_rank_variables_reject() {
         let ir = diagnostics(check_ir_program(
             &program,
             chelis_types::ProgramOrigin::Unlinked,
+            &mut chelis_types::NativeServices::new(None),
         ));
         let typed = diagnostics(check_typed_program(
             &program,
             chelis_types::ProgramOrigin::Unlinked,
+            &mut chelis_types::NativeServices::new(None),
         ));
         assert_eq!(typed, ir, "ingress parity for `{name}`");
         assert_eq!(ir.len(), 1, "`{name}` must report once: {ir:?}");
@@ -1454,10 +1562,12 @@ fn empty_deep_binder_list_is_rejected_at_both_checker_ingresses() {
     let ir = diagnostics(check_ir_program(
         &program,
         chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
     ));
     let typed = diagnostics(check_typed_program(
         &program,
         chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
     ));
     assert_eq!(typed, ir, "empty-list rejection must have ingress parity");
     assert_eq!(ir.len(), 1, "empty binder list must have one owner: {ir:?}");
@@ -1484,10 +1594,12 @@ fn malformed_and_duplicate_deep_binder_lists_reject_at_both_ingresses() {
         let ir = diagnostics(check_ir_program(
             &program,
             chelis_types::ProgramOrigin::Unlinked,
+            &mut chelis_types::NativeServices::new(None),
         ));
         let typed = diagnostics(check_typed_program(
             &program,
             chelis_types::ProgramOrigin::Unlinked,
+            &mut chelis_types::NativeServices::new(None),
         ));
         assert_eq!(typed, ir, "malformed-list ingress parity for `{binders}`");
         assert_eq!(ir.len(), 1, "`{binders}` must have one owner: {ir:?}");
@@ -1518,10 +1630,18 @@ fn declared_deep_type_dimension_and_rank_variables_check_clean() {
              (def {{}} f (fn {{}} (params {{}} x) (var {{}} x)))"
         ))
         .expect("Deep fixture must parse");
-        check_ir_program(&program, chelis_types::ProgramOrigin::Unlinked)
-            .expect("declared Deep binder must check");
-        check_typed_program(&program, chelis_types::ProgramOrigin::Unlinked)
-            .expect("typed ingress must agree");
+        check_ir_program(
+            &program,
+            chelis_types::ProgramOrigin::Unlinked,
+            &mut chelis_types::NativeServices::new(None),
+        )
+        .expect("declared Deep binder must check");
+        check_typed_program(
+            &program,
+            chelis_types::ProgramOrigin::Unlinked,
+            &mut chelis_types::NativeServices::new(None),
+        )
+        .expect("typed ingress must agree");
     }
 }
 
@@ -1533,10 +1653,18 @@ fn declared_but_unused_deep_binder_is_a_vacuous_quantifier() {
            (fn {} (params {}) (lit {type: (t-prim {} i32)} 1)))",
     )
     .expect("Deep fixture must parse");
-    check_ir_program(&program, chelis_types::ProgramOrigin::Unlinked)
-        .expect("IR ingress must accept an unused unbounded binder");
-    check_typed_program(&program, chelis_types::ProgramOrigin::Unlinked)
-        .expect("typed ingress must accept the same binder policy");
+    check_ir_program(
+        &program,
+        chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
+    )
+    .expect("IR ingress must accept an unused unbounded binder");
+    check_typed_program(
+        &program,
+        chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
+    )
+    .expect("typed ingress must accept the same binder policy");
 }
 
 #[test]
@@ -1551,10 +1679,12 @@ fn declared_but_unused_bounded_deep_binder_rejects_at_both_ingresses() {
     let ir = diagnostics(check_ir_program(
         &program,
         chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
     ));
     let typed = diagnostics(check_typed_program(
         &program,
         chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
     ));
     assert_eq!(
         typed, ir,
@@ -1578,10 +1708,18 @@ fn explicit_property_binders_check_at_both_ingresses() {
         include_str!("fixtures/core/tests/issue_1854_explicit_type_binders/shared_1334.json"),
     ] {
         let program = parse_core_fixture(source);
-        check_ir_program(&program, chelis_types::ProgramOrigin::Unlinked)
-            .expect("IR ingress must accept the property binder");
-        check_typed_program(&program, chelis_types::ProgramOrigin::Unlinked)
-            .expect("typed ingress must accept the property binder");
+        check_ir_program(
+            &program,
+            chelis_types::ProgramOrigin::Unlinked,
+            &mut chelis_types::NativeServices::new(None),
+        )
+        .expect("IR ingress must accept the property binder");
+        check_typed_program(
+            &program,
+            chelis_types::ProgramOrigin::Unlinked,
+            &mut chelis_types::NativeServices::new(None),
+        )
+        .expect("typed ingress must accept the property binder");
     }
 }
 
@@ -1593,10 +1731,12 @@ fn incomplete_property_binder_lists_reject_at_both_ingresses() {
     let ir = diagnostics(check_ir_program(
         &program,
         chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
     ));
     let typed = diagnostics(check_typed_program(
         &program,
         chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
     ));
     assert_eq!(typed, ir, "incomplete property binders need ingress parity");
     assert_eq!(ir.len(), 1, "undeclared `n` must have one owner: {ir:?}");

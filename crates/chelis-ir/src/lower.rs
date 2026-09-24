@@ -16293,9 +16293,12 @@ impl<'program> LowerCtx<'program> {
     /// arithmetic walker the checker uses. Axis folding remains on the
     /// narrower [`extract_int_for_dim`] path.
     fn fold_static_size(&self, expr: &Expr) -> Option<i64> {
-        chelis_types::fold_static_int_expr(expr, |name| {
-            self.static_size_bindings.get(name).copied()
-        })
+        chelis_types::fold_static_int_expr(
+            expr,
+            |name| self.static_size_bindings.get(name).copied(),
+            // FIXME(fcis-integration): use LoweringRuntime::native_mut()
+            &mut chelis_types::NativeServices::new(None),
+        )
     }
 
     /// chelis#620: resolve an already-lowered `if` condition to a
@@ -20152,10 +20155,19 @@ mod fused_zero_tests {
                     let checked = chelis_types::check_typed_program(
                         &expressions,
                         chelis_types::ProgramOrigin::Unlinked,
+                        &mut chelis_types::NativeServices::new(None),
                     )
                     .unwrap();
-                    let checked = chelis_effects::check_program(&checked).unwrap();
-                    let checked = chelis_types::check_linearity(&checked).unwrap();
+                    let checked = chelis_effects::check_program(
+                        &checked,
+                        &mut chelis_types::NativeServices::new(None),
+                    )
+                    .unwrap();
+                    let checked = chelis_types::check_linearity(
+                        &checked,
+                        &mut chelis_types::NativeServices::new(None),
+                    )
+                    .unwrap();
                     let library = try_lower_program_to_library(&checked, runtime).unwrap();
                     assert_eq!(
                         library.rootless_defs().contains("mapped"),
@@ -20256,9 +20268,12 @@ mod fused_zero_tests {
                 splice[&roots[&grad.grad_nodes[&x]]],
                 splice[&roots[&grad.grad_nodes[&y]]],
             ];
-            let values = eval_tensor_roots_with_strict(&ctx.dag, &selected, |_| {
-                Some(value(&[2], Prim::F32, &[2.0, 7.0]))
-            })
+            let values = eval_tensor_roots_with_strict(
+                &ctx.dag,
+                &selected,
+                |_| Some(value(&[2], Prim::F32, &[2.0, 7.0])),
+                &mut chelis_types::NativeServices::new(None),
+            )
             .unwrap();
             assert_eq!(values[&selected[0]].to_f64_lossy_vec(), [3.0, 3.0]);
             assert_eq!(values[&selected[1]].to_f64_lossy_vec(), [5.0, 5.0]);
@@ -20279,6 +20294,7 @@ mod fused_zero_tests {
             let checked = chelis_types::check_typed_program(
                 &expressions,
                 chelis_types::ProgramOrigin::Unlinked,
+                &mut chelis_types::NativeServices::new(None),
             )
             .unwrap();
             let mut ctx = LowerCtx::new(
@@ -20327,9 +20343,12 @@ mod fused_zero_tests {
                     "fused consumer introduced a non-topological dependency: {node:?}"
                 );
             }
-            let values = eval_tensor_roots_with_strict(&ctx.dag, &roots, |_| {
-                Some(value(&[2, 3], Prim::F32, &[2.0; 6]))
-            })
+            let values = eval_tensor_roots_with_strict(
+                &ctx.dag,
+                &roots,
+                |_| Some(value(&[2, 3], Prim::F32, &[2.0; 6])),
+                &mut chelis_types::NativeServices::new(None),
+            )
             .unwrap();
             assert_eq!(values[&roots[0]].to_f64_lossy_vec(), [9.0; 6]);
             assert_eq!(values[&roots[1]].to_f64_lossy_vec(), [15.0; 6]);
@@ -20397,9 +20416,12 @@ mod fused_zero_tests {
                 ("a", value(&[2], Prim::F32, &[3.0, 11.0])),
                 ("b", value(&[2], Prim::F32, &[2.0, 7.0])),
             ]);
-            let values = eval_tensor_roots_with_strict(&ctx.dag, &[zero, live], |name| {
-                supplied.get(name).cloned()
-            })
+            let values = eval_tensor_roots_with_strict(
+                &ctx.dag,
+                &[zero, live],
+                |name| supplied.get(name).cloned(),
+                &mut chelis_types::NativeServices::new(None),
+            )
             .unwrap();
             assert_eq!(values[&zero].to_f64_lossy_vec(), [0.0, 0.0]);
             assert_eq!(values[&live].to_f64_lossy_vec(), [4.0, 14.0]);
@@ -20427,9 +20449,12 @@ mod fused_zero_tests {
                     .unwrap()
                     .expect_node("constant fused gradient owns one zero root", runtime)
                     .unwrap();
-                let values = eval_tensor_roots_with_strict(&ctx.dag, &[root], |_| {
-                    Some(value(&[0], precision, &[]))
-                })
+                let values = eval_tensor_roots_with_strict(
+                    &ctx.dag,
+                    &[root],
+                    |_| Some(value(&[0], precision, &[])),
+                    &mut chelis_types::NativeServices::new(None),
+                )
                 .unwrap();
                 assert_eq!(values[&root].shape, [0]);
                 assert_eq!(values[&root].prim(), precision);
@@ -20476,13 +20501,18 @@ mod fused_zero_tests {
                 ctx.dag.get(zero).unwrap().output_type,
                 tensor_type(&[2], Prim::F32)
             );
-            let values = eval_tensor_roots_with_strict(&ctx.dag, &[zero], |name| {
-                Some(if name == "a" {
-                    value(&[2], Prim::F32, &[2.0, 7.0])
-                } else {
-                    value(&[], Prim::F32, &[11.0])
-                })
-            })
+            let values = eval_tensor_roots_with_strict(
+                &ctx.dag,
+                &[zero],
+                |name| {
+                    Some(if name == "a" {
+                        value(&[2], Prim::F32, &[2.0, 7.0])
+                    } else {
+                        value(&[], Prim::F32, &[11.0])
+                    })
+                },
+                &mut chelis_types::NativeServices::new(None),
+            )
             .unwrap();
             assert_eq!(
                 values[&zero]
@@ -20581,7 +20611,12 @@ mod fused_zero_tests {
                         .count(),
                     1
                 );
-                let values = eval_tensor_roots_with_strict(&pruned, pruned.roots(), |_| None);
+                let values = eval_tensor_roots_with_strict(
+                    &pruned,
+                    pruned.roots(),
+                    |_| None,
+                    &mut chelis_types::NativeServices::new(None),
+                );
                 if observed == 2 {
                     assert_eq!(
                         values.unwrap()[&pruned.roots()[0]].to_f64_lossy_vec(),
@@ -21064,6 +21099,7 @@ mod tests {
                 &normalized,
                 &[required_witness],
                 |_| Some(crate::eval::TensorValue::from_vec(vec![4], vec![1.0; 4])),
+                &mut chelis_types::NativeServices::new(None),
             )
             .expect_err("the retained false extent claim must still reject");
             assert!(
@@ -21367,9 +21403,12 @@ mod tests {
             "../tests/fixtures/core/src/lower/local_ascription.json"
         ))
         .expect("lossless local-ascription fixture");
-        let checked =
-            chelis_types::check_ir_program(&expressions, chelis_types::ProgramOrigin::Unlinked)
-                .unwrap_or_else(|report| panic!("fixture type check failed: {:?}", report.errors));
+        let checked = chelis_types::check_ir_program(
+            &expressions,
+            chelis_types::ProgramOrigin::Unlinked,
+            &mut chelis_types::NativeServices::new(None),
+        )
+        .unwrap_or_else(|report| panic!("fixture type check failed: {:?}", report.errors));
         let ascription = checked
             .local_tensor_ascriptions()
             .first()
@@ -21634,11 +21673,16 @@ mod tests {
 
     fn parse_and_check(src: &str) -> chelis_types::CheckedProgram {
         let exprs = chelis_deep::parser::parse_str(src).expect("parse failed");
-        let checked = chelis_types::check_ir_program(&exprs, chelis_types::ProgramOrigin::Unlinked)
-            .unwrap_or_else(|result| panic!("IR check failed: {:?}", result.errors));
-        let checked = chelis_effects::check_program(&checked)
-            .unwrap_or_else(|errors| panic!("effect check failed: {errors:?}"));
-        chelis_types::check_linearity(&checked)
+        let checked = chelis_types::check_ir_program(
+            &exprs,
+            chelis_types::ProgramOrigin::Unlinked,
+            &mut chelis_types::NativeServices::new(None),
+        )
+        .unwrap_or_else(|result| panic!("IR check failed: {:?}", result.errors));
+        let checked =
+            chelis_effects::check_program(&checked, &mut chelis_types::NativeServices::new(None))
+                .unwrap_or_else(|errors| panic!("effect check failed: {errors:?}"));
+        chelis_types::check_linearity(&checked, &mut chelis_types::NativeServices::new(None))
             .unwrap_or_else(|errors| panic!("linearity check failed: {errors:?}"))
     }
 
@@ -22882,12 +22926,19 @@ mod tests {
             let (type_env, library_checked) = chelis_types::build_compiled_library_context(
                 &library_exprs,
                 chelis_types::ProgramOrigin::Unlinked,
+                &mut chelis_types::NativeServices::new(None),
             )
             .expect("library checks");
-            let library_checked =
-                chelis_effects::check_program(&library_checked).expect("library effects");
-            let library_checked =
-                chelis_types::check_linearity(&library_checked).expect("library linearity");
+            let library_checked = chelis_effects::check_program(
+                &library_checked,
+                &mut chelis_types::NativeServices::new(None),
+            )
+            .expect("library effects");
+            let library_checked = chelis_types::check_linearity(
+                &library_checked,
+                &mut chelis_types::NativeServices::new(None),
+            )
+            .expect("library linearity");
             let library = lower_program_to_library(&library_checked, runtime);
 
             let new_exprs = chelis_deep::parser::parse_str(
@@ -22908,14 +22959,21 @@ mod tests {
                 &type_env,
                 &new_exprs,
                 chelis_types::ProgramOrigin::Unlinked,
+                &mut chelis_types::NativeServices::new(None),
             )
             .expect("new code checks");
-            let new_checked =
-                chelis_effects::check_effects_with_context(&library_checked, &new_checked)
-                    .expect("new code effects");
-            let new_checked =
-                chelis_types::check_linearity_with_context(&library_checked, &new_checked)
-                    .expect("new code linearity");
+            let new_checked = chelis_effects::check_effects_with_context(
+                &library_checked,
+                &new_checked,
+                &mut chelis_types::NativeServices::new(None),
+            )
+            .expect("new code effects");
+            let new_checked = chelis_types::check_linearity_with_context(
+                &library_checked,
+                &new_checked,
+                &mut chelis_types::NativeServices::new(None),
+            )
+            .expect("new code linearity");
 
             let dag = lower_program_with_context(&library, &new_checked, runtime);
             let copy_count = dag
@@ -23954,7 +24012,12 @@ mod tests {
                 "x".to_string(),
                 TensorValue::from_vec(vec![4], vec![1.0, 2.0, 4.0, 3.0]),
             );
-            let vals = eval_tensor(&result.dag, &inputs).expect("windowed max_reduce grad eval");
+            let vals = eval_tensor(
+                &result.dag,
+                &inputs,
+                &mut chelis_types::NativeServices::new(None),
+            )
+            .expect("windowed max_reduce grad eval");
             assert_eq!(
                 vals[&grad_x].to_f64_lossy_vec(),
                 vec![0.0, 0.0, 1.0, 1.0],
@@ -24035,7 +24098,12 @@ mod tests {
                 "x".to_string(),
                 TensorValue::from_vec(vec![3], vec![1.0, 2.0, 3.0]),
             );
-            let vals = eval_tensor(&result.dag, &inputs).expect("grad eval");
+            let vals = eval_tensor(
+                &result.dag,
+                &inputs,
+                &mut chelis_types::NativeServices::new(None),
+            )
+            .expect("grad eval");
             assert_eq!(
                 vals[&grad_x].to_f64_lossy_vec(),
                 vec![2.0, 2.0, 2.0],
@@ -24056,7 +24124,12 @@ mod tests {
                     "x".to_string(),
                     TensorValue::from_vec(vec![3], base.to_vec()),
                 );
-                eval_tensor(&result.dag, &ip).expect("analytic grad eval")[&grad_x]
+                eval_tensor(
+                    &result.dag,
+                    &ip,
+                    &mut chelis_types::NativeServices::new(None),
+                )
+                .expect("analytic grad eval")[&grad_x]
                     .to_f64_lossy_vec()
                     .clone()
             };
@@ -24076,8 +24149,12 @@ mod tests {
                     "x".to_string(),
                     TensorValue::from_vec(vec![3], minus.to_vec()),
                 );
-                let fp = eval_tensor(&dag, &ip).expect("plus eval")[&loss].to_f64_lossy_vec()[0];
-                let fm = eval_tensor(&dag, &im).expect("minus eval")[&loss].to_f64_lossy_vec()[0];
+                let fp = eval_tensor(&dag, &ip, &mut chelis_types::NativeServices::new(None))
+                    .expect("plus eval")[&loss]
+                    .to_f64_lossy_vec()[0];
+                let fm = eval_tensor(&dag, &im, &mut chelis_types::NativeServices::new(None))
+                    .expect("minus eval")[&loss]
+                    .to_f64_lossy_vec()[0];
                 let numerical = (fp - fm) / (2.0 * h);
                 assert!(
                     (a - numerical).abs() < 1e-3,
@@ -24140,7 +24217,12 @@ mod tests {
                 "idx".to_string(),
                 TensorValue::from_vec(vec![2], vec![0.0, 2.0]),
             );
-            let vals = eval_tensor(&result.dag, &inputs).expect("windowed gather grad eval");
+            let vals = eval_tensor(
+                &result.dag,
+                &inputs,
+                &mut chelis_types::NativeServices::new(None),
+            )
+            .expect("windowed gather grad eval");
             assert_eq!(
                 vals[&grad_x].to_f64_lossy_vec(),
                 vec![1.0, 0.0, 1.0, 0.0],
@@ -24281,9 +24363,13 @@ mod tests {
                     .lower_expr(&parse("(app {} (var {} first) (lit {} 10.0) (var {} x))"))
                     .unwrap();
                 let root = result.expect_node("scalar result", runtime).unwrap();
-                let values =
-                    crate::eval::eval_tensor_roots_with_strict(&ctx.dag, &[root], |_| None)
-                        .expect("all actuals were lowered in caller scope");
+                let values = crate::eval::eval_tensor_roots_with_strict(
+                    &ctx.dag,
+                    &[root],
+                    |_| None,
+                    &mut chelis_types::NativeServices::new(None),
+                )
+                .expect("all actuals were lowered in caller scope");
                 assert_eq!(values[&root].to_f64_lossy_vec(), vec![8.0]);
                 assert_eq!(ctx.bindings["x"].as_single_node(), caller.as_single_node());
                 assert!(!ctx.bindings.contains_key("y"));
@@ -24319,8 +24405,13 @@ mod tests {
                 .unwrap()
                 .expect_node("expanded result", runtime)
                 .unwrap();
-            let values = crate::eval::eval_tensor_roots_with_strict(&ctx.dag, &[root], |_| None)
-                .expect("static count remains caller-owned");
+            let values = crate::eval::eval_tensor_roots_with_strict(
+                &ctx.dag,
+                &[root],
+                |_| None,
+                &mut chelis_types::NativeServices::new(None),
+            )
+            .expect("static count remains caller-owned");
             assert_eq!(values[&root].to_f64_lossy_vec(), vec![7.0; 3]);
             assert_eq!(ctx.static_size_bindings["n"], 3);
             assert!(!ctx.static_size_bindings.contains_key("count"));
@@ -25412,12 +25503,18 @@ mod regression_tests {
 
     fn parse_and_lower(src: &str, runtime: &LoweringRuntime) -> Dag {
         let exprs = chelis_deep::parser::parse_str(src).expect("parse failed");
-        let checked = chelis_types::check_ir_program(&exprs, chelis_types::ProgramOrigin::Unlinked)
-            .unwrap_or_else(|result| panic!("IR check failed: {:?}", result.errors));
-        let checked = chelis_effects::check_program(&checked)
-            .unwrap_or_else(|errors| panic!("effect check failed: {errors:?}"));
-        let checked = chelis_types::check_linearity(&checked)
-            .unwrap_or_else(|errors| panic!("linearity check failed: {errors:?}"));
+        let checked = chelis_types::check_ir_program(
+            &exprs,
+            chelis_types::ProgramOrigin::Unlinked,
+            &mut chelis_types::NativeServices::new(None),
+        )
+        .unwrap_or_else(|result| panic!("IR check failed: {:?}", result.errors));
+        let checked =
+            chelis_effects::check_program(&checked, &mut chelis_types::NativeServices::new(None))
+                .unwrap_or_else(|errors| panic!("effect check failed: {errors:?}"));
+        let checked =
+            chelis_types::check_linearity(&checked, &mut chelis_types::NativeServices::new(None))
+                .unwrap_or_else(|errors| panic!("linearity check failed: {errors:?}"));
         lower_program(&checked, runtime)
     }
 
@@ -26884,9 +26981,12 @@ mod regression_tests {
             )]);
             let roots: Vec<crate::dag::NodeId> = dag.roots().to_vec();
             assert!(!roots.is_empty(), "grad DAG must have at least one root");
-            let result = crate::eval::eval_tensor_roots_with_strict(&dag, &roots, |name| {
-                inputs.get(name).cloned()
-            });
+            let result = crate::eval::eval_tensor_roots_with_strict(
+                &dag,
+                &roots,
+                |name| inputs.get(name).cloned(),
+                &mut chelis_types::NativeServices::new(None),
+            );
             let result = result.expect("evaluation of grad(loss)(input) must succeed");
             let output = &result[roots.last().unwrap()];
             assert_eq!(output.shape, vec![1], "gradient shape must be [1]");
@@ -26959,9 +27059,12 @@ mod regression_tests {
             )]);
             let roots: Vec<crate::dag::NodeId> = dag.roots().to_vec();
             assert!(!roots.is_empty(), "DAG must have roots");
-            let result = crate::eval::eval_tensor_roots_with_strict(&dag, &roots, |name| {
-                inputs.get(name).cloned()
-            });
+            let result = crate::eval::eval_tensor_roots_with_strict(
+                &dag,
+                &roots,
+                |name| inputs.get(name).cloned(),
+                &mut chelis_types::NativeServices::new(None),
+            );
             let result = result.expect("evaluation must succeed");
             let output = &result[roots.last().unwrap()];
             assert_eq!(output.shape, vec![1], "gradient shape must be [1]");

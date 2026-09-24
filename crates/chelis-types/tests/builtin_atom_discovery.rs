@@ -213,8 +213,11 @@ fn checked_applications_and_lexical_shadows_remain_distinct() {
         include_str!("fixtures/core/tests/builtin_atom_discovery/application_05.deep"),
     ] {
         let deep = chelis_deep::parse_and_stamp_file(source).expect("core fixture parses");
-        let checked =
-            chelis_types::check_typed_program(&deep, chelis_types::ProgramOrigin::Unlinked);
+        let checked = chelis_types::check_typed_program(
+            &deep,
+            chelis_types::ProgramOrigin::Unlinked,
+            &mut chelis_types::NativeServices::new(None),
+        );
         assert!(checked.is_ok(), "{source}: {checked:?}");
     }
     for source in [
@@ -223,8 +226,12 @@ fn checked_applications_and_lexical_shadows_remain_distinct() {
     ] {
         let deep = chelis_deep::parse_and_stamp_file(source).expect("core fixture parses");
         assert!(
-            chelis_types::check_typed_program(&deep, chelis_types::ProgramOrigin::Unlinked)
-                .is_err(),
+            chelis_types::check_typed_program(
+                &deep,
+                chelis_types::ProgramOrigin::Unlinked,
+                &mut chelis_types::NativeServices::new(None)
+            )
+            .is_err(),
             "{source}"
         );
     }
@@ -241,7 +248,12 @@ fn symbolic_observation_preserves_legal_applications_and_rejects_wrong_bounds() 
     ] {
         let deep = chelis_deep::parse_and_stamp_file(source).expect("core fixture parses");
         assert!(
-            chelis_types::check_typed_program(&deep, chelis_types::ProgramOrigin::Unlinked).is_ok(),
+            chelis_types::check_typed_program(
+                &deep,
+                chelis_types::ProgramOrigin::Unlinked,
+                &mut chelis_types::NativeServices::new(None)
+            )
+            .is_ok(),
             "{source}"
         );
     }
@@ -253,9 +265,12 @@ fn symbolic_observation_preserves_legal_applications_and_rejects_wrong_bounds() 
         include_str!("fixtures/core/tests/builtin_atom_discovery/application_17.deep"),
     ] {
         let deep = chelis_deep::parse_and_stamp_file(source).expect("core fixture parses");
-        let errors =
-            chelis_types::check_typed_program(&deep, chelis_types::ProgramOrigin::Unlinked)
-                .unwrap_err();
+        let errors = chelis_types::check_typed_program(
+            &deep,
+            chelis_types::ProgramOrigin::Unlinked,
+            &mut chelis_types::NativeServices::new(None),
+        )
+        .unwrap_err();
         assert!(!errors.errors.is_empty(), "{source}");
         assert!(
             errors
@@ -276,7 +291,7 @@ fn symbolic_selection_resolves_each_instantiation_without_a_default_case() {
     for name in ["eq", "neq", "to_string"] {
         let decl = builtin_decl(name).unwrap();
         let selection = decl
-            .semantic_selection(&[Type::Var(variable)], &Subst::new())
+            .semantic_selection(&[Type::Var(variable)], &mut Subst::new())
             .unwrap();
         assert!(matches!(&selection, BuiltinCaseSelection::ByOperand(_)));
         assert!(decl.semantic_case(&[Type::Var(variable)]).is_err());
@@ -302,7 +317,7 @@ fn symbolic_selection_resolves_each_instantiation_without_a_default_case() {
             let mut subst = Subst::new();
             subst.insert_type(variable, ty).unwrap();
             assert_eq!(
-                selection.resolve(&subst).unwrap(),
+                selection.resolve(&mut subst).unwrap(),
                 BuiltinCaseSelection::Resolved(expected)
             );
         }
@@ -310,11 +325,11 @@ fn symbolic_selection_resolves_each_instantiation_without_a_default_case() {
     // A symbolic len is an obligation, not permission to skip its selector.
     let decl = builtin_decl("len").unwrap();
     let selection = decl
-        .semantic_selection(&[Type::Var(variable)], &Subst::new())
+        .semantic_selection(&[Type::Var(variable)], &mut Subst::new())
         .unwrap();
     let mut invalid = Subst::new();
     invalid
         .insert_type(variable, Type::Prim(Prim::F32))
         .unwrap();
-    assert!(selection.resolve(&invalid).is_err());
+    assert!(selection.resolve(&mut invalid).is_err());
 }

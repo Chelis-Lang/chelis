@@ -65,10 +65,10 @@ fn sites<'a>(
 /// arm is never re-entered.
 #[test]
 fn a_route_registration_replaces_a_dtype_suspension_for_the_same_call() {
-    let (list, kids, env, mut product, subst, arg_tys) = probe();
+    let (list, kids, env, mut product, mut subst, arg_tys) = probe();
     let (route, dtype) = sites(&list, &kids, &env);
 
-    dtype.register(&arg_tys, &Type::Unit, &subst, &mut product);
+    dtype.register(&arg_tys, &Type::Unit, &mut subst, &mut product);
     assert_eq!(
         product.post_app_replays_for(&list),
         vec![PostAppReplay::DtypeAdmissibility],
@@ -89,11 +89,11 @@ fn a_route_registration_replaces_a_dtype_suspension_for_the_same_call() {
 /// covers it. One entry per call either way, so neither validator runs twice.
 #[test]
 fn a_dtype_suspension_after_a_route_registration_is_a_no_op() {
-    let (list, kids, env, mut product, subst, arg_tys) = probe();
+    let (list, kids, env, mut product, mut subst, arg_tys) = probe();
     let (route, dtype) = sites(&list, &kids, &env);
 
     route.register(&arg_tys, &Type::Unit, &mut product);
-    dtype.register(&arg_tys, &Type::Unit, &subst, &mut product);
+    dtype.register(&arg_tys, &Type::Unit, &mut subst, &mut product);
     assert_eq!(
         product.post_app_replays_for(&list),
         vec![PostAppReplay::Route],

@@ -140,7 +140,12 @@ fn gather_axis0_distinct_indices_gradient_is_one_per_picked_row() {
         "indices".to_string(),
         TensorValue::from_vec(vec![3], vec![0.0, 2.0, 3.0]),
     );
-    let vals = eval_tensor_with(&grad.dag, |n| inputs.get(n).cloned()).expect("bwd eval");
+    let vals = eval_tensor_with(
+        &grad.dag,
+        |n| inputs.get(n).cloned(),
+        &mut chelis_types::NativeServices::new(None),
+    )
+    .expect("bwd eval");
     let dtable = &vals[&grad_node];
     assert_eq!(dtable.shape, vec![4, 2]);
     // Row 0: picked once → 1; Row 1: never → 0; Row 2: picked once → 1;
@@ -182,7 +187,12 @@ fn gather_axis0_mixed_indices_gradient_matches_per_row_counts() {
         "indices".to_string(),
         TensorValue::from_vec(vec![4], vec![0.0, 0.0, 2.0, 0.0]),
     );
-    let vals = eval_tensor_with(&grad.dag, |n| inputs.get(n).cloned()).expect("bwd eval");
+    let vals = eval_tensor_with(
+        &grad.dag,
+        |n| inputs.get(n).cloned(),
+        &mut chelis_types::NativeServices::new(None),
+    )
+    .expect("bwd eval");
     let dtable = &vals[&grad_node];
     assert_eq!(dtable.shape, vec![4, 2]);
     // Row counts: 0→3, 1→0, 2→1, 3→0 → grad per (row, dim) cell.
@@ -255,7 +265,12 @@ fn gather_axis1_mixed_indices_gradient_matches_per_column_counts() {
         "indices".to_string(),
         TensorValue::from_vec(vec![4], vec![0.0, 2.0, 0.0, 4.0]),
     );
-    let vals = eval_tensor_with(&grad.dag, |n| inputs.get(n).cloned()).expect("bwd eval");
+    let vals = eval_tensor_with(
+        &grad.dag,
+        |n| inputs.get(n).cloned(),
+        &mut chelis_types::NativeServices::new(None),
+    )
+    .expect("bwd eval");
     let dtable = &vals[&grad_node];
     assert_eq!(dtable.shape, vec![2, 5]);
     // Column counts: 0→2, 1→0, 2→1, 3→0, 4→1. Same per row.
@@ -309,7 +324,12 @@ fn gather_eval_out_of_bounds_index_panics_fail_closed() {
         "indices".to_string(),
         TensorValue::from_vec(vec![2], vec![1.0, 5.0]),
     );
-    let _ = eval_tensor_with(&dag, |n| inputs.get(n).cloned()).unwrap();
+    let _ = eval_tensor_with(
+        &dag,
+        |n| inputs.get(n).cloned(),
+        &mut chelis_types::NativeServices::new(None),
+    )
+    .unwrap();
 }
 
 /// Negative gather indices must also panic fail-closed.
@@ -349,7 +369,12 @@ fn gather_eval_negative_index_panics_fail_closed() {
         "indices".to_string(),
         TensorValue::from_vec(vec![2], vec![0.0, -1.0]),
     );
-    let _ = eval_tensor_with(&dag, |n| inputs.get(n).cloned()).unwrap();
+    let _ = eval_tensor_with(
+        &dag,
+        |n| inputs.get(n).cloned(),
+        &mut chelis_types::NativeServices::new(None),
+    )
+    .unwrap();
 }
 
 #[test]
@@ -400,7 +425,12 @@ fn scatter_add_eval_out_of_bounds_index_panics_fail_closed() {
         "updates".to_string(),
         TensorValue::from_vec(vec![2, 2], vec![1.0; 4]),
     );
-    let _ = eval_tensor_with(&dag, |n| inputs.get(n).cloned()).unwrap();
+    let _ = eval_tensor_with(
+        &dag,
+        |n| inputs.get(n).cloned(),
+        &mut chelis_types::NativeServices::new(None),
+    )
+    .unwrap();
 }
 
 #[test]
@@ -451,7 +481,12 @@ fn scatter_replace_eval_out_of_bounds_index_panics_fail_closed() {
         "updates".to_string(),
         TensorValue::from_vec(vec![2, 2], vec![1.0; 4]),
     );
-    let _ = eval_tensor_with(&dag, |n| inputs.get(n).cloned()).unwrap();
+    let _ = eval_tensor_with(
+        &dag,
+        |n| inputs.get(n).cloned(),
+        &mut chelis_types::NativeServices::new(None),
+    )
+    .unwrap();
 }
 
 /// Scatter AD must reject regardless of `wrt`. The brief specifies the
@@ -638,8 +673,12 @@ fn scatter_add_backward_routes_target_and_updates_but_not_indices() {
             TensorValue::from_vec(vec![2], vec![23.0, 29.0]),
         ),
     ]);
-    let values = eval_tensor_with(&grad.dag, |name| inputs.get(name).cloned())
-        .expect("ScatterAdd adjoints evaluate");
+    let values = eval_tensor_with(
+        &grad.dag,
+        |name| inputs.get(name).cloned(),
+        &mut chelis_types::NativeServices::new(None),
+    )
+    .expect("ScatterAdd adjoints evaluate");
     assert_eq!(
         values[&grad.grad_nodes[&target]].to_f64_lossy_vec(),
         vec![2.0, 3.0, 5.0, 7.0]

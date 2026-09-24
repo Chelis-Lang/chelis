@@ -147,11 +147,11 @@ pub(super) enum WrtSelector<'a> {
     Index(i64),
 }
 
-fn wrt_selector(expr: &deep::Expr) -> Option<WrtSelector<'_>> {
+fn wrt_selector<'e>(expr: &'e deep::Expr, stack: &mut StackBudget<'_>) -> Option<WrtSelector<'e>> {
     if let Some(items) = tagged_children(expr, DeepTag::Tuple) {
         return Some(WrtSelector::Tuple(items));
     }
-    extract_int_for_dim(expr).map(WrtSelector::Index)
+    extract_int_for_dim(expr, stack).map(WrtSelector::Index)
 }
 
 pub(super) fn grad_wrt_indices(
@@ -199,7 +199,7 @@ pub(super) fn grad_wrt_indices(
             }
             let mut indices = Vec::new();
             for item in items {
-                let Some(index) = extract_int_for_dim(item) else {
+                let Some(index) = extract_int_for_dim(item, &mut errors.stack()) else {
                     return Err(report_witness(
                         errors,
                         CheckError::new(
@@ -476,7 +476,7 @@ fn vmap_transform_dims(
     axis: usize,
     batch_var: DimVar,
     vg: &mut VarGen,
-    subst: &Subst,
+    subst: &mut Subst,
     mapped_axis_renaming: &mut UnordMap<DimVar, DimVar>,
 ) -> Result<Vec<Dim>, String> {
     let has_rank_spread = dims.iter().any(|dim| matches!(dim, Dim::Rank(_)));
@@ -523,7 +523,7 @@ pub(super) fn vmap_transform_param_type(
     axis: usize,
     batch_var: DimVar,
     vg: &mut VarGen,
-    subst: &Subst,
+    subst: &mut Subst,
     mapped_axis_renaming: &mut UnordMap<DimVar, DimVar>,
 ) -> Result<Type, String> {
     match ty {
@@ -563,7 +563,7 @@ pub(super) fn vmap_transform_result_type(
     axis: usize,
     batch_var: DimVar,
     vg: &mut VarGen,
-    subst: &Subst,
+    subst: &mut Subst,
     mapped_axis_renaming: &mut UnordMap<DimVar, DimVar>,
 ) -> Result<Type, String> {
     match ty {
@@ -629,11 +629,13 @@ pub(super) fn infer_def(
     // chelis#397/#469: record the size provenance (see `infer_top_level` /
     // `infer_let`) so a later `expand` size built from this binding can be
     // checked for materializability. Classified against the pre-binding scope.
-    match classify_expand_size(&kids[1], env, adt_reg, subst) {
+    match classify_expand_size(&kids[1], env, adt_reg, subst, &mut errors.stack()) {
         SizeClass::Static => {
-            if let Some(value) =
-                fold_static_int_expr(&kids[1], |bound| env.static_size_value(bound))
-            {
+            if let Some(value) = fold_static_int_expr_with_stack(
+                &kids[1],
+                |bound| env.static_size_value(bound),
+                &mut errors.stack(),
+            ) {
                 env.mark_static_size_value(&name, value);
             } else {
                 env.mark_size_provenance(&name, crate::env::SizeProvenance::Static);

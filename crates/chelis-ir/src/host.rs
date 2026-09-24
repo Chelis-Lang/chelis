@@ -20796,9 +20796,12 @@ mod tests {
             let deep: Vec<Expr> =
                 serde_json::from_str(include_str!("../tests/fixtures/helper_summary_fatal.json"))
                     .expect("original helper-summary AST");
-            let checked =
-                chelis_types::check_ir_program(&deep, chelis_types::ProgramOrigin::Unlinked)
-                    .unwrap_or_else(|result| panic!("IR check failed: {:?}", result.errors));
+            let checked = chelis_types::check_ir_program(
+                &deep,
+                chelis_types::ProgramOrigin::Unlinked,
+                &mut chelis_types::NativeServices::new(None),
+            )
+            .unwrap_or_else(|result| panic!("IR check failed: {:?}", result.errors));
             let session = HostLoweringSession::new(&checked, runtime);
             for _ in 0..2 {
                 let result = top_level_fn_helper_summary_rejects(&session, name)
@@ -20952,18 +20955,27 @@ mod tests {
 
     fn parse_and_check(src: &str) -> CheckedProgram {
         let exprs = chelis_deep::parser::parse_str(src).expect("parse failed");
-        let checked = chelis_types::check_ir_program(&exprs, chelis_types::ProgramOrigin::Unlinked)
-            .unwrap_or_else(|result| panic!("IR check failed: {:?}", result.errors));
-        let checked = chelis_effects::check_program(&checked)
-            .unwrap_or_else(|errors| panic!("effect check failed: {errors:?}"));
-        chelis_types::check_linearity(&checked)
+        let checked = chelis_types::check_ir_program(
+            &exprs,
+            chelis_types::ProgramOrigin::Unlinked,
+            &mut chelis_types::NativeServices::new(None),
+        )
+        .unwrap_or_else(|result| panic!("IR check failed: {:?}", result.errors));
+        let checked =
+            chelis_effects::check_program(&checked, &mut chelis_types::NativeServices::new(None))
+                .unwrap_or_else(|errors| panic!("effect check failed: {errors:?}"));
+        chelis_types::check_linearity(&checked, &mut chelis_types::NativeServices::new(None))
             .unwrap_or_else(|errors| panic!("linearity check failed: {errors:?}"))
     }
 
     fn deep_check(src: &str) -> CheckedProgram {
         let deep = chelis_deep::parser::parse_str(src).expect("Deep fixture parse failed");
-        chelis_types::check_ir_program(&deep, chelis_types::ProgramOrigin::Unlinked)
-            .unwrap_or_else(|result| panic!("IR check failed: {:?}", result.errors))
+        chelis_types::check_ir_program(
+            &deep,
+            chelis_types::ProgramOrigin::Unlinked,
+            &mut chelis_types::NativeServices::new(None),
+        )
+        .unwrap_or_else(|result| panic!("IR check failed: {:?}", result.errors))
     }
 
     fn deep_var(name: &str) -> String {
@@ -21276,9 +21288,9 @@ mod tests {
                 .spawn(move || {
                 crate::lowering_runtime::with_native_lowering_runtime(|runtime| {
                     let typed = deep_check(&issue_1835_fanout_source(DEPTH, tensor_result));
-                    let effected = chelis_effects::check_program(&typed).expect("effect check");
+                    let effected = chelis_effects::check_program(&typed, &mut chelis_types::NativeServices::new(None)).expect("effect check");
                     let checked =
-                        chelis_types::check_linearity(&effected).expect("linearity check");
+                        chelis_types::check_linearity(&effected, &mut chelis_types::NativeServices::new(None)).expect("linearity check");
                     let names = (0..=DEPTH)
                         .map(|level| format!("f{level}"))
                         .collect::<Vec<_>>();
@@ -21362,7 +21374,12 @@ mod tests {
                 "../tests/fixtures/core/src/host/issue_1835_kernel_decision_work_is_linear.deep"
             ));
             let mixed = chelis_types::check_linearity(
-                &chelis_effects::check_program(&mixed).expect("mixed effect check"),
+                &chelis_effects::check_program(
+                    &mixed,
+                    &mut chelis_types::NativeServices::new(None),
+                )
+                .expect("mixed effect check"),
+                &mut chelis_types::NativeServices::new(None),
             )
             .expect("mixed linearity check");
             let mixed_names = ["k", "loud", "s", "k2"].map(String::from).to_vec();
@@ -21467,9 +21484,16 @@ mod tests {
             .spawn(move || {
                 crate::lowering_runtime::with_native_lowering_runtime(|runtime| {
                     let typed = deep_check(&issue_1205_source(operations, flat));
-                    let effected = chelis_effects::check_program(&typed).expect("effect check");
-                    let checked =
-                        chelis_types::check_linearity(&effected).expect("linearity check");
+                    let effected = chelis_effects::check_program(
+                        &typed,
+                        &mut chelis_types::NativeServices::new(None),
+                    )
+                    .expect("effect check");
+                    let checked = chelis_types::check_linearity(
+                        &effected,
+                        &mut chelis_types::NativeServices::new(None),
+                    )
+                    .expect("linearity check");
                     reset_host_work_profile();
                     try_lower_compiled_program(&checked, runtime).expect("#1205 fixture lowers");
                     take_host_work_profile()
@@ -21745,8 +21769,14 @@ mod tests {
                 !expr_is_runtime_shaped_to_tensor(literal),
                 "the preflight must share the lowerer's static-literal exemption"
             );
-            let effected = chelis_effects::check_program(&typed).expect("effect check");
-            let checked = chelis_types::check_linearity(&effected).expect("linearity check");
+            let effected =
+                chelis_effects::check_program(&typed, &mut chelis_types::NativeServices::new(None))
+                    .expect("effect check");
+            let checked = chelis_types::check_linearity(
+                &effected,
+                &mut chelis_types::NativeServices::new(None),
+            )
+            .expect("linearity check");
             reset_host_work_profile();
             try_lower_compiled_program(&checked, runtime).expect("static to_tensor fixture lowers");
             let profile = take_host_work_profile();
@@ -21837,8 +21867,16 @@ mod tests {
                 "the local f call must inherit the aliased top-level bc summary"
             );
 
-            let effected = chelis_effects::check_program(&aliased).expect("effect check");
-            let checked = chelis_types::check_linearity(&effected).expect("linearity check");
+            let effected = chelis_effects::check_program(
+                &aliased,
+                &mut chelis_types::NativeServices::new(None),
+            )
+            .expect("effect check");
+            let checked = chelis_types::check_linearity(
+                &effected,
+                &mut chelis_types::NativeServices::new(None),
+            )
+            .expect("linearity check");
             reset_host_work_profile();
             try_lower_compiled_program(&checked, runtime).expect("aliased fixture lowers");
             let profile = take_host_work_profile();

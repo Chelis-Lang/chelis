@@ -36,14 +36,22 @@ fn stamped(source: &str) -> Vec<Expr> {
 /// Errors from the stamped-Deep ingress, which preserves `Expr::BareList`
 /// rather than normalizing it to `Expr::List` first.
 fn typed_errors(exprs: &[Expr]) -> Vec<CheckError> {
-    match check_typed_program(exprs, chelis_types::ProgramOrigin::Unlinked) {
+    match check_typed_program(
+        exprs,
+        chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
+    ) {
         Ok(_) => Vec::new(),
         Err(result) => result.errors,
     }
 }
 
 fn ir_errors(exprs: &[Expr]) -> Vec<CheckError> {
-    match check_ir_program(exprs, chelis_types::ProgramOrigin::Unlinked) {
+    match check_ir_program(
+        exprs,
+        chelis_types::ProgramOrigin::Unlinked,
+        &mut chelis_types::NativeServices::new(None),
+    ) {
         Ok(_) => Vec::new(),
         Err(result) => result.errors,
     }

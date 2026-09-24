@@ -270,7 +270,8 @@ pub(super) fn annotate_ir_program(
     errors: &mut DiagnosticSink<'_>,
 ) -> Vec<deep::Expr> {
     let items = top_level_decl_items_with_modules(exprs);
-    let declared_signatures = collect_declared_sig_metadata(items.iter().map(|(_, expr)| *expr));
+    let declared_signatures =
+        collect_declared_sig_metadata(items.iter().map(|(_, expr)| *expr), &mut errors.stack());
     let annotation_context = AnnotationResolutionContext::root(&declared_signatures);
     annotate_top_levels(exprs, product, annotation_context, errors)
 }
@@ -289,10 +290,9 @@ pub(super) fn annotate_top_levels(
     annotation_context: AnnotationResolutionContext<'_>,
     errors: &mut DiagnosticSink<'_>,
 ) -> Vec<deep::Expr> {
-    let cancel = crate::cancel::current_cancel_token();
     let mut annotated = Vec::with_capacity(exprs.len());
     for expr in exprs {
-        if cancel.as_ref().is_some_and(CancelToken::is_cancelled) {
+        if errors.cancellation_observed() {
             break;
         }
         annotated.push(annotate_expr_with_scope(
@@ -313,7 +313,20 @@ pub(super) fn annotate_expr_with_scope(
 ) -> deep::Expr {
     // Bail value is the identity (unannotated) expr: annotation is a
     // best-effort pass and the entry boundary fails the check anyway.
-    stack_guard!("annotate_expr_with_scope", expr, expr.clone());
+    if errors.frame_exhausted("annotate_expr_with_scope", || expr.span_id()) {
+        return expr.clone();
+    }
+    let result = annotate_expr_with_scope_frame(expr, product, annotation_context, errors);
+    errors.exit_frame();
+    result
+}
+
+fn annotate_expr_with_scope_frame(
+    expr: &deep::Expr,
+    product: &InferenceProduct,
+    annotation_context: AnnotationResolutionContext<'_>,
+    errors: &mut DiagnosticSink<'_>,
+) -> deep::Expr {
     // PP7/E5e producer exception: this is an exhaustive representation-
     // preserving transformer. The List and Node arms each rebuild the same
     // carrier they received; neither arm decides that the other carrier is

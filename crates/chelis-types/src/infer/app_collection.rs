@@ -168,11 +168,13 @@ pub(super) enum ConcatListInfo {
 pub(super) fn tensor_concat_call_evidence(
     kids: &[deep::Expr],
     env: &Env,
-    subst: &Subst,
+    subst: &mut Subst,
     errors: &mut DiagnosticSink<'_>,
     product: &InferenceProduct,
 ) -> TensorConcatCallEvidence {
-    let raw_axis = kids.get(2).and_then(extract_int_for_dim);
+    let raw_axis = kids
+        .get(2)
+        .and_then(|expr| extract_int_for_dim(expr, &mut errors.stack()));
     let list_info = match kids.get(1).and_then(collect_cons_chain_for_shape) {
         Some(elements) => ConcatListInfo::Direct(
             elements
@@ -220,7 +222,7 @@ pub(super) fn tensor_concat_result_type(
     element_ty: &Type,
     raw_axis: Option<i64>,
     list_info: ConcatListInfo,
-    subst: &Subst,
+    subst: &mut Subst,
 ) -> Result<Type, String> {
     let Type::Tensor(dims, precision) = element_ty else {
         return Err(format!(
