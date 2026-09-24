@@ -13,15 +13,16 @@ either operation's accepted language or the numeric semantics in
 
 ## The shared failure boundary
 
-Both reported programs check and evaluate. In #1760, `gt(xs, xs)` changes the
-element dtype from a generic float to Bool, and compiled C constructs a
-rank-zero iteration domain for a concrete rank-one or rank-two result. In
-#1761, a nested `gt(where(gt(xs, xs), xs, xs), xs)` crosses the same generic
-instantiation with a Bool mask, numeric selected values, and a Bool result;
-ownership lowering finds Bool where the numeric subtree requires the bound
-float dtype. These are distinct observations of a call's checked rank and
-precision being reconstructed from a later operation or annotation instead
-of transported as one instantiated contract.
+The original #1760 report found a rank-zero C iteration domain for a concrete
+rank-one or rank-two Bool result from `gt(xs, xs)`. Its historical source now
+rejects an undeclared rank binder; with the required explicit binder, rank-one
+and rank-two versions pass Eval and linked C on the design PR's reviewed head.
+The original #1761 report found Bool where the numeric subtree of a nested
+`gt(where(gt(xs, xs), xs, xs), xs)` required the bound float dtype. That exact
+nested witness also passes Eval and linked C on the reviewed head. These were
+distinct historical failures at the boundary where a call's checked rank and
+precision must remain one instantiated contract. The passing replays do not
+establish either issue's complete acceptance matrix or the fixing commit.
 
 This bounded design owns concrete generic-call actualization through an elementwise DAG
 and its C iteration domain. It does not own a runtime extent equality claim:
@@ -70,10 +71,12 @@ registration.
 ## Acceptance and order
 
 Write the exact positive and negative tests before changing lowering. First,
-freeze each issue's current failure and a generic passthrough control. Then
-make the contract mandatory at the call/body boundary, migrate both elementwise
-lowering and C iteration-domain consumers, and remove any reconstruction path
-that infers a result rank or dtype from an adjacent operand's role.
+pin each historical witness in current syntax and a generic passthrough
+control, including the bounded replays that already pass. Inspect the
+remaining matrix for a failing consumer; close any gap by making the contract
+mandatory at the call/body boundary, migrating the affected elementwise and C
+iteration-domain consumers, and removing a reconstruction path that infers a
+result rank or dtype from an adjacent operand's role.
 
 | Issue | Required positive receipt | Required negative/control receipt |
 |---|---|---|
