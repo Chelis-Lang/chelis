@@ -69,7 +69,7 @@ fn unary_param(stage: &Expr) -> Option<&str> {
 /// `None` when no `app` node admits the synthesized application. A pipe stage
 /// is an inference-bypass child, so a hand-built `Pipe` node can carry a bare
 /// name there. Metadata bound to the stage's own tag remains on that stage;
-/// the synthesized `app` gets its location from the stage's span.
+/// the synthesized `app` gets its location from the stage's span metadata.
 fn fold_stage(stage: &Expr, acc: Expr) -> Option<Expr> {
     if let Some(param) = unary_param(stage)
         && let Some((_, _, stage_kids)) = stamped(stage)
@@ -112,8 +112,12 @@ fn fold_stage(stage: &Expr, acc: Expr) -> Option<Expr> {
     // A diagnostic about the application points at the stage the user wrote.
     // The stage retains tag-bound keys such as `grad`'s `wrt`; copying them
     // onto `app` would violate the node gate and leave a valid pipe unfolded.
+    // The source span is valid on either tag and must travel to the app too.
     let span = stage.span();
-    crate::node::Node::try_new(DeepTag::App, Metadata::default(), vec![stage, acc])
+    let app_meta = stamped(&stage)
+        .and_then(|(_, meta, _)| meta.span_id().cloned())
+        .map_or_else(Metadata::default, |span| MetadataValue::Span(span).into());
+    crate::node::Node::try_new(DeepTag::App, app_meta, vec![stage, acc])
         .ok()
         .map(|node| Expr::Node(Box::new(node), span))
 }
@@ -424,6 +428,15 @@ mod tests {
         assert_eq!(
             folded.trim_end(),
             "(app {} (grad {wrt: (var {} v)} (var {} sq)) (var {} x))"
+        );
+    }
+
+    #[test]
+    fn a_stage_span_is_kept_on_the_synthesized_application() {
+        let folded = fold_source(r#"(pipe {} (var {} x) (var {span: "stage"} f))"#);
+        assert_eq!(
+            folded.trim_end(),
+            r#"(app {span: "stage"} (var {span: "stage"} f) (var {} x))"#
         );
     }
 

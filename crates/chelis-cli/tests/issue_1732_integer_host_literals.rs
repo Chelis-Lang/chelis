@@ -54,7 +54,7 @@ fn check_eval_and_run_kind(source: &str, expected: &str, extension: &str) {
 fn executable_nullary_integer_example_agrees_in_eval_and_c() {
     check_eval_and_run(
         include_str!("../../../examples/integer_functions.ch"),
-        "anchor = 7\nuser = 7\n",
+        "anchor = 7\nuser = 7\nzero_checked = true\n",
     );
 }
 
