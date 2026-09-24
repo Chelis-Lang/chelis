@@ -1432,11 +1432,10 @@ pub(super) fn validate_ir_expr(
                 }
                 return StaticValue::Unknown;
             }
-            // `par` (sequential v1, spec/03-deep-syntax.md §2.3) and `jit`
-            // (compilation trigger, §2.7) are spec-blessed pass-through
-            // forms at Phase 0 evaluation. The validator used to reject
-            // both; the rejection is removed because lowering handles them
-            // (see `lower_par` and the `jit` lowering arm).
+            // `jit` is a spec-blessed pass-through form. `par` retains a
+            // legacy validation disposition here, but infer_expr owns the
+            // typed chelis#2388 checker fence before a checked program can
+            // reach lowering.
             if node.tag() == DeepTag::App
                 && let Some(func_name) = active_ir_builtin_name(node, static_env)
                 && is_ir_shape_sensitive_builtin(func_name)

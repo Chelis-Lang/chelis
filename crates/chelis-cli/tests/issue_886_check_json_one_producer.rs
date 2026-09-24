@@ -88,6 +88,7 @@ const CHECK_KIND_SPELLINGS: &[&str] = &[
     "UnknownForm",
     "MalformedForm",
     "Other",
+    "unsupported_feature",
     // effect diagnostics share the array
     "UnhandledEffect",
     "InvalidHandler",
@@ -118,6 +119,7 @@ fn every_emitted_kind_is_a_known_spelling() {
         "def f(x: f32) -> f32 = add(x, nope)\n",
         "def g(x: f32) -> f32 = add(x, cast(1, i32))\n",
         "def k(x: i64) -> i64 = copy(x)\n",
+        "def p() -> f32 = par { 1.0; 2.0 }\n",
     ] {
         let report = check_json(source);
         for error in report["errors"].as_array().expect("errors array") {

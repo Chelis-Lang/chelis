@@ -397,8 +397,10 @@ parallel runtime features are explicitly non-goals of this concurrency model.
 The tensor gather/scatter operations are not evidence of such a parallel runtime.
 
 Scheduling correctness therefore depends on complete data/shape/effect/ownership
-dependencies and synchronized foreign completion. Sequential `par` test success
-is permitted but does not test a parallel scheduler. Atomic reference counts
+dependencies and synchronized foreign completion. Chelis#2388 currently fences
+`par` in the checker because compiled host lowering can erase non-final effects;
+therefore the retained sequential lowerer supplies no runtime acceptance
+evidence. Atomic reference counts
 protect a lifetime protocol; they do not independently make all payload access,
 device queues or callbacks race-free. No concurrent execution was
 performed for this investigation.

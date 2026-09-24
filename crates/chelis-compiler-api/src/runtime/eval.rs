@@ -1161,17 +1161,11 @@ impl<'a> EvalContext<'a> {
                 )
             }
             DeepTag::Par => {
-                // `spec/03-deep-syntax.md` §2.3: `par` v1 is sequential
-                // composition; evaluate each child in order and return the
-                // value of the last child. Mirrors `lower_par` in
-                // `crates/chelis-ir/src/lower.rs`. Intermediate children
-                // are evaluated for their side effects (any
-                // `handle-effect` / `realize` / IO primitive in a child
-                // routes through its own host arm). If `par` has zero
-                // children, the spec doesn't define a v1 value; we return
-                // an error rather than synthesizing a zero default, since
-                // the parser/check layers should not have admitted an
-                // empty par body.
+                // Legacy sequential placeholder retained behind the
+                // chelis#2388 checker fence. No checked source program
+                // reaches this path until scheduler-independent cross-lane
+                // effects are complete. Keep the arm fail-closed for a
+                // malformed empty node used by internal probes.
                 let mut last: Option<RuntimeValue> = None;
                 for child in node.children {
                     last = Some(self.eval_expr(child)?);

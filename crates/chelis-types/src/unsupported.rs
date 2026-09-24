@@ -22,10 +22,10 @@
 //! over prose.
 //!
 //! **Status: the complete serialized surface is still the target.**
-//! Nothing on this path derives `Serialize`, and nothing constructs
-//! [`Stage::Checker`]. Chelis#1870 adds an in-process identity projection and
-//! retains the original [`Unsupported`] in compiler-api and selected lowering
-//! diagnostics, while serialized clients still receive
+//! Nothing on this path derives `Serialize`. Chelis#2388's `par` fence now
+//! constructs [`Stage::Checker`], while chelis#1870's in-process identity
+//! projection retains the original [`Unsupported`] in compiler-api and
+//! selected lowering diagnostics. Serialized clients still receive
 //! `kind: "unsupported_feature"` plus the rendering. Unimplemented rows also
 //! still lack the future exact capability-table key: their issue is tracking
 //! metadata, not semantic authority. Existing exact pins therefore remain.
