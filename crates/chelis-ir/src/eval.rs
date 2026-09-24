@@ -613,6 +613,71 @@ fn row_control(
         .scalar_at(leading_row(row, numel(shape), value.len())))
 }
 
+/// A key-operand random primitive's key batch against its operands, checked
+/// before it reads one, in [`RiscOp::draw_batch_layout`]'s order and with
+/// the C lane's report (spec/10 §3.2, rule V5): a key batch's shape is its
+/// data's leading axes, and each per-row control and activation is a
+/// leading part of that shape. The verifier relates the declared dims; this
+/// relates the values, so no row index rests on an extent nothing has
+/// checked. A key an inactive draw key withheld is rank 0, so it batches
+/// nothing. This lane builds each result from its data's shape, so it reads
+/// no declared result extent.
+fn check_draw_extents(
+    dag: &Dag,
+    node: &DagNode,
+    values: &UnordMap<NodeId, TensorValue>,
+) -> Result<(), String> {
+    let layout = node
+        .op
+        .draw_batch_layout()
+        .ok_or("check_draw_extents reads only a key-operand random primitive")?;
+    let op = layout.op;
+    let value = |slot: usize| node.inputs.get(slot).and_then(|input| values.get(input));
+    let Some(key) = value(layout.key).filter(|key| !key.shape.is_empty()) else {
+        return Ok(());
+    };
+    let key_dims = &dag
+        .get(node.inputs[layout.key])
+        .ok_or("random primitive key is not in its graph")?
+        .output_type
+        .dims;
+    let data = value(layout.data_input).ok_or("random primitive data is not available")?;
+    let operands = std::iter::once((layout.data_input, data, key.shape.len())).chain(
+        layout
+            .per_row
+            .iter()
+            .filter_map(|slot| value(*slot).map(|operand| (*slot, operand, operand.shape.len()))),
+    );
+    for (slot, operand, axes) in operands {
+        if axes > key.shape.len() || operand.shape.len() < axes {
+            return Err(format!(
+                "{op} input {slot} has rank {}, which its rank-{} key batch does not index",
+                operand.shape.len(),
+                key.shape.len()
+            ));
+        }
+        for axis in 0..axes {
+            let (claimed, observed) = (key.shape[axis], operand.shape[axis]);
+            if claimed != observed {
+                let claim = match key_dims.get(axis) {
+                    Some(DimInfo::Lit(value)) => value.to_string(),
+                    Some(DimInfo::Named(name, _)) => name.clone(),
+                    None => claimed.to_string(),
+                };
+                return Err(format!(
+                    "extent `{claim}`: claimed = {claimed}, {op} input {slot} axis {axis} = {observed}\n\
+                     {}",
+                    NumericTrap::Domain {
+                        op,
+                        prim: Prim::Int64
+                    }
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
 /// The element count of each row of `data` that a batch of keys of `shape`
 /// splits it into: the data's leading axes are the keys' shape.
 fn batched_row_len(data: &TensorValue, shape: &[usize], node: &DagNode) -> Result<usize, String> {
@@ -3722,27 +3787,36 @@ where
             // backend's `rintf` under the default rounding mode. NOT
             // `f64::round`, which rounds half away from zero.
             RiscOp::Round => unary_elementwise(ElementwiseUnOp::Round, &values[&node.inputs[0]])?,
-            RiscOp::Dropout | RiscOp::DropoutReplay => eval_dropout(
-                node,
-                &values[&node.inputs[0]],
-                &values[&node.inputs[1]],
-                draw_keys(node, 2, &values)?,
-            )?,
-            RiscOp::UniformLike => eval_uniform_like(
-                node,
-                &values[&node.inputs[0]],
-                &values[&node.inputs[1]],
-                &values[&node.inputs[2]],
-                out_prim,
-                draw_keys(node, 3, &values)?,
-            )?,
-            RiscOp::UniformBoundAdjoint { bound } => eval_uniform_bound_adjoint(
-                node,
-                &values[&node.inputs[1]],
-                *bound,
-                out_prim,
-                draw_keys(node, 2, &values)?,
-            )?,
+            RiscOp::Dropout | RiscOp::DropoutReplay => {
+                check_draw_extents(&bound_dag, node, &values)?;
+                eval_dropout(
+                    node,
+                    &values[&node.inputs[0]],
+                    &values[&node.inputs[1]],
+                    draw_keys(node, 2, &values)?,
+                )?
+            }
+            RiscOp::UniformLike => {
+                check_draw_extents(&bound_dag, node, &values)?;
+                eval_uniform_like(
+                    node,
+                    &values[&node.inputs[0]],
+                    &values[&node.inputs[1]],
+                    &values[&node.inputs[2]],
+                    out_prim,
+                    draw_keys(node, 3, &values)?,
+                )?
+            }
+            RiscOp::UniformBoundAdjoint { bound } => {
+                check_draw_extents(&bound_dag, node, &values)?;
+                eval_uniform_bound_adjoint(
+                    node,
+                    &values[&node.inputs[1]],
+                    *bound,
+                    out_prim,
+                    draw_keys(node, 2, &values)?,
+                )?
+            }
             RiscOp::DrawKey { .. } => {
                 unreachable!("draw keys are evaluated before the value match")
             }

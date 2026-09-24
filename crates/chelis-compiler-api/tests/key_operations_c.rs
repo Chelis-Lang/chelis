@@ -1220,3 +1220,352 @@ fn a_loaded_bridge_key_draws_the_counter_streams_bits_in_c() {
         }
     }
 }
+
+// ---- rule V5 at run time: extents a draw checks before it reads ----
+
+fn named_dims(name: &str, trailing: &[usize]) -> Vec<DimInfo> {
+    std::iter::once(DimInfo::Named(name.into(), None))
+        .chain(trailing.iter().map(|extent| DimInfo::Lit(*extent)))
+        .collect()
+}
+
+/// A value declared `[m, trailing..]` whose rows are those of the load
+/// `name`, declared `[p, trailing..]`: `op` (`neg`, or `not` for Bool) of
+/// that load. The verifier admits the renamed axis, and both lanes size the
+/// result from the load (chelis#1277's class), so at run time its rows can
+/// disagree with an `m` bound elsewhere. It is how a verified graph reaches
+/// a draw with operands whose extents disagree.
+fn rows_of_p(dag: &mut Dag, name: &str, trailing: &[usize], prim: Prim) -> NodeId {
+    let source = dag.add_node(
+        RiscOp::Load { name: name.into() },
+        vec![],
+        TensorType {
+            dims: named_dims("p", trailing),
+            precision: prim,
+        },
+        None,
+    );
+    let op = if prim == Prim::Bool {
+        RiscOp::Logical(chelis_ir::dag::LogicalKind::Not)
+    } else {
+        RiscOp::Neg
+    };
+    dag.add_node(
+        op,
+        vec![source],
+        TensorType {
+            dims: named_dims("m", trailing),
+            precision: prim,
+        },
+        None,
+    )
+}
+
+fn load_m(dag: &mut Dag, name: &str, trailing: &[usize], prim: Prim) -> NodeId {
+    dag.add_node(
+        RiscOp::Load { name: name.into() },
+        vec![],
+        TensorType {
+            dims: named_dims("m", trailing),
+            precision: prim,
+        },
+        None,
+    )
+}
+
+/// Which operand of a draw keyed by `k: tensor[m, key]` has `p` rows.
+#[derive(Clone, Copy, Debug)]
+enum Short {
+    DropoutData,
+    DropoutRate,
+    DropoutActivation,
+    UniformTemplate,
+    UniformHigh,
+    ReplayCotangent,
+    AdjointCotangent,
+}
+
+/// A draw whose `Short` operand has `p` rows while its key batch, and every
+/// other operand, has `m`. The short operand comes first, so neither lane
+/// has bound `m` when it sizes that operand from its load.
+fn short_operand_draw(short: Short) -> Dag {
+    let mut dag = Dag::new();
+    let f32_const = |dag: &mut Dag, value: f64| float_const(dag, Prim::F32, value);
+    let short_data = matches!(short, Short::DropoutData | Short::UniformTemplate);
+    let short_control = match short {
+        Short::DropoutRate => Some(rows_of_p(&mut dag, "r", &[], Prim::F32)),
+        Short::DropoutActivation => Some(rows_of_p(&mut dag, "on", &[], Prim::Bool)),
+        Short::UniformHigh => Some(rows_of_p(&mut dag, "h", &[], Prim::F32)),
+        _ => None,
+    };
+    let g = matches!(short, Short::ReplayCotangent | Short::AdjointCotangent)
+        .then(|| rows_of_p(&mut dag, "g", &[4], Prim::F32));
+    let data = if short_data {
+        rows_of_p(&mut dag, "x", &[4], Prim::F32)
+    } else {
+        load_m(&mut dag, "x", &[4], Prim::F32)
+    };
+    let (first, second) = match short {
+        Short::DropoutRate => (short_control.unwrap(), None),
+        Short::DropoutActivation => (f32_const(&mut dag, 0.5), short_control),
+        Short::UniformTemplate | Short::AdjointCotangent => {
+            (f32_const(&mut dag, 0.0), Some(f32_const(&mut dag, 1.0)))
+        }
+        Short::UniformHigh => (f32_const(&mut dag, 0.0), short_control),
+        _ => (f32_const(&mut dag, 0.5), None),
+    };
+    let keys = load_m(&mut dag, "k", &[], Prim::Key);
+    let drawn_ty = TensorType {
+        dims: named_dims("m", &[4]),
+        precision: Prim::F32,
+    };
+    let add = |dag: &mut Dag, op: RiscOp, inputs: Vec<NodeId>, ty: TensorType| {
+        let id = dag.add_node(op, inputs, ty, None);
+        dag.add_root(id);
+    };
+    match short {
+        Short::DropoutData | Short::DropoutRate => {
+            add(&mut dag, RiscOp::Dropout, vec![data, first, keys], drawn_ty);
+        }
+        Short::DropoutActivation => {
+            let on = second.unwrap();
+            add(
+                &mut dag,
+                RiscOp::Dropout,
+                vec![data, first, keys, on],
+                drawn_ty,
+            );
+        }
+        Short::UniformTemplate | Short::UniformHigh => {
+            let inputs = vec![data, first, second.unwrap(), keys];
+            add(&mut dag, RiscOp::UniformLike, inputs, drawn_ty);
+        }
+        // A replay runs before its forward draw here, so the forward's own
+        // result claim, which C checks against the `m` its entry bound from
+        // the short cotangent, is not what traps first.
+        Short::ReplayCotangent => {
+            let replay = vec![g.unwrap(), first, keys];
+            add(&mut dag, RiscOp::DropoutReplay, replay, drawn_ty.clone());
+            add(&mut dag, RiscOp::Dropout, vec![data, first, keys], drawn_ty);
+        }
+        Short::AdjointCotangent => {
+            add(
+                &mut dag,
+                RiscOp::UniformBoundAdjoint {
+                    bound: UniformBound::High,
+                },
+                vec![data, g.unwrap(), keys],
+                TensorType {
+                    dims: vec![],
+                    precision: Prim::F32,
+                },
+            );
+            let forward = vec![data, first, second.unwrap(), keys];
+            add(&mut dag, RiscOp::UniformLike, forward, drawn_ty);
+        }
+    }
+    dag
+}
+
+/// Inputs for [`short_operand_draw`]: three keys, so `m` is 3, and `p`
+/// rows in each load declared `[p, ..]`.
+fn short_operand_inputs(short: Short, p: usize) -> Vec<(&'static str, Input)> {
+    let x = if matches!(short, Short::DropoutData | Short::UniformTemplate) {
+        p
+    } else {
+        3
+    };
+    vec![
+        ("k", Input::Keys(vec![3], S_KEYS.to_vec())),
+        ("x", Input::Floats(Prim::F32, vec![x, 4], vec![1.0; x * 4])),
+        ("r", Input::Floats(Prim::F32, vec![p], vec![-0.5; p])),
+        ("on", Input::Bools(vec![p], vec![0; p])),
+        ("h", Input::Floats(Prim::F32, vec![p], vec![-1.0; p])),
+        ("g", Input::Floats(Prim::F32, vec![p, 4], vec![1.0; p * 4])),
+    ]
+}
+
+/// Only the inputs `dag` loads.
+fn inputs_for(dag: &Dag, inputs: &[(&'static str, Input)]) -> Vec<(&'static str, Input)> {
+    inputs
+        .iter()
+        .filter(|(name, _)| {
+            dag.nodes().iter().any(
+                |node| matches!(&node.op, RiscOp::Load { name: loaded } if loaded.as_str() == *name),
+            )
+        })
+        .cloned()
+        .collect()
+}
+
+/// Spec/10 §3.2's rule V5 relates a draw's declared dims, which the verifier
+/// checks; this is the run-time half. A draw whose operand's rows disagree
+/// with its key batch traps before it reads anything, with the same extent
+/// report and `Domain` trap in the DAG evaluator and in C; with agreeing
+/// rows both lanes draw the same bits. Each draw's row length is its data's
+/// element count over its key's, never its declared result's.
+///
+/// Evidentiary status: REGRESSION TEST. At c23ec448a eval reported untyped
+/// errors, and C read past the short operand or the key batch.
+#[test]
+fn a_draw_whose_operand_rows_disagree_with_its_keys_traps_in_c_as_in_eval() {
+    let cases = [
+        (
+            Short::DropoutData,
+            "extent `m`: claimed = 3, dropout input 0 axis 0 = 2",
+            "dropout",
+        ),
+        (
+            Short::DropoutRate,
+            "extent `m`: claimed = 3, dropout input 1 axis 0 = 2",
+            "dropout",
+        ),
+        (
+            Short::DropoutActivation,
+            "extent `m`: claimed = 3, dropout input 3 axis 0 = 2",
+            "dropout",
+        ),
+        (
+            Short::UniformTemplate,
+            "extent `m`: claimed = 3, uniform_like input 0 axis 0 = 2",
+            "uniform_like",
+        ),
+        (
+            Short::UniformHigh,
+            "extent `m`: claimed = 3, uniform_like input 2 axis 0 = 2",
+            "uniform_like",
+        ),
+        (
+            Short::ReplayCotangent,
+            "extent `m`: claimed = 3, dropout input 0 axis 0 = 2",
+            "dropout",
+        ),
+        (
+            Short::AdjointCotangent,
+            "extent `m`: claimed = 3, uniform_like input 1 axis 0 = 2",
+            "uniform_like",
+        ),
+    ];
+    for (short, line, op) in cases {
+        let report = format!("{line}\nnumeric trap: domain in {op} at i64");
+        let dag = short_operand_draw(short);
+        let inputs = inputs_for(&dag, &short_operand_inputs(short, 2));
+        assert_eq!(run_eval(&dag, &inputs), Err(report.clone()), "{short:?}");
+        let stderr = run_c_failure(dag, &inputs);
+        assert!(stderr.contains(&report), "{short:?}: {stderr}");
+    }
+    // With three rows everywhere the same graphs draw, in both lanes alike.
+    for short in [
+        Short::DropoutData,
+        Short::DropoutRate,
+        Short::UniformTemplate,
+        Short::ReplayCotangent,
+        Short::AdjointCotangent,
+    ] {
+        let dag = short_operand_draw(short);
+        let inputs = inputs_for(&dag, &short_operand_inputs(short, 3));
+        let eval = run_eval(&dag, &inputs).unwrap();
+        assert!(eval.iter().any(|root| !root.is_empty()), "{short:?}");
+        assert_eq!(run_c(dag, &inputs), eval, "{short:?}");
+    }
+    // The guard precedes the draw's allocation, and its row length is the
+    // data's element count over the key's.
+    let dag = short_operand_draw(Short::DropoutData);
+    let data = dag.get(dag.roots()[0]).unwrap().inputs[0].0;
+    let drawn = dag.roots()[0].0;
+    let (program, ..) = generated(dag);
+    let guard = program
+        .find("dropout input 0 axis 0 = %lld")
+        .expect("the draw guards its data's leading axes");
+    let allocation = program
+        .find(&format!("chelis_tensor *t{drawn} = chelis_alloc("))
+        .expect("the draw allocates its result");
+    assert!(guard < allocation, "the guard must precede the allocation");
+    assert!(
+        program.contains(&format!(
+            "t{drawn}_row_len = t{drawn}_rows > 0 ? t{data}_size / t{drawn}_rows : 0;"
+        )),
+        "the row length is the data's"
+    );
+}
+
+/// C allocates a draw's result from its declared dims, so it checks each
+/// declared extent against the data's before the allocation, with the local
+/// extent guard's report. Here `m` is bound from `neg(a)`'s axis, three, and
+/// the later load `x: tensor[m, 4, f32]` holds two rows, which C's entry
+/// does not check against `m` (chelis#1277's class). The rank-0-keyed
+/// dropout of `x` then traps instead of reading twelve elements of eight.
+/// The DAG evaluator builds the result from `x` and reads no declared
+/// extent, so it is not compared here.
+///
+/// Evidentiary status: REGRESSION TEST. At c23ec448a C read past `x`.
+#[test]
+fn a_draw_whose_declared_result_disagrees_with_its_data_traps_in_c() {
+    let build = || {
+        let mut dag = Dag::new();
+        let a = dag.add_node(
+            RiscOp::Load { name: "a".into() },
+            vec![],
+            TensorType {
+                dims: named_dims("p", &[]),
+                precision: Prim::F32,
+            },
+            None,
+        );
+        let negated = dag.add_node(
+            RiscOp::Neg,
+            vec![a],
+            TensorType {
+                dims: named_dims("m", &[]),
+                precision: Prim::F32,
+            },
+            None,
+        );
+        dag.add_root(negated);
+        let x = load_m(&mut dag, "x", &[4], Prim::F32);
+        let rate = float_const(&mut dag, Prim::F32, 0.5);
+        let key = load(&mut dag, "k", &[], Prim::Key);
+        let drawn = dag.add_node(
+            RiscOp::Dropout,
+            vec![x, rate, key],
+            TensorType {
+                dims: named_dims("m", &[4]),
+                precision: Prim::F32,
+            },
+            None,
+        );
+        dag.add_root(drawn);
+        (dag, drawn)
+    };
+    let inputs = |rows: usize| {
+        [
+            ("a", Input::Floats(Prim::F32, vec![3], vec![1.0; 3])),
+            (
+                "x",
+                Input::Floats(Prim::F32, vec![rows, 4], vec![1.0; rows * 4]),
+            ),
+            ("k", Input::Keys(vec![], vec![G_KEY])),
+        ]
+    };
+    let (dag, drawn) = build();
+    let stderr = run_c_failure(dag.clone(), &inputs(2));
+    assert!(
+        stderr.contains(
+            "extent `m`: claimed = 3, dropout axis 0 = 2\nnumeric trap: domain in dropout at i64"
+        ),
+        "{stderr}"
+    );
+    let (program, ..) = generated(dag.clone());
+    let guard = program
+        .find("dropout axis 0 = %lld")
+        .expect("the draw guards its declared extents");
+    let allocation = program
+        .find(&format!("chelis_tensor *t{} = chelis_alloc(", drawn.0))
+        .expect("the draw allocates its result");
+    assert!(guard < allocation, "the guard must precede the allocation");
+    // Three rows agree with `m`, and the lanes draw alike.
+    assert_eq!(
+        run_c(dag.clone(), &inputs(3)),
+        run_eval(&dag, &inputs(3)).unwrap()
+    );
+}

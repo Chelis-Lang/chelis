@@ -4604,6 +4604,7 @@ impl CEmitter {
     /// over a cotangent: drop where the arithmetic-width unit is below the
     /// rate, else the finalized `div(x, sub(1p, rate))`.
     fn emit_keyed_dropout(&mut self, node: &DagNode, dag: VerifiedDagView<'_>) {
+        self.emit_draw_extent_guards(node, dag);
         if !Self::is_draw_key(dag, node.inputs[2]) {
             return self.emit_explicitly_keyed_dropout(node, dag);
         }
@@ -4676,6 +4677,7 @@ impl CEmitter {
     /// [05-OP-8] over operand bounds and a key, with the same samplers the
     /// baked node uses.
     fn emit_keyed_uniform_like(&mut self, node: &DagNode, dag: VerifiedDagView<'_>) {
+        self.emit_draw_extent_guards(node, dag);
         if !Self::is_draw_key(dag, node.inputs[3]) {
             return self.emit_explicitly_keyed_uniform_like(node, dag);
         }
@@ -4736,6 +4738,7 @@ impl CEmitter {
         bound: chelis_ir::dag::UniformBound,
         dag: VerifiedDagView<'_>,
     ) {
+        self.emit_draw_extent_guards(node, dag);
         if !Self::is_draw_key(dag, node.inputs[2]) {
             return self.emit_explicitly_keyed_bound_adjoint(node, bound, dag);
         }
@@ -4903,11 +4906,122 @@ impl CEmitter {
         }
     }
 
-    /// The row count and per-row element count of a draw of `size_of`'s
-    /// elements under key `key`: one row for a rank-0 key, one per key for a
-    /// batch (spec/10 §3.2). Row `b` holds flat elements
-    /// `[b * row_len, (b + 1) * row_len)` and numbers them from zero.
-    fn emit_draw_rows(&mut self, id: usize, key: NodeId, dag: VerifiedDagView<'_>, size_of: usize) {
+    /// Check each extent `dims` declares against `observed(axis)`, a C
+    /// expression, before the result exists: a mismatch reports the claim
+    /// in the DAG evaluator's `check_declared_extents` form and traps
+    /// `Domain` in `op` at i64.
+    fn emit_declared_extent_guards(
+        &mut self,
+        op: &'static str,
+        dims: &[DimInfo],
+        observed: impl Fn(usize) -> String,
+    ) {
+        let trap = NumericTrap::Domain {
+            op,
+            prim: Prim::Int64,
+        }
+        .to_string();
+        for (axis, dim) in dims.iter().enumerate() {
+            let observed = observed(axis);
+            let claimed = Self::emit_dim_info(dim);
+            let claim = Self::extent_claim_label(dim);
+            self.line(&format!("if (({claimed}) != ({observed})) {{"));
+            self.indent += 1;
+            self.line(&format!(
+                "fprintf(stderr, \"extent `{claim}`: claimed = %lld, {op} axis {axis} = %lld\\n\", (long long)({claimed}), (long long)({observed}));"
+            ));
+            self.line(&format!("chelis_numeric_trap({trap:?});"));
+            self.indent -= 1;
+            self.line("}");
+        }
+    }
+
+    /// How an extent report names a declared axis: its literal, or its name
+    /// made safe for a format string.
+    fn extent_claim_label(dim: &DimInfo) -> String {
+        match dim {
+            DimInfo::Lit(value) => value.to_string(),
+            DimInfo::Named(name, _) => {
+                chelis_ir::span_sanitize::sanitize_for_format_string(name).into_owned()
+            }
+        }
+    }
+
+    /// A key-operand random primitive's extents, checked before it
+    /// allocates its result or reads an operand. First its key batch against
+    /// its operands, in [`RiscOp::draw_batch_layout`]'s order and with the
+    /// DAG evaluator's report (spec/10 §3.2, rule V5): a key batch's shape is
+    /// its data's leading axes, and each per-row control and activation is a
+    /// leading part of it. Then every extent the result's type declares,
+    /// from which this lane allocates the result, against the data's (a bound
+    /// adjoint's, against the key's leading axes), with the local extent
+    /// guard's report; the evaluator builds each result from its data and
+    /// reads no declared extent. So no row index, row length or loop bound
+    /// below rests on an extent that nothing has checked against the
+    /// operands.
+    fn emit_draw_extent_guards(&mut self, node: &DagNode, dag: VerifiedDagView<'_>) {
+        let layout = node
+            .op
+            .draw_batch_layout()
+            .expect("emit_draw_extent_guards emits only key-operand random primitives");
+        let op = layout.op;
+        let key = node.inputs[layout.key];
+        let data = node.inputs[layout.data_input];
+        let key_dims = &dag.get(key).expect("verified key").output_type.dims;
+        let rank = |input: NodeId| {
+            dag.get(input)
+                .expect("verified random operand")
+                .output_type
+                .dims
+                .len()
+        };
+        if !key_dims.is_empty() {
+            let trap = NumericTrap::Domain {
+                op,
+                prim: Prim::Int64,
+            }
+            .to_string();
+            let operands = std::iter::once((layout.data_input, data, key_dims.len())).chain(
+                layout.per_row.iter().filter_map(|slot| {
+                    node.inputs
+                        .get(*slot)
+                        .map(|input| (*slot, *input, rank(*input)))
+                }),
+            );
+            for (slot, input, axes) in operands.collect::<Vec<_>>() {
+                for (axis, dim) in key_dims.iter().enumerate().take(axes) {
+                    let claim = Self::extent_claim_label(dim);
+                    let claimed = format!("chelis_tensor_shape(t{}, {axis})", key.0);
+                    let observed = format!("chelis_tensor_shape(t{}, {axis})", input.0);
+                    self.line(&format!("if (({claimed}) != ({observed})) {{"));
+                    self.indent += 1;
+                    self.line(&format!(
+                        "fprintf(stderr, \"extent `{claim}`: claimed = %lld, {op} input {slot} axis {axis} = %lld\\n\", (long long)({claimed}), (long long)({observed}));"
+                    ));
+                    self.line(&format!("chelis_numeric_trap({trap:?});"));
+                    self.indent -= 1;
+                    self.line("}");
+                }
+            }
+        }
+        let source = if matches!(node.op, RiscOp::UniformBoundAdjoint { .. }) {
+            key
+        } else {
+            data
+        };
+        self.emit_declared_extent_guards(op, &node.output_type.dims, |axis| {
+            format!("chelis_tensor_shape(t{}, {axis})", source.0)
+        });
+    }
+
+    /// The row count and per-row element count of draw `id`'s data `data`
+    /// under key `key`: one row of every element for a rank-0 key, and for a
+    /// batch one row per key, of the data's runtime element count over the
+    /// key's (spec/10 §3.2). [`Self::emit_draw_extent_guards`] has checked
+    /// that the data's leading axes are the key's shape, so each row is
+    /// whole. Row `b` holds flat elements `[b * row_len, (b + 1) * row_len)`
+    /// and numbers them from zero.
+    fn emit_draw_rows(&mut self, id: usize, key: NodeId, dag: VerifiedDagView<'_>, data: NodeId) {
         let index = Self::prim_elem_type(Prim::Int64);
         let batched = !dag
             .get(key)
@@ -4922,7 +5036,8 @@ impl CEmitter {
         };
         self.line(&format!("{index} t{id}_rows = {rows};"));
         self.line(&format!(
-            "{index} t{id}_row_len = t{id}_rows > 0 ? t{size_of}_size / t{id}_rows : 0;"
+            "{index} t{id}_row_len = t{id}_rows > 0 ? t{}_size / t{id}_rows : 0;",
+            data.0
         ));
     }
 
@@ -4956,7 +5071,7 @@ impl CEmitter {
         }
         .to_string();
         self.emit_slot_wrapper(id, ty);
-        self.emit_draw_rows(id, key, dag, id);
+        self.emit_draw_rows(id, key, dag, node.inputs[0]);
         self.line(&format!("for ({index} b = 0; b < t{id}_rows; b++) {{"));
         self.indent += 1;
         self.line(&format!("if ({active}) {{"));
@@ -5029,7 +5144,7 @@ impl CEmitter {
         }
         .to_string();
         self.emit_slot_wrapper(id, ty);
-        self.emit_draw_rows(id, key, dag, id);
+        self.emit_draw_rows(id, key, dag, node.inputs[0]);
         self.line(&format!("for ({index} b = 0; b < t{id}_rows; b++) {{"));
         self.indent += 1;
         self.line(&format!("if ({active}) {{"));
@@ -5136,7 +5251,7 @@ impl CEmitter {
         };
         let per_row = !ty.dims.is_empty();
         self.emit_slot_wrapper(id, ty);
-        self.emit_draw_rows(id, key, dag, cotangent);
+        self.emit_draw_rows(id, key, dag, node.inputs[1]);
         // One output per group of rows sharing a bound element, or one for
         // the whole draw; each group's leaves are contiguous.
         let outputs = if per_row {
@@ -5293,28 +5408,13 @@ impl CEmitter {
         // before the allocation, as `chelis_movement_check_target` checks an
         // expansion's target and as the DAG evaluator checks this node; the
         // report is the local extent guard's.
-        for (axis, dim) in node.output_type.dims.iter().enumerate() {
-            let observed = if axis == last {
+        self.emit_declared_extent_guards("split_keys", &node.output_type.dims, |axis| {
+            if axis == last {
                 format!("t{id}_count")
             } else {
                 format!("chelis_tensor_shape(t{}, {axis})", key.0)
-            };
-            let claimed = Self::emit_dim_info(dim);
-            let claim = match dim {
-                DimInfo::Lit(value) => value.to_string(),
-                DimInfo::Named(name, _) => {
-                    chelis_ir::span_sanitize::sanitize_for_format_string(name).into_owned()
-                }
-            };
-            self.line(&format!("if (({claimed}) != ({observed})) {{"));
-            self.indent += 1;
-            self.line(&format!(
-                "fprintf(stderr, \"extent `{claim}`: claimed = %lld, split_keys axis {axis} = %lld\\n\", (long long)({claimed}), (long long)({observed}));"
-            ));
-            self.line(&format!("chelis_numeric_trap({trap:?});"));
-            self.indent -= 1;
-            self.line("}");
-        }
+            }
+        });
         self.emit_slot_wrapper(id, &node.output_type);
         self.line(&format!("for ({index} i = 0; i < t{}_size; i++) {{", key.0));
         self.indent += 1;

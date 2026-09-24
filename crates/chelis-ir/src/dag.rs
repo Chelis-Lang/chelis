@@ -541,6 +541,26 @@ impl RandomDraw {
     }
 }
 
+/// How a key-operand random primitive's inputs relate to its key batch
+/// (spec/10 §3.2, rule V5). Every lane checks their runtime extents in this
+/// order before it reads one: the data's leading axes against the key's
+/// shape, then each present per-row input's axes against the key's leading
+/// ones. The DAG evaluator and the C lane both read this one table, so they
+/// check the same inputs in the same order and report the same line.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DrawBatchLayout {
+    /// The operation its traps name.
+    pub op: &'static str,
+    /// The key's input slot.
+    pub key: usize,
+    /// The input whose leading axes are the key's shape: the data, the
+    /// template, or a bound adjoint's cotangent.
+    pub data_input: usize,
+    /// The controls' and the activation's slots, each shaped like a leading
+    /// part of the key's shape; an absent activation is skipped.
+    pub per_row: &'static [usize],
+}
+
 impl ReduceWindowKind {
     /// Canonical Surf builtin name. Used by [`crate::grad::risc_op_name`]
     /// and by the AD rejection error so error messages reference the
@@ -1366,6 +1386,23 @@ pub enum RiscAtomDisposition {
 }
 
 impl RiscOp {
+    /// The batch layout of a key-operand random primitive, or `None` for any
+    /// other operation.
+    pub fn draw_batch_layout(&self) -> Option<DrawBatchLayout> {
+        let (op, key, data_input, per_row): (_, _, _, &'static [usize]) = match self {
+            Self::Dropout | Self::DropoutReplay => ("dropout", 2, 0, &[1, 3]),
+            Self::UniformLike => ("uniform_like", 3, 0, &[1, 2, 4]),
+            Self::UniformBoundAdjoint { .. } => ("uniform_like", 2, 1, &[3]),
+            _ => return None,
+        };
+        Some(DrawBatchLayout {
+            op,
+            key,
+            data_input,
+            per_row,
+        })
+    }
+
     /// chelis#2368 / [05-OP-68]: operations that must execute because of
     /// what they DO, not because something consumes their result.
     ///
