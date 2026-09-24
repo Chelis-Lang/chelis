@@ -300,4 +300,176 @@ theorem realize_sub {x y : BinaryFloat f} {a b : ℚ} (hx : realize x = some a)
   rw [sub_eq_add_neg] at h ⊢
   exact realize_add hx (realize_neg hy) h
 
+/-! ### Finiteness of rounding below one and the dropout thresholds -/
+
+theorem roundQuotient_le (a b : ℕ) : BinaryFloat.roundQuotient a b ≤ a / b + 1 := by
+  unfold BinaryFloat.roundQuotient
+  dsimp only
+  split <;> omega
+
+theorem format_bias_bounds (g : BinaryFormat) : 2 ≤ g.bias ∧ g.bias < g.maxExponent := by
+  cases g <;> decide
+
+/-- Rounding a nonnegative quotient `n / d < 1` never overflows: the result is finite
+(in every format, whatever the requested sign). -/
+theorem round_isFinite_of_lt (g : BinaryFormat) (neg : Bool) (n d : ℕ) (hd : 0 < d)
+    (hlt : n < d) : (BinaryFloat.round g neg n d).isFinite = true := by
+  have hmax := maxExponent_pos g
+  obtain ⟨hb2, hbm⟩ := format_bias_bounds g
+  rcases Nat.eq_zero_or_pos n with rfl | hn
+  · have : BinaryFloat.round g neg 0 d = BinaryFloat.zero g neg := by
+      simp [BinaryFloat.round, hd.ne']
+    rw [this]
+    unfold BinaryFloat.zero
+    have := (pack_fields g neg 0 0 hmax (Nat.two_pow_pos _)).2.1
+    simp only [BinaryFloat.isFinite, this, bne_iff_ne, ne_eq]
+    omega
+  have hdq : (0 : ℚ) < d := by exact_mod_cast hd
+  obtain ⟨hL1, hL2⟩ := ratioExponent_spec hn hd
+  obtain ⟨L, hL⟩ : ∃ L, L = BinaryFloat.ratioExponent n d := ⟨_, rfl⟩
+  rw [← hL] at hL1 hL2
+  have hLneg : L < 0 := by
+    by_contra hc
+    have h1 : (1 : ℚ) ≤ 2 ^ L := one_le_zpow₀ (by norm_num) (by omega)
+    have h2 : (n : ℚ) / d < 1 := (div_lt_one hdq).mpr (by exact_mod_cast hlt)
+    linarith
+  obtain ⟨unit, hunit⟩ : ∃ unit : ℤ,
+      unit = max (1 - (g.bias : ℤ) - (g.fractionBits : ℤ)) (L - (g.fractionBits : ℤ)) :=
+    ⟨_, rfl⟩
+  have hunit_min : 1 - (g.bias : ℤ) - g.fractionBits ≤ unit := by
+    rw [hunit]; exact le_max_left _ _
+  have hunit_L : L - g.fractionBits ≤ unit := by rw [hunit]; exact le_max_right _ _
+  have hunit_max : unit + g.fractionBits + g.bias ≤ g.bias := by
+    rw [hunit]; omega
+  -- `n / d < 2 ^ (p + 1 + unit)`: the rounded significand has at most `p + 1` bits.
+  have hbound : (n : ℚ) / d < 2 ^ ((g.fractionBits : ℤ) + 1 + unit) :=
+    lt_of_lt_of_le hL2 (zpow_le_zpow_right₀ (by norm_num) (by omega))
+  obtain ⟨q0, hq0⟩ : ∃ q0, q0 = (if unit ≥ 0 then BinaryFloat.roundQuotient n (d * 2 ^ unit.toNat)
+      else BinaryFloat.roundQuotient (n * 2 ^ (-unit).toNat) d) := ⟨_, rfl⟩
+  have hq0le : q0 ≤ 2 ^ (g.fractionBits + 1) := by
+    rw [hq0]
+    split
+    · rename_i hu0
+      have hlt' : n < d * 2 ^ unit.toNat * 2 ^ (g.fractionBits + 1) := by
+        have : (n : ℚ) < d * 2 ^ unit.toNat * 2 ^ (g.fractionBits + 1) := by
+          rw [div_lt_iff₀ hdq] at hbound
+          rw [two_pow_nat_eq_zpow, two_pow_nat_eq_zpow, Int.toNat_of_nonneg hu0, mul_assoc,
+            ← zpow_add₀ two_ne_zero]
+          push_cast
+          calc (n : ℚ) < 2 ^ ((g.fractionBits : ℤ) + 1 + unit) * d := hbound
+            _ = d * 2 ^ (unit + ((g.fractionBits : ℤ) + 1)) := by rw [mul_comm]; ring_nf
+        exact_mod_cast this
+      have hdiv : n / (d * 2 ^ unit.toNat) < 2 ^ (g.fractionBits + 1) :=
+        (Nat.div_lt_iff_lt_mul (by positivity)).mpr
+          (by rw [Nat.mul_comm (2 ^ _)]; linarith [hlt'])
+      have := roundQuotient_le n (d * 2 ^ unit.toNat)
+      omega
+    · rename_i hu0
+      have hlt' : n * 2 ^ (-unit).toNat < d * 2 ^ (g.fractionBits + 1) := by
+        have : (n : ℚ) * 2 ^ (-unit).toNat < d * 2 ^ (g.fractionBits + 1) := by
+          rw [div_lt_iff₀ hdq] at hbound
+          rw [two_pow_nat_eq_zpow, two_pow_nat_eq_zpow, Int.toNat_of_nonneg (by omega)]
+          have hp : (0 : ℚ) < 2 ^ (-unit) := two_zpow_pos _
+          calc (n : ℚ) * 2 ^ (-unit) < 2 ^ ((g.fractionBits : ℤ) + 1 + unit) * d * 2 ^ (-unit) :=
+                mul_lt_mul_of_pos_right hbound hp
+            _ = d * 2 ^ (((g.fractionBits + 1 : ℕ) : ℤ)) := by
+                rw [mul_comm _ (d : ℚ), mul_assoc, ← zpow_add₀ two_ne_zero]; push_cast; ring_nf
+        exact_mod_cast this
+      have hdiv : n * 2 ^ (-unit).toNat / d < 2 ^ (g.fractionBits + 1) :=
+        (Nat.div_lt_iff_lt_mul hd).mpr (by rw [Nat.mul_comm (2 ^ _)]; exact hlt')
+      have := roundQuotient_le (n * 2 ^ (-unit).toNat) d
+      omega
+  have hround : BinaryFloat.round g neg n d =
+      (let carry := q0 ≥ 2 ^ (g.fractionBits + 1)
+       let q := if carry then q0 / 2 else q0
+       let unit := if carry then unit + 1 else unit
+       let e := if q < 2 ^ g.fractionBits then 0 else (unit + g.fractionBits + g.bias).toNat
+       if e ≥ g.maxExponent then BinaryFloat.infinity g neg
+       else BinaryFloat.pack g neg e (if e == 0 then q else q - 2 ^ g.fractionBits)) := by
+    unfold BinaryFloat.round
+    simp only [beq_iff_eq, hd.ne', hn.ne', if_false, ← hL, ← hunit, ← hq0]
+  rw [hround]
+  dsimp only
+  have hp := Nat.two_pow_pos g.fractionBits
+  have hpow : 2 ^ (g.fractionBits + 1) = 2 * 2 ^ g.fractionBits := by rw [pow_succ]; ring
+  by_cases hc : q0 ≥ 2 ^ (g.fractionBits + 1)
+  · have hq0eq : q0 = 2 ^ (g.fractionBits + 1) := le_antisymm hq0le hc
+    have hq2 : q0 / 2 = 2 ^ g.fractionBits := by rw [hq0eq, hpow]; omega
+    simp only [hc, if_true, hq2, lt_irrefl, if_false]
+    have he : (unit + 1 + g.fractionBits + g.bias).toNat < g.maxExponent := by omega
+    have hne : ((unit + 1 + g.fractionBits + g.bias).toNat == 0) = false := by
+      simp only [beq_eq_false_iff_ne]; omega
+    rw [if_neg (by omega), hne]
+    simp only [Bool.false_eq_true, if_false, Nat.sub_self]
+    have := (pack_fields g neg _ 0 he hp).2.1
+    simp only [BinaryFloat.isFinite, this, bne_iff_ne, ne_eq]
+    omega
+  · simp only [hc, if_false]
+    by_cases hq : q0 < 2 ^ g.fractionBits
+    · simp only [hq, if_true]
+      have : ¬ (0 ≥ g.maxExponent) := by omega
+      simp only [this, if_false, beq_self_eq_true, if_true]
+      have := (pack_fields g neg 0 q0 hmax hq).2.1
+      simp only [BinaryFloat.isFinite, this, bne_iff_ne, ne_eq]
+      omega
+    · simp only [hq, if_false]
+      have he : (unit + g.fractionBits + g.bias).toNat < g.maxExponent := by omega
+      have hne : ((unit + g.fractionBits + g.bias).toNat == 0) = false := by
+        simp only [beq_eq_false_iff_ne]; omega
+      rw [if_neg (by omega), hne]
+      simp only [Bool.false_eq_true, if_false]
+      have := (pack_fields g neg _ (q0 - 2 ^ g.fractionBits) he (by omega)).2.1
+      simp only [BinaryFloat.isFinite, this, bne_iff_ne, ne_eq]
+      omega
+
+/-- The unsigned ratio of an encoding is the absolute value of its finite interpretation. -/
+theorem ratio_div_eq_abs (x : BinaryFloat f) : (x.ratio.1 : ℚ) / x.ratio.2 = |value x| := by
+  unfold value
+  have h0 : (0 : ℚ) ≤ (x.ratio.1 : ℚ) / x.ratio.2 :=
+    div_nonneg (Nat.cast_nonneg _) (Nat.cast_nonneg _)
+  split
+  · rw [abs_neg, abs_of_nonneg h0]
+  · rw [abs_of_nonneg h0]
+
+/-- **Finiteness of narrowing below one.** Casting a finite value of magnitude below `1`
+to any format yields a finite encoding (the rounding cannot overflow). -/
+theorem cast_isFinite_of_abs_lt_one (g : BinaryFormat) {x : BinaryFloat f} {a : ℚ}
+    (hx : realize x = some a) (h1 : |a| < 1) : (BinaryFloat.cast g x).isFinite = true := by
+  obtain ⟨hxf, rfl⟩ := realize_eq_some.mp hx
+  unfold BinaryFloat.cast
+  rw [isNaN_eq_false_of_isFinite hxf, isInfinite_eq_false_of_isFinite hxf]
+  simp only [Bool.false_eq_true, if_false]
+  have hd := ratio_snd_pos x
+  have hlt : x.ratio.1 < x.ratio.2 := by
+    have : (x.ratio.1 : ℚ) / x.ratio.2 < 1 := by rw [ratio_div_eq_abs]; exact h1
+    rw [div_lt_one (by exact_mod_cast hd)] at this
+    exact_mod_cast this
+  exact round_isFinite_of_lt g _ _ _ hd hlt
+
+/-- The Rust `u as f32` of a binary64 unit `u ∈ (-1, 1)` is finite. -/
+theorem toF32_isFinite {u : F64} {a : ℚ} (hu : realize u = some a) (h1 : |a| < 1) :
+    (F64.toF32 u).isFinite = true :=
+  cast_isFinite_of_abs_lt_one .binary32 hu h1
+
+/-- **Non-f64 dropout threshold.** Rust compares `f64::from(u as f32)` with the wide rate
+`w`; for a unit of magnitude below `1` and a finite `w` of exact value `r` this is the exact
+comparison of the *f32-rounded* unit with `r` (not of the unit itself). -/
+theorem nonf64_lt_eq {u w : F64} {a r : ℚ} (hu : realize u = some a) (h1 : |a| < 1)
+    (hw : realize w = some r) :
+    F64.lt (F32.toF64 (F64.toF32 u)) w = decide (value (F64.toF32 u) < r) := by
+  have hfin := toF32_isFinite hu h1
+  have hc : realize (F32.toF64 (F64.toF32 u)) = some (value (F64.toF32 u)) :=
+    realize_cast hfin binary32_to_binary64
+  obtain ⟨hcf, hcv⟩ := realize_eq_some.mp hc
+  obtain ⟨hwf, rfl⟩ := realize_eq_some.mp hw
+  unfold F64.lt
+  rw [lt_eq_decide hcf hwf, hcv]
+
+/-- f64 dropout threshold: the exact comparison of the unit itself with the rate. -/
+theorem f64_lt_eq {u w : F64} {a r : ℚ} (hu : realize u = some a) (hw : realize w = some r) :
+    F64.lt u w = decide (a < r) := by
+  obtain ⟨huf, rfl⟩ := realize_eq_some.mp hu
+  obtain ⟨hwf, rfl⟩ := realize_eq_some.mp hw
+  exact lt_eq_decide huf hwf
+
 end ChelisBridge.Protocol
