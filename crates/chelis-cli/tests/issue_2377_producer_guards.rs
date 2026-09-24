@@ -6,7 +6,7 @@ mod result_claims;
 
 use result_claims::{assert_claim, run};
 
-fn candidate(prefix: &str, values: &str, effects: bool) -> String {
+fn candidate(prefix: &str, values: &str, effects: bool, monomorphic: bool) -> String {
     let (effect, before, after) = if effects {
         (
             " ! { IO }",
@@ -16,66 +16,83 @@ fn candidate(prefix: &str, values: &str, effects: bool) -> String {
     } else {
         ("", "", "")
     };
-    format!(
+    let source = format!(
         "def candidate[n, p: Float](witness: p, extent_source: tensor[n, i64]) -> tensor[3, p]{effect} = {{\n {prefix}\n {before}\n result = witness |> scalar_to_tensor |> insert(0i32, shape(extent_source, 0i32))\n {after}\n result\n}}\nout = candidate(16777217.0f64, to_tensor({values}))\n"
-    )
+    );
+    if monomorphic {
+        source
+            .replace("[n, p: Float](witness: p,", "[n](")
+            .replace("tensor[3, p]", "tensor[3, f64]")
+            .replace(
+                "witness |> scalar_to_tensor",
+                "16777217.0f64 |> scalar_to_tensor",
+            )
+            .replace("candidate(16777217.0f64,", "candidate(")
+    } else {
+        source
+    }
 }
 
 fn assert_order(native: bool) {
-    for values in ["[0i64, 0i64]", "[0i64, 0i64, 0i64]"] {
-        for bound_tail in [false, true] {
-            let mut source = candidate(
-                "_ = [-9223372036854775808i64] |> to_tensor |> neg",
-                values,
-                false,
-            );
-            if !bound_tail {
-                // The issue's original return expression, without a binding.
-                source = source
-                    .replace("result = witness", "witness")
-                    .replace("\n result\n}", "\n}");
+    for monomorphic in [false, true] {
+        for values in ["[0i64, 0i64]", "[0i64, 0i64, 0i64]"] {
+            for bound_tail in [false, true] {
+                let mut source = candidate(
+                    "_ = [-9223372036854775808i64] |> to_tensor |> neg",
+                    values,
+                    false,
+                    monomorphic,
+                );
+                if !bound_tail {
+                    // The issue's original return expression, without a binding.
+                    source = source
+                        .replace("result = ", "")
+                        .replace("\n result\n}", "\n}");
+                }
+                let (ok, output) = run(&source, native);
+                assert!(!ok, "{source}\n{output}");
+                assert!(
+                    output.contains("numeric trap: overflow in neg at i64"),
+                    "{source}\n{output}"
+                );
+                assert!(!output.contains("domain in"), "{output}");
+                assert_eq!(output.matches("numeric trap:").count(), 1, "{output}");
             }
-            let (ok, output) = run(&source, native);
-            assert!(!ok, "{source}\n{output}");
-            assert!(
-                output.contains("numeric trap: overflow in neg at i64"),
-                "{source}\n{output}"
-            );
-            assert!(!output.contains("domain in"), "{output}");
-            assert_eq!(output.matches("numeric trap:").count(), 1, "{output}");
         }
     }
 }
 
 fn assert_producer(native: bool) {
-    for effects in [false, true] {
-        for (values, agrees) in [("[0i64, 0i64]", false), ("[0i64, 0i64, 0i64]", true)] {
-            let (ok, output) = run(&candidate("", values, effects), native);
-            assert_eq!(ok, agrees, "{output}");
-            if effects {
-                assert_eq!(output.matches("before-producer").count(), 1, "{output}");
-                assert_eq!(
-                    output.matches("after-producer").count(),
-                    usize::from(agrees),
-                    "{output}"
-                );
-            }
-            if agrees {
+    for monomorphic in [false, true] {
+        for effects in [false, true] {
+            for (values, agrees) in [("[0i64, 0i64]", false), ("[0i64, 0i64, 0i64]", true)] {
+                let (ok, output) = run(&candidate("", values, effects, monomorphic), native);
+                assert_eq!(ok, agrees, "{output}");
                 if effects {
-                    assert!(
-                        output.find("before-producer") < output.find("after-producer"),
+                    assert_eq!(output.matches("before-producer").count(), 1, "{output}");
+                    assert_eq!(
+                        output.matches("after-producer").count(),
+                        usize::from(agrees),
                         "{output}"
                     );
                 }
-                assert!(
-                    output.contains(
-                        "out = tensor(shape=[3], data=[16777217.0, 16777217.0, 16777217.0])"
-                    ),
-                    "{output}"
-                );
-            } else {
-                assert_claim(&output, "insert", 2);
-                assert_eq!(output.matches("numeric trap:").count(), 1, "{output}");
+                if agrees {
+                    if effects {
+                        assert!(
+                            output.find("before-producer") < output.find("after-producer"),
+                            "{output}"
+                        );
+                    }
+                    assert!(
+                        output.contains(
+                            "out = tensor(shape=[3], data=[16777217.0, 16777217.0, 16777217.0])"
+                        ),
+                        "{output}"
+                    );
+                } else {
+                    assert_claim(&output, "insert", 2);
+                    assert_eq!(output.matches("numeric trap:").count(), 1, "{output}");
+                }
             }
         }
     }

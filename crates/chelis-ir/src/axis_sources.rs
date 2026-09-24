@@ -1326,58 +1326,16 @@ pub(crate) fn load_through_casts(dag: &Dag, node: NodeId, slot: usize) -> Option
 }
 
 impl RuntimeDimClass {
-    /// C1.3's placement for this class.
-    ///
-    /// `spec/04-type-system.md` section 4.7: "A guard whose operands are all
-    /// interface values (an input tensor's axis, a scalar parameter, or a
-    /// literal) is evaluated at function entry". Every other class compares
-    /// at least one locally computed value and takes the source position of
-    /// the operation that introduces the guarded extent.
+    /// Named classes compare their declaring witnesses. A literal result
+    /// class instead constrains each produced axis, so its ownership must
+    /// agree with an explicit literal-result token on the same axis (§4.7).
     pub fn placement(&self, dag: &Dag) -> GuardPlacement {
-        // Section 4.7 keys on the guard's OPERANDS, not on whether the axis
-        // belongs to a `Load`: "a guard whose operands are all interface
-        // values (an input tensor's axis, a scalar parameter, or a literal)
-        // is evaluated at function entry", against "a guard that compares a
-        // locally computed value (checked integer arithmetic, a
-        // user-function result, or an extent an operation computes)".
-        //
-        // So a folded `shape(y, k)` read is an INTERFACE value: `spec/05`
-        // section 2.4.1 admits `InputAxis` as an `expand` extent read
-        // "directly from that tensor's shape metadata", so the quantity the
-        // guard compares is an input tensor's axis, exactly the first item in
-        // section 4.7's list. Treating only `ExternalAxis` as interface
-        // confused "is this axis a `Load`'s own" with "is this operand an
-        // input's axis", and made every folded cross-tensor read a local
-        // guard.
-        // `ScalarInput` straddles section 4.7's line: it records only WHICH
-        // SLOT holds the extent, and that slot is either a scalar PARAMETER
-        // (interface) or the arithmetic that produced one (locally computed).
-        // The DAG keeps the difference - the slot names a node and that node
-        // has an op - so this is decided by reading it, not by adding a
-        // second representation to carry it.
-        // A slot holds an interface value only when its producer is a `Load`.
-        // Section 4.7's list says "an input TENSOR's axis" and "a scalar
-        // PARAMETER": a folded read of a COMPUTED tensor's axis, like a
-        // computed scalar, does not exist until its producer runs, so its
-        // guard cannot be evaluated at entry "before any other operation of
-        // the function".
-        // "A `cast` takes the placement of the value it casts" (section 4.7,
-        // the same paragraph as the interface list). A cast is how a scalar
-        // parameter of the wrong width reaches an extent - an `i32`
-        // parameter `m` in `reshape(x, [cast(m, i64)])` lands its
-        // `RtDim::Node` at the Cast, not at the `Load` - so classifying by
-        // the slot's IMMEDIATE producer would place the same claim two
-        // different ways depending on a width conversion. Look through the
-        // cast to the value cast: a cast of a parameter is interface, a cast
-        // of arithmetic is local.
-        //
-        // The walk is bounded by the node count, so a malformed graph cannot
-        // spin here.
-        if self
-            .members
-            .iter()
-            .all(|member| member_is_interface(dag, member))
-        {
+        if self.members.iter().all(|member| match self.claim {
+            DimClaim::Literal(_) => {
+                literal_result_interface_observation(dag, member.node, member.axis).is_some()
+            }
+            DimClaim::Name(_) => member_is_interface(dag, member),
+        }) {
             GuardPlacement::Entry
         } else {
             GuardPlacement::Local
@@ -1389,10 +1347,9 @@ impl RuntimeDimClass {
 /// value.
 ///
 /// Extracted from [`RuntimeDimClass::placement`] rather than copied, because
-/// two derivations now ask it: the equality classes above and the unit-extent
-/// claims below. The reasoning is the block comment in `placement`, and it
-/// stays there; splitting it in two is how the four instances of one defect
-/// that `member_load_axis` records came about.
+/// named witness classes and operand unit-extent claims both ask it. Literal
+/// result classes use their output owner's interface observation instead:
+/// an available operand does not turn its consumer into an interface value.
 fn member_is_interface(dag: &Dag, member: &ClassMember) -> bool {
     match member.source {
         AxisSource::Literal { .. } => true,
@@ -1868,16 +1825,11 @@ impl OrderedMember {
     }
 
     fn literal_guard_key(&self, dag: &Dag) -> OrderKey {
-        // A literal is its own canonical value. Its guard order therefore
-        // follows the input being checked, even when a later operation
-        // consumes a folded shape read or scalar parameter from that input.
-        let input_axis = member_load_axis(dag, &self.member).or_else(|| {
-            if let AxisSource::ScalarInput { input } = self.member.source {
-                load_through_casts(dag, self.member.node, input).map(|load| (load, 0))
-            } else {
-                None
-            }
-        });
+        // A literal result claim follows its output owner, even when the
+        // extent's value can be read from an earlier interface witness.
+        let input_axis =
+            literal_result_interface_observation(dag, self.member.node, self.member.axis)
+                .and_then(|observation| observation.entry_axis(dag));
         let slot =
             input_axis.and_then(|(load, axis)| abi_input_slot(dag, load).map(|slot| (slot, axis)));
         (slot.is_none(), slot, self.node, self.member.axis)
@@ -2378,18 +2330,27 @@ pub fn entry_extent_guards(dag: &Dag) -> Vec<EntryExtentGuard> {
         }
     }
     for class in derive_runtime_dim_classes(dag) {
-        if class.placement(dag) != GuardPlacement::Entry {
-            continue;
-        }
         let DimClaim::Literal(required) = class.claim else {
             continue;
         };
-        for observed in class
-            .members
-            .iter()
-            .filter_map(|member| member_load_axis(dag, member))
-        {
-            guards.push(EntryExtentGuard::Literal { required, observed });
+        for member in &class.members {
+            let observed = literal_result_interface_observation(dag, member.node, member.axis)
+                .and_then(|observation| observation.entry_axis(dag))
+                .or_else(|| {
+                    // A body result cannot invent an input obligation. Keep
+                    // the independent input check only when that input's own
+                    // declaration already states this exact literal.
+                    let (load, axis) = member_load_axis(dag, member)?;
+                    let declared = dag.get(load)?.output_type.dims.get(axis)?;
+                    matches!(declared,
+                        DimInfo::Lit(value) | DimInfo::Named(_, Some(value))
+                            if *value == required
+                    )
+                    .then_some((load, axis))
+                });
+            if let Some(observed) = observed {
+                guards.push(EntryExtentGuard::Literal { required, observed });
+            }
         }
     }
     for claim in derive_unit_extent_claims(dag) {
@@ -3477,6 +3438,30 @@ pub fn local_dim_guard_sites(dag: &Dag) -> Result<Vec<(LocalGuardSite, LocalGuar
             ));
         }
     }
+    // A physical literal annotation can restate an explicit token. Coalesce
+    // only the exact comparison at the same producer and observation; another
+    // required value or a named obligation remains independent.
+    let explicit_literals = sites
+        .iter()
+        .filter_map(|(site, claim)| {
+            let CanonicalExtent::Witness(witness) = claim.canonical else {
+                return None;
+            };
+            let RiscOp::ExtentWitness {
+                site: crate::dag::ExtentWitnessSite::LiteralResultClaim,
+                requirements,
+                ..
+            } = &dag.get(witness)?.op
+            else {
+                return None;
+            };
+            Some((
+                *site,
+                claim.observed.clone(),
+                requirements.first()?.as_i64_exact()?,
+            ))
+        })
+        .collect::<Vec<_>>();
     for class in derive_runtime_dim_classes(dag) {
         if class.placement(dag) != GuardPlacement::Local {
             continue;
@@ -3498,6 +3483,20 @@ pub fn local_dim_guard_sites(dag: &Dag) -> Result<Vec<(LocalGuardSite, LocalGuar
             }
         };
         for member in &class.members {
+            if let DimClaim::Literal(value) = class.claim {
+                let site = checked_result_extent_site(dag, member.node, member.axis)?;
+                if explicit_literals
+                    .iter()
+                    .any(|(key, observation, required)| {
+                        *key == (site.producer.0, member.axis)
+                            && *observation == site.observation
+                            && usize::try_from(*required).ok() == Some(value)
+                    })
+                {
+                    continue;
+                }
+            }
+
             // Captured named tokens and these physical/literal contracts
             // are additive. One agreeing requirement cannot discharge another.
             // Only the independent extent source can discharge a claim.

@@ -528,15 +528,14 @@ def generated_phase_b_corpus() -> tuple[CorpusRow, ...]:
             EXECUTES,
             "literal_claim.literal_result_claim_contract",
         ),
-        # B2h: the eval twin of the driven row. The value-binding form applies
-        # `f` through the kernel the C lane emits for it, and the literal input
-        # extent is checked at the kernel's entry by the DAG evaluator, the
-        # eval analogue of the C ABI preamble.
+        # The Eval fixture owns an independent literal result at insert.
+        # The C ABI fixture below separately declares a literal input extent;
+        # that input obligation remains an entry guard.
         _row(
             "expand.literal_claim.exported_kernel.eval",
             "silent_unguarded",
             EXECUTES,
-            "cli_slice_b.a_literal_claim_over_a_runtime_read_traps_at_entry_on_eval",
+            "cli_slice_b.a_literal_claim_over_a_runtime_read_traps_at_producer_on_eval",
         ),
         _row(
             "expand.literal_claim.exported_kernel.c",

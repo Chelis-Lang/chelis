@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "corpus_sha256": "d705ed2f61f5e3944d269a1ced2f6a33aabe8763dcfd21c640c4341fdbc73530",
+  "corpus_sha256": "dac75ca23966752aa5496687a62efe270e482a1a03fde41d68551ba774cef9ef",
   "rows": [
     {
       "id": "claim.literal.identity_root.c",
@@ -1230,7 +1230,7 @@
       "id": "expand.literal_claim.exported_kernel.eval",
       "baseline": "silent_unguarded",
       "phase_b": "executes_exactly",
-      "receipt": "cli_slice_b.a_literal_claim_over_a_runtime_read_traps_at_entry_on_eval"
+      "receipt": "cli_slice_b.a_literal_claim_over_a_runtime_read_traps_at_producer_on_eval"
     },
     {
       "id": "expand.literal_claim.inlined_root.c",

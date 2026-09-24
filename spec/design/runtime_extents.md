@@ -1683,9 +1683,12 @@ claim on the input tensor axis itself, whose guard runs at entry. Both lanes
 must consume that same classification, not whichever failure they currently
 report first.
 
-The #2377 receipts execute the earlier-overflow control, mismatching and
-agreeing inserts with scalar-only f64 precision evidence, effects on both sides
-of the producer, and an independent wrong input-axis claim. Tensor lowering
+The #2377 receipts execute generic and monomorphic earlier-overflow controls,
+mismatching and agreeing inserts with scalar-only f64 precision evidence,
+effects on both sides of the producer, and an independent wrong input-axis
+claim. Authored literal results with explicit movement-size carriers use producer
+tokens on both lowering paths; physical literal classes use the same output-owner classification and
+coalesce an exact token comparison without dropping a different requirement. Tensor lowering
 retains discarded eager initializers through exact dependencies on its return
 carrier, omitting already reachable values and inert literal/copy subgraphs.
 These receipts establish the enrolled insert/result-order cases; they do not

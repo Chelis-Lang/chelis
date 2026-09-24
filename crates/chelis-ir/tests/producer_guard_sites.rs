@@ -64,12 +64,33 @@ fn graph(axis: i32) -> Dag {
 
 #[test]
 fn interface_sized_insert_has_one_local_result_claim() {
-    let dag = graph(0);
-    assert!(entry_extent_guards(&dag).is_empty());
+    for (physical_claim, token) in [(None, true), (Some(3), false), (Some(3), true)] {
+        let mut dag = graph(0);
+        if let Some(required) = physical_claim {
+            let root = dag.roots()[0];
+            let node = dag.node_mut(root).unwrap();
+            node.output_type.dims = vec![DimInfo::Lit(required)];
+            if !token {
+                node.shape_deps.clear();
+            }
+        }
+        assert!(entry_extent_guards(&dag).is_empty());
+        let sites = local_dim_guard_sites(&dag).unwrap();
+        assert_eq!(sites.len(), 1);
+        assert_eq!(sites[0].0, (dag.roots()[0].0, 0));
+        assert_eq!(sites[0].1.op, "insert");
+    }
+    // A different physical requirement is independent of the literal token.
+    let mut dag = graph(0);
+    let root = dag.roots()[0];
+    dag.node_mut(root).unwrap().output_type.dims = vec![DimInfo::Lit(4)];
     let sites = local_dim_guard_sites(&dag).unwrap();
-    assert_eq!(sites.len(), 1);
-    assert_eq!(sites[0].0, (dag.roots()[0].0, 0));
-    assert_eq!(sites[0].1.op, "insert");
+    assert_eq!(sites.len(), 2);
+    assert!(
+        sites
+            .iter()
+            .all(|(site, claim)| *site == (root.0, 0) && claim.op == "insert")
+    );
 }
 
 #[test]

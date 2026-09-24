@@ -8265,11 +8265,16 @@ impl<'program> LowerCtx<'program> {
                     id = self.rebuild_result_claim_owner(id);
                     result = LoweredValue::Node(id);
                 }
+                // A result sized by an explicit runtime carrier owns its
+                // literal obligation even outside generic/helper lowering.
+                // Stamping that literal onto the carrier's input would turn
+                // the body's result claim into a signature requirement.
                 if literal
                     && (self.literal_result_claim_ownership
                         == LiteralResultClaimOwnership::AuthoredTensorHelper
                         || (authored_result_claim
-                            && self.same_shape_result_owner_is_admitted(id, axis)))
+                            && (self.same_shape_result_owner_is_admitted(id, axis)
+                                || self.runtime_carrier_result_owner_is_admitted(id, axis))))
                     && self.literal_result_token_owner_is_admitted(id, axis)
                 {
                     let value = match &self.dag.get(required).expect("literal requirement").op {
@@ -8390,6 +8395,30 @@ impl<'program> LowerCtx<'program> {
             Some(_) => true,
             None => false,
         }
+    }
+
+    /// The result site's producer has an independent movement-size carrier.
+    /// Use the shared producer walk so Copy/Cast wrappers cannot change this
+    /// admission decision. Op-computed axes keep their existing admission.
+    fn runtime_carrier_result_owner_is_admitted(&self, id: NodeId, axis: usize) -> bool {
+        crate::axis_sources::result_extent_sites(&self.dag, id)
+            .iter()
+            .any(|site| {
+                let RtAxis::Lit(output_axis) = site.output_axis();
+                usize::try_from(output_axis).ok() == Some(axis)
+                    && self.dag.get(site.producer()).is_some_and(|node| {
+                        let RtAxis::Lit(producer_axis) = site.producer_axis();
+                        usize::try_from(producer_axis)
+                            .ok()
+                            .is_some_and(|producer_axis| {
+                                crate::axis_sources::expand_or_reshape_carrier(
+                                    &node.op,
+                                    producer_axis,
+                                )
+                                .is_some()
+                            })
+                    })
+            })
     }
 
     fn same_shape_result_owner_is_admitted(&self, id: NodeId, axis: usize) -> bool {

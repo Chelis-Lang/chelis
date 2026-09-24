@@ -662,26 +662,9 @@ fn vmap_ordinary_shape_preserves_the_nested_gradient_claim() {
 /// that change gave its own name. The IR node and every guard row here are
 /// unchanged by the spelling.
 ///
-/// The extent this guards is an interface value - an input tensor's axis,
-/// read by the `expand` size - so `spec/04-type-system.md` section 4.7 places
-/// the guard at the ENTRY of the function that reads it. That is `f`, not the
-/// root, and a called function's entry sits exactly where its call sits in
-/// the caller's source order, so the control still discriminates: the guard
-/// is observed after anything the caller evaluates before `widened = f(...)`
-/// and before anything it evaluates after. An earlier draft of this comment
-/// said the placement was Local at the `expand`, which was the belief before
-/// the third placement refinement; the emitted C says otherwise and the
-/// emitted C is the oracle.
-///
-/// A class whose witnesses are two `Load` axes would NOT work here: its guard
-/// runs in `f`'s prologue either way, so both controls would pass wherever
-/// the guards went. chelis#1379's arithmetic form was unusable here for a
-/// different reason, that the C lane refused to build `mul(shape(x, 0), 2i64)`
-/// at all under chelis#469, and a control that fails at build time is not
-/// measuring order. That rejection is gone and the form now lands a local
-/// guard at its own operation, so it would serve; this fixture keeps the
-/// shape-read spelling because that is the form its measurements were taken
-/// on.
+/// The result claim belongs to `insert`, even when its extent is an input
+/// shape read. Its guard occurs within `f`'s call, between the caller's
+/// preceding and following independent traps (§4.7).
 fn guard_order_source(claim: u32, trap_first: bool) -> String {
     let trap = "boom = floor_div(1i64, sub(shape(xb, 0), shape(xb, 0)))";
     let widen = "widened = f(seed, x)";
@@ -741,11 +724,11 @@ fn c_independent_trap_after_a_mismatch_loses() {
     let (ok, out) = c_run_result(&dir, "after_c", &guard_order_source(MISMATCHED, false));
     assert!(!ok, "the binary must fail: {out}");
     assert!(
-        out.contains(&domain_trap_line("load")),
+        out.contains(&domain_trap_line("insert")),
         "the extent guard introduces the extent and fires first: {out}"
     );
     assert!(
-        out.contains("extent `4`: claimed = 4, x axis 0 = 5"),
+        out.contains("extent `4`: claimed = 4, insert axis 0 = 5"),
         "with section 4.7's context on its own line: {out}"
     );
     assert!(
@@ -1146,8 +1129,8 @@ fn every_local_member_of_one_class_is_guarded_at_its_operation_on_c() {
 // ---------------------------------------------------------------------------
 // The eval lane (chelis#1277 B2h). A value binding applying the def is the
 // eval twin of the DRIVEN C rows: `chelis eval` interprets the binding and
-// applies `f` through the kernel the C lane emits for it, so `f`'s entry
-// guards run at its call. A `def main() = f(..)` root is inlined on both
+// applies `f` through the kernel the C lane emits for it, so `f`'s result
+// guards run inside its call. A `def main() = f(..)` root is inlined on both
 // lanes and its extents become literals, so no such form appears here.
 // ---------------------------------------------------------------------------
 
@@ -1163,18 +1146,10 @@ fn eval_result(dir: &TempDir, name: &str, source: &str) -> (bool, String) {
 /// The guard-order fixture's claim that agrees with the read.
 const AGREEING: u32 = 5;
 
-/// expand.literal_claim.exported_kernel.eval: chelis#1377's shape through the
-/// value-binding form. The literal claim propagated onto `x` through
-/// inference, so the routed kernel's `Load x` is declared `[4]` and no class
-/// exists for the derived guard; what fires is the DAG evaluator's check of a
-/// declared literal input extent at entry, the eval analogue of the C ABI
-/// preamble (B2a's "complement"), rendered per [04-NUM-9] with section 4.7's
-/// context line.
-///
-/// EVIDENTIARY STATUS: regression test, watched failing on the tree without
-/// the evaluator's literal-extent check (eval printed `shape=[5]`).
+/// A literal result over a runtime read is checked at its producer. The
+/// result claim must not refine the source parameter's input declaration.
 #[test]
-fn a_literal_claim_over_a_runtime_read_traps_at_entry_on_eval() {
+fn a_literal_claim_over_a_runtime_read_traps_at_producer_on_eval() {
     let dir = tempfile::tempdir().expect("tempdir");
     let source = guard_order_source(MISMATCHED, false).replace(
         "boom = floor_div(1i64, sub(shape(xb, 0), shape(xb, 0)))\n",
@@ -1185,9 +1160,9 @@ fn a_literal_claim_over_a_runtime_read_traps_at_entry_on_eval() {
         !ok,
         "a declared tensor[4] over a read of 5 must not execute: {out}"
     );
-    assert!(out.contains(&domain_trap_line("load")), "{out}");
+    assert!(out.contains(&domain_trap_line("insert")), "{out}");
     assert!(
-        out.contains("extent `4`: claimed = 4, x axis 0 = 5"),
+        out.contains("extent `4`: claimed = 4, insert axis 0 = 5"),
         "section 4.7's context line names the claim, the input and the observed extent: {out}"
     );
 }
@@ -1242,8 +1217,8 @@ fn a_later_trap_is_preempted_by_the_extent_guard_on_eval() {
     let (ok, out) = eval_result(&dir, "after.ch", &guard_order_source(MISMATCHED, false));
     assert!(!ok, "the program must fail: {out}");
     assert!(
-        out.contains(&domain_trap_line("load")),
-        "the entry guard of `f` fires at its call, before the later trap: {out}"
+        out.contains(&domain_trap_line("insert")),
+        "the result guard of `f` fires at its producer, before the later trap: {out}"
     );
     assert!(
         !out.contains(DIV_ZERO_TRAP),
@@ -1274,7 +1249,7 @@ fn the_guard_order_fixture_reaches_its_later_trap_when_the_claim_agrees_on_eval(
 /// prints before or after the call. The `IO` body is host on both lanes
 /// (chelis#1528: the shared kernel decision keeps an effect the DAG cannot
 /// carry in host code, so the C host program prints it too), and `f` is a
-/// kernel on both, so the print and `f`'s entry guard are ordered by the
+/// kernel on both, so the print and `f`'s result guard are ordered by the
 /// body's source order on both.
 fn effect_order_source(claim: u32, effect_first: bool) -> String {
     let effect = "_ = print(\"effect\")";
@@ -1312,9 +1287,9 @@ fn an_effect_before_the_guard_runs_when_the_guard_traps_on_eval() {
         1,
         "{out}"
     );
-    assert!(out.contains(&domain_trap_line("load")), "{out}");
+    assert!(out.contains(&domain_trap_line("insert")), "{out}");
     assert!(
-        out.contains("extent `4`: claimed = 4, x axis 0 = 5"),
+        out.contains("extent `4`: claimed = 4, insert axis 0 = 5"),
         "{out}"
     );
 }
@@ -1331,7 +1306,7 @@ fn an_effect_after_the_guard_does_not_run_when_the_guard_traps_on_eval() {
     );
     assert!(!ok, "the program must fail: {out}");
     assert!(!out.lines().any(|line| line == "effect"), "{out}");
-    assert!(out.contains(&domain_trap_line("load")), "{out}");
+    assert!(out.contains(&domain_trap_line("insert")), "{out}");
 }
 
 /// Build, link and run a fixture, returning whether it exited zero, its
@@ -1486,13 +1461,13 @@ fn the_host_body_locator_refuses_a_forward_declaration_alone() {
 /// Supplement the executed output checks with the emitted statement order:
 /// inside `run`'s host body the `print` statement and the call into the
 /// kernel C extracts for `f(seed, x)` (`run__tensor_N`, with `f` inlined and
-/// the same entry guard `f__tensor_0` carries), in the order `effect_first`
-/// names; inside that kernel the entry guard before its first allocation.
+/// the same result guard `f__tensor_0` carries), in the order `effect_first`
+/// names; inside that kernel the result guard before the movement plan.
 fn assert_effect_order_in_emitted_c(emitted: &str, effect_first: bool) {
     // The kernel C extracts for `f(seed, x)` is the `run__tensor_N` whose
-    // body carries the entry guard (`seed`'s own sub-expression is another
+    // body carries the result guard (`seed`'s own sub-expression is another
     // `run__tensor_M`, called before the print in both variants).
-    let trap = "chelis_numeric_trap(\"numeric trap: domain in load at i64\")";
+    let trap = "chelis_numeric_trap(\"numeric trap: domain in insert at i64\")";
     let kernel_prefix = format!("static void {}__tensor_", authored_c_symbol("run"));
     let (kernel_name, kernel) = emitted
         .match_indices(&kernel_prefix)
@@ -1506,12 +1481,14 @@ fn assert_effect_order_in_emitted_c(emitted: &str, effect_first: bool) {
             (name, &rest[..body_end])
         })
         .find(|(_, kernel)| kernel.contains(trap))
-        .expect("one extracted kernel carries the entry guard");
+        .expect("one extracted kernel carries the result guard");
     let guard_at = kernel.find(trap).expect("the guard");
-    let alloc_at = kernel.find("chelis_alloc(").expect("the kernel allocates");
+    let alloc_at = kernel
+        .find("chelis_tensor_expand_plan(")
+        .expect("the kernel inserts");
     assert!(
         guard_at < alloc_at,
-        "the entry guard precedes the kernel's first allocation"
+        "the result guard precedes the shape-dependent movement plan"
     );
     let body = host_body_definition(
         emitted,
@@ -1550,9 +1527,9 @@ fn an_effect_before_the_guard_runs_when_the_guard_traps_on_c() {
         &effect_order_source(MISMATCHED, true),
     );
     assert!(!ok, "the binary must fail: {out}");
-    assert!(out.contains(&domain_trap_line("load")), "{out}");
+    assert!(out.contains(&domain_trap_line("insert")), "{out}");
     assert!(
-        out.contains("extent `4`: claimed = 4, x axis 0 = 5"),
+        out.contains("extent `4`: claimed = 4, insert axis 0 = 5"),
         "{out}"
     );
     assert_eq!(
@@ -1576,7 +1553,7 @@ fn an_effect_after_the_guard_does_not_run_when_the_guard_traps_on_c() {
         &effect_order_source(MISMATCHED, false),
     );
     assert!(!ok, "the binary must fail: {out}");
-    assert!(out.contains(&domain_trap_line("load")), "{out}");
+    assert!(out.contains(&domain_trap_line("insert")), "{out}");
     assert!(!out.lines().any(|line| line == "effect"), "{out}");
     assert_effect_order_in_emitted_c(&emitted, false);
 }
@@ -2702,9 +2679,9 @@ fn a_literal_claim_over_a_cross_tensor_read_traps_on_eval() {
         !ok,
         "a declared tensor[4, f32] over a read of 3 must not execute: {out}"
     );
-    assert!(out.contains(&domain_trap_line("load")), "{out}");
+    assert!(out.contains(&domain_trap_line("insert")), "{out}");
     assert!(
-        out.contains("extent `4`: claimed = 4, y axis 0 = 3"),
+        out.contains("extent `4`: claimed = 4, insert axis 0 = 3"),
         "the context names the constant requirement and the read it refutes: {out}"
     );
 
@@ -2737,9 +2714,9 @@ fn a_literal_claim_over_a_cross_tensor_read_traps_on_c() {
         !ok,
         "the linked binary must trap rather than print a shape: {out}"
     );
-    assert!(out.contains(&domain_trap_line("load")), "{out}");
+    assert!(out.contains(&domain_trap_line("insert")), "{out}");
     assert!(
-        out.contains("extent `4`: claimed = 4, y axis 0 = 3"),
+        out.contains("extent `4`: claimed = 4, insert axis 0 = 3"),
         "the C lane renders the same context as eval: {out}"
     );
 
@@ -3850,7 +3827,7 @@ fn a_nested_named_result_claim_is_enforced_through_its_resolved_binder() {
 /// the pairing change the design proposed. That change is measurably wrong:
 /// masking user-spelled names out of the pairing removed the guard from seven
 /// existing receipts in this file, among them
-/// `a_literal_claim_over_a_runtime_read_traps_at_entry_on_eval`, where a
+/// `a_literal_claim_over_a_runtime_read_traps_at_producer_on_eval`, where a
 /// declared `tensor[4, f32]` over a read of 5 executed and printed
 /// `widened = tensor(shape=[5], ...)`. The pairing carries legitimate
 /// user-spelled declarations as well as synthesized ones.
@@ -5249,48 +5226,19 @@ fn an_independent_root_literal_claim_still_names_its_claimed_extent() {
         "a literal claim of 4 over a read of 5 traps: {c_out}"
     );
     for out in [&eval_out, &c_out] {
-        assert!(out.contains(&domain_trap_line("load")), "{out}");
+        assert!(out.contains(&domain_trap_line("insert")), "{out}");
         assert!(
-            out.contains("extent `4`: claimed = 4, x axis 0 = 5"),
+            out.contains("extent `4`: claimed = 4, insert axis 0 = 5"),
             "an independent literal keeps its claimed-extent rendering: {out}"
         );
     }
 }
 
-/// The rule's FIRST bound, and the negatives that fix it: an entailing extent
-/// that arrives through the ABI keeps its literal guard, however many
-/// pass-through hops separate the parameter from the witness.
-///
-/// The suppression requires the other witness of the named claim to observe an
-/// axis whose extent the lowered GRAPH fixes. Here `g`'s binder `n` is
-/// declared by `f`'s parameter `a`, whose extent reaches the program as an ABI
-/// input spelled `tensor[4, ...]`: a promise the entry guard checks, not a
-/// fact of this graph. `f`'s own literal claim is therefore recorded, and all
-/// three spellings still render `claimed = 4`.
-///
-/// The three spellings are the finding. An earlier version of this row tested
-/// only `g(a, b)` and the code decided "graph-fixed" by matching the observed
-/// node's op against `RiscOp::Load`, so ONE node between the parameter and the
-/// witness defeated the bound: red team round 1 measured `g(mul(a, a), b)` and
-/// `g(cast(a, f32), b)` rendering ``extent `n`: x axis 0 = 4, y axis 0 = 5``
-/// at `a1b54dbc1`, against ``extent `4`: claimed = 4, y axis 0 = 5`` at
-/// `d861a6c6f`. The repair resolves the observed axis to its ORIGIN with
-/// `axis_sources::resolve_axis_extent`, so an `ExternalAxis` origin is
-/// recognised through any number of pass-through hops.
-///
-/// That bound is deliberate rather than a statement that the obligation is
-/// independent here. The entry guard does pin `a axis 0` to 4, so the named
-/// claim plus that guard entail the literal exactly as they do at an inlined
-/// root; declining only on a graph-fixed extent keeps this change inside the
-/// form chelis#1782 reports and leaves the ABI-promised form untouched.
-///
-/// EVIDENTIARY STATUS: mixed, per row. The `mul` and `cast` spellings are
-/// REGRESSION tests, recorded red at `a1b54dbc1` with the named rendering. The
-/// direct spelling is a DISPOSITION LOCK that passes at `d861a6c6f` and at
-/// `a1b54dbc1`. The entry-guard assertion is a lock on why this is a
-/// rendering finding and not a lost check.
+/// An ABI promise is checked on its own input. The nested invocation's
+/// named witness equality must still precede the enclosing literal result
+/// claim through direct, arithmetic, and cast argument spellings.
 #[test]
-fn an_abi_promised_entailing_extent_keeps_its_literal_guard() {
+fn an_abi_promised_input_keeps_its_named_guard_before_result_claim() {
     assert!(
         gcc_available(),
         "this row compares two executed lanes; neither may skip"
@@ -5316,8 +5264,8 @@ fn an_abi_promised_entailing_extent_keeps_its_literal_guard() {
         for out in [&eval_out, &c_out] {
             assert!(out.contains(&domain_trap_line("load")), "{label}: {out}");
             assert!(
-                out.contains("extent `4`: claimed = 4, y axis 0 = 5"),
-                "{label}: an ABI-promised entailing extent keeps the literal guard: {out}"
+                out.contains("extent `n`: x axis 0 = 4, y axis 0 = 5"),
+                "{label}: the nested named witness check precedes the enclosing result claim: {out}"
             );
         }
         assert!(
