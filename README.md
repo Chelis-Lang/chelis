@@ -132,13 +132,13 @@ consistently:
   `.venv/bin/python scripts/regen_all.py --check`. Inside an activated Devenv
   shell the equivalent is `python scripts/<name>.py`.
 - **The gate:** `python3 scripts/gate.py --fast`, `python3 scripts/gate.py
-  --local`, or `python3 scripts/gate.py --list`, in every environment.
+  --validation`, or `python3 scripts/gate.py --list`, in every environment.
   `scripts/gate.py` is stdlib-only; when `python3` is not already a uv- or
   Devenv-managed runtime it re-executes itself as
   `uv run --managed-python --python 3.11 --no-project python scripts/gate.py`
   and then exports its selected interpreter as `PYO3_PYTHON` to every child
   command. It never requires a checkout-local `.venv`, and its `--fast` and
-  `--local` preflight warns when one is missing (create it with
+  `--validation` preflight warns when one is missing (create it with
   `uv venv --python 3.11`), because direct cargo and nextest invocations
   outside the gate fall back to it. Do not invoke the gate through
   `.venv/bin/python`; the `uv run` form above is the gate's own fallback, not a
@@ -279,11 +279,11 @@ Devenv files.
 
 5. Run the gates through `chelis-gate`, which forwards every argument to
    `python3 scripts/gate.py`: `--fast` before every push. CI validates the pushed
-   candidate; `--local` is available for optional troubleshooting:
+   candidate; `--validation` is available for optional troubleshooting:
 
    ```sh
    chelis-gate --fast
-   chelis-gate --local  # optional
+   chelis-gate --validation  # optional
    ```
 
 Use `devenv shell --` to run one command without an interactive shell:
@@ -545,23 +545,23 @@ target/debug/chelis --help
 cargo run -p chelis-cli --bin chelis -- --help
 ```
 
-`--fast` is the pre-push gate: fix-in-place, run before every push. `--local`
+`--fast` is the pre-push gate: fix-in-place, run before every push. `--validation`
 (chelis#360) is optional for troubleshooting or additional local validation. Applicable
 CI checks must pass on the pushed candidate before marking the draft ready for review;
-no per-PR `--local` run is required. `scripts/gate.py` defines the commands shared with
+no per-PR `--validation` run is required. `scripts/gate.py` defines the commands shared with
 the CI gate stages:
 
 ```sh
 python3 scripts/gate.py --list  # re-executes through uv when needed
 python3 scripts/gate.py --fast  # before every push; fixes fmt and tier-0 regeneration in place
-python3 scripts/gate.py --local # optional troubleshooting and local validation
+python3 scripts/gate.py --validation # optional troubleshooting and extra validation
 ```
 
 `--fast` regenerates the tier-0 artifacts (`scripts/regen_all.py --tier 0`) and
 runs `cargo fmt --all` in write mode, then `chelis lint --check .`,
 `cargo clippy -p <crate> --tests` for each changed crate, and one nextest run
 over the drift tripwires; it prints the files it changed and exits non-zero
-only when a check fails. `--local` runs two workspace clippy configurations,
+only when a check fails. `--validation` runs two workspace clippy configurations,
 `cargo fmt --check`, `chelis lint --check .`, the regeneration and compile-fail
 guards, both oracles, and per-crate nextest for the crates changed vs
 `origin/main`; it takes an advisory workstation-wide lease on `gate.lock` under

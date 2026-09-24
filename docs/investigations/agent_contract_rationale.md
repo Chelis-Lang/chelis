@@ -162,7 +162,7 @@ followed.
 
 The worst of them contaminated a gate run. A reviewer inserted a type variant into
 tracked source to prove that a guard fires, which is exactly the probe the round called
-for. The author's `--local` gate compiled the tree while that variant was in it and
+for. The author's `--local` gate (now `--validation`) compiled the tree while that variant was in it and
 failed with three errors unrelated to anything either agent was working on. Nothing in
 the failure pointed at the cause, and the shape of it, several unrelated errors at once,
 is the shape the contract elsewhere teaches you to read as contention rather than as
@@ -182,7 +182,7 @@ one.
 
 ## 8. A gate run that described a head nobody merged, behind "Pull Request Lifecycle"
 
-An earlier rule said the `--local` gate runs at most once per pull request, on
+An earlier rule said the `--local` gate (now `--validation`) runs at most once per pull request, on
 the committed candidate, immediately before ready-for-review. Both halves cannot hold at
 once as soon as a review round changes the candidate, and the run's first pull request
 showed it: the `--local` evidence described head `7ea68247`, the round-2 repairs landed
@@ -192,7 +192,7 @@ candidate were never the same commit. Later in the same run a merge shipped with
 
 Neither case was a shortcut. Both are what the rule asks for when read literally, which
 is why validation evidence must identify the head it covered. Routine readiness now
-uses CI on the candidate head; `--local` is optional. The same evidence rule applies
+uses CI on the candidate head; `--validation` is optional. The same evidence rule applies
 when an optional local run is cited.
 
 The second rule is about the invocation rather than the cadence. The three `--local`

@@ -25,10 +25,10 @@ Usage (an unmanaged launcher is automatically re-executed through uv):
     python3 scripts/gate.py integration --support-only
     python3 scripts/gate.py runtime-representation  # run the #893 oracle stage
     python3 scripts/gate.py --list     # print the canonical full list,
-                                       # annotated fast/local/CI-owned
+                                       # annotated fast/validation/CI-owned
     python3 scripts/gate.py --fast     # the pre-push gate: fix in place, then
                                        # lint, per-crate clippy, tripwires
-    python3 scripts/gate.py --local    # optional troubleshooting and local
+    python3 scripts/gate.py --validation  # optional troubleshooting and extra
                                        # validation; CI owns PR readiness
 
 Local/CI stage split: the complete developer gate and legacy integration stage
@@ -38,9 +38,9 @@ prerequisites and runs units plus the reviewed Cargo integration targets through
 full/manual gate does not execute a redundant subset. Full Linux and broad
 phase-oracle validation runs in heavy-e2e.yml nightly or by manual dispatch;
 Mac coverage runs in macos-nightly.yml. PR success does not certify those oracles.
-The workspace execution stays out of `--local` because the mass first-exec burst
+The workspace execution stays out of `--validation` because the mass first-exec burst
 can wedge assessment on a Mac workstation (docs/local_macos_environment.md).
-The local command runs two workspace clippy configurations
+The validation command runs two workspace clippy configurations
 (compile-only, no mass exec), fmt, `chelis lint`, the regeneration and
 compile-fail guards, both oracles, plus `cargo nextest run -p <crate>
 --no-fail-fast` for each crate changed vs `origin/main` (committed diff plus
@@ -60,22 +60,22 @@ and after, so a file that was already dirty and that fmt changed further is
 still reported). It never runs the workspace clippy rows, the chelis#908
 oracle, or the runtime-representation oracle, and it never takes the lease.
 
-Why `--local` runs two of the three Clippy configurations
----------------------------------------------------------
-`check_configuration_closure.py` (in `--local`) reconciles every repository
+Why `--validation` runs two of the three Clippy configurations
+--------------------------------------------------------------
+`check_configuration_closure.py` (in `--validation`) reconciles every repository
 `.rs` file against rustc dep-info found under this worktree's target.
 `crates/chelis-prove/src/clarabel_sos.rs` is a whole module behind the
 `clarabel` feature, and the solver-free row is the only per-pull-request row
 that compiles it, so on a fresh target one configuration followed by the closure
 check fails. The `--no-default-features` row compiles a strict subset of the
 default row (no whole file is gated on `cfg(not(feature = ...))`), so dropping
-it from `--local` loses only the developer-side linting of the
+it from `--validation` loses only the developer-side linting of the
 `#[cfg(not(feature = "chelis-prove"))]` regions, which `gate.py lint-and-unit`
 still lints on Linux for every pull request. `--list` marks that row `ci-owned`.
 
 Preflight, lease, and run summary
 ---------------------------------
-`--fast`, `--local`, and the bare full gate run a preflight before the first
+`--fast`, `--validation`, and the bare full gate run a preflight before the first
 command: the environment checks in `gate_environment` (exit 2 on failure), the
 git facts for the summary (never fatal), a warning when the worktree has no
 `.venv/bin/python` (the gate exports `PYO3_PYTHON`, so only direct cargo and
@@ -86,7 +86,7 @@ skipped and the summary records `{"verdict": "skipped", "reason": "not
 darwin"}`; every other preflight, lease, and summary behavior is the same on
 both platforms. CI stage runs skip all of it.
 
-`--local` and the bare full gate then take an advisory workstation-wide lease,
+`--validation` and the bare full gate then take an advisory workstation-wide lease,
 `fcntl.flock` on `gate.lock` under `$CHELIS_GATE_LEASE_DIR`, else
 `$XDG_CACHE_HOME/chelis`, else `~/.cache/chelis`,
 held for the whole run so two cold full gates in different worktrees cannot
@@ -113,7 +113,7 @@ Detached runs (chelis#1568)
 `--detach` starts the run in its own session and returns at once, printing a
 handle; `--status [HANDLE]` reports that run's verdict and exits with it. This
 exists because the run outlives a caller's foreground command limit: the three
-`--local` runs of the 2026-09-02 fleet took 7m51s, 9m56s and 10m02s against a
+validation runs of the 2026-09-02 fleet took 7m51s, 9m56s and 10m02s against a
 ten-minute limit.
 
 The launcher is not a gate run. It creates no `GateReport`, writes no summary
@@ -185,7 +185,7 @@ that is not an executable file is a loud failure, never a silent fall back
 to a build, and an explicit setting from the caller is never replaced. That
 is the same discipline applied to an explicit `PYO3_PYTHON`, timing
 included -- `gate_environment` validates an explicit handoff, so a bad one
-aborts before the first command rather than after the whole `--local` subset
+aborts before the first command rather than after the whole `--validation` subset
 has run.
 
 Present-but-empty is a failure on both sides, not an off switch. Reading
@@ -436,7 +436,7 @@ CONFIGURATION_CLOSURE: list[str] = [
 # `compiler_pipeline_oracle.py`, so a forbidden dependency, a false no_std
 # claim, or a broken facade compile-fail boundary passed hosted CI green. The
 # dependency guard (one `cargo metadata`) and the documentation guard (pure
-# Python) are cheap enough for the `--local` subset; the pipeline-artifact
+# Python) are cheap enough for the `--validation` subset; the pipeline-artifact
 # compile-fail fixture builds an out-of-workspace crate, so it stays in the
 # per-PR gate stage (CI + full gate) alongside the checkpoint fixture.
 PIPELINE_CORE_DEPENDENCY_GUARD: list[str] = [
@@ -466,7 +466,7 @@ PIPELINE_CORE_COMPILE_FAIL: list[str] = [
 # has already built the workspace, so the oracle's two
 # `nextest run` calls and its `cargo build -p chelis-cli` are warm. The
 # separate `Verify nextest profile coverage` step also needs nextest, but runs
-# on shard 1 to balance the hosted work. `--local` keeps both obligations: a
+# on shard 1 to balance the hosted work. `--validation` keeps both obligations: a
 # developer machine running the gate already has nextest.
 UNREPRESENTABLE_DOMAIN_ORACLE: list[str] = [
     MANAGED_PYTHON,
@@ -479,7 +479,7 @@ UNREPRESENTABLE_DOMAIN_ORACLE: list[str] = [
 # mutation scans dominate the hosted cost, so the oracle remains its own gate
 # stage and CI job. This preserves the workspace shards' partition wall and
 # gives the cross-language receipt one failure boundary. The stage needs
-# `cargo nextest`, clang, and the managed Python; `--local` keeps the same
+# `cargo nextest`, clang, and the managed Python; `--validation` keeps the same
 # obligation on developer machines.
 RUNTIME_REPRESENTATION_ORACLE: list[str] = [
     MANAGED_PYTHON,
@@ -580,10 +580,10 @@ HASH_PARTITION_RE = re.compile(
     r"^hash:(?P<shard>[1-9][0-9]*)/(?P<count>[1-9][0-9]*)$"
 )
 
-# The static subset for optional `--local` validation (chelis#360). Deliberately
+# The static subset for optional `--validation` runs (chelis#360). Deliberately
 # excludes BUILD_WORKSPACE (clippy already compiles everything; no mass
 # first-exec burst) and NEXTEST_WORKSPACE (CI-owned; macOS Smoke is the
-# authoritative workspace oracle). `--local` appends a dynamic
+# authoritative workspace oracle). `--validation` appends a dynamic
 # `cargo nextest run -p <crate> --no-fail-fast` stage per changed crate; see
 # `local_command_list`.
 #
@@ -591,13 +591,13 @@ HASH_PARTITION_RE = re.compile(
 # CONFIGURATION_CLOSURE's leg 3 reconciles every repository `.rs` file against
 # the dep-info in this worktree's target, and
 # `crates/chelis-prove/src/clarabel_sos.rs` is compiled per pull request only
-# by CLIPPY_SOLVER_FREE_FEATURES, so that row must stay or `--local` fails on
+# by CLIPPY_SOLVER_FREE_FEATURES, so that row must stay or `--validation` fails on
 # every fresh worktree. CLIPPY_NO_DEFAULT_FEATURES compiles a strict subset of
 # CLIPPY_WORKSPACE (no whole file is gated on `cfg(not(feature = ...))`), so
 # dropping it here loses only the developer-side lint of the 25
 # `#[cfg(not(feature = "chelis-prove"))]` regions, which `lint-and-unit` still
 # lints on Linux in CI for every pull request, whichever platform the
-# developer runs `--local` on. It stays in STAGES so `--list` keeps publishing
+# developer runs `--validation` on. It stays in STAGES so `--list` keeps publishing
 # it (`ci-owned`) and `check_configuration_closure.py` still finds its owner.
 LOCAL_STATIC_COMMANDS: list[list[str]] = [
     CLIPPY_WORKSPACE,
@@ -623,7 +623,7 @@ LOCAL_STATIC_COMMANDS: list[list[str]] = [
 # The `--fast` inner-loop pass. Fix-in-place commands first, so the tree the
 # read-only checks see is already normalized: regenerate the tier-0 artifacts
 # (Python only, sub-second), then `cargo fmt --all` in write mode. The lint row
-# is shared with `--local` and is also the `chelis` builder the tripwire
+# is shared with `--validation` and is also the `chelis` builder the tripwire
 # nextest reuses. Per-crate clippy and the tripwire run are appended by
 # `fast_command_list`.
 FMT_WRITE: list[str] = ["cargo", "fmt", "--all"]
@@ -692,8 +692,8 @@ STD_PATH_PREFIXES: tuple[str, ...] = (
     "crates/chelis-std-bundle/",
 )
 
-LOCAL_ANNOTATION = "local + ci"
-FAST_ANNOTATION = "fast + local + ci"
+LOCAL_ANNOTATION = "validation + ci"
+FAST_ANNOTATION = "fast + validation + ci"
 CI_OWNED_ANNOTATION = "ci-owned"
 FULL_GATE_SPLIT_ANNOTATION = "full gate; CI coverage split"
 FAST_DYNAMIC_NOTE = (
@@ -704,7 +704,7 @@ FAST_DYNAMIC_NOTE = (
     "a std path changed, cargo nextest run -p chelis-std-bundle --lib"
 )
 LOCAL_DYNAMIC_NOTE = (
-    "# --local also runs: cargo nextest run -p <crate> --no-fail-fast "
+    "# --validation also runs: cargo nextest run -p <crate> --no-fail-fast "
     "for each crate changed vs origin/main"
 )
 
@@ -908,7 +908,7 @@ def gate_environment(
     # An explicit handoff is diagnosed here, before the first command runs,
     # not when the oracle finally reaches it (chelis#1322). The oracle
     # rejects a bad value on its own, but that is command 10 of 10 in
-    # `--local`: a typo would cost the whole workspace clippy, fmt, the
+    # `--validation`: a typo would cost the whole workspace clippy, fmt, the
     # lint pass, three rustdoc stages and two Python guards before saying
     # so. PYO3_PYTHON above is diagnosed at command 0 of 10, and the docs
     # claim the two get the same discipline, so they now do. Only a value
@@ -1049,8 +1049,8 @@ def render(command: list[str]) -> str:
 
 def list_annotation(command: list[str]) -> str:
     """The `--list` annotation for a canonical command: whether the
-    `--fast` pre-push gate and the optional `--local` subset
-    include it, only `--local` does, or CI owns it."""
+    `--fast` pre-push gate and the optional `--validation` subset
+    include it, only `--validation` does, or CI owns it."""
     if command in FAST_STATIC_COMMANDS and command in LOCAL_STATIC_COMMANDS:
         return FAST_ANNOTATION
     if command in LOCAL_STATIC_COMMANDS:
@@ -1073,8 +1073,8 @@ def workspace_member_packages(repo_root: Path = REPO_ROOT) -> dict[str, str]:
         # macOS system `python3` is 3.9. Surface that as guidance, not a
         # raw traceback (chelis#366).
         print(
-            "gate.py --local needs Python 3.11+ (tomllib); invoke "
-            "`python3 scripts/gate.py --local` so gate.py can route "
+            "gate.py needs Python 3.11+ (tomllib); invoke "
+            "`python3 scripts/gate.py` so gate.py can route "
             "through uv per AGENTS.md",
             file=sys.stderr,
         )
@@ -1105,7 +1105,7 @@ def changed_paths_from_git(diff_output: str, status_output: str) -> list[str]:
         # (core.quotePath); strip the quotes so the member-dir prefix
         # match still sees the path. Mirrors the porcelain branch below;
         # without this a committed-only change to such a file silently
-        # excludes its crate from the --local nextest stage (PR #362
+        # excludes its crate from the --validation nextest stage (PR #362
         # review finding 1).
         line = line.strip().strip('"')
         if line:
@@ -1138,7 +1138,7 @@ def changed_crates(
 
 
 def local_command_list(crates: list[str]) -> list[list[str]]:
-    """The optional `--local` command list: the static subset
+    """The optional `--validation` command list: the static subset
     plus one `cargo nextest run -p <crate> --no-fail-fast` per changed crate."""
     commands = list(LOCAL_STATIC_COMMANDS)
     for crate in crates:
@@ -1212,7 +1212,7 @@ def _git_output(args: list[str]) -> str:
 
 def _git_facts() -> dict[str, str | None]:
     """The commit facts the run summary records. Never fatal: a shallow CI
-    clone has no `origin/main`, and the `--local` and `--fast` paths keep
+    clone has no `origin/main`, and the `--validation` and `--fast` paths keep
     their own loud failure for the diff they actually depend on."""
     facts: dict[str, str | None] = {}
     for key, args in (
@@ -1396,7 +1396,7 @@ def write_summary(
 
 
 def _mode_label(mode: str) -> str:
-    if mode in ("fast", "local"):
+    if mode in ("fast", "validation"):
         return f"gate --{mode}"
     if mode == "full":
         return "gate"
@@ -1541,7 +1541,7 @@ def find_summary(
     to get this pid is the only match for the whole window before this run
     finishes; a later run that reused the pid outranks this run's own summary
     once it exists. Either way polling reports someone else's verdict, which is
-    a false PASS on the optional local gate.
+    a false PASS on the optional validation gate.
 
     `not_before` is the handle's `started_at`, and the rule is: take the
     EARLIEST summary that ended at or after this run started. That one is
@@ -1694,7 +1694,7 @@ def detached_state(
     summary_path = find(
         report_dir,
         pid,
-        handle.get("mode", "local"),
+        handle.get("mode", "validation"),
         not_before=handle.get("started_at"),
     )
     if summary_path is not None:
@@ -1935,7 +1935,7 @@ def run_preflight(
     output_stream=None,
     error_stream=None,
 ) -> tuple[int | None, dict[str, str] | None]:
-    """The checks before the first command of `--fast`, `--local`, or the
+    """The checks before the first command of `--fast`, `--validation`, or the
     bare full gate. Returns `(None, environment)` to proceed, or
     `(exit_code, None)` to stop. CI stage runs never call this. Everything
     the preflight says is a diagnostic, so it all goes to `error_stream`;
@@ -2363,7 +2363,7 @@ def take_lease(
     error_stream=None,
     lease_factory=None,
 ) -> tuple[int | None, GateLease | None]:
-    """Take the lease for `--local` and the bare full gate; only report a
+    """Take the lease for `--validation` and the bare full gate; only report a
     holder for `--fast`. Returns `(exit_code, None)` when the lease is held
     and the caller declined to wait, else `(None, lease_or_None)`."""
     output = sys.stdout if output_stream is None else output_stream
@@ -2487,7 +2487,7 @@ def _derive_changed(label: str, report: GateReport) -> tuple[list[str], list[str
             flush=True,
         )
     else:
-        stage = "nextest" if label == "--local" else "clippy"
+        stage = "nextest" if label == "--validation" else "clippy"
         print(
             f"gate {label}: no crate changes detected vs origin/main; "
             f"skipping the per-crate {stage} stage. The workspace suite "
@@ -2505,25 +2505,25 @@ def run_local(
     executable: Path,
     state: dict,
 ) -> int:
-    """Run the optional `--local` gate: preflight, lease, derive
-    the changed crates vs origin/main, then run the local command list."""
+    """Run the optional `--validation` gate: preflight, lease, derive
+    the changed crates vs origin/main, then run the validation command list."""
     code, environment = run_preflight(
-        mode="local", report=report, environ=environ, executable=executable
+        mode="validation", report=report, environ=environ, executable=executable
     )
     if code is not None:
         return code
     assert environment is not None
-    derived = _derive_changed("--local", report)
+    derived = _derive_changed("--validation", report)
     if isinstance(derived, int):
         return derived
     _paths, crates = derived
-    code, lease = take_lease(mode="local", args=args, report=report, environ=environment)
+    code, lease = take_lease(mode="validation", args=args, report=report, environ=environment)
     state["lease"] = lease
     if code is not None:
         return code
     return run_commands(
         local_command_list(crates),
-        stage_label="local",
+        stage_label="validation",
         environ=environment,
         executable=executable,
         report=report,
@@ -2669,14 +2669,15 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         action="store_true",
         help=(
             "Print the canonical full gate command list, annotated with "
-            "which commands the --local subset includes, and exit."
+            "which commands the --validation subset includes, and exit."
         ),
     )
     p.add_argument(
-        "--local",
+        "--validation",
         action="store_true",
         help=(
-            "Run optional local validation (chelis#360): two workspace "
+            "Run optional extra validation (chelis#360); --fast, not this, "
+            "is the pre-push gate. Runs two workspace "
             "clippy configurations, fmt --check, chelis lint --check ., the "
             "regeneration and compile-fail guards, both oracles, and cargo "
             "nextest run -p <crate> for each crate changed vs origin/main. "
@@ -2701,7 +2702,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         help=(
             "Start the run in its own session and return at once, printing a "
             "handle. For a caller with a foreground command timeout shorter "
-            "than the run: the three completed --local runs of the 2026-09-02 "
+            "than the run: the three completed validation runs of the 2026-09-02 "
             "fleet took 7m51s, 9m56s and 10m02s against a ten-minute limit. "
             "The exit code is a launch verdict; use --status for the gate's."
         ),
@@ -2737,16 +2738,16 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         help="Wait at most this long for the lease, then exit 4.",
     )
     args = p.parse_args(argv)
-    if args.local and args.stage is not None:
-        p.error("--local cannot be combined with a CI stage name")
-    if args.local and args.list:
-        p.error("--local cannot be combined with --list")
+    if args.validation and args.stage is not None:
+        p.error("--validation cannot be combined with a CI stage name")
+    if args.validation and args.list:
+        p.error("--validation cannot be combined with --list")
     if args.fast and args.stage is not None:
         p.error("--fast cannot be combined with a CI stage name")
     if args.fast and args.list:
         p.error("--fast cannot be combined with --list")
-    if args.fast and args.local:
-        p.error("--fast and --local are mutually exclusive")
+    if args.fast and args.validation:
+        p.error("--fast and --validation are mutually exclusive")
     if args.detach and args.status is not None:
         p.error("--detach and --status are mutually exclusive")
     if args.detach and args.list:
@@ -2765,8 +2766,8 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
             "--detach cannot be combined with --fast; --fast writes to the "
             "worktree and must not run unattended"
         )
-    if args.status is not None and (args.fast or args.local or args.list):
-        p.error("--status cannot be combined with --fast/--local/--list")
+    if args.status is not None and (args.fast or args.validation or args.list):
+        p.error("--status cannot be combined with --fast/--validation/--list")
     if args.status is not None and args.stage is not None:
         p.error("--status cannot be combined with a CI stage name")
     lease_flags = [
@@ -2808,10 +2809,10 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         if int(match.group("shard")) > int(match.group("count")):
             p.error("--partition shard N must not exceed partition count M")
     if (args.tests_only or args.support_only or args.partition) and (
-        args.local or args.list or args.fast
+        args.validation or args.list or args.fast
     ):
         p.error(
-            "integration selectors cannot be combined with --local/--fast/--list"
+            "integration selectors cannot be combined with --validation/--fast/--list"
         )
     return args
 
@@ -3220,12 +3221,12 @@ def main(
             argv=list(argv),
             environ=environment_in,
             executable=current_executable,
-            mode="local" if args.local else "full",
+            mode="validation" if args.validation else "full",
         )
     if args.fast:
         mode = "fast"
-    elif args.local:
-        mode = "local"
+    elif args.validation:
+        mode = "validation"
     elif args.stage is not None:
         mode = args.stage
     else:
@@ -3254,7 +3255,7 @@ def main(
                 report=report,
             )
         else:
-            runner = {"fast": run_fast, "local": run_local}.get(mode, run_full)
+            runner = {"fast": run_fast, "validation": run_local}.get(mode, run_full)
             exit_code = runner(
                 args,
                 report=report,

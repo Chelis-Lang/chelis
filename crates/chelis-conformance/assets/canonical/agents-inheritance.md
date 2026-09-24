@@ -429,11 +429,11 @@ when picking one up.
 The rules:
 
 ```sh
-python3 scripts/gate.py --fast    # before every push: fixes in place, then checks
-python3 scripts/gate.py --local   # optional troubleshooting and local validation
-python3 scripts/gate.py --detach --local   # optional run, detached
+python3 scripts/gate.py --fast         # before every push: fixes in place, then checks
+python3 scripts/gate.py --validation   # optional troubleshooting and extra validation
+python3 scripts/gate.py --detach --validation   # optional run, detached
 python3 scripts/gate.py --status [HANDLE]  # the detached run's real verdict
-python3 scripts/gate.py --list    # the canonical command list with ownership annotations
+python3 scripts/gate.py --list         # the canonical command list with ownership annotations
 ```
 
 - Fetch `origin/main` before any long local validation. Run `--fast` before every push

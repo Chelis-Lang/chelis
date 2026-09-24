@@ -97,12 +97,12 @@ authorization for new phase-based names.
 `scripts/gate.py` is the single source of truth for the per-PR
 developer-runnable gate; CI runs the same commands. `--fast` is the pre-push
 gate: fix-in-place, run before every push. Applicable CI checks on the pushed
-candidate must pass before ready-for-review. `--local` (chelis#360) is optional
-for troubleshooting or additional local validation:
+candidate must pass before ready-for-review. `--validation` (chelis#360) is
+optional, for troubleshooting or additional local validation:
 
 ```sh
 python3 scripts/gate.py --fast
-python3 scripts/gate.py --local  # optional
+python3 scripts/gate.py --validation  # optional
 ```
 
 `scripts/gate.py` is stdlib-only and re-executes itself through uv when

@@ -12,16 +12,16 @@ pull-request lifecycle.
 ## Modes
 
 ```sh
-python3 scripts/gate.py --fast             # before every push: fixes in place, then checks
-python3 scripts/gate.py --local            # optional troubleshooting and local validation
-python3 scripts/gate.py --detach --local   # optional run, detached
-python3 scripts/gate.py --status [HANDLE]  # the detached run's real verdict
-python3 scripts/gate.py --list             # the canonical command list with ownership annotations
+python3 scripts/gate.py --fast                 # before every push: fixes in place, then checks
+python3 scripts/gate.py --validation           # optional troubleshooting and extra validation
+python3 scripts/gate.py --detach --validation  # optional run, detached
+python3 scripts/gate.py --status [HANDLE]      # the detached run's real verdict
+python3 scripts/gate.py --list                 # the canonical command list with ownership annotations
 ```
 
 `--fast` is the pre-push gate: fix-in-place, run before every push. CI on the
 pushed candidate owns routine PR validation and must pass before
-ready-for-review. `--local` is an optional way to reproduce checks on the
+ready-for-review. `--validation` is an optional way to reproduce checks on the
 developer's machine; no per-PR run is required. The full workspace and broad
 phase oracles run in `heavy-e2e.yml` daily at 03:17 UTC and on manual
 dispatch. Passing PR checks does not certify those phase acceptance oracles;
@@ -33,14 +33,14 @@ legacy/full/manual gate selections remain available.
 `scripts/test_gate.py` pins the complete ordered set of single-line `run:`
 commands permitted in the gate-owned CI jobs, so shell syntax cannot hide an
 unreviewed command. `--list` prints the canonical full list. Each printed
-command carries one of four annotations: `fast + local + ci` (the lint row,
-which `--fast` and `--local` share), `local + ci`, `ci-owned`, and `full gate;
-CI coverage split` (the workspace nextest row). Two trailing `#` notes describe
-the dynamic stages: what `--fast` runs, and the per-crate nextest `--local`
-appends. The gate's own output is the only authoritative list; no document
+command carries one of four annotations: `fast + validation + ci` (the lint
+row, which `--fast` and `--validation` share), `validation + ci`, `ci-owned`,
+and `full gate; CI coverage split` (the workspace nextest row). Two trailing `#`
+notes describe the dynamic stages: what `--fast` runs, and the per-crate nextest
+`--validation` appends. The gate's own output is the only authoritative list; no document
 transcribes it.
 
-Before `--fast`, `--local`, or another long local validation, fetch
+Before `--fast`, `--validation`, or another long local validation, fetch
 `origin/main` so the changed-crate selection and inherited-failure comparison
 use current evidence. If the branch is materially behind, reconcile it
 deliberately before spending hours on a stale tree. When an unrelated failure
@@ -55,7 +55,7 @@ uv- or Devenv-managed it re-executes itself through
 `uv run --managed-python --python 3.11 --no-project` before running gate logic,
 so `python3 scripts/gate.py` is correct in every environment. It exports its
 selected interpreter as `PYO3_PYTHON` to every child command and never requires
-a checkout-local `.venv`; its `--fast` and `--local` preflight warns when the
+a checkout-local `.venv`; its `--fast` and `--validation` preflight warns when the
 worktree has no `.venv/bin/python` (create it with `uv venv --python 3.11`),
 because direct cargo and nextest runs outside the gate fall back to it when
 `PYO3_PYTHON` is unset. If uv is missing, the gate exits with installation and
@@ -91,7 +91,7 @@ rather than fall back.
 
 Two invocation forms follow, and the repository uses them consistently: every
 script is `.venv/bin/python scripts/<name>.py`, and the gate is always
-`python3 scripts/gate.py --fast`, `--local`, or `--list`, never
+`python3 scripts/gate.py --fast`, `--validation`, or `--list`, never
 `.venv/bin/python scripts/gate.py`. The
 `uv run --managed-python --python 3.11 --no-project python ...` form appears
 only where a document explains what the gate re-executes to, and as the
@@ -160,9 +160,10 @@ a file that was already dirty and that fmt changed further is still listed. It
 never runs a workspace clippy row, the chelis#908 oracle, or the
 runtime-representation oracle, and it never takes the lease.
 
-## What `--local` runs
+## What `--validation` runs
 
-`--local` (chelis#360) is an optional local validation command. It runs two of
+`--validation` (chelis#360) is an optional extra validation command, not the
+pre-push gate; `--fast` is. It runs two of
 the three workspace clippy configurations (`-D warnings`, compile-only): the
 default row and the solver-free-features row. The `--no-default-features` row
 is CI-owned through `gate.py lint-and-unit`, because
@@ -174,7 +175,7 @@ row compiles a strict subset of the default row. It then runs
 regeneration check, the explicit rustdoc commands, the checkpoint and
 hash-order compile-fail fixtures, the configuration-closure check, both
 pipeline-core guards, the chelis#908 unrepresentable-domain oracle, the
-runtime-representation Phase 0 oracle, and
+runtime-representation Phase 2 oracle, and
 `cargo nextest run -p <crate> --no-fail-fast` for each crate changed vs
 `origin/main` (committed diff plus uncommitted work; owning packages are
 resolved from each member's `Cargo.toml`, not the directory name). The derived
@@ -187,8 +188,8 @@ PR check, so dispatch it on the branch for Mac-specific changes.
 [`local_macos_environment.md`](local_macos_environment.md) explains why the
 workspace suite does not belong in the local loop on macOS.
 
-If a cold `--local` run is useful, launch it with
-`python3 scripts/gate.py --detach --local` and collect the result with
+If a cold `--validation` run is useful, launch it with
+`python3 scripts/gate.py --detach --validation` and collect the result with
 `python3 scripts/gate.py --status [HANDLE]`. The launcher's exit code is a
 launch verdict and nothing more: the run's own exit code, exit 4 for a lease
 timeout included, arrives through `--status`. Record the `--status` verdict and
@@ -237,7 +238,7 @@ wire census JSON, the dtype C header, or the tree-sitter parsers.
 
 ## Preflight
 
-`--fast`, `--local`, and the bare full gate run a preflight before the first
+`--fast`, `--validation`, and the bare full gate run a preflight before the first
 command: the environment checks (`PYO3_PYTHON`, `CARGO_TARGET_DIR`
 containment, an explicit oracle handoff; exit 2 on failure), the git facts for
 the run summary (never fatal), a warning when the worktree has no
@@ -258,7 +259,7 @@ CPU and make each other slower.
 
 ## The lease
 
-`--local` and the bare full gate hold a workstation-wide `flock` on
+`--validation` and the bare full gate hold a workstation-wide `flock` on
 `gate.lock` under `$CHELIS_GATE_LEASE_DIR`, else `$XDG_CACHE_HOME/chelis`, else
 `~/.cache/chelis`. Updated runners acquire in ticket-registration order.
 Cancellation, timeout, and process death release queue places; kernel locks
@@ -272,7 +273,7 @@ lease/queue contention; `--lease-timeout SECONDS` caps the wait (exit 4);
 Update active worktrees to honor the queue. Queue mechanics live in
 `scripts/gate.py`; acceptance:
 `.venv/bin/python -m unittest scripts.test_gate_queue`. The advisory lease
-serializes `--local` and full runs across worktrees on one workstation; it
+serializes `--validation` and full runs across worktrees on one workstation; it
 never kills another process.
 
 ## Transcripts and reports
@@ -288,7 +289,7 @@ per-stage seconds, the first failing stage, the termination class (`pass`,
 `stage-failure`, `signal`, `environment`, `preflight-stop`, `lease-timeout`,
 `user-cancel`, `internal-error`), and the files a `--fast` run changed; it then
 prints one summary line with the stage count, seconds, verdict, and report
-path. Record the seconds from that file when citing an optional `--local` run
+path. Record the seconds from that file when citing an optional `--validation` run
 in the pull request.
 
 ## Documentation-only changes

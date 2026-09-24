@@ -77,7 +77,7 @@ class ManagedRuntimeTests(unittest.TestCase):
 
         with self.assertRaisesRegex(RuntimeError, "exec intercepted"):
             gate.ensure_managed_runtime(
-                ["--local"],
+                ["--validation"],
                 environ={"PATH": "/usr/bin"},
                 executable=Path("/usr/bin/python3"),
                 prefix=Path("/System/Python"),
@@ -102,7 +102,7 @@ class ManagedRuntimeTests(unittest.TestCase):
                 str(Path(gate.__file__).resolve()),
             ],
         )
-        self.assertEqual(argv[8:], ["--local"])
+        self.assertEqual(argv[8:], ["--validation"])
         self.assertEqual(environment["PATH"], "/usr/bin")
 
     def test_reexec_drops_a_conflicting_python_preference(self):
@@ -171,7 +171,7 @@ class ManagedRuntimeTests(unittest.TestCase):
     def test_missing_uv_prints_install_and_setup_guidance(self):
         error = io.StringIO()
         result = gate.ensure_managed_runtime(
-            ["--local"],
+            ["--validation"],
             environ={},
             executable=Path("/usr/bin/python3"),
             prefix=Path("/System/Python"),

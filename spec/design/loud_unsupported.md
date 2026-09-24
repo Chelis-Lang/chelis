@@ -1692,8 +1692,8 @@ substitutes for the other.
 3. Conversions are per-site PR-reviewable units; the plumbing refactor
    (Phase 1 item 1) is one PR that changes signatures with zero behavior
    change, so review is mechanical.
-4. Gate with `scripts/gate.py --local`; macOS Smoke is the workspace
-   oracle.
+4. Gate with `scripts/gate.py --fast` before every push; macOS Smoke is the
+   workspace oracle.
 
 ---
 

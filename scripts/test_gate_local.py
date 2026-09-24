@@ -1,4 +1,4 @@
-"""Unit tests for `gate.py --local` and the `--list` annotations (chelis#360).
+"""Unit tests for `gate.py --validation` and the `--list` annotations (chelis#360).
 
 Run via:
 `uv run --managed-python --python 3.11 --no-project python -m unittest
@@ -13,17 +13,17 @@ What is locked here:
   (b) paths outside every workspace member map to no crate, and an
       empty diff yields the explicit "no crate changes detected"
       message instead of silently running nothing;
-  (c) the optional `--local` command list is exactly the static local subset
-      (two of the three workspace clippy configurations, fmt --check,
-      chelis lint --check ., the guards and oracles) plus one
+  (c) the optional `--validation` command list is exactly the static
+      validation subset (two of the three workspace clippy configurations,
+      fmt --check, chelis lint --check ., the guards and oracles) plus one
       `cargo nextest run -p <crate>` per changed crate -- no workspace
       build, no workspace nextest, and no `--no-default-features` clippy
       row (CI-owned; see the comment on the exact list below);
   (d) `--list` annotates every canonical command as in the `--fast` pass
-      and the `--local` subset, in the `--local` subset only, or CI-owned,
-      without changing the command list itself (the command-list lock
-      stays in `scripts/test_gate.py`), and prints the `--fast` note
-      before the `--local` note.
+      and the `--validation` subset, in the `--validation` subset only, or
+      CI-owned, without changing the command list itself (the command-list
+      lock stays in `scripts/test_gate.py`), and prints the `--fast` note
+      before the `--validation` note.
 
 No test here runs cargo, nextest, git, or any real gate stage: git
 output and the member->package mapping are injected as canned inputs,
@@ -206,7 +206,7 @@ class LocalCommandListTests(unittest.TestCase):
         # clarabel_sos.rs), while the --no-default-features row compiles a
         # strict subset of the default row and is CI-owned through
         # `gate.py lint-and-unit`.
-        # Assert the exact list so no `--local` stage disappears silently.
+        # Assert the exact list so no `--validation` stage disappears silently.
         rendered = [gate.render(c) for c in gate.local_command_list([])]
         self.assertEqual(
             rendered,
@@ -309,7 +309,7 @@ class ListAnnotationTests(unittest.TestCase):
                 ),
             )
             annotations[command] = annotation
-        # The local subset: two clippy rows, fmt, chelis lint. The standalone
+        # The validation subset: two clippy rows, fmt, chelis lint. The standalone
         # workspace build is intentionally absent: clippy already compiles all
         # targets, and the full gate's default-profile workspace suite is
         # covered in CI by the split workspace and dtype-oracle jobs.
@@ -329,7 +329,7 @@ class ListAnnotationTests(unittest.TestCase):
             annotations[gate.render(gate.FMT_CHECK)],
             gate.LOCAL_ANNOTATION,
         )
-        # The lint row is the one command `--fast` shares with `--local`.
+        # The lint row is the one command `--fast` shares with `--validation`.
         self.assertEqual(
             annotations[gate.render(gate.CHELIS_LINT_CHECK)],
             gate.FAST_ANNOTATION,
@@ -392,7 +392,7 @@ def _isolated_environ(tmp: str) -> dict:
 
 
 class LocalMainTests(unittest.TestCase):
-    """Drive `gate.main(["--local"])` end to end with canned git output,
+    """Drive `gate.main(["--validation"])` end to end with canned git output,
     canned git facts and probe, and a recorded `run_commands`, so no gate
     stage ever runs. The preflight's interpreter probe and the lease in a
     temporary directory are the only real side effects."""
@@ -425,7 +425,7 @@ class LocalMainTests(unittest.TestCase):
                 ), \
                 mock.patch.object(gate, "run_commands", fake_run_commands), \
                 redirect_stdout(buf):
-            rc = gate.main(["--local"], environ=_isolated_environ(tmp))
+            rc = gate.main(["--validation"], environ=_isolated_environ(tmp))
         return rc, recorded, buf.getvalue()
 
     def test_runs_static_subset_plus_changed_crate_suites(self):
@@ -435,7 +435,7 @@ class LocalMainTests(unittest.TestCase):
         )
         self.assertEqual(rc, 0)
         self.assertIn(
-            "gate --local: changed crates vs origin/main: "
+            "gate --validation: changed crates vs origin/main: "
             "chelis-cli, chelis-surf",
             out,
         )
@@ -475,7 +475,7 @@ class LocalMainTests(unittest.TestCase):
 
         err = io.StringIO()
         # `_git_facts` is deliberately NOT patched: it must swallow the same
-        # failure on its own, and `--local`'s own diff/status call still
+        # failure on its own, and `--validation`'s own diff/status call still
         # reports it loudly with the git exit code.
         with tempfile.TemporaryDirectory() as tmp, \
                 mock.patch.object(gate, "_git_output", failing_git_output), \
@@ -488,7 +488,7 @@ class LocalMainTests(unittest.TestCase):
                     ),
                 ), \
                 redirect_stdout(io.StringIO()), redirect_stderr(err):
-            rc = gate.main(["--local"], environ=_isolated_environ(tmp))
+            rc = gate.main(["--validation"], environ=_isolated_environ(tmp))
         self.assertEqual(rc, 128)
         self.assertIn("git failed", err.getvalue())
         self.assertIn("fatal: bad revision", err.getvalue())
@@ -496,17 +496,17 @@ class LocalMainTests(unittest.TestCase):
     def test_local_cannot_be_combined_with_a_stage(self):
         err = io.StringIO()
         with redirect_stderr(err), self.assertRaises(SystemExit):
-            gate.main(["lint-and-unit", "--local"])
+            gate.main(["lint-and-unit", "--validation"])
 
     def test_local_cannot_be_combined_with_list(self):
         err = io.StringIO()
         with redirect_stderr(err), self.assertRaises(SystemExit):
-            gate.main(["--list", "--local"])
+            gate.main(["--list", "--validation"])
 
     def test_local_cannot_be_combined_with_fast(self):
         err = io.StringIO()
         with redirect_stderr(err), self.assertRaises(SystemExit):
-            gate.main(["--fast", "--local"])
+            gate.main(["--fast", "--validation"])
 
 
 if __name__ == "__main__":

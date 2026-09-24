@@ -65,7 +65,7 @@ class ClippyRun:
     #: on macOS nightly. `no-default-features` has Linux coverage only.
     #: `scripts/test_check_configuration_closure.py` checks the macOS command
     #: pairing; `scripts/test_hosted_validation.py` guards its nightly
-    #: routing. Optional `--local` execution is supporting evidence.
+    #: routing. Optional `--validation` execution is supporting evidence.
     hosts: tuple[str, ...]
     cadence: str
 

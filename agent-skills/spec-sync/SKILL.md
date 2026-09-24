@@ -33,6 +33,6 @@ the pushed candidate before ready-for-review:
 python3 scripts/gate.py --fast
 ```
 
-`python3 scripts/gate.py --local` is optional for troubleshooting or additional local
+`python3 scripts/gate.py --validation` is optional for troubleshooting or additional local
 validation. It is not a per-PR requirement and does not replace a named acceptance
 oracle or manual gate.

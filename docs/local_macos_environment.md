@@ -243,7 +243,7 @@ the PR or phase docs that local validation was blocked by this failure mode.
 
 ## Gate Preflight
 
-`python3 scripts/gate.py --fast` and `python3 scripts/gate.py --local` run the
+`python3 scripts/gate.py --fast` and `python3 scripts/gate.py --validation` run the
 probe below automatically on macOS, as a subprocess, before their first
 command. Probe exit 0 proceeds. Exit 1 (the wedge classification) stops the
 gate with exit 3 and the termination class `preflight-stop`, naming this
@@ -274,7 +274,7 @@ runbook. It:
   failed, the probe binary was not executable, or it exited non-zero) — an
   environment problem, not a degradation verdict;
 - always cleans up its temp dir, so it is safe to run from anywhere;
-- is invoked automatically by the gate's preflight (`--fast`, `--local`, and
+- is invoked automatically by the gate's preflight (`--fast`, `--validation`, and
   the bare full gate) on macOS, with the exit mapping in Gate Preflight above.
 
 Tests: `scripts/test_preflight_exec_probe.py`
