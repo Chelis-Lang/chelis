@@ -43,7 +43,13 @@ fn checked_deep(src: &str) -> chelis_types::CheckedProgram {
 fn decision(src: &str, name: &str) -> Result<bool, String> {
     let program = checked_deep(src);
     chelis_ir::lowering_runtime::with_native_lowering_runtime(|runtime| {
-        host_def_kernel(&HostLoweringSession::new(&program, runtime), name, None)
+        host_def_kernel(
+            &mut HostLoweringSession::new(&program),
+            name,
+            None,
+            runtime,
+            &mut chelis_types::NativeServices::new(None),
+        )
     })
     .map(|kernel| kernel.is_some())
     .map_err(|diagnostic| diagnostic.to_string())
@@ -135,7 +141,13 @@ fn tensor_helper_retains_declaring_parameter_order() {
         }),
     ] {
         let kernel = chelis_ir::lowering_runtime::with_native_lowering_runtime(|runtime| {
-            host_def_kernel(&HostLoweringSession::new(&program, runtime), "f", random)
+            host_def_kernel(
+                &mut HostLoweringSession::new(&program),
+                "f",
+                random,
+                runtime,
+                &mut chelis_types::NativeServices::new(None),
+            )
         })
         .unwrap()
         .unwrap();
@@ -151,7 +163,12 @@ fn tensor_helper_retains_declaring_parameter_order() {
         assert_load_order_after_rebuilding(&kernel.dag, &["b", "z", "a"]);
     }
     let dag = chelis_ir::lowering_runtime::with_native_lowering_runtime(|runtime| {
-        lower_named_tensor_entry_dag(&program, "f", runtime)
+        lower_named_tensor_entry_dag(
+            &program,
+            "f",
+            runtime,
+            &mut chelis_types::NativeServices::new(None),
+        )
     })
     .unwrap();
     assert_load_order_after_rebuilding(&dag, &["b", "z", "a"]);
@@ -200,6 +217,7 @@ fn signatureless_helper_retains_assigned_abi_order() {
                 UnordMap::new(),
                 UnordMap::new(),
                 runtime,
+                &mut chelis_types::NativeServices::new(None),
             )
         })
         .unwrap();

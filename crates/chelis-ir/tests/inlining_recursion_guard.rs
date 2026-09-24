@@ -119,6 +119,7 @@ fn nested_fn_param_call_lowers_via_substituted_callable() {
             UnordMap::new(),
             program_defs,
             runtime,
+            &mut chelis_types::NativeServices::new(None),
         )
     });
 
@@ -190,6 +191,7 @@ fn true_self_recursion_errors_loudly_at_unroll_cap() {
             UnordMap::new(),
             program_defs,
             runtime,
+            &mut chelis_types::NativeServices::new(None),
         )
     })
     .expect_err("unbounded self-recursion must be rejected, not silently dropped");
@@ -255,6 +257,7 @@ fn static_base_case_recursion_unrolls_within_cap() {
             UnordMap::new(),
             program_defs,
             runtime,
+            &mut chelis_types::NativeServices::new(None),
         )
     });
 

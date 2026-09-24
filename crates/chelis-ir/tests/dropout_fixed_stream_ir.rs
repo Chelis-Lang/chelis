@@ -28,9 +28,11 @@ fn typed_rate_plan_from_ir(expressions: &[chelis_deep::Expr]) -> Result<Evaluati
     });
     let product = chelis_ir::lowering_runtime::with_native_lowering_runtime(|runtime| {
         chelis_ir::host::host_def_evaluation_plan(
-            &chelis_ir::host::HostLoweringSession::new(&checked, runtime),
+            &mut chelis_ir::host::HostLoweringSession::new(&checked),
             "sample",
             &context,
+            runtime,
+            &mut chelis_types::NativeServices::new(None),
         )
     })
     .map_err(|error| error.to_string())?
@@ -258,6 +260,7 @@ fn lower(
             defs,
             context,
             runtime,
+            &mut chelis_types::NativeServices::new(None),
         )
     })
     .unwrap()
@@ -303,9 +306,11 @@ fn staged_claim_failure_commits_the_preceding_draw_and_reuse_keeps_live_ordinals
     });
     let product = chelis_ir::lowering_runtime::with_native_lowering_runtime(|runtime| {
         chelis_ir::host::host_def_evaluation_plan(
-            &chelis_ir::host::HostLoweringSession::new(&checked, runtime),
+            &mut chelis_ir::host::HostLoweringSession::new(&checked),
             "sample",
             &context,
+            runtime,
+            &mut chelis_types::NativeServices::new(None),
         )
     })
     .unwrap()
@@ -464,6 +469,7 @@ fn source_profile_names_exclusions_before_plan_construction() {
                 UnordMap::new(),
                 &context,
                 runtime,
+                &mut chelis_types::NativeServices::new(None),
             )
         })
         .unwrap_err();
@@ -644,9 +650,11 @@ fn local_movement_failure_occurs_after_the_earlier_entered_draw() {
     });
     let kernel = chelis_ir::lowering_runtime::with_native_lowering_runtime(|runtime| {
         chelis_ir::host::host_def_evaluation_plan(
-            &chelis_ir::host::HostLoweringSession::new(&checked, runtime),
+            &mut chelis_ir::host::HostLoweringSession::new(&checked),
             "sample",
             &context,
+            runtime,
+            &mut chelis_types::NativeServices::new(None),
         )
     })
     .unwrap()
@@ -687,9 +695,11 @@ fn explicit_drop_in_gradient_retains_draws_and_verified_terminal_ownership() {
     });
     let kernel = chelis_ir::lowering_runtime::with_native_lowering_runtime(|runtime| {
         chelis_ir::host::host_def_evaluation_plan(
-            &chelis_ir::host::HostLoweringSession::new(&checked, runtime),
+            &mut chelis_ir::host::HostLoweringSession::new(&checked),
             "sample",
             &context,
+            runtime,
+            &mut chelis_types::NativeServices::new(None),
         )
     })
     .unwrap()

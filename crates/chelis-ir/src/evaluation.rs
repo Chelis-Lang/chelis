@@ -2203,6 +2203,7 @@ mod tests {
                 UnordMap::new(),
                 &context(),
                 runtime,
+                &mut chelis_types::NativeServices::new(None),
             )
         })
         .unwrap_err();
@@ -2614,14 +2615,20 @@ mod tests {
             .unwrap();
             let (forward_and_ad, next) =
                 crate::lowering_runtime::with_native_lowering_runtime(|runtime| {
-                    let session = crate::host::HostLoweringSession::new(&checked, runtime);
-                    let plan = |name| {
-                        crate::host::host_def_evaluation_plan(&session, name, &context())
-                            .unwrap()
-                            .unwrap()
-                            .plan()
-                            .unwrap()
-                            .clone()
+                    let mut session = crate::host::HostLoweringSession::new(&checked);
+                    let mut plan = |name| {
+                        crate::host::host_def_evaluation_plan(
+                            &mut session,
+                            name,
+                            &context(),
+                            runtime,
+                            &mut chelis_types::NativeServices::new(None),
+                        )
+                        .unwrap()
+                        .unwrap()
+                        .plan()
+                        .unwrap()
+                        .clone()
                     };
                     (plan("sample"), plan("next"))
                 });
@@ -2979,6 +2986,7 @@ mod tests {
                 UnordMap::new(),
                 &context(),
                 runtime,
+                &mut chelis_types::NativeServices::new(None),
             )
         })
         .unwrap()
@@ -3228,6 +3236,7 @@ mod tests {
                 definitions,
                 &context,
                 runtime,
+                &mut chelis_types::NativeServices::new(None),
             )
         })
         .unwrap();

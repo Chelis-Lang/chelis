@@ -121,7 +121,12 @@ fn front(source: &str) -> Front {
     let realizability = infer_realizability(&checked, C_TENSOR_PRIMS);
     let manifest = compute_root_manifest(&checked, &realizability);
     let compiled = chelis_ir::lowering_runtime::with_native_lowering_runtime(|runtime| {
-        try_lower_compiled_program_with_manifest(&checked, &manifest, runtime)
+        try_lower_compiled_program_with_manifest(
+            &checked,
+            &manifest,
+            runtime,
+            &mut chelis_types::NativeServices::new(None),
+        )
     })
     .unwrap_or_else(|diagnostic| panic!("host lowering: {diagnostic:?}"));
     let host = compiled.host.expect("test source must have a host lane");

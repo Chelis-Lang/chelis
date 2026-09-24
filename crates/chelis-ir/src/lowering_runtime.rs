@@ -411,13 +411,11 @@ impl LoweringRuntime {
             } else if let Some(diagnostic) = payload.downcast_ref::<D>() {
                 diagnostic.clone()
             } else {
-                message(
-                    payload.downcast_ref::<String>().cloned().or_else(|| {
-                        payload
-                            .downcast_ref::<&str>()
-                            .map(|value| (*value).to_string())
-                    }),
-                )
+                message(payload.downcast_ref::<String>().cloned().or_else(|| {
+                    payload
+                        .downcast_ref::<&str>()
+                        .map(|value| (*value).to_string())
+                }))
             }),
         }
     }
@@ -467,7 +465,8 @@ impl LoweringRuntime {
     ///
     /// Model: an arbitrary `usize`, consumed only by the profile primitives.
     pub(crate) fn detail_profile_start(&mut self) -> usize {
-        if std::env::var_os("CHELIS_PROFILE_COMPILE_CONTEXT_DETAIL").is_some_and(|value| value == "1")
+        if std::env::var_os("CHELIS_PROFILE_COMPILE_CONTEXT_DETAIL")
+            .is_some_and(|value| value == "1")
         {
             self.profile_mark()
         } else {
@@ -593,9 +592,8 @@ const LOWERING_GROW_SEGMENT_BYTES: usize = 512 * 1024 * 1024;
 static CHELIS_PANIC_HOOK_INSTALLED: LazyLock<()> = LazyLock::new(|| {
     let previous = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
-        let suppressed = NATIVE_LOWERING_STATE.with(|state| {
-            state.suppress_unrepresentable.get() || state.suppress_output.get()
-        });
+        let suppressed = NATIVE_LOWERING_STATE
+            .with(|state| state.suppress_unrepresentable.get() || state.suppress_output.get());
         if !suppressed {
             previous(info);
         }

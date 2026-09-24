@@ -27,7 +27,11 @@ fn deep_to_library(source: &str) -> Result<LoweredLibrary, String> {
         chelis_types::check_linearity(&checked, &mut chelis_types::NativeServices::new(None))
             .map_err(|errors| format!("linearity failed: {errors:?}"))?;
     chelis_ir::lowering_runtime::with_native_lowering_runtime(|runtime| {
-        try_lower_program_to_library(&checked, runtime)
+        try_lower_program_to_library(
+            &checked,
+            runtime,
+            &mut chelis_types::NativeServices::new(None),
+        )
     })
     .map_err(|error| format!("lowering failed: {error:?}"))
 }

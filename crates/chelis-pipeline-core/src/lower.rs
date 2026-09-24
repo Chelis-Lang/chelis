@@ -66,8 +66,9 @@ pub fn lower_checked(
     native: &mut NativeServices,
 ) -> Result<LoweredCompilation, CoreLowerError> {
     require_isolated_program(checked.program())?;
-    let lower_result = chelis_ir::lower::try_lower_program_to_library(checked.program(), runtime, native)
-        .map(LoweredProgram::from);
+    let lower_result =
+        chelis_ir::lower::try_lower_program_to_library(checked.program(), runtime, native)
+            .map(LoweredProgram::from);
     finish_isolated_lowering(checked, mode, lower_result)
 }
 
@@ -322,14 +323,13 @@ pub fn lower_checked_with_context(
     checked.root_metadata = root_metadata(&checked.program, Some(&lowered_map), runtime);
     let tensor_names = checked.root_metadata.tensor_names.clone();
 
-    let lower_result =
-        chelis_ir::lower::try_lower_program_with_context(
-            library.raw(),
-            &checked.program,
-            runtime,
-            native,
-        )
-        .map(LoweredProgram::from);
+    let lower_result = chelis_ir::lower::try_lower_program_with_context(
+        library.raw(),
+        &checked.program,
+        runtime,
+        native,
+    )
+    .map(LoweredProgram::from);
     finish_contextual_lowering(checked, library.dag(), mode, lower_result, &tensor_names)
 }
 
@@ -464,7 +464,12 @@ mod tests {
         let manifest =
             chelis_effects::realizability::compute_root_manifest(checked.program(), &realizability);
         let ordinary = chelis_ir::lowering_runtime::with_native_lowering_runtime(|runtime| {
-            lower_checked(checked.clone(), LoweringMode::Strict, runtime)
+            lower_checked(
+                checked.clone(),
+                LoweringMode::Strict,
+                runtime,
+                &mut chelis_types::NativeServices::new(None),
+            )
         })
         .unwrap();
         let expected_host = chelis_ir::lowering_runtime::with_native_lowering_runtime(|runtime| {
@@ -472,6 +477,7 @@ mod tests {
                 checked.program(),
                 &manifest,
                 runtime,
+                &mut chelis_types::NativeServices::new(None),
             )
         })
         .unwrap()
@@ -479,7 +485,13 @@ mod tests {
         for mode in [LoweringMode::AllowHostOnly, LoweringMode::AllowHostBackend] {
             let (actual, ordinary_host, plan) =
                 chelis_ir::lowering_runtime::with_native_lowering_runtime(|runtime| {
-                    lower_checked_for_c_execution(checked.clone(), &manifest, mode, runtime)
+                    lower_checked_for_c_execution(
+                        checked.clone(),
+                        &manifest,
+                        mode,
+                        runtime,
+                        &mut chelis_types::NativeServices::new(None),
+                    )
                 })
                 .unwrap();
             assert_eq!(ordinary_host.is_some(), expected_host.is_some());
@@ -508,7 +520,13 @@ mod tests {
                 .push(IrName::new("phantom"));
             assert!(matches!(
                 chelis_ir::lowering_runtime::with_native_lowering_runtime(|runtime| {
-                    lower_checked_for_c_execution(malformed, &manifest, mode, runtime)
+                    lower_checked_for_c_execution(
+                        malformed,
+                        &manifest,
+                        mode,
+                        runtime,
+                        &mut chelis_types::NativeServices::new(None),
+                    )
                 }),
                 Err(CoreLowerError::RootCount { .. })
             ));

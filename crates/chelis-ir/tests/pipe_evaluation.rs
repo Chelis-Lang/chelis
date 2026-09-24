@@ -62,6 +62,7 @@ fn pipe_unary_builtin_stage_lowers_and_evaluates() {
             UnordMap::new(),
             UnordMap::new(),
             runtime,
+            &mut chelis_types::NativeServices::new(None),
         )
     });
 
@@ -115,6 +116,7 @@ fn pipe_plain_callable_with_args_lowers_and_evaluates() {
             UnordMap::new(),
             UnordMap::new(),
             runtime,
+            &mut chelis_types::NativeServices::new(None),
         )
     });
 
@@ -190,6 +192,7 @@ fn pipe_grad_stage_matches_non_pipe_application() {
             UnordMap::new(),
             program_defs.clone(),
             runtime,
+            &mut chelis_types::NativeServices::new(None),
         )
     });
     let app_dag = chelis_ir::lowering_runtime::with_native_lowering_runtime(|runtime| {
@@ -199,6 +202,7 @@ fn pipe_grad_stage_matches_non_pipe_application() {
             UnordMap::new(),
             program_defs,
             runtime,
+            &mut chelis_types::NativeServices::new(None),
         )
     });
 
@@ -296,6 +300,7 @@ fn pipe_vmap_grad_stage_matches_non_pipe_application() {
             UnordMap::new(),
             program_defs.clone(),
             runtime,
+            &mut chelis_types::NativeServices::new(None),
         )
     });
     let app_dag = chelis_ir::lowering_runtime::with_native_lowering_runtime(|runtime| {
@@ -305,6 +310,7 @@ fn pipe_vmap_grad_stage_matches_non_pipe_application() {
             UnordMap::new(),
             program_defs,
             runtime,
+            &mut chelis_types::NativeServices::new(None),
         )
     });
 
@@ -398,6 +404,7 @@ fn pipe_vmap_def_stage_lowers_and_evaluates() {
             UnordMap::new(),
             program_defs,
             runtime,
+            &mut chelis_types::NativeServices::new(None),
         )
     });
 
@@ -483,6 +490,7 @@ fn pipe_fn_typed_parameter_stage_lowers_standalone_def() {
             UnordMap::new(),
             UnordMap::new(),
             runtime,
+            &mut chelis_types::NativeServices::new(None),
         )
     });
     assert!(
@@ -563,6 +571,7 @@ fn pipe_fn_typed_parameter_stage_matches_non_pipe_call_site() {
             UnordMap::new(),
             program_defs.clone(),
             runtime,
+            &mut chelis_types::NativeServices::new(None),
         )
     });
     let app_dag = chelis_ir::lowering_runtime::with_native_lowering_runtime(|runtime| {
@@ -572,6 +581,7 @@ fn pipe_fn_typed_parameter_stage_matches_non_pipe_call_site() {
             UnordMap::new(),
             program_defs,
             runtime,
+            &mut chelis_types::NativeServices::new(None),
         )
     });
 

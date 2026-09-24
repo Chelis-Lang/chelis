@@ -77,7 +77,11 @@ fn lowering_scalar_helpers_keeps_scope_snapshot_allocations_bounded() {
             .unwrap();
             let before = BYTES.load(Ordering::Relaxed);
             let lowered = chelis_ir::lowering_runtime::with_native_lowering_runtime(|runtime| {
-                chelis_ir::lower::try_lower_program_to_library(&checked, runtime)
+                chelis_ir::lower::try_lower_program_to_library(
+                    &checked,
+                    runtime,
+                    &mut chelis_types::NativeServices::new(None),
+                )
             })
             .unwrap();
             let allocated = BYTES.load(Ordering::Relaxed) - before;

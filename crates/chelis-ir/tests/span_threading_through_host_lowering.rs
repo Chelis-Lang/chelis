@@ -36,7 +36,11 @@ use chelis_types::{CheckedProgram, check_ir_program, check_linearity};
 /// fallible boundary.
 fn lower_compiled_program(program: &CheckedProgram) -> CompiledProgram {
     chelis_ir::lowering_runtime::with_native_lowering_runtime(|runtime| {
-        try_lower_compiled_program(program, runtime)
+        try_lower_compiled_program(
+            program,
+            runtime,
+            &mut chelis_types::NativeServices::new(None),
+        )
     })
     .expect("span fixture must lower through the host boundary")
 }

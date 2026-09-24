@@ -20,7 +20,13 @@ fn checked(src: &str) -> chelis_types::CheckedProgram {
 fn decision(source: &str, name: &str, kernel: bool) {
     let program = checked(source);
     let result = chelis_ir::lowering_runtime::with_native_lowering_runtime(|runtime| {
-        host_def_kernel(&HostLoweringSession::new(&program, runtime), name, None)
+        host_def_kernel(
+            &mut HostLoweringSession::new(&program),
+            name,
+            None,
+            runtime,
+            &mut chelis_types::NativeServices::new(None),
+        )
     })
     .map(|value| value.is_some())
     .map_err(|error| error.to_string());
@@ -186,7 +192,13 @@ fn computed_dynamic_extent_is_not_claimed_as_supported_host_partition() {
         "fixtures/core/tests/issue_1906_concat_admission/computed_dynamic_extent_is_not_claimed_as_supported_host_partition_13.dp"
     ));
     let error = chelis_ir::lowering_runtime::with_native_lowering_runtime(|runtime| {
-        host_def_kernel(&HostLoweringSession::new(&program, runtime), "run", None)
+        host_def_kernel(
+            &mut HostLoweringSession::new(&program),
+            "run",
+            None,
+            runtime,
+            &mut chelis_types::NativeServices::new(None),
+        )
     })
     .expect_err("computed concat stays outside this admission class");
     assert!(
@@ -216,6 +228,7 @@ fn forced_dynamic_concat_rejects_instead_of_fabricating_a_load() {
             UnordMap::new(),
             UnordMap::new(),
             runtime,
+            &mut chelis_types::NativeServices::new(None),
         )
     })
     .expect_err("no fabricated input");

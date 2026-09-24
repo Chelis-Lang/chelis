@@ -144,7 +144,11 @@ fn span_threading_through_lowering() {
 
     let checked = check(source);
     let dag = chelis_ir::lowering_runtime::with_native_lowering_runtime(|runtime| {
-        lower_program(&checked, runtime)
+        lower_program(
+            &checked,
+            runtime,
+            &mut chelis_types::NativeServices::new(None),
+        )
     });
     let dag_spans = collect_dag_spans(&dag);
     let missing: Vec<&String> = input_spans.difference(&dag_spans).collect();
@@ -200,7 +204,11 @@ fn lowering_without_spans_produces_none_span_ids() {
 
     let checked = check(source);
     let dag = chelis_ir::lowering_runtime::with_native_lowering_runtime(|runtime| {
-        lower_program(&checked, runtime)
+        lower_program(
+            &checked,
+            runtime,
+            &mut chelis_types::NativeServices::new(None),
+        )
     });
 
     assert!(
@@ -235,7 +243,11 @@ fn lowering_an_empty_program_does_not_panic() {
 
     let checked = check(source);
     let dag = chelis_ir::lowering_runtime::with_native_lowering_runtime(|runtime| {
-        lower_program(&checked, runtime)
+        lower_program(
+            &checked,
+            runtime,
+            &mut chelis_types::NativeServices::new(None),
+        )
     });
     assert!(
         dag.is_empty(),
@@ -263,7 +275,11 @@ fn single_span_program_propagates_to_every_ir_node() {
     "#;
     let checked = check(source);
     let dag = chelis_ir::lowering_runtime::with_native_lowering_runtime(|runtime| {
-        lower_program(&checked, runtime)
+        lower_program(
+            &checked,
+            runtime,
+            &mut chelis_types::NativeServices::new(None),
+        )
     });
 
     assert!(!dag.is_empty(), "uniform-span fixture should lower");
@@ -302,7 +318,11 @@ fn s2_lowering_does_not_emit_synthesized_markers() {
     "#;
     let checked = check(source);
     let dag = chelis_ir::lowering_runtime::with_native_lowering_runtime(|runtime| {
-        lower_program(&checked, runtime)
+        lower_program(
+            &checked,
+            runtime,
+            &mut chelis_types::NativeServices::new(None),
+        )
     });
 
     for node in dag.nodes() {
@@ -336,7 +356,11 @@ fn atom_const_inherits_parent_span() {
     "#;
     let checked = check(source);
     let dag = chelis_ir::lowering_runtime::with_native_lowering_runtime(|runtime| {
-        lower_program(&checked, runtime)
+        lower_program(
+            &checked,
+            runtime,
+            &mut chelis_types::NativeServices::new(None),
+        )
     });
 
     let mut found_atom_span = false;
@@ -406,7 +430,11 @@ fn var_ref_to_let_bound_name_records_span_on_cached_node() {
 
     let checked = check(source);
     let dag = chelis_ir::lowering_runtime::with_native_lowering_runtime(|runtime| {
-        lower_program(&checked, runtime)
+        lower_program(
+            &checked,
+            runtime,
+            &mut chelis_types::NativeServices::new(None),
+        )
     });
     let dag_spans = collect_dag_spans(&dag);
 
@@ -467,7 +495,11 @@ fn var_ref_without_span_does_not_fabricate_one() {
 
     let checked = check(source);
     let dag = chelis_ir::lowering_runtime::with_native_lowering_runtime(|runtime| {
-        lower_program(&checked, runtime)
+        lower_program(
+            &checked,
+            runtime,
+            &mut chelis_types::NativeServices::new(None),
+        )
     });
 
     let mut saw_lit_a_node = false;
@@ -513,7 +545,11 @@ fn var_ref_inherits_enclosing_apps_span_via_current_span_id() {
 
     let checked = check(source);
     let dag = chelis_ir::lowering_runtime::with_native_lowering_runtime(|runtime| {
-        lower_program(&checked, runtime)
+        lower_program(
+            &checked,
+            runtime,
+            &mut chelis_types::NativeServices::new(None),
+        )
     });
     let dag_spans = collect_dag_spans(&dag);
     assert!(
@@ -565,7 +601,11 @@ fn atom_symbol_ref_to_let_bound_name_records_span_on_cached_node() {
     let input_spans = collect_input_spans(&exprs);
     let checked = check(source);
     let dag = chelis_ir::lowering_runtime::with_native_lowering_runtime(|runtime| {
-        lower_program(&checked, runtime)
+        lower_program(
+            &checked,
+            runtime,
+            &mut chelis_types::NativeServices::new(None),
+        )
     });
     let dag_spans = collect_dag_spans(&dag);
     let missing: Vec<&String> = input_spans.difference(&dag_spans).collect();

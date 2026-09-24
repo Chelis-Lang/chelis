@@ -70,7 +70,14 @@ fn lower_over_symbolic_x(expr: &Expr) -> Dag {
         },
     );
     chelis_ir::lowering_runtime::with_native_lowering_runtime(|runtime| {
-        lower_subexpr_program(expr, scoped, UnordMap::new(), UnordMap::new(), runtime)
+        lower_subexpr_program(
+            expr,
+            scoped,
+            UnordMap::new(),
+            UnordMap::new(),
+            runtime,
+            &mut chelis_types::NativeServices::new(None),
+        )
     })
 }
 
@@ -170,6 +177,7 @@ fn two_reshapes_from_distinct_producers_reject_forced_dag() {
             UnordMap::new(),
             UnordMap::new(),
             runtime,
+            &mut chelis_types::NativeServices::new(None),
         )
     })
     .expect_err("distinct producers cannot prove the non-concat axes equal");

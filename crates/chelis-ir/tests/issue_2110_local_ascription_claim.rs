@@ -21,7 +21,12 @@ fn lower(source: &str) -> chelis_ir::Dag {
         panic!("type check failed: {:?}", report.errors);
     });
     chelis_ir::lowering_runtime::with_native_lowering_runtime(|runtime| {
-        chelis_ir::host::lower_named_tensor_entry_dag(&checked, "f", runtime)
+        chelis_ir::host::lower_named_tensor_entry_dag(
+            &checked,
+            "f",
+            runtime,
+            &mut chelis_types::NativeServices::new(None),
+        )
     })
     .expect("named tensor entry lowers")
 }
@@ -424,10 +429,16 @@ fn host_evaluation_kernel_carries_the_same_local_ascription_site() {
             counter: 0,
         });
     let plan = chelis_ir::lowering_runtime::with_native_lowering_runtime(|runtime| {
-        let session = chelis_ir::host::HostLoweringSession::new(&checked, runtime);
-        chelis_ir::host::host_def_evaluation_plan(&session, "f", &execution)
-            .expect("kernel decision")
-            .expect("tensor kernel")
+        let mut session = chelis_ir::host::HostLoweringSession::new(&checked);
+        chelis_ir::host::host_def_evaluation_plan(
+            &mut session,
+            "f",
+            &execution,
+            runtime,
+            &mut chelis_types::NativeServices::new(None),
+        )
+        .expect("kernel decision")
+        .expect("tensor kernel")
     });
     assert_eq!(
         local_claims(&plan.kernel_for_inspection().dag).len(),
@@ -449,10 +460,16 @@ fn staged_host_partition_retains_the_local_ascription_site() {
             counter: 0,
         });
     let plan = chelis_ir::lowering_runtime::with_native_lowering_runtime(|runtime| {
-        let session = chelis_ir::host::HostLoweringSession::new(&checked, runtime);
-        chelis_ir::host::host_def_evaluation_plan(&session, "f", &execution)
-            .expect("kernel decision")
-            .expect("tensor kernel")
+        let mut session = chelis_ir::host::HostLoweringSession::new(&checked);
+        chelis_ir::host::host_def_evaluation_plan(
+            &mut session,
+            "f",
+            &execution,
+            runtime,
+            &mut chelis_types::NativeServices::new(None),
+        )
+        .expect("kernel decision")
+        .expect("tensor kernel")
     });
     assert!(
         plan.kernel_for_inspection().staged.is_some(),

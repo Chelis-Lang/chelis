@@ -935,13 +935,8 @@ pub(crate) fn try_lower_program_to_library_with_trace(
     // failed lowering discards all partial observations with its contexts.
     runtime.catch_lowering_with(native, |runtime, native| {
         let mut collector = crate::lowering_trace::Collector::new();
-        let library = lower_program_to_library_inner(
-            program,
-            None,
-            Some(&mut collector),
-            runtime,
-            native,
-        )?;
+        let library =
+            lower_program_to_library_inner(program, None, Some(&mut collector), runtime, native)?;
         Ok((library, collector.finish()))
     })
 }
@@ -1005,8 +1000,7 @@ fn lower_program_to_library_inner(
             );
         }
     }
-    ctx.runtime
-        .detail_profile_phase(profile, "lower_ctx_new");
+    ctx.runtime.detail_profile_phase(profile, "lower_ctx_new");
     let mut last_dag_size: usize = ctx.dag.len();
     // Same reasoning as the assertions_loop above: prefer the
     // precomputed `lowered_names` over a fresh `top_level_expr_is_lowered`
@@ -1030,8 +1024,12 @@ fn lower_program_to_library_inner(
             }
             let nodes = ctx.dag.len();
             let name = top_level_expr_name(expr).unwrap_or("<anon>");
-            ctx.runtime
-                .detail_profile_declaration(declaration_start, &mut last_dag_size, nodes, name);
+            ctx.runtime.detail_profile_declaration(
+                declaration_start,
+                &mut last_dag_size,
+                nodes,
+                name,
+            );
         }
         Ok(())
     })?;
@@ -2768,9 +2766,9 @@ pub(crate) fn try_lower_staged_host_region(
         let mut evaluation = match ctx.execution.take() {
             Some(mut metadata) => {
                 metadata.spine.record_nodes(&ctx.dag);
-                metadata
-                    .complete(&ctx.dag)
-                    .map_err(|message| raise_fatal_lowering_error(message, None, None, ctx.runtime))?;
+                metadata.complete(&ctx.dag).map_err(|message| {
+                    raise_fatal_lowering_error(message, None, None, ctx.runtime)
+                })?;
                 Some(
                     crate::evaluation::StagedEvaluationPlan::new(ctx.dag.clone(), metadata)
                         .map_err(|message| {
@@ -3069,8 +3067,9 @@ fn normalize_evaluation_dag_with_trace(
             _ => true,
         });
     #[cfg(feature = "lowering-trace")]
-    let before_dce_execution =
-        trace.as_ref().map(|_| crate::lowering_trace::Collector::execution_observation(&dag, &execution));
+    let before_dce_execution = trace
+        .as_ref()
+        .map(|_| crate::lowering_trace::Collector::execution_observation(&dag, &execution));
     #[cfg(feature = "lowering-trace")]
     let before_dce = trace.as_ref().map(|_| dag.clone());
     let (after_dce, dce_remap) =
@@ -7252,7 +7251,10 @@ pub(crate) struct LoweredSubexprWithControls {
 
 impl LoweredValue {
     #[cfg(feature = "lowering-trace")]
-    fn trace_value(&self, runtime: &mut LoweringRuntime) -> LowerResult<crate::lowering_trace::Value> {
+    fn trace_value(
+        &self,
+        runtime: &mut LoweringRuntime,
+    ) -> LowerResult<crate::lowering_trace::Value> {
         use crate::lowering_trace::Value;
         Ok(match self {
             Self::Host { .. } => {
@@ -8204,8 +8206,7 @@ impl<'program> LowerCtx<'program> {
                 ty,
                 self.current_span_id.clone(),
             );
-            self.bindings
-                .insert(name.clone(), LoweredValue::Node(load));
+            self.bindings.insert(name.clone(), LoweredValue::Node(load));
             captures.insert(name, node_id);
             if let Some(owner) = owner {
                 self.execution_node_owners.insert(load, owner);
@@ -10963,11 +10964,7 @@ impl<'program> LowerCtx<'program> {
         self.extract_usize_value(wrt_expr).map(|index| vec![index])
     }
 
-    fn is_selected_wrt(
-        index: usize,
-        ty: &TensorType,
-        wrt_indices: Option<&[usize]>,
-    ) -> bool {
+    fn is_selected_wrt(index: usize, ty: &TensorType, wrt_indices: Option<&[usize]>) -> bool {
         let differentiable = ty.precision.is_float();
         match wrt_indices {
             Some(indices) => differentiable && indices.contains(&index),
@@ -11120,8 +11117,10 @@ impl<'program> LowerCtx<'program> {
         #[cfg(feature = "lowering-trace")]
         {
             if let Some(trace) = self.trace.as_deref_mut() {
-                subctx.trace_context =
-                    trace.child(self.trace_context, crate::lowering_trace::ContextKind::Gradient);
+                subctx.trace_context = trace.child(
+                    self.trace_context,
+                    crate::lowering_trace::ContextKind::Gradient,
+                );
                 subctx.trace = Some(trace);
             }
         }
@@ -11349,7 +11348,10 @@ impl<'program> LowerCtx<'program> {
         {
             #[cfg(feature = "lowering-trace")]
             if let Some(trace) = subctx.trace.as_deref_mut() {
-                trace.boundary(subctx.trace_context, crate::lowering_trace::BoundaryKind::UnresolvedCallableGradient);
+                trace.boundary(
+                    subctx.trace_context,
+                    crate::lowering_trace::BoundaryKind::UnresolvedCallableGradient,
+                );
             }
             // The standalone higher-order definition cannot know the
             // contribution from an unresolved callable result that reaches
@@ -12145,10 +12147,12 @@ impl<'program> LowerCtx<'program> {
         // chelis-types' boundary `stacker::grow` pattern would not: the
         // stack nears exhaustion mid-descent, and every additional level
         // re-enters this function, so the grow site is always in reach.
-        let mut result =
-            crate::lowering_runtime::grow_stack_if_needed(self, 64 * 1024, 4 * 1024 * 1024, |ctx| {
-                ctx.lower_expr_with_claim(body, Some(&declared_result), authored_result_claim)
-            })?;
+        let mut result = crate::lowering_runtime::grow_stack_if_needed(
+            self,
+            64 * 1024,
+            4 * 1024 * 1024,
+            |ctx| ctx.lower_expr_with_claim(body, Some(&declared_result), authored_result_claim),
+        )?;
         if let Some(ret_ty_expr) = fn_expr.result_type() {
             let ret_ty = Self::type_from_type_expr_with_subst(
                 ret_ty_expr,
@@ -12545,7 +12549,10 @@ impl<'program> LowerCtx<'program> {
     ) -> LowerResult<LoweredValue> {
         #[cfg(feature = "lowering-trace")]
         if let Some(trace) = self.trace.as_deref_mut() {
-            trace.boundary(self.trace_context, crate::lowering_trace::BoundaryKind::Vmap);
+            trace.boundary(
+                self.trace_context,
+                crate::lowering_trace::BoundaryKind::Vmap,
+            );
         }
         let Some((param_names, body)) = Self::extract_fn_parts(fn_expr, self.runtime)? else {
             return self.lower_unrepresentable("vmap", std::slice::from_ref(fn_expr));
@@ -12671,21 +12678,19 @@ impl<'program> LowerCtx<'program> {
             })
             .collect::<UnordSet<_>>();
 
-        let vmapped = match vmap::vectorize_axis0_with_captures(
-            &sub_dag,
-            batch_dim.clone(),
-            &captured_loads,
-        ) {
-            Ok(dag) => dag,
-            Err(message) => {
-                return Err(raise_lowering_error(
-                    format!("`vmap` lowering failed: {message}"),
-                    Some(body.span()),
-                    body.span_id().map(ToOwned::to_owned),
-                    self.runtime,
-                ));
-            }
-        };
+        let vmapped =
+            match vmap::vectorize_axis0_with_captures(&sub_dag, batch_dim.clone(), &captured_loads)
+            {
+                Ok(dag) => dag,
+                Err(message) => {
+                    return Err(raise_lowering_error(
+                        format!("`vmap` lowering failed: {message}"),
+                        Some(body.span()),
+                        body.span_id().map(ToOwned::to_owned),
+                        self.runtime,
+                    ));
+                }
+            };
 
         let batch_source = param_types
             .iter()
@@ -12837,7 +12842,10 @@ impl<'program> LowerCtx<'program> {
     ) -> LowerResult<LoweredValue> {
         #[cfg(feature = "lowering-trace")]
         if let Some(trace) = self.trace.as_deref_mut() {
-            trace.boundary(self.trace_context, crate::lowering_trace::BoundaryKind::VmapGradient);
+            trace.boundary(
+                self.trace_context,
+                crate::lowering_trace::BoundaryKind::VmapGradient,
+            );
         }
         let Some((param_names, body)) = Self::extract_fn_parts(fn_expr, self.runtime)? else {
             return self.lower_unrepresentable("vmap(grad)", std::slice::from_ref(fn_expr));
@@ -12904,8 +12912,10 @@ impl<'program> LowerCtx<'program> {
         #[cfg(feature = "lowering-trace")]
         {
             if let Some(trace) = self.trace.as_deref_mut() {
-                subctx.trace_context =
-                    trace.child(self.trace_context, crate::lowering_trace::ContextKind::VmapGradient);
+                subctx.trace_context = trace.child(
+                    self.trace_context,
+                    crate::lowering_trace::ContextKind::VmapGradient,
+                );
                 subctx.trace = Some(trace);
             }
         }
@@ -12954,7 +12964,10 @@ impl<'program> LowerCtx<'program> {
         {
             #[cfg(feature = "lowering-trace")]
             if let Some(trace) = subctx.trace.as_deref_mut() {
-                trace.boundary(subctx.trace_context, crate::lowering_trace::BoundaryKind::UnresolvedCallableGradient);
+                trace.boundary(
+                    subctx.trace_context,
+                    crate::lowering_trace::BoundaryKind::UnresolvedCallableGradient,
+                );
             }
             // As for ordinary grad, an incomplete live callable is unknown,
             // not an absent adjoint of a completely lowered constant body.
@@ -13033,9 +13046,9 @@ impl<'program> LowerCtx<'program> {
         }
         arg_map.merge(captured_bindings);
 
-        let remap = self
-            .splice_dag(&vmapped, &arg_map)
-            .map_err(|message| invalid_mapping(self.runtime, format!("splice failed: {message}")))?;
+        let remap = self.splice_dag(&vmapped, &arg_map).map_err(|message| {
+            invalid_mapping(self.runtime, format!("splice failed: {message}"))
+        })?;
         self.restore_vmapped_entry_witness_axes(&vmapped, &remap, &param_names, actual_args, axis);
         let mapped_root = |runtime: &mut LoweringRuntime, old: NodeId| {
             root_map
@@ -13053,7 +13066,10 @@ impl<'program> LowerCtx<'program> {
             .zip(wrt_param_indices.iter().copied())
             .map(|(load, index)| {
                 let actual = materialized_args.get(index).copied().ok_or_else(|| {
-                    invalid_mapping(self.runtime, format!("missing materialized argument {index}"))
+                    invalid_mapping(
+                        self.runtime,
+                        format!("missing materialized argument {index}"),
+                    )
                 })?;
                 Ok((load, index, actual))
             })
@@ -13068,7 +13084,10 @@ impl<'program> LowerCtx<'program> {
                         .get(*actual)
                         .map(|node| node.output_type.clone())
                         .ok_or_else(|| {
-                            invalid_mapping(self.runtime, format!("invalid materialized argument {actual:?}"))
+                            invalid_mapping(
+                                self.runtime,
+                                format!("invalid materialized argument {actual:?}"),
+                            )
                         })?;
                     let zero = self.zero_tensor_node(&ty, Some(*actual));
                     // Retain the whole reachable forward carrier: a root may
@@ -13088,7 +13107,9 @@ impl<'program> LowerCtx<'program> {
             .get(grad_result.output_node.0)
             .and_then(|batched| remap.get(batched))
             .copied()
-            .ok_or_else(|| invalid_mapping(self.runtime, "missing forward activation mapping".into()))?;
+            .ok_or_else(|| {
+                invalid_mapping(self.runtime, "missing forward activation mapping".into())
+            })?;
         for cotangent in flattened.iter().filter(|id| **id != forward_activation) {
             self.dag.add_shape_dep(*cotangent, forward_activation);
         }
@@ -13105,9 +13126,10 @@ impl<'program> LowerCtx<'program> {
             expected_cotangents: selected.len(),
         })
         .map_err(|message| {
-            invalid_mapping(self.runtime, format!(
-                "post-splice closure verification failed: {message}"
-            ))
+            invalid_mapping(
+                self.runtime,
+                format!("post-splice closure verification failed: {message}"),
+            )
         })?;
         if axis > 0 {
             for result in &mut flattened {
@@ -13140,9 +13162,10 @@ impl<'program> LowerCtx<'program> {
                 .iter()
                 .map(|index| {
                     groups.get(index).copied().ok_or_else(|| {
-                        invalid_mapping(self.runtime, format!(
-                            "cotangent packing has no selected parameter {index}"
-                        ))
+                        invalid_mapping(
+                            self.runtime,
+                            format!("cotangent packing has no selected parameter {index}"),
+                        )
                     })
                 })
                 .collect::<LowerResult<_>>()?;
@@ -14218,7 +14241,7 @@ impl<'program> LowerCtx<'program> {
                 // finding). Runtime-parameterized windows are op-owner
                 // support work, not a silent default.
                 let mut extract_literal_axis_list = |list_arg: &Expr,
-                                                 which: &str|
+                                                     which: &str|
                  -> LowerResult<Vec<usize>> {
                     collect_cons_chain(list_arg)
                         .and_then(|elems| {
@@ -15749,7 +15772,9 @@ impl<'program> LowerCtx<'program> {
             // `cast(<literal>, i64)` before an imported wrapper is
             // inlined. The checker has already established an integer
             // result type, so an exact integer input survives the cast.
-            RiscOp::Cast { .. } | RiscOp::Copy => Self::static_i64_from_node(dag, *node.inputs.first()?),
+            RiscOp::Cast { .. } | RiscOp::Copy => {
+                Self::static_i64_from_node(dag, *node.inputs.first()?)
+            }
             _ => None,
         }
     }
@@ -16493,11 +16518,7 @@ impl<'program> LowerCtx<'program> {
     /// narrower [`extract_int_for_dim`] path.
     fn fold_static_size(&mut self, expr: &Expr) -> Option<i64> {
         let bindings = &self.static_size_bindings;
-        chelis_types::fold_static_int_expr(
-            expr,
-            |name| bindings.get(name).copied(),
-            self.native,
-        )
+        chelis_types::fold_static_int_expr(expr, |name| bindings.get(name).copied(), self.native)
     }
 
     /// chelis#620: resolve an already-lowered `if` condition to a
@@ -18179,7 +18200,9 @@ impl<'program> LowerCtx<'program> {
         Ok(match effect_kind {
             Ok(EffectKind::Random) if elems.len() >= 4 => {
                 if self.host_program.is_some() {
-                    self.record_stage_status(crate::host::staged::StagingStatus::HostControlBoundary);
+                    self.record_stage_status(
+                        crate::host::staged::StagingStatus::HostControlBoundary,
+                    );
                     return Err(raise_lowering_error(
                         "a Random handler retains its host control boundary around staged calls",
                         Some(elems[3].span()),
@@ -20021,7 +20044,11 @@ impl<'program> LowerCtx<'program> {
     /// suppression-aware raise ladder for callers that carry a span-source
     /// expression rather than a tag's `elems` slice (chelis#620, e.g. the
     /// recursion-unroll caps in `lower_plain_callable_app`).
-    fn reject_lowering_slice(&mut self, span_expr: Option<&Expr>, message: String) -> LoweringFailure {
+    fn reject_lowering_slice(
+        &mut self,
+        span_expr: Option<&Expr>,
+        message: String,
+    ) -> LoweringFailure {
         if self.runtime.unrepresentable_panic_suppressed() {
             return self.runtime.raise_unrepresentable();
         }
@@ -20368,7 +20395,12 @@ mod fused_zero_tests {
                         &mut chelis_types::NativeServices::new(None),
                     )
                     .unwrap();
-                    let library = try_lower_program_to_library(&checked, runtime).unwrap();
+                    let library = try_lower_program_to_library(
+                        &checked,
+                        runtime,
+                        &mut chelis_types::NativeServices::new(None),
+                    )
+                    .unwrap();
                     assert_eq!(
                         library.rootless_defs().contains("mapped"),
                         !dead,
@@ -20503,7 +20535,7 @@ mod fused_zero_tests {
                 collect_top_level_sigs(checked.exprs()),
                 LinearityInfo::default(),
                 runtime,
-                native,
+                Box::leak(Box::new(chelis_types::NativeServices::new(None))),
             );
             let CallableExpr::Plain(function) = ctx
                 .resolve_callable_expr(&parsed("(var {} loss)"))
@@ -20563,7 +20595,7 @@ mod fused_zero_tests {
             BTreeMap::new(),
             LinearityInfo::default(),
             runtime,
-            native,
+            Box::leak(Box::new(chelis_types::NativeServices::new(None))),
         )
     }
 
@@ -20649,7 +20681,7 @@ mod fused_zero_tests {
                         "(app {{}} (vmap {{}} (grad {{}} {function}) 0) (var {{}} xs))"
                     )))
                     .unwrap()
-                    .expect_node("constant fused gradient owns one zero root", runtime)
+                    .expect_node("constant fused gradient owns one zero root", ctx.runtime)
                     .unwrap();
                 let values = eval_tensor_roots_with_strict(
                     &ctx.dag,
@@ -21343,6 +21375,7 @@ mod tests {
                 },
                 false,
                 runtime,
+                &mut chelis_types::NativeServices::new(None),
             )
             .expect("duplicate tuple lowers through the actual helper ingress");
 
@@ -21480,7 +21513,7 @@ mod tests {
             BTreeMap::new(),
             LinearityInfo::default(),
             runtime,
-            native,
+            Box::leak(Box::new(chelis_types::NativeServices::new(None))),
         )
     }
 
@@ -22056,7 +22089,11 @@ mod tests {
 
     fn parse_and_lower(src: &str, runtime: &mut LoweringRuntime) -> Dag {
         let checked = parse_and_check(src);
-        lower_program(&checked, runtime)
+        lower_program(
+            &checked,
+            runtime,
+            &mut chelis_types::NativeServices::new(None),
+        )
     }
 
     /// `compute_reduce_window_out_dims` refines any *statically-known*
@@ -22112,7 +22149,7 @@ mod tests {
             BTreeMap::new(),
             LinearityInfo::default(),
             runtime,
-            native,
+            Box::leak(Box::new(chelis_types::NativeServices::new(None))),
         );
         for expr in &exprs {
             ctx.lower_expr(expr)?;
@@ -22129,7 +22166,7 @@ mod tests {
                 BTreeMap::new(),
                 LinearityInfo::default(),
                 runtime,
-                native,
+                Box::leak(Box::new(chelis_types::NativeServices::new(None))),
             );
             let input = ctx.dag.add_node(
                 RiscOp::Load { name: "x".into() },
@@ -22202,7 +22239,7 @@ mod tests {
                 BTreeMap::new(),
                 LinearityInfo::default(),
                 runtime,
-                native,
+                Box::leak(Box::new(chelis_types::NativeServices::new(None))),
             );
             let out_ty = TensorType {
                 dims: vec![DimInfo::Named("result".to_string(), None)],
@@ -22266,7 +22303,7 @@ mod tests {
                 BTreeMap::new(),
                 LinearityInfo::default(),
                 runtime,
-                native,
+                Box::leak(Box::new(chelis_types::NativeServices::new(None))),
             );
             let actual_ty = TensorType {
                 dims: vec![
@@ -22317,7 +22354,7 @@ mod tests {
                 BTreeMap::new(),
                 LinearityInfo::default(),
                 runtime,
-                native,
+                Box::leak(Box::new(chelis_types::NativeServices::new(None))),
             );
             let placeholder = ctx.dag.add_node(
                 RiscOp::synth_const(Prim::F32, 0.0),
@@ -22356,7 +22393,7 @@ mod tests {
                 BTreeMap::new(),
                 LinearityInfo::default(),
                 runtime,
-                native,
+                Box::leak(Box::new(chelis_types::NativeServices::new(None))),
             );
             let then_node = ctx.dag.add_node(
                 RiscOp::Load {
@@ -22438,7 +22475,7 @@ mod tests {
             BTreeMap::new(),
             LinearityInfo::default(),
             runtime,
-            native,
+            Box::leak(Box::new(chelis_types::NativeServices::new(None))),
         );
         let x = ctx
             .dag
@@ -22682,7 +22719,7 @@ mod tests {
             BTreeMap::new(),
             LinearityInfo::default(),
             runtime,
-            native,
+            Box::leak(Box::new(chelis_types::NativeServices::new(None))),
         );
         let x = ctx
             .dag
@@ -23150,7 +23187,11 @@ mod tests {
                 &mut chelis_types::NativeServices::new(None),
             )
             .expect("library linearity");
-            let library = lower_program_to_library(&library_checked, runtime);
+            let library = lower_program_to_library(
+                &library_checked,
+                runtime,
+                &mut chelis_types::NativeServices::new(None),
+            );
 
             let new_exprs = chelis_deep::parser::parse_str(
                 r#"
@@ -23186,7 +23227,12 @@ mod tests {
             )
             .expect("new code linearity");
 
-            let dag = lower_program_with_context(&library, &new_checked, runtime);
+            let dag = lower_program_with_context(
+                &library,
+                &new_checked,
+                runtime,
+                &mut chelis_types::NativeServices::new(None),
+            );
             let copy_count = dag
                 .nodes()
                 .iter()
@@ -23441,7 +23487,7 @@ mod tests {
                 collect_top_level_sigs(checked.exprs()),
                 LinearityInfo::default(),
                 runtime,
-                native,
+                Box::leak(Box::new(chelis_types::NativeServices::new(None))),
             );
             let out_kids = match out_body {
                 Expr::List(list, _) => children(list),
@@ -23554,9 +23600,9 @@ mod tests {
                     collect_top_level_sigs(checked.exprs()),
                     LinearityInfo::default(),
                     runtime,
-                    native,
+                    Box::leak(Box::new(chelis_types::NativeServices::new(None))),
                 );
-                ctx.extract_fn_parts(&jac_fn)
+                LowerCtx::extract_fn_parts(&jac_fn, ctx.runtime)
                     .unwrap()
                     .expect("jac_row fn parts")
             };
@@ -23570,7 +23616,7 @@ mod tests {
                 collect_top_level_sigs(checked.exprs()),
                 LinearityInfo::default(),
                 runtime,
-                native,
+                Box::leak(Box::new(chelis_types::NativeServices::new(None))),
             );
             let app_exprs = chelis_deep::parser::parse_str(
             "(app {} (var {} jac_row) (var {} lm_model) (app {} (var {} to_tensor) (app {} (var {} Cons) (lit {type: (t-prim {} f32)} 1.0) (app {} (var {} Cons) (lit {type: (t-prim {} f32)} 2.0) (var {} Nil)))) (cast {} (lit {type: (t-prim {} f32)} 1.0) (t-prim {} f32)) (cast {} (lit {type: (t-prim {} f32)} 3.0) (t-prim {} f32)))"
@@ -23599,13 +23645,13 @@ mod tests {
                 panic!("expected bind list");
             };
             let target_fn = bind_kids[1].clone();
-            inline_ctx.local_callables.insert(
-                "target".to_string(),
-                inline_ctx
-                    .resolve_callable_expr(&target_fn)
-                    .unwrap()
-                    .expect("target callable"),
-            );
+            let target_callable = inline_ctx
+                .resolve_callable_expr(&target_fn)
+                .unwrap()
+                .expect("target callable");
+            inline_ctx
+                .local_callables
+                .insert("target".to_string(), target_callable);
             let (DeepTag::Fn, _, target_kids) =
                 stamped_parts(&target_fn).expect("expected target fn")
             else {
@@ -23621,8 +23667,8 @@ mod tests {
                 program_defs,
                 collect_top_level_sigs(checked.exprs()),
                 LinearityInfo::default(),
-                runtime,
-                native,
+                inline_ctx.runtime,
+                Box::leak(Box::new(chelis_types::NativeServices::new(None))),
             );
             subctx.local_callables = inline_ctx.local_callables.clone();
             let theta_local_ty = extract_param_type(&target_fn, 0, subctx.runtime)
@@ -23736,7 +23782,7 @@ mod tests {
                 BTreeMap::new(),
                 LinearityInfo::default(),
                 runtime,
-                native,
+                Box::leak(Box::new(chelis_types::NativeServices::new(None))),
             );
             for expr in &exprs {
                 ctx.lower_top_level(expr).unwrap();
@@ -23769,7 +23815,7 @@ mod tests {
                 BTreeMap::new(),
                 LinearityInfo::default(),
                 runtime,
-                native,
+                Box::leak(Box::new(chelis_types::NativeServices::new(None))),
             );
             for expr in &exprs {
                 ctx.lower_top_level(expr).unwrap();
@@ -24536,7 +24582,7 @@ mod tests {
                     BTreeMap::new(),
                     LinearityInfo::default(),
                     runtime,
-                    native,
+                    Box::leak(Box::new(chelis_types::NativeServices::new(None))),
                 );
                 ctx.lower_expr(&expr)?;
                 Ok(())
@@ -24574,7 +24620,7 @@ mod tests {
                     BTreeMap::new(),
                     LinearityInfo::default(),
                     runtime,
-                    native,
+                    Box::leak(Box::new(chelis_types::NativeServices::new(None))),
                 );
                 let caller = ctx.lower_expr(&parse("(lit {} 2.0)")).unwrap();
                 ctx.bindings.insert("x".into(), caller.clone());
@@ -24613,7 +24659,7 @@ mod tests {
                 BTreeMap::new(),
                 LinearityInfo::default(),
                 runtime,
-                native,
+                Box::leak(Box::new(chelis_types::NativeServices::new(None))),
             );
             let caller = ctx.lower_expr(&parse("(cast {} (lit {} 3) i64)")).unwrap();
             ctx.bindings.insert("n".into(), caller.clone());
@@ -24710,7 +24756,7 @@ mod tests {
                     BTreeMap::new(),
                     LinearityInfo::default(),
                     runtime,
-                    native,
+                    Box::leak(Box::new(chelis_types::NativeServices::new(None))),
                 );
                 ctx.random_seed = Some(7);
                 ctx.lower_expr(&expr)?;
@@ -24755,7 +24801,7 @@ mod tests {
                     BTreeMap::new(),
                     LinearityInfo::default(),
                     runtime,
-                    native,
+                    Box::leak(Box::new(chelis_types::NativeServices::new(None))),
                 );
                 ctx.lower_expr(&expr)?;
                 Ok(ctx.dag)
@@ -24802,7 +24848,7 @@ mod tests {
                 BTreeMap::new(),
                 LinearityInfo::default(),
                 runtime,
-                native,
+                Box::leak(Box::new(chelis_types::NativeServices::new(None))),
             );
             for (source, expected) in cases {
                 let expr = chelis_deep::parser::parse_str(source)
@@ -24839,7 +24885,7 @@ mod tests {
                 BTreeMap::new(),
                 LinearityInfo::default(),
                 runtime,
-                native,
+                Box::leak(Box::new(chelis_types::NativeServices::new(None))),
             );
             for source in cases {
                 let expr = chelis_deep::parser::parse_str(source)
@@ -24883,7 +24929,7 @@ mod tests {
                 BTreeMap::new(),
                 LinearityInfo::default(),
                 runtime,
-                native,
+                Box::leak(Box::new(chelis_types::NativeServices::new(None))),
             );
             for source in cases {
                 let expr = chelis_deep::parser::parse_str(source)
@@ -24952,7 +24998,7 @@ mod tests {
                         BTreeMap::new(),
                         LinearityInfo::default(),
                         runtime,
-                        native,
+                        Box::leak(Box::new(chelis_types::NativeServices::new(None))),
                     );
                     ctx.random_seed = Some(7);
                     ctx.lower_expr(&expr)?;
@@ -24997,7 +25043,7 @@ mod tests {
                     BTreeMap::new(),
                     LinearityInfo::default(),
                     runtime,
-                    native,
+                    Box::leak(Box::new(chelis_types::NativeServices::new(None))),
                 );
                 ctx.random_seed = Some(7);
                 ctx.lower_expr(&expr)?;
@@ -25039,7 +25085,7 @@ mod tests {
                     BTreeMap::new(),
                     LinearityInfo::default(),
                     runtime,
-                    native,
+                    Box::leak(Box::new(chelis_types::NativeServices::new(None))),
                 );
                 ctx.random_seed = Some(7);
                 ctx.lower_expr(&expr)?;
@@ -25081,7 +25127,7 @@ mod tests {
                     BTreeMap::new(),
                     LinearityInfo::default(),
                     runtime,
-                    native,
+                    Box::leak(Box::new(chelis_types::NativeServices::new(None))),
                 );
                 ctx.random_seed = Some(7);
                 ctx.lower_expr(&expr)?;
@@ -25122,7 +25168,7 @@ mod tests {
                 BTreeMap::new(),
                 LinearityInfo::default(),
                 runtime,
-                native,
+                Box::leak(Box::new(chelis_types::NativeServices::new(None))),
             );
             let tensor = parse_type_expr("(t-tensor {} (d-lit {} 2) (t-var {} p))");
             assert_eq!(ctx.resolved_type_precision(&tensor), None);
@@ -25423,7 +25469,7 @@ mod tests {
                 BTreeMap::new(),
                 LinearityInfo::default(),
                 runtime,
-                native,
+                Box::leak(Box::new(chelis_types::NativeServices::new(None))),
             );
             let id = ctx.dag.add_node(
                 RiscOp::Load {
@@ -25462,7 +25508,7 @@ mod tests {
                 BTreeMap::new(),
                 LinearityInfo::default(),
                 runtime,
-                native,
+                Box::leak(Box::new(chelis_types::NativeServices::new(None))),
             );
             let exact = TensorType {
                 dims: vec![DimInfo::Lit(2)],
@@ -25747,7 +25793,11 @@ mod regression_tests {
         let checked =
             chelis_types::check_linearity(&checked, &mut chelis_types::NativeServices::new(None))
                 .unwrap_or_else(|errors| panic!("linearity check failed: {errors:?}"));
-        lower_program(&checked, runtime)
+        lower_program(
+            &checked,
+            runtime,
+            &mut chelis_types::NativeServices::new(None),
+        )
     }
 
     fn parse_and_lower_unchecked(src: &str, runtime: &mut LoweringRuntime) -> LowerResult<Dag> {
@@ -25758,7 +25808,7 @@ mod regression_tests {
             BTreeMap::new(),
             LinearityInfo::default(),
             runtime,
-            native,
+            Box::leak(Box::new(chelis_types::NativeServices::new(None))),
         );
         for expr in &exprs {
             ctx.lower_expr(expr)?;
@@ -25906,7 +25956,7 @@ mod regression_tests {
                 BTreeMap::new(),
                 LinearityInfo::default(),
                 runtime,
-                native,
+                Box::leak(Box::new(chelis_types::NativeServices::new(None))),
             );
             ctx.lower_expr(&exprs[0]).unwrap();
             let load_x = ctx
@@ -26410,7 +26460,7 @@ mod regression_tests {
                     BTreeMap::new(),
                     LinearityInfo::default(),
                     runtime,
-                    native,
+                    Box::leak(Box::new(chelis_types::NativeServices::new(None))),
                 );
                 ctx.prec_substitutions.insert("p".to_string(), target);
                 ctx.lower_expr(&expr).unwrap();
@@ -26953,6 +27003,7 @@ mod regression_tests {
                 UnordMap::new(),
                 UnordMap::new(),
                 runtime,
+                &mut chelis_types::NativeServices::new(None),
             )
             .expect_err("an unsupported transform should return a diagnostic");
             let message = err.to_string();
@@ -27147,6 +27198,7 @@ mod regression_tests {
                 UnordMap::new(),
                 program_defs,
                 runtime,
+                &mut chelis_types::NativeServices::new(None),
             );
             assert!(
                 !dag.is_empty(),
@@ -27208,6 +27260,7 @@ mod regression_tests {
                 UnordMap::new(),
                 program_defs,
                 runtime,
+                &mut chelis_types::NativeServices::new(None),
             );
             // Evaluate with input = [3.0]; expected gradient = 2 * 3.0 = 6.0
             let inputs = UnordMap::from([(
@@ -27283,6 +27336,7 @@ mod regression_tests {
                 UnordMap::new(),
                 program_defs,
                 runtime,
+                &mut chelis_types::NativeServices::new(None),
             );
             assert!(
                 !dag.is_empty(),
