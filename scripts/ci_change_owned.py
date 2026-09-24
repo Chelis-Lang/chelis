@@ -3645,6 +3645,36 @@ def classify_expansion_failures(
     }
 
 
+def fork_point(repo: Path, base: str) -> str:
+    """The merge base of `base` and HEAD, the commit the branch diffs from.
+
+    The branch's own change is the diff from here, not from `base`'s tip. A
+    branch behind `base` would otherwise be charged with every path `base`
+    changed since the fork (chelis#2480), which CI never charges it with: the
+    synthetic merge it plans already contains that work on its first parent.
+    A missing ref or unrelated histories are refused rather than replaced by
+    some other diff.
+    """
+    found = subprocess.run(
+        ["git", "merge-base", base, "HEAD"],
+        cwd=repo,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if found.returncode == 1 and not found.stderr.strip():
+        raise ValueError(
+            f"{base} and HEAD share no history, so there is no merge base "
+            f"to diff the branch from"
+        )
+    if found.returncode != 0:
+        raise ValueError(
+            f"could not find the merge base of {base} and HEAD "
+            f"({found.stderr.strip()}); fetch {base} and rerun"
+        )
+    return found.stdout.strip()
+
+
 def working_tree_changed_paths(repo: Path = ROOT, base: str = "origin/main") -> list[str]:
     """The changed set the local classification reads, derived live.
 
@@ -3652,9 +3682,11 @@ def working_tree_changed_paths(repo: Path = ROOT, base: str = "origin/main") -> 
     runs. `--fast` regenerates before it checks, and a set captured before
     those writers cannot see a file they created.
 
-    Three deliberate differences from a naive `git diff --name-only` plus
+    Four deliberate differences from a naive `git diff --name-only` plus
     `git status`:
 
+    * the diff starts at the merge base with `base`, not at its tip, so a
+      branch behind `base` carries only its own paths; see `fork_point`.
     * `--find-renames` and both sides of a rename, matching `diff_at`, which
       is what CI classifies. A bare `--name-only` collapses a rename to its
       destination, so moving an unrouted file into a package root reads clean
@@ -3666,7 +3698,7 @@ def working_tree_changed_paths(repo: Path = ROOT, base: str = "origin/main") -> 
       junk row to a reviewed manifest.
     """
     paths: set[str] = set()
-    for revisions in ([base, "HEAD"], ["HEAD"]):
+    for revisions in ([fork_point(repo, base), "HEAD"], ["HEAD"]):
         # `parse_name_status_z` rejects an empty diff, because a candidate
         # always has one. A working tree legitimately may not, so emptiness is
         # handled here rather than by loosening the parser CI shares.
@@ -3703,6 +3735,11 @@ def classify_changed_paths(
     first, which is how chelis#2248's repair could have left a second one
     behind; locally there is no reason to make a developer find them one push
     at a time.
+
+    With `base`, an unrouted path that is gone from the working tree is a
+    retirement when the merge base with `base` tracked it: that is the tree
+    `working_tree_changed_paths` diffs from, so a file the branch deleted and
+    `base` has since deleted too is still recognized.
     """
     if not paths:
         # Nothing to classify, so do not pay for `cargo metadata`.
@@ -3721,7 +3758,9 @@ def classify_changed_paths(
                 f"workspace package roots: {error}"
             ) from error
     refused = []
-    base_paths = tracked_paths_at(repo, base) if base is not None else set()
+    base_paths = (
+        tracked_paths_at(repo, fork_point(repo, base)) if base is not None else set()
+    )
     for path in sorted(set(paths)):
         disposition, _, _ = static_path_classification(path, packages, config)
         if (
@@ -4464,7 +4503,11 @@ def build_parser() -> argparse.ArgumentParser:
             "runs, rather than taking it on the command line"
         ),
     )
-    classify.add_argument("--base", default="origin/main")
+    classify.add_argument(
+        "--base",
+        default="origin/main",
+        help="with --from-git, diff the branch from its merge base with this ref",
+    )
     classify.add_argument(
         "--config",
         type=Path,

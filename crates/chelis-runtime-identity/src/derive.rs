@@ -82,15 +82,26 @@ fn validate_unit(
     ] {
         fact(value, field)?;
     }
-    if unit.package.source.starts_with('/')
-        || unit.package.source.starts_with("path:/")
-        || unit.package.source.starts_with("file:")
+    // Cargo path package IDs use `path+file:///...`, not just `path:/...`.
+    let source = unit.package.source.as_str();
+    let location = source.strip_prefix("path:").unwrap_or(source);
+    let bytes = location.as_bytes();
+    let windows_absolute = bytes.len() >= 3
+        && bytes[0].is_ascii_alphabetic()
+        && bytes[1] == b':'
+        && matches!(bytes[2], b'/' | b'\\');
+    if location.starts_with('/')
+        || location.starts_with("\\\\")
+        || source.contains("file:")
+        || windows_absolute
     {
         return Err(InputError::InvalidObservation {
             field: "package.source must be a logical source identity".into(),
         });
     }
-    if unit.package.source.starts_with("registry+") && unit.package.checksum.is_none() {
+    if (source.starts_with("registry+") || source.starts_with("sparse+"))
+        && unit.package.checksum.is_none()
+    {
         return Err(InputError::InvalidObservation {
             field: "registry package checksum".into(),
         });

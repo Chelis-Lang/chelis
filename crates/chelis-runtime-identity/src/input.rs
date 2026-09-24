@@ -15,22 +15,14 @@ pub(crate) fn validate_path(path: &str) -> Result<(), InputError> {
 }
 
 fn selected(path: &str) -> bool {
-    if path.split('/').any(|part| {
-        matches!(
-            part,
-            ".git"
-                | "target"
-                | ".venv"
-                | ".devenv"
-                | "node_modules"
-                | "tests"
-                | "test"
-                | "benches"
-                | "bench"
-                | "examples"
-                | "example"
-        )
-    }) {
+    let first = path.split('/').next().unwrap_or(path);
+    if matches!(
+        first,
+        "target" | "tests" | "test" | "benches" | "bench" | "examples" | "example"
+    ) || path
+        .split('/')
+        .any(|part| matches!(part, ".git" | ".venv" | ".devenv" | "node_modules"))
+    {
         return false;
     }
     let name = path.rsplit('/').next().unwrap_or(path);
@@ -125,7 +117,11 @@ pub fn plan_inputs(roots: &[InventoryRoot]) -> Result<Vec<RequiredInput>, InputE
             } else {
                 format!("{}/{path}", root.logical_prefix)
             };
-            let class = classify(path, root.class);
+            let class = if root.class == InputClass::Toolchain {
+                InputClass::Toolchain
+            } else {
+                classify(path, root.class)
+            };
             if planned.insert(logical.clone(), class).is_some() {
                 return Err(InputError::DuplicateInput { path: logical });
             }
@@ -174,9 +170,13 @@ pub fn normalize_paths(value: &str, mappings: &[PathMapping]) -> Result<String, 
     let mut offset = 0;
     while offset < value.len() {
         let suffix = &value[offset..];
-        let before = value[..offset].chars().next_back();
+        let prefix = &value[..offset];
+        let before = prefix.chars().next_back();
         let boundary = before
-            .is_none_or(|ch| !ch.is_alphanumeric() && !matches!(ch, '/' | '_' | '-' | '.' | '\\'));
+            .is_none_or(|ch| !ch.is_alphanumeric() && !matches!(ch, '/' | '_' | '-' | '.' | '\\'))
+            || prefix.ends_with("file://")
+            || prefix.ends_with("-I")
+            || prefix.ends_with("-L");
         let mapping = if boundary {
             mappings.iter().find(|mapping| {
                 if !suffix.starts_with(&mapping.physical) {

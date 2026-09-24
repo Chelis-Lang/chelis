@@ -3,6 +3,10 @@
 Diagnosis pass for the bundled fix on branch `fix/jit-par-runtime-arms`.
 Findings 1+2 of the 0.7.6 toolchain hygiene red-team (PR #51).
 
+Current status: chelis#2388 found that the host `par` arm still erases
+effectful non-final children. The checker now fences `par`; the implementation
+record below is historical and is not an acceptance claim.
+
 Cross-references:
 
 - IR-side fix that PR #40 landed:
@@ -10,7 +14,7 @@ Cross-references:
 - IR-side pinning tests already on `main`:
   `crates/chelis-types/tests/jit_par_passthrough.rs` (`#[test]
   jit_wrapping_a_value_type_checks_and_carries_inner_type`,
-  `par_sequential_body_type_checks_and_yields_last_type`).
+  `par_is_rejected_with_the_typed_issue_fence`).
 - Failing-test pins for this branch:
   `crates/chelis-cli/tests/jit_par_runtime_gap.rs` (commit 1 of this
   branch).

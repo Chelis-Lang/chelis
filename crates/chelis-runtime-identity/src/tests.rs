@@ -260,6 +260,90 @@ fn mapping_is_boundary_aware_and_longest_first() {
     );
 }
 
+#[test]
+fn physical_package_sources_are_not_compatibility_inputs() {
+    let (mut recipe, captured) = fixture();
+    for source in [
+        "path+file:///Users/alice/checkout/dep",
+        "git+file:///Users/alice/checkout/repo#rev",
+        "git+file:/Users/alice/checkout/repo#rev",
+        "path:C:/checkout/dep",
+        "C:\\checkout\\dep",
+        "C:/checkout/dep",
+    ] {
+        recipe.units[1].package.source = source.into();
+        assert!(
+            matches!(
+                derive_descriptor(&recipe, &captured),
+                Err(InputError::InvalidObservation { .. })
+            ),
+            "accepted physical package source: {source}"
+        );
+    }
+    recipe.units[1].package.source = "sparse+https://index.crates.io/".into();
+    assert!(matches!(
+        derive_descriptor(&recipe, &captured),
+        Err(InputError::InvalidObservation { .. })
+    ));
+    recipe.units[1].package.checksum = Some(hash_bytes(b"registry archive"));
+    assert!(derive_descriptor(&recipe, &captured).is_ok());
+}
+
+#[test]
+fn mapping_covers_uri_paths_and_attached_compiler_flags() {
+    let mappings = [PathMapping {
+        physical: "/Users/alice/checkout".into(),
+        logical: "workspace".into(),
+    }];
+    assert_eq!(
+        normalize_paths(
+            "path+file:///Users/alice/checkout/dep -I/Users/alice/checkout/include -L/Users/alice/checkout/lib /other/Users/alice/checkout/file",
+            &mappings
+        )
+        .unwrap(),
+        "path+file://workspace/dep -Iworkspace/include -Lworkspace/lib /other/Users/alice/checkout/file"
+    );
+}
+
+#[test]
+fn nested_source_directories_are_not_build_output_exclusions() {
+    let roots = [InventoryRoot {
+        logical_prefix: "runtime".into(),
+        files: vec![
+            "src/target/mod.rs".into(),
+            "src/tests/feature.rs".into(),
+            "target/generated.rs".into(),
+        ],
+        explicitly_required: vec![],
+        class: InputClass::Source,
+    }];
+    let planned = plan_inputs(&roots).unwrap();
+    assert_eq!(
+        planned
+            .iter()
+            .map(|input| input.logical_path.as_str())
+            .collect::<Vec<_>>(),
+        ["runtime/src/target/mod.rs", "runtime/src/tests/feature.rs"]
+    );
+}
+
+#[test]
+fn toolchain_roots_keep_their_class_for_headers_and_manifests() {
+    let roots = [InventoryRoot {
+        logical_prefix: "toolchain".into(),
+        files: vec!["include/stdint.h".into(), "rust-src/core/Cargo.toml".into()],
+        explicitly_required: vec![],
+        class: InputClass::Toolchain,
+    }];
+    let planned = plan_inputs(&roots).unwrap();
+    assert_eq!(planned.len(), 2);
+    assert!(
+        planned
+            .iter()
+            .all(|input| input.class == InputClass::Toolchain)
+    );
+}
+
 fn native(format: object::BinaryFormat, records: &[Vec<u8>]) -> Vec<u8> {
     let mut object = object::write::Object::new(
         format,
@@ -569,6 +653,36 @@ fn archives_require_one_structured_native_record() {
     ));
     assert!(matches!(
         decode_archive(&archive(&[record])),
+        Err(RecordError::Malformed { .. })
+    ));
+}
+
+#[test]
+fn unsupported_native_members_and_invalid_archive_suffix_have_distinct_errors() {
+    for member in [
+        b"BC\xc0\xde".as_slice(),
+        b"not an object".as_slice(),
+        b"".as_slice(),
+    ] {
+        assert!(matches!(
+            decode_archive(&archive(&[member.to_vec()])),
+            Err(RecordError::Unsupported { .. })
+        ));
+    }
+    for prefix in [
+        b"\x7fELF\x02\x01\x01\0\0\0".as_slice(),
+        b"\xcf\xfa\xed\xfe\x0c\0\0\x01".as_slice(),
+    ] {
+        assert!(matches!(
+            decode_archive(&archive(&[prefix.to_vec()])),
+            Err(RecordError::Truncated { .. })
+        ));
+    }
+    let valid = native(object::BinaryFormat::Elf, &[]);
+    let mut archive_with_suffix = archive(&[valid]);
+    archive_with_suffix.push(b'\n');
+    assert!(matches!(
+        decode_archive(&archive_with_suffix),
         Err(RecordError::Malformed { .. })
     ));
 }
