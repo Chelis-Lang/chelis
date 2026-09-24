@@ -92,6 +92,93 @@
 
 mod common;
 
+/// #2083's rank-raising reproducer (explicit dimension binders are the
+/// sole syntax migration) and its width-three
+/// forward-failure twin. The agreeing case was repaired incidentally in #2144.
+#[test]
+fn issue_2083_rank_raising_gradient_keeps_geometry_and_forward_trap() {
+    assert!(
+        gcc_available(),
+        "this regression requires linked C execution"
+    );
+    let source = "def f[n, m](x: tensor[n, f32], y: tensor[m, f32]) -> tensor[1, n, f32] = permute(insert(insert(scalar_to_tensor(7.0f32), 0i32, add(shape(y, 0i32), 0i64)), 1i32, 1i64), 1i32, 0i32)\n\
+        def h(x: tensor[2, f32]) -> tensor[f32] = sum(sum(f(copy(x), to_tensor([1.0f32, 2.0f32])), 0i32), 0i32)\n\
+        def main() = grad(h)(to_tensor([1.0f32, 2.0f32]))\n";
+    let refuted = source.replacen(
+        "to_tensor([1.0f32, 2.0f32])",
+        "to_tensor([1.0f32, 2.0f32, 3.0f32])",
+        1,
+    );
+    let dir = tempfile::tempdir().unwrap();
+    for (stem, source, success) in [
+        ("agreeing", source, true),
+        ("refuted", refuted.as_str(), false),
+    ] {
+        let checked = check(&fixture(&dir, &format!("{stem}_check.ch"), source));
+        assert!(
+            checked.status.success(),
+            "{}{}",
+            String::from_utf8_lossy(&checked.stdout),
+            String::from_utf8_lossy(&checked.stderr)
+        );
+        for (ok, out) in [
+            eval_result(&dir, &format!("{stem}.ch"), source),
+            c_run_result(&dir, stem, source),
+        ] {
+            assert_eq!(ok, success, "{stem}: {out}");
+            if success {
+                assert!(
+                    out.contains("main = tensor(shape=[2], data=[0.0, 0.0])"),
+                    "{out}"
+                );
+            } else {
+                assert!(out.contains(&domain_trap_line("insert")), "{out}");
+                assert!(out.contains("axis 0"), "{out}");
+                assert!(!out.contains(&domain_trap_line("permute")), "{out}");
+            }
+        }
+    }
+}
+
+#[test]
+fn issue_1767_disconnected_gradient_preserves_false_declared_result_trap() {
+    assert!(
+        gcc_available(),
+        "this regression requires linked C execution"
+    );
+    let source = "def forward[n](x: tensor[n, f32]) -> tensor[3, f32] = insert(scalar_to_tensor(1.0f32), 0i32, add(shape(x, 0i32), 0i64))\n\
+        def loss(x: tensor[3, f32]) -> f32 = tensor_to_scalar(sum(forward(x), 0i32))\n\
+        def main() = grad(loss)(to_tensor([1.0f32, 2.0f32, 3.0f32]))\n";
+    let refuted = source.replacen("-> tensor[3, f32]", "-> tensor[4, f32]", 1);
+    let dir = tempfile::tempdir().unwrap();
+    for (stem, source, success) in [
+        ("agreeing_claim", source, true),
+        ("refuted_claim", refuted.as_str(), false),
+    ] {
+        let checked = check(&fixture(&dir, &format!("{stem}_check.ch"), source));
+        assert!(
+            checked.status.success(),
+            "{}{}",
+            String::from_utf8_lossy(&checked.stdout),
+            String::from_utf8_lossy(&checked.stderr)
+        );
+        for (ok, out) in [
+            eval_result(&dir, &format!("{stem}.ch"), source),
+            c_run_result(&dir, stem, source),
+        ] {
+            assert_eq!(ok, success, "{stem}: {out}");
+            if success {
+                assert!(
+                    out.contains("main = tensor(shape=[3], data=[0.0, 0.0, 0.0])"),
+                    "{out}"
+                );
+            } else {
+                assert!(out.contains(&domain_trap_line("insert")), "{out}");
+            }
+        }
+    }
+}
+
 use assert_cmd::Command;
 use sha2::{Digest, Sha256};
 use std::fs;

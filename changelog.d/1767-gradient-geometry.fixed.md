@@ -1,0 +1,1 @@
+Preserve each differentiated actual's ordered tensor shape for disconnected gradients, including top-level inputs, empty axes, and cached helper calls. Retain input and forward result checks when returning zero cotangents.
