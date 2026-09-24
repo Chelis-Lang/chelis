@@ -116,7 +116,7 @@ impl<'session> DiagnosticSink<'session> {
         }
     }
 
-    pub(crate) fn finish_recursive_group(&mut self, subst: &crate::unify::Subst) {
+    pub(crate) fn finish_recursive_group(&mut self, subst: &mut crate::unify::Subst) {
         if let Some(group) = self.recursive.take_group() {
             group.finish(subst, self);
         }
@@ -396,7 +396,7 @@ mod recursive_scope_tests {
             let parameter = variables.fresh_tvar();
             let ty = Type::Fn(vec![Type::Var(parameter)], Box::new(Type::Var(parameter)));
             subst.leave_level(level, &variables);
-            let scheme = env.generalize(&ty, &subst, &UnordSet::new());
+            let scheme = env.generalize(&ty, &mut subst, &UnordSet::new());
             env.bind(name.to_string(), scheme);
         }
         (env, variables, subst)
@@ -455,13 +455,13 @@ mod recursive_scope_tests {
         sink: &DiagnosticSink<'_>,
         env: &Env,
         variables: &mut VarGen,
-        subst: &Subst,
+        subst: &mut Subst,
         ty: &Type,
     ) -> bool {
         let alias = env.generalize(ty, subst, sink.recursive_state().pinned_vars());
         let mut probe = subst.clone();
-        let first = env.instantiate(&alias, variables, &probe);
-        let second = env.instantiate(&alias, variables, &probe);
+        let first = env.instantiate(&alias, variables, &mut probe);
+        let second = env.instantiate(&alias, variables, &mut probe);
         unify(&first, &identity_type(Prim::Int32), &mut probe).expect("first alias use");
         unify(&second, &identity_type(Prim::Bool), &mut probe).is_ok()
     }
@@ -479,7 +479,7 @@ mod recursive_scope_tests {
                 outer,
                 &env,
                 &mut variables,
-                &subst,
+                &mut subst,
                 &outer_reference,
             ));
 
@@ -494,21 +494,21 @@ mod recursive_scope_tests {
                     inner,
                     &env,
                     &mut variables,
-                    &subst,
+                    &mut subst,
                     &outer_reference,
                 ));
                 assert!(admits_independent_uses(
                     outer,
                     &env,
                     &mut variables,
-                    &subst,
+                    &mut subst,
                     &inner_reference,
                 ));
                 assert!(!admits_independent_uses(
                     inner,
                     &env,
                     &mut variables,
-                    &subst,
+                    &mut subst,
                     &inner_reference,
                 ));
                 Ok(())
@@ -518,7 +518,7 @@ mod recursive_scope_tests {
                 outer,
                 &env,
                 &mut variables,
-                &subst,
+                &mut subst,
                 &outer_reference,
             ));
             Ok(())
@@ -550,7 +550,7 @@ mod recursive_scope_tests {
                         outer,
                         &env,
                         &mut variables,
-                        &subst,
+                        &mut subst,
                         &first,
                     ));
 
@@ -580,7 +580,7 @@ mod recursive_scope_tests {
                         outer,
                         &env,
                         &mut variables,
-                        &subst,
+                        &mut subst,
                         &first,
                     ));
                     let last =
@@ -588,7 +588,7 @@ mod recursive_scope_tests {
                     unify(&first, &identity_type(Prim::Int32), &mut subst).unwrap();
                     unify(&last, &identity_type(Prim::Int32), &mut subst).unwrap();
                 }
-                sink.finish_recursive_group(&subst);
+                sink.finish_recursive_group(&mut subst);
                 Ok(())
             })
             .expect_err("completed groups report their nonuniform instantiations");
@@ -647,7 +647,7 @@ mod recursive_scope_tests {
                 let fifth = reference(outer, &env, &mut variables, &mut subst, "right", 50);
                 unify(&fifth, &identity_type(Prim::Int32), &mut subst).unwrap();
             }
-            sink.finish_recursive_group(&subst);
+            sink.finish_recursive_group(&mut subst);
             Ok(())
         })
         .expect_err("every completed group's recorded occurrence remains authoritative");

@@ -245,11 +245,11 @@ pub(super) fn classify_expand_size(
     expr: &deep::Expr,
     env: &Env,
     adt_reg: &AdtRegistry,
-    subst: &Subst,
+    subst: &mut Subst,
 ) -> SizeClass {
     classify_size_in(
         expr,
-        &SizeCtx {
+        &mut SizeCtx {
             env,
             adt_reg,
             subst,
@@ -265,7 +265,7 @@ pub(super) fn classify_expand_size(
 struct SizeCtx<'a> {
     env: &'a Env,
     adt_reg: &'a AdtRegistry,
-    subst: &'a Subst,
+    subst: &'a mut Subst,
     piped: &'a [PipedParam],
 }
 
@@ -292,7 +292,7 @@ impl SizeCtx<'_> {
     }
 }
 
-fn classify_size_in(expr: &deep::Expr, ctx: &SizeCtx<'_>) -> SizeClass {
+fn classify_size_in(expr: &deep::Expr, ctx: &mut SizeCtx<'_>) -> SizeClass {
     stack_guard!("classify_expand_size", expr, SizeClass::Unknown);
     let env = ctx.env;
     // The checker and lowerer share one checked static folder.
@@ -334,7 +334,7 @@ fn classify_size_in(expr: &deep::Expr, ctx: &SizeCtx<'_>) -> SizeClass {
                 .map_or(SizeClass::Unknown, |param| param.class),
             // A name carried by an in-scope tensor's shape is a
             // Form-2 symbolic dim with a real source.
-            Some(name) if env.tensor_carries_dim_with_subst(name, ctx.subst) => {
+            Some(name) if env.tensor_carries_dim_with_subst(name, &mut *ctx.subst) => {
                 SizeClass::ShapeSourced
             }
             // A recorded `let` provenance (shape-sourced or static).
@@ -398,7 +398,7 @@ fn classify_size_in(expr: &deep::Expr, ctx: &SizeCtx<'_>) -> SizeClass {
 /// chelis#1107 round 3: takes the children slice rather than a `&deep::List`,
 /// so the classifier works on either carrier (a stamped `Expr::Node` has no
 /// `&deep::List` to hand over).
-fn classify_arith_app(kids: &[deep::Expr], ctx: &SizeCtx<'_>) -> SizeClass {
+fn classify_arith_app(kids: &[deep::Expr], ctx: &mut SizeCtx<'_>) -> SizeClass {
     let Some(callee) = kids.first() else {
         return SizeClass::Sourceless;
     };
@@ -484,7 +484,7 @@ pub(super) fn shape_read_operand(expr: &deep::Expr) -> Option<&deep::Expr> {
 /// tensor (chelis#397/#469). The operand is a bare `var` (`shape(x, 0)`) or
 /// a borrow of one (`shape(&x, 0)`); either way the named binding must have
 /// a tensor type in `env`. A non-tensor operand cannot supply an extent.
-fn shape_operand_is_in_scope_tensor(operand: &deep::Expr, ctx: &SizeCtx<'_>) -> bool {
+fn shape_operand_is_in_scope_tensor(operand: &deep::Expr, ctx: &mut SizeCtx<'_>) -> bool {
     shape_operand_type(operand, ctx)
         .as_ref()
         .is_some_and(type_is_tensor)
@@ -506,7 +506,7 @@ fn shape_operand_is_in_scope_tensor(operand: &deep::Expr, ctx: &SizeCtx<'_>) -> 
 /// any of these, nested to any depth. A projection resolves only on a
 /// single-record-variant ADT with named fields, which is the only shape
 /// `infer_access` itself projects.
-fn shape_operand_type(operand: &deep::Expr, ctx: &SizeCtx<'_>) -> Option<Type> {
+fn shape_operand_type(operand: &deep::Expr, ctx: &mut SizeCtx<'_>) -> Option<Type> {
     stack_guard!("shape_operand_type", operand, None);
     if let Some(name) = symbolic_dim_ref_name(operand) {
         // A pipe stage's parameter denotes the upstream value (chelis#569).
@@ -612,7 +612,7 @@ pub(super) fn check_authored_dvars_rigid(
     declaration: &str,
     decl_ty: &Type,
     dim_names: &UnordMap<DimVar, String>,
-    subst: &Subst,
+    subst: &mut Subst,
     errors: &mut DiagnosticSink<'_>,
 ) {
     let Type::Fn(decl_params, decl_ret) = decl_ty else {
@@ -771,7 +771,7 @@ pub(super) fn check_declared_dvars_rigid(
     declaration: Option<&str>,
     declared_dvars: &[DimVar],
     dim_names: &UnordMap<DimVar, String>,
-    subst: &Subst,
+    subst: &mut Subst,
     errors: &mut DiagnosticSink<'_>,
 ) {
     let render = |dv: DimVar| render_declared_dim(dim_names, dv);

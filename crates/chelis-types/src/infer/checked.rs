@@ -102,7 +102,7 @@ struct InferredAdmissionContract {
 }
 
 impl InferredAdmissionContract {
-    fn unmet_families(&self, subst: &Subst) -> Vec<(TypeVar, TypeVarRestriction)> {
+    fn unmet_families(&self, subst: &mut Subst) -> Vec<(TypeVar, TypeVarRestriction)> {
         if self.failed_application.is_some() {
             return Vec::new();
         }
@@ -355,15 +355,19 @@ impl InferenceProduct {
         subject: &str,
         ty: &Type,
         env: &Env,
-        subst: &Subst,
+        subst: &mut Subst,
     ) {
-        let variables = crate::env::free_tvars(&subst.apply(ty))
+        // Restrictions are never touched by applying the substitution, so
+        // filtering before `record_admission_variables` applies it again
+        // selects exactly the variables a lazy filter would.
+        let variables: Vec<_> = crate::env::free_tvars(&subst.apply(ty))
             .into_iter()
             .filter(|variable| {
                 // Explicit binders have their own rigidity/entailment check.
                 subst.tvar_restriction(*variable).is_none()
                     && !env.active_declared_type_names().contains_key(variable)
-            });
+            })
+            .collect();
         self.record_admission_variables(subject, variables, env, subst);
     }
 
@@ -372,7 +376,7 @@ impl InferenceProduct {
         subject: &str,
         variables: impl IntoIterator<Item = TypeVar>,
         env: &Env,
-        subst: &Subst,
+        subst: &mut Subst,
     ) {
         let givens: Vec<_> = env
             .active_declared_type_names()
@@ -410,7 +414,7 @@ impl InferenceProduct {
         name: Option<&str>,
         arguments: &[Type],
         env: &Env,
-        subst: &Subst,
+        subst: &mut Subst,
     ) {
         let Type::Fn(parameters, _) = subst.apply(callee) else {
             return;
@@ -439,7 +443,7 @@ impl InferenceProduct {
         callee: &Type,
         name: Option<&str>,
         env: &Env,
-        subst: &Subst,
+        subst: &mut Subst,
     ) {
         let Type::Fn(_, result) = subst.apply(callee) else {
             return;
@@ -484,7 +488,7 @@ impl InferenceProduct {
     pub(super) fn has_pending_admission_contract_since(
         &self,
         checkpoint: usize,
-        subst: &Subst,
+        subst: &mut Subst,
     ) -> bool {
         self.inferred_admission_contracts[checkpoint..]
             .iter()
@@ -494,7 +498,7 @@ impl InferenceProduct {
     fn finish_admission_contracts(
         &mut self,
         declaration: Option<&str>,
-        subst: &Subst,
+        subst: &mut Subst,
         errors: &mut DiagnosticSink<'_>,
     ) {
         let mut reported = BTreeSet::new();
@@ -818,7 +822,7 @@ impl InferenceProduct {
     pub(super) fn cancel_shape_checks_for_failed_family_call(
         &mut self,
         callee: &Type,
-        subst: &Subst,
+        subst: &mut Subst,
         failure: ErrorWitness,
     ) {
         let Type::Fn(params, _) = subst.apply(callee) else {
@@ -860,7 +864,7 @@ impl InferenceProduct {
         callee: &Type,
         arguments: &[Type],
         vg: &VarGen,
-        subst: &Subst,
+        subst: &mut Subst,
         errors: &mut DiagnosticSink<'_>,
     ) -> Option<Type> {
         let Type::Fn(parameters, _) = subst.apply(callee) else {
@@ -921,7 +925,7 @@ impl InferenceProduct {
                 .collect();
             if settled
                 .iter()
-                .any(|ty| shape_operand_awaits_binding(ty, &structural))
+                .any(|ty| shape_operand_awaits_binding(ty, &mut structural))
             {
                 continue;
             }
@@ -1312,7 +1316,7 @@ impl InferenceProduct {
     /// Resolve after enclosing calls have unified their operands. Generic
     /// bodies preserve a type-indexed selection; they do not pick a sibling
     /// until their existing owner type is instantiated.
-    fn resolve_builtin_selections(&mut self, subst: &Subst, errors: &mut DiagnosticSink<'_>) {
+    fn resolve_builtin_selections(&mut self, subst: &mut Subst, errors: &mut DiagnosticSink<'_>) {
         for index in std::mem::take(&mut self.pending_builtin_selections) {
             let selection = &mut self.builtin_selections[index];
             match selection.resolve(subst) {
@@ -1334,7 +1338,7 @@ impl InferenceProduct {
         }
     }
 
-    pub(super) fn finish_root(&mut self, subst: &Subst, errors: &mut DiagnosticSink<'_>) {
+    pub(super) fn finish_root(&mut self, subst: &mut Subst, errors: &mut DiagnosticSink<'_>) {
         if errors.is_empty() {
             self.resolve_builtin_selections(subst, errors);
         }
@@ -1384,7 +1388,7 @@ impl InferenceProduct {
     /// Most stamps are already concrete when their root finishes, but a
     /// variable an earlier root left open can be bound by a later one, so
     /// every stamp gets one final resolution before annotation.
-    pub(super) fn resolve_owner_types(&mut self, subst: &Subst) {
+    pub(super) fn resolve_owner_types(&mut self, subst: &mut Subst) {
         let keys = self
             .owner_types
             .to_sorted()
@@ -1441,7 +1445,7 @@ impl InferenceProduct {
     pub(super) fn current_owner_type(
         &self,
         expr: &deep::Expr,
-        subst: &Subst,
+        subst: &mut Subst,
         errors: &mut DiagnosticSink<'_>,
     ) -> Option<Type> {
         let Some(epoch) = self.active_epoch.as_ref() else {
@@ -1552,7 +1556,7 @@ pub(super) fn reconcile_replayed_result(
 /// route that suspends on the same condition it resumes on cannot grow that
 /// hole again for a fourth provenance, so the provenance set is gone rather
 /// than extended.
-pub(super) fn shape_operand_awaits_binding(ty: &Type, subst: &Subst) -> bool {
+pub(super) fn shape_operand_awaits_binding(ty: &Type, subst: &mut Subst) -> bool {
     match subst.apply(ty) {
         Type::Var(_) => true,
         Type::Ref(inner) => shape_operand_awaits_binding(&inner, subst),
@@ -1732,20 +1736,20 @@ pub(crate) fn run_type_stamp_mutation_case(
     product.begin_root(&owner);
     match case {
         TypeStampMutationCase::Missing => {
-            product.finish_root(&Subst::new(), errors);
+            product.finish_root(&mut Subst::new(), errors);
             product.owner_type(&owner, "test owner", errors).is_none()
         }
         TypeStampMutationCase::CompatibleRepeat => {
             let ty = Type::Prim(Prim::Int64);
             product.record_canonical(&owner, ty.clone());
             product.record_bypass(&owner, ty.clone(), "compatible test repeat");
-            product.finish_root(&Subst::new(), errors);
+            product.finish_root(&mut Subst::new(), errors);
             product.owner_type(&owner, "test owner", errors) == Some(ty)
         }
         TypeStampMutationCase::IncompatibleRepeat => {
             product.record_canonical(&owner, Type::Prim(Prim::Int64));
             product.record_bypass(&owner, Type::Prim(Prim::String), "incompatible test repeat");
-            product.finish_root(&Subst::new(), errors);
+            product.finish_root(&mut Subst::new(), errors);
             true
         }
         TypeStampMutationCase::UnregisteredSynthesized => {
@@ -1756,7 +1760,7 @@ pub(crate) fn run_type_stamp_mutation_case(
                 "unregistered synthesized test node",
             );
             product.record_canonical(&owner, Type::Prim(Prim::Int64));
-            product.finish_root(&Subst::new(), errors);
+            product.finish_root(&mut Subst::new(), errors);
             product
                 .owner_type(&synthesized, "synthesized test node", errors)
                 .is_none()
@@ -1776,7 +1780,7 @@ pub(crate) fn run_type_stamp_mutation_case(
             };
             let runtime_child = &children(root_list)[0];
             product.record_canonical(runtime_child, Type::Prim(Prim::Int64));
-            product.current_owner_type(runtime_child, &Subst::new(), errors)
+            product.current_owner_type(runtime_child, &mut Subst::new(), errors)
                 == Some(Type::Prim(Prim::Int64))
         }
     }
@@ -1802,7 +1806,7 @@ pub(crate) fn run_finalization_mutation_case(
             let mut product = InferenceProduct::default();
             product.begin_root(&runtime);
             product.record_canonical(&runtime, crate::errors::error_sentinel_for_test());
-            product.finish_root(&Subst::new(), errors);
+            product.finish_root(&mut Subst::new(), errors);
             annotate_ir_program(std::slice::from_ref(&runtime), &product, errors)
         }
         FinalizationMutationCase::SilentErrorSignature => {

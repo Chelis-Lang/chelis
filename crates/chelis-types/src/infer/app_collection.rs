@@ -168,7 +168,7 @@ pub(super) enum ConcatListInfo {
 pub(super) fn tensor_concat_call_evidence(
     kids: &[deep::Expr],
     env: &Env,
-    subst: &Subst,
+    subst: &mut Subst,
     errors: &mut DiagnosticSink<'_>,
     product: &InferenceProduct,
 ) -> TensorConcatCallEvidence {
@@ -220,7 +220,7 @@ pub(super) fn tensor_concat_result_type(
     element_ty: &Type,
     raw_axis: Option<i64>,
     list_info: ConcatListInfo,
-    subst: &Subst,
+    subst: &mut Subst,
 ) -> Result<Type, String> {
     let Type::Tensor(dims, precision) = element_ty else {
         return Err(format!(

@@ -1812,7 +1812,7 @@ pub(super) fn reshape_output_dims(
     shape_expr: &deep::Expr,
     input_var_name: Option<&str>,
     input_dims: &[Dim],
-    subst: &Subst,
+    subst: &mut Subst,
 ) -> Vec<Dim> {
     let elements = match collect_shape_list_elements(shape_expr) {
         Some(elems) => elems,
@@ -1827,7 +1827,7 @@ pub(super) fn reshape_output_dims(
         .collect()
 }
 
-fn validate_reshape_target_dims(dims: &[Dim], subst: &Subst) -> Result<(), TypeError> {
+fn validate_reshape_target_dims(dims: &[Dim], subst: &mut Subst) -> Result<(), TypeError> {
     if let Some(value) = dims.iter().find_map(|dim| {
         subst
             .observe_dim(dim)
@@ -1847,7 +1847,7 @@ pub(super) fn reshape_output_dim(
     elem: &deep::Expr,
     input_var_name: Option<&str>,
     input_dims: &[Dim],
-    subst: &Subst,
+    subst: &mut Subst,
 ) -> Dim {
     if let Some(n) = extract_int_for_dim(elem) {
         return Dim::Lit(n);

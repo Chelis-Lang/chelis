@@ -350,7 +350,7 @@ impl GroupCtx {
     /// admitted — it cannot grow the instantiation set. An entry embedding a
     /// type variable inside a constructed type is polymorphic recursion
     /// ([04-INF-3]); for an authored generic, any non-variable entry is.
-    pub(crate) fn finish(self, subst: &Subst, errors: &mut DiagnosticSink<'_>) {
+    pub(crate) fn finish(self, subst: &mut Subst, errors: &mut DiagnosticSink<'_>) {
         for occ in self.occurrences {
             let resolved: Vec<Type> = occ.instantiation.iter().map(|ty| subst.apply(ty)).collect();
             let admissible = |ty: &Type| -> bool {
@@ -439,7 +439,7 @@ impl GroupCtx {
 /// unambiguous (one declared binder, one own tvar), the resolved own tvar
 /// renders under its declared name so the diagnostic reads `Box[a]` rather
 /// than `Box[?17]`.
-fn binder_display_names(occ: &Occurrence, subst: &Subst) -> UnordMap<TypeVar, String> {
+fn binder_display_names(occ: &Occurrence, subst: &mut Subst) -> UnordMap<TypeVar, String> {
     let mut names = UnordMap::new();
     if occ.caller_binder_names.len() == 1 && occ.caller_own_tvars.len() == 1 {
         let resolved = subst.apply(&Type::Var(occ.caller_own_tvars[0]));

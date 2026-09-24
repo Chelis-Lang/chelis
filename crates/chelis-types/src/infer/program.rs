@@ -621,11 +621,11 @@ pub(super) fn infer_program_with_product_in_session(
                 deferred_bindings.push(binding);
             }
             product.finish_deferred_shape_checks(decl_name, &mut vg, &mut subst, &adt_reg, errors);
-            product.finish_root(&subst, errors);
+            product.finish_root(&mut subst, errors);
             // Issue #256 round 2: re-check each deferred borrow against the
             // now-complete substitution (see `validate_deferred_borrow_vars`).
             validate_deferred_borrow_vars(
-                &subst,
+                &mut subst,
                 &adt_reg,
                 env.active_declared_type_names(),
                 errors,
@@ -637,7 +637,7 @@ pub(super) fn infer_program_with_product_in_session(
             validate_deferred_tensor_operands(&mut subst, env.active_declared_type_names(), errors);
             // D-CHECK: drain the per-def deferred-access ledger (see
             // `validate_deferred_opaque_uses`).
-            validate_deferred_opaque_uses(&subst, &adt_reg, errors);
+            validate_deferred_opaque_uses(&mut subst, &adt_reg, errors);
             #[cfg(test)]
             if cyclic {
                 primary_recursive_member_finished_for_test();
@@ -653,7 +653,7 @@ pub(super) fn infer_program_with_product_in_session(
             // Function-recursion validation, when independently active, must
             // clear its pins before component-wide generalization.
             if recursion_active {
-                errors.finish_recursive_group(&subst);
+                errors.finish_recursive_group(&mut subst);
             }
             component_scope
                 .take()
@@ -664,7 +664,7 @@ pub(super) fn infer_program_with_product_in_session(
                 .map(|(name, ty, owned_contracts)| {
                     let scheme = env.generalize_with_collection_contracts(
                         &ty,
-                        &subst,
+                        &mut subst,
                         &owned_contracts,
                         errors.recursive_state().pinned_vars(),
                     );
@@ -702,7 +702,7 @@ pub(super) fn infer_program_with_product_in_session(
     if cancellation_gate(errors) {
         return product;
     }
-    product.resolve_owner_types(&subst);
+    product.resolve_owner_types(&mut subst);
 
     // PP9 / [04-TOT-5]: every public entry reaches one ordered semantic pass
     // protocol after inference. Build the same declaration-type view the IR
@@ -1319,7 +1319,7 @@ pub(crate) fn check_ir_with_signature_context_in_session(
     if cancellation_gate(errors) {
         return Err(stats);
     }
-    product.resolve_owner_types(&state.subst);
+    product.resolve_owner_types(&mut state.subst);
     // Run cycle / shape / precision validators on new_exprs only. The
     // combined IR env is supplied so `(var libfoo)` references
     // resolve to the library's declared type during shape validation.
@@ -1499,7 +1499,7 @@ pub(super) fn infer_ir_program_with_env(
     let empty_inner = crate::context::TypeEnv::empty();
     let mut state = empty_inner.inner().clone();
     let mut product = infer_ir_program_with_state(exprs, &mut state, origin, errors);
-    product.resolve_owner_types(&state.subst);
+    product.resolve_owner_types(&mut state.subst);
     product
 }
 
@@ -1728,7 +1728,7 @@ pub(super) fn infer_ir_program_with_state(
                 &state.adt_reg,
                 errors,
             );
-            product.finish_root(&state.subst, errors);
+            product.finish_root(&mut state.subst, errors);
             if let Some(t0) = t0 {
                 let elapsed = t0.elapsed();
                 let name = top_level_decl_name(expr).unwrap_or("<anon>");
@@ -1739,7 +1739,7 @@ pub(super) fn infer_ir_program_with_state(
             // substitution. Draining per-def keeps error attribution local and
             // prevents one def's deferrals from leaking into the next.
             validate_deferred_borrow_vars(
-                &state.subst,
+                &mut state.subst,
                 &state.adt_reg,
                 state.env.active_declared_type_names(),
                 errors,
@@ -1752,7 +1752,7 @@ pub(super) fn infer_ir_program_with_state(
             );
             // D-CHECK: drain the per-def deferred-access ledger (see
             // `validate_deferred_opaque_uses`).
-            validate_deferred_opaque_uses(&state.subst, &state.adt_reg, errors);
+            validate_deferred_opaque_uses(&mut state.subst, &state.adt_reg, errors);
         }
         if cancelled() {
             if let Some(scope) = component_scope.take() {
@@ -1769,7 +1769,7 @@ pub(super) fn infer_ir_program_with_state(
             // Function-recursion validation, when independently active, must
             // clear its pins before component-wide generalization.
             if recursion_active {
-                errors.finish_recursive_group(&state.subst);
+                errors.finish_recursive_group(&mut state.subst);
             }
             component_scope
                 .take()
@@ -1780,7 +1780,7 @@ pub(super) fn infer_ir_program_with_state(
                 .map(|(name, ty, owned_contracts)| {
                     let scheme = state.env.generalize_with_collection_contracts(
                         &ty,
-                        &state.subst,
+                        &mut state.subst,
                         &owned_contracts,
                         errors.recursive_state().pinned_vars(),
                     );
@@ -2894,14 +2894,14 @@ mod component_level_scope_tests {
         scope.abort(&mut env, &var_gen, &mut subst, &mut recursive);
         // A variable born inside the component can now be independently
         // instantiated: both its inference level and recursive pin were released.
-        let released = env.generalize(&Type::Var(pinned), &subst, recursive.pinned_vars());
-        let first = env.instantiate(&released, &mut var_gen, &subst);
-        let second = env.instantiate(&released, &mut var_gen, &subst);
+        let released = env.generalize(&Type::Var(pinned), &mut subst, recursive.pinned_vars());
+        let first = env.instantiate(&released, &mut var_gen, &mut subst);
+        let second = env.instantiate(&released, &mut var_gen, &mut subst);
         unify(&first, &Type::Prim(Prim::Int32), &mut subst).expect("first use is integral");
         unify(&second, &Type::Prim(Prim::Bool), &mut subst).expect("second use is independent");
         let restored = env.lookup("left").expect("shadowed prior binding restored");
         assert_eq!(
-            env.instantiate(restored, &mut var_gen, &subst),
+            env.instantiate(restored, &mut var_gen, &mut subst),
             Type::Prim(Prim::Bool),
         );
         assert!(env.lookup("right").is_none());

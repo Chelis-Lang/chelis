@@ -297,7 +297,7 @@ pub(super) fn precision_variable_verdict(
     fname: &str,
     var: TypeVar,
     name: &str,
-    subst: &Subst,
+    subst: &mut Subst,
 ) -> PrecisionVerdict {
     let Some(required) = operand_family_policy(fname) else {
         return PrecisionVerdict::Admit;
@@ -330,7 +330,7 @@ pub(super) fn decide_precision_variable_operand(
     fname: &str,
     var: TypeVar,
     env: &Env,
-    subst: &Subst,
+    subst: &mut Subst,
     errors: &mut DiagnosticSink<'_>,
 ) -> Option<Type> {
     let authored = env
@@ -554,7 +554,7 @@ pub(super) fn validate_numeric_and_reduction_arguments(
     func_name: &Option<String>,
     arg_tys: &[Type],
     env: &Env,
-    subst: &Subst,
+    subst: &mut Subst,
     errors: &mut DiagnosticSink<'_>,
     route_observed: &mut bool,
     suspension: Option<&DtypeAdmissibilitySite<'_>>,

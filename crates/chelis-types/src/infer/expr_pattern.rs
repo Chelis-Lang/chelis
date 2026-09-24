@@ -784,7 +784,7 @@ fn check_literal_pattern(
     pat: &deep::Expr,
     atom: LiteralPatternAtom<'_>,
     scrutinee_ty: &Type,
-    subst: &Subst,
+    subst: &mut Subst,
     adt_reg: &AdtRegistry,
     errors: &mut DiagnosticSink<'_>,
 ) {

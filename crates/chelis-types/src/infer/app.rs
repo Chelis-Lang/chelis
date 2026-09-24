@@ -18,7 +18,7 @@ enum ListAxis {
 }
 
 impl ListAxis {
-    fn classify(dim: &Dim, subst: &Subst) -> Self {
+    fn classify(dim: &Dim, subst: &mut Subst) -> Self {
         let observation = subst.observe_dim(dim);
         if observation.rank().is_some()
             || (observation.variable().is_some()
@@ -486,7 +486,7 @@ fn infer_app_inner(
     }
     let mixed_division_precisions =
         matches!(func_name.as_deref(), Some("div" | "trunc_div")) && arg_tys.len() == 2 && {
-            let precision = |ty: &Type| match type_for_readonly_check(ty, subst) {
+            let mut precision = |ty: &Type| match type_for_readonly_check(ty, subst) {
                 Type::Prim(prim) | Type::Tensor(_, TensorPrec::Concrete(prim)) => Some(prim),
                 _ => None,
             };

@@ -437,7 +437,7 @@ impl Env {
             .any(|(_, scheme)| type_carries_dim_name(&scheme.body, name))
     }
 
-    pub(crate) fn tensor_carries_dim_with_subst(&self, name: &str, subst: &Subst) -> bool {
+    pub(crate) fn tensor_carries_dim_with_subst(&self, name: &str, subst: &mut Subst) -> bool {
         self.bindings
             .to_sorted()
             .into_iter()
@@ -692,7 +692,7 @@ impl Env {
         &self,
         scheme: &Scheme,
         var_gen: &mut VarGen,
-        inference_subst: &Subst,
+        inference_subst: &mut Subst,
     ) -> Type {
         self.instantiate_scheme(scheme, var_gen, inference_subst).ty
     }
@@ -706,7 +706,7 @@ impl Env {
         &self,
         scheme: &Scheme,
         var_gen: &mut VarGen,
-        inference_subst: &Subst,
+        inference_subst: &mut Subst,
     ) -> (Type, Vec<(TypeVar, Type)>) {
         let instantiated = self.instantiate_scheme(scheme, var_gen, inference_subst);
         (instantiated.ty, instantiated.tvars)
@@ -732,7 +732,7 @@ impl Env {
         &self,
         scheme: &Scheme,
         var_gen: &mut VarGen,
-        inference_subst: &Subst,
+        inference_subst: &mut Subst,
     ) -> InstantiatedScheme {
         let mut subst = Subst::new();
         let mut tvar_mapping = Vec::with_capacity(scheme.tvars.len());
@@ -858,7 +858,7 @@ impl Env {
     /// Generalize variables not free in the environment or pinned by the
     /// current recursive inference group. Callers supply the invocation's
     /// pin set explicitly; standalone generalization supplies an empty set.
-    pub fn generalize(&self, ty: &Type, subst: &Subst, pinned: &UnordSet<TypeVar>) -> Scheme {
+    pub fn generalize(&self, ty: &Type, subst: &mut Subst, pinned: &UnordSet<TypeVar>) -> Scheme {
         self.generalize_owned(ty, subst, None, pinned)
     }
 
@@ -871,7 +871,7 @@ impl Env {
     pub(crate) fn generalize_with_collection_contracts(
         &self,
         ty: &Type,
-        subst: &Subst,
+        subst: &mut Subst,
         owned_contracts: &[crate::unify::CollectionContractId],
         pinned: &UnordSet<TypeVar>,
     ) -> Scheme {
@@ -881,7 +881,7 @@ impl Env {
     fn generalize_owned(
         &self,
         ty: &Type,
-        subst: &Subst,
+        subst: &mut Subst,
         owned_contracts: Option<&[crate::unify::CollectionContractId]>,
         pinned: &UnordSet<TypeVar>,
     ) -> Scheme {
@@ -943,7 +943,7 @@ impl Env {
         body: &Type,
         body_variables: &[TypeVar],
         body_candidates: &[TypeVar],
-        subst: &Subst,
+        subst: &mut Subst,
         owned_contracts: Option<&[crate::unify::CollectionContractId]>,
     ) -> CollectionQuantification {
         let mut split = CollectionQuantification::default();
@@ -994,7 +994,7 @@ impl Env {
     fn generalize_by_levels(
         &self,
         ty: &Type,
-        subst: &Subst,
+        subst: &mut Subst,
         owned_contracts: Option<&[crate::unify::CollectionContractId]>,
         pinned: &UnordSet<TypeVar>,
     ) -> (Scheme, Vec<crate::unify::CollectionContractId>) {
@@ -1085,7 +1085,7 @@ impl Env {
     fn generalize_by_sweep(
         &self,
         ty: &Type,
-        subst: &Subst,
+        subst: &mut Subst,
         owned_contracts: Option<&[crate::unify::CollectionContractId]>,
         pinned: &UnordSet<TypeVar>,
     ) -> (Scheme, Vec<crate::unify::CollectionContractId>) {
@@ -1318,16 +1318,16 @@ mod module_scope_tests {
 
         let component = subst.enter_level(&var_gen);
         let first_mark = subst.collection_contract_mark();
-        let first_ty = env.instantiate(&checked, &mut var_gen, &subst);
+        let first_ty = env.instantiate(&checked, &mut var_gen, &mut subst);
         let first_ids = subst.collection_contract_ids_since(first_mark);
         let second_mark = subst.collection_contract_mark();
-        let second_ty = env.instantiate(&checked, &mut var_gen, &subst);
+        let second_ty = env.instantiate(&checked, &mut var_gen, &mut subst);
         let second_ids = subst.collection_contract_ids_since(second_mark);
         subst.leave_level(component, &var_gen);
 
         let first = env.generalize_with_collection_contracts(
             &first_ty,
-            &subst,
+            &mut subst,
             &first_ids,
             &UnordSet::new(),
         );
@@ -1340,7 +1340,7 @@ mod module_scope_tests {
 
         let second = env.generalize_with_collection_contracts(
             &second_ty,
-            &subst,
+            &mut subst,
             &second_ids,
             &UnordSet::new(),
         );
@@ -1541,14 +1541,14 @@ mod tests {
 
         // Neither a signature nor a parameter binding carries these roots.
         // Only the RHS-local variable is fresh at each use of the nested let.
-        let nested = body_env.generalize(&rhs, &subst, &UnordSet::new());
+        let nested = body_env.generalize(&rhs, &mut subst, &UnordSet::new());
         assert_eq!(nested.tvars, vec![local]);
         assert!(nested.dvars.is_empty());
         assert!(nested.rvars.is_empty());
 
         // The declaration's lexical roots must not pin its published scheme.
         subst.leave_level(declaration_level, &vg);
-        let published = env.generalize(&rhs, &subst, &UnordSet::new());
+        let published = env.generalize(&rhs, &mut subst, &UnordSet::new());
         assert_eq!(published.tvars, vec![precision, local]);
         assert_eq!(published.dvars, vec![type_dim, dim_alias, rank_dim]);
         assert_eq!(published.rvars, vec![type_rank]);
@@ -1594,13 +1594,13 @@ mod tests {
         let scheme = restricted_scheme();
         let env = Env::new();
 
-        let plain_subst = Subst::new();
+        let mut plain_subst = Subst::new();
         let mut plain_gen = VarGen::default();
-        let plain = env.instantiate(&scheme, &mut plain_gen, &plain_subst);
+        let plain = env.instantiate(&scheme, &mut plain_gen, &mut plain_subst);
 
-        let mapped_subst = Subst::new();
+        let mut mapped_subst = Subst::new();
         let mut mapped_gen = VarGen::default();
-        let mapped = env.instantiate_scheme(&scheme, &mut mapped_gen, &mapped_subst);
+        let mapped = env.instantiate_scheme(&scheme, &mut mapped_gen, &mut mapped_subst);
 
         assert_eq!(
             plain, mapped.ty,
@@ -1643,10 +1643,10 @@ mod tests {
             ),
         };
         let env = Env::new();
-        let inference_subst = Subst::new();
+        let mut inference_subst = Subst::new();
         inference_subst.mark_mapped_axis(quantified, 1);
         let mut var_gen = VarGen::default();
-        let instantiated = env.instantiate_scheme(&scheme, &mut var_gen, &inference_subst);
+        let instantiated = env.instantiate_scheme(&scheme, &mut var_gen, &mut inference_subst);
         let fresh = instantiated.dvars[0].1;
 
         assert_eq!(inference_subst.mapped_axis(fresh), Some(1));
@@ -1682,10 +1682,10 @@ mod tests {
         // Every route instantiates the same scheme from the same starting
         // generator state, so all three mint the same fresh variables and the
         // observed restriction sets are directly comparable.
-        let restrictions_after = |instantiate: &dyn Fn(&Subst, &mut VarGen)| {
-            let subst = Subst::new();
+        let restrictions_after = |instantiate: &dyn Fn(&mut Subst, &mut VarGen)| {
+            let mut subst = Subst::new();
             let mut var_gen = VarGen::default();
-            instantiate(&subst, &mut var_gen);
+            instantiate(&mut subst, &mut var_gen);
             (0..64)
                 .map(TypeVar)
                 .filter_map(|v| subst.tvar_restriction(v).map(|r| (v, r)))

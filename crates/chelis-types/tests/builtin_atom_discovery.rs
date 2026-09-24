@@ -276,7 +276,7 @@ fn symbolic_selection_resolves_each_instantiation_without_a_default_case() {
     for name in ["eq", "neq", "to_string"] {
         let decl = builtin_decl(name).unwrap();
         let selection = decl
-            .semantic_selection(&[Type::Var(variable)], &Subst::new())
+            .semantic_selection(&[Type::Var(variable)], &mut Subst::new())
             .unwrap();
         assert!(matches!(&selection, BuiltinCaseSelection::ByOperand(_)));
         assert!(decl.semantic_case(&[Type::Var(variable)]).is_err());
@@ -302,7 +302,7 @@ fn symbolic_selection_resolves_each_instantiation_without_a_default_case() {
             let mut subst = Subst::new();
             subst.insert_type(variable, ty).unwrap();
             assert_eq!(
-                selection.resolve(&subst).unwrap(),
+                selection.resolve(&mut subst).unwrap(),
                 BuiltinCaseSelection::Resolved(expected)
             );
         }
@@ -310,11 +310,11 @@ fn symbolic_selection_resolves_each_instantiation_without_a_default_case() {
     // A symbolic len is an obligation, not permission to skip its selector.
     let decl = builtin_decl("len").unwrap();
     let selection = decl
-        .semantic_selection(&[Type::Var(variable)], &Subst::new())
+        .semantic_selection(&[Type::Var(variable)], &mut Subst::new())
         .unwrap();
     let mut invalid = Subst::new();
     invalid
         .insert_type(variable, Type::Prim(Prim::F32))
         .unwrap();
-    assert!(selection.resolve(&invalid).is_err());
+    assert!(selection.resolve(&mut invalid).is_err());
 }

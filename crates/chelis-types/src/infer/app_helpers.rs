@@ -8,7 +8,7 @@ use super::*;
 pub(super) fn auto_borrow_call_arg_types(
     func_ty: &Type,
     arg_tys: Vec<Type>,
-    subst: &Subst,
+    subst: &mut Subst,
 ) -> Vec<Type> {
     let Type::Fn(params, _) = subst.apply(func_ty) else {
         return arg_tys;
@@ -254,7 +254,7 @@ pub(super) fn dims_identical(d1: &Dim, d2: &Dim) -> bool {
 /// `where`/`clamp` require identical shapes, unlike permissive dimension
 /// unification or scatter containment. Names do not equal bare literals;
 /// known contradictions take precedence over a matching semantic label.
-pub(super) fn elementwise_shapes_match(a: &[Dim], b: &[Dim], subst: &Subst) -> bool {
+pub(super) fn elementwise_shapes_match(a: &[Dim], b: &[Dim], subst: &mut Subst) -> bool {
     a.len() == b.len()
         && a.iter().zip(b).all(|(a, b)| {
             let a = subst.observe_dim(a);
@@ -332,7 +332,7 @@ pub(super) fn types_structurally_equal(a: &Type, b: &Type) -> bool {
     }
 }
 
-pub(super) fn type_for_readonly_check(ty: &Type, subst: &Subst) -> Type {
+pub(super) fn type_for_readonly_check(ty: &Type, subst: &mut Subst) -> Type {
     match subst.apply(ty) {
         Type::Ref(inner) => subst.apply(&inner),
         other => other,
@@ -366,13 +366,13 @@ mod dimension_observation_tests {
             assert!(!elementwise_shapes_match(
                 std::slice::from_ref(x),
                 std::slice::from_ref(y),
-                &subst
+                &mut subst
             ));
         }
         assert!(elementwise_shapes_match(
             std::slice::from_ref(&a),
             std::slice::from_ref(&symbolic),
-            &subst
+            &mut subst
         ));
         assert_eq!(
             subst.observe_dim(&alias).variable(),
@@ -385,17 +385,17 @@ mod dimension_observation_tests {
             subst.static_dim_products_match(std::slice::from_ref(&a), &[Dim::Lit(3)]),
             None
         );
-        assert_eq!(select_diagonal_extent(&a, &b, &subst).dim, Dim::Lit(2));
-        assert_eq!(select_diagonal_extent(&b, &a, &subst).dim, Dim::Lit(2));
+        assert_eq!(select_diagonal_extent(&a, &b, &mut subst).dim, Dim::Lit(2));
+        assert_eq!(select_diagonal_extent(&b, &a, &mut subst).dim, Dim::Lit(2));
         assert_eq!(
-            select_diagonal_extent(&symbolic, &alias, &subst).dim,
+            select_diagonal_extent(&symbolic, &alias, &mut subst).dim,
             symbolic
         );
         // Shape A still compares authored identity, not equal labels.
         assert!(!dims_identical(&a, &symbolic));
         assert!(dims_identical(&a, &a));
         let serialized = bincode::serialize(&subst).unwrap();
-        let decoded: Subst = bincode::deserialize(&serialized).unwrap();
+        let mut decoded: Subst = bincode::deserialize(&serialized).unwrap();
         assert_eq!(decoded.observe_dim(&a).known_extent(), Some(2));
         assert_eq!(decoded.observe_dim(&alias).name(), Some("row"));
         assert!(!decoded.observe_dim(&alias).is_protected());
@@ -435,7 +435,7 @@ mod dimension_observation_tests {
                 args,
                 &[Dim::Lit(1), Dim::Lit(2), known],
                 &kernel,
-                &subst
+                &mut subst
             ),
             Some(vec![3])
         );
@@ -444,7 +444,7 @@ mod dimension_observation_tests {
                 args,
                 &[Dim::Lit(1), Dim::Lit(2), unknown],
                 &kernel,
-                &subst
+                &mut subst
             ),
             None
         );
@@ -453,7 +453,7 @@ mod dimension_observation_tests {
                 args,
                 &[Dim::Lit(1), Dim::Lit(2), Dim::Lit(2)],
                 &kernel,
-                &subst
+                &mut subst
             ),
             None
         );
