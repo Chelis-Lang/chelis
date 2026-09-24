@@ -1434,7 +1434,7 @@ pub(super) fn validate_ir_expr(
             }
             // `jit` is a spec-blessed pass-through form. `par` retains a
             // legacy validation disposition here, but infer_expr owns the
-            // typed chelis#2388 checker fence before a checked program can
+            // typed chelis#2503 checker fence before a checked program can
             // reach lowering.
             if node.tag() == DeepTag::App
                 && let Some(func_name) = active_ir_builtin_name(node, static_env)

@@ -279,7 +279,7 @@ shape).
 
 **STATUS (updated 2026-09-24): the complete structured `chelis check` and wire
 surface above is still the TARGET, not current behavior.** The `Unsupported`
-object now carries the §C2.1 opaque typed authority. Chelis#2388's `par` fence
+object now carries the §C2.1 opaque typed authority. Chelis#2503's `par` fence
 constructs `Stage::Checker` and reaches `chelis check`, `eval`, and `build`
 through the checker diagnostic channel; no type on the `Unsupported` path
 derives `Serialize`. Chelis#1870's bounded in-process trial remains the

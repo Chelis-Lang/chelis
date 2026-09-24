@@ -4,8 +4,8 @@ Diagnosis pass for the bundled fix on branch `fix/jit-par-runtime-arms`.
 Findings 1+2 of the 0.7.6 toolchain hygiene red-team (PR #51).
 
 Current status: chelis#2388 found that the host `par` arm still erases
-effectful non-final children. The checker now fences `par`; the implementation
-record below is historical and is not an acceptance claim.
+effectful non-final children. The checker now fences `par` under chelis#2503;
+the implementation record below is historical and is not an acceptance claim.
 
 Cross-references:
 

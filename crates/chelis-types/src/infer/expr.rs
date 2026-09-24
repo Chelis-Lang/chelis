@@ -35,7 +35,7 @@ fn report_par_fence(node: &DeepNode, source_span: &Span, errors: &mut Diagnostic
         "the Chelis execution surface while cross-lane `par` effects are incomplete",
         Stage::Checker,
         crate::unimplemented_rejection!(
-            2388,
+            2503,
             "`par` is not fully implemented across evaluation and compiled lanes; \
              use `do { ... }` when sequential evaluation is intended"
         ),
@@ -334,7 +334,7 @@ pub(super) fn infer_expr_with_type_metadata_ownership(
                     }
                 }
                 DeepTag::Par => {
-                    // chelis#2388: every source ingress is fenced until the
+                    // chelis#2503: every source ingress is fenced until the
                     // evaluator and compiled lanes preserve the same `par`
                     // effects. Keep checking children so this fence does not
                     // hide their independent diagnostics.

@@ -7937,7 +7937,7 @@ fn lower_host_expr_kind(
             )?
         }
         Expr::Node(list, _) if list.tag() == DeepTag::Par => {
-            // Legacy sequential placeholder retained behind the chelis#2388
+            // Legacy sequential placeholder retained behind the chelis#2503
             // checker fence. No checked source program reaches this path
             // while cross-lane `par` effects remain incomplete. We do not
             // thread intermediate children through a sequence node; if

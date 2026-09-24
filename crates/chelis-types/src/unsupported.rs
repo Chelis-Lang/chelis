@@ -22,7 +22,7 @@
 //! over prose.
 //!
 //! **Status: the complete serialized surface is still the target.**
-//! Nothing on this path derives `Serialize`. Chelis#2388's `par` fence now
+//! Nothing on this path derives `Serialize`. Chelis#2503's `par` fence now
 //! constructs [`Stage::Checker`], while chelis#1870's in-process identity
 //! projection retains the original [`Unsupported`] in compiler-api and
 //! selected lowering diagnostics. Serialized clients still receive
