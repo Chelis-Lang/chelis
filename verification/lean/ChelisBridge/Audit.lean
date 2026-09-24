@@ -13,6 +13,8 @@ import ChelisBridge.Runtime.Scopes
 import ChelisBridge.Numeric
 import ChelisBridge.Numeric.Flat
 import ChelisBridge.Numeric.Decode
+import ChelisBridge.Numeric.Primal
+import ChelisBridge.Numeric.Examples
 import Lean.Util.CollectAxioms
 
 /-!
@@ -271,7 +273,11 @@ def accepted : List Name := [
   ``ChelisBridge.Numeric.liftOp_decodeOperation,
   ``ChelisBridge.Numeric.runF_complete,
   ``ChelisBridge.Numeric.decodeCircuitF_complete,
-  ``ChelisBridge.Numeric.decoded_graph_realize
+  ``ChelisBridge.Numeric.decoded_graph_realize,
+  ``ChelisBridge.Numeric.progCircuit_eval,
+  ``ChelisBridge.Numeric.selectRoot_eval,
+  ``ChelisBridge.Numeric.primalCheck_sound,
+  ``ChelisBridge.Numeric.acceptPrimal_sound
 ]
 
 def allowedAxioms : List Name := [``propext, ``Classical.choice, ``Quot.sound]
