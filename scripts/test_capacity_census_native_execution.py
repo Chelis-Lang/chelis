@@ -18,6 +18,17 @@ from capacity_census_graph import GraphError
 import capacity_census_native_execution as execution
 
 
+def replace_bytes(path: Path, content: bytes) -> None:
+    """Give `path` new bytes on a fresh inode, never through the old one.
+
+    Without reflinks Kache restores Cargo outputs as hardlinks to its read-only
+    store blobs: writing through one fails, and forcing it writable would
+    corrupt the shared blob.
+    """
+    path.unlink(missing_ok=True)
+    path.write_bytes(content)
+
+
 class MatrixContractTests(unittest.TestCase):
     def test_authority_identity_ignores_run_paths_but_binds_the_executed_contract(self):
         packet = {
@@ -393,12 +404,12 @@ class NativeExecutionIntegration(unittest.TestCase):
                 original = path.read_bytes()
                 status = path.stat()
                 try:
-                    path.write_bytes(original + b"changed")
+                    replace_bytes(path, original + b"changed")
                     with self.assertRaises(GraphError): self.witness.validate()
                     path.unlink()
                     with self.assertRaises(GraphError): self.witness.validate()
                 finally:
-                    path.write_bytes(original)
+                    replace_bytes(path, original)
                     path.chmod(status.st_mode)
                     os.utime(path, ns=(status.st_atime_ns, status.st_mtime_ns))
         with mock.patch.object(execution, "_source_packet", return_value={"head": "changed"}):
