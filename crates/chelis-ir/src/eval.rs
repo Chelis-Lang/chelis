@@ -656,23 +656,39 @@ fn check_draw_extents(
                 key.shape.len()
             ));
         }
-        for axis in 0..axes {
-            let (claimed, observed) = (key.shape[axis], operand.shape[axis]);
-            if claimed != observed {
-                let claim = match key_dims.get(axis) {
-                    Some(DimInfo::Lit(value)) => value.to_string(),
-                    Some(DimInfo::Named(name, _)) => name.clone(),
-                    None => claimed.to_string(),
-                };
-                return Err(format!(
-                    "extent `{claim}`: claimed = {claimed}, {op} input {slot} axis {axis} = {observed}\n\
-                     {}",
-                    NumericTrap::Domain {
-                        op,
-                        prim: Prim::Int64
-                    }
-                ));
-            }
+        check_operand_extents(op, key_dims, key, slot, operand, axes)?;
+    }
+    Ok(())
+}
+
+/// Input `slot`, `operand`, against `reference`, whose declared axes are
+/// `reference_dims`, on its first `axes` extents: the first that disagrees
+/// reports the reference's claim and traps `Domain` in `op` at i64, the C
+/// lane's operand extent guard's report.
+fn check_operand_extents(
+    op: &'static str,
+    reference_dims: &[DimInfo],
+    reference: &TensorValue,
+    slot: usize,
+    operand: &TensorValue,
+    axes: usize,
+) -> Result<(), String> {
+    for axis in 0..axes {
+        let (claimed, observed) = (reference.shape[axis], operand.shape[axis]);
+        if claimed != observed {
+            let claim = match reference_dims.get(axis) {
+                Some(DimInfo::Lit(value)) => value.to_string(),
+                Some(DimInfo::Named(name, _)) => name.clone(),
+                None => claimed.to_string(),
+            };
+            return Err(format!(
+                "extent `{claim}`: claimed = {claimed}, {op} input {slot} axis {axis} = {observed}\n\
+                 {}",
+                NumericTrap::Domain {
+                    op,
+                    prim: Prim::Int64
+                }
+            ));
         }
     }
     Ok(())
@@ -3831,12 +3847,20 @@ where
             RiscOp::FoldIn => {
                 let keys = &values[&node.inputs[0]];
                 let ns = &values[&node.inputs[1]];
-                if keys.shape != ns.shape {
+                if keys.shape.len() != ns.shape.len() {
                     return Err(format!(
                         "fold_in at node {}: key shape {:?} and count shape {:?} must be equal",
                         node.id.0, keys.shape, ns.shape
                     ));
                 }
+                // Each count extent against the key's, before either is
+                // read, with the C lane's report.
+                let key_dims = &bound_dag
+                    .get(node.inputs[0])
+                    .ok_or("fold_in key is not in its graph")?
+                    .output_type
+                    .dims;
+                check_operand_extents("fold_in", key_dims, keys, 1, ns, keys.shape.len())?;
                 key_value(keys, fold_in_storage(keys.storage(), ns.storage()))?
             }
             RiscOp::SplitN { count } => {

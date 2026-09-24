@@ -1509,9 +1509,9 @@ impl CEmitter {
                 draw,
                 dtype,
             } => self.emit_draw_key(node, *handler, *draw, *dtype, dag)?,
-            RiscOp::KeyFromSeed => self.emit_key_from_seed(node),
-            RiscOp::Split { branch } => self.emit_split_key(node, *branch),
-            RiscOp::FoldIn => self.emit_fold_in(node),
+            RiscOp::KeyFromSeed => self.emit_key_from_seed(node, dag),
+            RiscOp::Split { branch } => self.emit_split_key(node, *branch, dag),
+            RiscOp::FoldIn => self.emit_fold_in(node, dag),
             RiscOp::SplitN { count } => self.emit_split_keys(node, count),
             RiscOp::Dropout => self.emit_keyed_dropout(node, dag),
             RiscOp::DropoutReplay => {
@@ -4947,6 +4947,39 @@ impl CEmitter {
         }
     }
 
+    /// Check input `slot`, `input`, against `reference`, whose declared axes
+    /// are `reference_dims`, on its first `axes` runtime extents: a mismatch
+    /// reports the reference's claim in the DAG evaluator's
+    /// `check_operand_extents` form and traps `Domain` in `op` at i64.
+    fn emit_operand_extent_guards(
+        &mut self,
+        op: &'static str,
+        reference: NodeId,
+        reference_dims: &[DimInfo],
+        slot: usize,
+        input: NodeId,
+        axes: usize,
+    ) {
+        let trap = NumericTrap::Domain {
+            op,
+            prim: Prim::Int64,
+        }
+        .to_string();
+        for (axis, dim) in reference_dims.iter().enumerate().take(axes) {
+            let claim = Self::extent_claim_label(dim);
+            let claimed = format!("chelis_tensor_shape(t{}, {axis})", reference.0);
+            let observed = format!("chelis_tensor_shape(t{}, {axis})", input.0);
+            self.line(&format!("if (({claimed}) != ({observed})) {{"));
+            self.indent += 1;
+            self.line(&format!(
+                "fprintf(stderr, \"extent `{claim}`: claimed = %lld, {op} input {slot} axis {axis} = %lld\\n\", (long long)({claimed}), (long long)({observed}));"
+            ));
+            self.line(&format!("chelis_numeric_trap({trap:?});"));
+            self.indent -= 1;
+            self.line("}");
+        }
+    }
+
     /// A key-operand random primitive's extents, checked before it
     /// allocates its result or reads an operand. First its key batch against
     /// its operands, in [`RiscOp::draw_batch_layout`]'s order and with the
@@ -4976,11 +5009,6 @@ impl CEmitter {
                 .len()
         };
         if !key_dims.is_empty() {
-            let trap = NumericTrap::Domain {
-                op,
-                prim: Prim::Int64,
-            }
-            .to_string();
             let operands = std::iter::once((layout.data_input, data, key_dims.len())).chain(
                 layout.per_row.iter().filter_map(|slot| {
                     node.inputs
@@ -4989,19 +5017,7 @@ impl CEmitter {
                 }),
             );
             for (slot, input, axes) in operands.collect::<Vec<_>>() {
-                for (axis, dim) in key_dims.iter().enumerate().take(axes) {
-                    let claim = Self::extent_claim_label(dim);
-                    let claimed = format!("chelis_tensor_shape(t{}, {axis})", key.0);
-                    let observed = format!("chelis_tensor_shape(t{}, {axis})", input.0);
-                    self.line(&format!("if (({claimed}) != ({observed})) {{"));
-                    self.indent += 1;
-                    self.line(&format!(
-                        "fprintf(stderr, \"extent `{claim}`: claimed = %lld, {op} input {slot} axis {axis} = %lld\\n\", (long long)({claimed}), (long long)({observed}));"
-                    ));
-                    self.line(&format!("chelis_numeric_trap({trap:?});"));
-                    self.indent -= 1;
-                    self.line("}");
-                }
+                self.emit_operand_extent_guards(op, key, key_dims, slot, input, axes);
             }
         }
         let source = if matches!(node.op, RiscOp::UniformBoundAdjoint { .. }) {
@@ -5323,13 +5339,44 @@ impl CEmitter {
         self.line("}");
     }
 
+    /// An elementwise key operation's extents ([05-OP-69], [05-OP-70],
+    /// [05-OP-72]), checked before it allocates its result or reads an
+    /// operand. The verifier gives the result and every operand one declared
+    /// shape; this lane allocates the result from it and reads each operand
+    /// at every flat index of the result. So first each later operand's
+    /// runtime extents against the first's, with the DAG evaluator's report,
+    /// then every extent the result declares against the first operand's,
+    /// with the local extent guard's report; the evaluator builds the result
+    /// from its operands and reads no declared extent. Every index below the
+    /// result's size is then in bounds for every operand.
+    fn emit_key_operation_extent_guards(
+        &mut self,
+        op: &'static str,
+        node: &DagNode,
+        dag: VerifiedDagView<'_>,
+    ) {
+        let first = node.inputs[0];
+        let dims = &dag
+            .get(first)
+            .expect("verified key operand")
+            .output_type
+            .dims;
+        for (slot, input) in node.inputs.iter().enumerate().skip(1) {
+            self.emit_operand_extent_guards(op, first, dims, slot, *input, dims.len());
+        }
+        self.emit_declared_extent_guards(op, &node.output_type.dims, |axis| {
+            format!("chelis_tensor_shape(t{}, {axis})", first.0)
+        });
+    }
+
     /// [05-OP-69]: each key is its i64 seed's two's-complement bits.
-    fn emit_key_from_seed(&mut self, node: &DagNode) {
+    fn emit_key_from_seed(&mut self, node: &DagNode, dag: VerifiedDagView<'_>) {
         let id = node.id.0;
         let seed = node.inputs[0].0;
         let word = Self::prim_elem_type(Prim::Key);
         let seed_ty = Self::prim_elem_type(Prim::Int64);
         let index = Self::prim_elem_type(Prim::Int64);
+        self.emit_key_operation_extent_guards("key_from_seed", node, dag);
         self.emit_slot_wrapper(id, &node.output_type);
         self.line(&format!("for ({index} i = 0; i < t{id}_size; i++) {{"));
         self.indent += 1;
@@ -5341,7 +5388,12 @@ impl CEmitter {
     }
 
     /// One half of [05-OP-70]: `derive(k, 0)` or `derive(k, 1)` per element.
-    fn emit_split_key(&mut self, node: &DagNode, branch: chelis_ir::dag::KeyBranch) {
+    fn emit_split_key(
+        &mut self,
+        node: &DagNode,
+        branch: chelis_ir::dag::KeyBranch,
+        dag: VerifiedDagView<'_>,
+    ) {
         let id = node.id.0;
         let key = node.inputs[0];
         let word = Self::prim_elem_type(Prim::Key);
@@ -5350,6 +5402,7 @@ impl CEmitter {
             chelis_ir::dag::KeyBranch::Left => 0,
             chelis_ir::dag::KeyBranch::Right => 1,
         };
+        self.emit_key_operation_extent_guards("split_key", node, dag);
         self.emit_slot_wrapper(id, &node.output_type);
         self.line(&format!("for ({index} i = 0; i < t{id}_size; i++) {{"));
         self.indent += 1;
@@ -5363,12 +5416,13 @@ impl CEmitter {
 
     /// [05-OP-72]: `derive(derive(k, 2), n)` per element, `n`'s i64 read as
     /// its two's-complement bits.
-    fn emit_fold_in(&mut self, node: &DagNode) {
+    fn emit_fold_in(&mut self, node: &DagNode, dag: VerifiedDagView<'_>) {
         let id = node.id.0;
         let key = node.inputs[0];
         let n = node.inputs[1].0;
         let word = Self::prim_elem_type(Prim::Key);
         let index_ty = Self::prim_elem_type(Prim::Int64);
+        self.emit_key_operation_extent_guards("fold_in", node, dag);
         self.emit_slot_wrapper(id, &node.output_type);
         self.line(&format!("for ({index_ty} i = 0; i < t{id}_size; i++) {{"));
         self.indent += 1;

@@ -1569,3 +1569,191 @@ fn a_draw_whose_declared_result_disagrees_with_its_data_traps_in_c() {
         run_eval(&dag, &inputs(3)).unwrap()
     );
 }
+
+// ---- extents a key operation checks before it reads ----
+
+/// An elementwise key operation: [05-OP-69], one half of [05-OP-70], or
+/// [05-OP-72].
+#[derive(Clone, Copy, Debug)]
+enum KeyOperation {
+    FromSeed,
+    Split,
+    FoldIn,
+}
+
+impl KeyOperation {
+    fn name(self) -> &'static str {
+        match self {
+            Self::FromSeed => "key_from_seed",
+            Self::Split => "split_key",
+            Self::FoldIn => "fold_in",
+        }
+    }
+}
+
+/// A value declared `[m]` whose extent is that of the load `name`, declared
+/// `[p]`: `neg` of that load, as in [`rows_of_p`].
+fn neg_of_p(dag: &mut Dag, name: &str, prim: Prim) -> NodeId {
+    rows_of_p(dag, name, &[], prim)
+}
+
+/// `op` over loads declared `[m]`, its result declared `[m]`, after the root
+/// `neg(a)` declared `[m]` over `a: tensor[p, f32]`. C's entry binds `m`
+/// from that `neg`'s axis, which is `a`'s, and does not check the later
+/// loads against it (chelis#1277's class), so at run time the key
+/// operation's declared extent can differ from its operands'.
+fn key_operation_after_a(op: KeyOperation) -> (Dag, NodeId) {
+    let mut dag = Dag::new();
+    let negated = neg_of_p(&mut dag, "a", Prim::F32);
+    dag.add_root(negated);
+    let declared = || TensorType {
+        dims: named_dims("m", &[]),
+        precision: Prim::Key,
+    };
+    let result = match op {
+        KeyOperation::FromSeed => {
+            let seeds = load_m(&mut dag, "s", &[], Prim::Int64);
+            dag.add_node(RiscOp::KeyFromSeed, vec![seeds], declared(), None)
+        }
+        KeyOperation::Split => {
+            let keys = load_m(&mut dag, "k", &[], Prim::Key);
+            let branch = KeyBranch::Left;
+            dag.add_node(RiscOp::Split { branch }, vec![keys], declared(), None)
+        }
+        KeyOperation::FoldIn => {
+            let keys = load_m(&mut dag, "k", &[], Prim::Key);
+            let indices = load_m(&mut dag, "i", &[], Prim::Int64);
+            dag.add_node(RiscOp::FoldIn, vec![keys, indices], declared(), None)
+        }
+    };
+    dag.add_root(result);
+    (dag, result)
+}
+
+/// Inputs for [`key_operation_after_a`]: `a` holds `m` elements, and every
+/// operand two.
+fn key_operation_inputs(m: usize) -> Vec<(&'static str, Input)> {
+    vec![
+        ("a", Input::Floats(Prim::F32, vec![m], vec![1.0; m])),
+        ("s", Input::Ints(vec![2], vec![-3, 7])),
+        ("k", Input::Keys(vec![2], vec![1, 2])),
+        ("i", Input::Ints(vec![2], vec![5, 6])),
+    ]
+}
+
+/// key_ref.py's `fold_in(key(1), 5)` and `fold_in(key(2), 6)`.
+const FOLDED: [u64; 2] = [0x3fcf_c3fe_583c_3f8c, 0x6595_59e7_5fe8_debb];
+
+/// C allocates an elementwise key operation's result from its declared dims
+/// and reads every operand at each index of it, so before the allocation it
+/// checks each declared extent against its operands', with the local extent
+/// guard's report. Here `m` is three and each operand holds two elements.
+/// The DAG evaluator builds the result from its operands and reads no
+/// declared extent, so on this graph it returns two keys where C traps, as
+/// it does for a generic operation; it is not compared here. With `m` two
+/// the lanes agree on key_ref.py's keys.
+///
+/// Evidentiary status: REGRESSION TEST. At 8a79e7c95 C exited normally
+/// after reading a third element past each two-element operand.
+#[test]
+fn a_key_operation_whose_declared_result_exceeds_its_operands_traps_in_c() {
+    for (op, reference) in [
+        // key_ref.py's key(-3) and key(7).
+        (KeyOperation::FromSeed, [0xffff_ffff_ffff_fffd, 7]),
+        // key_ref.py's split(key(1)).0 and split(key(2)).0.
+        (
+            KeyOperation::Split,
+            [0x187d_9c3f_8064_0697, 0x000a_32cd_565f_bcd0],
+        ),
+        (KeyOperation::FoldIn, FOLDED),
+    ] {
+        let name = op.name();
+        let (dag, result) = key_operation_after_a(op);
+        let inputs = inputs_for(&dag, &key_operation_inputs(3));
+        let stderr = run_c_failure(dag.clone(), &inputs);
+        let report = format!(
+            "extent `m`: claimed = 3, {name} axis 0 = 2\nnumeric trap: domain in {name} at i64"
+        );
+        assert!(stderr.contains(&report), "{op:?}: {stderr}");
+        let (program, ..) = generated(dag.clone());
+        let guard = program
+            .find(&format!("{name} axis 0 = %lld"))
+            .expect("the key operation guards its declared extents");
+        let allocation = program
+            .find(&format!("chelis_tensor *t{} = chelis_alloc(", result.0))
+            .expect("the key operation allocates its result");
+        assert!(
+            guard < allocation,
+            "{op:?}: the guard must precede the allocation"
+        );
+        let inputs = inputs_for(&dag, &key_operation_inputs(2));
+        let eval = run_eval(&dag, &inputs).unwrap();
+        assert_eq!(eval[1], reference.to_vec(), "{op:?}");
+        assert_eq!(run_c(dag, &inputs), eval, "{op:?}");
+    }
+}
+
+/// `fold_in(k, i)` whose key and index disagree at run time. The operand
+/// that is `neg` of a load declared `[p]` comes first, so neither lane has
+/// bound `m` when it sizes it, and C's entry binds `m` from it. Both lanes
+/// check the index's extents against the key's before reading either, with
+/// one report; with agreeing extents both return key_ref.py's keys.
+///
+/// Evidentiary status: REGRESSION TEST. At 8a79e7c95 the DAG evaluator
+/// reported an untyped shape error, and C read past the shorter operand.
+#[test]
+fn a_fold_in_whose_key_and_index_disagree_traps_in_c_as_in_eval() {
+    // `index_first`: `i = neg(j)` with `j: tensor[p, i64]` and the load
+    // `k: tensor[m, key]`; otherwise `k = key_from_seed(neg(s))` with
+    // `s: tensor[p, i64]` and the load `i: tensor[m, i64]`.
+    let build = |index_first: bool| {
+        let mut dag = Dag::new();
+        let declared = || TensorType {
+            dims: named_dims("m", &[]),
+            precision: Prim::Key,
+        };
+        let (keys, indices) = if index_first {
+            let indices = neg_of_p(&mut dag, "j", Prim::Int64);
+            (load_m(&mut dag, "k", &[], Prim::Key), indices)
+        } else {
+            let seeds = neg_of_p(&mut dag, "s", Prim::Int64);
+            let keys = dag.add_node(RiscOp::KeyFromSeed, vec![seeds], declared(), None);
+            (keys, load_m(&mut dag, "i", &[], Prim::Int64))
+        };
+        let folded = dag.add_node(RiscOp::FoldIn, vec![keys, indices], declared(), None);
+        dag.add_root(folded);
+        dag
+    };
+    let inputs = |index_first: bool, p: usize| {
+        if index_first {
+            vec![
+                ("j", Input::Ints(vec![p], vec![-5, -6, -7][..p].to_vec())),
+                ("k", Input::Keys(vec![2], vec![1, 2])),
+            ]
+        } else {
+            vec![
+                ("s", Input::Ints(vec![p], vec![-1, -2, -3][..p].to_vec())),
+                ("i", Input::Ints(vec![2], vec![5, 6])),
+            ]
+        }
+    };
+    for (index_first, line) in [
+        (true, "extent `m`: claimed = 2, fold_in input 1 axis 0 = 3"),
+        (false, "extent `m`: claimed = 3, fold_in input 1 axis 0 = 2"),
+    ] {
+        let report = format!("{line}\nnumeric trap: domain in fold_in at i64");
+        let dag = build(index_first);
+        let inputs3 = inputs(index_first, 3);
+        assert_eq!(
+            run_eval(&dag, &inputs3),
+            Err(report.clone()),
+            "{index_first}"
+        );
+        let stderr = run_c_failure(dag.clone(), &inputs3);
+        assert!(stderr.contains(&report), "{index_first}: {stderr}");
+        let inputs2 = inputs(index_first, 2);
+        let eval = run_eval(&dag, &inputs2).unwrap();
+        assert_eq!(eval, vec![FOLDED.to_vec()], "{index_first}");
+        assert_eq!(run_c(dag, &inputs2), eval, "{index_first}");
+    }
+}
