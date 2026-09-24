@@ -2512,400 +2512,402 @@ pub(super) fn infer_top_level(
             subst,
             errors.recursive_state(),
         );
-        let mut caller_scope = errors.enter_recursive_caller(recursive_caller);
-        let errors = caller_scope.sink();
-        let declared_dim_names = declared_binder_identities.dim_names();
-        let declared_type_names = declared_binder_identities.type_names();
-        let declared_rank_names = declared_binder_identities.rank_names();
-        // A declaration's signature owns the only named binders legal in its
-        // nested source annotations. Infer against a lexical clone so the
-        // scope follows nested env clones but cannot leak to the next `def`
-        // or into the reusable top-level environment.
-        // chelis#260 Site 2: park the composed map on the OUTER env, which
-        // is what the per-def deferred-borrow drain reads. `body_env` below
-        // is a clone, so parking there would not survive to the drain.
-        // chelis#260 Site 2 parks the map here and chelis#1486 checks
-        // rigidity from it after body inference, so the two consumers
-        // each take their own copy. The rigidity check keeps the value
-        // THIS declaration computed rather than reading the parked one
-        // back, which body inference could have replaced.
-        env.set_active_declared_type_names(declared_type_names.clone());
-        let declared_dtype_bounds: UnordMap<TypeVar, Option<TypeVarRestriction>> =
-            declared_type_names
-                .to_sorted()
-                .into_iter()
-                .map(|(variable, _)| (*variable, subst.tvar_restriction(*variable)))
-                .collect();
-        let mut body_env = env.clone();
-        body_env.set_type_resolution_scope(
-            binder_names.map(|_| &declared_binder_identities),
-            declaration_diagnostic_owner,
-        );
-        install_exact_op35_dependency_contracts(&name, declared_ty.as_ref(), &mut body_env, vg);
-
-        let body_diagnostic_checkpoint = errors.checkpoint();
-        if let Some(Type::Fn(params, _)) = &declared_ty {
-            subst.protect_dimensions(params.iter().flat_map(crate::env::free_dvars));
-        }
-        // WS-A7: when the body is a bare-arg `(fn (params) body)` and the
-        // declared signature gives concrete param types, seed the body's
-        // params with the declared types BEFORE inferring the body. Without
-        // this seeding, bare params get fresh, unconstrained type variables.
-        // For callee schemes that share a tvar between an `&T` param and a
-        // non-borrow return position (e.g. `add: (&t, &t) -> t`), the
-        // call-site `auto_borrow_call_arg_types` wraps the actual param
-        // tvar in `Ref(...)` and unifies it with the formal `Ref(α)`,
-        // collapsing the param-side and return-side of the callee into
-        // the same equivalence class. The post-body sig-unify then drives
-        // the return position to `Ref(t)` instead of the declared `t`,
-        // surfacing as `def 'tadd' body doesn't match declared signature:
-        // body has type `(&t, &t) -> &t`, declared type is `(&t, &t) -> t``.
-        // Annotated params do not hit this because their concrete type
-        // (`&tensor[..]`) flows through the call site directly. Seeding
-        // bare params with the declared type here makes the bare-arg path
-        // behave the same as the annotated path. See
-        // `crates/chelis-cli/tests/bareref_return_inference.rs`.
-        let body_ty = if let Some(witness) = prebound_type_failure {
-            propagate(witness)
-        } else if let Some(decl_ty) = &declared_ty {
-            infer_declared_def_body(
-                &kids[1],
-                decl_ty,
-                declaration_meta,
-                declared_signatures.get(&name),
-                &mut body_env,
-                vg,
-                subst,
-                adt_reg,
-                errors,
-                product,
+        errors.with_recursive_caller(recursive_caller, |errors| {
+            let declared_dim_names = declared_binder_identities.dim_names();
+            let declared_type_names = declared_binder_identities.type_names();
+            let declared_rank_names = declared_binder_identities.rank_names();
+            // A declaration's signature owns the only named binders legal in its
+            // nested source annotations. Infer against a lexical clone so the
+            // scope follows nested env clones but cannot leak to the next `def`
+            // or into the reusable top-level environment.
+            // chelis#260 Site 2: park the composed map on the OUTER env, which
+            // is what the per-def deferred-borrow drain reads. `body_env` below
+            // is a clone, so parking there would not survive to the drain.
+            // chelis#260 Site 2 parks the map here and chelis#1486 checks
+            // rigidity from it after body inference, so the two consumers
+            // each take their own copy. The rigidity check keeps the value
+            // THIS declaration computed rather than reading the parked one
+            // back, which body inference could have replaced.
+            env.set_active_declared_type_names(declared_type_names.clone());
+            let declared_dtype_bounds: UnordMap<TypeVar, Option<TypeVarRestriction>> =
+                declared_type_names
+                    .to_sorted()
+                    .into_iter()
+                    .map(|(variable, _)| (*variable, subst.tvar_restriction(*variable)))
+                    .collect();
+            let mut body_env = env.clone();
+            body_env.set_type_resolution_scope(
+                binder_names.map(|_| &declared_binder_identities),
                 declaration_diagnostic_owner,
-            )
-        } else {
-            infer_expr_with_declaration_diagnostic_owner(
-                &kids[1],
-                &mut body_env,
-                vg,
-                subst,
-                adt_reg,
-                errors,
-                product,
-                declaration_diagnostic_owner,
-            )
-        };
-        // Did the body's inference report any UnboundVariable diagnostic?
-        // We use this to discriminate WS-A5 RT-3a F1's masked-by-Error
-        // case (where Error is a downstream consequence of a reportable
-        // cause that the user can act on) from cascades where Error
-        // emerges from an internal type-checker limitation that has no
-        // matching upstream diagnostic. Without this discriminator the
-        // F1 detector double-reports on legitimate code that exercises
-        // type-checker gaps (record construction, region effects) which
-        // the permissive unify rule was implicitly tolerating.
-        let body_has_unbound_diagnostic = errors
-            .iter_since(body_diagnostic_checkpoint)
-            .any(|e| matches!(e.kind, CheckErrorKind::UnboundVariable { .. }));
-
-        // Enforce defsig: body must match declared signature.
-        //
-        // After unify succeeds, the body's inferred type may still carry
-        // `Dim::Wildcard` slots (e.g. from `pad_sequences_to`, `concat`,
-        // `to_tensor`) because `unify_dim` treats Wildcard as a permissive
-        // matches-anything sentinel. Generalizing the raw body would expose
-        // those wildcards to callers, who would then silently accept any
-        // concrete dim. Narrow the body's Wildcards against the declared
-        // template so the scheme registered for callers reflects the
-        // declared concrete shape (#39).
-        //
-        // Implicit-copy fan-out v3 Shape A: if the initial unify fails
-        // and the body's tail position resolves to a `(var x)`
-        // reference (after walking `let`/`if`/`match` wrappers via
-        // `descend_to_tail_var`) whose declared return is owned `T`
-        // while the body's inferred type returns `Ref(T)`, retry the
-        // unify against the declared return relaxed into `Ref(T)`.
-        // This mirrors `auto_borrow_call_arg_types`'s owned-to-borrow
-        // coercion at argument positions: the caller already arranged
-        // the borrow lifetime via the param itself, and the tail-var
-        // descent confirms every reachable return path returns the
-        // same parameter.  Heterogeneous returns and bodies whose tail
-        // is an `app` or other non-var expression still fail with the
-        // existing TypeMismatch.
-        let scheme_body = if is_exact_op35_wrapper(&name) {
-            // These package-reserved wrappers intentionally consume contracts
-            // delivered by sibling Phase-4 issues: all-dtype random parameters
-            // (#1295) and runtime-axis shape typing (#1298). Ordinary inference
-            // still walks the complete body and owns every child stamp, while
-            // the exact manifest signature remains authoritative at this one
-            // compiler-owned boundary. Preserve all actionable diagnostics;
-            // only the currently-unprovable type/shape relations are deferred
-            // to those lower-level receipts. The stdlib surface oracle locks
-            // each accepted graph structurally, including mutation controls.
-            errors.retain_since(body_diagnostic_checkpoint, |error| {
-                !matches!(
-                    error.kind,
-                    CheckErrorKind::TypeMismatch
-                        | CheckErrorKind::DimensionMismatch
-                        | CheckErrorKind::CastNonTensor
-                )
-            });
-            let declared_ty =
-                declared_ty.expect("every exact OP-35 wrapper has a declared signature");
-            if let Err(error) = subst.project_tvar_restrictions(&body_ty, &declared_ty) {
-                errors.push(error.into());
-            }
-            declared_ty
-        } else if let Some(decl_ty) = declared_ty {
-            let unify_result = unify(&body_ty, &decl_ty, subst);
-            let resolved_body = subst.apply(&body_ty);
-            let resolved_decl = subst.apply(&decl_ty);
-            // Declared-dim rigidity check (TypeCheck-FreeDimVarUnification-F1
-            // Path B). The declared signature's param positions introduce
-            // the universally-quantified dim parameters; after the
-            // post-body sig-unify above, two distinct declared dims must
-            // not have collapsed into one another (and none may have been
-            // pinned to a concrete literal). This runs here, not inside
-            // `infer_def_body_with_sig`, because the collapse for an
-            // annotated-param body happens in the sig-unify itself, not
-            // during body inference. The body's tail returns the wrong
-            // declared dim (`def g[n, m](x: tensor[n, f32],
-            // y: tensor[m, f32]) -> tensor[n, f32] = y`), and the
-            // structural relaxed-retry guard does not see it because the
-            // initial unify already succeeded by collapsing `n` and `m`.
-            // Classify every authored dimension identity together. Parameter
-            // and body-only roles are rigid under [04-INF-6]; result-only
-            // roles retain §4.4.1 output inference and may collapse only with
-            // another result-only identity. This declaration-level path is
-            // shared by ordinary and recursive members.
-            check_authored_dvars_rigid(&name, &decl_ty, &declared_dim_names, subst, errors);
-            // [04-INF-6]: the type/rank twins of the dimension check above.
-            // Their key sets come from the same declaration-owned identity
-            // object, and inference holes ([04-INF-5]) are excluded by
-            // construction.
-            check_declared_tvars_rigid(&name, &declared_type_names, subst, errors);
-            check_declared_rvars_rigid(&name, &declared_rank_names, subst, errors);
-            // Tier-2 rank-polymorphism Body Discipline
-            // (spec/design/rank_polymorphism.md §Soundness Boundary, spec §4.2):
-            // a def whose signature mentions a rank variable `..r` may call only
-            // shape-identity (elementwise) builtins. Against an opaque rank there
-            // are no named axes left to catch a transposition/reshape, so any
-            // shape-rewriting op (or an unproven user call) is rejected here.
-            if type_contains_rank(&decl_ty)
-                && !is_exact_op35_wrapper(&name)
-                && let Some((_, body_expr)) =
-                    extract_fn_params_and_body(&kids[1], &mut errors.stack())
-            {
-                check_rank_body_discipline(&name, &body_expr, user_def_names, errors);
-            }
-            // chelis#272 list-uniformity check. A list literal of
-            // tensors with *mismatched concrete* element axes joins to a
-            // `Wildcard` along the differing axis (the deliberate #218
-            // bare-`concat` ergonomic). That wildcard is a defensible
-            // "I don't know the shape" result for an unannotated bare
-            // list, but it must NOT silently satisfy a declared element
-            // type that names a rigid/named dimension — `List[tensor[k]]`
-            // promises every element has the *same* length `k`. A body
-            // like `def make[k](a: tensor[2], b: tensor[3])
-            //   -> List[tensor[k]] = [a, b]` produces
-            // `List<tensor[Wildcard]>`; the wildcard unifies permissively
-            // with the rigid `k` and leaves it unbound, so neither the
-            // pin-to-literal nor the distinct-collapse arm of
-            // `check_declared_dvars_rigid` fires. Flag that mismatch here
-            // by comparing the declared return's list-element dims
-            // against the resolved body's. (The `[k, m]` variant is
-            // already caught above: the tightened Cons-join now unifies
-            // the two rigid dims, and `check_declared_dvars_rigid`
-            // reports the collapse.)
-            check_list_elem_rigid_dim_vs_wildcard(
-                &decl_ty,
-                &resolved_body,
-                &declared_dim_names,
-                errors,
             );
-            // Implicit-copy fan-out v3 Shape A relaxed retry: if the
-            // initial unify fails and the body's tail position resolves
-            // to a `(var x)` reference whose declared return is owned
-            // `T` while the body's inferred type returns `Ref(T)`,
-            // retry the unify against the declared return relaxed
-            // into `Ref(T)`.
-            let initial_failed = unify_result.is_err();
-            let recovered_by_relaxed_retry = if initial_failed {
-                let relaxed_decl = shape_a_relaxed_return(
+            install_exact_op35_dependency_contracts(&name, declared_ty.as_ref(), &mut body_env, vg);
+
+            let body_diagnostic_checkpoint = errors.checkpoint();
+            if let Some(Type::Fn(params, _)) = &declared_ty {
+                subst.protect_dimensions(params.iter().flat_map(crate::env::free_dvars));
+            }
+            // WS-A7: when the body is a bare-arg `(fn (params) body)` and the
+            // declared signature gives concrete param types, seed the body's
+            // params with the declared types BEFORE inferring the body. Without
+            // this seeding, bare params get fresh, unconstrained type variables.
+            // For callee schemes that share a tvar between an `&T` param and a
+            // non-borrow return position (e.g. `add: (&t, &t) -> t`), the
+            // call-site `auto_borrow_call_arg_types` wraps the actual param
+            // tvar in `Ref(...)` and unifies it with the formal `Ref(α)`,
+            // collapsing the param-side and return-side of the callee into
+            // the same equivalence class. The post-body sig-unify then drives
+            // the return position to `Ref(t)` instead of the declared `t`,
+            // surfacing as `def 'tadd' body doesn't match declared signature:
+            // body has type `(&t, &t) -> &t`, declared type is `(&t, &t) -> t``.
+            // Annotated params do not hit this because their concrete type
+            // (`&tensor[..]`) flows through the call site directly. Seeding
+            // bare params with the declared type here makes the bare-arg path
+            // behave the same as the annotated path. See
+            // `crates/chelis-cli/tests/bareref_return_inference.rs`.
+            let body_ty = if let Some(witness) = prebound_type_failure {
+                propagate(witness)
+            } else if let Some(decl_ty) = &declared_ty {
+                infer_declared_def_body(
                     &kids[1],
-                    &resolved_body,
-                    &resolved_decl,
-                    &mut errors.stack(),
-                );
-                relaxed_decl
-                    .as_ref()
-                    .is_some_and(|relaxed| unify(&body_ty, relaxed, subst).is_ok())
+                    decl_ty,
+                    declaration_meta,
+                    declared_signatures.get(&name),
+                    &mut body_env,
+                    vg,
+                    subst,
+                    adt_reg,
+                    errors,
+                    product,
+                    declaration_diagnostic_owner,
+                )
             } else {
-                false
+                infer_expr_with_declaration_diagnostic_owner(
+                    &kids[1],
+                    &mut body_env,
+                    vg,
+                    subst,
+                    adt_reg,
+                    errors,
+                    product,
+                    declaration_diagnostic_owner,
+                )
             };
-            // WS-A5 RT-3a F1: the permissive `(Error, _)` unify rule lets
-            // a body whose return position collapses to `Type::Error`
-            // (e.g. `def use_mix(x: tensor[3, i32]) -> tensor[3, f32]
-            // = poly_id(nonexistent_function(x))`, where the outer call
-            // early-exits at `Type::Error` so the body's `fn` type is
-            // `Fn([tensor[3, i32]], Type::Error)`) silently satisfy a
-            // concrete declared signature, masking the precision/shape
-            // mismatch the user would otherwise see. Surface the masked
-            // mismatch here when the body collapses to `Type::Error` at
-            // the top level OR at the return position of a function
-            // type, and the corresponding declared slot is concrete.
-            // We deliberately do NOT recurse through tuples/ADTs/Fn
-            // arg positions: those would re-fire on cascade patterns
-            // (e.g. tuple destructuring on an unannotated parameter
-            // produces `Tuple([Error, Error, ...])` from a localized
-            // inference gap that has already been surfaced upstream
-            // and should not double-report the def-level diagnostic).
-            let body_return_collapsed = match (&resolved_body, &resolved_decl) {
-                (Type::Error(_), decl) => !matches!(decl, Type::Error(_)),
-                (Type::Fn(_, ret), Type::Fn(_, decl_ret))
-                    if matches!(**ret, Type::Error(_)) && !matches!(**decl_ret, Type::Error(_)) =>
-                {
-                    true
+            // Did the body's inference report any UnboundVariable diagnostic?
+            // We use this to discriminate WS-A5 RT-3a F1's masked-by-Error
+            // case (where Error is a downstream consequence of a reportable
+            // cause that the user can act on) from cascades where Error
+            // emerges from an internal type-checker limitation that has no
+            // matching upstream diagnostic. Without this discriminator the
+            // F1 detector double-reports on legitimate code that exercises
+            // type-checker gaps (record construction, region effects) which
+            // the permissive unify rule was implicitly tolerating.
+            let body_has_unbound_diagnostic = errors
+                .iter_since(body_diagnostic_checkpoint)
+                .any(|e| matches!(e.kind, CheckErrorKind::UnboundVariable { .. }));
+
+            // Enforce defsig: body must match declared signature.
+            //
+            // After unify succeeds, the body's inferred type may still carry
+            // `Dim::Wildcard` slots (e.g. from `pad_sequences_to`, `concat`,
+            // `to_tensor`) because `unify_dim` treats Wildcard as a permissive
+            // matches-anything sentinel. Generalizing the raw body would expose
+            // those wildcards to callers, who would then silently accept any
+            // concrete dim. Narrow the body's Wildcards against the declared
+            // template so the scheme registered for callers reflects the
+            // declared concrete shape (#39).
+            //
+            // Implicit-copy fan-out v3 Shape A: if the initial unify fails
+            // and the body's tail position resolves to a `(var x)`
+            // reference (after walking `let`/`if`/`match` wrappers via
+            // `descend_to_tail_var`) whose declared return is owned `T`
+            // while the body's inferred type returns `Ref(T)`, retry the
+            // unify against the declared return relaxed into `Ref(T)`.
+            // This mirrors `auto_borrow_call_arg_types`'s owned-to-borrow
+            // coercion at argument positions: the caller already arranged
+            // the borrow lifetime via the param itself, and the tail-var
+            // descent confirms every reachable return path returns the
+            // same parameter.  Heterogeneous returns and bodies whose tail
+            // is an `app` or other non-var expression still fail with the
+            // existing TypeMismatch.
+            let scheme_body = if is_exact_op35_wrapper(&name) {
+                // These package-reserved wrappers intentionally consume contracts
+                // delivered by sibling Phase-4 issues: all-dtype random parameters
+                // (#1295) and runtime-axis shape typing (#1298). Ordinary inference
+                // still walks the complete body and owns every child stamp, while
+                // the exact manifest signature remains authoritative at this one
+                // compiler-owned boundary. Preserve all actionable diagnostics;
+                // only the currently-unprovable type/shape relations are deferred
+                // to those lower-level receipts. The stdlib surface oracle locks
+                // each accepted graph structurally, including mutation controls.
+                errors.retain_since(body_diagnostic_checkpoint, |error| {
+                    !matches!(
+                        error.kind,
+                        CheckErrorKind::TypeMismatch
+                            | CheckErrorKind::DimensionMismatch
+                            | CheckErrorKind::CastNonTensor
+                    )
+                });
+                let declared_ty =
+                    declared_ty.expect("every exact OP-35 wrapper has a declared signature");
+                if let Err(error) = subst.project_tvar_restrictions(&body_ty, &declared_ty) {
+                    errors.push(error.into());
                 }
-                _ => false,
-            };
-            let masked_by_error =
-                unify_result.is_ok() && body_return_collapsed && body_has_unbound_diagnostic;
-            let unrecovered_initial_failure = initial_failed && !recovered_by_relaxed_retry;
-            if unrecovered_initial_failure || masked_by_error {
-                // Declared-signature mismatches remain the established
-                // TypeMismatch contract except when nominal-dimension
-                // enforcement proves a concrete extent disagreement.  The
-                // latter is the one structurally distinct case introduced by
-                // [04-ADT-4].
-                let mismatch_kind = match unify_result.as_ref().err().map(|error| &error.kind) {
-                    Some(TypeErrorKind::DimensionMismatch) => CheckErrorKind::DimensionMismatch,
-                    Some(TypeErrorKind::DtypeFamilyMismatch) => CheckErrorKind::PrecisionMismatch,
-                    _ => CheckErrorKind::TypeMismatch,
-                };
-                // RT-2 fixup B1: when the mismatch is a tensor
-                // precision mismatch (notably a `reduce_sum` body
-                // whose result precision differs from the declared
-                // one), include a §5.7.1 cite directly in the message
-                // so the user sees the result-precision table rule
-                // rather than a generic "doesn't match declared
-                // signature".
-                let extra = if let Some(error) = unify_result
-                    .as_ref()
-                    .err()
-                    .filter(|error| matches!(error.kind, TypeErrorKind::DtypeFamilyMismatch))
+                declared_ty
+            } else if let Some(decl_ty) = declared_ty {
+                let unify_result = unify(&body_ty, &decl_ty, subst);
+                let resolved_body = subst.apply(&body_ty);
+                let resolved_decl = subst.apply(&decl_ty);
+                // Declared-dim rigidity check (TypeCheck-FreeDimVarUnification-F1
+                // Path B). The declared signature's param positions introduce
+                // the universally-quantified dim parameters; after the
+                // post-body sig-unify above, two distinct declared dims must
+                // not have collapsed into one another (and none may have been
+                // pinned to a concrete literal). This runs here, not inside
+                // `infer_def_body_with_sig`, because the collapse for an
+                // annotated-param body happens in the sig-unify itself, not
+                // during body inference. The body's tail returns the wrong
+                // declared dim (`def g[n, m](x: tensor[n, f32],
+                // y: tensor[m, f32]) -> tensor[n, f32] = y`), and the
+                // structural relaxed-retry guard does not see it because the
+                // initial unify already succeeded by collapsing `n` and `m`.
+                // Classify every authored dimension identity together. Parameter
+                // and body-only roles are rigid under [04-INF-6]; result-only
+                // roles retain §4.4.1 output inference and may collapse only with
+                // another result-only identity. This declaration-level path is
+                // shared by ordinary and recursive members.
+                check_authored_dvars_rigid(&name, &decl_ty, &declared_dim_names, subst, errors);
+                // [04-INF-6]: the type/rank twins of the dimension check above.
+                // Their key sets come from the same declaration-owned identity
+                // object, and inference holes ([04-INF-5]) are excluded by
+                // construction.
+                check_declared_tvars_rigid(&name, &declared_type_names, subst, errors);
+                check_declared_rvars_rigid(&name, &declared_rank_names, subst, errors);
+                // Tier-2 rank-polymorphism Body Discipline
+                // (spec/design/rank_polymorphism.md §Soundness Boundary, spec §4.2):
+                // a def whose signature mentions a rank variable `..r` may call only
+                // shape-identity (elementwise) builtins. Against an opaque rank there
+                // are no named axes left to catch a transposition/reshape, so any
+                // shape-rewriting op (or an unproven user call) is rejected here.
+                if type_contains_rank(&decl_ty)
+                    && !is_exact_op35_wrapper(&name)
+                    && let Some((_, body_expr)) =
+                        extract_fn_params_and_body(&kids[1], &mut errors.stack())
                 {
-                    format!(": {}", error.message)
+                    check_rank_body_discipline(&name, &body_expr, user_def_names, errors);
+                }
+                // chelis#272 list-uniformity check. A list literal of
+                // tensors with *mismatched concrete* element axes joins to a
+                // `Wildcard` along the differing axis (the deliberate #218
+                // bare-`concat` ergonomic). That wildcard is a defensible
+                // "I don't know the shape" result for an unannotated bare
+                // list, but it must NOT silently satisfy a declared element
+                // type that names a rigid/named dimension — `List[tensor[k]]`
+                // promises every element has the *same* length `k`. A body
+                // like `def make[k](a: tensor[2], b: tensor[3])
+                //   -> List[tensor[k]] = [a, b]` produces
+                // `List<tensor[Wildcard]>`; the wildcard unifies permissively
+                // with the rigid `k` and leaves it unbound, so neither the
+                // pin-to-literal nor the distinct-collapse arm of
+                // `check_declared_dvars_rigid` fires. Flag that mismatch here
+                // by comparing the declared return's list-element dims
+                // against the resolved body's. (The `[k, m]` variant is
+                // already caught above: the tightened Cons-join now unifies
+                // the two rigid dims, and `check_declared_dvars_rigid`
+                // reports the collapse.)
+                check_list_elem_rigid_dim_vs_wildcard(
+                    &decl_ty,
+                    &resolved_body,
+                    &declared_dim_names,
+                    errors,
+                );
+                // Implicit-copy fan-out v3 Shape A relaxed retry: if the
+                // initial unify fails and the body's tail position resolves
+                // to a `(var x)` reference whose declared return is owned
+                // `T` while the body's inferred type returns `Ref(T)`,
+                // retry the unify against the declared return relaxed
+                // into `Ref(T)`.
+                let initial_failed = unify_result.is_err();
+                let recovered_by_relaxed_retry = if initial_failed {
+                    let relaxed_decl = shape_a_relaxed_return(
+                        &kids[1],
+                        &resolved_body,
+                        &resolved_decl,
+                        &mut errors.stack(),
+                    );
+                    relaxed_decl
+                        .as_ref()
+                        .is_some_and(|relaxed| unify(&body_ty, relaxed, subst).is_ok())
                 } else {
-                    match (&resolved_body, &resolved_decl) {
-                        (Type::Tensor(_, body_prec), Type::Tensor(_, decl_prec))
-                            if body_prec != decl_prec =>
-                        {
-                            format!(
-                                " (precision `{}` vs declared `{}`; if the body is a \
+                    false
+                };
+                // WS-A5 RT-3a F1: the permissive `(Error, _)` unify rule lets
+                // a body whose return position collapses to `Type::Error`
+                // (e.g. `def use_mix(x: tensor[3, i32]) -> tensor[3, f32]
+                // = poly_id(nonexistent_function(x))`, where the outer call
+                // early-exits at `Type::Error` so the body's `fn` type is
+                // `Fn([tensor[3, i32]], Type::Error)`) silently satisfy a
+                // concrete declared signature, masking the precision/shape
+                // mismatch the user would otherwise see. Surface the masked
+                // mismatch here when the body collapses to `Type::Error` at
+                // the top level OR at the return position of a function
+                // type, and the corresponding declared slot is concrete.
+                // We deliberately do NOT recurse through tuples/ADTs/Fn
+                // arg positions: those would re-fire on cascade patterns
+                // (e.g. tuple destructuring on an unannotated parameter
+                // produces `Tuple([Error, Error, ...])` from a localized
+                // inference gap that has already been surfaced upstream
+                // and should not double-report the def-level diagnostic).
+                let body_return_collapsed = match (&resolved_body, &resolved_decl) {
+                    (Type::Error(_), decl) => !matches!(decl, Type::Error(_)),
+                    (Type::Fn(_, ret), Type::Fn(_, decl_ret))
+                        if matches!(**ret, Type::Error(_))
+                            && !matches!(**decl_ret, Type::Error(_)) =>
+                    {
+                        true
+                    }
+                    _ => false,
+                };
+                let masked_by_error =
+                    unify_result.is_ok() && body_return_collapsed && body_has_unbound_diagnostic;
+                let unrecovered_initial_failure = initial_failed && !recovered_by_relaxed_retry;
+                if unrecovered_initial_failure || masked_by_error {
+                    // Declared-signature mismatches remain the established
+                    // TypeMismatch contract except when nominal-dimension
+                    // enforcement proves a concrete extent disagreement.  The
+                    // latter is the one structurally distinct case introduced by
+                    // [04-ADT-4].
+                    let mismatch_kind = match unify_result.as_ref().err().map(|error| &error.kind) {
+                        Some(TypeErrorKind::DimensionMismatch) => CheckErrorKind::DimensionMismatch,
+                        Some(TypeErrorKind::DtypeFamilyMismatch) => {
+                            CheckErrorKind::PrecisionMismatch
+                        }
+                        _ => CheckErrorKind::TypeMismatch,
+                    };
+                    // RT-2 fixup B1: when the mismatch is a tensor
+                    // precision mismatch (notably a `reduce_sum` body
+                    // whose result precision differs from the declared
+                    // one), include a §5.7.1 cite directly in the message
+                    // so the user sees the result-precision table rule
+                    // rather than a generic "doesn't match declared
+                    // signature".
+                    let extra =
+                        if let Some(error) = unify_result.as_ref().err().filter(|error| {
+                            matches!(error.kind, TypeErrorKind::DtypeFamilyMismatch)
+                        }) {
+                            format!(": {}", error.message)
+                        } else {
+                            match (&resolved_body, &resolved_decl) {
+                                (Type::Tensor(_, body_prec), Type::Tensor(_, decl_prec))
+                                    if body_prec != decl_prec =>
+                                {
+                                    format!(
+                                        " (precision `{}` vs declared `{}`; if the body is a \
                              `reduce_sum`, see spec/04-type-system.md §5.7.1: \
                              narrow integer operands widen to i32 to prevent \
                              silent overflow; use `tensor[{}]` or omit the result \
                              type)",
-                                body_prec.name(),
-                                decl_prec.name(),
-                                body_prec.name(),
-                            )
-                        }
-                        _ => String::new(),
-                    }
-                };
-                errors.push(CheckError::new(
-                    mismatch_kind,
-                    format!(
-                        "def '{}' body doesn't match declared signature: \
+                                        body_prec.name(),
+                                        decl_prec.name(),
+                                        body_prec.name(),
+                                    )
+                                }
+                                _ => String::new(),
+                            }
+                        };
+                    errors.push(CheckError::new(
+                        mismatch_kind,
+                        format!(
+                            "def '{}' body doesn't match declared signature: \
                          body has type `{}`, declared type is `{}`{}",
-                        name, resolved_body, resolved_decl, extra
-                    ),
-                    vec![],
-                ));
-            }
-            // #39 wildcard narrowing. The narrow may now substitute a
-            // declared `Dim::Var` or `Dim::Name` into a body
-            // wildcard, but ONLY for binders in a parameter tensor
-            // position (`param_bound_dims`). That keeps the
-            // `const_col[n](spots: tensor[n, ..]) -> tensor[n, 1]` family's
-            // return dim tied to its input (chelis#405 / WS-3 build ICE)
-            // while leaving return-only / value-parameter dims as
-            // wildcards (the RT-39+44 soundness boundary, commit 8067c9ce).
-            let param_dims = param_bound_dims(&resolved_decl);
-            narrow_wildcards_with(&resolved_body, &resolved_decl, &param_dims)
-        } else if let Some(provisional) = provisional_recursive_type {
-            if let Err(error) = unify(&body_ty, provisional, subst) {
-                errors.push(error.into());
-            }
-            subst.apply(provisional)
-        } else {
-            body_ty
-        };
-
-        check_declared_dtype_bounds(
-            &name,
-            &declared_type_names,
-            &declared_dtype_bounds,
-            subst,
-            errors,
-        );
-
-        // The private frame constrains this body, but never replaces the
-        // rejected declaration with a callable public signature.
-        let scheme_body = match rejected_signature {
-            Some(rejected) => propagate(&rejected.witness),
-            None => scheme_body,
-        };
-
-        if let Some(level) = ordinary_level {
-            subst.leave_level(level, vg);
-        }
-
-        product.record_bypass(expr, scheme_body.clone(), "top-level declaration inference");
-
-        // chelis#397/#469: record the size provenance of a top-level value
-        // binding (e.g. `zero_count = sub(cast(0, i32), cast(0, i32))`)
-        // BEFORE binding it, so a later `expand(b, 0, zero_count)` recovers
-        // whether it is a materializable extent (static / shape-sourced) or a
-        // sourceless runtime scalar. Classified against the pre-binding scope.
-        // The `Sourceless`/`Unknown` arm CLEARS any stale provenance so a
-        // re-bind to a sourceless RHS does not inherit an earlier entry.
-        match classify_expand_size(&kids[1], env, adt_reg, subst, &mut errors.stack()) {
-            SizeClass::Static => {
-                if let Some(value) = fold_static_int_expr_with_stack(
-                    &kids[1],
-                    |bound| env.static_size_value(bound),
-                    &mut errors.stack(),
-                ) {
-                    env.mark_static_size_value(&name, value);
-                } else {
-                    env.mark_size_provenance(&name, crate::env::SizeProvenance::Static);
+                            name, resolved_body, resolved_decl, extra
+                        ),
+                        vec![],
+                    ));
                 }
-            }
-            SizeClass::ShapeSourced => {
-                env.mark_size_provenance(&name, crate::env::SizeProvenance::ShapeSourced);
-            }
-            SizeClass::Sourceless | SizeClass::Unknown => env.clear_size_provenance(&name),
-        }
-        // chelis#631: same discipline for list-literal lengths.
-        note_list_literal_binding(env, &name, &kids[1]);
-        if defer_recursive_binding {
-            Some((
-                name,
-                scheme_body,
-                subst.collection_contract_ids_since(collection_contract_mark),
-            ))
-        } else {
-            let owned_contracts = subst.collection_contract_ids_since(collection_contract_mark);
-            let scheme = env.generalize_with_collection_contracts(
-                &scheme_body,
+                // #39 wildcard narrowing. The narrow may now substitute a
+                // declared `Dim::Var` or `Dim::Name` into a body
+                // wildcard, but ONLY for binders in a parameter tensor
+                // position (`param_bound_dims`). That keeps the
+                // `const_col[n](spots: tensor[n, ..]) -> tensor[n, 1]` family's
+                // return dim tied to its input (chelis#405 / WS-3 build ICE)
+                // while leaving return-only / value-parameter dims as
+                // wildcards (the RT-39+44 soundness boundary, commit 8067c9ce).
+                let param_dims = param_bound_dims(&resolved_decl);
+                narrow_wildcards_with(&resolved_body, &resolved_decl, &param_dims)
+            } else if let Some(provisional) = provisional_recursive_type {
+                if let Err(error) = unify(&body_ty, provisional, subst) {
+                    errors.push(error.into());
+                }
+                subst.apply(provisional)
+            } else {
+                body_ty
+            };
+
+            check_declared_dtype_bounds(
+                &name,
+                &declared_type_names,
+                &declared_dtype_bounds,
                 subst,
-                &owned_contracts,
-                errors.recursive_state().pinned_vars(),
+                errors,
             );
-            env.bind(name, scheme);
-            None
-        }
+
+            // The private frame constrains this body, but never replaces the
+            // rejected declaration with a callable public signature.
+            let scheme_body = match rejected_signature {
+                Some(rejected) => propagate(&rejected.witness),
+                None => scheme_body,
+            };
+
+            if let Some(level) = ordinary_level {
+                subst.leave_level(level, vg);
+            }
+
+            product.record_bypass(expr, scheme_body.clone(), "top-level declaration inference");
+
+            // chelis#397/#469: record the size provenance of a top-level value
+            // binding (e.g. `zero_count = sub(cast(0, i32), cast(0, i32))`)
+            // BEFORE binding it, so a later `expand(b, 0, zero_count)` recovers
+            // whether it is a materializable extent (static / shape-sourced) or a
+            // sourceless runtime scalar. Classified against the pre-binding scope.
+            // The `Sourceless`/`Unknown` arm CLEARS any stale provenance so a
+            // re-bind to a sourceless RHS does not inherit an earlier entry.
+            match classify_expand_size(&kids[1], env, adt_reg, subst, &mut errors.stack()) {
+                SizeClass::Static => {
+                    if let Some(value) = fold_static_int_expr_with_stack(
+                        &kids[1],
+                        |bound| env.static_size_value(bound),
+                        &mut errors.stack(),
+                    ) {
+                        env.mark_static_size_value(&name, value);
+                    } else {
+                        env.mark_size_provenance(&name, crate::env::SizeProvenance::Static);
+                    }
+                }
+                SizeClass::ShapeSourced => {
+                    env.mark_size_provenance(&name, crate::env::SizeProvenance::ShapeSourced);
+                }
+                SizeClass::Sourceless | SizeClass::Unknown => env.clear_size_provenance(&name),
+            }
+            // chelis#631: same discipline for list-literal lengths.
+            note_list_literal_binding(env, &name, &kids[1]);
+            if defer_recursive_binding {
+                Some((
+                    name,
+                    scheme_body,
+                    subst.collection_contract_ids_since(collection_contract_mark),
+                ))
+            } else {
+                let owned_contracts = subst.collection_contract_ids_since(collection_contract_mark);
+                let scheme = env.generalize_with_collection_contracts(
+                    &scheme_body,
+                    subst,
+                    &owned_contracts,
+                    errors.recursive_state().pinned_vars(),
+                );
+                env.bind(name, scheme);
+                None
+            }
+        })
     } else {
         // Any other top-level expression
         let _ = infer_expr(expr, env, vg, subst, adt_reg, errors, product);

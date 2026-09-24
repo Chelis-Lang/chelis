@@ -442,7 +442,10 @@ pub(super) fn infer_program_with_product_in_session(
     // turns any walker stack bail into a hard located error so deep input
     // can never produce a silent green / partial result.
     errors.enter_stack_scope();
-    let result = infer_program_with_product_in_session_scoped(exprs, origin, errors);
+    // Every whole-program pass starts in a fresh recursive frame.
+    let result = errors.with_recursive_inference(|errors| {
+        infer_program_with_product_in_session_scoped(exprs, origin, errors)
+    });
     errors.exit_stack_scope();
     result
 }
@@ -452,8 +455,6 @@ fn infer_program_with_product_in_session_scoped(
     origin: ProgramOrigin,
     errors: &mut DiagnosticSink<'_>,
 ) -> InferenceProduct {
-    let mut recursive_scope = errors.enter_recursive_inference();
-    let errors = recursive_scope.sink();
     let (mut env, mut vg) = builtins::builtin_env();
     let mut subst = Subst::new();
     let mut adt_reg = AdtRegistry::new();
@@ -487,264 +488,271 @@ fn infer_program_with_product_in_session_scoped(
 
     // Checker-enforced opacity (RFC D-CHECK): install the per-run
     // context so the inference hooks see module identity, exports,
-    // and producer text. Dropped at the end of this function.
+    // and producer text. The enclosing policy returns after this pass.
     let opacity_meta = build_opacity_meta(&items, &adt_reg, &env);
-    let mut opacity_scope =
-        errors.install_opacity_context(crate::opacity::OpacityContextData::from_meta(opacity_meta));
-    let errors = opacity_scope.sink();
-
-    // Second pass: infer def bodies. Same module-descent rationale as the
-    // declaration pass — without it, the entire HM checker is a no-op on
-    // module-wrapped programs.
-    let user_def_names = collect_user_def_names(&top_level_decl_items(exprs));
-    let declared_signatures =
-        collect_declared_sig_metadata(items.iter().map(|(_, expr)| *expr), &mut errors.stack());
-    validate_binder_literal_adoption_in_program(&items, &declared_signatures, errors);
-    let external_input_types = collect_literal_external_input_types(&items, &mut errors.stack());
-    let (metadata_prebound_names, function_metadata_failures) =
-        prebind_defsig_less_function_body_types(
-            &items,
-            &declared_signatures,
-            &declaration_diagnostic_owners,
-            &mut env,
-            &mut vg,
-            &mut subst,
-            &adt_reg,
-            errors,
-        );
-    let top_level_references = TopLevelReferenceGraph::build(&items, &mut errors.stack());
-    product.function_inference_plan =
-        FunctionInferencePlan::build_from_reference_graph(&top_level_references, errors.native());
-    let inference_groups = primary_inference_groups_with_reference_graph(
-        &product.function_inference_plan,
-        &items,
-        &top_level_references,
-        &mut errors.stack(),
-    );
-    // Match the persisted-state driver: poll the invocation's token at
-    // declaration granularity. In particular, an incomplete cyclic component
-    // must consume its structured scope through `abort` before this schedule
-    // returns; finishing or generalizing a partially inferred group would
-    // leak its pins, temporary bindings, and child level.
-    'schedule: for group in inference_groups {
-        if errors.cancellation_observed() {
-            break;
-        }
-        let component_diagnostic_checkpoint = errors.checkpoint();
-        let cyclic = group.cyclic;
-        let recursion_active = !group.recursive_function_indices.is_empty();
-        let cycle_precedence_names = if cyclic {
-            top_level_references
-                .cycle_precedence_targets(&group.indices)
-                .into_iter()
-                .map(|target| top_level_references.definition(target).name.clone())
-                .collect::<Vec<_>>()
-        } else {
-            Vec::new()
-        };
-        let mut component_scope = cyclic.then(|| {
-            ComponentLevelScope::enter(
-                &group.indices,
-                &items,
-                &cycle_precedence_names,
-                &mut env,
-                &vg,
-                &mut subst,
-            )
-        });
-        let provisional_types = if cyclic {
-            prebind_cyclic_component_schemes(
-                &group.indices,
+    let opacity = crate::opacity::OpacityContextData::from_meta(opacity_meta);
+    errors.with_opacity_context(opacity, |errors| {
+        // Second pass: infer def bodies. Same module-descent rationale as the
+        // declaration pass — without it, the entire HM checker is a no-op on
+        // module-wrapped programs.
+        let user_def_names = collect_user_def_names(&top_level_decl_items(exprs));
+        let declared_signatures =
+            collect_declared_sig_metadata(items.iter().map(|(_, expr)| *expr), &mut errors.stack());
+        validate_binder_literal_adoption_in_program(&items, &declared_signatures, errors);
+        let external_input_types =
+            collect_literal_external_input_types(&items, &mut errors.stack());
+        let (metadata_prebound_names, function_metadata_failures) =
+            prebind_defsig_less_function_body_types(
                 &items,
                 &declared_signatures,
-                &metadata_prebound_names,
+                &declaration_diagnostic_owners,
                 &mut env,
                 &mut vg,
-            )
-        } else {
-            UnordMap::new()
-        };
-        // spec/04 §3.1.1: recursive-instantiation validation remains the
-        // function-plan projection. A mixed reference cycle alone must not
-        // activate it.
-        if recursion_active {
-            errors.recursive_state_mut().begin_group(
-                group
-                    .recursive_function_indices
-                    .iter()
-                    .filter_map(|&index| {
-                        top_level_decl_name(items[index].1).map(|name| {
-                            let authored = declared_signatures
-                                .get(name)
-                                .is_some_and(|metadata| !metadata.binders.is_empty());
-                            (name, authored)
-                        })
-                    }),
-                &env,
+                &mut subst,
+                &adt_reg,
+                errors,
             );
-        }
-        let mut deferred_bindings = Vec::new();
-        for &declaration_index in &group.indices {
+        let top_level_references = TopLevelReferenceGraph::build(&items, &mut errors.stack());
+        product.function_inference_plan = FunctionInferencePlan::build_from_reference_graph(
+            &top_level_references,
+            errors.native(),
+        );
+        let inference_groups = primary_inference_groups_with_reference_graph(
+            &product.function_inference_plan,
+            &items,
+            &top_level_references,
+            &mut errors.stack(),
+        );
+        // Match the persisted-state driver: poll the invocation's token at
+        // declaration granularity. In particular, an incomplete cyclic component
+        // must consume its structured scope through `abort` before this schedule
+        // returns; finishing or generalizing a partially inferred group would
+        // leak its pins, temporary bindings, and child level.
+        'schedule: for group in inference_groups {
+            if errors.cancellation_observed() {
+                break;
+            }
+            let component_diagnostic_checkpoint = errors.checkpoint();
+            let cyclic = group.cyclic;
+            let recursion_active = !group.recursive_function_indices.is_empty();
+            let cycle_precedence_names = if cyclic {
+                top_level_references
+                    .cycle_precedence_targets(&group.indices)
+                    .into_iter()
+                    .map(|target| top_level_references.definition(target).name.clone())
+                    .collect::<Vec<_>>()
+            } else {
+                Vec::new()
+            };
+            let mut component_scope = cyclic.then(|| {
+                ComponentLevelScope::enter(
+                    &group.indices,
+                    &items,
+                    &cycle_precedence_names,
+                    &mut env,
+                    &vg,
+                    &mut subst,
+                )
+            });
+            let provisional_types = if cyclic {
+                prebind_cyclic_component_schemes(
+                    &group.indices,
+                    &items,
+                    &declared_signatures,
+                    &metadata_prebound_names,
+                    &mut env,
+                    &mut vg,
+                )
+            } else {
+                UnordMap::new()
+            };
+            // spec/04 §3.1.1: recursive-instantiation validation remains the
+            // function-plan projection. A mixed reference cycle alone must not
+            // activate it.
+            if recursion_active {
+                errors.recursive_state_mut().begin_group(
+                    group
+                        .recursive_function_indices
+                        .iter()
+                        .filter_map(|&index| {
+                            top_level_decl_name(items[index].1).map(|name| {
+                                let authored = declared_signatures
+                                    .get(name)
+                                    .is_some_and(|metadata| !metadata.binders.is_empty());
+                                (name, authored)
+                            })
+                        }),
+                    &env,
+                );
+            }
+            let mut deferred_bindings = Vec::new();
+            for &declaration_index in &group.indices {
+                if errors.cancellation_observed() {
+                    if let Some(scope) = component_scope.take() {
+                        scope.abort(&mut env, &vg, &mut subst, errors.recursive_state_mut());
+                    }
+                    break 'schedule;
+                }
+                let (module, expr) = &items[declaration_index];
+                product.begin_root(expr, &mut errors.stack());
+                let decl_name = top_level_decl_name(expr);
+                errors.set_opacity_current_item(
+                    crate::opacity::module_key_for_item(module.as_deref(), decl_name),
+                    decl_name.map(str::to_string),
+                );
+                let declaration_diagnostic_owner = declaration_diagnostic_owners
+                    .get(declaration_index)
+                    .and_then(Option::as_ref);
+                env.set_current_declaration_ordinal(Some(declaration_index));
+                let external_input_failure = prebind_literal_external_input_for_declaration(
+                    declaration_index,
+                    expr,
+                    &external_input_types,
+                    &declared_signatures,
+                    declaration_diagnostic_owner,
+                    &mut env,
+                    &mut vg,
+                    &mut subst,
+                    &adt_reg,
+                    errors,
+                );
+                let prebound_type_failure = external_input_failure
+                    .as_ref()
+                    .or_else(|| function_metadata_failures.get(&declaration_index));
+                if let Some(binding) = infer_top_level(
+                    expr,
+                    &mut env,
+                    &mut vg,
+                    &mut subst,
+                    &adt_reg,
+                    errors,
+                    &mut product,
+                    prebound_type_failure,
+                    provisional_types
+                        .get(&declaration_index)
+                        .map(recursion::RecursiveExpected::Provisional),
+                    cyclic,
+                    &user_def_names,
+                    &declared_signatures,
+                    declaration_diagnostic_owner,
+                ) {
+                    deferred_bindings.push(binding);
+                }
+                product
+                    .finish_deferred_shape_checks(decl_name, &mut vg, &mut subst, &adt_reg, errors);
+                product.finish_root(&mut subst, errors);
+                // Issue #256 round 2: re-check each deferred borrow against the
+                // now-complete substitution (see `validate_deferred_borrow_vars`).
+                validate_deferred_borrow_vars(
+                    &mut subst,
+                    &adt_reg,
+                    env.active_declared_type_names(),
+                    errors,
+                );
+                // chelis#1489: decide this def's deferred operands against the
+                // final substitution (see `validate_deferred_tensor_operands`).
+                // One pass, per def — an earlier revision had a second,
+                // whole-program phase that three library lanes never reached.
+                validate_deferred_tensor_operands(
+                    &mut subst,
+                    env.active_declared_type_names(),
+                    errors,
+                );
+                // D-CHECK: drain the per-def deferred-access ledger (see
+                // `validate_deferred_opaque_uses`).
+                validate_deferred_opaque_uses(&mut subst, &adt_reg, errors);
+                #[cfg(test)]
+                if cyclic {
+                    primary_recursive_member_finished_for_test();
+                }
+            }
             if errors.cancellation_observed() {
                 if let Some(scope) = component_scope.take() {
                     scope.abort(&mut env, &vg, &mut subst, errors.recursive_state_mut());
                 }
                 break 'schedule;
             }
-            let (module, expr) = &items[declaration_index];
-            product.begin_root(expr, &mut errors.stack());
-            let decl_name = top_level_decl_name(expr);
-            errors.set_opacity_current_item(
-                crate::opacity::module_key_for_item(module.as_deref(), decl_name),
-                decl_name.map(str::to_string),
-            );
-            let declaration_diagnostic_owner = declaration_diagnostic_owners
-                .get(declaration_index)
-                .and_then(Option::as_ref);
-            env.set_current_declaration_ordinal(Some(declaration_index));
-            let external_input_failure = prebind_literal_external_input_for_declaration(
-                declaration_index,
-                expr,
-                &external_input_types,
-                &declared_signatures,
-                declaration_diagnostic_owner,
-                &mut env,
-                &mut vg,
-                &mut subst,
-                &adt_reg,
-                errors,
-            );
-            let prebound_type_failure = external_input_failure
-                .as_ref()
-                .or_else(|| function_metadata_failures.get(&declaration_index));
-            if let Some(binding) = infer_top_level(
-                expr,
-                &mut env,
-                &mut vg,
-                &mut subst,
-                &adt_reg,
-                errors,
-                &mut product,
-                prebound_type_failure,
-                provisional_types
-                    .get(&declaration_index)
-                    .map(recursion::RecursiveExpected::Provisional),
-                cyclic,
-                &user_def_names,
-                &declared_signatures,
-                declaration_diagnostic_owner,
-            ) {
-                deferred_bindings.push(binding);
-            }
-            product.finish_deferred_shape_checks(decl_name, &mut vg, &mut subst, &adt_reg, errors);
-            product.finish_root(&mut subst, errors);
-            // Issue #256 round 2: re-check each deferred borrow against the
-            // now-complete substitution (see `validate_deferred_borrow_vars`).
-            validate_deferred_borrow_vars(
-                &mut subst,
-                &adt_reg,
-                env.active_declared_type_names(),
-                errors,
-            );
-            // chelis#1489: decide this def's deferred operands against the
-            // final substitution (see `validate_deferred_tensor_operands`).
-            // One pass, per def — an earlier revision had a second,
-            // whole-program phase that three library lanes never reached.
-            validate_deferred_tensor_operands(&mut subst, env.active_declared_type_names(), errors);
-            // D-CHECK: drain the per-def deferred-access ledger (see
-            // `validate_deferred_opaque_uses`).
-            validate_deferred_opaque_uses(&mut subst, &adt_reg, errors);
-            #[cfg(test)]
             if cyclic {
-                primary_recursive_member_finished_for_test();
-            }
-        }
-        if errors.cancellation_observed() {
-            if let Some(scope) = component_scope.take() {
-                scope.abort(&mut env, &vg, &mut subst, errors.recursive_state_mut());
-            }
-            break 'schedule;
-        }
-        if cyclic {
-            // Function-recursion validation, when independently active, must
-            // clear its pins before component-wide generalization.
-            if recursion_active {
-                errors.finish_recursive_group(&mut subst);
-            }
-            component_scope
-                .take()
-                .expect("cyclic component owns an inference-level scope")
-                .complete(&mut env, &vg, &mut subst);
-            let schemes = deferred_bindings
-                .into_iter()
-                .map(|(name, ty, owned_contracts)| {
-                    let scheme = env.generalize_with_collection_contracts(
-                        &ty,
+                // Function-recursion validation, when independently active, must
+                // clear its pins before component-wide generalization.
+                if recursion_active {
+                    errors.finish_recursive_group(&mut subst);
+                }
+                component_scope
+                    .take()
+                    .expect("cyclic component owns an inference-level scope")
+                    .complete(&mut env, &vg, &mut subst);
+                let schemes = deferred_bindings
+                    .into_iter()
+                    .map(|(name, ty, owned_contracts)| {
+                        let scheme = env.generalize_with_collection_contracts(
+                            &ty,
+                            &mut subst,
+                            &owned_contracts,
+                            errors.recursive_state().pinned_vars(),
+                        );
+                        (name, scheme)
+                    })
+                    .collect::<Vec<_>>();
+                for (name, scheme) in schemes {
+                    env.bind(name, scheme);
+                }
+                if recursion_active
+                    && errors
+                        .iter_since(component_diagnostic_checkpoint)
+                        .next()
+                        .is_none()
+                {
+                    sweep_recursive_collection_contracts(
+                        &group.recursive_function_indices,
+                        &items,
+                        &cycle_precedence_names,
+                        &mut env,
+                        &mut vg,
                         &mut subst,
-                        &owned_contracts,
-                        errors.recursive_state().pinned_vars(),
+                        &adt_reg,
+                        errors,
+                        &user_def_names,
+                        &declared_signatures,
+                        &declaration_diagnostic_owners,
                     );
-                    (name, scheme)
-                })
-                .collect::<Vec<_>>();
-            for (name, scheme) in schemes {
-                env.bind(name, scheme);
-            }
-            if recursion_active
-                && errors
-                    .iter_since(component_diagnostic_checkpoint)
-                    .next()
-                    .is_none()
-            {
-                sweep_recursive_collection_contracts(
-                    &group.recursive_function_indices,
-                    &items,
-                    &cycle_precedence_names,
-                    &mut env,
-                    &mut vg,
-                    &mut subst,
-                    &adt_reg,
-                    errors,
-                    &user_def_names,
-                    &declared_signatures,
-                    &declaration_diagnostic_owners,
-                );
+                }
             }
         }
-    }
-    errors.set_opacity_current_item(None, None);
-    env.set_current_declaration_ordinal(None);
+        errors.set_opacity_current_item(None, None);
+        env.set_current_declaration_ordinal(None);
 
-    if cancellation_gate(errors) {
-        return product;
-    }
-    product.resolve_owner_types(&mut subst);
+        if cancellation_gate(errors) {
+            return product;
+        }
+        product.resolve_owner_types(&mut subst);
 
-    // PP9 / [04-TOT-5]: every public entry reaches one ordered semantic pass
-    // protocol after inference. Build the same declaration-type view the IR
-    // entries supply; stamped input stays stamped and every reader below must
-    // handle that carrier directly.
-    let semantic_type_env = build_ir_type_env(exprs, &mut errors.stack());
-    validate_semantic_program(exprs, &semantic_type_env, &top_level_references, errors);
-    if cancellation_gate(errors) {
+        // PP9 / [04-TOT-5]: every public entry reaches one ordered semantic pass
+        // protocol after inference. Build the same declaration-type view the IR
+        // entries supply; stamped input stays stamped and every reader below must
+        // handle that carrier directly.
+        let semantic_type_env = build_ir_type_env(exprs, &mut errors.stack());
+        validate_semantic_program(exprs, &semantic_type_env, &top_level_references, errors);
+        if cancellation_gate(errors) {
+            errors.drain_stack_bail();
+            product.top_level_references = top_level_references;
+            return product;
+        }
+
+        // Final shared checks: reject tensor types whose element precision isn't supported
+        // by the Phase 0f backend (f16/bf16/f8e4m3). These would silently get
+        // downcast to f32 by the current build targets, violating the "no implicit
+        // precision promotion" rule. f64 is supported as of v0.2.3.
+        validate_tensor_precisions_in_program(exprs, errors);
+        crate::invariants::validate_type_invariants_in_program_with_sink(exprs, errors);
+
+        // If any walker bailed on a nearly-exhausted stack during this run,
+        // surface it as a hard located failure (covered-or-rejected).
         errors.drain_stack_bail();
+
         product.top_level_references = top_level_references;
-        return product;
-    }
-
-    // Final shared checks: reject tensor types whose element precision isn't supported
-    // by the Phase 0f backend (f16/bf16/f8e4m3). These would silently get
-    // downcast to f32 by the current build targets, violating the "no implicit
-    // precision promotion" rule. f64 is supported as of v0.2.3.
-    validate_tensor_precisions_in_program(exprs, errors);
-    crate::invariants::validate_type_invariants_in_program_with_sink(exprs, errors);
-
-    // If any walker bailed on a nearly-exhausted stack during this run,
-    // surface it as a hard located failure (covered-or-rejected).
-    errors.drain_stack_bail();
-
-    product.top_level_references = top_level_references;
-    product
+        product
+    })
 }
 
 pub fn check_ir_program(
@@ -1625,8 +1633,17 @@ pub(super) fn infer_ir_program_with_state(
     origin: ProgramOrigin,
     errors: &mut DiagnosticSink<'_>,
 ) -> InferenceProduct {
-    let mut recursive_scope = errors.enter_recursive_inference();
-    let errors = recursive_scope.sink();
+    errors.with_recursive_inference(|errors| {
+        infer_ir_program_with_state_in_fresh_frame(exprs, state, origin, errors)
+    })
+}
+
+fn infer_ir_program_with_state_in_fresh_frame(
+    exprs: &[deep::Expr],
+    state: &mut TypeEnvInner,
+    origin: ProgramOrigin,
+    errors: &mut DiagnosticSink<'_>,
+) -> InferenceProduct {
     let mut product = InferenceProduct::default();
 
     // RFC v4b (RT-1 F2): reject a named module opened by more than one
@@ -1661,107 +1678,199 @@ pub(super) fn infer_ir_program_with_state(
     // and install the per-run context for the inference hooks.
     let phase_meta = build_opacity_meta(&items, &state.adt_reg, &state.env);
     state.opacity.merge_from(&phase_meta);
-    let mut opacity_scope = errors.install_opacity_context(
-        crate::opacity::OpacityContextData::from_meta(state.opacity.clone()),
-    );
-    let errors = opacity_scope.sink();
-
-    // Per-decl profile: when the shell enables profiling on the native
-    // services, emit one stderr line per top-level decl with its name and
-    // inference time.
-    // Aggregated by name in caller scripts to attribute cost per module.
-    let user_def_names = collect_user_def_names(&top_level_decl_items(exprs));
-    let declared_signatures =
-        collect_declared_sig_metadata(items.iter().map(|(_, expr)| *expr), &mut errors.stack());
-    validate_binder_literal_adoption_in_program(&items, &declared_signatures, errors);
-    // PP9 uses the same two bounded prebind capabilities at both entries:
-    // [04-INF-4] external-input ascriptions are declaration-local, while a
-    // defsig-less function body stamp supplies the callable header that
-    // [04-INF-2]/[04-INF-3] make forward-visible. Eager values are never
-    // prebound from body metadata, preserving #1134's source-order rule.
-    let external_input_types = collect_literal_external_input_types(&items, &mut errors.stack());
-    let (metadata_prebound_names, function_metadata_failures) =
-        prebind_defsig_less_function_body_types(
-            &items,
-            &declared_signatures,
-            &declaration_diagnostic_owners,
-            &mut state.env,
-            &mut state.var_gen,
-            &mut state.subst,
-            &state.adt_reg,
-            errors,
-        );
-    let top_level_references = TopLevelReferenceGraph::build(&items, &mut errors.stack());
-    product.function_inference_plan =
-        FunctionInferencePlan::build_from_reference_graph(&top_level_references, errors.native());
-    let inference_groups = primary_inference_groups_with_reference_graph(
-        &product.function_inference_plan,
-        &items,
-        &top_level_references,
-        &mut errors.stack(),
-    );
-    // chelis#930: cooperative cancellation at top-level-declaration
-    // granularity. Body inference is one of the two front-end passes whose
-    // cost scales with declaration count, so an abandoned compile has to be
-    // able to stop inside it rather than only at the end of the phase. The
-    // invocation's token is polled per declaration as one relaxed load, leaving the type checker's own recursive walk — which runs
-    // many orders of magnitude more often — untouched.
-    'schedule: for group in inference_groups {
-        let component_diagnostic_checkpoint = errors.checkpoint();
-        let cyclic = group.cyclic;
-        let recursion_active = !group.recursive_function_indices.is_empty();
-        let cycle_precedence_names = if cyclic {
-            top_level_references
-                .cycle_precedence_targets(&group.indices)
-                .into_iter()
-                .map(|target| top_level_references.definition(target).name.clone())
-                .collect::<Vec<_>>()
-        } else {
-            Vec::new()
-        };
-        let mut component_scope = cyclic.then(|| {
-            ComponentLevelScope::enter(
-                &group.indices,
-                &items,
-                &cycle_precedence_names,
-                &mut state.env,
-                &state.var_gen,
-                &mut state.subst,
-            )
-        });
-        let provisional_types = if cyclic {
-            prebind_cyclic_component_schemes(
-                &group.indices,
+    let opacity = crate::opacity::OpacityContextData::from_meta(state.opacity.clone());
+    errors.with_opacity_context(opacity, |errors| {
+        // Per-decl profile: when the shell enables profiling on the native
+        // services, emit one stderr line per top-level decl with its name and
+        // inference time.
+        // Aggregated by name in caller scripts to attribute cost per module.
+        let user_def_names = collect_user_def_names(&top_level_decl_items(exprs));
+        let declared_signatures =
+            collect_declared_sig_metadata(items.iter().map(|(_, expr)| *expr), &mut errors.stack());
+        validate_binder_literal_adoption_in_program(&items, &declared_signatures, errors);
+        // PP9 uses the same two bounded prebind capabilities at both entries:
+        // [04-INF-4] external-input ascriptions are declaration-local, while a
+        // defsig-less function body stamp supplies the callable header that
+        // [04-INF-2]/[04-INF-3] make forward-visible. Eager values are never
+        // prebound from body metadata, preserving #1134's source-order rule.
+        let external_input_types =
+            collect_literal_external_input_types(&items, &mut errors.stack());
+        let (metadata_prebound_names, function_metadata_failures) =
+            prebind_defsig_less_function_body_types(
                 &items,
                 &declared_signatures,
-                &metadata_prebound_names,
+                &declaration_diagnostic_owners,
                 &mut state.env,
                 &mut state.var_gen,
-            )
-        } else {
-            UnordMap::new()
-        };
-        // spec/04 §3.1.1: recursive-instantiation validation remains the
-        // function-plan projection. A mixed reference cycle alone must not
-        // activate it.
-        if recursion_active {
-            errors.recursive_state_mut().begin_group(
-                group
-                    .recursive_function_indices
-                    .iter()
-                    .filter_map(|&index| {
-                        top_level_decl_name(items[index].1).map(|name| {
-                            let authored = declared_signatures
-                                .get(name)
-                                .is_some_and(|metadata| !metadata.binders.is_empty());
-                            (name, authored)
-                        })
-                    }),
-                &state.env,
+                &mut state.subst,
+                &state.adt_reg,
+                errors,
             );
-        }
-        let mut deferred_bindings = Vec::new();
-        for &declaration_index in &group.indices {
+        let top_level_references = TopLevelReferenceGraph::build(&items, &mut errors.stack());
+        product.function_inference_plan = FunctionInferencePlan::build_from_reference_graph(
+            &top_level_references,
+            errors.native(),
+        );
+        let inference_groups = primary_inference_groups_with_reference_graph(
+            &product.function_inference_plan,
+            &items,
+            &top_level_references,
+            &mut errors.stack(),
+        );
+        // chelis#930: cooperative cancellation at top-level-declaration
+        // granularity. Body inference is one of the two front-end passes whose
+        // cost scales with declaration count, so an abandoned compile has to be
+        // able to stop inside it rather than only at the end of the phase. The
+        // invocation's token is polled per declaration as one relaxed load, leaving the type checker's own recursive walk — which runs
+        // many orders of magnitude more often — untouched.
+        'schedule: for group in inference_groups {
+            let component_diagnostic_checkpoint = errors.checkpoint();
+            let cyclic = group.cyclic;
+            let recursion_active = !group.recursive_function_indices.is_empty();
+            let cycle_precedence_names = if cyclic {
+                top_level_references
+                    .cycle_precedence_targets(&group.indices)
+                    .into_iter()
+                    .map(|target| top_level_references.definition(target).name.clone())
+                    .collect::<Vec<_>>()
+            } else {
+                Vec::new()
+            };
+            let mut component_scope = cyclic.then(|| {
+                ComponentLevelScope::enter(
+                    &group.indices,
+                    &items,
+                    &cycle_precedence_names,
+                    &mut state.env,
+                    &state.var_gen,
+                    &mut state.subst,
+                )
+            });
+            let provisional_types = if cyclic {
+                prebind_cyclic_component_schemes(
+                    &group.indices,
+                    &items,
+                    &declared_signatures,
+                    &metadata_prebound_names,
+                    &mut state.env,
+                    &mut state.var_gen,
+                )
+            } else {
+                UnordMap::new()
+            };
+            // spec/04 §3.1.1: recursive-instantiation validation remains the
+            // function-plan projection. A mixed reference cycle alone must not
+            // activate it.
+            if recursion_active {
+                errors.recursive_state_mut().begin_group(
+                    group
+                        .recursive_function_indices
+                        .iter()
+                        .filter_map(|&index| {
+                            top_level_decl_name(items[index].1).map(|name| {
+                                let authored = declared_signatures
+                                    .get(name)
+                                    .is_some_and(|metadata| !metadata.binders.is_empty());
+                                (name, authored)
+                            })
+                        }),
+                    &state.env,
+                );
+            }
+            let mut deferred_bindings = Vec::new();
+            for &declaration_index in &group.indices {
+                if errors.cancellation_observed() {
+                    if let Some(scope) = component_scope.take() {
+                        scope.abort(
+                            &mut state.env,
+                            &state.var_gen,
+                            &mut state.subst,
+                            errors.recursive_state_mut(),
+                        );
+                    }
+                    break 'schedule;
+                }
+                let (module, expr) = &items[declaration_index];
+                product.begin_root(expr, &mut errors.stack());
+                let decl_clock = errors.native().profile_start();
+                let decl_name = top_level_decl_name(expr);
+                errors.set_opacity_current_item(
+                    crate::opacity::module_key_for_item(module.as_deref(), decl_name),
+                    decl_name.map(str::to_string),
+                );
+                let declaration_diagnostic_owner = declaration_diagnostic_owners
+                    .get(declaration_index)
+                    .and_then(Option::as_ref);
+                state
+                    .env
+                    .set_current_declaration_ordinal(Some(declaration_index));
+                let external_input_failure = prebind_literal_external_input_for_declaration(
+                    declaration_index,
+                    expr,
+                    &external_input_types,
+                    &declared_signatures,
+                    declaration_diagnostic_owner,
+                    &mut state.env,
+                    &mut state.var_gen,
+                    &mut state.subst,
+                    &state.adt_reg,
+                    errors,
+                );
+                let prebound_type_failure = external_input_failure
+                    .as_ref()
+                    .or_else(|| function_metadata_failures.get(&declaration_index));
+                if let Some(binding) = infer_top_level(
+                    expr,
+                    &mut state.env,
+                    &mut state.var_gen,
+                    &mut state.subst,
+                    &state.adt_reg,
+                    errors,
+                    &mut product,
+                    prebound_type_failure,
+                    provisional_types
+                        .get(&declaration_index)
+                        .map(recursion::RecursiveExpected::Provisional),
+                    cyclic,
+                    &user_def_names,
+                    &declared_signatures,
+                    declaration_diagnostic_owner,
+                ) {
+                    deferred_bindings.push(binding);
+                }
+                product.finish_deferred_shape_checks(
+                    top_level_decl_name(expr),
+                    &mut state.var_gen,
+                    &mut state.subst,
+                    &state.adt_reg,
+                    errors,
+                );
+                product.finish_root(&mut state.subst, errors);
+                errors.native().profile_phase(
+                    decl_clock,
+                    "infer_ir_decl",
+                    top_level_decl_name(expr).unwrap_or("<anon>"),
+                );
+                // Issue #256 round 2: drain the deferred-borrow ledger for this
+                // def and re-check each recorded variable against the now-complete
+                // substitution. Draining per-def keeps error attribution local and
+                // prevents one def's deferrals from leaking into the next.
+                validate_deferred_borrow_vars(
+                    &mut state.subst,
+                    &state.adt_reg,
+                    state.env.active_declared_type_names(),
+                    errors,
+                );
+                // chelis#1489: see `validate_deferred_tensor_operands`.
+                validate_deferred_tensor_operands(
+                    &mut state.subst,
+                    state.env.active_declared_type_names(),
+                    errors,
+                );
+                // D-CHECK: drain the per-def deferred-access ledger (see
+                // `validate_deferred_opaque_uses`).
+                validate_deferred_opaque_uses(&mut state.subst, &state.adt_reg, errors);
+            }
             if errors.cancellation_observed() {
                 if let Some(scope) = component_scope.take() {
                     scope.abort(
@@ -1773,158 +1882,67 @@ pub(super) fn infer_ir_program_with_state(
                 }
                 break 'schedule;
             }
-            let (module, expr) = &items[declaration_index];
-            product.begin_root(expr, &mut errors.stack());
-            let decl_clock = errors.native().profile_start();
-            let decl_name = top_level_decl_name(expr);
-            errors.set_opacity_current_item(
-                crate::opacity::module_key_for_item(module.as_deref(), decl_name),
-                decl_name.map(str::to_string),
-            );
-            let declaration_diagnostic_owner = declaration_diagnostic_owners
-                .get(declaration_index)
-                .and_then(Option::as_ref);
-            state
-                .env
-                .set_current_declaration_ordinal(Some(declaration_index));
-            let external_input_failure = prebind_literal_external_input_for_declaration(
-                declaration_index,
-                expr,
-                &external_input_types,
-                &declared_signatures,
-                declaration_diagnostic_owner,
-                &mut state.env,
-                &mut state.var_gen,
-                &mut state.subst,
-                &state.adt_reg,
-                errors,
-            );
-            let prebound_type_failure = external_input_failure
-                .as_ref()
-                .or_else(|| function_metadata_failures.get(&declaration_index));
-            if let Some(binding) = infer_top_level(
-                expr,
-                &mut state.env,
-                &mut state.var_gen,
-                &mut state.subst,
-                &state.adt_reg,
-                errors,
-                &mut product,
-                prebound_type_failure,
-                provisional_types
-                    .get(&declaration_index)
-                    .map(recursion::RecursiveExpected::Provisional),
-                cyclic,
-                &user_def_names,
-                &declared_signatures,
-                declaration_diagnostic_owner,
-            ) {
-                deferred_bindings.push(binding);
-            }
-            product.finish_deferred_shape_checks(
-                top_level_decl_name(expr),
-                &mut state.var_gen,
-                &mut state.subst,
-                &state.adt_reg,
-                errors,
-            );
-            product.finish_root(&mut state.subst, errors);
-            errors.native().profile_phase(
-                decl_clock,
-                "infer_ir_decl",
-                top_level_decl_name(expr).unwrap_or("<anon>"),
-            );
-            // Issue #256 round 2: drain the deferred-borrow ledger for this
-            // def and re-check each recorded variable against the now-complete
-            // substitution. Draining per-def keeps error attribution local and
-            // prevents one def's deferrals from leaking into the next.
-            validate_deferred_borrow_vars(
-                &mut state.subst,
-                &state.adt_reg,
-                state.env.active_declared_type_names(),
-                errors,
-            );
-            // chelis#1489: see `validate_deferred_tensor_operands`.
-            validate_deferred_tensor_operands(
-                &mut state.subst,
-                state.env.active_declared_type_names(),
-                errors,
-            );
-            // D-CHECK: drain the per-def deferred-access ledger (see
-            // `validate_deferred_opaque_uses`).
-            validate_deferred_opaque_uses(&mut state.subst, &state.adt_reg, errors);
-        }
-        if errors.cancellation_observed() {
-            if let Some(scope) = component_scope.take() {
-                scope.abort(
-                    &mut state.env,
-                    &state.var_gen,
-                    &mut state.subst,
-                    errors.recursive_state_mut(),
-                );
-            }
-            break 'schedule;
-        }
-        if cyclic {
-            // Function-recursion validation, when independently active, must
-            // clear its pins before component-wide generalization.
-            if recursion_active {
-                errors.finish_recursive_group(&mut state.subst);
-            }
-            component_scope
-                .take()
-                .expect("cyclic component owns an inference-level scope")
-                .complete(&mut state.env, &state.var_gen, &mut state.subst);
-            let schemes = deferred_bindings
-                .into_iter()
-                .map(|(name, ty, owned_contracts)| {
-                    let scheme = state.env.generalize_with_collection_contracts(
-                        &ty,
+            if cyclic {
+                // Function-recursion validation, when independently active, must
+                // clear its pins before component-wide generalization.
+                if recursion_active {
+                    errors.finish_recursive_group(&mut state.subst);
+                }
+                component_scope
+                    .take()
+                    .expect("cyclic component owns an inference-level scope")
+                    .complete(&mut state.env, &state.var_gen, &mut state.subst);
+                let schemes = deferred_bindings
+                    .into_iter()
+                    .map(|(name, ty, owned_contracts)| {
+                        let scheme = state.env.generalize_with_collection_contracts(
+                            &ty,
+                            &mut state.subst,
+                            &owned_contracts,
+                            errors.recursive_state().pinned_vars(),
+                        );
+                        (name, scheme)
+                    })
+                    .collect::<Vec<_>>();
+                for (name, scheme) in schemes {
+                    state.env.bind(name, scheme);
+                }
+                if recursion_active
+                    && errors
+                        .iter_since(component_diagnostic_checkpoint)
+                        .next()
+                        .is_none()
+                {
+                    sweep_recursive_collection_contracts(
+                        &group.recursive_function_indices,
+                        &items,
+                        &cycle_precedence_names,
+                        &mut state.env,
+                        &mut state.var_gen,
                         &mut state.subst,
-                        &owned_contracts,
-                        errors.recursive_state().pinned_vars(),
+                        &state.adt_reg,
+                        errors,
+                        &user_def_names,
+                        &declared_signatures,
+                        &declaration_diagnostic_owners,
                     );
-                    (name, scheme)
-                })
-                .collect::<Vec<_>>();
-            for (name, scheme) in schemes {
-                state.env.bind(name, scheme);
-            }
-            if recursion_active
-                && errors
-                    .iter_since(component_diagnostic_checkpoint)
-                    .next()
-                    .is_none()
-            {
-                sweep_recursive_collection_contracts(
-                    &group.recursive_function_indices,
-                    &items,
-                    &cycle_precedence_names,
-                    &mut state.env,
-                    &mut state.var_gen,
-                    &mut state.subst,
-                    &state.adt_reg,
-                    errors,
-                    &user_def_names,
-                    &declared_signatures,
-                    &declaration_diagnostic_owners,
-                );
+                }
             }
         }
-    }
-    errors.set_opacity_current_item(None, None);
-    state.env.set_current_declaration_ordinal(None);
+        errors.set_opacity_current_item(None, None);
+        state.env.set_current_declaration_ordinal(None);
 
-    if errors.cancellation_observed() {
-        // Abandoned mid-schedule. The remaining declarations were never
-        // inferred, so the walks below would attribute their absence to the
-        // program and spend the phase's remaining budget doing it. The caller's
-        // `cancellation_gate` turns this early return into a hard failure.
-        return product;
-    }
+        if errors.cancellation_observed() {
+            // Abandoned mid-schedule. The remaining declarations were never
+            // inferred, so the walks below would attribute their absence to the
+            // program and spend the phase's remaining budget doing it. The caller's
+            // `cancellation_gate` turns this early return into a hard failure.
+            return product;
+        }
 
-    product.top_level_references = top_level_references;
-    product
+        product.top_level_references = top_level_references;
+        product
+    })
 }
 
 /// The hoist order: the total order the body-inference schedule used before
