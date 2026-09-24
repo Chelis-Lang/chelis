@@ -1143,11 +1143,6 @@ disposition = "packages"
 packages = ["chelis-e2e"]
 
 [[path_rule]]
-prefix = "examples/macro_typed_binding.ch"
-disposition = "packages"
-packages = ["chelis-cli", "chelis-e2e"]
-
-[[path_rule]]
 prefix = "examples/recursive_cast_targets.ch"
 disposition = "packages"
 packages = ["chelis-e2e"]

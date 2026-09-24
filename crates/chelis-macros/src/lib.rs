@@ -1084,11 +1084,14 @@ fn hygienize_params_expr(
                 let Expr::Atom(Atom::Name(_), name_span) = meta.expr.as_ref() else {
                     unreachable!("admitted prefix metadata parameter has a name")
                 };
-                children.push(Expr::MetaExpr(
-                    MetaExpr {
-                        metadata: meta.metadata.clone(),
-                        expr: Box::new(Expr::Atom(Atom::Name(fresh), *name_span)),
-                    },
+                // A vocabulary name needs prefix metadata to avoid being read
+                // as a Deep tag. The fresh name is ordinary, so use the
+                // canonical typed-name carrier that Surf desugaring emits.
+                children.push(Expr::BareList(
+                    vec![
+                        Expr::Atom(Atom::Name(fresh), *name_span),
+                        Expr::Map(meta.metadata.clone(), *span),
+                    ],
                     *span,
                 ));
             }
@@ -1639,17 +1642,14 @@ mod tests {
                     },
                     zero_span(),
                 );
-                let renamed = Expr::MetaExpr(
-                    chelis_deep::MetaExpr {
-                        metadata: Metadata::default(),
-                        expr: Box::new(Expr::Atom(
-                            Atom::Name("metadata_parameter_macro_0".to_string()),
-                            zero_span(),
-                        )),
-                    },
-                    zero_span(),
-                );
-                (parameter, node(DeepTag::Params, vec![renamed]), 1)
+                (
+                    parameter,
+                    node(
+                        DeepTag::Params,
+                        vec![typed_parameter("metadata_parameter_macro_0")],
+                    ),
+                    1,
+                )
             },
         ];
 
