@@ -21396,6 +21396,154 @@ mod tests {
         })
     }
 
+    /// A tagged Deep node `(tag {} children...)` for preflight identity tests.
+    fn preflight_test_node(tag: DeepTag, children: Vec<Expr>) -> Expr {
+        let span = chelis_deep::Span::new(0, 0);
+        let mut elements = vec![
+            Expr::Atom(Atom::Tag(tag), span),
+            Expr::Map(Metadata::default(), span),
+        ];
+        elements.extend(children);
+        Expr::List(List { elements }, span)
+    }
+
+    /// `(tuple (let (bind bc <local fn>) CALL) CALL)`: two equal `bc` calls,
+    /// the first shadowed by a local callable, the second the top-level `bc`
+    /// whose summary reaches a dynamic `to_tensor`. Returns the tuple and the
+    /// two calls' semantic paths.
+    fn preflight_shadowing_tuple() -> (Expr, [usize; 2], [usize; 1]) {
+        let call = parse_one_expr("(app {} (var {} bc) (lit {type: (t-prim {} f32)} 1.0))");
+        let local = parse_one_expr("(fn {} (params {} (c {type: (t-prim {} f32)})) (var {} c))");
+        let span = chelis_deep::Span::new(0, 0);
+        let bind = preflight_test_node(
+            DeepTag::Bind,
+            vec![Expr::Atom(Atom::Name("bc".to_string()), span), local],
+        );
+        let shadowing = preflight_test_node(DeepTag::Let, vec![bind, call.clone()]);
+        let tuple = preflight_test_node(DeepTag::Tuple, vec![shadowing, call]);
+        let kids = children(as_list(&tuple).expect("tuple list"));
+        let shadowed = &children(as_list(&kids[0]).expect("let list"))[1];
+        assert_eq!(
+            shadowed, &kids[1],
+            "the shadowed and unshadowed calls are content-equal"
+        );
+        (tuple, [0, 1], [1])
+    }
+
+    #[test]
+    fn preflight_identity_separates_content_equal_nodes_under_different_bindings() {
+        crate::lowering_runtime::with_native_lowering_runtime(|runtime| {
+            let dynamic = deep_check(include_str!(
+                "../tests/fixtures/core/src/host/issue_1205_callable_scope_restore_semantics.deep"
+            ));
+            let mut native = chelis_types::NativeServices::new(None);
+            let mut session = HostLoweringSession::new(&dynamic);
+            let (tuple, shadowed, unshadowed) = preflight_shadowing_tuple();
+            with_preflight(
+                &tuple,
+                &mut session.cx(runtime, &mut native),
+                |program, root| {
+                    let shadowed = preflight_descendant(Some(root), &shadowed, program);
+                    let unshadowed = preflight_descendant(Some(root), &unshadowed, program);
+                    assert_ne!(shadowed, unshadowed);
+                    assert!(
+                        !tensor_helper_preflight_rejects(shadowed, program),
+                        "the call under the local `bc` binding does not reach the top-level summary"
+                    );
+                    assert!(
+                        tensor_helper_preflight_rejects(unshadowed, program),
+                        "the equal call outside the binding does"
+                    );
+                },
+            );
+        })
+    }
+
+    #[test]
+    fn preflight_facts_do_not_cover_a_copy_of_the_frame_root() {
+        crate::lowering_runtime::with_native_lowering_runtime(|runtime| {
+            let dynamic = deep_check(include_str!(
+                "../tests/fixtures/core/src/host/issue_1205_callable_scope_restore_semantics.deep"
+            ));
+            let mut native = chelis_types::NativeServices::new(None);
+            let mut session = HostLoweringSession::new(&dynamic);
+            let (tuple, shadowed, _) = preflight_shadowing_tuple();
+            with_preflight(
+                &tuple,
+                &mut session.cx(runtime, &mut native),
+                |program, root| {
+                    let covered = preflight_descendant(Some(root), &shadowed, program);
+                    // A clone, and a rewritten body, are trees lowering builds:
+                    // they carry no identity, so their first lowering opens a
+                    // frame of its own even though the original is covered.
+                    let copy = tuple.clone();
+                    let mut rewritten = tuple.clone();
+                    let Expr::List(list, _) = &mut rewritten else {
+                        unreachable!("the tuple is a list");
+                    };
+                    list.elements.pop();
+                    for fresh in [&copy, &rewritten] {
+                        with_preflight_if_uncovered(fresh, None, program, |program, fresh_root| {
+                            assert_eq!(program.state.invocation.preflight.len(), 2);
+                            assert_ne!(fresh_root.frame, root.frame);
+                            assert_eq!(fresh_root.node, 0);
+                            assert!(!tensor_helper_preflight_rejects(covered, program));
+                        });
+                    }
+                    // The original's own identity is still covered by its frame.
+                    with_preflight_if_uncovered(&tuple, Some(root), program, |program, id| {
+                        assert_eq!(program.state.invocation.preflight.len(), 1);
+                        assert_eq!(id, root);
+                    });
+                },
+            );
+        })
+    }
+
+    #[test]
+    fn preflight_nested_and_sibling_frames_do_not_share_facts() {
+        crate::lowering_runtime::with_native_lowering_runtime(|runtime| {
+            let dynamic = deep_check(include_str!(
+                "../tests/fixtures/core/src/host/issue_1205_callable_scope_restore_semantics.deep"
+            ));
+            let mut native = chelis_types::NativeServices::new(None);
+            let mut session = HostLoweringSession::new(&dynamic);
+            let program = &mut session.cx(runtime, &mut native);
+            let (tuple, shadowed, unshadowed) = preflight_shadowing_tuple();
+            let call = parse_one_expr("(app {} (var {} bc) (lit {type: (t-prim {} f32)} 1.0))");
+            // Sibling frames over equal trees: the first frame's identities
+            // are not covered once it pops, even while an equal tree's frame
+            // is live at the same stack depth.
+            let first = with_preflight(&tuple, program, |program, root| {
+                preflight_descendant(Some(root), &unshadowed, program)
+            });
+            assert!(first.is_some());
+            reset_host_work_profile();
+            with_preflight(&tuple, program, |program, root| {
+                assert_ne!(first.map(|id| id.frame), Some(root.frame));
+                assert!(!tensor_helper_preflight_rejects(first, program));
+                let second = preflight_descendant(Some(root), &unshadowed, program);
+                assert!(tensor_helper_preflight_rejects(second, program));
+                // A nested frame over an equal call does not answer for the
+                // outer frame's nodes, and the outer frame does not answer
+                // for the nested root.
+                let shadowed = preflight_descendant(Some(root), &shadowed, program);
+                with_preflight(&call, program, |program, nested| {
+                    assert!(tensor_helper_preflight_rejects(Some(nested), program));
+                    assert!(!tensor_helper_preflight_rejects(shadowed, program));
+                    assert_eq!(
+                        preflight_child(Some(nested), 1, program).map(|id| id.frame),
+                        Some(nested.frame)
+                    );
+                });
+                assert!(!tensor_helper_preflight_rejects(shadowed, program));
+            });
+            let profile = take_host_work_profile();
+            assert_eq!(profile.tensor_helper_preflight_lookup_misses, 1);
+            assert_eq!(profile.tensor_helper_preflight_lookup_hits, 4);
+        })
+    }
+
     /// A nested probe's already-returned error retains the existing deferral.
     /// The public source still rejects in real lowering (API/CLI regression).
     #[test]
