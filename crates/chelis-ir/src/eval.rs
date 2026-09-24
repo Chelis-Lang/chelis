@@ -3760,10 +3760,14 @@ where
                     .to_string());
                 }
                 let count = resolve_eval_bound(count, node, &values, 0)?;
-                let storage =
-                    split_keys_storage(keys.storage(), count).map_err(|error| error.to_string())?;
                 let mut shape = keys.shape.clone();
                 shape.push(count);
+                // The key's extents and the count are the result's; every
+                // extent its type declares is a claim about them, checked
+                // before any key exists, as the C lane checks it.
+                check_declared_extents("split_keys", &node.output_type, &shape, &runtime_dims)?;
+                let storage =
+                    split_keys_storage(keys.storage(), count).map_err(|error| error.to_string())?;
                 TensorValue::from_storage(shape, storage)
             }
             RiscOp::MaxElem => binary_elementwise(
@@ -4350,6 +4354,43 @@ fn local_guard_verdict(
              numeric trap: domain in {} at i64",
             claim.claim, claim.op, claim.op,
         ));
+    }
+    Ok(())
+}
+
+/// The extents `shape` an operation computed against the extents its
+/// declared type claims: a literal, a bound name, or a name an earlier
+/// operation declared. A name nothing has bound yet is declared by this
+/// result (`op_declared_axes`), and an anonymous one claims nothing. The
+/// report is [`local_guard_verdict`]'s, which the C lane mirrors.
+fn check_declared_extents(
+    op: &str,
+    declared: &TensorType,
+    shape: &[usize],
+    runtime_dims: &UnordMap<String, usize>,
+) -> Result<(), String> {
+    if declared.dims.len() != shape.len() {
+        return Err(format!(
+            "{op} computed rank {}, but its type declares rank {}",
+            shape.len(),
+            declared.dims.len()
+        ));
+    }
+    for (axis, (dim, &observed)) in declared.dims.iter().zip(shape).enumerate() {
+        let (claim, claimed) = match dim {
+            DimInfo::Lit(value) => (value.to_string(), *value),
+            DimInfo::Named(name, Some(value)) => (name.clone(), *value),
+            DimInfo::Named(name, None) => match runtime_dims.get(name) {
+                Some(value) => (name.clone(), *value),
+                None => continue,
+            },
+        };
+        if observed != claimed {
+            return Err(format!(
+                "extent `{claim}`: claimed = {claimed}, {op} axis {axis} = {observed}\n\
+                 numeric trap: domain in {op} at i64"
+            ));
+        }
     }
     Ok(())
 }

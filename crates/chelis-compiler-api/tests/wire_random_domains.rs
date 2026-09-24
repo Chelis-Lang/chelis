@@ -348,6 +348,18 @@ fn the_codec_admits_the_key_chain_and_rejects_every_malformed_key_form() {
     declared["nodes"][6]["output_type"]["dims"] = json!([{"kind":"lit","size":4}]);
     assert!(WireDag::from_validated_json(&declared.to_string()).is_err());
 
+    // The same disagreement against a named count axis whose extent is
+    // known; the batched draw's data declares that axis too.
+    let mut named = key_chain();
+    let n4 = json!({"kind":"named","name":"n","size":4});
+    named["nodes"][6]["output_type"]["dims"] = json!([n4]);
+    for data in [7, 9] {
+        named["nodes"][data]["output_type"]["dims"] = json!([n4, {"kind":"lit","size":4}]);
+    }
+    rejects_domain(&named, "with a split's count axis appended last");
+    named["nodes"][6]["op"]["count"] = json!({"bound":"lit","value":4});
+    accepts(&named);
+
     // A count carrier outside `lit` and a node at slot 1.
     let mut axis_count = key_chain();
     axis_count["nodes"][6]["op"]["count"] =

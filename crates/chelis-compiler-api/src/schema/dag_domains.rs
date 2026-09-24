@@ -296,7 +296,11 @@ fn key_node(dag: &WireDag, node: &WireDagNode) -> Result<()> {
                     (WireRtDim::Lit { value }, Some(WireDimInfo::Lit { size })) => {
                         value.get() == size.get()
                     }
-                    (WireRtDim::Lit { .. }, Some(WireDimInfo::Named { .. })) => true,
+                    // A named axis with a known extent claims that extent;
+                    // an unresolved one is checked when the split runs.
+                    (WireRtDim::Lit { value }, Some(WireDimInfo::Named { size, .. })) => {
+                        size.as_ref().is_none_or(|size| size.get() == value.get())
+                    }
                     (WireRtDim::Node { .. }, _) => true,
                     _ => false,
                 }

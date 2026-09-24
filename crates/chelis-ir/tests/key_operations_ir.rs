@@ -593,6 +593,169 @@ fn a_negative_runtime_split_count_traps_and_zero_is_empty() {
     }
 }
 
+/// `split_keys(key(7), count)` whose count axis is declared `n`, the axis
+/// the input `d` also binds, and, when `draw`, a dropout of `d` batched by
+/// those keys. `[05-OP-71]`'s count is the extent; `n` is a claim about it.
+fn split_declaring_n(count: RtDim, draw: bool) -> (Dag, NodeId) {
+    let mut dag = Dag::new();
+    let seed = i64_const(&mut dag, 7);
+    let root = node(&mut dag, RiscOp::KeyFromSeed, vec![seed], &[], Prim::Key);
+    let mut inputs = vec![root];
+    if matches!(count, RtDim::Node(_)) {
+        inputs.push(load(&mut dag, "cnt", &[], Prim::Int64));
+    }
+    let n = || DimInfo::Named("n".into(), None);
+    let rows = dag.add_node(
+        RiscOp::SplitN { count },
+        inputs,
+        TensorType {
+            dims: vec![n()],
+            precision: Prim::Key,
+        },
+        None,
+    );
+    let d = dag.add_node(
+        RiscOp::Load { name: "d".into() },
+        vec![],
+        TensorType {
+            dims: vec![n(), DimInfo::Lit(2)],
+            precision: Prim::F32,
+        },
+        None,
+    );
+    let out = if draw {
+        let rate = float_const(&mut dag, Prim::F32, 0.5);
+        let drawn = dag.add_node(
+            RiscOp::Dropout,
+            vec![d, rate, rows],
+            TensorType {
+                dims: vec![n(), DimInfo::Lit(2)],
+                precision: Prim::F32,
+            },
+            None,
+        );
+        dag.add_root(drawn);
+        drawn
+    } else {
+        dag.add_root(rows);
+        dag.add_root(d);
+        rows
+    };
+    (dag, out)
+}
+
+fn eval_split(dag: &Dag, count: i64) -> Result<UnordMap<NodeId, TensorValue>, String> {
+    assert_eq!(verify(dag), Vec::<String>::new());
+    let inputs = UnordMap::from_iter([
+        (
+            "cnt",
+            TensorValue::from_storage(
+                vec![],
+                finalize_tensor("test", Prim::Int64, RawTensor::Int(vec![count])).unwrap(),
+            ),
+        ),
+        ("d", floats(Prim::F32, vec![4, 2], vec![1.0; 8])),
+    ]);
+    eval_tensor_roots_with_frame(dag, dag.roots(), &mut RandomFrame::unhandled(), |name| {
+        inputs.get(name).cloned()
+    })
+}
+
+/// A count that disagrees with its declared, elsewhere-bound axis traps
+/// before any key exists, with the `Domain` trap a negative count raises,
+/// and a batched draw keyed by those keys never runs. The count that agrees
+/// gives key_ref.py's `split_n(key(7), 4)`.
+#[test]
+fn a_split_count_that_disagrees_with_its_declared_extent_traps() {
+    let trap = "numeric trap: domain in split_keys at i64";
+    for (count, draw) in [(3, false), (6, false), (40, false), (3, true)] {
+        let (dag, _) = split_declaring_n(RtDim::Node(1), draw);
+        let error = eval_split(&dag, count).unwrap_err();
+        assert!(error.ends_with(trap), "count {count}: {error}");
+        assert!(
+            error.contains(&format!(
+                "extent `n`: claimed = 4, split_keys axis 0 = {count}"
+            )),
+            "count {count}: {error}"
+        );
+    }
+    let (dag, rows) = split_declaring_n(RtDim::Node(1), false);
+    assert_eq!(
+        key_bits(&eval_split(&dag, 4).unwrap()[&rows]),
+        [
+            0x25ea_33e6_1c10_576f,
+            0x7071_24fb_ecd5_f054,
+            0x8239_3615_3a56_5205,
+            0x53c6_f7e8_3810_b049
+        ]
+    );
+    // A literal count is checked the same way against a runtime-bound axis.
+    let (dag, _) = split_declaring_n(RtDim::Lit(6), false);
+    let error = eval_split(&dag, 0).unwrap_err();
+    assert!(
+        error.contains("extent `n`: claimed = 4, split_keys axis 0 = 6") && error.ends_with(trap),
+        "{error}"
+    );
+    let (dag, rows) = split_declaring_n(RtDim::Lit(4), false);
+    assert_eq!(eval_split(&dag, 0).unwrap()[&rows].shape, vec![4]);
+}
+
+/// The key's axes are the leading extents of a split's result, and a
+/// declared leading axis bound elsewhere is checked against them too.
+#[test]
+fn a_split_whose_declared_leading_axis_disagrees_with_its_key_traps() {
+    let mut dag = Dag::new();
+    let key = dag.add_node(
+        RiscOp::Load { name: "k".into() },
+        vec![],
+        TensorType {
+            dims: vec![DimInfo::Named("a".into(), None)],
+            precision: Prim::Key,
+        },
+        None,
+    );
+    let rows = dag.add_node(
+        RiscOp::SplitN {
+            count: RtDim::Lit(2),
+        },
+        vec![key],
+        TensorType {
+            dims: vec![DimInfo::Named("b".into(), None), DimInfo::Lit(2)],
+            precision: Prim::Key,
+        },
+        None,
+    );
+    let e = dag.add_node(
+        RiscOp::Load { name: "e".into() },
+        vec![],
+        TensorType {
+            dims: vec![DimInfo::Named("b".into(), None)],
+            precision: Prim::F32,
+        },
+        None,
+    );
+    dag.add_root(rows);
+    dag.add_root(e);
+    assert_eq!(verify(&dag), Vec::<String>::new());
+    let one = RandomKey::from_seed(scalar_from_i64("test", Prim::Int64, 1).unwrap()).unwrap();
+    let run = |b: usize| {
+        let inputs = UnordMap::from_iter([
+            ("k", keys_value(vec![3], vec![one; 3])),
+            ("e", floats(Prim::F32, vec![b], vec![0.0; b])),
+        ]);
+        eval_tensor_roots_with_frame(&dag, dag.roots(), &mut RandomFrame::unhandled(), |name| {
+            inputs.get(name).cloned()
+        })
+    };
+    let error = run(2).unwrap_err();
+    assert!(
+        error.contains("extent `b`: claimed = 2, split_keys axis 0 = 3")
+            && error.ends_with("numeric trap: domain in split_keys at i64"),
+        "{error}"
+    );
+    assert_eq!(run(3).unwrap()[&rows].shape, vec![3, 2]);
+}
+
 // ---- trap liveness: spec/06 §5.2, "purity alone does not make a possible
 // trap dead" ----
 

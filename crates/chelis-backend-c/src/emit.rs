@@ -5259,19 +5259,46 @@ impl CEmitter {
         let index = Self::prim_elem_type(Prim::Int64);
         let last = node.output_type.dims.len() - 1;
         let extent = Self::bound_c_expr(count, &node.inputs, key.0, last);
+        let trap = NumericTrap::Domain {
+            op: "split_keys",
+            prim: Prim::Int64,
+        }
+        .to_string();
         self.line(&format!("{index} t{id}_count = ({index})({extent});"));
         if matches!(count, RtDim::Node(_)) {
-            let trap = NumericTrap::Domain {
-                op: "split_keys",
-                prim: Prim::Int64,
-            }
-            .to_string();
             self.line(&format!(
                 "if (t{id}_count < 0) chelis_numeric_trap({trap:?});"
             ));
         }
         if self.runtime_dim_sites.contains_key(&(id, last)) {
             self.emit_runtime_dim_sites(id, &[(last, format!("t{id}_count"))]);
+        }
+        // The key's extents and the count are the result's extents. Every
+        // extent the result's type declares is a claim about them, checked
+        // before the allocation, as `chelis_movement_check_target` checks an
+        // expansion's target and as the DAG evaluator checks this node; the
+        // report is the local extent guard's.
+        for (axis, dim) in node.output_type.dims.iter().enumerate() {
+            let observed = if axis == last {
+                format!("t{id}_count")
+            } else {
+                format!("chelis_tensor_shape(t{}, {axis})", key.0)
+            };
+            let claimed = Self::emit_dim_info(dim);
+            let claim = match dim {
+                DimInfo::Lit(value) => value.to_string(),
+                DimInfo::Named(name, _) => {
+                    chelis_ir::span_sanitize::sanitize_for_format_string(name).into_owned()
+                }
+            };
+            self.line(&format!("if (({claimed}) != ({observed})) {{"));
+            self.indent += 1;
+            self.line(&format!(
+                "fprintf(stderr, \"extent `{claim}`: claimed = %lld, split_keys axis {axis} = %lld\\n\", (long long)({claimed}), (long long)({observed}));"
+            ));
+            self.line(&format!("chelis_numeric_trap({trap:?});"));
+            self.indent -= 1;
+            self.line("}");
         }
         self.emit_slot_wrapper(id, &node.output_type);
         self.line(&format!("for ({index} i = 0; i < t{}_size; i++) {{", key.0));

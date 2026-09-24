@@ -590,6 +590,106 @@ fn a_negative_runtime_split_count_traps_in_c_as_in_eval() {
     assert!(run_c_failure(build(), &inputs).contains(trap));
 }
 
+/// `split_keys(key(7), count)` whose count axis is declared `n`, which the
+/// input `d` also binds, and, when `draw`, a dropout of `d` batched by those
+/// keys.
+fn split_declaring_n(count: RtDim, draw: bool) -> (Dag, NodeId) {
+    let mut dag = Dag::new();
+    let seed = i64_const(&mut dag, 7);
+    let root = node(&mut dag, RiscOp::KeyFromSeed, vec![seed], &[], Prim::Key);
+    let mut inputs = vec![root];
+    if matches!(count, RtDim::Node(_)) {
+        inputs.push(load(&mut dag, "cnt", &[], Prim::Int64));
+    }
+    let n = || DimInfo::Named("n".into(), None);
+    let rows = dag.add_node(
+        RiscOp::SplitN { count },
+        inputs,
+        TensorType {
+            dims: vec![n()],
+            precision: Prim::Key,
+        },
+        None,
+    );
+    let d = dag.add_node(
+        RiscOp::Load { name: "d".into() },
+        vec![],
+        TensorType {
+            dims: vec![n(), DimInfo::Lit(2)],
+            precision: Prim::F32,
+        },
+        None,
+    );
+    if draw {
+        let rate = float_const(&mut dag, Prim::F32, 0.5);
+        let drawn = dag.add_node(
+            RiscOp::Dropout,
+            vec![d, rate, rows],
+            TensorType {
+                dims: vec![n(), DimInfo::Lit(2)],
+                precision: Prim::F32,
+            },
+            None,
+        );
+        dag.add_root(drawn);
+    } else {
+        dag.add_root(rows);
+        dag.add_root(d);
+    }
+    (dag, rows)
+}
+
+/// [05-OP-71]'s count is the result's extent. A count that disagrees with
+/// its declared, elsewhere-bound axis traps before the result is allocated,
+/// so nothing is written past it, and a batched draw keyed by those keys
+/// never runs; the agreeing count gives key_ref.py's `split_n(key(7), 4)`.
+#[test]
+fn a_split_count_that_disagrees_with_its_declared_extent_traps_in_c() {
+    let trap = "numeric trap: domain in split_keys at i64";
+    let inputs = |count: i64| {
+        [
+            ("cnt", Input::Ints(vec![], vec![count])),
+            ("d", Input::Floats(Prim::F32, vec![4, 2], vec![1.0; 8])),
+        ]
+    };
+    for (count, draw) in [(3, false), (6, false), (40, false), (3, true)] {
+        let (dag, _) = split_declaring_n(RtDim::Node(1), draw);
+        let stderr = run_c_failure(dag, &inputs(count));
+        assert!(stderr.contains(trap), "count {count}: {stderr}");
+        assert!(
+            stderr.contains(&format!(
+                "extent `n`: claimed = 4, split_keys axis 0 = {count}"
+            )),
+            "count {count}: {stderr}"
+        );
+    }
+    let (dag, rows) = split_declaring_n(RtDim::Node(1), false);
+    let (program, ..) = generated(dag.clone());
+    let guard = program
+        .find("extent `n`: claimed")
+        .expect("the split guards its declared extent");
+    let allocation = program
+        .find(&format!("chelis_tensor *t{} = chelis_alloc(", rows.0))
+        .expect("the split allocates its result");
+    assert!(guard < allocation, "the guard must precede the allocation");
+    let keys = [
+        0x25ea_33e6_1c10_576f,
+        0x7071_24fb_ecd5_f054,
+        0x8239_3615_3a56_5205,
+        0x53c6_f7e8_3810_b049,
+    ];
+    assert_eq!(run_c(dag, &inputs(4))[0], keys);
+    // A literal count is checked the same way against a runtime-bound axis.
+    let (dag, _) = split_declaring_n(RtDim::Lit(6), false);
+    let stderr = run_c_failure(dag, &inputs(0));
+    assert!(
+        stderr.contains("extent `n`: claimed = 4, split_keys axis 0 = 6") && stderr.contains(trap),
+        "{stderr}"
+    );
+    let (dag, _) = split_declaring_n(RtDim::Lit(4), false);
+    assert_eq!(run_c(dag, &inputs(0))[0], keys);
+}
+
 #[test]
 fn an_explicitly_keyed_draw_validates_its_own_controls_in_c() {
     for (rate, traps) in [(0.5, false), (1.0, true), (-0.25, true)] {
