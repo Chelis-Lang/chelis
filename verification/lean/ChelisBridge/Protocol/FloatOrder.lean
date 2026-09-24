@@ -472,4 +472,9 @@ theorem f64_lt_eq {u w : F64} {a r : ℚ} (hu : realize u = some a) (hw : realiz
   obtain ⟨hwf, rfl⟩ := realize_eq_some.mp hw
   exact lt_eq_decide huf hwf
 
+/-- Re-encoding the bits of an encoding gives the encoding back. -/
+theorem ofNat_bits (x : BinaryFloat f) : BinaryFloat.ofNat f x.bits.toNat = x := by
+  cases x
+  simp [BinaryFloat.ofNat]
+
 end ChelisBridge.Protocol

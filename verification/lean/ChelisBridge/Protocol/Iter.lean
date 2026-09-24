@@ -43,14 +43,14 @@ section IterMap
 
 variable {T B F : Type} (fnInst : core.ops.function.FnMut F T B) (c : F) (f : T → Result B)
 
-theorem mapSlice_next_some (hf : ∀ x, fnInst.call_mut c x = (do let y ← f x; .ok (y, c)))
-    (s : Slice T) (k : ℕ) (hk : k < s.val.length) :
+theorem mapSlice_next_some (s : Slice T) (k : ℕ) (hk : k < s.val.length)
+    (hf : fnInst.call_mut c s.val[k] = (do let y ← f s.val[k]; .ok (y, c))) :
     (core.iter.traits.iterator.IteratorMap (core.iter.traits.iterator.IteratorSliceIter T)
         fnInst).next ⟨{ slice := s, i := k, back := 0 }, c⟩ =
       (do let y ← f s.val[k]; .ok (some y, ⟨{ slice := s, i := k + 1, back := 0 }, c⟩)) := by
   simp only [core.iter.adapters.map.IteratorMap.next, core.slice.iter.IteratorSliceIter.next]
   have hk' : k < s.length - 0 := by simp only [Slice.length]; omega
-  simp only [hk', dite_true, bind_tc_ok, hf, Slice.getElem_Nat_eq]
+  simp only [hk', dite_true, bind_tc_ok, Slice.getElem_Nat_eq, hf]
   cases f s.val[k] <;> rfl
 
 theorem mapSlice_next_none (s : Slice T) (k : ℕ) (hk : s.val.length ≤ k) :
@@ -63,8 +63,8 @@ theorem mapSlice_next_none (s : Slice T) (k : ℕ) (hk : s.val.length ≤ k) :
 
 /-- Collecting `slice.iter().map(f)` for a closure whose state never changes: a successful
 collection is `mapM` of the underlying function over the remaining elements. -/
-theorem iterToList_map_slice (hf : ∀ x, fnInst.call_mut c x = (do let y ← f x; .ok (y, c)))
-    (s : Slice T) :
+theorem iterToList_map_slice (s : Slice T)
+    (hf : ∀ x ∈ s.val, fnInst.call_mut c x = (do let y ← f x; .ok (y, c))) :
     ∀ (n k : ℕ) (acc : List B) (l : List B) it', s.val.length - k = n →
       alloc.vec.FromIteratorVec.iterToList
           (core.iter.traits.iterator.IteratorMap (core.iter.traits.iterator.IteratorSliceIter T)
@@ -85,7 +85,7 @@ theorem iterToList_map_slice (hf : ∀ x, fnInst.call_mut c x = (do let y ← f 
     intro k acc l it' hn h
     have hk : k < s.val.length := by omega
     rw [alloc.vec.FromIteratorVec.iterToList.eq_def,
-      mapSlice_next_some fnInst c f hf s k hk] at h
+      mapSlice_next_some fnInst c f s k hk (hf _ (List.getElem_mem hk))] at h
     rw [List.drop_eq_getElem_cons hk]
     cases hfx : f s.val[k] with
     | ok y =>
@@ -94,6 +94,53 @@ theorem iterToList_map_slice (hf : ∀ x, fnInst.call_mut c x = (do let y ← f 
       refine ⟨y :: ys, ?_, ?_⟩
       · simp only [List.mapM_cons, hfx, hys, bind_tc_ok]; rfl
       · rw [hl]; simp
+    | fail e => simp [hfx] at h
+    | div => simp [hfx] at h
+
+
+/-- Conversely, when `mapM f` succeeds on the remaining elements, collecting
+`slice.iter().map(f)` succeeds with exactly those values. -/
+theorem iterToList_map_slice_ok (s : Slice T)
+    (hf : ∀ x ∈ s.val, fnInst.call_mut c x = (do let y ← f x; .ok (y, c))) :
+    ∀ (n k : ℕ) (acc ys : List B), s.val.length - k = n → (s.val.drop k).mapM f = .ok ys →
+      ∃ it', alloc.vec.FromIteratorVec.iterToList
+          (core.iter.traits.iterator.IteratorMap (core.iter.traits.iterator.IteratorSliceIter T)
+            fnInst)
+          ⟨{ slice := s, i := k, back := 0 }, c⟩ acc = .ok (acc.reverse ++ ys, it') := by
+  intro n
+  induction n with
+  | zero =>
+    intro k acc ys hn h
+    have hd : s.val.drop k = [] := List.drop_eq_nil_of_le (by omega)
+    rw [hd] at h
+    cases h
+    refine ⟨⟨{ slice := s, i := k, back := 0 }, c⟩, ?_⟩
+    rw [alloc.vec.FromIteratorVec.iterToList.eq_def,
+      mapSlice_next_none fnInst c s k (by omega)]
+    simp
+  | succ n ih =>
+    intro k acc ys hn h
+    have hk : k < s.val.length := by omega
+    rw [List.drop_eq_getElem_cons hk, List.mapM_cons] at h
+    cases hfx : f s.val[k] with
+    | ok y =>
+      simp only [hfx, bind_tc_ok] at h
+      cases hrest : (s.val.drop (k + 1)).mapM f with
+      | ok ys' =>
+        rw [hrest] at h
+        have hy : ys = y :: ys' := by
+          change Result.ok (y :: ys') = Result.ok ys at h
+          injection h with h; exact h.symm
+        subst hy
+        obtain ⟨it', hit⟩ := ih (k + 1) (y :: acc) ys' (by omega) hrest
+        refine ⟨it', ?_⟩
+        rw [alloc.vec.FromIteratorVec.iterToList.eq_def,
+          mapSlice_next_some fnInst c f s k hk (hf _ (List.getElem_mem hk)), hfx]
+        simp only [bind_tc_ok]
+        rw [hit]
+        simp
+      | fail e => rw [hrest] at h; cases h
+      | div => rw [hrest] at h; cases h
     | fail e => simp [hfx] at h
     | div => simp [hfx] at h
 

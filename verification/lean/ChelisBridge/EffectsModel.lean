@@ -1,0 +1,25 @@
+import ChelisEffects
+
+/-!
+# The only contact point with the generated `chelis_effects` model
+
+`chelis_ir` depends on `chelis_effects`, so a whole-core extraction contains these items as
+`<root>.chelis_effects.<path>`; the standalone `chelis_effects` slice (root module
+`ChelisEffects`) names them `chelis_effects.<path>`. With the root namespace opened,
+`chelis_effects.<path>` resolves in both, exactly as in `ChelisBridge.Model`. Swapping the
+model changes the `import` and the namespace opened by `open_chelis_effects_model`.
+-/
+
+-- `open_chelis_effects_model` opens the configured extraction root namespace (the swap point).
+set_option hygiene false in
+macro "open_chelis_effects_model" : command => `(open chelis_effects)
+
+open_chelis_effects_model
+
+namespace ChelisBridge.EffectsModel
+
+/-- The extracted production host-C device check `chelis_effects::is_c_host_device_designator`. -/
+abbrev isCHostDeviceDesignator : Aeneas.Std.Str → Aeneas.Std.Result Bool :=
+  chelis_effects.is_c_host_device_designator
+
+end ChelisBridge.EffectsModel
