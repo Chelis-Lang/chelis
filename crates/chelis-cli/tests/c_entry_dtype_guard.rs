@@ -9,6 +9,12 @@
 //! result, a tuple result, a record result, and a tensor nested in a tuple
 //! parameter. The direct four-argument DAG entry is covered beside the other
 //! direct-entry guards in `chelis-backend-c/tests/exec_compile.rs`.
+//!
+//! A kernel the entry calls carries its own guard, prefixed with the kernel's
+//! name, so an entry that reaches a kernel would still trap without the host
+//! entry's guard. The kernel-free rows (a pass-through, a `debug`-only body, a
+//! tuple of the parameter) reach no kernel, and every direct row must print
+//! the host rendering, a line with no function-name prefix.
 
 mod common;
 
@@ -23,7 +29,10 @@ def singles(x: tensor[3, f32]) -> tensor[3, f32] = x + x\n\
 def int_pair(x: tensor[3, i64]) -> (tensor[3, i64], tensor[3, i64]) = (x + x, x * x)\n\
 type IntRecord =\n  | IntRecord { twice: tensor[3, i64], square: tensor[3, i64] }\n\
 def int_record(x: tensor[3, i64]) -> IntRecord = IntRecord { twice: x + x, square: x * x }\n\
-def nested(p: (tensor[3, i64], tensor[3, i64])) -> tensor[3, i64] = p.0 + p.1\n";
+def nested(p: (tensor[3, i64], tensor[3, i64])) -> tensor[3, i64] = p.0 + p.1\n\
+def pass_through(x: tensor[3, i64]) -> tensor[3, i64] = x\n\
+def shown(x: tensor[3, i64]) -> tensor[3, i64] ! {IO} = debug(x)\n\
+def pass_pair(x: tensor[3, i64]) -> (tensor[3, i64], tensor[3, i64]) = (x, x)\n";
 
 /// How the harness hands one supplied tensor to one entry and releases the
 /// result. The C local `x` is the supplied tensor.
@@ -132,12 +141,16 @@ fn mismatched_dtypes_trap_at_every_host_entry_kind() {
         ("tuple", Entry::Tuple("int_pair"), "F64", "i64"),
         ("record", Entry::Record("int_record"), "F64", "i64"),
         ("nested", Entry::NestedInTuple("nested"), "F64", "i64"),
+        ("pass_through", Entry::Tensor("pass_through"), "F64", "i64"),
+        ("debug_only", Entry::Tensor("shown"), "F64", "i64"),
+        ("pass_pair", Entry::Tuple("pass_pair"), "F64", "i64"),
     ] {
         // Each supplied tag's language spelling is its lowercase name.
         let actual = supplied.to_lowercase();
         let (succeeded, output) = run(&out, name, entry, supplied);
-        let names_parameter =
-            matches!(entry, Entry::NestedInTuple(_)) || output.contains("input `x` expected dtype");
+        let host_line = format!("input `x` expected dtype {declared}, got {actual}");
+        let names_parameter = matches!(entry, Entry::NestedInTuple(_))
+            || output.lines().any(|line| line == host_line);
         if succeeded
             || output.contains("completed")
             || !output.contains(&format!("expected dtype {declared}, got {actual}"))
@@ -164,6 +177,9 @@ fn matching_dtypes_complete_at_every_host_entry_kind() {
         ("i64_pair", Entry::Tuple("int_pair"), "I64"),
         ("i64_record", Entry::Record("int_record"), "I64"),
         ("i64_nested", Entry::NestedInTuple("nested"), "I64"),
+        ("i64_pass_through", Entry::Tensor("pass_through"), "I64"),
+        ("i64_debug_only", Entry::Tensor("shown"), "I64"),
+        ("i64_pass_pair", Entry::Tuple("pass_pair"), "I64"),
     ] {
         let (succeeded, output) = run(&out, name, entry, supplied);
         assert!(succeeded, "{name}: {output}");
