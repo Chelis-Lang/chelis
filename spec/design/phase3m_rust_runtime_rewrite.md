@@ -213,12 +213,14 @@ unmanaged Cargo built has no observation, so its target must be rebuilt under
 the managed driver; there is no fallback descriptor and no automatic deletion
 of a user's target directory.
 A Cargo started inside a managed build, by a test, a `cargo run` program or a
-build script, first restores the variables the enclosing session changed,
-unless its caller changed them since, and then observes into its own target's
-state. On Linux the driver puts the exact compiler's toolchain libraries first
-on the loader path, as rustup's proxy does; a test's loader path can otherwise
-load the rustc-dev copy of the compiler driver. An analysis tool may compile
-exactly one declared crate through its own rustc driver
+build script, must be PATH `cargo`, the managed launcher. It first restores the
+variables the enclosing session changed, unless its caller changed them since,
+and then observes into its own target's state. Cargo sets `CARGO` and
+`env!("CARGO")` to the real binary, which would inherit the enclosing session
+without a driver. On Linux the driver puts the exact compiler's toolchain
+libraries first on the loader path, as rustup's proxy does; a test's loader
+path can otherwise load the rustc-dev copy of the compiler driver. An analysis
+tool may compile exactly one declared crate through its own rustc driver
 (`CHELIS_IDENTITY_ANALYSIS_DRIVER` and `CHELIS_IDENTITY_ANALYSIS_CRATE`). That
 compilation sees the same inputs, including retained producer records, but
 publishes no receipt; every other unit is observed as usual.

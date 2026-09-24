@@ -210,8 +210,9 @@ fn chelisup_bin() -> PathBuf {
         }
         None => workspace_root.join("target"),
     };
-    let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_string());
-    let status = Proc::new(cargo)
+    // A managed build puts its observed Cargo launcher first on PATH; $CARGO
+    // names the real binary, which would inherit the enclosing session.
+    let status = Proc::new("cargo")
         .current_dir(&workspace_root)
         .args(["build", "-p", "chelisup", "--bin", "chelisup"])
         .status()
