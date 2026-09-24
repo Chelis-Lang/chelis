@@ -1,48 +1,43 @@
-//! Runtime-evaluator and C-backend coverage for `jit` and `par` (Findings 1+2
-//! of the 0.7.6 toolchain hygiene red-team, PR #51).
+//! Runtime-evaluator and C-backend coverage for `jit`, plus the chelis#2388
+//! checker fence for `par`.
 //!
 //! ## Background
 //!
-//! PR #40 ("fix: jit pass-through and par sequential semantics per spec") wired
-//! `jit` and `par` into IR lowering (`crates/chelis-ir/src/lower.rs::lower_jit`
-//! pass-through; `lower_par` sequential-yielding-last) and the checker. The IR
-//! DAG path now lowers both forms correctly, which is enough for scalar bodies
-//! whose top-level `def` classifies as "lowered" (DAG-evaluable) by
-//! `top_level_lowering_map`.
+//! PR #40 wired `jit` and a sequential placeholder for `par` into IR lowering.
+//! PR #51 added adjacent runtime and host-lane arms. Chelis#2388 later proved
+//! that the host arm drops effectful non-final children, so accepting `par`
+//! still permits cross-lane divergence.
 //!
 //! PR #40 did not extend the **runtime evaluator's** dispatch in
 //! `crates/chelis-compiler-api/src/runtime/eval.rs::eval_list` or the C-backend's
 //! `lower_host_expr_kind` in `crates/chelis-ir/src/host.rs`. This branch's
-//! fix commit adds the missing arms in both layers, matching the IR
-//! semantics: jit is pass-through; par is sequential (last-yields). See
+//! fix commit added the missing arms in both layers. See
 //! `docs/investigations/jit_par_runtime_gaps_diagnosis.md` for the
-//! pre-fix diagnosis.
+//! historical diagnosis. The checker now fences every `par` use until its
+//! execution semantics are implemented consistently.
 //!
 //! Spec semantics (`spec/03-deep-syntax.md`):
 //!
 //! * §2.7 `jit` — compilation trigger, semantically a no-op at evaluation.
 //!   The runtime arm must return the value of the inner expression.
-//! * §2.3 `par` v1 — sequential composition. The runtime arm must evaluate
-//!   each child in order and return the value of the last child.
+//! * §2.3 `par` — scheduler-independent parallel evaluation. The construct is
+//!   currently rejected under chelis#2388.
 //!
 //! ## Fixtures
 //!
-//! These tests reproduce the gaps empirically. The fix landed in the same
-//! branch (`fix/jit-par-runtime-arms`), so all six run by default.
+//! The `jit` tests retain the original runtime coverage. The `par` tests pin
+//! the replacement checker fence on both scalar and host-runtime-shaped input.
 //!
 //! * `eval_jit_scalar_returns_inner_value` — `result: f32 = jit(1.5)` evals
 //!   to `1.5`. Scalar `jit` routes through IR DAG; baseline against a
 //!   DAG-side regression.
 //! * `eval_jit_tensor_returns_inner_value` — `result = jit(to_tensor([..]))`
 //!   evals to the tensor (host runtime `jit` arm).
-//! * `eval_par_scalar_returns_last_value` — `result: f32 = par {1.0;2.0;3.0}`
-//!   evals to `3.0`. Baseline; routes through IR DAG.
-//! * `eval_par_tensor_returns_last_value` — `result = par {to_tensor(a);
-//!   to_tensor(b)}` evals to the second tensor (host runtime `par` arm).
+//! * scalar and tensor `par` inputs both fail with the typed chelis#2388
+//!   unsupported receipt before execution.
 //! * `build_c_jit_tensor_runs_and_prints_value` — generated C prints the
 //!   inner-tensor value (C-backend host-lane `jit` arm).
-//! * `build_c_par_tensor_runs_and_prints_last_value` — generated C prints
-//!   the last tensor's value (C-backend host-lane `par` arm).
+//! * C build rejects `par` before emitting source.
 
 use assert_cmd::Command;
 use std::fs;
@@ -62,6 +57,12 @@ fn eval_file(path: &Path) -> (bool, String, String) {
         String::from_utf8_lossy(&output.stdout).into_owned(),
         String::from_utf8_lossy(&output.stderr).into_owned(),
     )
+}
+
+fn assert_par_fence(stderr: &str) {
+    assert!(stderr.contains("unsupported: `par` expression"), "{stderr}");
+    assert!(stderr.contains("unimplemented chelis#2388"), "{stderr}");
+    assert!(stderr.contains("not fully implemented"), "{stderr}");
 }
 
 fn write_program(dir: &Path, name: &str, body: &str) -> PathBuf {
@@ -161,10 +162,7 @@ fn eval_jit_tensor_returns_inner_value() {
 }
 
 #[test]
-fn eval_par_scalar_returns_last_value() {
-    // Scalar `par`: spec §2.3 v1 sequential, last-yields. Scalar path routes
-    // through IR DAG; baseline coverage so a DAG-side regression surfaces
-    // at the same place as the host-side one.
+fn eval_par_scalar_is_fenced_before_execution() {
     let dir = tempdir().expect("tempdir");
     let path = write_program(
         dir.path(),
@@ -172,21 +170,12 @@ fn eval_par_scalar_returns_last_value() {
         "result: f32 = par {\n  1.0;\n  2.0;\n  3.0\n}\n",
     );
     let (ok, stdout, stderr) = eval_file(&path);
-    assert!(ok, "scalar par should eval; stderr={stderr}");
-    let value = parse_anonymous_scalar(&stdout)
-        .unwrap_or_else(|| panic!("expected scalar tensor in stdout: {stdout}"));
-    assert!(
-        (value - 3.0).abs() < 1e-6,
-        "result expected 3.0, got {value}; stdout={stdout}"
-    );
+    assert!(!ok, "scalar par must be rejected; stdout={stdout}");
+    assert_par_fence(&stderr);
 }
 
 #[test]
-fn eval_par_tensor_returns_last_value() {
-    // Tensor `par`: hits host-runtime classification via `to_tensor`. With
-    // the `Some("par")` arm in `eval_list`, the runtime evaluates each
-    // child in order and returns the last child's tensor value. Spec §2.3
-    // (v1 sequential).
+fn eval_par_tensor_is_fenced_before_execution() {
     let dir = tempdir().expect("tempdir");
     let path = write_program(
         dir.path(),
@@ -194,13 +183,8 @@ fn eval_par_tensor_returns_last_value() {
         "result = par {\n  to_tensor([1.0, 2.0]);\n  to_tensor([3.0, 4.0, 5.0])\n}\n",
     );
     let (ok, stdout, stderr) = eval_file(&path);
-    assert!(
-        ok,
-        "tensor par should eval (spec section 2.3 v1: sequential, last-yields); stderr={stderr} stdout={stdout}"
-    );
-    let elements = parse_anonymous_tensor_data(&stdout)
-        .unwrap_or_else(|| panic!("expected tensor in stdout: {stdout}"));
-    assert_eq!(elements, vec![3.0, 4.0, 5.0], "stdout={stdout}");
+    assert!(!ok, "tensor par must be rejected; stdout={stdout}");
+    assert_par_fence(&stderr);
 }
 
 // ── chelis build --target c (C backend) ──────────────────────────────────────
@@ -277,10 +261,7 @@ fn build_c_jit_tensor_runs_and_prints_value() {
 }
 
 #[test]
-fn build_c_par_tensor_runs_and_prints_last_value() {
-    // The host-lane lowerer now has a `par` arm that lowers each child in
-    // order and returns the last child's HostExpr. Spec §2.3 v1
-    // sequential: the value of `par` is the value of the last child.
+fn build_c_par_tensor_is_fenced_before_emission() {
     let dir = tempdir().expect("tempdir");
     let src = write_program(
         dir.path(),
@@ -288,8 +269,20 @@ fn build_c_par_tensor_runs_and_prints_last_value() {
         "result = par {\n  to_tensor([1.0, 2.0]);\n  to_tensor([3.0, 4.0, 5.0])\n}\n",
     );
     let out = dir.path().join("out");
-    let stdout = build_c_and_run(&out, &src);
-    let elements = parse_named_tensor_data(&stdout, "result")
-        .unwrap_or_else(|| panic!("expected tensor 'result' in compiled stdout: {stdout}"));
-    assert_eq!(elements, vec![3.0, 4.0, 5.0], "stdout={stdout}");
+    let output = Command::cargo_bin("chelis")
+        .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .args([
+            "build",
+            src.to_str().unwrap(),
+            "--target",
+            "c",
+            "--output",
+            out.to_str().unwrap(),
+        ])
+        .output()
+        .expect("run chelis build");
+    assert!(!output.status.success(), "par build must be rejected");
+    assert_par_fence(&String::from_utf8_lossy(&output.stderr));
+    assert!(!out.join("tensor_par.c").exists());
 }

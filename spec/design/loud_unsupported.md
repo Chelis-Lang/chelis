@@ -277,14 +277,15 @@ gains a rejected-cells section asserting these strings byte-for-byte per
 lane (a rejection emitted differently per lane is lane skew, [#712]'s
 shape).
 
-**STATUS (updated 2026-09-13): the complete structured `chelis check` and wire
+**STATUS (updated 2026-09-24): the complete structured `chelis check` and wire
 surface above is still the TARGET, not current behavior.** The `Unsupported`
-object now carries the §C2.1 opaque typed authority, but no stage constructs `Stage::Checker`
-(`chelis check` never reaches lowering or codegen, so no `Unsupported` can
-arrive there), and no type on the `Unsupported` path derives `Serialize`.
-Chelis#1870 adds a bounded in-process trial: `schema::Diagnostic` retains the
-actual typed value off-wire, `LowerDiagnostic` retains it for selected
-lowering producers, and `unsupported_identity()` projects the exact
+object now carries the §C2.1 opaque typed authority. Chelis#2388's `par` fence
+constructs `Stage::Checker` and reaches `chelis check`, `eval`, and `build`
+through the checker diagnostic channel; no type on the `Unsupported` path
+derives `Serialize`. Chelis#1870's bounded in-process trial remains the
+transport: `schema::Diagnostic` retains the actual typed value off-wire,
+`LowerDiagnostic` retains it for selected lowering producers, and
+`unsupported_identity()` projects the exact
 `unsupported:` brand/prefix, diagnostic
 kind, subject, context, stage, span association, disposition, atom or tracking
 issue, and supported alternative without parsing prose. The
