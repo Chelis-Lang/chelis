@@ -14,6 +14,10 @@
 //! binders, the type check rejects a body that requires a narrower dtype family
 //! than its authored contract permits.
 //!
+//! A call suspended on an operand that an authored binder denotes is decided
+//! here too, at the declaration boundary, by replaying it at the binder's
+//! instantiations ([`decide_at_rigid_binder_instantiations`], chelis#2216).
+//!
 //! An inference hole (`(t-var {} _)`) is NOT a binder and is not checked here.
 //! [04-INF-5] gives the hole the type its body determines; it never reaches
 //! the declaration-owned identity maps because the binder list never includes
@@ -21,10 +25,14 @@
 
 use chelis_unord::UnordMap;
 
+use super::app_helpers::type_for_readonly_check;
+use super::checked::{InferenceProduct, PostAppCall};
+use super::expr_pattern::family_members;
+use crate::adt::AdtRegistry;
 use crate::errors::{CheckError, CheckErrorKind};
 use crate::session::DiagnosticSink;
-use crate::types::{Dim, RankVar, Type, TypeVar, TypeVarRestriction};
-use crate::unify::Subst;
+use crate::types::{Dim, RankVar, Type, TypeVar, TypeVarRestriction, VarGen};
+use crate::unify::{Subst, unify};
 
 /// Render an authored binder for a diagnostic, falling back to the internal id
 /// rather than inventing a name (the `render_declared_dim` convention).
@@ -241,4 +249,223 @@ pub(super) fn check_declared_dtype_bounds(
             ));
         }
     }
+}
+
+/// chelis#2216: one authored binder that a suspended call's operand denotes,
+/// and the instantiations the call is decided at.
+struct RigidOperand<'a> {
+    var: TypeVar,
+    name: &'a str,
+    bound: Option<TypeVarRestriction>,
+    instantiations: Vec<Type>,
+}
+
+/// The instantiations a rigid binder's decision replays the call at.
+///
+/// Every dtype of the family its restriction names, which is the declared
+/// bound unless the body narrowed it. A narrowing is reported by
+/// [`check_declared_dtype_bounds`] against the declared bound, so replaying
+/// only what the narrowed family admits reports each defect once. A binder
+/// with no restriction admits every type ([04-DTYPE-2]), and `()` stands for
+/// it: a call that suspended on its operand's outer constructor accepts
+/// `()` only if it accepts every type, in which case it never suspended.
+fn rigid_instantiations(var: TypeVar, subst: &Subst) -> Vec<Type> {
+    match subst.tvar_restriction(var) {
+        Some(restriction) => family_members(restriction.precision_family())
+            .map(Type::Prim)
+            .collect(),
+        None => vec![Type::Unit],
+    }
+}
+
+/// chelis#2216: decide a suspended call whose operand is an authored binder,
+/// at the declaration boundary.
+///
+/// [04-INF-6] quantifies an authored binder over every instantiation its
+/// declaration admits, and nothing ever binds it. A call suspended on such an
+/// operand (`operand_deferral.rs`) therefore waited for an event that cannot
+/// occur, and the unresolved-operand disposition at the boundary dropped it
+/// unchecked: `numel(k)` with `k: p` and `p: Float` checked at score 1, then
+/// trapped in `eval` and emitted C that does not compile.
+///
+/// The call is decided instead by replaying it at every combination of its
+/// binders' instantiations ([`rigid_instantiations`]) against cloned solver
+/// state and a scratch product. The replay is the call's own route
+/// ([`InferenceProduct::replay_post_app`]), so the verdict at `f32` is the one
+/// a concrete `f32` operand gets, and an operation that accepts every member
+/// of the bound (`take(xs, n)` with `n: p` and `p: Int`) stays accepted. The
+/// first failing combination is reported with the route's own kind and text,
+/// naming the instantiation.
+///
+/// Returns true when the call is fully decided: it was rejected, or every
+/// operand it waited on is an authored binder and every combination passed.
+/// An operand that is a flexible inference variable keeps its existing
+/// disposition (chelis#1489). So does a call whose binders all appear among
+/// `shape_rule_operands`, the operands an unresolved shape-rule entry waits
+/// on: that entry rejects the declaration on the same operand at the
+/// boundary, and deciding here too would report it twice.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn decide_at_rigid_binder_instantiations(
+    call: PostAppCall<'_>,
+    arg_tys: &[Type],
+    result_ty: &Type,
+    shape_rule_operands: &[TypeVar],
+    declaration: Option<&str>,
+    vg: &VarGen,
+    subst: &Subst,
+    adt_reg: &AdtRegistry,
+    errors: &mut DiagnosticSink<'_>,
+) -> bool {
+    let mut binders: Vec<RigidOperand<'_>> = Vec::new();
+    let mut flexible_operand = false;
+    for arg_ty in arg_tys {
+        let Type::Var(var) = type_for_readonly_check(arg_ty, subst) else {
+            continue;
+        };
+        match call.env.authored_type_binder(var, subst) {
+            Some(_) if binders.iter().any(|binder| binder.var == var) => {}
+            Some((name, bound)) => binders.push(RigidOperand {
+                var,
+                name,
+                bound,
+                instantiations: rigid_instantiations(var, subst),
+            }),
+            None => flexible_operand = true,
+        }
+    }
+    if binders.is_empty()
+        || binders
+            .iter()
+            .all(|binder| shape_rule_operands.contains(&binder.var))
+    {
+        return false;
+    }
+
+    // An odometer over the binders' instantiation lists, first binder slowest,
+    // so the reported combination is the same on every run.
+    let mut cursor = vec![0usize; binders.len()];
+    loop {
+        let assignment: Vec<(&RigidOperand<'_>, &Type)> = binders
+            .iter()
+            .zip(&cursor)
+            .map(|(binder, index)| (binder, &binder.instantiations[*index]))
+            .collect();
+        if let Some(rejections) = replay_at_instantiation(
+            call,
+            arg_tys,
+            result_ty,
+            &assignment,
+            vg,
+            subst,
+            adt_reg,
+            errors,
+        ) {
+            for rejection in rejections {
+                errors.push(at_rigid_instantiation(rejection, declaration, &assignment));
+            }
+            return true;
+        }
+        let Some(position) = (0..binders.len())
+            .rev()
+            .find(|position| cursor[*position] + 1 < binders[*position].instantiations.len())
+        else {
+            return !flexible_operand;
+        };
+        cursor[position] += 1;
+        for later in &mut cursor[position + 1..] {
+            *later = 0;
+        }
+    }
+}
+
+/// Replay `call` with each binder in `assignment` bound to its instantiation,
+/// in cloned solver state. `Some` carries the diagnostics the replay raised,
+/// which are withdrawn from `errors` so the caller can report them once, at
+/// the instantiation. A combination the binders' own restrictions reject is
+/// not one the declaration admits and decides nothing.
+#[allow(clippy::too_many_arguments)]
+fn replay_at_instantiation(
+    call: PostAppCall<'_>,
+    arg_tys: &[Type],
+    result_ty: &Type,
+    assignment: &[(&RigidOperand<'_>, &Type)],
+    vg: &VarGen,
+    subst: &Subst,
+    adt_reg: &AdtRegistry,
+    errors: &mut DiagnosticSink<'_>,
+) -> Option<Vec<CheckError>> {
+    let mut trial_subst = subst.clone();
+    for (binder, instantiation) in assignment {
+        if unify(&Type::Var(binder.var), instantiation, &mut trial_subst).is_err() {
+            return None;
+        }
+    }
+    let settled = arg_tys.iter().map(|ty| trial_subst.apply(ty)).collect();
+    let mut trial_vg = vg.clone();
+    let mut trial_product = InferenceProduct::default();
+    let checkpoint = errors.checkpoint();
+    trial_product.replay_post_app(
+        call,
+        settled,
+        result_ty,
+        &mut trial_vg,
+        &mut trial_subst,
+        adt_reg,
+        errors,
+    );
+    let rejections: Vec<CheckError> = errors.iter_since(checkpoint).cloned().collect();
+    errors.retain_since(checkpoint, |_| false);
+    (!rejections.is_empty()).then_some(rejections)
+}
+
+/// Name the instantiation a replayed rejection was raised at, and the repair.
+fn at_rigid_instantiation(
+    mut error: CheckError,
+    declaration: Option<&str>,
+    assignment: &[(&RigidOperand<'_>, &Type)],
+) -> CheckError {
+    let owner =
+        declaration.map_or_else(|| "its declaration".to_string(), |name| format!("`{name}`"));
+    let binders = assignment
+        .iter()
+        .map(|(binder, _)| match binder.bound {
+            Some(bound) => format!(
+                "`{}`, declared `{}: {}`",
+                binder.name,
+                binder.name,
+                bound.family_name()
+            ),
+            None => format!("`{}`, declared with no dtype-family bound", binder.name),
+        })
+        .collect::<Vec<_>>()
+        .join(" and ");
+    let at = assignment
+        .iter()
+        .map(|(binder, instantiation)| format!("`{} := {instantiation}`", binder.name))
+        .collect::<Vec<_>>()
+        .join(", ");
+    error.message = format!(
+        "{}: an operand's type is the authored type binder {binders} of {owner}, so the call \
+         must type-check at every instantiation {owner} admits, and it does not at {at} \
+         (spec/04-type-system.md §3.1.3 [04-INF-6], §5.9 [04-DTYPE-2])",
+        error.message
+    );
+    let repairs = assignment.iter().map(|(binder, _)| match binder.bound {
+        Some(bound) => format!(
+            "`{name}: {family}` denotes a scalar of that family at every instantiation, never a \
+             tensor, collection, or string. Declare the operand with the type this operation \
+             requires, such as `tensor[n, {name}]`, or narrow `{name}`'s bound to the dtypes the \
+             operation admits.",
+            name = binder.name,
+            family = bound.family_name(),
+        ),
+        None => format!(
+            "`{name}` declares no dtype-family bound, so it denotes every type. Declare the \
+             operand with the type this operation requires, or bound `{name}` with a dtype \
+             family the operation admits.",
+            name = binder.name,
+        ),
+    });
+    error.suggestions.splice(0..0, repairs);
+    error
 }

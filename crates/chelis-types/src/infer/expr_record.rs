@@ -968,32 +968,74 @@ pub(super) fn infer_cast(
             // by [05-OP-35]'s same-p `linspace` and `arange` graphs; a closed
             // cast outside such a declaration still rejects the name in the
             // resolver above.
+            //
+            // chelis#2158: every arm applies [05-OP-6]'s `cast_trunc` pair
+            // rule. A source dtype that is still a variable, an authored binder
+            // among them, is constrained rather than inspected: reading its
+            // restriction rejected an inference variable that a later binding
+            // makes a float, and admitting it skipped a binder that nothing
+            // ever binds.
+            let trunc_pair_rejected = |source_is_float: bool| {
+                mode == CastMode::Trunc
+                    && (!source_is_float
+                        || subst.tvar_restriction(target) != Some(TypeVarRestriction::ActiveInt))
+            };
+            let trunc_pair_rejection = || {
+                CheckError::new(
+                    CheckErrorKind::CastNonTensor,
+                    "`cast_trunc` requires a float source and an integer target ([05-OP-6]); use `cast` for other conversions".to_string(),
+                    vec![],
+                )
+            };
             return match resolved {
                 Type::Tensor(dims, source) if subst.tvar_restriction(target).is_some() => {
                     // [05-OP-63]: a dtype change preserves every dimension.
                     // The declaration's [04-DTYPE-2] bound is retained on the
                     // precision variable and checked at each instantiation.
-                    if mode == CastMode::Trunc {
-                        let source_is_float = match source {
-                            TensorPrec::Concrete(p) => p.is_float(),
-                            TensorPrec::Var(p) => {
-                                subst.tvar_restriction(p) == Some(TypeVarRestriction::ActiveFloat)
-                            }
-                        };
-                        if !source_is_float
-                            || subst.tvar_restriction(target) != Some(TypeVarRestriction::ActiveInt)
-                        {
-                            return report(errors, CheckError::new(
-                                CheckErrorKind::CastNonTensor,
-                                "`cast_trunc` requires a float source and an integer target ([05-OP-6]); use `cast` for other conversions".to_string(),
-                                vec![],
-                            ));
-                        }
+                    let source_is_float = match source {
+                        TensorPrec::Concrete(p) => p.is_float(),
+                        TensorPrec::Var(_) => true,
+                    };
+                    if trunc_pair_rejected(source_is_float) {
+                        return report(errors, trunc_pair_rejection());
+                    }
+                    if mode == CastMode::Trunc
+                        && let TensorPrec::Var(p) = source
+                        && let Some(error) = constrain_cast_source(
+                            p,
+                            TypeVarRestriction::ActiveFloat,
+                            mode,
+                            env,
+                            subst,
+                        )
+                    {
+                        return report(errors, error);
                     }
                     Type::Tensor(dims, TensorPrec::Var(target))
                 }
-                Type::Prim(source) if source.is_numeric() => Type::Var(target),
-                Type::Var(_) | Type::Error(_) => Type::Var(target),
+                Type::Prim(source) if source.is_numeric() => {
+                    if trunc_pair_rejected(source.is_float()) {
+                        return report(errors, trunc_pair_rejection());
+                    }
+                    Type::Var(target)
+                }
+                // The arm publishes a scalar at the target, so the source is a
+                // numeric scalar, and for `cast_trunc` a float one.
+                Type::Var(source) => {
+                    if trunc_pair_rejected(true) {
+                        return report(errors, trunc_pair_rejection());
+                    }
+                    let required = if mode == CastMode::Trunc {
+                        TypeVarRestriction::ActiveFloat
+                    } else {
+                        TypeVarRestriction::ActiveNumeric
+                    };
+                    if let Some(error) = constrain_cast_source(source, required, mode, env, subst) {
+                        return report(errors, error);
+                    }
+                    Type::Var(target)
+                }
+                Type::Error(_) => Type::Var(target),
                 other => report(
                     errors,
                     CheckError::new(
@@ -1025,6 +1067,21 @@ pub(super) fn infer_cast(
         }
     };
 
+    // chelis#2158: an authored binder whose bound admits an integer is named at
+    // the cast, whether it is a tensor source's precision or a scalar source.
+    // The float requirement itself is recorded where the settled source is
+    // decided, which discharge shares.
+    if mode == CastMode::Trunc
+        && let Some(error) = authored_cast_source_rejection(
+            &resolved,
+            TypeVarRestriction::ActiveFloat,
+            mode,
+            env,
+            subst,
+        )
+    {
+        return report(errors, error);
+    }
     cast_result_from_source(resolved, new_prec, mode, subst, vg, errors)
 }
 
@@ -1036,19 +1093,23 @@ pub(super) fn infer_cast(
 /// also runs the `CastOut` opacity check on the peeled source before reaching
 /// here, and discharge does not re-run it.
 ///
-/// It takes no substitution, no `VarGen` and no `DiagnosticSink`, which is the
-/// point: a suspended `Cast` constraint discharges from inside unification,
-/// where none of those are in hand, and it must reach the same verdict as the
-/// eager call that has all three.
+/// It takes no `VarGen` and no `DiagnosticSink`, which is the point: a
+/// suspended `Cast` constraint discharges from inside unification, where
+/// neither is in hand, and it must reach the same verdict as the eager call
+/// that has both. The substitution it does take is used only to record a
+/// `cast_trunc` source's float requirement on a precision variable
+/// ([`require_cast_source_family`]), which unification's own restriction
+/// table carries.
 ///
 /// A `Type::Var` source is not settled and does not reach here from discharge,
 /// which only runs once the variable is bound. `infer_cast` has its own
-/// earlier arm for a quantified target that tolerates a variable source
-/// without suspending it -- see the gap recorded on chelis#1489.
+/// earlier arm for a quantified target, which constrains a variable source
+/// rather than suspending it.
 pub(crate) fn cast_result_from_settled_source(
     resolved: Type,
     new_prec: Prim,
     mode: CastMode,
+    subst: &Subst,
 ) -> Result<Type, Box<CheckError>> {
     match resolved {
         Type::Tensor(dims, src_prec) => {
@@ -1063,6 +1124,20 @@ pub(crate) fn cast_result_from_settled_source(
                     TensorPrec::Var(_) => None,
                 };
                 if let Some(error) = trunc_pair_error(source, new_prec) {
+                    return Err(Box::new(error));
+                }
+                // chelis#2158: a precision variable is constrained here rather
+                // than admitted. An authored binder never binds, so admitting
+                // it until "unification binds it" admitted an `Int`-bounded
+                // tensor for good.
+                if let TensorPrec::Var(precision) = src_prec
+                    && let Some(error) = require_cast_source_family(
+                        precision,
+                        TypeVarRestriction::ActiveFloat,
+                        mode,
+                        subst,
+                    )
+                {
                     return Err(Box::new(error));
                 }
             }
@@ -1132,7 +1207,7 @@ pub(super) fn cast_result_from_source(
         // Every settled source, accepted or rejected, is decided by the one
         // function discharge also calls. There is no second copy of this
         // decision to disagree with.
-        settled => match cast_result_from_settled_source(settled, new_prec, mode) {
+        settled => match cast_result_from_settled_source(settled, new_prec, mode, subst) {
             Ok(result) => result,
             Err(error) => report(errors, *error),
         },
@@ -1183,8 +1258,10 @@ pub(crate) fn bounded_scalar_cast_result(
 /// truncating semantics for it.
 ///
 /// `source == None` means the operand's tensor precision is still a
-/// quantified variable; the pair is re-checked once unification binds it,
-/// so accepting it here is not a hole.
+/// variable, and this function decides only the target for it. Its callers
+/// record the source's float requirement on that variable with
+/// [`require_cast_source_family`] (chelis#2158): an authored binder is never
+/// bound, so no later binding would re-check it.
 pub(super) fn trunc_pair_error(source: Option<Prim>, target: Prim) -> Option<CheckError> {
     let hint = "`cast_trunc` truncates a float toward zero into an integer \
                 width ([05-OP-6]); use `cast` for every other conversion"
@@ -1207,6 +1284,136 @@ pub(super) fn trunc_pair_error(source: Option<Prim>, target: Prim) -> Option<Che
         )),
         _ => None,
     }
+}
+
+/// chelis#2158: record a cast's dtype-family requirement on the variable that
+/// stands for its source dtype, the precision of a tensor source or the type
+/// of a scalar one.
+///
+/// The requirement travels with the variable like every other family policy
+/// (chelis#1805). An inference variable is checked at whichever binding
+/// reaches it, so the verdict does not depend on inference order (chelis#1489),
+/// and an authored binder whose declared bound admits more than the cast
+/// accepts is reported against its declaration by
+/// `check_declared_dtype_bounds`, with the bound to declare. Only a variable
+/// whose family shares no dtype with the requirement is rejected here.
+pub(crate) fn require_cast_source_family(
+    variable: TypeVar,
+    required: TypeVarRestriction,
+    mode: CastMode,
+    subst: &Subst,
+) -> Option<CheckError> {
+    let operation = if mode == CastMode::Trunc {
+        "cast_trunc"
+    } else {
+        "cast"
+    };
+    let hint = format!(
+        "Declare the source's binder with the `{}` bound, or convert the source with `cast` \
+         first ([05-OP-6])",
+        required.family_name()
+    );
+    match subst.apply(&Type::Var(variable)) {
+        Type::Var(variable) => {
+            if subst.narrow_tvar_restriction(variable, required).is_ok() {
+                return None;
+            }
+            // A failed narrowing leaves the variable's own family in place.
+            let bound = subst.tvar_restriction(variable)?;
+            Some(CheckError::new(
+                CheckErrorKind::PrecisionMismatch,
+                format!(
+                    "`{operation}` requires a source of dtype family `{}` ([05-OP-6]), but the \
+                     source dtype is bounded by dtype family `{}` ({}), which shares no dtype \
+                     with it (spec/04-type-system.md §5.9 [04-DTYPE-2])",
+                    required.family_name(),
+                    bound.family_name(),
+                    bound.membership_gloss(),
+                ),
+                vec![hint],
+            ))
+        }
+        Type::Prim(prim) if !required.admits(prim) => Some(CheckError::new(
+            CheckErrorKind::PrecisionMismatch,
+            format!(
+                "`{operation}` requires a source of dtype family `{}` ([05-OP-6]), got `{}`",
+                required.family_name(),
+                prim.name(),
+            ),
+            vec![hint],
+        )),
+        _ => None,
+    }
+}
+
+/// chelis#2158: an authored binder standing for a cast's source dtype, the
+/// precision of a tensor `source` or the type of a scalar one, whose declared
+/// bound admits a dtype `required` does not.
+///
+/// Decided here, from the declaration, rather than by narrowing the binder:
+/// [04-DTYPE-2] puts the bound in the binder list, so no call site can change
+/// the verdict, and the scheme the declaration publishes stays its declared
+/// signature ([04-INF-6]). The same shape as a family-policy operation's
+/// verdict on a bounded precision variable (chelis#1805).
+fn authored_cast_source_rejection(
+    source: &Type,
+    required: TypeVarRestriction,
+    mode: CastMode,
+    env: &Env,
+    subst: &Subst,
+) -> Option<CheckError> {
+    let variable = match source {
+        Type::Tensor(_, TensorPrec::Var(precision)) => *precision,
+        Type::Var(variable) => *variable,
+        _ => return None,
+    };
+    let Type::Var(variable) = subst.apply(&Type::Var(variable)) else {
+        return None;
+    };
+    let (name, Some(bound)) = env.authored_type_binder(variable, subst)? else {
+        return None;
+    };
+    if bound.intersect(required) == Some(bound) {
+        return None;
+    }
+    let operation = if mode == CastMode::Trunc {
+        "cast_trunc"
+    } else {
+        "cast"
+    };
+    Some(CheckError::new(
+        CheckErrorKind::PrecisionMismatch,
+        format!(
+            "`{operation}` requires a source of dtype family `{}` ([05-OP-6]), but its source \
+             dtype is the declared type parameter `{name}`, whose `{}` bound ({}) admits dtypes \
+             outside `{}`; an authored binder must satisfy the operation at every instantiation \
+             its declaration admits (spec/04-type-system.md §3.1.3 [04-INF-6], §5.9 \
+             [04-DTYPE-2])",
+            required.family_name(),
+            bound.family_name(),
+            bound.membership_gloss(),
+            required.family_name(),
+        ),
+        vec![format!(
+            "Declare `{name}: {}` in the binder list, or convert the source with `cast` first \
+             ([05-OP-6])",
+            required.family_name()
+        )],
+    ))
+}
+
+/// [`authored_cast_source_rejection`], then [`require_cast_source_family`]:
+/// the whole source-dtype decision where the declaration's binders are in
+/// scope.
+fn constrain_cast_source(
+    variable: TypeVar,
+    required: TypeVarRestriction,
+    mode: CastMode,
+    env: &Env,
+    subst: &Subst,
+) -> Option<CheckError> {
+    authored_cast_source_rejection(&Type::Var(variable), required, mode, env, subst)
+        .or_else(|| require_cast_source_family(variable, required, mode, subst))
 }
 
 pub(super) fn cast_target_nominal_name(name: &str, adt_reg: &AdtRegistry) -> Option<String> {

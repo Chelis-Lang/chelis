@@ -584,6 +584,7 @@ impl DeferredOperandGate {
                     resolved.clone(),
                     target,
                     mode,
+                    subst,
                 ) {
                     Ok(settled) => {
                         self.reconcile_result(result, settled, subst);
