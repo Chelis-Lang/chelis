@@ -129,10 +129,10 @@ impl<'session> DiagnosticSink<'session> {
     }
 
     /// Enter a check unit for stack-exhaustion tracking. Entering the
-    /// OUTERMOST unit resets the recorded bail. Pair with
-    /// [`Self::exit_stack_scope`] on every return path.
+    /// OUTERMOST unit resets the recorded bail and the guarded-frame depth.
+    /// Pair with [`Self::exit_stack_scope`] on every return path.
     pub(crate) fn enter_stack_scope(&mut self) {
-        self.stack_bails.enter_scope();
+        self.stack_bails.enter_scope(self.native);
     }
 
     /// Leave a check unit entered with [`Self::enter_stack_scope`].

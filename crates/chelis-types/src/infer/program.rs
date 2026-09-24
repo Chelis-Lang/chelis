@@ -796,26 +796,22 @@ fn build_type_env_from_library_in_session_scoped(
     // (#908 producer switch).
     let normalized = normalize_program_input(library_exprs);
     let library_exprs = &normalized;
-    let mut sub_t = errors.native().profile_clock();
+    let sub_t = errors.native().profile_start();
     // Start from the empty (builtins + prelude ADTs) state.
     let empty = TypeEnv::empty();
     let mut state = empty.inner().clone();
 
     // Library IR declared-type lookup.
     let library_ir = build_ir_type_env(library_exprs, &mut errors.stack());
-    errors.native().profile_phase(
-        &mut sub_t,
-        "build_type_env_sub",
-        "build_ir_type_env_initial",
-    );
+    errors
+        .native()
+        .profile_phase(sub_t, "build_type_env_sub", "build_ir_type_env_initial");
 
     let product = infer_ir_program_with_state(library_exprs, &mut state, origin, errors);
     let stats = product.stats();
-    errors.native().profile_phase(
-        &mut sub_t,
-        "build_type_env_sub",
-        "infer_ir_program_with_state",
-    );
+    errors
+        .native()
+        .profile_phase(sub_t, "build_type_env_sub", "infer_ir_program_with_state");
     // chelis#930: inference may have abandoned its schedule. Stop before the
     // validators, which would otherwise report the un-inferred tail as program
     // errors and spend the rest of the phase doing it.
@@ -828,18 +824,14 @@ fn build_type_env_from_library_in_session_scoped(
         &product.top_level_references,
         errors,
     );
-    errors.native().profile_phase(
-        &mut sub_t,
-        "build_type_env_sub",
-        "validate_semantic_program",
-    );
+    errors
+        .native()
+        .profile_phase(sub_t, "build_type_env_sub", "validate_semantic_program");
     validate_tensor_precisions_in_program(library_exprs, errors);
     crate::invariants::validate_type_invariants_in_program_with_sink(library_exprs, errors);
-    errors.native().profile_phase(
-        &mut sub_t,
-        "build_type_env_sub",
-        "validate_tensor_precisions",
-    );
+    errors
+        .native()
+        .profile_phase(sub_t, "build_type_env_sub", "validate_tensor_precisions");
     // Surface a stack-exhaustion bail from the passes above as a hard
     // located error before the gate (and before the errors drain below).
     errors.drain_stack_bail();
@@ -858,11 +850,9 @@ fn build_type_env_from_library_in_session_scoped(
             library_def_names.insert(name.to_string());
         }
     }
-    errors.native().profile_phase(
-        &mut sub_t,
-        "build_type_env_sub",
-        "collect_library_def_names",
-    );
+    errors
+        .native()
+        .profile_phase(sub_t, "build_type_env_sub", "collect_library_def_names");
 
     // Build a richer `ir_types` by annotating library exprs against
     // the now-populated state and re-extracting type metadata. The raw
@@ -883,7 +873,7 @@ fn build_type_env_from_library_in_session_scoped(
     let library_annotated =
         annotate_top_levels(library_exprs, &product, annotation_context, errors);
     errors.native().profile_phase(
-        &mut sub_t,
+        sub_t,
         "build_type_env_sub",
         "annotate_library_exprs_outer_loop",
     );
@@ -892,7 +882,7 @@ fn build_type_env_from_library_in_session_scoped(
     }
     let library_ir_annotated = build_ir_type_env(&library_annotated, &mut errors.stack());
     errors.native().profile_phase(
-        &mut sub_t,
+        sub_t,
         "build_type_env_sub",
         "build_ir_type_env_from_annotated",
     );
@@ -1375,7 +1365,7 @@ fn check_ir_with_signature_context_in_session_scoped(
     // (#908 producer switch).
     let normalized = normalize_program_input(new_exprs);
     let new_exprs = &normalized;
-    let mut sub_t = errors.native().profile_clock();
+    let sub_t = errors.native().profile_start();
     let mut state = context.resume_for_new_check();
 
     // New-code declared types (IR) layered on top of library's.
@@ -1388,7 +1378,7 @@ fn check_ir_with_signature_context_in_session_scoped(
         .collect();
     errors
         .native()
-        .profile_phase(&mut sub_t, "check_ir_sub", "build_ir_and_combine");
+        .profile_phase(sub_t, "check_ir_sub", "build_ir_and_combine");
 
     // Library is already validated; only run validate / inference on
     // new exprs. Inference's canonical collector binds the new-code's
@@ -1397,7 +1387,7 @@ fn check_ir_with_signature_context_in_session_scoped(
     let stats = product.stats();
     errors
         .native()
-        .profile_phase(&mut sub_t, "check_ir_sub", "infer_ir_program_with_state");
+        .profile_phase(sub_t, "check_ir_sub", "infer_ir_program_with_state");
     // chelis#930: see `build_type_env_from_library_in_session` — stop before
     // the validators if inference abandoned its schedule.
     if cancellation_gate(errors) {
@@ -1415,12 +1405,12 @@ fn check_ir_with_signature_context_in_session_scoped(
     );
     errors
         .native()
-        .profile_phase(&mut sub_t, "check_ir_sub", "validate_semantic_program");
+        .profile_phase(sub_t, "check_ir_sub", "validate_semantic_program");
     validate_tensor_precisions_in_program(new_exprs, errors);
     crate::invariants::validate_type_invariants_in_program_with_sink(new_exprs, errors);
     errors
         .native()
-        .profile_phase(&mut sub_t, "check_ir_sub", "validate_tensor_precisions");
+        .profile_phase(sub_t, "check_ir_sub", "validate_tensor_precisions");
     // Surface any stack-exhaustion bail from the passes above as a hard
     // located error (covered-or-rejected) before the empty-errors gate.
     errors.drain_stack_bail();
@@ -1433,7 +1423,7 @@ fn check_ir_with_signature_context_in_session_scoped(
     let annotated_exprs = annotate_ir_program(new_exprs, &product, errors);
     errors
         .native()
-        .profile_phase(&mut sub_t, "check_ir_sub", "annotate_ir_program");
+        .profile_phase(sub_t, "check_ir_sub", "annotate_ir_program");
     // Annotation also recurses (annotate_expr_with_scope); if it bailed on
     // low stack, reject rather than return a partially-annotated program.
     errors.drain_stack_bail();
@@ -1455,7 +1445,7 @@ fn check_ir_with_signature_context_in_session_scoped(
     }
     errors
         .native()
-        .profile_phase(&mut sub_t, "check_ir_sub", "annotated_type_env_build");
+        .profile_phase(sub_t, "check_ir_sub", "annotated_type_env_build");
     let checked = finalize_checked_program(
         annotated_exprs,
         annotated_type_env,
@@ -1785,7 +1775,7 @@ pub(super) fn infer_ir_program_with_state(
             }
             let (module, expr) = &items[declaration_index];
             product.begin_root(expr, &mut errors.stack());
-            let mut decl_clock = errors.native().profile_clock();
+            let decl_clock = errors.native().profile_start();
             let decl_name = top_level_decl_name(expr);
             errors.set_opacity_current_item(
                 crate::opacity::module_key_for_item(module.as_deref(), decl_name),
@@ -1840,7 +1830,7 @@ pub(super) fn infer_ir_program_with_state(
             );
             product.finish_root(&mut state.subst, errors);
             errors.native().profile_phase(
-                &mut decl_clock,
+                decl_clock,
                 "infer_ir_decl",
                 top_level_decl_name(expr).unwrap_or("<anon>"),
             );

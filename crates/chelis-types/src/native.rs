@@ -7,18 +7,25 @@
 //! is one platform call on this explicitly owned state. Semantic code receives
 //! `&mut NativeServices` from the embedding shell and never reaches thread
 //! locals, globals, the environment, the clock, or stderr directly.
+//! [`sha256_concat`] is the one pure primitive: the checker's only use of the
+//! `sha2` crate.
 //!
 //! The primitives are the trusted boundary of the functional model. Each is
-//! documented with the Lean model it is intended to have.
+//! documented with the Lean model it is intended to have. Their signatures
+//! mention only `NativeServices` itself, the separately modeled
+//! [`CancelToken`] (shell-only constructor argument), std types, and
+//! closures, and `NativeServices` has no trait impls, so the Lean model can be
+//! written before any crate is extracted.
 
 use std::time::Instant;
+
+use sha2::{Digest, Sha256};
 
 use crate::cancel::CancelToken;
 use crate::infer::{FALLBACK_MAX_DEPTH, GROW_SEGMENT_BYTES, STACK_RED_ZONE_BYTES};
 
 /// Native effects available to one checking invocation. Constructed by the
 /// embedding shell and threaded by `&mut` through every public checker entry.
-#[derive(Debug)]
 pub struct NativeServices {
     /// Shared cancellation flag of this invocation, if the shell armed one.
     cancel: Option<CancelToken>,
@@ -27,39 +34,47 @@ pub struct NativeServices {
     depth: usize,
     /// Stack segment size used by [`Self::with_grown_stack`].
     grow_segment_bytes: usize,
-    /// Whether [`Self::profile_phase`] reports phase timings on stderr.
-    profiling: bool,
+    /// Profiling phase marks, `Some` only when profiling is enabled: one per
+    /// [`Self::profile_start`], each holding the end of its latest phase.
+    /// Marks are never reused, so nested or re-entered profiled scopes keep
+    /// independent clocks.
+    profile_marks: Option<Vec<Instant>>,
 }
 
-/// Opaque profiling-clock reading. `None` when profiling is disabled, so a
-/// disabled invocation never reads the clock.
-#[derive(Debug)]
-pub(crate) struct ProfileClock(Option<Instant>);
-
 impl NativeServices {
-    /// Services for one invocation, polling `cancel` when present. Profiling
-    /// is off and the production stack segment is used.
+    /// Primitive. Services for one invocation, polling `cancel` when present.
+    /// Profiling is off and the production stack segment is used. Shell-only:
+    /// extracted code receives services and never constructs them.
+    ///
+    /// Model: an arbitrary native state (the correspondence theorems quantify
+    /// over it).
     pub fn new(cancel: Option<CancelToken>) -> Self {
         Self {
             cancel,
             depth: 0,
             grow_segment_bytes: GROW_SEGMENT_BYTES,
-            profiling: false,
+            profile_marks: None,
         }
     }
 
-    /// Enable or disable per-phase profiling on stderr. The shell decides
-    /// (historically from `CHELIS_PROFILE_COMPILE_CONTEXT_DETAIL=1`).
+    /// Primitive. Enable or disable per-phase profiling on stderr. The shell
+    /// decides (historically from `CHELIS_PROFILE_COMPILE_CONTEXT_DETAIL=1`).
+    /// Shell-only.
+    ///
+    /// Model: identity.
     pub fn with_profiling(mut self, enabled: bool) -> Self {
-        self.profiling = enabled;
+        self.profile_marks = enabled.then(Vec::new);
         self
     }
 
-    /// Test-only stack segment size for [`Self::with_grown_stack`]. The
-    /// recursion-depth-guard corpus shrinks the segment to a few MiB so the
-    /// per-site stack guards remain exercised; `0` keeps the production
+    /// Primitive. Test-only stack segment size for [`Self::with_grown_stack`].
+    /// The recursion-depth-guard corpus shrinks the segment to a few MiB so
+    /// the per-site stack guards remain exercised; `0` keeps the production
     /// segment. Not for production use: a too-small value makes a
     /// legitimately deep program bail where it would otherwise check.
+    /// Shell-only.
+    ///
+    /// Model: identity.
     #[doc(hidden)]
     pub fn with_grow_segment_bytes_for_test(mut self, bytes: usize) -> Self {
         self.grow_segment_bytes = if bytes > 0 { bytes } else { GROW_SEGMENT_BYTES };
@@ -102,6 +117,16 @@ impl NativeServices {
         self.depth = self.depth.saturating_sub(1);
     }
 
+    /// Primitive. Forget every guarded frame. Called when the OUTERMOST check
+    /// unit is entered: a check that unwound out of guarded walkers never ran
+    /// their frame exits, and its leftover depth must not make the next check
+    /// on these services trip the fallback cap early.
+    ///
+    /// Model: `depth := 0`.
+    pub(crate) fn reset_frames(&mut self) {
+        self.depth = 0;
+    }
+
     /// Primitive. Run `f` on a freshly allocated native stack segment
     /// (`stacker::grow`) of the production size or the test override.
     ///
@@ -119,23 +144,47 @@ impl NativeServices {
         stacker::grow(self.grow_segment_bytes, || f(self))
     }
 
-    /// Primitive. Read the profiling clock when profiling is enabled.
+    /// Primitive. Start a profiled scope and return its mark. When profiling
+    /// is enabled this reads the clock; otherwise it returns `0` and reads
+    /// nothing.
     ///
-    /// Model: an opaque unit value.
-    pub(crate) fn profile_clock(&mut self) -> ProfileClock {
-        ProfileClock(self.profiling.then(Instant::now))
+    /// Model: an arbitrary `usize`; no effect on checking.
+    pub(crate) fn profile_start(&mut self) -> usize {
+        match &mut self.profile_marks {
+            Some(marks) => {
+                marks.push(Instant::now());
+                marks.len() - 1
+            }
+            None => 0,
+        }
     }
 
     /// Primitive. When profiling is enabled, report on stderr the time since
-    /// `clock` as `"{scope}: {seconds:>8.4}s {label}"` and restart `clock`.
+    /// `mark`'s latest phase as `"{scope}: {seconds:>8.4}s {label}"` and start
+    /// its next phase.
     ///
     /// Model: no-op.
-    pub(crate) fn profile_phase(&mut self, clock: &mut ProfileClock, scope: &str, label: &str) {
-        if let Some(start) = clock.0 {
+    pub(crate) fn profile_phase(&mut self, mark: usize, scope: &str, label: &str) {
+        if let Some(start) = self
+            .profile_marks
+            .as_mut()
+            .and_then(|marks| marks.get_mut(mark))
+        {
             eprintln!("{scope}: {:>8.4}s {label}", start.elapsed().as_secs_f64());
-            clock.0 = Some(Instant::now());
+            *start = Instant::now();
         }
     }
+}
+
+/// Primitive. SHA-256 digest of the in-order concatenation of `parts`.
+///
+/// Model: `sha256 (parts.flatten)` (FIPS 180-4).
+pub(crate) fn sha256_concat(parts: &[&[u8]]) -> [u8; 32] {
+    let mut hasher = Sha256::new();
+    for part in parts {
+        hasher.update(part);
+    }
+    hasher.finalize().into()
 }
 
 #[cfg(test)]
@@ -188,5 +237,43 @@ mod tests {
         token.cancel();
         let observed = native.with_grown_stack(NativeServices::cancellation_observed);
         assert!(observed);
+    }
+
+    /// A check that unwinds out of guarded walkers never runs their frame
+    /// exits. Services reused after the caught unwind must start the next
+    /// check like fresh services: on a platform that cannot report remaining
+    /// stack, leftover depth would trip the `depth > FALLBACK_MAX_DEPTH`
+    /// fallback before the new check has recursed at all.
+    #[test]
+    fn check_after_a_caught_unwind_starts_like_fresh_services() {
+        let mut reused = NativeServices::new(None);
+        let unwound = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            crate::session::run_test_session(&mut reused, |sink| {
+                sink.enter_stack_scope();
+                for _ in 0..=FALLBACK_MAX_DEPTH {
+                    assert!(!sink.frame_exhausted("unwinding_walker", || None));
+                }
+                panic!("guarded walker panicked mid-descent");
+            })
+        }));
+        assert!(unwound.is_err());
+        assert!(
+            reused.depth > FALLBACK_MAX_DEPTH,
+            "the unwind must leave its frames unexited for this test to mean anything"
+        );
+
+        let depth_at_check_entry = |native: &mut NativeServices| {
+            crate::session::run_test_session(native, |sink| {
+                sink.enter_stack_scope();
+                let depth = sink.stack().native().depth;
+                sink.exit_stack_scope();
+                depth
+            })
+            .0
+        };
+        assert_eq!(
+            depth_at_check_entry(&mut reused),
+            depth_at_check_entry(&mut NativeServices::new(None))
+        );
     }
 }

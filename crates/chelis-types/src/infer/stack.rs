@@ -111,12 +111,14 @@ pub(crate) struct StackBailRecord {
 }
 
 impl StackBailRecord {
-    /// Enter a check unit. Entering the OUTERMOST scope resets the bail;
-    /// nested scopes are no-ops for the reset. Pair with [`Self::exit_scope`]
-    /// on every return path.
-    pub(crate) fn enter_scope(&mut self) {
+    /// Enter a check unit. Entering the OUTERMOST scope resets the bail and
+    /// the services' guarded-frame depth (a previous check that unwound out
+    /// of guarded walkers left its frames unexited); nested scopes are no-ops
+    /// for the reset. Pair with [`Self::exit_scope`] on every return path.
+    pub(crate) fn enter_scope(&mut self, native: &mut NativeServices) {
         if self.scope_depth == 0 {
             self.first = None;
+            native.reset_frames();
         }
         self.scope_depth += 1;
     }
