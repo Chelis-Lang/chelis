@@ -193,7 +193,9 @@ The Cargo entrypoint observes actual rustc units and build-script executions,
 binds exact Cargo artifacts to compiler-output bytes, and checks cached inputs
 and output digests. Observed compilations withhold the compiler's artifact
 notices, including notices a compiler cache replays, so Cargo starts a
-dependent only after the unit's receipt exists.
+dependent only after the unit's receipt exists. The driver gives Cargo the
+resolved target directory, whether configured or passed as `--target-dir`,
+because Cargo copies its `.` and `..` segments into every path it derives.
 Rustc's dependency metadata keeps exactly the files rustc read. The observer
 adds only its own state: the unit's receipt, bindings and digest index, so a
 pruned or partial observation store rebuilds the unit instead of failing its
@@ -207,7 +209,8 @@ what its compiler reads. Only producer units retain the owning workspace's
 manifest, toolchain file and Cargo configuration, and their stamps cover those
 files too; other units record the declarations' effect in their observed
 compiler invocation. A cached input that still changes without a rebuild, such
-as a mutated custom sysroot, fails the build with the stale package's name, and
+as a mutated custom sysroot or a selectable file added to a directory that held
+no selected input, fails the build with the stale package's name, and
 `cargo clean -p <package>` followed by a managed build recovers. A unit that an
 unmanaged Cargo built has no observation, so its target must be rebuilt under
 the managed driver; there is no fallback descriptor and no automatic deletion

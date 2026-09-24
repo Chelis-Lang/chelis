@@ -1429,3 +1429,12 @@ class RedTeamRegressionTests(unittest.TestCase):
             f"no subdirectory closure witness among {sorted(paths)}",
         )
 
+    def test_the_docstring_source_counts_match_the_frozen_list(self) -> None:
+        rust = sum(1 for path in oracle.INVENTORY_SOURCES if path.endswith(".rs"))
+        native = len(oracle.INVENTORY_SOURCES) - rust
+        source = Path(oracle.__file__).read_text(encoding="utf-8")
+        self.assertIn(
+            "Seventy-six are Rust and eleven are C, C++, or Objective-C sources",
+            source,
+        )
+        self.assertEqual((rust, native), (76, 11))

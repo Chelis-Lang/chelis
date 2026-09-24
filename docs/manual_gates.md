@@ -110,11 +110,12 @@ execution; do not treat an empty ordinary run as producer evidence or invoke
 the heavy suite from its own nested Cargo builds.
 
 The daily 03:17 UTC and manually dispatched `heavy-e2e.yml` workflow owns both
-ignored rows on `ubuntu-latest` and Apple Silicon `macos-latest`. It installs a
-real second Rust compiler (1.97.0, distinct from the repository's 1.98.0 pin),
-not a wrapper with a forged version. Both scenarios are mandatory. These owner
-commands describe required acceptance, not a claim that a particular candidate
-has passed them.
+ignored rows on `ubuntu-latest`. It installs a real second Rust compiler
+(1.97.0, distinct from the repository's 1.98.0 pin), not a wrapper with a
+forged version. Apple Silicon macOS evidence, including the Mach-O records,
+comes from a manual run of both rows on a native Mac, not from the nightly.
+Both scenarios are mandatory on both platforms. These owner commands describe
+required acceptance, not a claim that a particular candidate has passed them.
 
 Run from the repository root on native Linux or macOS with the README's C/C++
 compiler, CMake, libclang, native numerical-library prerequisites, cargo-nextest,

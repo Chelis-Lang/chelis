@@ -295,7 +295,8 @@ def check_receipt(receipt, captured_by_path=None):
         raise ObservationError("incomplete runtime dependency observation: " + "; ".join(receipt["errors"]))
     for output in receipt["outputs"]:
         if digest(Path(output["path"]).read_bytes()) != output["digest"]:
-            raise ObservationError(f"changed compiler output: {output['path']}")
+            name = receipt["unit"]["package"]["name"]
+            raise ObservationError(f"changed compiler output: {output['path']}; {name} was rebuilt outside the managed driver, so run `cargo clean -p {name}` and rebuild")
     required, captured = capture(refreshed_roots(receipt["roots"]), captured_by_path)
     if required != receipt["required_inputs"] or captured != receipt["captured"]:
         name = receipt["unit"]["package"]["name"]

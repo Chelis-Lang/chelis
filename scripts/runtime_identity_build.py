@@ -104,6 +104,28 @@ def metadata_arguments(arguments):
     return result
 
 
+def canonical_target(arguments, configured):
+    """Resolve the target directory once and give Cargo only that spelling.
+
+    Cargo keeps `.` and `..` segments of a target directory in every path it
+    derives, such as OUT_DIR, and identity path mappings accept only resolved
+    paths. `--target-dir` takes precedence over `configured`, the directory
+    `cargo metadata` reports from the environment and configuration. Return
+    the arguments with that option resolved, and the resolved directory.
+    """
+    rewritten = list(arguments)
+    end = rewritten.index("--") if "--" in rewritten else len(rewritten)
+    for index in range(end):
+        if rewritten[index] == "--target-dir" and index + 1 < end:
+            rewritten[index + 1] = os.path.realpath(rewritten[index + 1])
+            return rewritten, rewritten[index + 1]
+        if rewritten[index].startswith("--target-dir="):
+            directory = os.path.realpath(rewritten[index].removeprefix("--target-dir="))
+            rewritten[index] = "--target-dir=" + directory
+            return rewritten, directory
+    return rewritten, os.path.realpath(configured)
+
+
 def event_receipt(event, state):
     found = None
     for filename in observer.cargo_output_files(event):
@@ -250,7 +272,12 @@ def run(cargo, arguments):
     if explicit_root and (not Path(explicit_root).is_dir() or Path(explicit_root).resolve() != workspace.resolve()):
         raise observer.ObservationError("explicit CHELIS_IDENTITY_WORKSPACE is missing or differs from Cargo's actual workspace root")
     source = Path(__file__).resolve().parents[1]
-    state = Path(environment.get("CHELIS_IDENTITY_STATE", str(Path(metadata["target_directory"]) / "runtime-identity-observations"))).absolute()
+    arguments, target = canonical_target(arguments, metadata["target_directory"])
+    if target != metadata["target_directory"]:
+        # The environment overrides a configured directory; a resolved
+        # `--target-dir` names the same one.
+        environment["CARGO_TARGET_DIR"] = target
+    state = Path(environment.get("CHELIS_IDENTITY_STATE", str(Path(target) / "runtime-identity-observations"))).absolute()
     state.mkdir(parents=True, exist_ok=True)
     helper_target = state / "helper-target"
     bootstrap_env = {key: value for key, value in environment.items() if not key.startswith("CHELIS_IDENTITY_")}
@@ -296,7 +323,8 @@ def run(cargo, arguments):
         environment["CHELIS_IDENTITY_WORKSPACE_WRAPPER"] = observed["path"]
     if environment.get("RUSTC_WRAPPER") and environment["RUSTC_WRAPPER"] != environment.get("CHELIS_IDENTITY_HELPER"):
         environment["CHELIS_IDENTITY_INNER_WRAPPER"] = observer.transparent_wrapper(environment["RUSTC_WRAPPER"])
-    environment.update({"RUSTC_WRAPPER": str(helper), "CHELIS_IDENTITY_HELPER": str(helper), "CHELIS_IDENTITY_PROTOCOL": "1", "CHELIS_IDENTITY_BACKEND": "cargo", "CHELIS_IDENTITY_WORKSPACE": str(workspace), "CHELIS_IDENTITY_STATE": str(state)})
+    # The helper runs the observer with this checked interpreter, not PATH python3.
+    environment.update({"RUSTC_WRAPPER": str(helper), "CHELIS_IDENTITY_HELPER": str(helper), "CHELIS_IDENTITY_PYTHON": sys.executable, "CHELIS_IDENTITY_PROTOCOL": "1", "CHELIS_IDENTITY_BACKEND": "cargo", "CHELIS_IDENTITY_WORKSPACE": str(workspace), "CHELIS_IDENTITY_STATE": str(state)})
     if environment.get("CHELIS_IDENTITY_PROVENANCE") not in {"source-worktree", "sealed-distribution"}:
         raise observer.ObservationError("CHELIS_IDENTITY_PROVENANCE must explicitly select source-worktree or sealed-distribution")
     # An analysis tool may compile exactly one crate through its own rustc

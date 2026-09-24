@@ -93,12 +93,14 @@ jobs:
 
   # Producer-only #2394 proof. Neither this job nor the independent Nix
   # runtime-identity-producers check changes production runtime selection.
+  # Linux only by maintainer decision: a nightly macOS leg costs 10x billing.
+  # Apple Silicon evidence comes from the manual run in docs/manual_gates.md.
   runtime-identity-producers:
     name: Runtime Identity Producers (${{ matrix.os }})
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        os: [ubuntu-latest]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 240
     env:
@@ -115,13 +117,6 @@ jobs:
       - name: Install Linux native prerequisites
         if: runner.os == 'Linux'
         run: python3 scripts/ci_apt_get.py gcc g++ clang cmake libclang-dev libopenblas-dev libgmp-dev libmpfr-dev
-
-      - name: Install macOS native prerequisites
-        if: runner.os == 'macOS'
-        run: |
-          set -euo pipefail
-          test "$(uname -m)" = "arm64"
-          brew list cmake >/dev/null 2>&1 || brew install cmake
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable

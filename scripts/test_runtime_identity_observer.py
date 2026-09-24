@@ -49,10 +49,27 @@ class ObservationFailureTests(unittest.TestCase):
     def test_changed_output_is_rejected_before_derivation(self):
         artifact = self.root / "libdep.rlib"
         artifact.write_bytes(b"compiler output")
-        receipt = {"protocol": 1, "errors": [], "outputs": [{"path": str(artifact), "digest": observer.digest(artifact.read_bytes())}]}
+        receipt = {"protocol": 1, "errors": [], "unit": {"package": {"name": "dep"}},
+                   "outputs": [{"path": str(artifact), "digest": observer.digest(artifact.read_bytes())}]}
         artifact.write_bytes(b"replaced compiler output")
-        with self.assertRaisesRegex(observer.ObservationError, "changed compiler output"):
+        with self.assertRaisesRegex(observer.ObservationError, "changed compiler output: .*cargo clean -p dep"):
             observer.check_receipt(receipt)
+
+    def test_managed_builds_resolve_the_target_directory(self):
+        # Cargo keeps `..` in every path it derives from its target directory,
+        # such as OUT_DIR, and identity path mappings reject such paths.
+        (self.root / "sub").mkdir()
+        spelled = str(self.root / "sub" / ".." / "target")
+        resolved = os.path.realpath(self.root / "target")
+        self.assertEqual(driver.canonical_target(["build"], spelled), (["build"], resolved))
+        # `--target-dir` wins and is itself resolved; after `--` the arguments
+        # belong to the program Cargo runs.
+        for option in (["--target-dir", spelled], ["--target-dir=" + spelled]):
+            arguments, target = driver.canonical_target(["build", *option, "--", "--target-dir", "x"], "/elsewhere")
+            self.assertEqual(target, resolved)
+            self.assertIn(resolved, " ".join(arguments[:-3]))
+            self.assertNotIn(spelled, " ".join(arguments))
+            self.assertEqual(arguments[-3:], ["--", "--target-dir", "x"])
 
     def test_debug_directory_cannot_supply_a_native_output_binding(self):
         artifact = self.root / "program"
