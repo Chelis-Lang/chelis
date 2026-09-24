@@ -361,7 +361,11 @@ fn ownership_lowering_keeps_the_claim_live_through_its_initializer_owner() {
         .expect("initializer owner")
         .id;
     let owned = chelis_ir::ownership::verify_ownership(
-        chelis_ir::ownership::lower_dag_ownership(dag).expect("ownership lowering"),
+        chelis_ir::ownership::lower_dag_ownership(
+            dag,
+            &mut chelis_ir::capacity_key::CapacityScopeSupply::native(),
+        )
+        .expect("ownership lowering"),
     )
     .expect("ownership verification");
     let plan = chelis_ir::ownership::plan_c_storage(owned).expect("C storage plan");

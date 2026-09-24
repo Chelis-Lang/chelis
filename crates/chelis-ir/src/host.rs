@@ -20320,7 +20320,7 @@ mod tests {
             let plan = lower_named_tensor_entry_execution_plan(&fixed, "main", runtime)
                 .expect("fixed entry lowers")
                 .expect("fixed entry retains its execution plan");
-            plan.verify_ownership()
+            plan.verify_ownership(&mut crate::capacity_key::CapacityScopeSupply::native())
                 .expect("entry plan validates and seals against its DAG");
 
             let ordinary = deep_check(include_str!(
@@ -20368,7 +20368,7 @@ mod tests {
                             if parameter == "unused" && !claims.is_empty()
                     ))
             );
-            plan.verify_ownership()
+            plan.verify_ownership(&mut crate::capacity_key::CapacityScopeSupply::native())
                 .expect("authored interface plan remains sealed");
         })
     }

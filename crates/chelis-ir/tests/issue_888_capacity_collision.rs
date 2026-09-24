@@ -2,6 +2,7 @@
 //! The key-level witness lives in capacity_key::tests, where construction is
 //! private. No production compatibility normalizer survives just for a test.
 
+use chelis_ir::capacity_key::CapacityScopeSupply;
 use chelis_ir::dag::{Dag, DimInfo, RiscOp, TensorType};
 use chelis_ir::ownership::{lower_dag_ownership, plan_c_storage, verify_ownership};
 use chelis_types::types::Prim;
@@ -29,7 +30,9 @@ fn slots_for(final_type: TensorType) -> usize {
     let b = dag.add_node(RiscOp::Neg, vec![a], small, None);
     let c = dag.add_node(RiscOp::Neg, vec![b], final_type, None);
     dag.add_root(c);
-    let program = verify_ownership(lower_dag_ownership(dag).unwrap()).unwrap();
+    let program =
+        verify_ownership(lower_dag_ownership(dag, &mut CapacityScopeSupply::native()).unwrap())
+            .unwrap();
     plan_c_storage(program).unwrap().slots().len()
 }
 
@@ -84,7 +87,10 @@ fn expired_owned_slots_require_exact_representation_in_both_lanes() {
             );
             dag.add_root(c);
             for hip in [false, true] {
-                let verified = verify_ownership(lower_dag_ownership(dag.clone()).unwrap()).unwrap();
+                let verified = verify_ownership(
+                    lower_dag_ownership(dag.clone(), &mut CapacityScopeSupply::native()).unwrap(),
+                )
+                .unwrap();
                 let shared = if hip {
                     let plan = plan_hip_storage(verified).unwrap();
                     plan.slot_for_node(a) == plan.slot_for_node(c)

@@ -152,7 +152,11 @@ fn result_claim_witnesses_survive_rebuilds_without_joining_same_labels() {
             let errors = chelis_ir::verify::verify(&rebuilt);
             assert!(errors.is_empty(), "{errors:?}");
             let owned = chelis_ir::ownership::verify_ownership(
-                chelis_ir::ownership::lower_dag_ownership(rebuilt.clone()).unwrap(),
+                chelis_ir::ownership::lower_dag_ownership(
+                    rebuilt.clone(),
+                    &mut chelis_ir::capacity_key::CapacityScopeSupply::native(),
+                )
+                .unwrap(),
             )
             .unwrap();
             let plan = chelis_ir::ownership::plan_c_storage(owned).unwrap();

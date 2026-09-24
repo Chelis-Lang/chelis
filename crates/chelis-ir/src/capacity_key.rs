@@ -214,15 +214,41 @@ enum CapacitySource {
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub(crate) struct CapacityScope(u64);
 
-static NEXT_CAPACITY_SCOPE: AtomicU64 = AtomicU64::new(1);
+/// Explicit source of capacity-scope identities, passed by `&mut` to every
+/// ownership lowering that seals a DAG.
+///
+/// Scopes must stay distinct across every verified program in the process,
+/// including programs lowered by different invocations, supplies, or threads,
+/// so the native supply is a handle on one process-global sequence rather
+/// than a per-invocation counter. It is deliberately not `Clone`: a copied
+/// model state would replay identities.
+#[derive(Debug)]
+pub struct CapacityScopeSupply {
+    _native: (),
+}
 
-pub(crate) fn fresh_capacity_scope() -> CapacityScope {
-    let scope = NEXT_CAPACITY_SCOPE
-        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
-            current.checked_add(1)
-        })
-        .expect("capacity-scope identity space exhausted");
-    CapacityScope(scope)
+impl CapacityScopeSupply {
+    /// Acquire the native supply. Every native supply draws from the same
+    /// process-global sequence, which is never reset.
+    pub const fn native() -> Self {
+        Self { _native: () }
+    }
+
+    /// Primitive: allocate the next capacity scope.
+    ///
+    /// Model: next element of a process-global, strictly increasing identity
+    /// sequence starting at 1 (opaque supply state; never reset per
+    /// invocation; exhaustion is a panic, never a wrap-around). Native: one
+    /// relaxed checked increment of a process-global `AtomicU64`.
+    pub(crate) fn fresh(&mut self) -> CapacityScope {
+        static NEXT_CAPACITY_SCOPE: AtomicU64 = AtomicU64::new(1);
+        let scope = NEXT_CAPACITY_SCOPE
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+                current.checked_add(1)
+            })
+            .expect("capacity-scope identity space exhausted");
+        CapacityScope(scope)
+    }
 }
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
@@ -626,7 +652,8 @@ mod tests {
     }
 
     fn verified(dag: Dag) -> crate::ownership::VerifiedDagProgram {
-        verify_ownership(lower_dag_ownership(dag).unwrap()).unwrap()
+        verify_ownership(lower_dag_ownership(dag, &mut CapacityScopeSupply::native()).unwrap())
+            .unwrap()
     }
 
     #[test]

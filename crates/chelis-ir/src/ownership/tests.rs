@@ -16,6 +16,7 @@ use super::ir::{
     Unit, UnitId, UnitKind,
 };
 use super::{DagDirective, DagOwnershipPlan, LiveByteBound};
+use crate::capacity_key::CapacityScopeSupply;
 use crate::host::{
     ConcreteHostFunction, ConcreteHostProgram, HostBinding, HostDisplayRoot, HostExpr,
     HostExprKind, HostFunctionOrigin,
@@ -1907,7 +1908,7 @@ fn dag_verification_checks_mutated_directives_and_terminal_completeness() {
     let load = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], ty.clone(), None);
     let copied = dag.add_node(RiscOp::Copy, vec![load], ty.clone(), None);
     let dropped = dag.add_node(RiscOp::Drop, vec![copied], ty.clone(), None);
-    let mut plan = DagOwnershipPlan::lower(&dag).unwrap();
+    let mut plan = DagOwnershipPlan::lower(&dag, &mut CapacityScopeSupply::native()).unwrap();
     plan.verify(&dag).unwrap();
     plan.directives[2] = DagDirective::OwnedDrop {
         node: dropped,
@@ -1922,7 +1923,8 @@ fn dag_verification_checks_mutated_directives_and_terminal_completeness() {
     let borrowed =
         borrowed_drop.add_node(RiscOp::Load { name: "x".into() }, vec![], ty.clone(), None);
     let dropped = borrowed_drop.add_node(RiscOp::Drop, vec![borrowed], ty.clone(), None);
-    let mut plan = DagOwnershipPlan::lower(&borrowed_drop).unwrap();
+    let mut plan =
+        DagOwnershipPlan::lower(&borrowed_drop, &mut CapacityScopeSupply::native()).unwrap();
     assert!(matches!(
         plan.directives[1],
         DagDirective::BorrowedDrop { .. }
@@ -1939,7 +1941,8 @@ fn dag_verification_checks_mutated_directives_and_terminal_completeness() {
     let mut unterminated = Dag::new();
     let load = unterminated.add_node(RiscOp::Load { name: "x".into() }, vec![], ty.clone(), None);
     unterminated.add_node(RiscOp::Neg, vec![load], ty, None);
-    let mut plan = DagOwnershipPlan::lower(&unterminated).unwrap();
+    let mut plan =
+        DagOwnershipPlan::lower(&unterminated, &mut CapacityScopeSupply::native()).unwrap();
     plan.directives.pop();
     assert!(matches!(
         plan.verify(&unterminated),
@@ -1960,7 +1963,8 @@ fn dag_verification_checks_mutated_directives_and_terminal_completeness() {
         None,
     );
     borrowed_realize.add_root(realized);
-    let mut plan = DagOwnershipPlan::lower(&borrowed_realize).unwrap();
+    let mut plan =
+        DagOwnershipPlan::lower(&borrowed_realize, &mut CapacityScopeSupply::native()).unwrap();
     assert!(matches!(
         plan.directives[1],
         DagDirective::CloneProduce { .. }
@@ -1988,7 +1992,8 @@ fn dag_verification_checks_mutated_directives_and_terminal_completeness() {
         None,
     );
     borrowed_store.add_root(stored);
-    let mut plan = DagOwnershipPlan::lower(&borrowed_store).unwrap();
+    let mut plan =
+        DagOwnershipPlan::lower(&borrowed_store, &mut CapacityScopeSupply::native()).unwrap();
     assert!(matches!(
         plan.directives[1],
         DagDirective::CloneStore { .. }
@@ -2019,7 +2024,7 @@ fn store_terminal_can_be_an_exported_root_but_drop_cannot() {
         None,
     );
     stored.add_root(output);
-    let plan = DagOwnershipPlan::lower(&stored).unwrap();
+    let plan = DagOwnershipPlan::lower(&stored, &mut CapacityScopeSupply::native()).unwrap();
     plan.verify(&stored).unwrap();
     assert!(plan.render().contains("store-root n2"));
 
@@ -2032,7 +2037,7 @@ fn store_terminal_can_be_an_exported_root_but_drop_cannot() {
     );
     let terminal = dropped.add_node(RiscOp::Drop, vec![value], ty, None);
     dropped.add_root(terminal);
-    let error = DagOwnershipPlan::lower(&dropped).unwrap_err();
+    let error = DagOwnershipPlan::lower(&dropped, &mut CapacityScopeSupply::native()).unwrap_err();
     assert!(matches!(error, OwnershipError::LoweringInvariant { .. }));
     assert!(
         error

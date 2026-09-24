@@ -8,6 +8,7 @@
 use std::collections::BTreeSet;
 
 use chelis_effects::realizability::{compute_root_manifest, infer_realizability};
+use chelis_ir::capacity_key::CapacityScopeSupply;
 use chelis_ir::host::{
     ConcreteHostProgram, HostExpr, HostExprKind, HostFunctionOrigin,
     try_lower_compiled_program_with_manifest,
@@ -47,7 +48,9 @@ fn verified_dag_exposes_the_exact_drop_source_without_raw_plan_access() {
         None,
     );
     let drop = dag.add_node(RiscOp::Drop, vec![source], ty, None);
-    let verified = verify_ownership(lower_dag_ownership(dag).unwrap()).unwrap();
+    let verified =
+        verify_ownership(lower_dag_ownership(dag, &mut CapacityScopeSupply::native()).unwrap())
+            .unwrap();
 
     assert_eq!(
         verified.emission().action_for_node(drop),
@@ -68,7 +71,9 @@ fn verified_dag_distinguishes_a_borrowed_logical_drop_from_an_owned_terminal() {
         None,
     );
     let owned_drop = dag.add_node(RiscOp::Drop, vec![owned], ty, None);
-    let verified = verify_ownership(lower_dag_ownership(dag).unwrap()).unwrap();
+    let verified =
+        verify_ownership(lower_dag_ownership(dag, &mut CapacityScopeSupply::native()).unwrap())
+            .unwrap();
 
     assert_eq!(
         verified.emission().action_for_node(borrowed_drop),
@@ -125,7 +130,11 @@ fn front(source: &str) -> Front {
 
 fn lower_source(source: &str) -> Result<HostOwnershipProgram, OwnershipError> {
     let front = front(source);
-    lower_host_ownership(&front.manifested, front.host)
+    lower_host_ownership(
+        &front.manifested,
+        front.host,
+        &mut CapacityScopeSupply::native(),
+    )
 }
 
 fn lower_fixture(name: &str) -> Result<HostOwnershipProgram, OwnershipError> {
@@ -248,7 +257,8 @@ fn aliased_roots_copy_the_earlier_sink_in_manifest_order() {
     let mut front = front(&fixture_source("issue_1222_root_alias"));
     front.manifest.entries.reverse();
     let manifested = ManifestedProgram::new(front.checked, front.manifest.clone(), Target::C);
-    let lowered = lower_host_ownership(&manifested, front.host).unwrap();
+    let lowered =
+        lower_host_ownership(&manifested, front.host, &mut CapacityScopeSupply::native()).unwrap();
     let roots = unit_text(&verify_ownership(lowered).unwrap(), "roots");
     assert!(
         line_index(&roots, "root alias move") < line_index(&roots, "root original move"),
@@ -266,7 +276,8 @@ fn non_root_heap_value_drops_at_its_verified_last_use() {
         .entries
         .retain(|entry| entry.def_name == "out");
     let manifested = ManifestedProgram::new(front.checked, front.manifest, Target::C);
-    let lowered = lower_host_ownership(&manifested, front.host).unwrap();
+    let lowered =
+        lower_host_ownership(&manifested, front.host, &mut CapacityScopeSupply::native()).unwrap();
     let roots = unit_text(&verify_ownership(lowered).unwrap(), "roots");
     assert_eq!(count(&roots, "root out move"), 1, "{roots}");
     assert_eq!(count(&roots, "drop move"), 1, "{roots}");
@@ -479,7 +490,8 @@ fn missing_manifest_binding_is_a_typed_lowering_error() {
     front.manifest.entries.push(ghost);
     let manifested = ManifestedProgram::new(front.checked, front.manifest, Target::C);
     assert_eq!(
-        lower_host_ownership(&manifested, front.host).unwrap_err(),
+        lower_host_ownership(&manifested, front.host, &mut CapacityScopeSupply::native())
+            .unwrap_err(),
         OwnershipError::ManifestRootWithoutBinding {
             root: "ghost".to_string(),
             def_name: "ghost".to_string(),
@@ -709,7 +721,11 @@ fn malformed_real_host_programs_fail_at_typed_boundaries() {
         ty: ConcreteHostType::Int64,
     });
     assert!(matches!(
-        lower_host_ownership(&front.manifested, wrong_arity),
+        lower_host_ownership(
+            &front.manifested,
+            wrong_arity,
+            &mut CapacityScopeSupply::native()
+        ),
         Err(OwnershipError::CallArityMismatch { .. })
     ));
 
@@ -719,7 +735,12 @@ fn malformed_real_host_programs_fail_at_typed_boundaries() {
         ConcreteHostType::Int64,
     ));
     assert_eq!(
-        lower_host_ownership(&front.manifested, unbound).unwrap_err(),
+        lower_host_ownership(
+            &front.manifested,
+            unbound,
+            &mut CapacityScopeSupply::native()
+        )
+        .unwrap_err(),
         OwnershipError::UnboundName {
             unit: "roots".to_string(),
             name: "nobody".to_string(),
@@ -745,7 +766,12 @@ fn checked_tensor_call_slots_preserve_dimension_instantiation_and_reject_forgery
     );
     let front = front(source);
     let verified = verify_ownership(
-        lower_host_ownership(&front.manifested, front.host.clone()).expect("valid instantiation"),
+        lower_host_ownership(
+            &front.manifested,
+            front.host.clone(),
+            &mut CapacityScopeSupply::native(),
+        )
+        .expect("valid instantiation"),
     )
     .expect("valid ownership");
     assert!(unit_text(&verified, "call").contains("call:guarded"));
@@ -765,7 +791,12 @@ fn checked_tensor_call_slots_preserve_dimension_instantiation_and_reject_forgery
         dims: vec![DimInfo::Lit(5)],
         precision: Prim::F32,
     });
-    let error = lower_host_ownership(&front.manifested, forged).unwrap_err();
+    let error = lower_host_ownership(
+        &front.manifested,
+        forged,
+        &mut CapacityScopeSupply::native(),
+    )
+    .unwrap_err();
     assert!(
         matches!(error, OwnershipError::CallArgumentType { argument: 0, .. }),
         "{error:?}"
@@ -787,7 +818,12 @@ fn checked_nominal_dimension_provenance_rejects_a_different_name() {
         dims: vec![DimInfo::Named("seq".into(), None)],
         precision: Prim::F32,
     });
-    let error = lower_host_ownership(&front.manifested, front.host).unwrap_err();
+    let error = lower_host_ownership(
+        &front.manifested,
+        front.host,
+        &mut CapacityScopeSupply::native(),
+    )
+    .unwrap_err();
     assert!(
         matches!(
             error,
@@ -816,7 +852,12 @@ fn checked_repeated_dimension_variable_rejects_inconsistent_actuals() {
         dims: vec![DimInfo::Lit(5)],
         precision: Prim::F32,
     });
-    let error = lower_host_ownership(&front.manifested, front.host).unwrap_err();
+    let error = lower_host_ownership(
+        &front.manifested,
+        front.host,
+        &mut CapacityScopeSupply::native(),
+    )
+    .unwrap_err();
     assert!(
         matches!(
             error,
@@ -849,7 +890,11 @@ fn forged_call_argument_types_cannot_retag_an_actual_expression() {
     };
     arg_tys[0] = ConcreteHostType::Int64;
     assert!(matches!(
-        lower_host_ownership(&front.manifested, forged_slot),
+        lower_host_ownership(
+            &front.manifested,
+            forged_slot,
+            &mut CapacityScopeSupply::native()
+        ),
         Err(OwnershipError::CallArgumentType { argument: 0, .. })
     ));
 
@@ -866,7 +911,11 @@ fn forged_call_argument_types_cannot_retag_an_actual_expression() {
     };
     args[0] = HostExpr::new(HostExprKind::Bool(true));
     assert!(matches!(
-        lower_host_ownership(&front.manifested, forged_value),
+        lower_host_ownership(
+            &front.manifested,
+            forged_value,
+            &mut CapacityScopeSupply::native()
+        ),
         Err(OwnershipError::CallArgumentType { argument: 0, .. })
     ));
 }
@@ -920,7 +969,11 @@ fn callable_manifest_root_consumes_the_materialized_observation_binding() {
     let mut missing = front.host;
     missing.functions.clear();
     assert!(matches!(
-        lower_host_ownership(&front.manifested, missing),
+        lower_host_ownership(
+            &front.manifested,
+            missing,
+            &mut CapacityScopeSupply::native()
+        ),
         Err(OwnershipError::ManifestRootWithoutBinding { .. })
     ));
 }
@@ -930,9 +983,15 @@ fn authored_entries_are_borrow_adapters_but_internal_specializations_are_not() {
     let authored = front(include_str!(
         "fixtures/core/tests/ownership_lowering/authored_entries_are_borrow_adapters_but_internal_specializations_are_not.json"
     ));
-    let authored_verified =
-        verify_ownership(lower_host_ownership(&authored.manifested, authored.host).unwrap())
-            .unwrap();
+    let authored_verified = verify_ownership(
+        lower_host_ownership(
+            &authored.manifested,
+            authored.host,
+            &mut CapacityScopeSupply::native(),
+        )
+        .unwrap(),
+    )
+    .unwrap();
     assert!(unit_text(&authored_verified, "id").contains("EntryBorrow"));
 
     let internal = front(include_str!(
@@ -940,8 +999,15 @@ fn authored_entries_are_borrow_adapters_but_internal_specializations_are_not() {
     ));
     let mut host = internal.host;
     host.functions[0].origin = HostFunctionOrigin::Monomorphized;
-    let internal_verified =
-        verify_ownership(lower_host_ownership(&internal.manifested, host).unwrap()).unwrap();
+    let internal_verified = verify_ownership(
+        lower_host_ownership(
+            &internal.manifested,
+            host,
+            &mut CapacityScopeSupply::native(),
+        )
+        .unwrap(),
+    )
+    .unwrap();
     assert!(!unit_text(&internal_verified, "id").contains("EntryBorrow"));
 }
 
@@ -957,8 +1023,15 @@ fn internal_borrowed_formal_remains_live_through_both_branch_arms() {
         .find(|function| function.name == "choose")
         .expect("choose host function");
     function.origin = HostFunctionOrigin::Monomorphized;
-    let verified = verify_ownership(lower_host_ownership(&internal.manifested, host).unwrap())
-        .expect("an internal borrowed formal spans its complete function body");
+    let verified = verify_ownership(
+        lower_host_ownership(
+            &internal.manifested,
+            host,
+            &mut CapacityScopeSupply::native(),
+        )
+        .unwrap(),
+    )
+    .expect("an internal borrowed formal spans its complete function body");
     let function = unit_text(&verified, "choose");
     assert!(!function.contains("EntryBorrow"), "{function}");
     assert!(function.contains("b0 (Borrowed %0"), "{function}");
@@ -1031,7 +1104,9 @@ fn standalone_and_nested_dags_cross_verified_payload_boundaries() {
     );
     let neg = dag.add_node(RiscOp::Neg, vec![load], scalar_tensor(), None);
     dag.add_root(neg);
-    let dag = verify_ownership(lower_dag_ownership(dag).unwrap()).unwrap();
+    let dag =
+        verify_ownership(lower_dag_ownership(dag, &mut CapacityScopeSupply::native()).unwrap())
+            .unwrap();
     assert!(dag.render().contains("borrow load n0"));
     assert!(dag.render().contains("root move n1"));
 
@@ -1051,7 +1126,10 @@ fn standalone_and_nested_dags_cross_verified_payload_boundaries() {
         None,
     );
     terminal_dag.add_node(RiscOp::Drop, vec![copied], scalar_tensor(), None);
-    let terminal = verify_ownership(lower_dag_ownership(terminal_dag).unwrap()).unwrap();
+    let terminal = verify_ownership(
+        lower_dag_ownership(terminal_dag, &mut CapacityScopeSupply::native()).unwrap(),
+    )
+    .unwrap();
     let terminal = terminal.render();
     assert!(terminal.contains("clone n2 from n1"), "{terminal}");
     assert!(terminal.contains("store n3 move n1"), "{terminal}");
@@ -1082,7 +1160,7 @@ fn a_dag_owner_cannot_have_two_terminal_directives() {
     );
     dag.add_node(RiscOp::Drop, vec![produced], scalar_tensor(), None);
     assert!(matches!(
-        lower_dag_ownership(dag),
+        lower_dag_ownership(dag, &mut CapacityScopeSupply::native()),
         Err(OwnershipError::DagDuplicateTerminal { owner: 1 })
     ));
 }
@@ -1101,7 +1179,9 @@ fn a_borrowed_dag_drop_is_a_non_consuming_logical_discard() {
     let discarded = dag.add_node(RiscOp::Drop, vec![load], scalar_tensor(), None);
     let copied_after_discard = dag.add_node(RiscOp::Copy, vec![load], scalar_tensor(), None);
     dag.add_root(copied_after_discard);
-    let verified = verify_ownership(lower_dag_ownership(dag).unwrap()).unwrap();
+    let verified =
+        verify_ownership(lower_dag_ownership(dag, &mut CapacityScopeSupply::native()).unwrap())
+            .unwrap();
     assert_eq!(
         verified.emission().action_for_node(discarded),
         Some(VerifiedDagAction::BorrowedDrop {
@@ -1121,7 +1201,8 @@ fn a_borrowed_dag_drop_is_a_non_consuming_logical_discard() {
     );
     let copied = twin.add_node(RiscOp::Copy, vec![load], scalar_tensor(), None);
     twin.add_node(RiscOp::Drop, vec![copied], scalar_tensor(), None);
-    verify_ownership(lower_dag_ownership(twin).unwrap()).unwrap();
+    verify_ownership(lower_dag_ownership(twin, &mut CapacityScopeSupply::native()).unwrap())
+        .unwrap();
 }
 
 #[test]
@@ -1139,7 +1220,10 @@ fn realize_clones_a_borrowed_or_fanned_out_source_and_moves_a_last_owned_source(
     let later = borrowed.add_node(RiscOp::Copy, vec![load], scalar_tensor(), None);
     borrowed.add_root(realized);
     borrowed.add_root(later);
-    let verified = verify_ownership(lower_dag_ownership(borrowed).unwrap()).unwrap();
+    let verified = verify_ownership(
+        lower_dag_ownership(borrowed, &mut CapacityScopeSupply::native()).unwrap(),
+    )
+    .unwrap();
     assert_eq!(
         verified.emission().action_for_node(realized),
         Some(VerifiedDagAction::CloneProduce {
@@ -1162,7 +1246,9 @@ fn realize_clones_a_borrowed_or_fanned_out_source_and_moves_a_last_owned_source(
     let later = fanned.add_node(RiscOp::Copy, vec![produced], scalar_tensor(), None);
     fanned.add_root(realized);
     fanned.add_root(later);
-    let verified = verify_ownership(lower_dag_ownership(fanned).unwrap()).unwrap();
+    let verified =
+        verify_ownership(lower_dag_ownership(fanned, &mut CapacityScopeSupply::native()).unwrap())
+            .unwrap();
     assert_eq!(
         verified.emission().action_for_node(realized),
         Some(VerifiedDagAction::CloneProduce {
@@ -1183,7 +1269,9 @@ fn realize_clones_a_borrowed_or_fanned_out_source_and_moves_a_last_owned_source(
     let produced = last.add_node(RiscOp::Neg, vec![load], scalar_tensor(), None);
     let realized = last.add_node(RiscOp::Realize, vec![produced], scalar_tensor(), None);
     last.add_root(realized);
-    let verified = verify_ownership(lower_dag_ownership(last).unwrap()).unwrap();
+    let verified =
+        verify_ownership(lower_dag_ownership(last, &mut CapacityScopeSupply::native()).unwrap())
+            .unwrap();
     assert_eq!(
         verified.emission().action_for_node(realized),
         Some(VerifiedDagAction::MoveProduce {
@@ -1211,7 +1299,10 @@ fn store_clones_a_borrowed_source_but_moves_an_owned_source() {
         None,
     );
     borrowed.add_root(stored);
-    let verified = verify_ownership(lower_dag_ownership(borrowed).unwrap()).unwrap();
+    let verified = verify_ownership(
+        lower_dag_ownership(borrowed, &mut CapacityScopeSupply::native()).unwrap(),
+    )
+    .unwrap();
     assert_eq!(
         verified.emission().action_for_node(stored),
         Some(VerifiedDagAction::CloneStore {
@@ -1237,7 +1328,9 @@ fn store_clones_a_borrowed_source_but_moves_an_owned_source() {
         None,
     );
     owned.add_root(stored);
-    let verified = verify_ownership(lower_dag_ownership(owned).unwrap()).unwrap();
+    let verified =
+        verify_ownership(lower_dag_ownership(owned, &mut CapacityScopeSupply::native()).unwrap())
+            .unwrap();
     assert_eq!(
         verified.emission().action_for_node(stored),
         Some(VerifiedDagAction::MoveStore {
@@ -1263,7 +1356,9 @@ fn dangling_owned_dag_producer_receives_a_verified_scope_drop() {
         None,
     );
     dag.add_root(output);
-    let verified = verify_ownership(lower_dag_ownership(dag).unwrap()).unwrap();
+    let verified =
+        verify_ownership(lower_dag_ownership(dag, &mut CapacityScopeSupply::native()).unwrap())
+            .unwrap();
     assert!(
         verified
             .emission()
@@ -1293,7 +1388,7 @@ fn a_dag_copy_after_store_move_is_rejected() {
     let copied = dag.add_node(RiscOp::Copy, vec![produced], scalar_tensor(), None);
     dag.add_root(copied);
     assert!(matches!(
-        lower_dag_ownership(dag),
+        lower_dag_ownership(dag, &mut CapacityScopeSupply::native()),
         Err(OwnershipError::DagUseAfterTerminal {
             owner: 1,
             consumer: 3,
@@ -1318,7 +1413,8 @@ fn a_dag_copy_after_store_move_is_rejected() {
         None,
     );
     twin.add_root(copied);
-    verify_ownership(lower_dag_ownership(twin).unwrap()).unwrap();
+    verify_ownership(lower_dag_ownership(twin, &mut CapacityScopeSupply::native()).unwrap())
+        .unwrap();
 }
 
 #[test]
@@ -1357,7 +1453,15 @@ fn signature_entry_requires_tensor_observations_and_preserves_borrows() {
         body: Box::new(function.body.clone()),
         ty: function.ret_ty.clone(),
     });
-    verify_ownership(lower_host_ownership(&front.manifested, host.clone()).unwrap()).unwrap();
+    verify_ownership(
+        lower_host_ownership(
+            &front.manifested,
+            host.clone(),
+            &mut CapacityScopeSupply::native(),
+        )
+        .unwrap(),
+    )
+    .unwrap();
     for missing in [false, true] {
         let mut forged = host.clone();
         let function = forged
@@ -1376,7 +1480,12 @@ fn signature_entry_requires_tensor_observations_and_preserves_borrows() {
         } else {
             args[0] = HostExpr::new(HostExprKind::String("not a tensor".into()));
         }
-        let error = lower_host_ownership(&front.manifested, forged).unwrap_err();
+        let error = lower_host_ownership(
+            &front.manifested,
+            forged,
+            &mut CapacityScopeSupply::native(),
+        )
+        .unwrap_err();
         if missing {
             assert!(
                 matches!(

@@ -318,6 +318,15 @@ The production API smoke exercises checking, strict and sealed contextual loweri
 evaluation of `7 * 3 = 21`, live-input fatal AD rejection through DAG and host paths,
 reuse, and four concurrent threads.
 
+Ownership lowering takes an explicit `&mut CapacityScopeSupply` as the final argument
+of `lower_dag_ownership`, `lower_host_ownership`, `lower_host_execution_ownership`,
+and `EvaluationPlan::verify_ownership`. Its `fresh` primitive alone performs the
+process-global relaxed checked increment. Every native supply draws from that one
+sequence, so scopes never reset per invocation and keep their allocation order: one
+per successfully lowered DAG plan, global helpers before function helpers. Payload
+specialization is selected through a sealed borrowed enum instead of `dyn Any`
+downcasts, and terminator successors use a concrete iterator in the same order.
+
 These are steps toward FCIS, not evidence of a pure functional core. Explicit ownership
 removes hidden dependencies in these subsystems; it does not remove cancellation,
 global ID allocation, counters, stack growth, or panic effects from the remaining

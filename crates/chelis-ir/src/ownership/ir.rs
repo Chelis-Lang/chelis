@@ -293,10 +293,16 @@ pub(crate) enum Terminator {
 }
 
 impl Terminator {
-    pub(crate) fn edges(&self) -> Box<dyn Iterator<Item = &Edge> + '_> {
+    pub(crate) fn edges(&self) -> SuccessorEdges<&Edge, std::slice::Iter<'_, Edge>> {
         match self {
-            Self::Return { .. } | Self::Exit => Box::new(std::iter::empty()),
-            Self::Jump(edge) => Box::new(std::iter::once(edge)),
+            Self::Return { .. } | Self::Exit => SuccessorEdges::Fixed {
+                first: None,
+                second: None,
+            },
+            Self::Jump(edge) => SuccessorEdges::Fixed {
+                first: Some(edge),
+                second: None,
+            },
             Self::Branch {
                 then_edge,
                 else_edge,
@@ -306,15 +312,24 @@ impl Terminator {
                 body_edge: then_edge,
                 exit_edge: else_edge,
                 ..
-            } => Box::new(std::iter::once(then_edge).chain(std::iter::once(else_edge))),
-            Self::Match { arms, .. } => Box::new(arms.iter()),
+            } => SuccessorEdges::Fixed {
+                first: Some(then_edge),
+                second: Some(else_edge),
+            },
+            Self::Match { arms, .. } => SuccessorEdges::Arms(arms.iter()),
         }
     }
 
-    pub(crate) fn edges_mut(&mut self) -> Box<dyn Iterator<Item = &mut Edge> + '_> {
+    pub(crate) fn edges_mut(&mut self) -> SuccessorEdges<&mut Edge, std::slice::IterMut<'_, Edge>> {
         match self {
-            Self::Return { .. } | Self::Exit => Box::new(std::iter::empty()),
-            Self::Jump(edge) => Box::new(std::iter::once(edge)),
+            Self::Return { .. } | Self::Exit => SuccessorEdges::Fixed {
+                first: None,
+                second: None,
+            },
+            Self::Jump(edge) => SuccessorEdges::Fixed {
+                first: Some(edge),
+                second: None,
+            },
             Self::Branch {
                 then_edge,
                 else_edge,
@@ -324,8 +339,39 @@ impl Terminator {
                 body_edge: then_edge,
                 exit_edge: else_edge,
                 ..
-            } => Box::new(std::iter::once(then_edge).chain(std::iter::once(else_edge))),
-            Self::Match { arms, .. } => Box::new(arms.iter_mut()),
+            } => SuccessorEdges::Fixed {
+                first: Some(then_edge),
+                second: Some(else_edge),
+            },
+            Self::Match { arms, .. } => SuccessorEdges::Arms(arms.iter_mut()),
+        }
+    }
+}
+
+/// Successor edges of one terminator in source order: a jump's edge, a
+/// branch's then/else (a loop's body/exit), or every match arm.
+pub(crate) enum SuccessorEdges<E, A> {
+    Fixed { first: Option<E>, second: Option<E> },
+    Arms(A),
+}
+
+impl<E, A: Iterator<Item = E>> Iterator for SuccessorEdges<E, A> {
+    type Item = E;
+
+    fn next(&mut self) -> Option<E> {
+        match self {
+            Self::Fixed { first, second } => first.take().or_else(|| second.take()),
+            Self::Arms(arms) => arms.next(),
+        }
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        match self {
+            Self::Fixed { first, second } => {
+                let remaining = usize::from(first.is_some()) + usize::from(second.is_some());
+                (remaining, Some(remaining))
+            }
+            Self::Arms(arms) => arms.size_hint(),
         }
     }
 }

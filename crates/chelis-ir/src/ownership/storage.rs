@@ -1087,6 +1087,7 @@ fn physical_live_byte_bound(slots: &[StorageSlotPlan]) -> Result<LiveByteBound, 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::capacity_key::CapacityScopeSupply;
     use crate::dag::{Dag, FusedInput, FusedStep, FusedStepOp, TensorType};
     use crate::ownership::{lower_dag_ownership, verify_ownership};
     use chelis_types::types::Prim;
@@ -1207,8 +1208,10 @@ mod tests {
     }
 
     fn verified(dag: Dag) -> VerifiedDagProgram {
-        verify_ownership(lower_dag_ownership(dag).expect("test DAG lowers"))
-            .expect("test DAG verifies")
+        verify_ownership(
+            lower_dag_ownership(dag, &mut CapacityScopeSupply::native()).expect("test DAG lowers"),
+        )
+        .expect("test DAG verifies")
     }
 
     fn dropped_then_root(first: TensorType, second: TensorType) -> Dag {

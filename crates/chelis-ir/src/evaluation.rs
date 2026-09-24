@@ -391,7 +391,10 @@ impl EvaluationPlan {
     /// Current lowering preserves graph-node order while inserting controls.
     /// Reject a different schedule rather than applying a DAG-order lifetime
     /// plan to it, or silently reordering effects to fit that lifetime plan.
-    pub fn verify_ownership(self) -> Result<VerifiedEvaluationPlan, String> {
+    pub fn verify_ownership(
+        self,
+        scopes: &mut crate::capacity_key::CapacityScopeSupply,
+    ) -> Result<VerifiedEvaluationPlan, String> {
         self.validate()?;
         let scheduled = self
             .metadata
@@ -405,7 +408,7 @@ impl EvaluationPlan {
         if !scheduled.eq(self.dag.nodes().iter().map(|node| node.id)) {
             return Err("native execution order differs from ownership graph order".into());
         }
-        let ownership = crate::ownership::lower_dag_ownership(self.dag)
+        let ownership = crate::ownership::lower_dag_ownership(self.dag, scopes)
             .and_then(crate::ownership::verify_ownership)
             .map_err(|error| error.to_string())?;
         Ok(VerifiedEvaluationPlan {
@@ -2066,7 +2069,7 @@ mod tests {
         let plan = fixture(&[0.5, 0.5], 4, true);
         let expected_steps = plan.steps_for_inspection().to_vec();
         let expected_source = plan.source_for_inspection().to_vec();
-        plan.verify_ownership()
+        plan.verify_ownership(&mut crate::capacity_key::CapacityScopeSupply::native())
             .unwrap()
             .with_emission(|owned, execution| {
                 assert_eq!(owned.emission().roots(), &[NodeId(2)]);
@@ -2108,7 +2111,8 @@ mod tests {
         // applied to a different schedule merely because both are topological.
         let plan = EvaluationPlan::new(dag, metadata).unwrap();
         assert_eq!(
-            plan.verify_ownership().unwrap_err(),
+            plan.verify_ownership(&mut crate::capacity_key::CapacityScopeSupply::native())
+                .unwrap_err(),
             "native execution order differs from ownership graph order"
         );
     }
@@ -2126,7 +2130,8 @@ mod tests {
         plan.metadata.complete(&plan.dag).unwrap();
         plan.validate().unwrap();
         assert!(
-            plan.verify_ownership().is_err(),
+            plan.verify_ownership(&mut crate::capacity_key::CapacityScopeSupply::native())
+                .is_err(),
             "duplicate logical termination must reject"
         );
     }

@@ -683,7 +683,11 @@ fn explicit_drop_in_gradient_retains_draws_and_verified_terminal_ownership() {
             .iter()
             .all(|id| !matches!(dag.get(*id).unwrap().op, RiscOp::Drop))
     );
-    let ownership = chelis_ir::ownership::lower_dag_ownership(dag.clone()).unwrap();
+    let ownership = chelis_ir::ownership::lower_dag_ownership(
+        dag.clone(),
+        &mut chelis_ir::capacity_key::CapacityScopeSupply::native(),
+    )
+    .unwrap();
     let verified = chelis_ir::ownership::verify_ownership(ownership).unwrap();
     assert!(verified.emission().actions().any(|action| matches!(
         action,

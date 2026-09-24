@@ -55,9 +55,11 @@
 //! ```compile_fail
 //! # use chelis_ir::host::ConcreteHostProgram;
 //! # use chelis_types::manifest::ManifestedProgram;
+//! use chelis_ir::capacity_key::CapacityScopeSupply;
 //! use chelis_ir::ownership::lower_host_ownership;
 //! fn mutate_after_lowering(manifested: &ManifestedProgram, mut host: ConcreteHostProgram) {
-//!     let _lowered = lower_host_ownership(manifested, host).unwrap();
+//!     let _lowered =
+//!         lower_host_ownership(manifested, host, &mut CapacityScopeSupply::native()).unwrap();
 //!     host.globals.reverse();
 //! }
 //! ```
@@ -103,6 +105,7 @@ use std::collections::BTreeMap;
 
 use chelis_types::manifest::{ManifestedProgram, RootManifest};
 
+use crate::capacity_key::CapacityScopeSupply;
 use crate::dag::{Dag, DagNode, NodeId, RiscOp, SymbolicDimBinding};
 use crate::host::{
     ConcreteHostBinding, ConcreteHostExpr, ConcreteHostFunction, ConcreteHostParam,
@@ -1347,15 +1350,6 @@ impl<'a> VerifiedHostEmission<'a> {
     }
 }
 
-/// Closed payload identity. Public only so the sealed generic verifier can
-/// carry a public bound without exposing its private representation.
-#[doc(hidden)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PayloadKind {
-    Host,
-    Dag,
-}
-
 /// Sealed verifier-derived live-byte upper bound.
 ///
 /// Verification composes local owner costs through the direct-call graph and
@@ -1399,15 +1393,22 @@ impl VerifiedLiveSetBound {
 }
 
 mod sealed {
-    pub trait Sealed {}
+    /// Closed borrowed view of the one specialization a sealed payload is.
+    /// Generic verification selects its lane from this variant, never from
+    /// runtime type identity.
+    pub enum PayloadRef<'a> {
+        Host(&'a super::HostEmissionPayload),
+        Dag(&'a super::DagEmissionPayload),
+    }
+
+    pub trait Sealed {
+        fn payload_ref(&self) -> PayloadRef<'_>;
+    }
 }
 
 /// A sealed emission-payload specialization. Downstream crates can name the
 /// concrete host and DAG payloads but cannot add a third unchecked lane.
-pub trait EmissionPayload: sealed::Sealed + 'static {
-    #[doc(hidden)]
-    const KIND: PayloadKind;
-}
+pub trait EmissionPayload: sealed::Sealed {}
 
 /// Exact host payload after manifest observation materialization.
 #[derive(Debug)]
@@ -1416,10 +1417,12 @@ pub struct HostEmissionPayload {
     manifest: RootManifest,
 }
 
-impl sealed::Sealed for HostEmissionPayload {}
-impl EmissionPayload for HostEmissionPayload {
-    const KIND: PayloadKind = PayloadKind::Host;
+impl sealed::Sealed for HostEmissionPayload {
+    fn payload_ref(&self) -> sealed::PayloadRef<'_> {
+        sealed::PayloadRef::Host(self)
+    }
 }
+impl EmissionPayload for HostEmissionPayload {}
 
 /// Exact post-optimization standalone tensor DAG.
 #[derive(Debug)]
@@ -1427,10 +1430,12 @@ pub struct DagEmissionPayload {
     dag: Dag,
 }
 
-impl sealed::Sealed for DagEmissionPayload {}
-impl EmissionPayload for DagEmissionPayload {
-    const KIND: PayloadKind = PayloadKind::Dag;
+impl sealed::Sealed for DagEmissionPayload {
+    fn payload_ref(&self) -> sealed::PayloadRef<'_> {
+        sealed::PayloadRef::Dag(self)
+    }
 }
+impl EmissionPayload for DagEmissionPayload {}
 
 #[derive(Debug)]
 enum OwnershipProof {
@@ -1482,8 +1487,9 @@ pub type VerifiedDagProgram = VerifiedOwnershipProgram<DagEmissionPayload>;
 pub fn lower_host_ownership(
     manifested: &ManifestedProgram,
     host: ConcreteHostProgram,
+    scopes: &mut CapacityScopeSupply,
 ) -> Result<HostOwnershipProgram, OwnershipError> {
-    lower_host_ownership_with_execution(manifested, host, None)
+    lower_host_ownership_with_execution(manifested, host, None, scopes)
 }
 
 /// Consume the opaque host execution carrier and bind every lowering-owned
@@ -1491,15 +1497,17 @@ pub fn lower_host_ownership(
 pub fn lower_host_execution_ownership(
     manifested: &ManifestedProgram,
     plan: crate::host::HostExecutionPlan,
+    scopes: &mut CapacityScopeSupply,
 ) -> Result<HostOwnershipProgram, OwnershipError> {
     let (host, execution) = plan.into_parts();
-    lower_host_ownership_with_execution(manifested, host, Some(execution))
+    lower_host_ownership_with_execution(manifested, host, Some(execution), scopes)
 }
 
 fn lower_host_ownership_with_execution(
     manifested: &ManifestedProgram,
     mut host: ConcreteHostProgram,
     execution: Option<crate::host::HostExecutionAssociations>,
+    scopes: &mut CapacityScopeSupply,
 ) -> Result<HostOwnershipProgram, OwnershipError> {
     let root_bindings = lower::materialize_manifest_roots(&mut host, manifested.manifest())?;
     let mut sites = ir::HostSiteBuilder::default();
@@ -1512,7 +1520,7 @@ fn lower_host_ownership_with_execution(
     )?;
     let mut sites = sites.finish();
     last_use::schedule(&mut program, &mut sites)?;
-    let nested_dags = lower_nested_dags(&host, execution)?;
+    let nested_dags = lower_nested_dags(&host, execution, scopes)?;
     Ok(OwnershipProgram {
         payload: HostEmissionPayload {
             program: host,
@@ -1528,8 +1536,11 @@ fn lower_host_ownership_with_execution(
 
 /// Consume a standalone DAG and attach an explicit ownership directive for
 /// every node, root, and implicit scope-exit drop.
-pub fn lower_dag_ownership(dag: Dag) -> Result<DagOwnershipProgram, OwnershipError> {
-    let plan = DagOwnershipPlan::lower(&dag)?;
+pub fn lower_dag_ownership(
+    dag: Dag,
+    scopes: &mut CapacityScopeSupply,
+) -> Result<DagOwnershipProgram, OwnershipError> {
+    let plan = DagOwnershipPlan::lower(&dag, scopes)?;
     Ok(OwnershipProgram {
         payload: DagEmissionPayload { dag },
         proof: OwnershipProof::Dag(plan),
@@ -1540,25 +1551,23 @@ pub fn lower_dag_ownership(dag: Dag) -> Result<DagOwnershipProgram, OwnershipErr
 pub fn verify_ownership<P: EmissionPayload>(
     program: OwnershipProgram<P>,
 ) -> Result<VerifiedOwnershipProgram<P>, OwnershipError> {
-    let verification = match (&program.proof, P::KIND) {
+    let verification = match (&program.proof, program.payload.payload_ref()) {
         (
             OwnershipProof::Host {
                 program: ir_program,
                 sites,
                 nested_dags,
             },
-            PayloadKind::Host,
+            sealed::PayloadRef::Host(payload),
         ) => {
             let verification = verify::verify(ir_program)?;
-            let payload = host_payload(&program)?;
             verify::verify_host_sites(&payload.program, &payload.manifest, ir_program, sites)?;
             verify_manifest_sinks(payload, ir_program, sites)?;
-            verify_nested_dags(&program, nested_dags)?;
+            verify_nested_dags(payload, nested_dags)?;
             VerificationProof::Host(verification)
         }
-        (OwnershipProof::Dag(plan), PayloadKind::Dag) => {
-            let dag = dag_payload(&program)?;
-            plan.verify(dag)?;
+        (OwnershipProof::Dag(plan), sealed::PayloadRef::Dag(payload)) => {
+            plan.verify(&payload.dag)?;
             VerificationProof::Dag
         }
         _ => {
@@ -1639,9 +1648,7 @@ impl VerifiedHostProgram {
         else {
             unreachable!("sealed host specialization")
         };
-        let payload = (&self.0.payload as &dyn std::any::Any)
-            .downcast_ref::<HostEmissionPayload>()
-            .expect("sealed host payload specialization");
+        let payload = &self.0.payload;
         let VerificationProof::Host(verification) = &self.1 else {
             unreachable!("sealed host verification specialization")
         };
@@ -1685,9 +1692,7 @@ impl VerifiedHostProgram {
 
 impl VerifiedDagProgram {
     pub fn emission(&self) -> VerifiedDagView<'_> {
-        let payload = (&self.0.payload as &dyn std::any::Any)
-            .downcast_ref::<DagEmissionPayload>()
-            .expect("sealed DAG payload specialization");
+        let payload = &self.0.payload;
         let OwnershipProof::Dag(plan) = &self.0.proof else {
             unreachable!("sealed DAG specialization")
         };
@@ -1705,30 +1710,10 @@ impl VerifiedDagProgram {
     }
 }
 
-fn dag_payload<P: EmissionPayload>(program: &OwnershipProgram<P>) -> Result<&Dag, OwnershipError> {
-    let payload = (&program.payload as &dyn std::any::Any)
-        .downcast_ref::<DagEmissionPayload>()
-        .ok_or_else(|| OwnershipError::LoweringInvariant {
-            unit: "ownership-boundary".to_string(),
-            detail: "requested DAG payload from host specialization".to_string(),
-        })?;
-    Ok(&payload.dag)
-}
-
-fn host_payload<P: EmissionPayload>(
-    program: &OwnershipProgram<P>,
-) -> Result<&HostEmissionPayload, OwnershipError> {
-    (&program.payload as &dyn std::any::Any)
-        .downcast_ref::<HostEmissionPayload>()
-        .ok_or_else(|| OwnershipError::LoweringInvariant {
-            unit: "ownership-boundary".to_string(),
-            detail: "requested host payload from DAG specialization".to_string(),
-        })
-}
-
 fn lower_nested_dags(
     host: &ConcreteHostProgram,
     execution: Option<crate::host::HostExecutionAssociations>,
+    scopes: &mut CapacityScopeSupply,
 ) -> Result<Vec<NestedDagProof>, OwnershipError> {
     let (global_execution, function_execution) = execution.unwrap_or_else(|| {
         (
@@ -1769,7 +1754,7 @@ fn lower_nested_dags(
         }
         result.push(NestedDagProof {
             location: NestedDagLocation::Global(helper),
-            plan: DagOwnershipPlan::lower(&child.dag)?,
+            plan: DagOwnershipPlan::lower(&child.dag, scopes)?,
             execution,
         });
     }
@@ -1792,7 +1777,7 @@ fn lower_nested_dags(
             }
             result.push(NestedDagProof {
                 location: NestedDagLocation::Function { function, helper },
-                plan: DagOwnershipPlan::lower(&child.dag)?,
+                plan: DagOwnershipPlan::lower(&child.dag, scopes)?,
                 execution,
             });
         }
@@ -1800,11 +1785,10 @@ fn lower_nested_dags(
     Ok(result)
 }
 
-fn verify_nested_dags<P: EmissionPayload>(
-    program: &OwnershipProgram<P>,
+fn verify_nested_dags(
+    host: &HostEmissionPayload,
     children: &[NestedDagProof],
 ) -> Result<(), OwnershipError> {
-    let host = host_payload(program)?;
     for child in children {
         let dag = match child.location {
             NestedDagLocation::Global(helper) => &host.program.global_tensor_helpers[helper].dag,
@@ -1915,7 +1899,7 @@ struct DagOwnershipPlan {
 }
 
 impl DagOwnershipPlan {
-    fn lower(dag: &Dag) -> Result<Self, OwnershipError> {
+    fn lower(dag: &Dag, scopes: &mut CapacityScopeSupply) -> Result<Self, OwnershipError> {
         let structural_errors = crate::verify::verify_ownership_input(dag);
         if !structural_errors.is_empty() {
             return Err(OwnershipError::LoweringInvariant {
@@ -2084,7 +2068,7 @@ impl DagOwnershipPlan {
             }
         }
         Ok(Self {
-            capacity_scope: crate::capacity_key::fresh_capacity_scope(),
+            capacity_scope: scopes.fresh(),
             owners,
             directives,
         })
