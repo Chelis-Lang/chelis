@@ -253,16 +253,15 @@ fn resolve_declared_surface_in_session_scoped(
             BinderMode::ExplicitGeneric(&binders),
             &headers,
             &mut vg,
-            sink,
         )
         .with_dtype_bounds(declaration_dtype_bounds(meta));
-        if let Ok(ty) = resolver.resolve(type_expr) {
+        if let Ok(ty) = resolver.resolve(&mut vg, sink, type_expr) {
             let type_names = resolver
                 .type_var_names()
                 .into_sorted()
                 .into_iter()
                 .collect();
-            if let Ok(bounds) = resolver.finish_dtype_bounds() {
+            if let Ok(bounds) = resolver.finish_dtype_bounds(sink) {
                 signatures.insert(
                     name.to_string(),
                     DeclaredSignature {

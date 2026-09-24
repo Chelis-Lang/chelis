@@ -209,12 +209,10 @@ impl TypeResolutionEnv {
 
 /// Stateful resolver for one binder scope. Sharing an instance across field
 /// types or signature components preserves repeated variable identity.
-pub(crate) struct DeepTypeResolver<'resolver, 'session, 'binders> {
+pub(crate) struct DeepTypeResolver<'resolver, 'binders> {
     use_site: TypeUseSite,
     binder_mode: BinderMode<'binders>,
     headers: &'resolver TypeResolutionEnv,
-    vg: &'resolver mut VarGen,
-    errors: &'resolver mut DiagnosticSink<'session>,
     type_vars: UnordMap<String, TypeVar>,
     dim_vars: UnordMap<String, DimVar>,
     rank_vars: UnordMap<String, RankVar>,
@@ -239,20 +237,20 @@ pub(crate) struct DeepTypeResolver<'resolver, 'session, 'binders> {
     resolving_tensor_precision: bool,
 }
 
-impl<'resolver, 'session, 'binders> DeepTypeResolver<'resolver, 'session, 'binders> {
+impl<'resolver, 'binders> DeepTypeResolver<'resolver, 'binders> {
+    /// `vg` mints the identities of `ExplicitKinds` binders; every later
+    /// operation receives the variable supply and the diagnostic sink as
+    /// explicit parameters, so the resolver owns no mutable borrow.
     pub(crate) fn new(
         use_site: TypeUseSite,
         binder_mode: BinderMode<'binders>,
         headers: &'resolver TypeResolutionEnv,
-        vg: &'resolver mut VarGen,
-        errors: &'resolver mut DiagnosticSink<'session>,
+        vg: &mut VarGen,
     ) -> Self {
         let mut resolver = Self {
             use_site,
             binder_mode,
             headers,
-            vg,
-            errors,
             type_vars: UnordMap::new(),
             dim_vars: UnordMap::new(),
             rank_vars: UnordMap::new(),
@@ -273,14 +271,10 @@ impl<'resolver, 'session, 'binders> DeepTypeResolver<'resolver, 'session, 'binde
             for (name, kind) in kinds.to_sorted() {
                 match kind {
                     NominalParamKind::Type => {
-                        resolver
-                            .type_vars
-                            .insert(name.clone(), resolver.vg.fresh_tvar());
+                        resolver.type_vars.insert(name.clone(), vg.fresh_tvar());
                     }
                     NominalParamKind::Dimension => {
-                        resolver
-                            .dim_vars
-                            .insert(name.clone(), resolver.vg.fresh_dvar());
+                        resolver.dim_vars.insert(name.clone(), vg.fresh_dvar());
                     }
                 }
             }
@@ -315,6 +309,7 @@ impl<'resolver, 'session, 'binders> DeepTypeResolver<'resolver, 'session, 'binde
     /// which is the exact failure this rule exists to prevent.
     pub(crate) fn finish_dtype_bounds(
         &mut self,
+        errors: &mut DiagnosticSink<'_>,
     ) -> Result<Vec<(TypeVar, TypeVarRestriction)>, ErrorWitness> {
         let unused: Vec<&String> = self
             .dtype_bounds
@@ -329,7 +324,7 @@ impl<'resolver, 'session, 'binders> DeepTypeResolver<'resolver, 'session, 'binde
                 .get(&name)
                 .expect("the unused name came from this map")
                 .family_name();
-            return Err(self.type_error(format!(
+            return Err(self.type_error(errors, format!(
                 "binder `{name}` is bounded by dtype family `{family}` but does not occur in {}",
                 self.use_site.label()
             )));
@@ -350,9 +345,14 @@ impl<'resolver, 'session, 'binders> DeepTypeResolver<'resolver, 'session, 'binde
         self
     }
 
-    pub(crate) fn resolve(&mut self, expr: &deep::Expr) -> Result<ResolvedDeepType, ErrorWitness> {
+    pub(crate) fn resolve(
+        &mut self,
+        vg: &mut VarGen,
+        errors: &mut DiagnosticSink<'_>,
+        expr: &deep::Expr,
+    ) -> Result<ResolvedDeepType, ErrorWitness> {
         self.begin_resolution(expr);
-        self.resolve_type(expr).map(ResolvedDeepType)
+        self.resolve_type(vg, errors, expr).map(ResolvedDeepType)
     }
 
     /// Parse a parameter annotation as a real constraint or an inference hole.
@@ -360,18 +360,20 @@ impl<'resolver, 'session, 'binders> DeepTypeResolver<'resolver, 'session, 'binde
     /// slot, or a fresh body-local variable when no signature exists.
     pub(crate) fn resolve_parameter(
         &mut self,
+        vg: &mut VarGen,
+        errors: &mut DiagnosticSink<'_>,
         expr: &deep::Expr,
     ) -> Result<Option<ResolvedDeepType>, ErrorWitness> {
         self.begin_resolution(expr);
-        let (form, tag, children) = self.type_form_expr(expr)?;
-        if form == Some(DeepTag::TVar) && self.one_symbol(tag, children)? == "_" {
+        let (form, tag, children) = self.type_form_expr(errors, expr)?;
+        if form == Some(DeepTag::TVar) && self.one_symbol(errors, tag, children)? == "_" {
             return if self.allows_hole() {
                 Ok(None)
             } else {
-                Err(self.unbound("type", "_"))
+                Err(self.unbound(errors, "type", "_"))
             };
         }
-        self.recover_parts(form, tag, children)
+        self.recover_parts(vg, errors, form, tag, children)
             .into_result()
             .map(|ty| Some(ResolvedDeepType(ty)))
     }
@@ -381,6 +383,8 @@ impl<'resolver, 'session, 'binders> DeepTypeResolver<'resolver, 'session, 'binde
     /// so an extra child cannot be ignored by a cast-only fast path.
     pub(crate) fn resolve_cast_target(
         &mut self,
+        vg: &mut VarGen,
+        errors: &mut DiagnosticSink<'_>,
         expr: &deep::Expr,
     ) -> Result<ResolvedCastTarget, ErrorWitness> {
         self.begin_resolution(expr);
@@ -391,9 +395,9 @@ impl<'resolver, 'session, 'binders> DeepTypeResolver<'resolver, 'session, 'binde
             });
         }
         if matches!(expr, deep::Expr::List(_, _) | deep::Expr::Node(_, _)) {
-            let (form_tag, tag, children) = self.type_form_expr(expr)?;
+            let (form_tag, tag, children) = self.type_form_expr(errors, expr)?;
             if form_tag == Some(DeepTag::TPrim) {
-                let name = self.one_symbol(tag, children)?;
+                let name = self.one_symbol(errors, tag, children)?;
                 // Reserved primitive spellings cannot be captured by a
                 // declaration-local type variable with the same name. This
                 // matters for the deferred `f8e4m3` spelling: treating it as
@@ -416,7 +420,7 @@ impl<'resolver, 'session, 'binders> DeepTypeResolver<'resolver, 'session, 'binde
                 });
             }
         }
-        self.resolve(expr).map(ResolvedCastTarget::Type)
+        self.resolve(vg, errors, expr).map(ResolvedCastTarget::Type)
     }
 
     pub(crate) fn type_var(&self, name: &str) -> Option<TypeVar> {
@@ -520,20 +524,28 @@ impl<'resolver, 'session, 'binders> DeepTypeResolver<'resolver, 'session, 'binde
         self.current_location = Some(TypeDiagnosticLocation::from_expr(expr).unwrap_or_default());
     }
 
-    fn resolve_type(&mut self, expr: &deep::Expr) -> Result<Type, ErrorWitness> {
-        let (form, tag, children) = self.type_form_expr(expr)?;
-        self.recover_parts(form, tag, children).into_result()
+    fn resolve_type(
+        &mut self,
+        vg: &mut VarGen,
+        errors: &mut DiagnosticSink<'_>,
+        expr: &deep::Expr,
+    ) -> Result<Type, ErrorWitness> {
+        let (form, tag, children) = self.type_form_expr(errors, expr)?;
+        self.recover_parts(vg, errors, form, tag, children)
+            .into_result()
     }
 
     fn resolve_atomic_type(
         &mut self,
+        vg: &mut VarGen,
+        errors: &mut DiagnosticSink<'_>,
         form_tag: Option<DeepTag>,
         tag: &str,
         children: &[deep::Expr],
     ) -> Result<Type, ErrorWitness> {
         match form_tag {
             Some(DeepTag::TPrim) => {
-                let name = self.one_symbol(tag, children)?;
+                let name = self.one_symbol(errors, tag, children)?;
                 if let Some(prim) = Prim::parse_name(name) {
                     if prim.is_admissible_active() {
                         return Ok(Type::Prim(prim));
@@ -543,7 +555,9 @@ impl<'resolver, 'session, 'binders> DeepTypeResolver<'resolver, 'session, 'binde
                     // through the same [04-DTYPE-1] rejection.
                     let tensor = self.resolving_tensor_precision;
                     let diagnostic = f8e4m3_diagnostic(tensor);
-                    return Err(self.report_rejected_primitive_diagnostic_once(name, diagnostic));
+                    return Err(
+                        self.report_rejected_primitive_diagnostic_once(errors, name, diagnostic)
+                    );
                 }
                 // chelis#1593: this is the one boundary every type position
                 // crosses, so a name reserved under §1.1.1 is reported the
@@ -568,7 +582,9 @@ impl<'resolver, 'session, 'binders> DeepTypeResolver<'resolver, 'session, 'binde
                     .or_else(|| unsigned_family_diagnostic(name, tensor))
                     .or_else(|| deferred_family_diagnostic(name, tensor))
                 {
-                    return Err(self.report_rejected_primitive_diagnostic_once(name, diagnostic));
+                    return Err(
+                        self.report_rejected_primitive_diagnostic_once(errors, name, diagnostic)
+                    );
                 }
                 let nearest = nearest_active_dtype(name);
                 let diagnostic = CheckError::new(
@@ -581,29 +597,34 @@ impl<'resolver, 'session, 'binders> DeepTypeResolver<'resolver, 'session, 'binde
                         "replace `{name}` with nearest active dtype `{nearest}`, or declare `{name}` in the signature binder list if it is intentionally generic"
                     )],
                 );
-                Err(self.report_unknown_primitive_diagnostic_once(name, diagnostic))
+                Err(self.report_unknown_primitive_diagnostic_once(errors, name, diagnostic))
             }
             Some(DeepTag::TVar) => {
-                let name = self.one_symbol(tag, children)?;
-                self.resolve_type_var(name).map(Type::Var)
+                let name = self.one_symbol(errors, tag, children)?;
+                self.resolve_type_var(vg, errors, name).map(Type::Var)
             }
             Some(DeepTag::TUnit) => {
-                self.exact_arity(tag, children, 0)?;
+                self.exact_arity(errors, tag, children, 0)?;
                 Ok(Type::Unit)
             }
-            _ => Err(self.malformed(format!(
-                "unknown Deep type tag `{tag}` in {}",
-                self.use_site.label()
-            ))),
+            _ => Err(self.malformed(
+                errors,
+                format!("unknown Deep type tag `{tag}` in {}", self.use_site.label()),
+            )),
         }
     }
 
-    fn resolve_dim(&mut self, expr: &deep::Expr) -> Result<Dim, ErrorWitness> {
+    fn resolve_dim(
+        &mut self,
+        vg: &mut VarGen,
+        errors: &mut DiagnosticSink<'_>,
+        expr: &deep::Expr,
+    ) -> Result<Dim, ErrorWitness> {
         self.enter_expr(expr);
-        let (form_tag, tag, children) = self.type_form_expr(expr)?;
+        let (form_tag, tag, children) = self.type_form_expr(errors, expr)?;
         match form_tag {
             Some(DeepTag::DName) => {
-                let name = self.one_symbol(tag, children)?;
+                let name = self.one_symbol(errors, tag, children)?;
                 if name == "*" {
                     Ok(Dim::Wildcard)
                 } else {
@@ -611,36 +632,47 @@ impl<'resolver, 'session, 'binders> DeepTypeResolver<'resolver, 'session, 'binde
                 }
             }
             Some(DeepTag::DVar) => {
-                let name = self.one_symbol(tag, children)?;
-                self.resolve_dim_var(name).map(Dim::Var)
+                let name = self.one_symbol(errors, tag, children)?;
+                self.resolve_dim_var(vg, errors, name).map(Dim::Var)
             }
             Some(DeepTag::DRank) => {
-                let name = self.one_symbol(tag, children)?;
-                self.resolve_rank_var(name).map(Dim::Rank)
+                let name = self.one_symbol(errors, tag, children)?;
+                self.resolve_rank_var(vg, errors, name).map(Dim::Rank)
             }
             Some(DeepTag::DLit) => {
-                self.exact_arity(tag, children, 1)?;
+                self.exact_arity(errors, tag, children, 1)?;
                 match &children[0] {
                     deep::Expr::Atom(deep::Atom::Int(value), _) => Ok(Dim::Lit(*value)),
-                    _ => Err(self.malformed(format!(
-                        "malformed `d-lit` in {}: expected one integer child",
-                        self.use_site.label()
-                    ))),
+                    _ => Err(self.malformed(
+                        errors,
+                        format!(
+                            "malformed `d-lit` in {}: expected one integer child",
+                            self.use_site.label()
+                        ),
+                    )),
                 }
             }
-            _ => Err(self.malformed(format!(
-                "unknown Deep dimension tag `{tag}` in {}",
-                self.use_site.label()
-            ))),
+            _ => Err(self.malformed(
+                errors,
+                format!(
+                    "unknown Deep dimension tag `{tag}` in {}",
+                    self.use_site.label()
+                ),
+            )),
         }
     }
 
-    fn resolve_type_var(&mut self, name: &str) -> Result<TypeVar, ErrorWitness> {
+    fn resolve_type_var(
+        &mut self,
+        vg: &mut VarGen,
+        errors: &mut DiagnosticSink<'_>,
+        name: &str,
+    ) -> Result<TypeVar, ErrorWitness> {
         if name == "_" {
             return self
                 .allows_hole()
-                .then(|| self.vg.fresh_tvar())
-                .ok_or_else(|| self.unbound("type", name));
+                .then(|| vg.fresh_tvar())
+                .ok_or_else(|| self.unbound(errors, "type", name));
         }
         // chelis#1593 round 1. `spec/04-type-system.md` §5.8.1 says a spelling
         // [04-DTYPE-1] rejects names no type variable in ANY type position, and
@@ -655,10 +687,11 @@ impl<'resolver, 'session, 'binders> DeepTypeResolver<'resolver, 'session, 'binde
             .or_else(|| unsigned_family_diagnostic(name, tensor))
             .or_else(|| deferred_family_diagnostic(name, tensor))
         {
-            return Err(self.report_rejected_primitive_diagnostic_once(name, diagnostic));
+            return Err(self.report_rejected_primitive_diagnostic_once(errors, name, diagnostic));
         }
         if Prim::parse_name(name).is_some_and(|prim| prim.is_admissible_active()) {
             return Err(self.type_error_with_suggestions(
+                errors,
                 format!(
                     "active primitive `{name}` cannot be rebound as a type variable in {}",
                     self.use_site.label()
@@ -673,22 +706,22 @@ impl<'resolver, 'session, 'binders> DeepTypeResolver<'resolver, 'session, 'binde
             BinderMode::ExplicitKinds(kinds)
                 if kinds.get(name) == Some(&NominalParamKind::Dimension)
         ) {
-            return Err(self.type_error(format!(
+            return Err(self.type_error(errors, format!(
                 "nominal parameter `{name}` has Dimension kind and cannot be used in a type slot in {}",
                 self.use_site.label()
             )));
         }
         if !self.allows_name(name) {
-            return Err(self.unbound("type", name));
+            return Err(self.unbound(errors, "type", name));
         }
         if matches!(self.binder_mode, BinderMode::Lexical(..)) && !self.type_vars.contains_key(name)
         {
-            return Err(self.unbound("type", name));
+            return Err(self.unbound(errors, "type", name));
         }
         let variable = *self
             .type_vars
             .entry(name.to_string())
-            .or_insert_with(|| self.vg.fresh_tvar());
+            .or_insert_with(|| vg.fresh_tvar());
         // [04-DTYPE-2]: the bound belongs to the binder, so it is recorded on
         // first occurrence and every later occurrence of the same name reuses
         // the same bounded variable.
@@ -703,69 +736,79 @@ impl<'resolver, 'session, 'binders> DeepTypeResolver<'resolver, 'session, 'binde
         Ok(variable)
     }
 
-    fn resolve_dim_var(&mut self, name: &str) -> Result<DimVar, ErrorWitness> {
+    fn resolve_dim_var(
+        &mut self,
+        vg: &mut VarGen,
+        errors: &mut DiagnosticSink<'_>,
+        name: &str,
+    ) -> Result<DimVar, ErrorWitness> {
         if name == "_" {
             return self
                 .allows_hole()
-                .then(|| self.vg.fresh_dvar())
-                .ok_or_else(|| self.unbound("dimension", name));
+                .then(|| vg.fresh_dvar())
+                .ok_or_else(|| self.unbound(errors, "dimension", name));
         }
         if matches!(
             self.binder_mode,
             BinderMode::ExplicitKinds(kinds)
                 if kinds.get(name) == Some(&NominalParamKind::Type)
         ) {
-            return Err(self.type_error(format!(
+            return Err(self.type_error(errors, format!(
                 "nominal parameter `{name}` has Type kind and cannot be used in a dimension slot in {}",
                 self.use_site.label()
             )));
         }
         if self.dtype_bounds.contains_key(name) {
-            return Err(self.bounded_binder_misuse(name, "a dimension slot"));
+            return Err(self.bounded_binder_misuse(errors, name, "a dimension slot"));
         }
         if !self.allows_name(name) {
-            return Err(self.unbound("dimension", name));
+            return Err(self.unbound(errors, "dimension", name));
         }
         if matches!(self.binder_mode, BinderMode::Lexical(..)) && !self.dim_vars.contains_key(name)
         {
-            return Err(self.unbound("dimension", name));
+            return Err(self.unbound(errors, "dimension", name));
         }
         Ok(*self
             .dim_vars
             .entry(name.to_string())
-            .or_insert_with(|| self.vg.fresh_dvar()))
+            .or_insert_with(|| vg.fresh_dvar()))
     }
 
-    fn resolve_rank_var(&mut self, name: &str) -> Result<RankVar, ErrorWitness> {
+    fn resolve_rank_var(
+        &mut self,
+        vg: &mut VarGen,
+        errors: &mut DiagnosticSink<'_>,
+        name: &str,
+    ) -> Result<RankVar, ErrorWitness> {
         if name == "_" {
             return self
                 .allows_hole()
-                .then(|| self.vg.fresh_rvar())
-                .ok_or_else(|| self.unbound("rank", name));
+                .then(|| vg.fresh_rvar())
+                .ok_or_else(|| self.unbound(errors, "rank", name));
         }
         if matches!(
             self.binder_mode,
             BinderMode::ExplicitKinds(kinds) if kinds.contains_key(name)
         ) {
-            return Err(self.type_error(format!(
+            return Err(self.type_error(errors, format!(
                 "nominal parameter `{name}` cannot be used as a rank spread in {}; nominal parameters have only Type or Dimension kind",
                 self.use_site.label()
             )));
         }
         if self.dtype_bounds.contains_key(name) {
-            return Err(self.bounded_binder_misuse(name, "a rank spread"));
+            return Err(self.bounded_binder_misuse(errors, name, "a rank spread"));
         }
         if !self.allows_name(name) {
-            return Err(self.unbound("rank", name));
+            return Err(self.unbound(errors, "rank", name));
         }
         if matches!(self.binder_mode, BinderMode::Lexical(..)) && !self.rank_vars.contains_key(name)
         {
-            return Err(self.unbound("rank", name));
+            return Err(self.unbound(errors, "rank", name));
         }
         Ok(*self
             .rank_vars
             .entry(name.to_string())
-            .or_insert_with(|| self.vg.fresh_rvar()))
+            .or_insert_with(|| vg.fresh_rvar()))
     }
 
     fn allows_name(&self, name: &str) -> bool {
@@ -789,63 +832,79 @@ impl<'resolver, 'session, 'binders> DeepTypeResolver<'resolver, 'session, 'binde
     /// non-type vocabulary tag.
     fn type_form<'b>(
         &mut self,
+        errors: &mut DiagnosticSink<'_>,
         list: &'b deep::List,
     ) -> Result<(Option<DeepTag>, &'b str, &'b [deep::Expr]), ErrorWitness> {
         let (tag, tag_str) = match list.elements.first() {
             Some(deep::Expr::Atom(deep::Atom::Tag(tag), _)) => (Some(*tag), tag.as_str()),
             Some(deep::Expr::Atom(deep::Atom::Name(name), _)) => (None, name.as_str()),
             _ => {
-                return Err(self.malformed(format!(
-                    "malformed Deep type form in {}: expected a tag symbol",
-                    self.use_site.label()
-                )));
+                return Err(self.malformed(
+                    errors,
+                    format!(
+                        "malformed Deep type form in {}: expected a tag symbol",
+                        self.use_site.label()
+                    ),
+                ));
             }
         };
         if !matches!(list.elements.get(1), Some(deep::Expr::Map(_, _))) {
-            return Err(self.malformed(format!(
-                "malformed `{tag_str}` in {}: the metadata map must be present at element 1",
-                self.use_site.label()
-            )));
+            return Err(self.malformed(
+                errors,
+                format!(
+                    "malformed `{tag_str}` in {}: the metadata map must be present at element 1",
+                    self.use_site.label()
+                ),
+            ));
         }
         Ok((tag, tag_str, &list.elements[2..]))
     }
 
     fn type_form_expr<'b>(
         &mut self,
+        errors: &mut DiagnosticSink<'_>,
         expr: &'b deep::Expr,
     ) -> Result<(Option<DeepTag>, &'b str, &'b [deep::Expr]), ErrorWitness> {
         match expr {
             deep::Expr::Node(node, _) => {
                 Ok((Some(node.tag()), node.tag().as_str(), node.children_slice()))
             }
-            deep::Expr::List(list, _) => self.type_form(list),
+            deep::Expr::List(list, _) => self.type_form(errors, list),
             deep::Expr::UnknownForm(data) => {
                 Ok((None, data.head.as_str(), data.children.as_slice()))
             }
-            _ => Err(self.malformed(format!(
-                "{} must use a canonical Deep type form; bare `{}` is not a type",
-                self.use_site.label(),
-                render_expr(expr)
-            ))),
+            _ => Err(self.malformed(
+                errors,
+                format!(
+                    "{} must use a canonical Deep type form; bare `{}` is not a type",
+                    self.use_site.label(),
+                    render_expr(expr)
+                ),
+            )),
         }
     }
 
     fn one_symbol<'b>(
         &mut self,
+        errors: &mut DiagnosticSink<'_>,
         tag: &str,
         children: &'b [deep::Expr],
     ) -> Result<&'b str, ErrorWitness> {
-        self.exact_arity(tag, children, 1)?;
+        self.exact_arity(errors, tag, children, 1)?;
         symbol_name(&children[0]).ok_or_else(|| {
-            self.malformed(format!(
-                "malformed `{tag}` in {}: expected one symbol child",
-                self.use_site.label()
-            ))
+            self.malformed(
+                errors,
+                format!(
+                    "malformed `{tag}` in {}: expected one symbol child",
+                    self.use_site.label()
+                ),
+            )
         })
     }
 
     fn exact_arity(
         &mut self,
+        errors: &mut DiagnosticSink<'_>,
         tag: &str,
         children: &[deep::Expr],
         expected: usize,
@@ -853,40 +912,52 @@ impl<'resolver, 'session, 'binders> DeepTypeResolver<'resolver, 'session, 'binde
         if children.len() == expected {
             Ok(())
         } else {
-            Err(self.malformed(format!(
-                "malformed `{tag}` in {}: expected {expected} child(ren), got {}",
-                self.use_site.label(),
-                children.len()
-            )))
+            Err(self.malformed(
+                errors,
+                format!(
+                    "malformed `{tag}` in {}: expected {expected} child(ren), got {}",
+                    self.use_site.label(),
+                    children.len()
+                ),
+            ))
         }
     }
 
     /// A dtype family names a set of element types, so a bounded binder can
     /// never stand for an extent or a run of extents ([04-DTYPE-2]).
-    fn bounded_binder_misuse(&mut self, name: &str, position: &str) -> ErrorWitness {
+    fn bounded_binder_misuse(
+        &mut self,
+        errors: &mut DiagnosticSink<'_>,
+        name: &str,
+        position: &str,
+    ) -> ErrorWitness {
         let family = self
             .dtype_bounds
             .get(name)
             .map_or("a dtype family", |restriction| restriction.family_name());
-        self.type_error(format!(
+        self.type_error(errors, format!(
             "binder `{name}` is bounded by dtype family `{family}` and cannot be used as {position} in {}",
             self.use_site.label()
         ))
     }
 
-    fn unbound(&mut self, kind: &str, name: &str) -> ErrorWitness {
+    fn unbound(&mut self, errors: &mut DiagnosticSink<'_>, kind: &str, name: &str) -> ErrorWitness {
         let class = match kind {
             "type" => DeclarationTypeDiagnosticClass::UndeclaredTypeVariable,
             "dimension" => DeclarationTypeDiagnosticClass::UndeclaredDimensionVariable,
             "rank" => DeclarationTypeDiagnosticClass::UndeclaredRankVariable,
             _ => {
-                return self.type_error(format!(
-                    "undeclared {kind} variable `{name}` in {}",
-                    self.use_site.label()
-                ));
+                return self.type_error(
+                    errors,
+                    format!(
+                        "undeclared {kind} variable `{name}` in {}",
+                        self.use_site.label()
+                    ),
+                );
             }
         };
         self.report_declaration_type_diagnostic_once(
+            errors,
             name,
             class,
             CheckError::new(
@@ -901,20 +972,21 @@ impl<'resolver, 'session, 'binders> DeepTypeResolver<'resolver, 'session, 'binde
         )
     }
 
-    fn malformed(&mut self, message: String) -> ErrorWitness {
+    fn malformed(&mut self, errors: &mut DiagnosticSink<'_>, message: String) -> ErrorWitness {
         let error = CheckError::new(CheckErrorKind::MalformedForm, message, vec![]);
         let error = self
             .diagnostic_location()
             .map_or(error.clone(), |location| location.attach(error));
-        report_witness(self.errors, error)
+        report_witness(errors, error)
     }
 
-    fn type_error(&mut self, message: String) -> ErrorWitness {
-        self.type_error_with_suggestions(message, vec![])
+    fn type_error(&mut self, errors: &mut DiagnosticSink<'_>, message: String) -> ErrorWitness {
+        self.type_error_with_suggestions(errors, message, vec![])
     }
 
     fn type_error_with_suggestions(
         &mut self,
+        errors: &mut DiagnosticSink<'_>,
         message: String,
         suggestions: Vec<String>,
     ) -> ErrorWitness {
@@ -922,22 +994,28 @@ impl<'resolver, 'session, 'binders> DeepTypeResolver<'resolver, 'session, 'binde
         let error = self
             .diagnostic_location()
             .map_or(error.clone(), |location| location.attach(error));
-        report_witness(self.errors, error)
+        report_witness(errors, error)
     }
 
-    fn report_primitive_diagnostic(&mut self, diagnostic: CheckError) -> ErrorWitness {
+    fn report_primitive_diagnostic(
+        &mut self,
+        errors: &mut DiagnosticSink<'_>,
+        diagnostic: CheckError,
+    ) -> ErrorWitness {
         let diagnostic = self
             .diagnostic_location()
             .map_or(diagnostic.clone(), |location| location.attach(diagnostic));
-        report_witness(self.errors, diagnostic)
+        report_witness(errors, diagnostic)
     }
 
     fn report_rejected_primitive_diagnostic_once(
         &mut self,
+        errors: &mut DiagnosticSink<'_>,
         name: &str,
         diagnostic: CheckError,
     ) -> ErrorWitness {
         self.report_declaration_type_diagnostic_once(
+            errors,
             name,
             DeclarationTypeDiagnosticClass::RejectedPrimitive,
             diagnostic,
@@ -947,10 +1025,12 @@ impl<'resolver, 'session, 'binders> DeepTypeResolver<'resolver, 'session, 'binde
 
     fn report_unknown_primitive_diagnostic_once(
         &mut self,
+        errors: &mut DiagnosticSink<'_>,
         name: &str,
         diagnostic: CheckError,
     ) -> ErrorWitness {
         self.report_declaration_type_diagnostic_once(
+            errors,
             name,
             DeclarationTypeDiagnosticClass::UnknownPrimitive,
             diagnostic,
@@ -960,6 +1040,7 @@ impl<'resolver, 'session, 'binders> DeepTypeResolver<'resolver, 'session, 'binde
 
     fn report_declaration_type_diagnostic_once(
         &mut self,
+        errors: &mut DiagnosticSink<'_>,
         name: &str,
         class: DeclarationTypeDiagnosticClass,
         diagnostic: CheckError,
@@ -968,26 +1049,26 @@ impl<'resolver, 'session, 'binders> DeepTypeResolver<'resolver, 'session, 'binde
         let location = self.diagnostic_location();
         let declaration_owner = self.declaration_diagnostic_owner.clone();
         if let Some(owner) = &declaration_owner
-            && let Some(witness) = self.errors.declaration_type_witness(owner, name, class)
+            && let Some(witness) = errors.declaration_type_witness(owner, name, class)
         {
             if record_unknown_site {
-                self.record_unknown_primitive_site(location.as_ref(), name, witness);
+                self.record_unknown_primitive_site(errors, location.as_ref(), name, witness);
             }
             return witness;
         }
-        let witness = self.report_primitive_diagnostic(diagnostic);
+        let witness = self.report_primitive_diagnostic(errors, diagnostic);
         if record_unknown_site {
-            self.record_unknown_primitive_site(location.as_ref(), name, witness);
+            self.record_unknown_primitive_site(errors, location.as_ref(), name, witness);
         }
         if let Some(owner) = declaration_owner {
-            self.errors
-                .record_declaration_type_witness(owner, name.to_string(), class, witness);
+            errors.record_declaration_type_witness(owner, name.to_string(), class, witness);
         }
         witness
     }
 
     fn record_unknown_primitive_site(
         &mut self,
+        errors: &mut DiagnosticSink<'_>,
         location: Option<&TypeDiagnosticLocation>,
         name: &str,
         witness: ErrorWitness,
@@ -996,7 +1077,7 @@ impl<'resolver, 'session, 'binders> DeepTypeResolver<'resolver, 'session, 'binde
             return;
         };
         let (span_offset, span_id) = location.stable_key();
-        self.errors.record_unknown_primitive_site_witness(
+        errors.record_unknown_primitive_site_witness(
             span_offset,
             span_id.map(str::to_string),
             name.to_string(),

@@ -402,11 +402,10 @@ fn extract_params_with_ownership(
         binder_mode,
         adt_reg.resolution_env(),
         vg,
-        errors,
     )
     .with_declaration_diagnostic_owner(declaration_diagnostic_owner);
     let mut resolve_annotation =
-        |annotation: &deep::Expr| match resolver.resolve_parameter(annotation) {
+        |annotation: &deep::Expr| match resolver.resolve_parameter(vg, errors, annotation) {
             Ok(ty) => ty.map(|ty| ty.into_type()),
             Err(witness) => Some(propagate(&witness)),
         };
@@ -463,7 +462,6 @@ fn extract_params_with_ownership(
             _ => {}
         }
     }
-    drop(resolver);
     let mut aliases = AliasExpansionSession::new(adt_reg, vg);
     for (_, annotation) in &mut params {
         if let Some(ty) = annotation {

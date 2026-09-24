@@ -69,13 +69,15 @@ impl TypeResolution {
     }
 }
 
-impl DeepTypeResolver<'_, '_, '_> {
+impl DeepTypeResolver<'_, '_> {
     pub(crate) fn resolve_signature(
         &mut self,
+        vg: &mut VarGen,
+        errors: &mut DiagnosticSink<'_>,
         expr: &deep::Expr,
     ) -> Result<ResolvedDeepType, RejectedSignatureType> {
         self.begin_resolution(expr);
-        let (form, tag, children) = match self.type_form_expr(expr) {
+        let (form, tag, children) = match self.type_form_expr(errors, expr) {
             Ok(parts) => parts,
             Err(witness) => {
                 return Err(RejectedSignatureType::from_resolved(
@@ -84,22 +86,29 @@ impl DeepTypeResolver<'_, '_, '_> {
                 ));
             }
         };
-        match self.recover_parts(form, tag, children) {
+        match self.recover_parts(vg, errors, form, tag, children) {
             TypeResolution::Resolved(ty) => Ok(ResolvedDeepType(ty)),
             TypeResolution::Rejected { ty, witness } => Err(RejectedSignatureType { ty, witness }),
         }
     }
 
-    pub(super) fn recover_type(&mut self, expr: &deep::Expr) -> TypeResolution {
+    pub(super) fn recover_type(
+        &mut self,
+        vg: &mut VarGen,
+        errors: &mut DiagnosticSink<'_>,
+        expr: &deep::Expr,
+    ) -> TypeResolution {
         self.enter_expr(expr);
-        match self.type_form_expr(expr) {
-            Ok((form, tag, children)) => self.recover_parts(form, tag, children),
+        match self.type_form_expr(errors, expr) {
+            Ok((form, tag, children)) => self.recover_parts(vg, errors, form, tag, children),
             Err(witness) => TypeResolution::failed(witness),
         }
     }
 
     pub(super) fn recover_parts(
         &mut self,
+        vg: &mut VarGen,
+        errors: &mut DiagnosticSink<'_>,
         form: Option<DeepTag>,
         tag: &str,
         children: &[deep::Expr],
@@ -107,14 +116,17 @@ impl DeepTypeResolver<'_, '_, '_> {
         match form {
             Some(DeepTag::TFn) => {
                 if children.is_empty() {
-                    return TypeResolution::failed(self.malformed(format!(
-                        "malformed `t-fn` in {}: expected at least a return type",
-                        self.use_site.label()
-                    )));
+                    return TypeResolution::failed(self.malformed(
+                        errors,
+                        format!(
+                            "malformed `t-fn` in {}: expected at least a return type",
+                            self.use_site.label()
+                        ),
+                    ));
                 }
                 let parts = children
                     .iter()
-                    .map(|child| self.recover_type(child))
+                    .map(|child| self.recover_type(vg, errors, child))
                     .collect();
                 TypeResolution::compose(parts, |mut parts| {
                     let result = parts.pop().expect("a function type has a result child");
@@ -124,61 +136,75 @@ impl DeepTypeResolver<'_, '_, '_> {
             Some(DeepTag::TTuple) => {
                 let parts = children
                     .iter()
-                    .map(|child| self.recover_type(child))
+                    .map(|child| self.recover_type(vg, errors, child))
                     .collect();
                 TypeResolution::compose(parts, Type::Tuple)
             }
             Some(DeepTag::TRef) => {
-                if let Err(witness) = self.exact_arity(tag, children, 1) {
+                if let Err(witness) = self.exact_arity(errors, tag, children, 1) {
                     return TypeResolution::failed(witness);
                 }
-                TypeResolution::compose(vec![self.recover_type(&children[0])], |mut parts| {
-                    Type::Ref(Box::new(parts.pop().expect("a reference has one child")))
-                })
+                TypeResolution::compose(
+                    vec![self.recover_type(vg, errors, &children[0])],
+                    |mut parts| {
+                        Type::Ref(Box::new(parts.pop().expect("a reference has one child")))
+                    },
+                )
             }
-            Some(DeepTag::TTensor) => self.recover_tensor(children),
-            Some(DeepTag::TAdt) => self.recover_nominal(children),
-            _ => TypeResolution::from_result(self.resolve_atomic_type(form, tag, children)),
+            Some(DeepTag::TTensor) => self.recover_tensor(vg, errors, children),
+            Some(DeepTag::TAdt) => self.recover_nominal(vg, errors, children),
+            _ => TypeResolution::from_result(
+                self.resolve_atomic_type(vg, errors, form, tag, children),
+            ),
         }
     }
 
-    fn recover_tensor(&mut self, children: &[deep::Expr]) -> TypeResolution {
+    fn recover_tensor(
+        &mut self,
+        vg: &mut VarGen,
+        errors: &mut DiagnosticSink<'_>,
+        children: &[deep::Expr],
+    ) -> TypeResolution {
         if children.is_empty() {
-            return TypeResolution::failed(self.malformed(format!(
-                "malformed `t-tensor` in {}: expected dimensions followed by a precision",
-                self.use_site.label()
-            )));
+            return TypeResolution::failed(self.malformed(
+                errors,
+                format!(
+                    "malformed `t-tensor` in {}: expected dimensions followed by a precision",
+                    self.use_site.label()
+                ),
+            ));
         }
         let dimensions: Vec<_> = children[..children.len() - 1]
             .iter()
-            .map(|child| self.resolve_dim(child))
+            .map(|child| self.resolve_dim(vg, errors, child))
             .collect();
         let outer = std::mem::replace(&mut self.resolving_tensor_precision, true);
-        let precision = self.recover_type(&children[children.len() - 1]);
+        let precision = self.recover_type(vg, errors, &children[children.len() - 1]);
         self.resolving_tensor_precision = outer;
-        let precision = match precision {
-            TypeResolution::Resolved(Type::Prim(prim)) => (TensorPrec::Concrete(prim), None),
-            TypeResolution::Resolved(Type::Var(var)) => (TensorPrec::Var(var), None),
-            TypeResolution::Resolved(other) => {
-                let witness = self.type_error(format!(
+        let precision =
+            match precision {
+                TypeResolution::Resolved(Type::Prim(prim)) => (TensorPrec::Concrete(prim), None),
+                TypeResolution::Resolved(Type::Var(var)) => (TensorPrec::Var(var), None),
+                TypeResolution::Resolved(other) => {
+                    let witness = self.type_error(errors, format!(
                     "tensor precision in {} must be `t-prim` or a legal `t-var`, got `{other}`",
                     self.use_site.label()
                 ));
-                // The rejected signature frame still needs a tensor precision
-                // slot so valid sibling dimensions remain available to body
-                // checking. This fresh variable is private to that frame; the
-                // declaration remains publicly bound to the witness below.
-                (TensorPrec::Var(self.vg.fresh_tvar()), Some(witness))
-            }
-            TypeResolution::Rejected { witness, .. } => {
-                // Keep the tensor constructor and every successfully resolved
-                // dimension in the private recovery frame. The fresh precision
-                // is not a successful interpretation of the authored dtype:
-                // `witness` rejects the declaration, while the placeholder
-                // prevents an unrelated shape check from losing the rank.
-                (TensorPrec::Var(self.vg.fresh_tvar()), Some(witness))
-            }
-        };
+                    // The rejected signature frame still needs a tensor precision
+                    // slot so valid sibling dimensions remain available to body
+                    // checking. This fresh variable is private to that frame; the
+                    // declaration remains publicly bound to the witness below.
+                    (TensorPrec::Var(vg.fresh_tvar()), Some(witness))
+                }
+                TypeResolution::Rejected { witness, .. } => {
+                    // Keep the tensor constructor and every successfully resolved
+                    // dimension in the private recovery frame. The fresh precision
+                    // is not a successful interpretation of the authored dtype:
+                    // `witness` rejects the declaration, while the placeholder
+                    // prevents an unrelated shape check from losing the rank.
+                    (TensorPrec::Var(vg.fresh_tvar()), Some(witness))
+                }
+            };
         // Dimensions have no error constructor. Never replace a failed one with
         // a wildcard or a fresh variable just to construct a tensor frame.
         let dimensions = dimensions.into_iter().collect::<Result<Vec<_>, _>>();
@@ -194,26 +220,34 @@ impl DeepTypeResolver<'_, '_, '_> {
         }
     }
 
-    fn recover_nominal(&mut self, children: &[deep::Expr]) -> TypeResolution {
+    fn recover_nominal(
+        &mut self,
+        vg: &mut VarGen,
+        errors: &mut DiagnosticSink<'_>,
+        children: &[deep::Expr],
+    ) -> TypeResolution {
         let Some(name) = children.first().and_then(symbol_name) else {
-            return TypeResolution::failed(self.malformed(format!(
+            return TypeResolution::failed(self.malformed(errors, format!(
                 "malformed `t-adt` in {}: expected a nominal type name followed by type arguments",
                 self.use_site.label()
             )));
         };
         let Some(kinds) = self.headers.param_kinds(name) else {
-            return TypeResolution::failed(self.type_error(format!(
-                "unknown nominal type `{name}` in {}",
-                self.use_site.label()
-            )));
+            return TypeResolution::failed(self.type_error(
+                errors,
+                format!("unknown nominal type `{name}` in {}", self.use_site.label()),
+            ));
         };
         let actual = children.len() - 1;
         let arity_failure = (actual != kinds.len()).then(|| {
-            self.type_error(format!(
-                "nominal type `{name}` in {} expects {} argument(s), got {actual}",
-                self.use_site.label(),
-                kinds.len()
-            ))
+            self.type_error(
+                errors,
+                format!(
+                    "nominal type `{name}` in {} expects {} argument(s), got {actual}",
+                    self.use_site.label(),
+                    kinds.len()
+                ),
+            )
         });
         let mut arguments = Vec::with_capacity(actual);
         let mut failure = None;
@@ -221,19 +255,19 @@ impl DeepTypeResolver<'_, '_, '_> {
         for (index, (child, kind)) in children[1..].iter().zip(kinds).enumerate() {
             self.enter_expr(child);
             let argument = (|| -> Result<_, ErrorWitness> {
-                let (child_tag, _, parts) = self.type_form_expr(child)?;
+                let (child_tag, _, parts) = self.type_form_expr(errors, child)?;
                 match kind {
                     NominalParamKind::Type => {
                         if matches!(
                             child_tag,
                             Some(DeepTag::DName | DeepTag::DVar | DeepTag::DLit | DeepTag::DRank)
                         ) {
-                            return Err(self.type_error(format!(
+                            return Err(self.type_error(errors, format!(
                                 "nominal type `{name}` argument {} expects a type, got a dimension",
                                 index + 1
                             )));
                         }
-                        let (ty, witness) = self.recover_type(child).into_parts();
+                        let (ty, witness) = self.recover_type(vg, errors, child).into_parts();
                         if failure.is_none() {
                             failure = witness;
                         }
@@ -242,13 +276,13 @@ impl DeepTypeResolver<'_, '_, '_> {
                     NominalParamKind::Dimension => {
                         let dim = match child_tag {
                             Some(DeepTag::DName | DeepTag::DVar | DeepTag::DLit) => {
-                                self.resolve_dim(child)?
+                                self.resolve_dim(vg, errors, child)?
                             }
                             Some(DeepTag::TVar) => {
-                                let name = self.one_symbol("t-var", parts)?;
-                                Dim::Var(self.resolve_dim_var(name)?)
+                                let name = self.one_symbol(errors, "t-var", parts)?;
+                                Dim::Var(self.resolve_dim_var(vg, errors, name)?)
                             }
-                            _ => return Err(self.type_error(format!(
+                            _ => return Err(self.type_error(errors, format!(
                                 "nominal type `{name}` argument {} expects a dimension, got a type",
                                 index + 1
                             ))),

@@ -92,13 +92,13 @@ pub(super) fn resolve_deep_type_with_binder_identities(
 ) -> Result<ResolvedDeclaredType, Box<RejectedDeclaredType>> {
     let (resolution, bound_result, bounds, binder_identities) = {
         let mut resolver =
-            DeepTypeResolver::new(use_site, binder_mode, adt_reg.resolution_env(), vg, errors)
+            DeepTypeResolver::new(use_site, binder_mode, adt_reg.resolution_env(), vg)
                 .with_declaration_diagnostic_owner(diagnostic_owner)
                 .with_dtype_bounds(dtype_bounds);
-        let resolution = resolver.resolve_signature(expr);
+        let resolution = resolver.resolve_signature(vg, errors, expr);
         let binder_identities = resolver.binder_identities();
         let bounds = resolver.resolved_dtype_bounds();
-        let bound_result = resolver.finish_dtype_bounds();
+        let bound_result = resolver.finish_dtype_bounds(errors);
         (resolution, bound_result, bounds, binder_identities)
     };
     let recovery = match (resolution, bound_result) {

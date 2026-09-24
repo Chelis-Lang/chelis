@@ -893,10 +893,9 @@ pub(super) fn infer_cast(
             annotation_binder_mode(env),
             adt_reg.resolution_env(),
             vg,
-            errors,
         )
         .with_diagnostic_owner(&cast_owner);
-        let target = match resolver.resolve_cast_target(&kids[1]) {
+        let target = match resolver.resolve_cast_target(vg, errors, &kids[1]) {
             Ok(target) => target,
             Err(witness) => return propagate(&witness),
         };

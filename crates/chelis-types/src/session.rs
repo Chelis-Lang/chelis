@@ -155,14 +155,27 @@ impl<'session> DiagnosticSink<'session> {
         self.stack_bails.recorded()
     }
 
-    /// A checking pass starts with no active group, including declaration
-    /// collection. Reentrant passes move the enclosing frame into the scope.
-    pub(crate) fn enter_recursive_inference(&mut self) -> RecursiveInferenceScope<'_, 'session> {
-        let previous = std::mem::take(&mut self.recursive);
-        RecursiveInferenceScope {
-            sink: self,
-            previous,
-        }
+    /// Run one checking pass in a fresh recursive frame, then restore the
+    /// enclosing frame. A checking pass starts with no active group, including
+    /// declaration collection; a reentrant pass moves the enclosing frame
+    /// aside for the duration of `body`. Exit drops the pass's own frame, so
+    /// an aborted pass discards its unfinished group evidence, while every
+    /// diagnostic it pushed stays in this authoritative sink.
+    ///
+    /// Model: `enter; body; exit` (the frame is plain owned data).
+    ///
+    /// The exit is explicit and runs whenever `body` returns (Ok or Err
+    /// results alike). An unwinding `body` skips it; nothing can observe the
+    /// skipped restore. Every sink is opened by a `session.rs` checker entry
+    /// and owned by it, chelis-types has no production `catch_unwind`, and no
+    /// other crate can construct or hold a sink. A catch outside the checker
+    /// (chelis-ir's `catch_lowering`) only sees the entry return by
+    /// unwinding, which has already dropped this sink with its frame.
+    pub(crate) fn with_recursive_inference<R>(&mut self, body: impl FnOnce(&mut Self) -> R) -> R {
+        let enclosing = std::mem::take(&mut self.recursive);
+        let result = body(self);
+        let _finished_frame = std::mem::replace(&mut self.recursive, enclosing);
+        result
     }
 
     pub(crate) fn recursive_state(&self) -> &RecursiveState {
@@ -173,21 +186,29 @@ impl<'session> DiagnosticSink<'session> {
         &mut self.recursive
     }
 
-    pub(crate) fn enter_recursive_caller(
+    /// Attribute recursive occurrences recorded by `body` to `caller`, then
+    /// restore the enclosing caller. Only a present `caller` replaces and later
+    /// restores the attribution; `None` leaves the active group untouched.
+    /// Occurrences recorded by `body` stay in the group either way.
+    ///
+    /// Model: `enter; body; exit`, where enter/exit are
+    /// `RecursiveState::replace_caller` when `caller` is present.
+    ///
+    /// The explicit exit runs whenever `body` returns; see
+    /// [`Self::with_recursive_inference`] for why an unwinding `body` needs no
+    /// restore (no production code observes this sink after an unwind).
+    pub(crate) fn with_recursive_caller<R>(
         &mut self,
         caller: Option<Caller>,
-    ) -> RecursiveCallerScope<'_, 'session> {
-        let active = caller.is_some();
-        let previous = if active {
-            self.recursive.replace_caller(caller)
-        } else {
-            None
-        };
-        RecursiveCallerScope {
-            sink: self,
-            previous,
-            active,
+        body: impl FnOnce(&mut Self) -> R,
+    ) -> R {
+        if caller.is_none() {
+            return body(self);
         }
+        let enclosing = self.recursive.replace_caller(caller);
+        let result = body(self);
+        let _finished_caller = self.recursive.replace_caller(enclosing);
+        result
     }
 
     pub(crate) fn finish_recursive_group(&mut self, subst: &mut crate::unify::Subst) {
@@ -196,17 +217,24 @@ impl<'session> DiagnosticSink<'session> {
         }
     }
 
-    /// Install this inference pass's policy without opening another diagnostic
-    /// destination. The scope restores the enclosing pass on return or unwind.
-    pub(crate) fn install_opacity_context(
+    /// Install this inference pass's opacity policy for `body` without opening
+    /// another diagnostic destination, then restore the enclosing policy. No
+    /// diagnostic vector or witness table is replaced, copied, or discarded.
+    ///
+    /// Model: `enter; body; exit` over the sink's `opacity` field.
+    ///
+    /// The explicit exit runs whenever `body` returns; see
+    /// [`Self::with_recursive_inference`] for why an unwinding `body` needs no
+    /// restore (no production code observes this sink after an unwind).
+    pub(crate) fn with_opacity_context<R>(
         &mut self,
         context: OpacityContextData,
-    ) -> OpacityScope<'_, 'session> {
-        let previous = self.opacity.replace(context);
-        OpacityScope {
-            sink: self,
-            previous,
-        }
+        body: impl FnOnce(&mut Self) -> R,
+    ) -> R {
+        let enclosing = self.opacity.replace(context);
+        let result = body(self);
+        self.opacity = enclosing;
+        result
     }
 
     pub(crate) fn opacity_context(&self) -> Option<&OpacityContextData> {
@@ -338,65 +366,6 @@ impl<'session> DiagnosticSink<'session> {
             .filter(|error| keep(error))
             .collect::<Vec<_>>();
         self.errors.extend(retained);
-    }
-}
-
-/// A scoped policy change borrowing the existing authoritative sink. No
-/// diagnostic vector or witness table is replaced, copied, or discarded.
-#[must_use = "opacity enforcement lasts only while this scope is held"]
-pub(crate) struct OpacityScope<'sink, 'session> {
-    sink: &'sink mut DiagnosticSink<'session>,
-    previous: Option<OpacityContextData>,
-}
-
-impl<'session> OpacityScope<'_, 'session> {
-    pub(crate) fn sink(&mut self) -> &mut DiagnosticSink<'session> {
-        self.sink
-    }
-}
-
-impl Drop for OpacityScope<'_, '_> {
-    fn drop(&mut self) {
-        self.sink.opacity = self.previous.take();
-    }
-}
-
-#[must_use = "the enclosing recursive frame is restored when this scope drops"]
-pub(crate) struct RecursiveInferenceScope<'sink, 'session> {
-    sink: &'sink mut DiagnosticSink<'session>,
-    previous: RecursiveState,
-}
-
-impl<'session> RecursiveInferenceScope<'_, 'session> {
-    pub(crate) fn sink(&mut self) -> &mut DiagnosticSink<'session> {
-        self.sink
-    }
-}
-
-impl Drop for RecursiveInferenceScope<'_, '_> {
-    fn drop(&mut self) {
-        std::mem::swap(&mut self.sink.recursive, &mut self.previous);
-    }
-}
-
-#[must_use = "the enclosing recursive caller is restored when this scope drops"]
-pub(crate) struct RecursiveCallerScope<'sink, 'session> {
-    sink: &'sink mut DiagnosticSink<'session>,
-    previous: Option<Caller>,
-    active: bool,
-}
-
-impl<'session> RecursiveCallerScope<'_, 'session> {
-    pub(crate) fn sink(&mut self) -> &mut DiagnosticSink<'session> {
-        self.sink
-    }
-}
-
-impl Drop for RecursiveCallerScope<'_, '_> {
-    fn drop(&mut self) {
-        if self.active {
-            let _finished_caller = self.sink.recursive.replace_caller(self.previous.take());
-        }
     }
 }
 
@@ -538,60 +507,65 @@ mod recursive_scope_tests {
         run_result(&mut crate::NativeServices::new(None), |outer| {
             begin_group(outer, &env);
             let current = caller(outer, &env, &mut variables, &mut subst, "left", "a");
-            let mut outer_scope = outer.enter_recursive_caller(Some(current));
-            let outer = outer_scope.sink();
-            let outer_reference = reference(outer, &env, &mut variables, &mut subst, "right", 10);
-            assert!(!admits_independent_uses(
-                outer,
-                &env,
-                &mut variables,
-                &mut subst,
-                &outer_reference,
-            ));
-
-            run_result(&mut crate::NativeServices::new(None), |inner| {
-                begin_group(inner, &env);
-                let current = caller(inner, &env, &mut variables, &mut subst, "right", "b");
-                let mut inner_scope = inner.enter_recursive_caller(Some(current));
-                let inner = inner_scope.sink();
-                let inner_reference =
-                    reference(inner, &env, &mut variables, &mut subst, "left", 20);
-                assert!(admits_independent_uses(
-                    inner,
+            outer.with_recursive_caller(Some(current), |outer| {
+                let outer_reference =
+                    reference(outer, &env, &mut variables, &mut subst, "right", 10);
+                assert!(!admits_independent_uses(
+                    outer,
                     &env,
                     &mut variables,
                     &mut subst,
                     &outer_reference,
                 ));
-                assert!(admits_independent_uses(
+
+                run_result(&mut crate::NativeServices::new(None), |inner| {
+                    begin_group(inner, &env);
+                    let current = caller(inner, &env, &mut variables, &mut subst, "right", "b");
+                    inner.with_recursive_caller(Some(current), |inner| {
+                        let inner_reference =
+                            reference(inner, &env, &mut variables, &mut subst, "left", 20);
+                        assert!(admits_independent_uses(
+                            inner,
+                            &env,
+                            &mut variables,
+                            &mut subst,
+                            &outer_reference,
+                        ));
+                        assert!(admits_independent_uses(
+                            outer,
+                            &env,
+                            &mut variables,
+                            &mut subst,
+                            &inner_reference,
+                        ));
+                        assert!(!admits_independent_uses(
+                            inner,
+                            &env,
+                            &mut variables,
+                            &mut subst,
+                            &inner_reference,
+                        ));
+                        Ok(())
+                    })
+                })
+                .expect("the independent session has no rejected occurrence");
+                assert!(!admits_independent_uses(
                     outer,
                     &env,
                     &mut variables,
                     &mut subst,
-                    &inner_reference,
-                ));
-                assert!(!admits_independent_uses(
-                    inner,
-                    &env,
-                    &mut variables,
-                    &mut subst,
-                    &inner_reference,
+                    &outer_reference,
                 ));
                 Ok(())
             })
-            .expect("the independent session has no rejected occurrence");
-            assert!(!admits_independent_uses(
-                outer,
-                &env,
-                &mut variables,
-                &mut subst,
-                &outer_reference,
-            ));
-            Ok(())
         })
         .expect("unbound recursive instantiations have no diagnostic");
     }
 
+    /// Scope exits are explicit: they run when the body returns, Ok or Err.
+    /// An unwind skips them, which production cannot observe: it drops the
+    /// unwinding entry's own sink. So the unwind case checks what a live
+    /// enclosing session observes around an unwinding nested check.
     #[test]
     fn recursive_invocations_restore_pending_evidence_on_return_and_unwind() {
         let nested: Vec<chelis_deep::Expr> = serde_json::from_str(include_str!(
@@ -606,9 +580,7 @@ mod recursive_scope_tests {
             let report = run_result(&mut crate::NativeServices::new(None), |sink| {
                 begin_group(sink, &env);
                 let current = caller(sink, &env, &mut variables, &mut subst, "left", "a");
-                {
-                    let mut outer_scope = sink.enter_recursive_caller(Some(current));
-                    let outer = outer_scope.sink();
+                sink.with_recursive_caller(Some(current), |outer| {
                     let first =
                         reference(outer, &env, &mut variables, &mut subst, "right", 1_000_000);
                     driver(&nested, ProgramOrigin::Unlinked, outer);
@@ -620,22 +592,52 @@ mod recursive_scope_tests {
                         &first,
                     ));
 
-                    let unwind = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                        let mut invocation = outer.enter_recursive_inference();
-                        let inner = invocation.sink();
+                    let rejected = outer.with_recursive_inference(|inner| {
                         begin_group(inner, &env);
                         let current = caller(inner, &env, &mut variables, &mut subst, "right", "b");
-                        let mut member = inner.enter_recursive_caller(Some(current));
-                        let abandoned = reference(
-                            member.sink(),
-                            &env,
-                            &mut variables,
-                            &mut subst,
-                            "left",
-                            1_000_001,
-                        );
-                        unify(&abandoned, &identity_type(Prim::Int32), &mut subst).unwrap();
-                        std::panic::panic_any(NestedAbort);
+                        inner.with_recursive_caller(Some(current), |member| {
+                            let abandoned = reference(
+                                member,
+                                &env,
+                                &mut variables,
+                                &mut subst,
+                                "left",
+                                1_000_001,
+                            );
+                            unify(&abandoned, &identity_type(Prim::Int32), &mut subst).unwrap();
+                            Err::<(), _>(NestedAbort)
+                        })
+                    });
+                    assert!(matches!(rejected, Err(NestedAbort)));
+                    assert!(!admits_independent_uses(
+                        outer,
+                        &env,
+                        &mut variables,
+                        &mut subst,
+                        &first,
+                    ));
+
+                    let unwind = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        run_test_session(&mut crate::NativeServices::new(None), |inner| {
+                            inner.with_recursive_inference(|inner| {
+                                begin_group(inner, &env);
+                                let current =
+                                    caller(inner, &env, &mut variables, &mut subst, "right", "b");
+                                inner.with_recursive_caller(Some(current), |member| {
+                                    let abandoned = reference(
+                                        member,
+                                        &env,
+                                        &mut variables,
+                                        &mut subst,
+                                        "left",
+                                        1_000_003,
+                                    );
+                                    unify(&abandoned, &identity_type(Prim::Int32), &mut subst)
+                                        .unwrap();
+                                    std::panic::panic_any(NestedAbort);
+                                })
+                            })
+                        })
                     }));
                     assert!(
                         unwind
@@ -653,7 +655,7 @@ mod recursive_scope_tests {
                         reference(outer, &env, &mut variables, &mut subst, "right", 1_000_002);
                     unify(&first, &identity_type(Prim::Int32), &mut subst).unwrap();
                     unify(&last, &identity_type(Prim::Int32), &mut subst).unwrap();
-                }
+                });
                 sink.finish_recursive_group(&mut subst);
                 Ok(())
             })
@@ -683,36 +685,27 @@ mod recursive_scope_tests {
         let report = run_result(&mut crate::NativeServices::new(None), |sink| {
             begin_group(sink, &env);
             let current = caller(sink, &env, &mut variables, &mut subst, "left", "a");
-            {
-                let mut outer_scope = sink.enter_recursive_caller(Some(current));
-                let outer = outer_scope.sink();
+            sink.with_recursive_caller(Some(current), |outer| {
                 let first = reference(outer, &env, &mut variables, &mut subst, "right", 10);
                 unify(&first, &identity_type(Prim::Int32), &mut subst).unwrap();
-                {
-                    let current = caller(outer, &env, &mut variables, &mut subst, "right", "b");
-                    let mut inner = outer.enter_recursive_caller(Some(current));
-                    let second =
-                        reference(inner.sink(), &env, &mut variables, &mut subst, "left", 20);
+                let current = caller(outer, &env, &mut variables, &mut subst, "right", "b");
+                outer.with_recursive_caller(Some(current), |inner| {
+                    let second = reference(inner, &env, &mut variables, &mut subst, "left", 20);
                     unify(&second, &identity_type(Prim::Int32), &mut subst).unwrap();
-                }
+                });
                 let third = reference(outer, &env, &mut variables, &mut subst, "right", 30);
                 unify(&third, &identity_type(Prim::Int32), &mut subst).unwrap();
-                let unwind = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    let current = caller(outer, &env, &mut variables, &mut subst, "right", "b");
-                    let mut inner = outer.enter_recursive_caller(Some(current));
-                    let fourth =
-                        reference(inner.sink(), &env, &mut variables, &mut subst, "left", 40);
+                // A rejecting member body leaves through the same explicit exit.
+                let current = caller(outer, &env, &mut variables, &mut subst, "right", "b");
+                let rejected = outer.with_recursive_caller(Some(current), |inner| {
+                    let fourth = reference(inner, &env, &mut variables, &mut subst, "left", 40);
                     unify(&fourth, &identity_type(Prim::Int32), &mut subst).unwrap();
-                    std::panic::panic_any(NestedAbort);
-                }));
-                assert!(
-                    unwind
-                        .expect_err("nested caller unwinds")
-                        .is::<NestedAbort>()
-                );
+                    Err::<(), _>(NestedAbort)
+                });
+                assert!(matches!(rejected, Err(NestedAbort)));
                 let fifth = reference(outer, &env, &mut variables, &mut subst, "right", 50);
                 unify(&fifth, &identity_type(Prim::Int32), &mut subst).unwrap();
-            }
+            });
             sink.finish_recursive_group(&mut subst);
             Ok(())
         })
@@ -773,24 +766,24 @@ mod opacity_scope_tests {
     fn opacity_policy_belongs_to_the_diagnostic_session_not_the_thread() {
         let library = library();
         let report = run_result(&mut crate::NativeServices::new(None), |outer| {
-            let mut outer_scope = outer.install_opacity_context(policy(&library, "agent.strategy"));
-            let outer = outer_scope.sink();
+            outer.with_opacity_context(policy(&library, "agent.strategy"), |outer| {
+                // Annotation-only sessions do not inherit another check's policy.
+                run_result(&mut crate::NativeServices::new(None), |annotation| {
+                    assert!(!rejects_construction(&library, annotation));
+                    Ok(())
+                })
+                .expect("an inactive session does not enforce the outer policy");
 
-            // Annotation-only sessions do not inherit another check's policy.
-            run_result(&mut crate::NativeServices::new(None), |annotation| {
-                assert!(!rejects_construction(&library, annotation));
+                run_result(&mut crate::NativeServices::new(None), |inner| {
+                    inner.with_opacity_context(policy(&library, "stats.prob"), |inner| {
+                        assert!(rejects_construction(&library, outer));
+                        assert!(!rejects_construction(&library, inner));
+                        Ok(())
+                    })
+                })
+                .expect("the defining module remains authorized");
                 Ok(())
             })
-            .expect("an inactive session does not enforce the outer policy");
-
-            run_result(&mut crate::NativeServices::new(None), |inner| {
-                let mut inner_scope = inner.install_opacity_context(policy(&library, "stats.prob"));
-                assert!(rejects_construction(&library, outer));
-                assert!(!rejects_construction(&library, inner_scope.sink()));
-                Ok(())
-            })
-            .expect("the defining module remains authorized");
-            Ok(())
         })
         .expect_err("the outer session still rejects construction outside the defining module");
 
@@ -801,32 +794,46 @@ mod opacity_scope_tests {
         ));
     }
 
+    /// Scope exits are explicit: they run when the body returns, Ok or Err.
+    /// An unwind skips them, which production cannot observe: it drops the
+    /// unwinding entry's own sink. So the unwind case checks what a live
+    /// enclosing session and a later session on the same services observe.
     #[test]
     fn opacity_scopes_restore_policy_on_return_and_unwind_without_losing_errors() {
         let library = library();
+        let mut reused = crate::NativeServices::new(None);
         let report = run_result(&mut crate::NativeServices::new(None), |sink| {
-            {
-                let mut outer_scope = sink.install_opacity_context(policy(&library, "stats.prob"));
-                let outer = outer_scope.sink();
-                {
-                    let mut inner_scope =
-                        outer.install_opacity_context(policy(&library, "agent.strategy"));
-                    assert!(rejects_construction(&library, inner_scope.sink()));
-                }
+            sink.with_opacity_context(policy(&library, "stats.prob"), |outer| {
+                outer.with_opacity_context(policy(&library, "agent.strategy"), |inner| {
+                    assert!(rejects_construction(&library, inner));
+                });
+                assert!(!rejects_construction(&library, outer));
+
+                let rejected =
+                    outer.with_opacity_context(policy(&library, "agent.strategy"), |inner| {
+                        assert!(rejects_construction(&library, inner));
+                        Err::<(), _>("abort nested opacity check")
+                    });
+                assert!(rejected.is_err());
                 assert!(!rejects_construction(&library, outer));
 
                 let unwind = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    let mut inner_scope =
-                        outer.install_opacity_context(policy(&library, "agent.strategy"));
-                    assert!(rejects_construction(&library, inner_scope.sink()));
-                    std::panic::panic_any("abort nested opacity check");
+                    run_test_session(&mut reused, |inner| {
+                        inner.with_opacity_context(policy(&library, "agent.strategy"), |inner| {
+                            assert!(rejects_construction(&library, inner));
+                            std::panic::panic_any("abort nested opacity check");
+                        })
+                    })
                 }));
                 assert!(unwind.is_err());
                 assert!(!rejects_construction(&library, outer));
+                let (enforced, fresh_errors) =
+                    run_test_session(&mut reused, |fresh| rejects_construction(&library, fresh));
+                assert!(!enforced && fresh_errors.is_empty());
 
                 outer.set_opacity_current_item(Some("agent.strategy".into()), None);
                 assert!(rejects_construction(&library, outer));
-            }
+            });
             assert!(!rejects_construction(&library, sink));
             Ok(())
         })
@@ -850,7 +857,12 @@ mod rejected_signature_resolution_tests {
 
     fn resolve<T>(
         source: &str,
-        operation: impl FnOnce(&mut DeepTypeResolver<'_, '_, '_>, &chelis_deep::Expr) -> T,
+        operation: impl FnOnce(
+            &mut DeepTypeResolver<'_, '_>,
+            &mut VarGen,
+            &mut DiagnosticSink<'_>,
+            &chelis_deep::Expr,
+        ) -> T,
     ) -> (T, Vec<CheckError>) {
         resolve_with_binders(source, &[], operation)
     }
@@ -858,7 +870,12 @@ mod rejected_signature_resolution_tests {
     fn resolve_with_binders<T>(
         source: &str,
         binder_names: &[&str],
-        operation: impl FnOnce(&mut DeepTypeResolver<'_, '_, '_>, &chelis_deep::Expr) -> T,
+        operation: impl FnOnce(
+            &mut DeepTypeResolver<'_, '_>,
+            &mut VarGen,
+            &mut DiagnosticSink<'_>,
+            &chelis_deep::Expr,
+        ) -> T,
     ) -> (T, Vec<CheckError>) {
         let program = chelis_deep::parse_and_stamp_file(&format!("(defsig {{}} fixture {source})"))
             .expect("parse declaration type");
@@ -881,9 +898,8 @@ mod rejected_signature_resolution_tests {
                 BinderMode::ExplicitGeneric(&binders),
                 &headers,
                 &mut variables,
-                &mut sink,
             );
-            operation(&mut resolver, ty)
+            operation(&mut resolver, &mut variables, &mut sink, ty)
         };
         (result, errors)
     }
@@ -892,7 +908,7 @@ mod rejected_signature_resolution_tests {
     fn ordinary_resolution_never_returns_partial_structure_as_success() {
         let (result, errors) = resolve(
             "(t-fn {} (t-prim {} f8e4m3) (t-prim {} i32) (t-prim {} f8e5m2))",
-            |resolver, ty| resolver.resolve(ty),
+            |resolver, variables, sink, ty| resolver.resolve(variables, sink, ty),
         );
         assert!(result.is_err());
         assert_eq!(errors.len(), 2, "{errors:?}");
@@ -904,7 +920,7 @@ mod rejected_signature_resolution_tests {
     fn only_a_rejected_outcome_carries_partial_signature_structure() {
         let (result, errors) = resolve(
             "(t-fn {} (t-prim {} f8e4m3) (t-prim {} i32) (t-prim {} f8e5m2))",
-            |resolver, ty| resolver.resolve_signature(ty),
+            |resolver, variables, sink, ty| resolver.resolve_signature(variables, sink, ty),
         );
         let rejected = result.expect_err("an invalid signature cannot resolve");
         let Type::Fn(arguments, result) = rejected.ty else {
@@ -921,7 +937,7 @@ mod rejected_signature_resolution_tests {
     fn valid_structure_resolves_without_an_error_witness() {
         let (result, errors) = resolve(
             "(t-fn {} (t-prim {} i32) (t-prim {} bool))",
-            |resolver, ty| resolver.resolve_signature(ty),
+            |resolver, variables, sink, ty| resolver.resolve_signature(variables, sink, ty),
         );
         assert_eq!(
             result.expect("valid signature").into_type(),
@@ -935,14 +951,15 @@ mod rejected_signature_resolution_tests {
 
     #[test]
     fn parameter_holes_are_distinct_from_named_binders() {
-        let (hole, errors) = resolve("(t-var {} _)", |resolver, ty| {
-            resolver.resolve_parameter(ty)
+        let (hole, errors) = resolve("(t-var {} _)", |resolver, variables, sink, ty| {
+            resolver.resolve_parameter(variables, sink, ty)
         });
         assert!(hole.expect("a parameter admits a hole").is_none());
         assert!(errors.is_empty());
-        let (named, errors) = resolve_with_binders("(t-var {} a)", &["a"], |resolver, ty| {
-            resolver.resolve_parameter(ty)
-        });
+        let (named, errors) =
+            resolve_with_binders("(t-var {} a)", &["a"], |resolver, variables, sink, ty| {
+                resolver.resolve_parameter(variables, sink, ty)
+            });
         assert!(matches!(
             named
                 .expect("named binder")
