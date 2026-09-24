@@ -137,6 +137,13 @@ class ObservationFailureTests(unittest.TestCase):
         with self.assertRaises(OSError):
             observer.enumerate_files(self.root / "missing")
 
+    def test_inventory_prunes_build_output_only_at_the_root(self):
+        package = self.root / "package"
+        for name in ("src/lib.rs", "src/target/mod.rs", "target/debug/build/out.rs", "src/.git/HEAD", "src/node_modules/shim.rs"):
+            (package / name).parent.mkdir(parents=True, exist_ok=True)
+            (package / name).write_text("")
+        self.assertEqual(observer.enumerate_files(package), ["src/lib.rs", "src/target/mod.rs"])
+
     def test_required_probe_failure_is_not_an_empty_observation(self):
         with self.assertRaisesRegex(observer.ObservationError, "probe failed"):
             observer.probe(["/bin/sh", "-c", "printf 'probe denied' >&2; exit 17"])

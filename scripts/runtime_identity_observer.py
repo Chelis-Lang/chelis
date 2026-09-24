@@ -226,7 +226,11 @@ def enumerate_files(root):
         raise FileNotFoundError(f"input inventory root is absent: {root}")
     result = []
     for directory, dirs, files in os.walk(root, onerror=lambda error: (_ for _ in ()).throw(error)):
-        dirs[:] = sorted(name for name in dirs if name not in {".git", "target", ".venv", ".devenv", "node_modules"})
+        # Mirror the core's selection: `target` is build output only as the
+        # root's first segment, so a nested source directory of that name is
+        # an input. The other names are excluded at any depth.
+        top = Path(directory) == root
+        dirs[:] = sorted(name for name in dirs if name not in {".git", ".venv", ".devenv", "node_modules"} and not (top and name == "target"))
         for name in sorted(files):
             path = Path(directory) / name
             if path.is_symlink() and not path.resolve().is_file():
