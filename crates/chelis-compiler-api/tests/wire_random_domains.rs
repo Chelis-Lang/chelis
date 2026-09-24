@@ -326,7 +326,12 @@ fn the_codec_admits_the_key_chain_and_rejects_every_malformed_key_form() {
         .as_array_mut()
         .unwrap()
         .push(json!(chosen));
-    assert!(WireDag::from_validated_json(&selected.to_string()).is_err());
+    // Keys select through activations, never through `where` (V4); a
+    // key-precision `where` is also no key operation (V1).
+    rejects_domain(
+        &selected,
+        &format!("key 11 reaches node {chosen} input 1; only a key operation"),
+    );
 
     let mut dependency = key_chain();
     dependency["nodes"][9]["shape_deps"] = json!([6]);

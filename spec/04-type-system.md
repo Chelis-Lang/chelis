@@ -46,20 +46,20 @@ These closed subsets are used throughout the specs:
 
 - the **eight active numeric dtypes** are the four floats (`f16`, `bf16`,
   `f32`, `f64`) and four signed integers (`i8`, `i16`, `i32`, `i64`);
-- the **nine active tensor element dtypes** are those eight numeric dtypes plus
-  `bool`; and
+- the **ten active tensor element dtypes** are those eight numeric dtypes,
+  `bool`, and `key`;
+- the **nine active data element dtypes** are the active tensor element dtypes
+  other than `key`: the eight numeric dtypes plus `bool`; and
 - `string` is an active host primitive, but is neither a numeric dtype nor a
-  tensor element dtype; and
-- `key` is an active primitive and may be the element of a `tensor[D, key]`,
-  but is neither a numeric dtype nor one of the nine active tensor element
-  dtypes, so an operation that admits every active tensor element dtype does
-  not admit it.
+  tensor element dtype.
 
-A `key` is a 64-bit random key ([05-RNG-2]). It has no arithmetic,
-comparison, cast, literal, or default value. [05-OP-69] creates keys and
-[05-OP-70] through [05-OP-72] derive them; an operation admits a key operand
-only where its own atom names `key`. (Source and Deep ingress do not yet
-accept the `key` spelling; chelis#2413.)
+A `key` is a 64-bit random key ([05-RNG-2]). It is not numeric, and it has
+no arithmetic, comparison, cast, literal, or default value. [05-OP-69] creates
+keys, [05-OP-70] through [05-OP-72] derive them, and a draw keyed by a key
+reads it under [05-RNG-2]. An operation admits `key` elements only where its
+own atom names `key`: a domain written as every active tensor element dtype
+admits exactly the nine active data element dtypes. (Source and Deep ingress
+do not yet accept the `key` spelling; chelis#2413.)
 
 Code, tests, examples, and stdlib signatures referenced from any active spec
 section must use these set names with exactly those meanings. The reserved

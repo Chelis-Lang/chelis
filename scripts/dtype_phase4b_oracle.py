@@ -1100,7 +1100,8 @@ def validate_normative_contract(
                 "one of the eleven active primitives is well-typed",
                 "backend-neutral active primitive set",
             ),
-            ("nine active tensor element dtypes", "nine tensor element dtypes"),
+            ("ten active tensor element dtypes", "ten tensor element dtypes"),
+            ("nine active data element dtypes", "nine data element dtypes"),
             (
                 "For an unconsumed local owner, the compiler inserts `Drop` at the "
                 "earliest\npost-dominating point after its last use",
@@ -2048,7 +2049,7 @@ def validate_normative_contract(
             "`to_string(value) -> result` borrows exactly one value",
             "without consuming it and returns `string`",
             "It admits exactly an active numeric, `bool`, or `string` scalar",
-            "a tensor whose element dtype is one of the nine active tensor element dtypes",
+            "a tensor whose element dtype is one of the nine active data element dtypes",
             "a `List` whose reachable elements are recursively admitted by this rule",
             "Unit, tuples, `Dict`, `Option`, ADTs, functions, resource handles, and "
             "deferred values are type errors",

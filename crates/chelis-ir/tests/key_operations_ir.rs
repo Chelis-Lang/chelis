@@ -921,6 +921,9 @@ fn a_key_reaching_arithmetic_selection_or_a_shape_dependency_is_rejected() {
         &dag,
         "only a key operation or a random primitive consumes a key",
     );
+    // `key` is an active tensor element dtype, but `where` names no `key`,
+    // so its own scheme rejects key branches too, independently of V4.
+    assert_rejected(&dag, "branches must use an active data element dtype");
 
     let mut dag = Dag::new();
     let key = root_key(&mut dag);

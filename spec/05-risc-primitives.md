@@ -1638,7 +1638,7 @@ traps `Test` with its supplied label and the operation name.
 > **[05-OP-25]** `to_string(value) -> result` borrows exactly one value
 > without consuming it and returns `string`. It admits exactly an active
 > numeric, `bool`, or `string` scalar; a tensor whose element dtype is one of
-> the nine active tensor element dtypes in spec/04 §1.1; or a `List` whose
+> the nine active data element dtypes in spec/04 §1.1; or a `List` whose
 > reachable elements are recursively admitted by this rule. Unit, tuples,
 > `Dict`, `Option`, ADTs, functions, resource handles, and
 > deferred values are type errors. A `string`

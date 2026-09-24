@@ -1622,9 +1622,12 @@ fn verify_with_dangling_policy(dag: &Dag, reject_dangling: bool) -> Vec<String> 
                             node.id.0
                         ));
                     }
-                    if !then_value.output_type.precision.is_valid_tensor_precision() {
+                    // spec/04 §1.1: `where` names no `key`, so its branches
+                    // range over the data element dtypes; keys select through
+                    // activations instead.
+                    if !then_value.output_type.precision.is_data_element_dtype() {
                         errors.push(format!(
-                            "where at node {} branches must use an active tensor element dtype",
+                            "where at node {} branches must use an active data element dtype",
                             node.id.0
                         ));
                     }

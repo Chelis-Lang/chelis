@@ -2405,7 +2405,7 @@ impl WireDag {
                             then_value,
                             &shape_participants,
                         )
-                        || !branch_precision.is_some_and(|prim| prim.is_valid_tensor_precision())
+                        || !branch_precision.is_some_and(|prim| prim.is_data_element_dtype())
                     {
                         return Err(WireDagContractError::new(format!(
                             "WireDag Where node {} requires a same-shape Bool condition and exactly matching branch/output types",
