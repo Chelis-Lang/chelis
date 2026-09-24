@@ -4615,6 +4615,11 @@ mod tests {
     /// The binding comparison repeats no comparison a witness class already
     /// owns, directly or through a chain of equalities (section 4.7 evaluates
     /// each guard once), and relates no two scopes that merely share a name.
+    ///
+    /// EVIDENTIARY STATUS: disposition lock. It asserts only what the binding
+    /// comparison must not add, so it also passes with that comparison
+    /// switched off; the regression test is
+    /// `an_input_axis_a_name_sizes_is_compared_with_that_names_binding`.
     #[test]
     fn binding_comparisons_repeat_no_class_guard_and_cross_no_scope() {
         let named = |name: &str| ty(vec![DimInfo::Named(name.into(), None)], Prim::F32);

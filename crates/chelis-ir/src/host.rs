@@ -19477,9 +19477,10 @@ fn adt_constructor_definitions(program: &HostLoweringSession<'_>) -> Vec<Generic
 /// The layout of every ADT a function parameter carries, directly or nested
 /// in a tuple, list, option, dictionary, or another ADT's field.
 ///
-/// An ADT whose constructors do not all instantiate at the carried type gets
-/// no layout; the backend that would walk it refuses it by name rather than
-/// skipping its tensors.
+/// An ADT the checker registers no constructor for gets a layout with none.
+/// An ADT whose name matches several registered ADTs, or whose constructors
+/// do not all instantiate at the carried type, gets no layout; the backend
+/// that would walk it refuses it by name rather than skipping its tensors.
 fn parameter_adt_layouts(
     program: &HostLoweringSession<'_>,
     functions: &[HostFunction],
@@ -19519,10 +19520,22 @@ fn parameter_adt_layouts(
                 } else {
                     exact
                 };
+                // Lowering builds, matches and reads a field of an ADT only
+                // through a constructor of this table. A type the checker
+                // registers no constructor for, such as the checker-native
+                // `Result`, therefore has no field a body can read, and its
+                // layout is exactly that: no constructors.
+                if candidates.is_empty() {
+                    layouts.push(HostAdtLayout {
+                        ty: ty.clone(),
+                        constructors: Vec::new(),
+                    });
+                    continue;
+                }
                 let one_adt = candidates
                     .windows(2)
                     .all(|pair| pair[0].adt_name == pair[1].adt_name);
-                if candidates.is_empty() || !one_adt {
+                if !one_adt {
                     continue;
                 }
                 let canonical =

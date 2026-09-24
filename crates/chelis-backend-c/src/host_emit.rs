@@ -373,12 +373,12 @@ pub(crate) fn emit_host_abi_program(
     };
 
     // chelis#2506: every function's nested-value entry work, and the walkers
-    // it calls, before any body that calls one.
+    // its exported entry calls, before any function that calls one.
     let mut entry_walkers = entry_walk::EntryWalkers::new(program)?;
     let entry_work = program
         .functions
         .iter()
-        .map(|function| entry_walkers.function_work(function))
+        .map(|function| entry_walkers.entry_work(function))
         .collect::<Result<Vec<_>, _>>()?;
     entry_walkers.render(&mut body);
 
@@ -2480,7 +2480,7 @@ fn emit_function(
     verified_helpers: &[VerifiedHostTensorHelperView<'_>],
     external_helpers: &UnordSet<String>,
     captured_globals: &[String],
-    entry_work: &entry_walk::FunctionEntryWork,
+    entry_work: &entry_walk::EntryWork,
     #[cfg(feature = "native-random-observer")]
     source_sites: &[crate::random_observer::SourceSite<'_>],
 ) -> Result<(), Unsupported> {
@@ -2586,10 +2586,10 @@ fn emit_function(
     let delegated_entry_guards = entry::delegated_function_guards(function, verified_helpers);
     emitter.lines.extend(signature_entry_lines(
         &entry_plan,
-        &entry_work.args,
+        &entry_work.body.args,
         &emitter.indent,
         &delegated_entry_guards,
-        Some(entry_work),
+        Some(&entry_work.body),
     )?);
     // Entry guards still read parameters the body does not use. Their
     // verified entry drops run only after those witness reads finish.
@@ -2636,6 +2636,28 @@ fn emit_function(
 
     if authored {
         let entry_uses = authored_entry_uses(ownership_sites, function.params.len())?;
+        // chelis#2506: a walk costs the size of the value, so it runs here,
+        // once per exported call, and never on the body's recursive or
+        // internal calls. The whole signature entry runs with it, so every
+        // metadata check still dominates every extent read; the body then
+        // repeats only its constant-cost checks.
+        let exported_work = entry_work.exported.as_ref().ok_or_else(|| {
+            invalid_abi_shape(
+                "authored function has no exported entry work".into(),
+                "signature entry",
+            )
+        })?;
+        let exported_entry = if exported_work.walks() {
+            signature_entry_lines(
+                &entry_plan,
+                &exported_work.args,
+                "    ",
+                &delegated_entry_guards,
+                Some(exported_work),
+            )?
+        } else {
+            Vec::new()
+        };
         let wrapper_params = function
             .params
             .iter()
@@ -2653,6 +2675,7 @@ fn emit_function(
             &declaration,
         ));
         out.push(format!("{} {{", declaration.trim_end_matches(';')));
+        out.extend(exported_entry.iter().cloned());
         append_invocation_random_context(out);
         append_invocation_origin_context(out);
         let mut args = Vec::with_capacity(function.params.len());
@@ -2706,6 +2729,7 @@ fn emit_function(
                 c_type(&function.ret_ty)?,
                 emitted_name
             ));
+            out.extend(exported_entry);
             out.push("    chelis_rng_state __chelis_rng_local = {0ULL, 0ULL, 0};".to_string());
             out.push("    chelis_rng_state *__chelis_rng = &__chelis_rng_local;".to_string());
             crate::random_observer::append_observed_context(out, "    ");

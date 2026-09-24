@@ -45,7 +45,8 @@ def choice_total(c: Choice) -> i64 = match c with {\n  | Ints(t) => tensor_to_sc
 def named_pair[n](p: (tensor[n, i64], tensor[n, i64])) -> tensor[n, i64] = p.0 + p.1\n\
 def list_count(xs: List[tensor[3, i64]]) -> i64 = len(xs)\n\
 type Tree =\n  | Leaf(tensor[3, i64])\n  | Node(Tree, Tree)\n\
-def tree_leaves(t: Tree) -> i64 = match t with {\n  | Leaf(x) => 1i64\n  | Node(l, r) => tree_leaves(l) + tree_leaves(r)\n}\n";
+def tree_leaves(t: Tree) -> i64 = match t with {\n  | Leaf(x) => 1i64\n  | Node(l, r) => tree_leaves(l) + tree_leaves(r)\n}\n\
+def list_walk(xs: List[tensor[3, i64]], i: i64, acc: i64) -> i64 = if (i >= len(xs)) then acc else list_walk(xs, i + 1i64, acc + 1i64)\n";
 
 /// How the harness hands one supplied tensor to one entry and releases the
 /// result. The C local `x` is the supplied tensor.
@@ -86,8 +87,14 @@ impl Entry {
 }
 
 fn build(dir: &Path) -> std::path::PathBuf {
+    build_source(dir, SOURCE).unwrap_or_else(|stderr| panic!("{stderr}"))
+}
+
+/// Build `source` to C in `dir`, returning the output directory or the
+/// compiler's stderr.
+fn build_source(dir: &Path, source: &str) -> Result<std::path::PathBuf, String> {
     let path = dir.join("entry.ch");
-    fs::write(&path, SOURCE).expect("source");
+    fs::write(&path, source).expect("source");
     let out = dir.join("c");
     let built = Command::cargo_bin("chelis")
         .expect("chelis")
@@ -98,12 +105,30 @@ fn build(dir: &Path) -> std::path::PathBuf {
         .arg(&out)
         .output()
         .expect("build C");
-    assert!(
-        built.status.success(),
-        "{}",
-        String::from_utf8_lossy(&built.stderr)
-    );
-    out
+    if built.status.success() {
+        Ok(out)
+    } else {
+        Err(String::from_utf8_lossy(&built.stderr).into_owned())
+    }
+}
+
+/// Link the C `harness` against the generated program in `out`, run it, and
+/// return (exit success, stdout plus stderr).
+fn link_and_run(out: &Path, name: &str, harness: &str) -> (bool, String) {
+    let file = format!("{name}.c");
+    fs::write(out.join(&file), harness).expect("harness");
+    assert!(link_generated(out, &file, name).success(), "{name} link");
+    let run = std::process::Command::new(out.join(name))
+        .output()
+        .expect("run");
+    (
+        run.status.success(),
+        format!(
+            "{}{}",
+            String::from_utf8_lossy(&run.stdout),
+            String::from_utf8_lossy(&run.stderr)
+        ),
+    )
 }
 
 /// Link a harness that supplies a zero-filled rank-1 tensor of dtype
@@ -119,20 +144,7 @@ fn run(out: &Path, name: &str, entry: Entry, supplied: &str) -> (bool, String) {
          puts(\"completed\"); return 0;\n}}\n",
         entry.call()
     );
-    let file = format!("{name}.c");
-    fs::write(out.join(&file), harness).expect("harness");
-    assert!(link_generated(out, &file, name).success(), "{name} link");
-    let run = std::process::Command::new(out.join(name))
-        .output()
-        .expect("run");
-    (
-        run.status.success(),
-        format!(
-            "{}{}",
-            String::from_utf8_lossy(&run.stdout),
-            String::from_utf8_lossy(&run.stderr)
-        ),
-    )
+    link_and_run(out, name, &harness)
 }
 
 #[test]
@@ -324,20 +336,7 @@ fn run_nested(
         shape.len(),
         carrier.call()
     );
-    let file = format!("{name}.c");
-    fs::write(out.join(&file), harness).expect("harness");
-    assert!(link_generated(out, &file, name).success(), "{name} link");
-    let run = std::process::Command::new(out.join(name))
-        .output()
-        .expect("run");
-    (
-        run.status.success(),
-        format!(
-            "{}{}",
-            String::from_utf8_lossy(&run.stdout),
-            String::from_utf8_lossy(&run.stderr)
-        ),
-    )
+    link_and_run(out, name, &harness)
 }
 
 /// chelis#2506 REGRESSION TEST: at the pre-fix tree a tensor nested in a
@@ -430,6 +429,199 @@ fn a_matching_nested_tensor_runs_at_every_carrier() {
         assert!(!output.contains("numeric trap"), "{name}: {output}");
         if let Some(result) = result {
             assert!(output.contains(result), "{name}: {output}");
+        }
+    }
+}
+
+/// chelis#2506 REGRESSION TEST: an exported entry walks a nested value once,
+/// and the recursive calls its body makes do not walk it again. The harness
+/// counts every `chelis_tensor_shape` read in the generated program; walking
+/// four elements reads four literal extents. At the pre-fix tree the walk ran
+/// in the body every call entered, so `list_walk` over four elements read
+/// twenty, one walk per call.
+#[test]
+fn an_exported_entry_walks_a_nested_value_once_and_its_internal_calls_do_not() {
+    if !gcc_available() {
+        return;
+    }
+    let dir = tempfile::tempdir().expect("tempdir");
+    let out = build(dir.path());
+    let harness = format!(
+        "#include \"chelis_runtime.h\"\n\
+         static long long shape_reads = 0;\n\
+         static int64_t counted_shape(const chelis_tensor *tensor, int32_t axis) {{\n\
+         ++shape_reads; return chelis_tensor_shape(tensor, axis);\n}}\n\
+         #define chelis_tensor_shape(tensor, axis) counted_shape(tensor, axis)\n\
+         #define main generated_main\n#include \"entry.c\"\n#undef main\n\
+         int main(void) {{\n\
+         chelis_value items[4];\n\
+         for (int k = 0; k < 4; ++k) items[k] = chelis_value_take_tensor(chelis_alloc(1, (int64_t[]){{3}}, CHELIS_DTYPE_I64));\n\
+         chelis_list *xs = chelis_list_from_values(items, 4);\n\
+         for (int k = 0; k < 4; ++k) chelis_value_release(items[k]);\n\
+         long long steps = (long long){}(xs, 0, 0);\n\
+         printf(\"steps %lld shape reads %lld\\n\", steps, shape_reads);\n\
+         chelis_list_release(xs);\n\
+         return 0;\n}}\n",
+        authored_c_symbol("list_walk")
+    );
+    let (succeeded, output) = link_and_run(&out, "walk_once", &harness);
+    assert!(succeeded, "{output}");
+    assert!(
+        output.contains("steps 4 shape reads 4\n"),
+        "one walk of four elements at the exported entry: {output}"
+    );
+    let (succeeded, output) = run_nested(&out, "walk_once_trap", Carrier::List, "F64", &[3]);
+    assert!(
+        !succeeded
+            && output.contains(
+                "input `xs[1]` expected dtype i64, got f64\nnumeric trap: domain in load at i64\n"
+            ),
+        "the exported entry still traps: {output}"
+    );
+}
+
+/// chelis#2506: a path longer than the 512-byte rendering buffer ends in a
+/// visible marker rather than stopping mid-segment. At the pre-fix tree it
+/// was cut silently.
+#[test]
+fn a_nested_path_too_long_to_render_ends_in_a_truncation_marker() {
+    if !gcc_available() {
+        return;
+    }
+    let dir = tempfile::tempdir().expect("tempdir");
+    let out = build(dir.path());
+    // Eighty `Node(Leaf(good), .)` levels above `Leaf(supplied)` render
+    // `t` + 80 x `.Node.1` + `.Leaf.0`, 568 bytes.
+    let harness = format!(
+        "#define main generated_main\n#include \"entry.c\"\n#undef main\n\
+         int main(void) {{\n\
+         chelis_string leaf = chelis_string_from_cstr(\"Leaf\");\n\
+         chelis_string node = chelis_string_from_cstr(\"Node\");\n\
+         chelis_value field = chelis_value_take_tensor(chelis_alloc(1, (int64_t[]){{3}}, CHELIS_DTYPE_F64));\n\
+         chelis_value tree = chelis_value_take_adt(chelis_adt_construct(leaf, &field, 1));\n\
+         chelis_value_release(field);\n\
+         for (int level = 0; level < 80; ++level) {{\n\
+         chelis_value good = chelis_value_take_tensor(chelis_alloc(1, (int64_t[]){{3}}, CHELIS_DTYPE_I64));\n\
+         chelis_value children[2] = {{ chelis_value_take_adt(chelis_adt_construct(leaf, &good, 1)), tree }};\n\
+         chelis_value_release(good);\n\
+         tree = chelis_value_take_adt(chelis_adt_construct(node, children, 2));\n\
+         chelis_value_release(children[0]); chelis_value_release(children[1]);\n\
+         }}\n\
+         printf(\"leaves %lld\\n\", (long long){}(chelis_adt_take_value(tree)));\n\
+         puts(\"completed\"); return 0;\n}}\n",
+        authored_c_symbol("tree_leaves")
+    );
+    let (succeeded, output) = link_and_run(&out, "long_path", &harness);
+    let prefix = format!("input `t{}", ".Node.1".repeat(70));
+    let line = output
+        .lines()
+        .find(|line| line.starts_with(&prefix))
+        .unwrap_or_else(|| panic!("no deep path line: {output}"));
+    assert!(
+        !succeeded
+            && line.ends_with("...(truncated)` expected dtype i64, got f64")
+            && line.len() == "input ``".len() + 511 + " expected dtype i64, got f64".len(),
+        "{line}"
+    );
+}
+
+/// chelis#2521 round 1 REGRESSION TEST: the checker-native `Result` has no
+/// constructor, so no body can read a value's payload, and a parameter that
+/// carries one needs no walk. At the pre-fix tree every row failed to build,
+/// because the walk demanded a constructor layout `Result` does not have;
+/// the base before chelis#2506 built them all.
+#[test]
+fn a_parameter_carrying_the_constructorless_result_builds() {
+    let mut failures = Vec::new();
+    for (name, definition) in [
+        ("scalar", "def f(x: Result[i64, string]) -> i64 = 1i64\n"),
+        (
+            "tensor",
+            "def f(x: Result[tensor[3, f32], string]) -> i64 = 1i64\n",
+        ),
+        (
+            "list",
+            "def f(x: List[Result[i64, string]]) -> i64 = len(x)\n",
+        ),
+        (
+            "option",
+            "def f(x: Option[Result[i64, string]]) -> i64 = 1i64\n",
+        ),
+        (
+            "tuple",
+            "def f(x: (i64, Result[i64, string])) -> i64 = x.0\n",
+        ),
+        (
+            "field",
+            "type Wrap =\n  | Wrap(Result[i64, string])\ndef f(x: Wrap) -> i64 = 1i64\n",
+        ),
+        (
+            "field_beside_tensor",
+            "type Wrap =\n  | Wrap(Result[tensor[3, f32], string], tensor[3, f32])\ndef f(x: Wrap) -> i64 = 1i64\n",
+        ),
+    ] {
+        let dir = tempfile::tempdir().expect("tempdir");
+        // A second definition keeps the program on the host entry path.
+        let source = format!("{definition}def g(x: i64) -> i64 = x\n");
+        if let Err(stderr) = build_source(dir.path(), &source) {
+            failures.push(format!("{name}: {stderr}"));
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// A `Result` payload of the wrong dtype runs, since nothing reads it, while
+/// a tensor field beside the `Result` is still checked at the entry.
+#[test]
+fn a_result_payload_is_not_walked_and_a_sibling_tensor_is() {
+    if !gcc_available() {
+        return;
+    }
+    let dir = tempfile::tempdir().expect("tempdir");
+    let out = build_source(
+        dir.path(),
+        "type Wrap =\n  | Wrap(Result[tensor[3, f32], string], tensor[3, f32])\n\
+         def f(x: Wrap) -> i64 = 1i64\n\
+         def g(x: Result[tensor[3, f32], string]) -> i64 = 2i64\n",
+    )
+    .unwrap_or_else(|stderr| panic!("{stderr}"));
+    for (name, sibling, expected) in [
+        ("sibling_matches", "F32", None),
+        (
+            "sibling_mismatches",
+            "F64",
+            Some("input `x.1` expected dtype f32, got f64\nnumeric trap: domain in load at f32\n"),
+        ),
+    ] {
+        let harness = format!(
+            "#define main generated_main\n#include \"entry.c\"\n#undef main\n\
+             int main(void) {{\n\
+             chelis_string ok = chelis_string_from_cstr(\"Ok\");\n\
+             chelis_string wrap = chelis_string_from_cstr(\"Wrap\");\n\
+             chelis_value payload = chelis_value_take_tensor(chelis_alloc(1, (int64_t[]){{3}}, CHELIS_DTYPE_F64));\n\
+             chelis_adt *result = chelis_adt_construct(ok, &payload, 1);\n\
+             chelis_value_release(payload);\n\
+             printf(\"g %lld\\n\", (long long){}(result));\n\
+             chelis_value fields[2] = {{ chelis_value_take_adt(result), chelis_value_take_tensor(chelis_alloc(1, (int64_t[]){{3}}, CHELIS_DTYPE_{sibling})) }};\n\
+             chelis_adt *x = chelis_adt_construct(wrap, fields, 2);\n\
+             chelis_value_release(fields[0]); chelis_value_release(fields[1]);\n\
+             printf(\"f %lld\\n\", (long long){}(x));\n\
+             chelis_adt_release(x); chelis_string_release(ok); chelis_string_release(wrap);\n\
+             puts(\"completed\"); return 0;\n}}\n",
+            authored_c_symbol("g"),
+            authored_c_symbol("f")
+        );
+        let (succeeded, output) = link_and_run(&out, name, &harness);
+        assert!(output.contains("g 2\n"), "{name}: {output}");
+        match expected {
+            None => assert!(
+                succeeded && output.contains("f 1\ncompleted"),
+                "{name}: {output}"
+            ),
+            Some(expected) => assert!(
+                !succeeded && output.contains(expected) && !output.contains("f 1"),
+                "{name}: {output}"
+            ),
         }
     }
 }

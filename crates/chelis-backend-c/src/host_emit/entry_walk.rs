@@ -13,9 +13,15 @@
 //! arguments have no host representation, so a field's name cannot be tied to
 //! the signature's, and a list's elements share one declared extent that no
 //! fixed observation carries.
+//!
+//! A walk costs the size of the value, so it runs once, where a value enters
+//! from outside: the exported entry of an authored function. The body that
+//! recursive and internal calls enter keeps only the fixed-position checks;
+//! the values those calls pass were validated where they entered or built by
+//! checked code.
 
 use super::*;
-use chelis_ir::host::{HostAdtLayout, HostTensorInput, SignatureEntryPlan};
+use chelis_ir::host::{HostAdtLayout, HostFunctionOrigin, HostTensorInput, SignatureEntryPlan};
 
 /// One tensor the entry plan observes: a tensor parameter, or a tensor at a
 /// fixed tuple position inside a parameter.
@@ -111,6 +117,20 @@ pub(super) struct FunctionEntryWork {
     pub release: Vec<String>,
 }
 
+impl FunctionEntryWork {
+    /// Whether any parameter's value is walked.
+    pub fn walks(&self) -> bool {
+        self.params.iter().any(|param| !param.metadata.is_empty())
+    }
+}
+
+/// A function's entry work: its body's, and its exported entry's when it has
+/// one.
+pub(super) struct EntryWork {
+    pub body: FunctionEntryWork,
+    pub exported: Option<FunctionEntryWork>,
+}
+
 /// A tensor-carrying ADT field: its index, path segment and walker.
 type WalkedField = (usize, String, usize);
 
@@ -159,6 +179,20 @@ fn borrow_value(ty: &HostAbiType, value: &str) -> String {
     format!("chelis_{kind}_borrow_value({value})")
 }
 
+/// Whether `function` has an exported entry, the only place a walk runs.
+fn has_exported_entry(function: &HostFunction) -> bool {
+    function.origin == HostFunctionOrigin::Authored
+}
+
+/// Whether `ty` holds a tensor at a fixed tuple position.
+fn observes(ty: &HostAbiType) -> bool {
+    match ty {
+        HostAbiType::Tensor(_) => true,
+        HostAbiType::Tuple(items) => items.iter().any(observes),
+        _ => false,
+    }
+}
+
 impl<'a> EntryWalkers<'a> {
     pub fn new(program: &'a HostProgram) -> Result<Self, Unsupported> {
         let mut walkers = Self {
@@ -171,6 +205,7 @@ impl<'a> EntryWalkers<'a> {
             program
                 .functions
                 .iter()
+                .filter(|function| has_exported_entry(function))
                 .flat_map(|function| function.params.iter().map(|param| param.ty.clone())),
         )?;
         Ok(walkers)
@@ -242,6 +277,13 @@ impl<'a> EntryWalkers<'a> {
         self.carrying.contains(ty)
     }
 
+    /// Whether an entry does work on a value of `ty`: an exported entry
+    /// (`walk`) checks every tensor it carries, a body only the tensors at
+    /// fixed tuple positions.
+    fn has_work(&self, ty: &HostAbiType, walk: bool) -> bool {
+        if walk { self.carries(ty) } else { observes(ty) }
+    }
+
     /// The walker for `ty`, registering it and every walker it calls.
     fn walker(&mut self, ty: &HostAbiType) -> Result<usize, Unsupported> {
         if let Some(id) = self.types.iter().position(|seen| seen == ty) {
@@ -294,11 +336,23 @@ impl<'a> EntryWalkers<'a> {
         Ok(id)
     }
 
+    /// The entry work of one function's body and of its exported entry.
+    pub fn entry_work(&mut self, function: &HostFunction) -> Result<EntryWork, Unsupported> {
+        Ok(EntryWork {
+            body: self.function_work(function, false)?,
+            exported: has_exported_entry(function)
+                .then(|| self.function_work(function, true))
+                .transpose()?,
+        })
+    }
+
     /// The entry work of one function: fetch every tensor at a fixed tuple
-    /// position, and call a walker on every other tensor-carrying value.
-    pub fn function_work(
+    /// position and, for its exported entry (`walk`), call a walker on every
+    /// other tensor-carrying value.
+    fn function_work(
         &mut self,
         function: &HostFunction,
+        walk: bool,
     ) -> Result<FunctionEntryWork, Unsupported> {
         let mut work = FunctionEntryWork {
             args: Vec::new(),
@@ -315,6 +369,7 @@ impl<'a> EntryWalkers<'a> {
                 c_ident(&param.name).into_owned(),
                 param.name.clone(),
                 index,
+                walk,
                 &mut serial,
                 &mut work,
             )?;
@@ -322,12 +377,14 @@ impl<'a> EntryWalkers<'a> {
         Ok(work)
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn param_work(
         &mut self,
         ty: &HostAbiType,
         value: String,
         path: String,
         param: usize,
+        walk: bool,
         serial: &mut usize,
         work: &mut FunctionEntryWork,
     ) -> Result<(), Unsupported> {
@@ -336,14 +393,14 @@ impl<'a> EntryWalkers<'a> {
                 work.args.push(value);
                 work.owners.push(param);
             }
-            HostAbiType::Tuple(items) if self.carries(ty) => {
+            HostAbiType::Tuple(items) if self.has_work(ty, walk) => {
                 let label = chelis_ir::span_sanitize::sanitize_for_format_string(&path);
                 work.params[param].fetch.push(format!(
                     "if ({value} == NULL) {{ fprintf(stderr, \"input `{label}` is NULL\\n\"); abort(); }}"
                 ));
                 for (index, item) in items.iter().enumerate() {
                     let item_path = format!("{path}.{index}");
-                    if !self.carries(item) {
+                    if !self.has_work(item, walk) {
                         continue;
                     }
                     let id = *serial;
@@ -359,10 +416,10 @@ impl<'a> EntryWalkers<'a> {
                         borrow_value(item, &held)
                     ));
                     work.release.push(format!("chelis_value_release({held});"));
-                    self.param_work(item, typed, item_path, param, serial, work)?;
+                    self.param_work(item, typed, item_path, param, walk, serial, work)?;
                 }
             }
-            _ if self.carries(ty) => {
+            _ if walk && self.carries(ty) => {
                 let walker = self.walker(ty)?;
                 let id = *serial;
                 *serial += 1;
@@ -394,23 +451,30 @@ impl<'a> EntryWalkers<'a> {
         out.push(
             r#"
 
+/* `used` counts the whole path's length, including what did not fit. */
 static void __chelis_entry_path_append(const __chelis_entry_path *path, char *buffer, size_t size, size_t *used) {
     if (path->parent != NULL) __chelis_entry_path_append(path->parent, buffer, size, used);
-    if (*used + 1 >= size) return;
+    size_t room = *used < size ? size - *used : 0;
+    char *at = room > 0 ? buffer + *used : NULL;
     int written = path->segment != NULL
-        ? snprintf(buffer + *used, size - *used, "%s", path->segment)
-        : snprintf(buffer + *used, size - *used, "[%lld]", (long long)path->index);
-    if (written < 0) return;
-    *used += (size_t)written;
-    if (*used >= size) *used = size - 1;
+        ? snprintf(at, room, "%s", path->segment)
+        : snprintf(at, room, "[%lld]", (long long)path->index);
+    if (written > 0) *used += (size_t)written;
 }
 
 /* Renders only on a failing check, into storage the trap that follows ends. */
 static const char *__chelis_entry_path_text(const __chelis_entry_path *path) {
+    static const char marker[] = "...(truncated)";
     static char buffer[512];
     size_t used = 0;
     buffer[0] = '\0';
     __chelis_entry_path_append(path, buffer, sizeof buffer, &used);
+    if (used >= sizeof buffer) {
+        /* A path that did not fit ends in the marker, placed at a UTF-8 lead byte. */
+        size_t end = sizeof buffer - sizeof marker;
+        while (end > 0 && (buffer[end] & 0xC0) == 0x80) --end;
+        memcpy(buffer + end, marker, sizeof marker);
+    }
     return buffer;
 }
 "#
