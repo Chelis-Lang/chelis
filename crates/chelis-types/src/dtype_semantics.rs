@@ -3558,34 +3558,6 @@ impl<'a> PreparedDropout<'a> {
         }
         Ok(tensor_from_scalars(prim, &output))
     }
-
-    /// The row-batched draw: the input's elements split into `keys.len()`
-    /// equal rows, and row `b` is [`Self::apply`] of that row under
-    /// `keys[b]`, its element indices numbered from zero within the row.
-    pub fn apply_rows(&self, keys: &[RandomKey]) -> Result<TensorStorage, NumericKernelError> {
-        let len = self.input.len();
-        require_row_split("dropout", len, keys.len())?;
-        let prim = self.input.prim();
-        let wide_rate = self.parameters.rate().as_f64_lossy();
-        let zero = cast_raw("dropout", RawScalar::Int(0), prim)?;
-        let denominator = self.parameters.denominator()?;
-        let mut output = Vec::with_capacity(len);
-        for index in 0..len {
-            let (row, element) = batched_row(index, len, keys.len());
-            let exact_unit = random_unit(keys[row].bits, element);
-            let arithmetic_unit = if prim == Prim::F64 {
-                exact_unit
-            } else {
-                f64::from(exact_unit as f32)
-            };
-            output.push(if arithmetic_unit < wide_rate {
-                zero
-            } else {
-                float_binop(FloatBinOp::Div, self.input.scalar_at(index), denominator)?
-            });
-        }
-        Ok(tensor_from_scalars(prim, &output))
-    }
 }
 
 /// Validated `[05-OP-8]` controls: the output dtype `p` and its two bounds.
@@ -3717,20 +3689,6 @@ impl PreparedUniformLike {
     pub fn apply(&self, key: RandomKey) -> Result<TensorStorage, NumericKernelError> {
         let values = (0..self.len)
             .map(|index| self.parameters.sample(key, index as u64))
-            .collect::<Result<Vec<_>, _>>()?;
-        Ok(tensor_from_scalars(self.parameters.prim, &values))
-    }
-
-    /// The row-batched draw: the template's elements split into
-    /// `keys.len()` equal rows, and row `b` is [`Self::apply`] of that row
-    /// under `keys[b]`, its element indices numbered from zero within the row.
-    pub fn apply_rows(&self, keys: &[RandomKey]) -> Result<TensorStorage, NumericKernelError> {
-        require_row_split("uniform_like", self.len, keys.len())?;
-        let values = (0..self.len)
-            .map(|index| {
-                let (row, element) = batched_row(index, self.len, keys.len());
-                self.parameters.sample(keys[row], element)
-            })
             .collect::<Result<Vec<_>, _>>()?;
         Ok(tensor_from_scalars(self.parameters.prim, &values))
     }

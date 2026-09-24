@@ -919,6 +919,207 @@ fn an_explicitly_keyed_draw_validates_its_own_controls_in_c() {
     }
 }
 
+/// A control or activation of a batched draw: rank 0, or one element per
+/// key row.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Operand {
+    Rank0,
+    PerRow,
+}
+
+/// A load whose leading axis is the key batch's `n`, followed by `trailing`.
+fn load_n(dag: &mut Dag, name: &str, trailing: &[usize], prim: Prim) -> NodeId {
+    let mut dims = vec![DimInfo::Named("n".into(), None)];
+    dims.extend(trailing.iter().map(|extent| DimInfo::Lit(*extent)));
+    dag.add_node(
+        RiscOp::Load { name: name.into() },
+        vec![],
+        TensorType {
+            dims,
+            precision: prim,
+        },
+        None,
+    )
+}
+
+fn batched_operand(dag: &mut Dag, name: &str, prim: Prim, shape: Operand) -> NodeId {
+    match shape {
+        Operand::Rank0 => load(dag, name, &[], prim),
+        Operand::PerRow => load_n(dag, name, &[], prim),
+    }
+}
+
+/// spec/10 §3.2: each row of a batched draw is one draw and validates the
+/// controls it reads only when it is active, so a batch with no rows
+/// validates nothing. The rank-0 control is invalid; the per-row control is
+/// invalid in row 0 and valid in row 1, and the per-row activation turns
+/// row 0 off. Row 1's draw is then key_ref_ext.py's S1 value.
+#[test]
+fn a_batched_draw_validates_each_active_rows_controls_in_c_and_eval() {
+    let prim = Prim::F32;
+    for uniform in [false, true] {
+        for rows in [0usize, 2] {
+            for control in [Operand::Rank0, Operand::PerRow] {
+                for activation in [None, Some(Operand::Rank0), Some(Operand::PerRow)] {
+                    let build = || {
+                        let mut dag = Dag::new();
+                        let keys = load_n(&mut dag, "k", &[], Prim::Key);
+                        let x = load_n(&mut dag, "x", &[4], prim);
+                        let mut inputs = vec![x];
+                        if uniform {
+                            inputs.push(batched_operand(&mut dag, "lo", prim, control));
+                            inputs.push(batched_operand(&mut dag, "hi", prim, control));
+                        } else {
+                            inputs.push(batched_operand(&mut dag, "rate", prim, control));
+                        }
+                        inputs.push(keys);
+                        if let Some(shape) = activation {
+                            inputs.push(batched_operand(&mut dag, "on", Prim::Bool, shape));
+                        }
+                        let op = if uniform {
+                            RiscOp::UniformLike
+                        } else {
+                            RiscOp::Dropout
+                        };
+                        let drawn = dag.add_node(
+                            op,
+                            inputs,
+                            TensorType {
+                                dims: vec![DimInfo::Named("n".into(), None), DimInfo::Lit(4)],
+                                precision: prim,
+                            },
+                            None,
+                        );
+                        dag.add_root(drawn);
+                        dag
+                    };
+                    let control_input = |invalid: f64, valid: f64| match control {
+                        Operand::Rank0 => Input::Floats(prim, vec![], vec![invalid]),
+                        Operand::PerRow => {
+                            Input::Floats(prim, vec![rows], [invalid, valid][..rows].to_vec())
+                        }
+                    };
+                    let on = match activation {
+                        Some(Operand::PerRow) => Input::Bools(vec![rows], [0, 1][..rows].to_vec()),
+                        _ => Input::Bools(vec![], vec![1]),
+                    };
+                    let mut inputs = vec![
+                        ("k", Input::Keys(vec![rows], S_KEYS[..rows].to_vec())),
+                        (
+                            "x",
+                            Input::Floats(prim, vec![rows, 4], [1.0, 2.0, 3.0, 4.0].repeat(rows)),
+                        ),
+                        ("on", on),
+                    ];
+                    if uniform {
+                        inputs.push(("lo", control_input(2.0, 0.0)));
+                        inputs.push(("hi", control_input(1.0, 1.0)));
+                    } else {
+                        inputs.push(("rate", control_input(1.5, 0.5)));
+                    }
+                    let row_one = if uniform {
+                        uniform01_bits(prim)[1].to_vec()
+                    } else {
+                        let kept = [1.0, 2.0, 3.0, 4.0]
+                            .into_iter()
+                            .zip(DROPOUT_KEPT[1])
+                            .map(|(x, keep)| if keep { 2.0 * x } else { 0.0 })
+                            .collect::<Vec<_>>();
+                        float_bits(prim, &kept)
+                    };
+                    let case = format!(
+                        "uniform={uniform} rows={rows} control={control:?} activation={activation:?}"
+                    );
+                    if rows == 0 {
+                        assert_eq!(run_eval(&build(), &inputs), Ok(vec![Vec::new()]), "{case}");
+                        assert_eq!(run_c(build(), &inputs), vec![Vec::<u64>::new()], "{case}");
+                    } else if control == Operand::PerRow && activation == Some(Operand::PerRow) {
+                        let expected = vec![[vec![0; 4], row_one].concat()];
+                        assert_eq!(run_eval(&build(), &inputs), Ok(expected.clone()), "{case}");
+                        assert_eq!(run_c(build(), &inputs), expected, "{case}");
+                    } else {
+                        let trap = format!(
+                            "numeric trap: domain in {} at f32",
+                            if uniform { "uniform_like" } else { "dropout" }
+                        );
+                        assert_eq!(run_eval(&build(), &inputs), Err(trap.clone()), "{case}");
+                        let stderr = run_c_failure(build(), &inputs);
+                        assert!(stderr.contains(&trap), "{case}: {stderr}");
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Round 2's probe: keys split from `key(7)` by a runtime count, and an
+/// invalid rank-0 control. No rows validate nothing; two rows trap.
+#[test]
+fn an_empty_split_batch_with_an_invalid_control_is_empty_in_c_and_eval() {
+    for uniform in [false, true] {
+        for count in [0i64, 2] {
+            let build = || {
+                let mut dag = Dag::new();
+                let seed = i64_const(&mut dag, 7);
+                let root = node(&mut dag, RiscOp::KeyFromSeed, vec![seed], &[], Prim::Key);
+                let cnt = load(&mut dag, "cnt", &[], Prim::Int64);
+                let rows = dag.add_node(
+                    RiscOp::SplitN {
+                        count: RtDim::Node(1),
+                    },
+                    vec![root, cnt],
+                    TensorType {
+                        dims: vec![DimInfo::Named("n".into(), None)],
+                        precision: Prim::Key,
+                    },
+                    None,
+                );
+                let x = load_n(&mut dag, "x", &[4], Prim::F32);
+                let (op, mut inputs) = if uniform {
+                    let low = float_const(&mut dag, Prim::F32, 2.0);
+                    let high = float_const(&mut dag, Prim::F32, 1.0);
+                    (RiscOp::UniformLike, vec![x, low, high])
+                } else {
+                    let rate = float_const(&mut dag, Prim::F32, 1.5);
+                    (RiscOp::Dropout, vec![x, rate])
+                };
+                inputs.push(rows);
+                let drawn = dag.add_node(
+                    op,
+                    inputs,
+                    TensorType {
+                        dims: vec![DimInfo::Named("n".into(), None), DimInfo::Lit(4)],
+                        precision: Prim::F32,
+                    },
+                    None,
+                );
+                dag.add_root(drawn);
+                dag
+            };
+            let rows = count as usize;
+            let inputs = [
+                ("cnt", Input::Ints(vec![], vec![count])),
+                (
+                    "x",
+                    Input::Floats(Prim::F32, vec![rows, 4], vec![1.0; rows * 4]),
+                ),
+            ];
+            let case = format!("uniform={uniform} count={count}");
+            if count == 0 {
+                assert_eq!(run_eval(&build(), &inputs), Ok(vec![Vec::new()]), "{case}");
+                assert_eq!(run_c(build(), &inputs), vec![Vec::<u64>::new()], "{case}");
+            } else {
+                let trap = format!(
+                    "numeric trap: domain in {} at f32",
+                    if uniform { "uniform_like" } else { "dropout" }
+                );
+                assert_eq!(run_eval(&build(), &inputs), Err(trap.clone()), "{case}");
+                assert!(run_c_failure(build(), &inputs).contains(&trap), "{case}");
+            }
+        }
+    }
+}
+
 // ---- oracle (c): the counter bridge, C lane ----
 
 #[test]

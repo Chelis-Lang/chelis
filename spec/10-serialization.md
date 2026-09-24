@@ -273,8 +273,11 @@ for some `c <= r`, and row `b` reads the element that `b`'s leading `c`
 indices name, so under a rank-zero key every control and the activation are
 rank zero.
 Both operations preserve the first input's exact shape and dtype. Their
-value-domain checks remain [05-OP-8/37], before Random consumption; the codec
-neither inserts casts nor implements an adjoint. `DropoutReplay.inputs` is
+value-domain checks remain [05-OP-8/37], before Random consumption. Each row
+is one draw and checks the control elements it reads only when it is active,
+so a row whose activation is false, or a batch with no rows, checks nothing,
+as the stack of the rows' draws would. The codec neither inserts casts nor
+implements an adjoint. `DropoutReplay.inputs` is
 its cotangent, its rate, its forward draw's key and that draw's activation
 when it has one. `UniformBoundAdjoint.inputs` is its template, its
 cotangent, its forward draw's key and that draw's activation when it has one;

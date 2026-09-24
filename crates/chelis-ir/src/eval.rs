@@ -645,6 +645,48 @@ fn concat_rows(prim: Prim, rows: &[TensorStorage]) -> TensorStorage {
     tensor_from_scalars(prim, &scalars)
 }
 
+/// A draw over `data`'s elements at `prim`, as the stack of its rows' draws
+/// (`spec/10-serialization.md` §3.2): a rank-0 key is one row of every
+/// element, and a key batch splits the data by its leading axes. `draw`
+/// receives each active row's index, key, key shape and element count, and
+/// is the only place a row's controls are read and validated. So a batch
+/// validates exactly its active rows, and one with no rows validates
+/// nothing, as `vmap` over no calls does. An inactive row, and every row
+/// under a false rank-0 activation, is positive zeros.
+fn stack_draw_rows(
+    node: &DagNode,
+    data: &TensorValue,
+    prim: Prim,
+    keys: DrawKeys<'_>,
+    mut draw: impl FnMut(usize, RandomKey, &[usize], usize) -> Result<TensorStorage, String>,
+) -> Result<TensorStorage, String> {
+    match keys {
+        DrawKeys::Inactive => zero_storage(prim, data.len()),
+        DrawKeys::Scalar(key) => draw(0, key, &[], data.len()),
+        DrawKeys::Rows {
+            keys: rows,
+            shape,
+            active,
+        } => {
+            let row_len = batched_row_len(data, shape, node)?;
+            let keys = DrawKeys::Rows {
+                keys: rows,
+                shape,
+                active,
+            };
+            let mut out = Vec::with_capacity(rows.len());
+            for (row, key) in rows.iter().enumerate() {
+                out.push(if keys.row_active(row) {
+                    draw(row, *key, shape, row_len)?
+                } else {
+                    zero_storage(prim, row_len)?
+                });
+            }
+            Ok(concat_rows(prim, &out))
+        }
+    }
+}
+
 /// `[05-OP-37]`'s dropout (or its replay, on the cotangent) under `keys`.
 fn eval_dropout(
     node: &DagNode,
@@ -652,50 +694,19 @@ fn eval_dropout(
     rate: &TensorValue,
     keys: DrawKeys<'_>,
 ) -> Result<TensorValue, String> {
-    let prim = data.prim();
-    let storage = match keys {
-        DrawKeys::Inactive => zero_storage(prim, data.len())?,
-        DrawKeys::Scalar(key) => {
-            let rate = rank0_scalar(rate, "dropout rate")?;
-            PreparedDropout::new(data.storage(), rate)
-                .and_then(|prepared| prepared.apply(key))
-                .map_err(|error| error.to_string())?
-        }
-        DrawKeys::Rows {
-            keys: rows,
-            shape,
-            active,
-        } => {
-            let row_len = batched_row_len(data, shape, node)?;
-            if active.is_none() && rate.shape.is_empty() {
-                let rate = rank0_scalar(rate, "dropout rate")?;
-                PreparedDropout::new(data.storage(), rate)
-                    .and_then(|prepared| prepared.apply_rows(rows))
-                    .map_err(|error| error.to_string())?
-            } else {
-                let keys = DrawKeys::Rows {
-                    keys: rows,
-                    shape,
-                    active,
-                };
-                let mut out = Vec::with_capacity(rows.len());
-                for (row, key) in rows.iter().enumerate() {
-                    if !keys.row_active(row) {
-                        out.push(zero_storage(prim, row_len)?);
-                        continue;
-                    }
-                    let input = row_of(data.storage(), row, row_len);
-                    let rate = row_control(rate, row, shape, "dropout rate")?;
-                    out.push(
-                        PreparedDropout::new(&input, rate)
-                            .and_then(|prepared| prepared.apply(*key))
-                            .map_err(|error| error.to_string())?,
-                    );
-                }
-                concat_rows(prim, &out)
-            }
-        }
-    };
+    let storage = stack_draw_rows(node, data, data.prim(), keys, |row, key, shape, row_len| {
+        let gathered;
+        let input = if row_len == data.len() {
+            data.storage()
+        } else {
+            gathered = row_of(data.storage(), row, row_len);
+            &gathered
+        };
+        let rate = row_control(rate, row, shape, "dropout rate")?;
+        PreparedDropout::new(input, rate)
+            .and_then(|prepared| prepared.apply(key))
+            .map_err(|error| error.to_string())
+    })?;
     Ok(TensorValue::from_storage(data.shape.clone(), storage))
 }
 
@@ -708,53 +719,14 @@ fn eval_uniform_like(
     prim: Prim,
     keys: DrawKeys<'_>,
 ) -> Result<TensorValue, String> {
-    let shape = template.shape.clone();
-    let storage = match keys {
-        DrawKeys::Inactive => zero_storage(prim, numel(&shape))?,
-        DrawKeys::Scalar(key) => {
-            let low = rank0_scalar(low, "uniform_like low bound")?;
-            let high = rank0_scalar(high, "uniform_like high bound")?;
-            PreparedUniformLike::new(prim, numel(&shape), low, high)
-                .and_then(|prepared| prepared.apply(key))
-                .map_err(|error| error.to_string())?
-        }
-        DrawKeys::Rows {
-            keys: rows,
-            shape: key_shape,
-            active,
-        } => {
-            let row_len = batched_row_len(template, key_shape, node)?;
-            if active.is_none() && low.shape.is_empty() && high.shape.is_empty() {
-                let low = rank0_scalar(low, "uniform_like low bound")?;
-                let high = rank0_scalar(high, "uniform_like high bound")?;
-                PreparedUniformLike::new(prim, numel(&shape), low, high)
-                    .and_then(|prepared| prepared.apply_rows(rows))
-                    .map_err(|error| error.to_string())?
-            } else {
-                let keys = DrawKeys::Rows {
-                    keys: rows,
-                    shape: key_shape,
-                    active,
-                };
-                let mut out = Vec::with_capacity(rows.len());
-                for (row, key) in rows.iter().enumerate() {
-                    if !keys.row_active(row) {
-                        out.push(zero_storage(prim, row_len)?);
-                        continue;
-                    }
-                    let low = row_control(low, row, key_shape, "uniform_like low bound")?;
-                    let high = row_control(high, row, key_shape, "uniform_like high bound")?;
-                    out.push(
-                        PreparedUniformLike::new(prim, row_len, low, high)
-                            .and_then(|prepared| prepared.apply(*key))
-                            .map_err(|error| error.to_string())?,
-                    );
-                }
-                concat_rows(prim, &out)
-            }
-        }
-    };
-    Ok(TensorValue::from_storage(shape, storage))
+    let storage = stack_draw_rows(node, template, prim, keys, |row, key, shape, row_len| {
+        let low = row_control(low, row, shape, "uniform_like low bound")?;
+        let high = row_control(high, row, shape, "uniform_like high bound")?;
+        PreparedUniformLike::new(prim, row_len, low, high)
+            .and_then(|prepared| prepared.apply(key))
+            .map_err(|error| error.to_string())
+    })?;
+    Ok(TensorValue::from_storage(template.shape.clone(), storage))
 }
 
 /// `[05-OP-8]`'s bound adjoint of the cotangent `g` under `keys`. A batched

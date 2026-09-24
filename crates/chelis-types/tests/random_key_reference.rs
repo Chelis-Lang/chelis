@@ -289,8 +289,11 @@ fn key_kernels_reject_non_key_and_non_i64_operands() {
     assert!(key_from_seed_storage(&keys).is_err());
 }
 
+/// A batched draw is the stack of its rows' draws (spec/10 §3.2), each row
+/// the scalar kernel under its own key; the lanes stack these, so the
+/// kernel's per-row values are the reference their stacks must reproduce.
 #[test]
-fn a_row_batched_draw_is_the_stack_of_its_rows_scalar_draws() {
+fn each_split_rows_scalar_draw_is_the_reference_draw() {
     let rows = key(-3)
         .split()
         .0
@@ -299,41 +302,36 @@ fn a_row_batched_draw_is_the_stack_of_its_rows_scalar_draws() {
         .split_n(3);
     let zero = scalar_from_f64("test", Prim::F32, 0.0).unwrap();
     let one = scalar_from_f64("test", Prim::F32, 1.0).unwrap();
-    let batched = PreparedUniformLike::new(Prim::F32, 12, zero, one)
+    let first = PreparedUniformLike::new(Prim::F32, 4, zero, one)
         .unwrap()
-        .apply_rows(&rows)
+        .apply(rows[0])
         .unwrap();
-    let stacked: Vec<f64> = rows
-        .iter()
-        .flat_map(|row| {
-            PreparedUniformLike::new(Prim::F32, 4, zero, one)
-                .unwrap()
-                .apply(*row)
-                .unwrap()
-                .to_f64_lossy_vec()
-        })
-        .collect();
-    assert_eq!(batched.to_f64_lossy_vec(), stacked);
     // key_ref_ext.py's f32 words for the first row, S0.
-    let StorageView::F32(values) = batched.view() else {
+    let StorageView::F32(values) = first.view() else {
         panic!("f32 draw");
     };
     assert_eq!(
-        values[..4].iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+        values.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
         [0x3d77_27f8, 0x3ed5_3b14, 0x3d8a_16fd, 0x3ef3_5934]
     );
 
     let input = finalize_tensor(
         "test",
         Prim::F32,
-        chelis_types::RawTensor::Float((1..=12).map(|x| f64::from(x % 4 + 1)).collect()),
+        chelis_types::RawTensor::Float(vec![2.0, 3.0, 4.0, 1.0]),
     )
     .unwrap();
     let rate = scalar_from_f64("test", Prim::F32, 0.5).unwrap();
-    let dropped = PreparedDropout::new(&input, rate)
-        .unwrap()
-        .apply_rows(&rows)
-        .unwrap();
+    let dropped = rows
+        .iter()
+        .flat_map(|row| {
+            PreparedDropout::new(&input, rate)
+                .unwrap()
+                .apply(*row)
+                .unwrap()
+                .to_f64_lossy_vec()
+        })
+        .collect::<Vec<_>>();
     // key_ref_ext.py: dropout_half over [1,2,3,4] is S0 [0,0,0,0], S1
     // [0,4,6,0] and S2 [2,4,6,8]; this input's rows are [2,3,4,1] each.
     let expect_row = |kept: [bool; 4]| {
@@ -346,14 +344,7 @@ fn a_row_batched_draw_is_the_stack_of_its_rows_scalar_draws() {
     let mut expected = expect_row([false, false, false, false]);
     expected.extend(expect_row([false, true, true, false]));
     expected.extend(expect_row([true, true, true, true]));
-    assert_eq!(dropped.to_f64_lossy_vec(), expected);
-    assert!(
-        PreparedUniformLike::new(Prim::F32, 10, zero, one)
-            .unwrap()
-            .apply_rows(&rows)
-            .is_err(),
-        "rows must split the elements evenly"
-    );
+    assert_eq!(dropped, expected);
 }
 
 #[test]
