@@ -2455,16 +2455,10 @@ impl CEmitter {
         let supplied = chelis_vocab::RuntimeDType::ALL
             .iter()
             .map(|dtype| {
-                let prim = Prim::ACTIVE_FLOATS
-                    .into_iter()
-                    .chain(Prim::ACTIVE_INTEGERS)
-                    .chain([Prim::Bool])
-                    .find(|prim| prim.runtime_dtype().is_ok_and(|mapped| mapped == *dtype))
-                    .expect("every runtime ABI dtype is a language dtype");
                 format!(
                     "__chelis_supplied_dtype == {} ? \"{}\" : ",
                     dtype.c_macro(),
-                    prim.name()
+                    Prim::from_runtime_dtype(*dtype).name()
                 )
             })
             .collect::<String>();

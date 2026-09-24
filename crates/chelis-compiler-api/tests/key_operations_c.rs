@@ -1757,3 +1757,56 @@ fn a_fold_in_whose_key_and_index_disagree_traps_in_c_as_in_eval() {
         assert_eq!(run_c(dag, &inputs2), eval, "{index_first}");
     }
 }
+
+// ---- [04-NUM-11] at a key parameter ----
+
+/// `fold_in(k, 9)` over the loaded rank-zero key `k`.
+fn fold_in_of_a_loaded_key() -> Dag {
+    let mut dag = Dag::new();
+    let key = load(&mut dag, "k", &[], Prim::Key);
+    let index = i64_const(&mut dag, 9);
+    let folded = node(&mut dag, RiscOp::FoldIn, vec![key, index], &[], Prim::Key);
+    dag.add_root(folded);
+    dag
+}
+
+/// A C public entry checks a key parameter's dtype tag as it checks any other
+/// input's ([04-NUM-11]): an `i64` tensor traps `Domain` in `load` at `key`
+/// before the key is read, and a key tensor runs to the evaluator's key.
+///
+/// Evidentiary status: REGRESSION TEST. On the merge of 7365310e9 with main
+/// 946218e16, C emission panicked while spelling the supplied dtype, because
+/// that lookup covered only the numeric and bool dtypes.
+#[test]
+fn a_key_parameter_given_an_i64_tensor_traps_before_it_is_read_in_c() {
+    let wrong = [("k", Input::Ints(vec![], vec![5]))];
+    let stderr = run_c_failure(fold_in_of_a_loaded_key(), &wrong);
+    assert!(
+        stderr.contains(
+            "sample: input `k` expected dtype key, got i64\nnumeric trap: domain in load at key"
+        ),
+        "{stderr}"
+    );
+    let right = [("k", Input::Keys(vec![], vec![5]))];
+    let eval = run_eval(&fold_in_of_a_loaded_key(), &right).unwrap();
+    assert_eq!(run_c(fold_in_of_a_loaded_key(), &right), eval);
+}
+
+/// The supplied side names a key too: a float parameter given a key tensor
+/// traps before the load reads it, naming `key`.
+///
+/// Evidentiary status: REGRESSION TEST, for the same merge as above.
+#[test]
+fn a_float_parameter_given_a_key_tensor_names_the_key_in_c() {
+    let mut dag = Dag::new();
+    let x = load(&mut dag, "x", &[2], Prim::F32);
+    let negated = node(&mut dag, RiscOp::Neg, vec![x], &[2], Prim::F32);
+    dag.add_root(negated);
+    let stderr = run_c_failure(dag, &[("x", Input::Keys(vec![2], vec![1, 2]))]);
+    assert!(
+        stderr.contains(
+            "sample: input `x` expected dtype f32, got key\nnumeric trap: domain in load at f32"
+        ),
+        "{stderr}"
+    );
+}

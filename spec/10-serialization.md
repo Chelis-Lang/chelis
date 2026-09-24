@@ -279,9 +279,11 @@ so a row whose activation is false, or a batch with no rows, checks nothing,
 as the stack of the rows' draws would. The codec neither inserts casts nor
 implements an adjoint. `DropoutReplay.inputs` is
 its cotangent, its rate, its forward draw's key and that draw's activation
-when it has one. `UniformBoundAdjoint.inputs` is its template, its
-cotangent, its forward draw's key and that draw's activation when it has one;
-its result has the shape of the key's leading `c` axes for some `c <= r`, and
+when it has one, and its result has its cotangent's exact shape and dtype.
+`UniformBoundAdjoint.inputs` is its template, its cotangent, its forward
+draw's key and that draw's activation when it has one. Its cotangent has its
+template's exact shape and dtype, and its result has the template's dtype and
+the shape of the key's leading `c` axes for some `c <= r`, and
 each element is one canonical tree over the contributions, in row-major
 order, of the rows whose leading `c` indices name it. Each reads the key
 without consuming it. A `DrawKey`'s controls and activation are rank zero. An activation is an earlier-node

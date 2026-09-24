@@ -279,6 +279,24 @@ impl Prim {
         }
     }
 
+    /// The language dtype a runtime ABI dtype stores, the inverse of
+    /// [`Self::runtime_dtype`]. Every runtime dtype has one, so a runtime
+    /// dtype added without its language dtype fails to compile here.
+    pub fn from_runtime_dtype(dtype: RuntimeDType) -> Prim {
+        match dtype {
+            RuntimeDType::F32 => Prim::F32,
+            RuntimeDType::F64 => Prim::F64,
+            RuntimeDType::F16 => Prim::F16,
+            RuntimeDType::Bf16 => Prim::Bf16,
+            RuntimeDType::I8 => Prim::Int8,
+            RuntimeDType::I16 => Prim::Int16,
+            RuntimeDType::I32 => Prim::Int32,
+            RuntimeDType::I64 => Prim::Int64,
+            RuntimeDType::Bool => Prim::Bool,
+            RuntimeDType::Key => Prim::Key,
+        }
+    }
+
     /// True for the active float dtypes per `spec/04-type-system.md` §1.1.
     /// `f8e4m3` is deferred (§1.1.1) and is NOT a float for any active
     /// classification purpose.
@@ -1125,6 +1143,18 @@ mod prim_classification_tests {
         assert!(!Prim::Key.is_valid_scalar_cast_target());
         assert_eq!(Prim::Key.runtime_dtype(), Ok(RuntimeDType::Key));
         assert!(Prim::String.runtime_dtype().is_err());
+    }
+
+    #[test]
+    fn from_runtime_dtype_inverts_runtime_dtype() {
+        for dtype in RuntimeDType::ALL {
+            assert_eq!(Prim::from_runtime_dtype(dtype).runtime_dtype(), Ok(dtype));
+        }
+        for prim in ALL_PRIMS {
+            if let Ok(dtype) = prim.runtime_dtype() {
+                assert_eq!(Prim::from_runtime_dtype(dtype), *prim);
+            }
+        }
     }
 
     #[test]
