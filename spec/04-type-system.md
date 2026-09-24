@@ -3269,6 +3269,7 @@ Scope:
 > | `i16` | signed two's-complement 16-bit integer | 16 | exact i16 |
 > | `i8` | signed two's-complement 8-bit integer | 8 | exact i8 |
 > | `bool` | canonical Bool8 (`0x00` false, `0x01` true) | 8 | not an arithmetic dtype ([04-NUM-4]) |
+> | `key` | opaque 64-bit word, every bit pattern a key ([05-RNG-2]) | 64 | not an arithmetic dtype (§1.1) |
 >
 > Stored representation, storage width, and arithmetic width are separate
 > facts. Equal storage widths do not make two representations interchangeable:
