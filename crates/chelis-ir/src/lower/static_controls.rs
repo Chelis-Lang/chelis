@@ -1,6 +1,7 @@
 //! Source-only static rate specialization. Admission and lowering share this
 //! typed scalar grammar; neither executes a helper or substitutes its arguments.
 use super::*;
+use crate::lowering_runtime::LowerResult;
 use std::rc::Rc;
 
 pub(super) fn type_prim(expr: &Expr, substitutions: &UnordMap<String, Prim>) -> Option<Prim> {
@@ -180,24 +181,26 @@ impl Profile<'_> {
         body_depth: usize,
         caller: &Environment,
         runtime: &LoweringRuntime,
-    ) {
+    ) -> LowerResult<()> {
         use crate::evaluation::LegacyEvaluationReason as Reason;
         for arg in args {
-            self.visit(arg, caller_depth, caller, runtime);
+            self.visit(arg, caller_depth, caller, runtime)?;
         }
         if let Some(name) = &closure.name
             && !self.active.insert(name.clone())
         {
             self.reason.get_or_insert(Reason::RecursiveControl);
-            return;
+            return Ok(());
         }
         let (_, _, kids) = stamped_parts(&closure.function).expect("resolved function");
         let Some((DeepTag::Params, _, params)) = kids.first().and_then(stamped_parts) else {
             // No parameter environment can be inferred from a malformed
             // function; its owning Deep/lowering boundary diagnoses it.
-            return;
+            return Ok(());
         };
-        let Some(body) = kids.get(1) else { return };
+        let Some(body) = kids.get(1) else {
+            return Ok(());
+        };
         let mut env = (*closure.environment).clone();
         // The lowerer has no general lexical closure carrier. A captured
         // scalar with a different caller binding is no longer proven static
@@ -224,8 +227,8 @@ impl Profile<'_> {
             .collect::<Option<Vec<_>>>();
         if let Some(actual_types) = actual_types {
             let formals = (0..params.len())
-                .map(|index| extract_param_type(&closure.function, index, runtime).cloned())
-                .collect::<Vec<_>>();
+                .map(|index| Ok(extract_param_type(&closure.function, index, runtime)?.cloned()))
+                .collect::<LowerResult<Vec<_>>>()?;
             env.precisions
                 .merge(tensor_prec_substitutions(&formals, &actual_types));
             env.precisions.merge(formal_precision_var_bindings(
@@ -236,7 +239,7 @@ impl Profile<'_> {
         }
         for (index, param) in params.iter().enumerate() {
             let mut names = UnordSet::new();
-            collect_param_bound_names(param, &mut names, runtime);
+            collect_param_bound_names(param, &mut names, runtime)?;
             for name in names.into_sorted() {
                 env.bind(
                     &name,
@@ -245,23 +248,30 @@ impl Profile<'_> {
                 );
             }
         }
-        self.visit(body, body_depth, &env, runtime);
+        self.visit(body, body_depth, &env, runtime)?;
         if let Some(name) = closure.name {
             self.active.remove(&name);
         }
+        Ok(())
     }
 
-    fn visit(&mut self, expr: &Expr, depth: usize, env: &Environment, runtime: &LoweringRuntime) {
+    fn visit(
+        &mut self,
+        expr: &Expr,
+        depth: usize,
+        env: &Environment,
+        runtime: &LoweringRuntime,
+    ) -> LowerResult<()> {
         use crate::evaluation::LegacyEvaluationReason as Reason;
         let Some((tag, metadata, kids)) = stamped_parts(expr) else {
-            return;
+            return Ok(());
         };
         if tag == DeepTag::App
             && let Some(callee) = kids.first()
         {
             if let Some(closure) = self.callable(callee, env) {
-                self.apply(closure, &kids[1..], depth, depth, env, runtime);
-                return;
+                self.apply(closure, &kids[1..], depth, depth, env, runtime)?;
+                return Ok(());
             }
             if let Some((DeepTag::Grad, _, grad)) = stamped_parts(callee)
                 && let Some(closure) = grad
@@ -271,8 +281,8 @@ impl Profile<'_> {
                 if depth != 0 {
                     self.reason.get_or_insert(Reason::HigherOrderAd);
                 }
-                self.apply(closure, &kids[1..], depth, depth + 1, env, runtime);
-                return;
+                self.apply(closure, &kids[1..], depth, depth + 1, env, runtime)?;
+                return Ok(());
             }
         }
         if let Some(("dropout", args)) = app_var_name_and_args(expr)
@@ -286,7 +296,7 @@ impl Profile<'_> {
         }
         if tag == DeepTag::Var {
             if let Some(closure) = self.callable(expr, env) {
-                self.apply(closure, &[], depth, depth, env, runtime);
+                self.apply(closure, &[], depth, depth, env, runtime)?;
             } else if let Some(name) = bare_var_name(expr)
                 && !env.bound.contains(&name)
                 && let Some(body) = self.defs.get(&name)
@@ -303,29 +313,29 @@ impl Profile<'_> {
                             ..Environment::default()
                         },
                         runtime,
-                    );
+                    )?;
                     self.active.remove(&name);
                 } else {
                     self.reason.get_or_insert(Reason::RecursiveControl);
                 }
             }
-            return;
+            return Ok(());
         }
         if tag == DeepTag::Fn {
             let mut scoped = env.clone();
             if let Some((_, _, params)) = kids.first().and_then(stamped_parts) {
                 for param in params {
                     let mut names = UnordSet::new();
-                    collect_param_bound_names(param, &mut names, runtime);
+                    collect_param_bound_names(param, &mut names, runtime)?;
                     for name in names.into_sorted() {
                         scoped.bind(&name, None, None);
                     }
                 }
             }
             if let Some(body) = kids.get(1) {
-                self.visit(body, depth, &scoped, runtime);
+                self.visit(body, depth, &scoped, runtime)?;
             }
-            return;
+            return Ok(());
         }
         if tag == DeepTag::Let {
             let mut scoped = env.clone();
@@ -333,7 +343,7 @@ impl Profile<'_> {
                 for pair in bindings.as_chunks::<2>().0 {
                     let callable = self.callable(&pair[1], &scoped);
                     if callable.is_none() {
-                        self.visit(&pair[1], depth, &scoped, runtime);
+                        self.visit(&pair[1], depth, &scoped, runtime)?;
                     }
                     let value = scoped.scalar(&pair[1]);
                     let precision = scoped.precision(&pair[1]);
@@ -346,9 +356,9 @@ impl Profile<'_> {
                 }
             }
             if let Some(body) = kids.get(1) {
-                self.visit(body, depth, &scoped, runtime);
+                self.visit(body, depth, &scoped, runtime)?;
             }
-            return;
+            return Ok(());
         }
         let next_depth = match tag {
             DeepTag::Grad => {
@@ -386,9 +396,9 @@ impl Profile<'_> {
                 };
                 if let Some(branch) = branch {
                     if let Some(selected) = kids.get(if branch { 1 } else { 2 }) {
-                        self.visit(selected, depth, env, runtime);
+                        self.visit(selected, depth, env, runtime)?;
                     }
-                    return;
+                    return Ok(());
                 }
                 self.reason.get_or_insert(Reason::DynamicControl);
                 depth
@@ -400,8 +410,9 @@ impl Profile<'_> {
             _ => depth,
         };
         for child in kids {
-            self.visit(child, next_depth, env, runtime);
+            self.visit(child, next_depth, env, runtime)?;
         }
+        Ok(())
     }
 }
 
@@ -411,7 +422,7 @@ pub(super) fn profile(
     inputs: &[(String, TensorType)],
     resource_policy: crate::evaluation::ResourcePolicy,
     runtime: &LoweringRuntime,
-) -> crate::evaluation::EvaluationProfile {
+) -> LowerResult<crate::evaluation::EvaluationProfile> {
     use crate::evaluation::{EvaluationProfile, LegacyEvaluationReason};
     let mut profile = Profile {
         defs,
@@ -427,14 +438,14 @@ pub(super) fn profile(
     for (name, ty) in inputs {
         env.bind(name, None, Some(ty.precision));
     }
-    profile.visit(expr, 0, &env, runtime);
-    if let Some(reason) = profile.reason {
+    profile.visit(expr, 0, &env, runtime)?;
+    Ok(if let Some(reason) = profile.reason {
         EvaluationProfile::Legacy(reason)
     } else if profile.dropout {
         EvaluationProfile::FixedControl
     } else {
         EvaluationProfile::Legacy(LegacyEvaluationReason::NoDropout)
-    }
+    })
 }
 
 #[cfg(test)]
@@ -470,7 +481,7 @@ mod tests {
                         crate::evaluation::ResourcePolicy::Legacy,
                         runtime,
                     ),
-                    expected
+                    Ok(expected)
                 );
             }
         })

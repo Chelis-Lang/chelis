@@ -385,8 +385,9 @@ proofs.
 Whole `chelis_pipeline_core` extraction is still blocked before LLBC generation.
 The current first failure is Charon/Hax's external closure-region handling for
 `chelis_ir::lower::try_lower_program_to_library::{closure#0}` with two erased capture
-regions. Native suppression TLS now lives behind `lowering_runtime`; moving that
-boundary does not supply its hook/unwind correspondence. The AD slice is not the full core.
+regions. Native suppression TLS now lives behind `lowering_runtime`, and lowering
+rejection returns an explicit `LowerResult`; neither supplies the remaining native
+hook/unwind correspondence. The AD slice is not the full core.
 
 There is no Rust/Lean/LaCaDiLE correspondence theorem or full-core proof-acceptance
 claim. Unsupported runtime paths have not been replaced with opaque shims,

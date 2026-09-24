@@ -7,6 +7,7 @@ use chelis_unord::{UnordMap, UnordSet};
 use std::borrow::Cow;
 use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::convert::Infallible;
 use std::fmt;
 use std::ops::{Deref, DerefMut};
 use std::sync::Arc;
@@ -25,8 +26,11 @@ use crate::host_type_state::{
     ConcreteHostType, HostInferenceVar, HostPrecisionTerm, HostShapeSlot, HostShapeTerm,
     HostTensorTypeTerm, HostTypeDecodeError, HostTypeTerm, decode_host_type,
 };
-use crate::lower::top_level_lowering_map;
-use crate::lowering_runtime::LoweringRuntime;
+use crate::lower::top_level_lowering_map_inner;
+use crate::lowering_runtime::{
+    LowerResult, LoweringRuntime, try_any, try_collect_options, try_collect_results, try_find_map,
+    try_ok, try_some,
+};
 
 thread_local! {
     // chelis#1829: kernel-decision summary probes that missed the memo and ran
@@ -2117,8 +2121,18 @@ pub fn try_lower_compiled_program(
     program: &CheckedProgram,
     runtime: &LoweringRuntime,
 ) -> Result<CompiledProgram, crate::lower::LowerDiagnostic> {
-    try_lower_compiled_program_with_lane_overrides(program, None, false, false, runtime)
-        .map(|(compiled, _)| compiled)
+    try_lower_compiled_program_inner(program, runtime)
+        .unwrap_or_else(|failure| failure.resume_at_boundary())
+}
+
+pub(crate) fn try_lower_compiled_program_inner(
+    program: &CheckedProgram,
+    runtime: &LoweringRuntime,
+) -> LowerResult<Result<CompiledProgram, crate::lower::LowerDiagnostic>> {
+    Ok(
+        try_lower_compiled_program_with_lane_overrides(program, None, false, false, runtime)?
+            .map(|(compiled, _)| compiled),
+    )
 }
 
 /// Lower through the realizability phase boundary carried by a manifested
@@ -2129,14 +2143,22 @@ pub fn try_lower_manifested_program(
     program: &chelis_types::manifest::ManifestedProgram,
     runtime: &LoweringRuntime,
 ) -> Result<CompiledProgram, crate::lower::LowerDiagnostic> {
-    try_lower_compiled_program_with_lane_overrides(
+    try_lower_manifested_program_inner(program, runtime)
+        .unwrap_or_else(|failure| failure.resume_at_boundary())
+}
+
+pub(crate) fn try_lower_manifested_program_inner(
+    program: &chelis_types::manifest::ManifestedProgram,
+    runtime: &LoweringRuntime,
+) -> LowerResult<Result<CompiledProgram, crate::lower::LowerDiagnostic>> {
+    Ok(try_lower_compiled_program_with_lane_overrides(
         program.checked(),
         Some(program.manifest()),
         false,
         false,
         runtime,
-    )
-    .map(|(compiled, _)| compiled)
+    )?
+    .map(|(compiled, _)| compiled))
 }
 
 /// Lower a checked program using the supplied root manifest as the authority
@@ -2147,8 +2169,23 @@ pub fn try_lower_compiled_program_with_manifest(
     manifest: &chelis_types::manifest::RootManifest,
     runtime: &LoweringRuntime,
 ) -> Result<CompiledProgram, crate::lower::LowerDiagnostic> {
-    try_lower_compiled_program_with_lane_overrides(program, Some(manifest), false, false, runtime)
-        .map(|(compiled, _)| compiled)
+    try_lower_compiled_program_with_manifest_inner(program, manifest, runtime)
+        .unwrap_or_else(|failure| failure.resume_at_boundary())
+}
+
+pub(crate) fn try_lower_compiled_program_with_manifest_inner(
+    program: &CheckedProgram,
+    manifest: &chelis_types::manifest::RootManifest,
+    runtime: &LoweringRuntime,
+) -> LowerResult<Result<CompiledProgram, crate::lower::LowerDiagnostic>> {
+    Ok(try_lower_compiled_program_with_lane_overrides(
+        program,
+        Some(manifest),
+        false,
+        false,
+        runtime,
+    )?
+    .map(|(compiled, _)| compiled))
 }
 
 /// Lower a manifested program while retaining source execution authority for
@@ -2157,6 +2194,19 @@ pub fn try_lower_manifested_execution_program(
     program: &chelis_types::manifest::ManifestedProgram,
     runtime: &LoweringRuntime,
 ) -> Result<(Option<crate::Dag>, Option<HostExecutionPlan>), crate::lower::LowerDiagnostic> {
+    try_lower_manifested_execution_program_inner(program, runtime)
+        .unwrap_or_else(|failure| failure.resume_at_boundary())
+}
+
+/// A whole-program execution lowering: the tensor DAG and host plan, or the
+/// ordinary diagnostic that rejected them.
+type ExecutionLowering =
+    Result<(Option<crate::Dag>, Option<HostExecutionPlan>), crate::lower::LowerDiagnostic>;
+
+pub(crate) fn try_lower_manifested_execution_program_inner(
+    program: &chelis_types::manifest::ManifestedProgram,
+    runtime: &LoweringRuntime,
+) -> LowerResult<ExecutionLowering> {
     lower_execution_program(program.checked(), Some(program.manifest()), false, runtime)
 }
 
@@ -2165,6 +2215,15 @@ pub fn try_lower_manifested_execution_program_with_trace(
     program: &chelis_types::manifest::ManifestedProgram,
     runtime: &LoweringRuntime,
 ) -> Result<(Option<crate::Dag>, Option<HostExecutionPlan>), crate::lower::LowerDiagnostic> {
+    try_lower_manifested_execution_program_with_trace_inner(program, runtime)
+        .unwrap_or_else(|failure| failure.resume_at_boundary())
+}
+
+#[cfg(feature = "lowering-trace")]
+pub(crate) fn try_lower_manifested_execution_program_with_trace_inner(
+    program: &chelis_types::manifest::ManifestedProgram,
+    runtime: &LoweringRuntime,
+) -> LowerResult<ExecutionLowering> {
     lower_execution_program(program.checked(), Some(program.manifest()), true, runtime)
 }
 
@@ -2174,6 +2233,15 @@ pub fn try_lower_execution_program_with_manifest(
     manifest: &chelis_types::manifest::RootManifest,
     runtime: &LoweringRuntime,
 ) -> Result<(Option<crate::Dag>, Option<HostExecutionPlan>), crate::lower::LowerDiagnostic> {
+    try_lower_execution_program_with_manifest_inner(program, manifest, runtime)
+        .unwrap_or_else(|failure| failure.resume_at_boundary())
+}
+
+pub(crate) fn try_lower_execution_program_with_manifest_inner(
+    program: &CheckedProgram,
+    manifest: &chelis_types::manifest::RootManifest,
+    runtime: &LoweringRuntime,
+) -> LowerResult<ExecutionLowering> {
     lower_execution_program(program, Some(manifest), false, runtime)
 }
 
@@ -2183,6 +2251,16 @@ pub fn try_lower_execution_program_with_manifest_and_trace(
     manifest: &chelis_types::manifest::RootManifest,
     runtime: &LoweringRuntime,
 ) -> Result<(Option<crate::Dag>, Option<HostExecutionPlan>), crate::lower::LowerDiagnostic> {
+    try_lower_execution_program_with_manifest_and_trace_inner(program, manifest, runtime)
+        .unwrap_or_else(|failure| failure.resume_at_boundary())
+}
+
+#[cfg(feature = "lowering-trace")]
+pub(crate) fn try_lower_execution_program_with_manifest_and_trace_inner(
+    program: &CheckedProgram,
+    manifest: &chelis_types::manifest::RootManifest,
+    runtime: &LoweringRuntime,
+) -> LowerResult<ExecutionLowering> {
     lower_execution_program(program, Some(manifest), true, runtime)
 }
 
@@ -2191,22 +2269,22 @@ fn lower_execution_program(
     manifest: Option<&chelis_types::manifest::RootManifest>,
     collect_trace: bool,
     runtime: &LoweringRuntime,
-) -> Result<(Option<crate::Dag>, Option<HostExecutionPlan>), crate::lower::LowerDiagnostic> {
-    let (compiled, execution) = try_lower_compiled_program_with_lane_overrides(
+) -> LowerResult<ExecutionLowering> {
+    let (compiled, execution) = try_ok!(try_lower_compiled_program_with_lane_overrides(
         program,
         manifest,
         true,
         collect_trace,
         runtime,
-    )?;
-    Ok((
+    )?);
+    Ok(Ok((
         compiled.dag,
         compiled.host.map(|host| HostExecutionPlan {
             program: host,
             global: execution.global,
             functions: execution.functions,
         }),
-    ))
+    )))
 }
 
 #[derive(Default)]
@@ -2221,13 +2299,14 @@ fn try_lower_compiled_program_with_lane_overrides(
     collect_execution: bool,
     collect_trace: bool,
     runtime: &LoweringRuntime,
-) -> Result<(CompiledProgram, HostExecutionMetadata), crate::lower::LowerDiagnostic> {
+) -> LowerResult<Result<(CompiledProgram, HostExecutionMetadata), crate::lower::LowerDiagnostic>> {
     // The whole-program lowering owns its session. Every function below reads
     // the program through it, so there is no entry to this lowering that can
     // forget to establish one (chelis#1835).
     let session = HostLoweringSession::new(program, runtime);
     let program = &session;
-    let mut lowered_names = top_level_lowering_map(program.exprs(), program.type_env(), runtime);
+    let mut lowered_names =
+        top_level_lowering_map_inner(program.exprs(), program.type_env(), runtime)?;
     if let Some(manifest) = manifest {
         for entry in &manifest.entries {
             lowered_names.insert(
@@ -2246,13 +2325,13 @@ fn try_lower_compiled_program_with_lane_overrides(
     // original fallback semantics so host-only programs still build.
     let dag = match crate::lower::try_lower_program(program, runtime) {
         Ok(dag) => Some(dag),
-        Err(diagnostic) if diagnostic.fatal => return Err(diagnostic),
+        Err(diagnostic) if diagnostic.fatal => return Ok(Err(diagnostic)),
         Err(_) => None,
     };
-    let (host_terms, execution) = runtime.catch_lowering(|| {
+    let (host_terms, execution) = try_ok!(try_ok!(runtime.catch_lowering(|| {
         lower_host_program_with_execution(program, &lowered_names, collect_execution, collect_trace)
-    })??;
-    let host = resolve_host_program(host_terms).map_err(|error| {
+    })));
+    let host = try_ok!(resolve_host_program(host_terms).map_err(|error| {
         crate::lower::LowerDiagnostic::new(
             format!(
                 "host type did not resolve before the code-generation boundary: {error} \
@@ -2262,9 +2341,9 @@ fn try_lower_compiled_program_with_lane_overrides(
             None,
         )
         .fatal()
-    })?;
+    }));
 
-    Ok((
+    Ok(Ok((
         CompiledProgram {
             dag: dag.filter(|dag| !dag.roots().is_empty()),
             host: if host.globals.is_empty() && host.functions.is_empty() {
@@ -2274,7 +2353,7 @@ fn try_lower_compiled_program_with_lane_overrides(
             },
         },
         execution,
-    ))
+    )))
 }
 
 pub fn host_program_requires_host_backend(program: &ConcreteHostProgram) -> bool {
@@ -2373,47 +2452,50 @@ type NamedTensorEntryLoweringInputs = (
 fn named_tensor_entry_lowering_inputs(
     program: &HostLoweringSession<'_>,
     name: &str,
-) -> Option<NamedTensorEntryLoweringInputs> {
+) -> LowerResult<Option<NamedTensorEntryLoweringInputs>> {
     let runtime = program.runtime();
     let defs = cached_program_defs(program);
-    let body = lookup_program_def(&defs, name)?.clone();
+    let body = try_some!(lookup_program_def(&defs, name)).clone();
     let Expr::List(list, _) = &body else {
-        return None;
+        return Ok(None);
     };
     if tag(list) != Some(DeepTag::Fn) {
-        return None;
+        return Ok(None);
     }
 
     let kids = children(list);
-    let params_list = kids.first().and_then(as_list)?;
+    let params_list = try_some!(kids.first().and_then(as_list));
     if tag(params_list) != Some(DeepTag::Params) {
-        return None;
+        return Ok(None);
     }
 
-    let declared_param_tys = lookup_declared_type_expr(program, name)
-        .and_then(|ty| parse_expanded_fn_type_expr(program, &ty))
-        .map(|(params, _)| params)
-        .unwrap_or_default();
+    let declared_param_tys = match lookup_declared_type_expr(program, name) {
+        Some(ty) => parse_expanded_fn_type_expr(program, &ty)?,
+        None => None,
+    }
+    .map(|(params, _)| params)
+    .unwrap_or_default();
     let mut scope = Vec::new();
     for (index, param) in children(params_list).iter().enumerate() {
-        let pname = param_name(param)?;
-        let pty = declared_param_tys
-            .get(index)
-            .cloned()
-            .or_else(|| {
-                param_host_type(param, &program.invocation.type_subst.borrow(), runtime)
-                    .map(|ty| expand_host_type_aliases(program, ty))
-            })
-            .filter(|ty| !ty.is_unresolved())?;
-        let tensor_ty = tensor_type_from_host_input(&pty)?;
+        let pname = try_some!(param_name(param));
+        let pty = match declared_param_tys.get(index).cloned() {
+            Some(ty) => Some(ty),
+            None => param_host_type(param, &program.invocation.type_subst.borrow(), runtime)?
+                .map(|ty| expand_host_type_aliases(program, ty))
+                .transpose()?,
+        };
+        let pty = try_some!(pty.filter(|ty| !ty.is_unresolved()));
+        let tensor_ty = try_some!(tensor_type_from_host_input(&pty));
         scope.push((pname, tensor_ty));
     }
 
-    let body_expr = kids.get(1)?.clone();
-    let result_claim = lookup_declared_type_expr(program, name)
-        .and_then(|ty| parse_expanded_fn_type_expr(program, &ty))
-        .and_then(|(_, result)| tensor_type_from_host_input(&result));
-    Some((body_expr, scope, result_claim, defs))
+    let body_expr = try_some!(kids.get(1)).clone();
+    let result_claim = match lookup_declared_type_expr(program, name) {
+        Some(ty) => parse_expanded_fn_type_expr(program, &ty)?,
+        None => None,
+    }
+    .and_then(|(_, result)| tensor_type_from_host_input(&result));
+    Ok(Some((body_expr, scope, result_claim, defs)))
 }
 
 pub fn lower_named_tensor_entry_dag(
@@ -2421,11 +2503,21 @@ pub fn lower_named_tensor_entry_dag(
     name: &str,
     runtime: &LoweringRuntime,
 ) -> Option<crate::Dag> {
+    lower_named_tensor_entry_dag_inner(program, name, runtime)
+        .unwrap_or_else(|failure| failure.resume_at_boundary())
+}
+
+pub(crate) fn lower_named_tensor_entry_dag_inner(
+    program: &CheckedProgram,
+    name: &str,
+    runtime: &LoweringRuntime,
+) -> LowerResult<Option<crate::Dag>> {
     // A whole-program entry owns its session, so nothing outside this crate
     // has to know one exists (chelis#1835).
     let session = HostLoweringSession::new(program, runtime);
     let program = &session;
-    let (body_expr, scope, result_claim, defs) = named_tensor_entry_lowering_inputs(program, name)?;
+    let (body_expr, scope, result_claim, defs) =
+        try_some!(named_tensor_entry_lowering_inputs(program, name)?);
     // Issue #197: a fatal lowering diagnostic (AD-rejection) must
     // propagate as a panic so the outer runtime catch
     // surfaces it to the user. Silently absorbing it with `.ok()`
@@ -2436,23 +2528,27 @@ pub fn lower_named_tensor_entry_dag(
         defs.clone(),
         Arc::new(crate::lower::collect_top_level_sigs(program.exprs())),
     );
-    match crate::lower::try_lower_subexpr_program_with_ordered_inputs(
-        &body_expr,
-        scope,
-        &context,
-        result_claim.as_ref(),
-        RandomLoweringState {
-            seed: None,
-            counter: 0,
+    Ok(
+        match crate::lower::try_lower_subexpr_program_with_ordered_inputs(
+            &body_expr,
+            scope,
+            &context,
+            result_claim.as_ref(),
+            RandomLoweringState {
+                seed: None,
+                counter: 0,
+            },
+            // `scope` is this def's own declared parameter list.
+            true,
+            runtime,
+        ) {
+            Ok((dag, _)) => Some(dag),
+            Err(diagnostic) if diagnostic.fatal => {
+                return Err(runtime.raise_fatal_lowering_diagnostic(diagnostic));
+            }
+            Err(_) => None,
         },
-        // `scope` is this def's own declared parameter list.
-        true,
-        runtime,
-    ) {
-        Ok((dag, _)) => Some(dag),
-        Err(diagnostic) if diagnostic.fatal => runtime.raise_fatal_lowering_diagnostic(diagnostic),
-        Err(_) => None,
-    }
+    )
 }
 
 /// Lower one named tensor entry with source-owned fixed-control execution.
@@ -2465,6 +2561,15 @@ pub fn lower_named_tensor_entry_execution_plan(
     name: &str,
     runtime: &LoweringRuntime,
 ) -> Result<Option<crate::evaluation::EvaluationPlan>, crate::lower::LowerDiagnostic> {
+    lower_named_tensor_entry_execution_plan_inner(program, name, runtime)
+        .unwrap_or_else(|failure| failure.resume_at_boundary())
+}
+
+pub(crate) fn lower_named_tensor_entry_execution_plan_inner(
+    program: &CheckedProgram,
+    name: &str,
+    runtime: &LoweringRuntime,
+) -> LowerResult<Result<Option<crate::evaluation::EvaluationPlan>, crate::lower::LowerDiagnostic>> {
     // A whole-program entry owns its session, so nothing outside this crate
     // has to know one exists (chelis#1835).
     let session = HostLoweringSession::new(program, runtime);
@@ -2488,6 +2593,24 @@ pub fn lower_named_tensor_entry_execution_plan_with_trace(
     )>,
     crate::lower::LowerDiagnostic,
 > {
+    lower_named_tensor_entry_execution_plan_with_trace_inner(program, name, runtime)
+        .unwrap_or_else(|failure| failure.resume_at_boundary())
+}
+
+#[cfg(feature = "lowering-trace")]
+pub(crate) fn lower_named_tensor_entry_execution_plan_with_trace_inner(
+    program: &CheckedProgram,
+    name: &str,
+    runtime: &LoweringRuntime,
+) -> LowerResult<
+    Result<
+        Option<(
+            crate::evaluation::EvaluationPlan,
+            crate::lowering_trace::HelperLoweringTrace,
+        )>,
+        crate::lower::LowerDiagnostic,
+    >,
+> {
     let session = HostLoweringSession::new(program, runtime);
     lower_named_tensor_entry_execution_with(
         &session,
@@ -2509,33 +2632,33 @@ fn lower_named_tensor_entry_execution_with<T>(
         bool,
         &crate::evaluation::RandomExecutionContext,
         &LoweringRuntime,
-    ) -> Result<T, crate::lower::LowerDiagnostic>,
-) -> Result<Option<T>, crate::lower::LowerDiagnostic> {
+    ) -> LowerResult<Result<T, crate::lower::LowerDiagnostic>>,
+) -> LowerResult<Result<Option<T>, crate::lower::LowerDiagnostic>> {
     let runtime = program.runtime();
     let Some((body_expr, scope, result_claim, defs)) =
-        named_tensor_entry_lowering_inputs(program, name)
+        named_tensor_entry_lowering_inputs(program, name)?
     else {
-        return Ok(None);
+        return Ok(Ok(None));
     };
     let context = crate::lower::prepare_checked_subexpr_lowering_context(
         program,
         defs,
         Arc::new(crate::lower::collect_top_level_sigs(program.exprs())),
     );
-    let profile = context.c_execution_profile(&body_expr, &scope, runtime);
+    let profile = context.c_execution_profile(&body_expr, &scope, runtime)?;
     match profile {
         crate::evaluation::EvaluationProfile::Legacy(
             crate::evaluation::LegacyEvaluationReason::NoDropout,
-        ) => return Ok(None),
+        ) => return Ok(Ok(None)),
         crate::evaluation::EvaluationProfile::Legacy(reason) => {
-            return Err(crate::lower::LowerDiagnostic::new(
+            return Ok(Err(crate::lower::LowerDiagnostic::new(
                 format!(
                     "tensor entry `{name}` has Dropout execution that is not fixed-control: {reason:?}"
                 ),
                 None,
                 None,
             )
-            .fatal());
+            .fatal()));
         }
         crate::evaluation::EvaluationProfile::FixedControl => {}
     }
@@ -2543,7 +2666,7 @@ fn lower_named_tensor_entry_execution_with<T>(
         seed: None,
         counter: 0,
     });
-    lower(
+    Ok(lower(
         &body_expr,
         scope,
         &context,
@@ -2551,8 +2674,8 @@ fn lower_named_tensor_entry_execution_with<T>(
         true,
         &planning,
         runtime,
-    )
-    .map(Some)
+    )?
+    .map(Some))
 }
 
 /// Does the named top-level def have a pure tensor signature — every
@@ -2643,7 +2766,9 @@ fn lower_host_program(
     program: &HostLoweringSession<'_>,
     lowered_names: &BTreeMap<String, bool>,
 ) -> Result<HostProgram, crate::lower::LowerDiagnostic> {
-    lower_host_program_with_execution(program, lowered_names, false, false).map(|(host, _)| host)
+    lower_host_program_with_execution(program, lowered_names, false, false)
+        .unwrap_or_else(|failure| failure.resume_at_boundary())
+        .map(|(host, _)| host)
 }
 
 fn lower_host_program_with_execution(
@@ -2651,7 +2776,7 @@ fn lower_host_program_with_execution(
     lowered_names: &BTreeMap<String, bool>,
     collect_execution: bool,
     collect_trace: bool,
-) -> Result<(HostProgram, HostExecutionMetadata), crate::lower::LowerDiagnostic> {
+) -> LowerResult<Result<(HostProgram, HostExecutionMetadata), crate::lower::LowerDiagnostic>> {
     let runtime = program.runtime();
     // Each invocation rebuilds its specializations, without clearing an outer
     // invocation or retaining a failed run's partial memo.
@@ -2811,7 +2936,7 @@ fn lower_host_program_with_execution(
         // wrapper per def in that case so each gets its own C symbol.
         let is_fn_body = matches!(body, Expr::List(list, _) if tag(list) == Some(DeepTag::Fn));
         let has_any_host_lane_def = lowered_names.values().any(|lowered| !*lowered);
-        let has_callable_params = lookup_declared_fn_type(program, name)
+        let has_callable_params = lookup_declared_fn_type(program, name)?
             .is_some_and(|(params, _)| params.iter().any(|ty| matches!(ty, HostTypeTerm::Fn(..))));
         // Non-F32/Bool tensor precisions (e.g. i32, i64) aren't
         // representable in the Phase 0f DAG-only codegen path — it still
@@ -2819,7 +2944,7 @@ fn lower_host_program_with_execution(
         // signature carries such a tensor so the program stays on the
         // host-lane code path instead of panicking in DAG emit.
         let has_non_dag_tensor =
-            lookup_declared_fn_type(program, name).is_some_and(|(params, ret)| {
+            lookup_declared_fn_type(program, name)?.is_some_and(|(params, ret)| {
                 fn ty_has_non_dag_tensor(ty: &HostTypeTerm) -> bool {
                     match ty {
                         HostTypeTerm::Tensor(tensor) => !matches!(
@@ -2862,7 +2987,7 @@ fn lower_host_program_with_execution(
         // wrapper, the def is still dropped from emission. Tracked as a
         // residual HOF emission issue (red-team A20.1).
         let scalar_only_callable_signature = has_callable_params
-            && lookup_declared_fn_type(program, name).is_some_and(|(params, ret)| {
+            && lookup_declared_fn_type(program, name)?.is_some_and(|(params, ret)| {
                 fn ty_is_scalar_or_callable_scalar(ty: &HostTypeTerm) -> bool {
                     match ty {
                         HostTypeTerm::Tensor(_) => false,
@@ -2898,13 +3023,14 @@ fn lower_host_program_with_execution(
             && cached_def_effect_rows(program)
                 .get(name)
                 .is_some_and(|row| !row.contains(&chelis_types::types::Effect::Random))
-            && named_tensor_entry_lowering_inputs(program, name).is_some_and(
-                |(body, scope, _, _)| {
+            && match named_tensor_entry_lowering_inputs(program, name)? {
+                Some((body, scope, _, _)) => {
                     cached_subexpr_lowering_context(program)
-                        .c_execution_profile(&body, &scope, runtime)
+                        .c_execution_profile(&body, &scope, runtime)?
                         == crate::evaluation::EvaluationProfile::FixedControl
-                },
-            );
+                }
+                None => false,
+            };
         let needs_host_wrapper = is_fn_body
             && (has_non_dag_tensor
                 || scalar_only_callable_signature
@@ -2951,14 +3077,14 @@ fn lower_host_program_with_execution(
         // says so); otherwise we have no good lowering and must drop the
         // def — at least the caller will get `implicit declaration` rather
         // than `call(…)` undefined-symbol.
-        if let Some(lowered) = lower_host_function(
+        if let Some(lowered) = try_ok!(lower_host_function(
             name,
             body,
             ty_expr.as_ref(),
             program,
             collect_execution,
             collect_trace,
-        )? {
+        )?) {
             let mut function = lowered.function;
             // N→1 lowering collapse per `spec/design/chelis_span_survival.md`
             // §2.3 host-side table, rule "Lowering. Top-level def collapses
@@ -2989,12 +3115,12 @@ fn lower_host_program_with_execution(
             // `lower_host_function`.
             global_tensor_helpers.declaration_name = Some(name.to_string());
             let inlined_body = inline_local_callable_lets(body);
-            let mut value = lower_host_expr(
+            let mut value = try_ok!(lower_host_expr(
                 &inlined_body,
                 program,
                 &global_scope,
                 &mut global_tensor_helpers,
-            )?;
+            )?);
             // N→1 lowering collapse per `spec/design/chelis_span_survival.md`
             // §2.3 host-side table, rule "Lowering. Top-level def collapses
             // to body": when a `(def {span: a} name body)` lowers to a
@@ -3015,7 +3141,9 @@ fn lower_host_program_with_execution(
             let declared_ty = ty_expr
                 .as_ref()
                 .map(|ty| decode_host_type_or_raise(ty, &UnordMap::new(), runtime))
+                .transpose()?
                 .map(|ty| expand_host_type_aliases(program, ty))
+                .transpose()?
                 .filter(|ty| !ty.is_unresolved());
             // chelis#1137: movement-helper lowering may prove a different
             // rank from the checker's provisional type (notably `expand`
@@ -3095,13 +3223,13 @@ fn lower_host_program_with_execution(
     // under the helper's own name since global tensor helpers don't
     // share a binding name directly.
     collect_program_summary_rejections(&mut host);
-    Ok((
+    Ok(Ok((
         host,
         HostExecutionMetadata {
             global,
             functions: function_execution,
         },
-    ))
+    )))
 }
 
 /// Aggregate per-function rejections into `HostProgram::summary_rejections`
@@ -4022,8 +4150,17 @@ pub fn host_def_kernel(
     name: &str,
     random: Option<RandomLoweringState>,
 ) -> Result<Option<HostDefKernel>, crate::lower::LowerDiagnostic> {
-    host_def_kernel_product(program, name, random, None)
-        .map(|product| product.map(|product| product.kernel))
+    host_def_kernel_inner(program, name, random)
+        .unwrap_or_else(|failure| failure.resume_at_boundary())
+}
+
+pub(crate) fn host_def_kernel_inner(
+    program: &HostLoweringSession<'_>,
+    name: &str,
+    random: Option<RandomLoweringState>,
+) -> LowerResult<Result<Option<HostDefKernel>, crate::lower::LowerDiagnostic>> {
+    Ok(host_def_kernel_product(program, name, random, None)?
+        .map(|product| product.map(|product| product.kernel)))
 }
 
 /// The evaluator's counterpart to [`host_def_kernel`], carrying the execution
@@ -4058,6 +4195,15 @@ pub fn host_def_evaluation_plan(
     name: &str,
     context: &crate::evaluation::RandomExecutionContext,
 ) -> Result<Option<HostDefEvaluationPlan>, crate::lower::LowerDiagnostic> {
+    host_def_evaluation_plan_inner(program, name, context)
+        .unwrap_or_else(|failure| failure.resume_at_boundary())
+}
+
+pub(crate) fn host_def_evaluation_plan_inner(
+    program: &HostLoweringSession<'_>,
+    name: &str,
+    context: &crate::evaluation::RandomExecutionContext,
+) -> LowerResult<Result<Option<HostDefEvaluationPlan>, crate::lower::LowerDiagnostic>> {
     host_def_kernel_product(program, name, Some(context.state()), Some(context))
 }
 
@@ -4066,13 +4212,13 @@ fn host_def_kernel_product(
     name: &str,
     random: Option<RandomLoweringState>,
     execution: Option<&crate::evaluation::RandomExecutionContext>,
-) -> Result<Option<HostDefEvaluationPlan>, crate::lower::LowerDiagnostic> {
+) -> LowerResult<Result<Option<HostDefEvaluationPlan>, crate::lower::LowerDiagnostic>> {
     let runtime = program.runtime();
     // The declaration's own name is the key for every per-def fact (the
     // effect row, the call graph); a caller may hand in a shorter spelling
     // that `find_top_level_def_named` resolves.
     let Some((canonical, body)) = find_top_level_def_named(program.exprs(), name) else {
-        return Ok(None);
+        return Ok(Ok(None));
     };
     let name = canonical;
     let transfer_literal_result_claims =
@@ -4086,13 +4232,13 @@ fn host_def_kernel_product(
                 || crate::lower::type_expr_has_rank_var(&signature)
         })
     {
-        return Ok(None);
+        return Ok(Ok(None));
     }
     // `ty_expr` is redundant with the lookup `host_def_signature` performs
     // first (the C caller passes that same lookup's result), so `None` here
     // yields the identical signature.
-    let Some(signature) = host_def_signature(name, body, None, program) else {
-        return Ok(None);
+    let Some(signature) = host_def_signature(name, body, None, program)? else {
+        return Ok(Ok(None));
     };
     let _preflight_guard = TensorHelperPreflightGuard::begin(&signature.body_expr, program);
     // Classify lexical controls before host signature preparation substitutes
@@ -4106,7 +4252,7 @@ fn host_def_kernel_product(
             profile_body,
             &kernel_scope_types(&signature.scope, Some(&signature.params)),
             runtime,
-        ),
+        )?,
         None => crate::evaluation::EvaluationProfile::Legacy(
             crate::evaluation::LegacyEvaluationReason::LegacyApi,
         ),
@@ -4117,67 +4263,74 @@ fn host_def_kernel_product(
     {
         let execution_out = (profile == crate::evaluation::EvaluationProfile::FixedControl)
             .then_some(&mut staged_plan);
-        match staged_def_kernel_product(program, &signature, random, execution_out)? {
+        match try_ok!(staged_def_kernel_product(
+            program,
+            &signature,
+            random,
+            execution_out
+        )) {
             staged::StagingAttempt::Ready(kernel) => {
-                return Ok(Some(HostDefEvaluationPlan {
+                return Ok(Ok(Some(HostDefEvaluationPlan {
                     kernel,
                     plan: None,
                     profile,
                     staged_plan: staged_plan.map(Box::new),
-                }));
+                })));
             }
-            staged::StagingAttempt::HostControlBoundary => return Ok(None),
+            staged::StagingAttempt::HostControlBoundary => return Ok(Ok(None)),
             staged::StagingAttempt::NotApplicable => {}
         }
     }
-    let expected = match def_body_decision_impl(
+    let expected = match try_ok!(def_body_decision_impl(
         program,
         &signature,
         profile == crate::evaluation::EvaluationProfile::FixedControl,
-    )? {
+    )?) {
         DefBodyDecision::Kernel(expected) => expected,
-        DefBodyDecision::Host => return Ok(None),
-        DefBodyDecision::TensorVar(..) => return Ok(None),
+        DefBodyDecision::Host => return Ok(Ok(None)),
+        DefBodyDecision::TensorVar(..) => return Ok(Ok(None)),
     };
     let plan = if profile == crate::evaluation::EvaluationProfile::FixedControl {
         let context = cached_subexpr_lowering_context(program);
         let scoped = kernel_scope_types(&signature.scope, Some(&signature.params));
         let execution = execution.expect("fixed profile is only selected by the evaluator");
         let plan = if transfer_literal_result_claims {
-            crate::lower::try_lower_tensor_helper_evaluation_with_ordered_inputs(
-                &signature.body_expr,
-                scoped,
-                &context,
-                Some(&expected),
-                true,
-                execution,
-                runtime,
-            )?
+            try_ok!(
+                crate::lower::try_lower_tensor_helper_evaluation_with_ordered_inputs(
+                    &signature.body_expr,
+                    scoped,
+                    &context,
+                    Some(&expected),
+                    true,
+                    execution,
+                    runtime,
+                )?
+            )
         } else {
-            crate::lower::try_lower_subexpr_evaluation_with_ordered_inputs(
-                &signature.body_expr,
-                scoped,
-                &context,
-                Some(&expected),
-                true,
-                execution,
-                runtime,
-            )?
+            try_ok!(
+                crate::lower::try_lower_subexpr_evaluation_with_ordered_inputs(
+                    &signature.body_expr,
+                    scoped,
+                    &context,
+                    Some(&expected),
+                    true,
+                    execution,
+                    runtime,
+                )?
+            )
         };
         let rebound =
             remap_tensor_helper_dim_symbols(plan.dag_for_inspection(), &signature.scope, &expected);
-        Some(
-            plan.rebind_dimensions(rebound).map_err(|message| {
-                crate::lower::LowerDiagnostic::new(message, None, None).fatal()
-            })?,
-        )
+        Some(try_ok!(plan.rebind_dimensions(rebound).map_err(
+            |message| { crate::lower::LowerDiagnostic::new(message, None, None).fatal() }
+        )))
     } else {
         None
     };
     let (dag, next_random_counter) = if let Some(plan) = &plan {
         (plan.dag_for_inspection().clone(), None)
     } else {
-        lower_kernel_dag(
+        try_ok!(lower_kernel_dag(
             &signature.body_expr,
             program,
             &signature.scope,
@@ -4185,17 +4338,17 @@ fn host_def_kernel_product(
             &expected,
             random,
             transfer_literal_result_claims,
-        )?
+        ))
     };
     if let Some(builtin) = kernel_dag_loads_builtin(&dag, &signature.scope) {
-        return Err(crate::lower::LowerDiagnostic::new(
+        return Ok(Err(crate::lower::LowerDiagnostic::new(
             format!(
                 "the kernel body of `{name}` reaches the host-only builtin `{builtin}`, which has \
                  no tensor-DAG lowering"
             ),
             None,
             None,
-        ));
+        )));
     }
     let inputs = tensor_helper_inputs(&dag);
     let output = dag
@@ -4204,7 +4357,7 @@ fn host_def_kernel_product(
         .and_then(|id| dag.get(*id))
         .map(|node| node.output_type.clone())
         .unwrap_or_else(|| expected.clone());
-    Ok(Some(HostDefEvaluationPlan {
+    Ok(Ok(Some(HostDefEvaluationPlan {
         kernel: HostDefKernel {
             dag,
             staged: None,
@@ -4216,7 +4369,7 @@ fn host_def_kernel_product(
         plan,
         profile,
         staged_plan: None,
-    }))
+    })))
 }
 
 fn staged_def_kernel(
@@ -4378,7 +4531,7 @@ pub(crate) fn body_form_the_dag_cannot_carry(
     body: &Expr,
     params: &[HostParam],
     evaluation_dropout: bool,
-) -> Option<String> {
+) -> LowerResult<Option<String>> {
     let runtime = program.runtime();
     let defs = cached_program_defs(program);
     let type_subst = program.invocation.type_subst.borrow();
@@ -4557,37 +4710,37 @@ impl UncarriableWalk<'_> {
         })
     }
 
-    fn expr(&mut self, expr: &Expr) -> Option<String> {
-        match expr {
+    fn expr(&mut self, expr: &Expr) -> LowerResult<Option<String>> {
+        Ok(match expr {
             Expr::Atom(Atom::Str(_), _) => {
                 Some("a string literal, which has no numeric IR constant (chelis#856)".to_string())
             }
             Expr::Atom(_, _) | Expr::Map(_, _) => None,
-            Expr::MetaExpr(meta, _) => self.expr(&meta.expr),
-            Expr::Node(node, span) => self.expr(&Expr::List(node.to_list(*span), *span)),
-            Expr::BareList(elems, _) => elems.iter().find_map(|elem| self.expr(elem)),
-            Expr::UnknownForm(data) => data.children.iter().find_map(|child| self.expr(child)),
-            Expr::List(list, _) => self.list(list),
-        }
+            Expr::MetaExpr(meta, _) => self.expr(&meta.expr)?,
+            Expr::Node(node, span) => self.expr(&Expr::List(node.to_list(*span), *span))?,
+            Expr::BareList(elems, _) => try_find_map(elems, |elem| self.expr(elem))?,
+            Expr::UnknownForm(data) => try_find_map(&data.children, |child| self.expr(child))?,
+            Expr::List(list, _) => self.list(list)?,
+        })
     }
 
-    fn list(&mut self, list: &List) -> Option<String> {
+    fn list(&mut self, list: &List) -> LowerResult<Option<String>> {
         let kids = children(list);
-        match tag(list) {
+        Ok(match tag(list) {
             Some(DeepTag::Var) => {
-                let name = kids.first().and_then(symbol_name)?;
+                let name = try_some!(kids.first().and_then(symbol_name));
                 if self.bound(name).is_some()
                     || BUILTIN_NAMES.contains(&name)
                     || (self.evaluation_dropout && name == "dropout")
                     || name.chars().next().is_some_and(char::is_uppercase)
                 {
-                    return None;
+                    return Ok(None);
                 }
                 match self.defs.get(name) {
                     // A callee inlines into the kernel, so its body is walked
                     // under its own parameters; a value binding becomes a
                     // `Load` and carries nothing.
-                    Some(def_body) => self.def(name, def_body, None),
+                    Some(def_body) => self.def(name, def_body, None)?,
                     None => Some(format!(
                         "the name `{name}`, which is neither a parameter nor a definition \
                          of this program (a library definition under a compiled context)"
@@ -4614,11 +4767,11 @@ impl UncarriableWalk<'_> {
                         Expr::UnknownForm(data) if data.head == "vmap-grad"
                     );
                     if !recognized_callee {
-                        return Some(
+                        return Ok(Some(
                             "an application whose callee is a computed function value, which \
                              the C host ABI rejects rather than erasing (chelis#1951)"
                                 .to_string(),
-                        );
+                        ));
                     }
                 }
                 if let Some(callee) = kids.first().and_then(as_list)
@@ -4628,9 +4781,9 @@ impl UncarriableWalk<'_> {
                     && !self.defs.contains_key(name)
                 {
                     if HOST_ONLY_BUILTINS.contains(&name) {
-                        return Some(format!(
+                        return Ok(Some(format!(
                             "the builtin `{name}`, which has no tensor-DAG lowering"
-                        ));
+                        )));
                     }
                     // [05-OP-62]: the static Pad+Add concat lowerer cannot
                     // sum an input's runtime width. Decide Host before a
@@ -4639,7 +4792,7 @@ impl UncarriableWalk<'_> {
                         && kids.len() == 3
                         && self.concat_requires_host(&kids[1], &kids[2])
                     {
-                        return Some("tensor concat over a directly forwarded runtime input extent (chelis#1906)".to_string());
+                        return Ok(Some("tensor concat over a directly forwarded runtime input extent (chelis#1906)".to_string()));
                     }
                     if name.starts_with("reduce_window_")
                         && kids[1..]
@@ -4647,17 +4800,17 @@ impl UncarriableWalk<'_> {
                             .skip(1)
                             .any(|list_arg| !is_literal_int_list(list_arg))
                     {
-                        return Some(format!(
+                        return Ok(Some(format!(
                             "`{name}` with a non-literal window or stride list, which the \
                              compiled lowering does not carry (chelis#1058)"
-                        ));
+                        )));
                     }
                     if name == "pad" && kids.get(3).is_some_and(|fill| !is_static_scalar(fill)) {
-                        return Some(
+                        return Ok(Some(
                             "`pad` with a fill value that does not resolve statically \
                              (chelis#776)"
                                 .to_string(),
-                        );
+                        ));
                     }
                     // A bare name handed directly to a builtin that the program
                     // does not define is a dimension name (a named axis of a
@@ -4669,11 +4822,12 @@ impl UncarriableWalk<'_> {
                     if BUILTIN_NAMES.contains(&name)
                         || (self.evaluation_dropout && name == "dropout")
                     {
-                        return kids
-                            .iter()
-                            .skip(1)
-                            .filter(|kid| !is_bare_lowercase_var(kid))
-                            .find_map(|kid| self.expr(kid));
+                        return try_find_map(
+                            kids.iter()
+                                .skip(1)
+                                .filter(|kid| !is_bare_lowercase_var(kid)),
+                            |kid| self.expr(kid),
+                        );
                     }
                 }
                 if let Some((DeepTag::Var, _, callee)) = kids.first().and_then(stamped_parts)
@@ -4683,8 +4837,8 @@ impl UncarriableWalk<'_> {
                 {
                     // Resolve every actual in the caller before any callee
                     // formal shadows it; two calls can carry different widths.
-                    if let Some(found) = kids.iter().skip(1).find_map(|arg| self.expr(arg)) {
-                        return Some(found);
+                    if let Some(found) = try_find_map(kids.iter().skip(1), |arg| self.expr(arg))? {
+                        return Ok(Some(found));
                     }
                     let actuals = kids
                         .iter()
@@ -4693,7 +4847,7 @@ impl UncarriableWalk<'_> {
                         .collect();
                     return self.def(name, body, Some(actuals));
                 }
-                kids.iter().find_map(|kid| self.expr(kid))
+                try_find_map(kids, |kid| self.expr(kid))?
             }
             Some(DeepTag::Fn) => {
                 let params = kids
@@ -4703,7 +4857,10 @@ impl UncarriableWalk<'_> {
                     .map(|name| (name, AdmissionBinding::default()))
                     .collect();
                 self.scopes.push(params);
-                let found = kids.get(1).and_then(|body| self.expr(body));
+                let found = match kids.get(1) {
+                    Some(body) => self.expr(body)?,
+                    None => None,
+                };
                 self.scopes.pop();
                 found
             }
@@ -4716,7 +4873,9 @@ impl UncarriableWalk<'_> {
                     let binding_kids = children(bindings);
                     let mut index = 0;
                     while index + 1 < binding_kids.len() {
-                        found = found.or_else(|| self.expr(&binding_kids[index + 1]));
+                        if found.is_none() {
+                            found = self.expr(&binding_kids[index + 1])?;
+                        }
                         let static_ctor = is_static_constructor(&binding_kids[index + 1], self);
                         // Only a whole-value alias inherits a whole-value fact;
                         // this walk does not project tuple/list destructuring.
@@ -4741,36 +4900,41 @@ impl UncarriableWalk<'_> {
                         index += 2;
                     }
                 }
-                let found = found.or_else(|| kids.get(1).and_then(|body| self.expr(body)));
+                if found.is_none() {
+                    found = match kids.get(1) {
+                        Some(body) => self.expr(body)?,
+                        None => None,
+                    };
+                }
                 self.scopes.pop();
                 found
             }
             Some(DeepTag::Access) => {
-                let base = kids.first()?;
-                if let Some(found) = self.expr(base) {
-                    return Some(found);
+                let base = try_some!(kids.first());
+                if let Some(found) = self.expr(base)? {
+                    return Ok(Some(found));
                 }
                 if !is_static_constructor(base, self) {
-                    return Some(
+                    return Ok(Some(
                         "a field projection on a runtime record value, which IR lowering \
                          resolves only for a compile-time-known record construction \
                          (chelis#520 D1)"
                             .to_string(),
-                    );
+                    ));
                 }
                 None
             }
             Some(DeepTag::Match) => {
-                let scrutinee = kids.first()?;
-                if let Some(found) = self.expr(scrutinee) {
-                    return Some(found);
+                let scrutinee = try_some!(kids.first());
+                if let Some(found) = self.expr(scrutinee)? {
+                    return Ok(Some(found));
                 }
                 if !is_static_constructor(scrutinee, self) {
-                    return Some(
+                    return Ok(Some(
                         "a `match` on a runtime scrutinee, which IR lowering resolves only \
                          for a compile-time-known constructor value (chelis#520 D1)"
                             .to_string(),
-                    );
+                    ));
                 }
                 for arm in kids.iter().skip(1) {
                     let Some(arm_list) = as_list(arm) else {
@@ -4791,16 +4955,16 @@ impl UncarriableWalk<'_> {
                             .map(|n| (n, AdmissionBinding::default()))
                             .collect(),
                     );
-                    let found = arm_kids.iter().skip(1).find_map(|kid| self.expr(kid));
+                    let found = try_find_map(arm_kids.iter().skip(1), |kid| self.expr(kid))?;
                     self.scopes.pop();
                     if found.is_some() {
-                        return found;
+                        return Ok(found);
                     }
                 }
                 None
             }
-            _ => kids.iter().find_map(|kid| self.expr(kid)),
-        }
+            _ => try_find_map(kids, |kid| self.expr(kid))?,
+        })
     }
 
     fn def(
@@ -4808,14 +4972,14 @@ impl UncarriableWalk<'_> {
         name: &str,
         body: &Expr,
         actuals: Option<Vec<ConcatInputFact>>,
-    ) -> Option<String> {
+    ) -> LowerResult<Option<String>> {
         let runtime = self.runtime;
         let Some((DeepTag::Fn, _, fn_kids)) = stamped_parts(body) else {
-            return None;
+            return Ok(None);
         };
         if self.active.contains(name) {
             self.cycle_cutoff = true;
-            return None;
+            return Ok(None);
         }
         let params: Vec<_> = fn_kids
             .first()
@@ -4832,19 +4996,21 @@ impl UncarriableWalk<'_> {
                         .first()
                         .and_then(stamped_parts)
                         .and_then(|(_, _, params)| params.get(index))
-                        .and_then(|param| param_host_type(param, self.type_subst, runtime))
+                        .map(|param| param_host_type(param, self.type_subst, runtime))
+                        .transpose()?
+                        .flatten()
                         .map(|ty| ConcatInputFact::from_type(&ty))
                         .unwrap_or(ConcatInputFact::Unknown),
                 };
-                (
+                Ok((
                     param,
                     AdmissionBinding {
                         constructor: false,
                         concat,
                     },
-                )
+                ))
             })
-            .collect();
+            .collect::<LowerResult<_>>()?;
         // A callee runs under only these resolved bindings. The definition
         // table and evaluation mode are invariant for this walk; free names
         // resolve there, never in the caller's discarded lexical scopes.
@@ -4856,7 +5022,7 @@ impl UncarriableWalk<'_> {
             .get(name)
             .and_then(|contexts| contexts.iter().find(|context| context.inputs == inputs))
         {
-            return completed.reason.clone();
+            return Ok(completed.reason.clone());
         }
         self.active.insert(name.to_string());
         let enclosing_cutoff = std::mem::replace(&mut self.cycle_cutoff, false);
@@ -4865,7 +5031,10 @@ impl UncarriableWalk<'_> {
             self.def_visits += 1;
         }
         let saved = std::mem::replace(&mut self.scopes, vec![params.into_iter().collect()]);
-        let found = fn_kids.get(1).and_then(|fn_body| self.expr(fn_body));
+        let found = match fn_kids.get(1) {
+            Some(fn_body) => self.expr(fn_body)?,
+            None => None,
+        };
         self.scopes = saved;
         self.active.remove(name);
         // A cycle-truncated traversal depends on the active stack and is not
@@ -4880,7 +5049,7 @@ impl UncarriableWalk<'_> {
                 });
         }
         self.cycle_cutoff |= enclosing_cutoff;
-        found
+        Ok(found)
     }
 }
 
@@ -5099,13 +5268,13 @@ fn is_static_scalar(expr: &Expr) -> bool {
 fn def_body_decision(
     program: &HostLoweringSession<'_>,
     signature: &HostDefSignature,
-) -> Result<DefBodyDecision, crate::lower::LowerDiagnostic> {
+) -> LowerResult<Result<DefBodyDecision, crate::lower::LowerDiagnostic>> {
     let runtime = program.runtime();
     let fixed_dropout = cached_subexpr_lowering_context(program).c_execution_profile(
         &signature.body_expr,
         &kernel_scope_types(&signature.scope, Some(&signature.params)),
         runtime,
-    ) == crate::evaluation::EvaluationProfile::FixedControl;
+    )? == crate::evaluation::EvaluationProfile::FixedControl;
     def_body_decision_impl(program, signature, fixed_dropout)
 }
 
@@ -5113,7 +5282,7 @@ fn def_body_decision_impl(
     program: &HostLoweringSession<'_>,
     signature: &HostDefSignature,
     evaluation_dropout: bool,
-) -> Result<DefBodyDecision, crate::lower::LowerDiagnostic> {
+) -> LowerResult<Result<DefBodyDecision, crate::lower::LowerDiagnostic>> {
     let body_expr = &signature.body_expr;
     // Skip the tensor-helper path when any param is callable: the DAG
     // helper has no representation for fn-pointer inputs and would otherwise
@@ -5125,7 +5294,7 @@ fn def_body_decision_impl(
         .iter()
         .any(|param| matches!(param.ty, HostTypeTerm::Fn(_, _)));
     let HostTypeTerm::Tensor(expected) = signature.ret_ty.clone() else {
-        return Ok(DefBodyDecision::Host);
+        return Ok(Ok(DefBodyDecision::Host));
     };
     // chelis#1528: a body whose checked effect row carries an effect the DAG
     // cannot represent stays in host code on both lanes. `spec/04-type-system.md`
@@ -5136,21 +5305,21 @@ fn def_body_decision_impl(
     // `Random` (`UniformLike`) and `Accum` (gradient accumulation) are carried
     // by the DAG.
     if def_effect_row_forbids_kernel(program, &signature.name) {
-        return Ok(DefBodyDecision::Host);
+        return Ok(Ok(DefBodyDecision::Host));
     }
     // A computed function value has no tensor-helper representation. Keep it
     // in the host lane before any DAG path can erase the outer application;
     // the C ABI then emits its typed unsupported-callable fence (#1951).
     if contains_computed_callable_application(body_expr) {
-        return Ok(DefBodyDecision::Host);
+        return Ok(Ok(DefBodyDecision::Host));
     }
     // A form the kernel lowering cannot carry keeps the def in host code on
     // both lanes, decided here rather than discovered by a failed lowering
     // (chelis#1277 B2h; the classes the byte-identity corpus found).
-    if body_form_the_dag_cannot_carry(program, body_expr, &signature.params, evaluation_dropout)
+    if body_form_the_dag_cannot_carry(program, body_expr, &signature.params, evaluation_dropout)?
         .is_some()
     {
-        return Ok(DefBodyDecision::Host);
+        return Ok(Ok(DefBodyDecision::Host));
     }
     // The callee summary probe is asked LAST of the host-lane predicates, and
     // only after the declared result type, the effect row and the body form
@@ -5162,24 +5331,26 @@ fn def_body_decision_impl(
     // saving. The predicates are independent, so the decision is unchanged.
     if any_callable_param
         || expr_needs_host_lane_tensor_lowering(body_expr, program)
-        || expr_calls_top_level_fn_with_callable_param(body_expr, program)
+        || expr_calls_top_level_fn_with_callable_param(body_expr, program)?
         || should_keep_tensor_expr_in_host_lane(body_expr)
-        || expr_calls_summary_rejecting_top_level_fn(body_expr, program)?
+        || try_ok!(expr_calls_summary_rejecting_top_level_fn(
+            body_expr, program
+        )?)
     {
-        return Ok(DefBodyDecision::Host);
+        return Ok(Ok(DefBodyDecision::Host));
     }
     if let Expr::List(list, _) = body_expr
         && tag(list) == Some(DeepTag::Var)
         && let Some(name) = children(list).first().and_then(symbol_name)
     {
-        return Ok(DefBodyDecision::TensorVar(name.to_string(), expected));
+        return Ok(Ok(DefBodyDecision::TensorVar(name.to_string(), expected)));
     }
     if tensor_helper_preflight_rejects(body_expr, program) {
         record_host_work(|profile| {
             profile.tensor_helper_fallbacks += 1;
             profile.tensor_helper_preflight_rejections += 1;
         });
-        return Ok(DefBodyDecision::Host);
+        return Ok(Ok(DefBodyDecision::Host));
     }
     record_host_work(|profile| {
         profile.tensor_helper_attempts += 1;
@@ -5194,9 +5365,9 @@ fn def_body_decision_impl(
             profile.tensor_helper_fail_guard_rejections += 1;
             profile.tensor_helper_fallbacks += 1;
         });
-        return Ok(DefBodyDecision::Host);
+        return Ok(Ok(DefBodyDecision::Host));
     }
-    Ok(DefBodyDecision::Kernel(expected))
+    Ok(Ok(DefBodyDecision::Kernel(expected)))
 }
 
 /// The C lane's use of the shared decision: a kernel call, or `None` for the
@@ -5207,47 +5378,47 @@ fn lower_def_body_kernel(
     program: &HostLoweringSession<'_>,
     signature: &HostDefSignature,
     tensor_helpers: &mut TensorHelperSink,
-) -> Result<Option<HostExpr>, crate::lower::LowerDiagnostic> {
+) -> LowerResult<Result<Option<HostExpr>, crate::lower::LowerDiagnostic>> {
     let runtime = program.runtime();
     // A returned/dynamically-computed callable has no C value ABI. Do not
     // let a staged or tensor helper erase its outer application; the host
     // lowering route emits the existing unspellable marker, and the C ABI
     // turns that into the typed #879 rejection before artifacts exist.
     if contains_computed_callable_application(&signature.body_expr) {
-        return Ok(None);
+        return Ok(Ok(None));
     }
     let transfer_literal_result_claims =
         top_level_fn_transfers_literal_result_claims(program, &signature.name);
-    match staged_def_kernel(program, signature, None)? {
+    match try_ok!(staged_def_kernel(program, signature, None)) {
         staged::StagingAttempt::Ready(kernel) => {
-            return lower_staged_host_plan(
+            return Ok(lower_staged_host_plan(
                 kernel.staged.as_ref().expect("staged kernel"),
                 program,
                 &signature.scope,
                 tensor_helpers,
-            )
+            )?
             .map(|body| {
                 record_literal_result_transfer(signature, tensor_helpers);
                 Some(body)
-            });
+            }));
         }
-        staged::StagingAttempt::HostControlBoundary => return Ok(None),
+        staged::StagingAttempt::HostControlBoundary => return Ok(Ok(None)),
         staged::StagingAttempt::NotApplicable => {}
     }
-    let expected = match def_body_decision(program, signature)? {
-        DefBodyDecision::Host => return Ok(None),
+    let expected = match try_ok!(def_body_decision(program, signature)?) {
+        DefBodyDecision::Host => return Ok(Ok(None)),
         DefBodyDecision::TensorVar(name, expected) => {
-            return Ok(Some(HostExpr::new(HostExprKind::Var(
+            return Ok(Ok(Some(HostExpr::new(HostExprKind::Var(
                 name,
                 HostTypeTerm::Tensor(expected),
-            ))));
+            )))));
         }
         DefBodyDecision::Kernel(expected) => expected,
     };
     if tensor_helpers.collect_execution {
         let context = cached_subexpr_lowering_context(program);
         let scoped = kernel_scope_types(&signature.scope, Some(&signature.params));
-        if context.c_execution_profile(&signature.body_expr, &scoped, runtime)
+        if context.c_execution_profile(&signature.body_expr, &scoped, runtime)?
             == crate::evaluation::EvaluationProfile::FixedControl
         {
             let planning = crate::evaluation::RandomExecutionContext::new(RandomLoweringState {
@@ -5257,7 +5428,7 @@ fn lower_def_body_kernel(
             #[cfg(feature = "lowering-trace")]
             let (plan, trace) = if tensor_helpers.collect_trace && transfer_literal_result_claims {
                 let (plan, trace) =
-                    crate::lower::try_lower_tensor_helper_c_execution_with_ordered_inputs_and_trace(
+                    try_ok!(crate::lower::try_lower_tensor_helper_c_execution_with_ordered_inputs_and_trace(
                         &signature.body_expr,
                         scoped,
                         &context,
@@ -5265,10 +5436,10 @@ fn lower_def_body_kernel(
                         true,
                         &planning,
                         runtime,
-                    )?;
+                    )?);
                 (plan, Some(trace))
             } else if tensor_helpers.collect_trace {
-                let (plan, trace) =
+                let (plan, trace) = try_ok!(
                     crate::lower::try_lower_subexpr_c_execution_with_ordered_inputs_and_trace(
                         &signature.body_expr,
                         scoped,
@@ -5277,10 +5448,43 @@ fn lower_def_body_kernel(
                         true,
                         &planning,
                         runtime,
-                    )?;
+                    )?
+                );
                 (plan, Some(trace))
             } else if transfer_literal_result_claims {
                 (
+                    try_ok!(
+                        crate::lower::try_lower_tensor_helper_c_execution_with_ordered_inputs(
+                            &signature.body_expr,
+                            scoped,
+                            &context,
+                            Some(&expected),
+                            true,
+                            &planning,
+                            runtime,
+                        )?
+                    ),
+                    None,
+                )
+            } else {
+                (
+                    try_ok!(
+                        crate::lower::try_lower_subexpr_c_execution_with_ordered_inputs(
+                            &signature.body_expr,
+                            scoped,
+                            &context,
+                            Some(&expected),
+                            true,
+                            &planning,
+                            runtime,
+                        )?
+                    ),
+                    None,
+                )
+            };
+            #[cfg(not(feature = "lowering-trace"))]
+            let plan = if transfer_literal_result_claims {
+                try_ok!(
                     crate::lower::try_lower_tensor_helper_c_execution_with_ordered_inputs(
                         &signature.body_expr,
                         scoped,
@@ -5289,11 +5493,10 @@ fn lower_def_body_kernel(
                         true,
                         &planning,
                         runtime,
-                    )?,
-                    None,
+                    )?
                 )
             } else {
-                (
+                try_ok!(
                     crate::lower::try_lower_subexpr_c_execution_with_ordered_inputs(
                         &signature.body_expr,
                         scoped,
@@ -5302,40 +5505,17 @@ fn lower_def_body_kernel(
                         true,
                         &planning,
                         runtime,
-                    )?,
-                    None,
+                    )?
                 )
-            };
-            #[cfg(not(feature = "lowering-trace"))]
-            let plan = if transfer_literal_result_claims {
-                crate::lower::try_lower_tensor_helper_c_execution_with_ordered_inputs(
-                    &signature.body_expr,
-                    scoped,
-                    &context,
-                    Some(&expected),
-                    true,
-                    &planning,
-                    runtime,
-                )?
-            } else {
-                crate::lower::try_lower_subexpr_c_execution_with_ordered_inputs(
-                    &signature.body_expr,
-                    scoped,
-                    &context,
-                    Some(&expected),
-                    true,
-                    &planning,
-                    runtime,
-                )?
             };
             let rebound = remap_tensor_helper_dim_symbols(
                 plan.dag_for_inspection(),
                 &signature.scope,
                 &expected,
             );
-            let plan = plan.rebind_dimensions(rebound).map_err(|message| {
+            let plan = try_ok!(plan.rebind_dimensions(rebound).map_err(|message| {
                 crate::lower::LowerDiagnostic::new(message, None, None).fatal()
-            })?;
+            }));
             #[cfg(feature = "lowering-trace")]
             let mut trace = trace;
             #[cfg(feature = "lowering-trace")]
@@ -5344,7 +5524,7 @@ fn lower_def_body_kernel(
             }
             let (dag, execution) = plan.into_parts();
             record_literal_result_transfer(signature, tensor_helpers);
-            return Ok(Some(finish_tensor_helper_product(
+            return Ok(Ok(Some(finish_tensor_helper_product(
                 dag,
                 Some(execution),
                 #[cfg(feature = "lowering-trace")]
@@ -5352,7 +5532,7 @@ fn lower_def_body_kernel(
                 &signature.scope,
                 tensor_helpers,
                 expected,
-            )));
+            ))));
         }
     }
     #[cfg(feature = "lowering-trace")]
@@ -5422,13 +5602,15 @@ fn lower_def_body_kernel(
         }
         #[cfg(not(feature = "lowering-trace"))]
         Ok((dag, _)) => (dag, ()),
-        Err(diagnostic) if diagnostic.fatal => runtime.raise_fatal_lowering_diagnostic(diagnostic),
+        Err(diagnostic) if diagnostic.fatal => {
+            return Err(runtime.raise_fatal_lowering_diagnostic(diagnostic));
+        }
         Err(_) => {
             record_host_work(|profile| {
                 profile.tensor_helper_dag_rejections += 1;
                 profile.tensor_helper_fallbacks += 1;
             });
-            return Ok(None);
+            return Ok(Ok(None));
         }
     };
     if kernel_dag_loads_builtin(&dag, &signature.scope).is_some() {
@@ -5436,11 +5618,11 @@ fn lower_def_body_kernel(
             profile.tensor_helper_fallbacks += 1;
             profile.tensor_helper_builtin_load_rejections += 1;
         });
-        return Ok(None);
+        return Ok(Ok(None));
     }
     record_host_work(|profile| profile.tensor_helper_successes += 1);
     record_literal_result_transfer(signature, tensor_helpers);
-    Ok(Some(finish_tensor_helper_product(
+    Ok(Ok(Some(finish_tensor_helper_product(
         dag,
         None,
         #[cfg(feature = "lowering-trace")]
@@ -5448,7 +5630,7 @@ fn lower_def_body_kernel(
         &signature.scope,
         tensor_helpers,
         expected,
-    )))
+    ))))
 }
 
 fn record_literal_result_transfer(signature: &HostDefSignature, sink: &mut TensorHelperSink) {
@@ -5584,7 +5766,7 @@ fn host_def_signature(
     body: &Expr,
     ty_expr: Option<&Expr>,
     program: &HostLoweringSession<'_>,
-) -> Option<HostDefSignature> {
+) -> LowerResult<Option<HostDefSignature>> {
     let runtime = program.runtime();
     // Preserve authored dimension identities while expanding only the
     // checker-validated nominal aliases below. Replacing this expression with
@@ -5601,49 +5783,61 @@ fn host_def_signature(
     // checked function under fresh inference variables: that loses symbolic
     // dimension provenance and can turn a valid tensor helper into a false
     // sourceless runtime-extent materialization rejection.
-    let (param_tys, ret_ty) = declared_fn_type_expr
-        .as_ref()
-        .and_then(|ty| parse_expanded_fn_type_expr(program, ty))
-        .or_else(|| {
-            expr_fn_type(body, runtime)
-                .map(|signature| expand_host_fn_type_aliases(program, signature))
-        })
-        .or_else(|| lookup_declared_fn_type(program, name))
-        .unwrap_or((Vec::new(), fresh_host_inference()));
+    let parsed = match declared_fn_type_expr.as_ref() {
+        Some(ty) => parse_expanded_fn_type_expr(program, ty)?,
+        None => None,
+    };
+    let parsed = match parsed {
+        Some(parts) => Some(parts),
+        None => match expr_fn_type(body, runtime)? {
+            Some(signature) => Some(expand_host_fn_type_aliases(program, signature)?),
+            None => None,
+        },
+    };
+    let parsed = match parsed {
+        Some(parts) => Some(parts),
+        None => lookup_declared_fn_type(program, name)?,
+    };
+    // The fallback variable is allocated even when unused, as before.
+    let (param_tys, ret_ty) = parsed.unwrap_or((Vec::new(), fresh_host_inference()));
 
     let mut scope = UnordMap::new();
     let mut params = Vec::new();
     let body_expr = if let Expr::List(list, _) = body {
         if tag(list) == Some(DeepTag::Fn) {
             let kids = children(list);
-            let params_list = kids.first().and_then(as_list)?;
+            let params_list = try_some!(kids.first().and_then(as_list));
             if tag(params_list) != Some(DeepTag::Params) {
-                return None;
+                return Ok(None);
             }
             for (index, param) in children(params_list).iter().enumerate() {
                 let Some(pname) = param_name(param) else {
                     continue;
                 };
-                let pty = param_tys
+                let pty = match param_tys
                     .get(index)
                     .cloned()
                     .filter(|ty| !ty.is_unresolved())
-                    .or_else(|| {
-                        param_host_type(param, &program.invocation.type_subst.borrow(), runtime)
+                {
+                    Some(ty) => Some(ty),
+                    None => {
+                        param_host_type(param, &program.invocation.type_subst.borrow(), runtime)?
                             .map(|ty| expand_host_type_aliases(program, ty))
+                            .transpose()?
                             .filter(|ty| !ty.is_unresolved())
-                    })
-                    .unwrap_or_else(fresh_host_inference);
+                    }
+                }
+                .unwrap_or_else(fresh_host_inference);
                 scope.insert(pname.clone(), pty.clone());
                 params.push(HostParam {
                     name: pname,
                     ty: pty,
                 });
             }
-            kids.get(1)?.clone()
+            try_some!(kids.get(1)).clone()
         } else {
             if param_tys.is_empty() && ret_ty.is_unresolved() {
-                return None;
+                return Ok(None);
             }
             for (index, param_ty) in param_tys.iter().enumerate() {
                 let pname = format!("arg{index}");
@@ -5661,7 +5855,7 @@ fn host_def_signature(
             )
         }
     } else {
-        return None;
+        return Ok(None);
     };
     // Inline any local callable bindings (fn / grad / vmap / vmap-grad)
     // into the body before lowering. The host backend only recognizes
@@ -5671,13 +5865,13 @@ fn host_def_signature(
     // unresolved-callable marker builtin
     // (`HOST_UNRESOLVED_CALLABLE_MARKER`), which ABI projection rejects
     // pre-emission.
-    Some(HostDefSignature {
+    Ok(Some(HostDefSignature {
         name: name.to_string(),
         params,
         scope,
         ret_ty,
         body_expr: inline_local_callable_lets(&body_expr),
-    })
+    }))
 }
 
 fn lower_host_function(
@@ -5687,9 +5881,9 @@ fn lower_host_function(
     program: &HostLoweringSession<'_>,
     collect_execution: bool,
     collect_trace: bool,
-) -> Result<Option<LoweredHostFunction>, crate::lower::LowerDiagnostic> {
-    let Some(signature) = host_def_signature(name, body, ty_expr, program) else {
-        return Ok(None);
+) -> LowerResult<Result<Option<LoweredHostFunction>, crate::lower::LowerDiagnostic>> {
+    let Some(signature) = host_def_signature(name, body, ty_expr, program)? else {
+        return Ok(Ok(None));
     };
     let mut tensor_helpers =
         TensorHelperSink::for_declaration(collect_execution, collect_trace, name);
@@ -5714,9 +5908,17 @@ fn lower_host_function(
     // chelis#1277 B2h: the kernel-or-host decision and the kernel lowering
     // are shared with the eval interpreter through `host_def_kernel`, so the
     // two lanes cannot answer "is this def a kernel" differently.
-    let mut host_body = match lower_def_body_kernel(program, &signature, &mut tensor_helpers)? {
+    let mut host_body = match try_ok!(lower_def_body_kernel(
+        program,
+        &signature,
+        &mut tensor_helpers
+    )?) {
         Some(kernel_call) => kernel_call,
-        None => lower_host_body_with_record_locals(&signature, program, &mut tensor_helpers)?,
+        None => try_ok!(lower_host_body_with_record_locals(
+            &signature,
+            program,
+            &mut tensor_helpers
+        )?),
     };
     // Per `spec/design/chelis_span_survival.md` §2.3 host-side table, the
     // "Tensor-helper extraction" and "Lowering. Fn-body" rules: every
@@ -5750,7 +5952,7 @@ fn lower_host_function(
     };
     let helper_result_claim_axes = tensor_helpers.transferred_result_claim_axes.clone();
     let (tensor_helpers, products) = tensor_helpers.into_parts();
-    Ok(Some(LoweredHostFunction {
+    Ok(Ok(Some(LoweredHostFunction {
         function: HostFunction {
             helper_result_claim_axes,
             name: name.to_string(),
@@ -5763,7 +5965,7 @@ fn lower_host_function(
             summary_rejections: Vec::new(),
         },
         products,
-    }))
+    })))
 }
 
 fn callable_type_metadata(ty: Option<&Expr>) -> chelis_deep::Metadata {
@@ -5815,7 +6017,7 @@ fn try_lower_tensor_helper_call(
     scope: &UnordMap<String, HostTypeTerm>,
     tensor_helpers: &mut TensorHelperSink,
     expected: TensorType,
-) -> Option<HostExpr> {
+) -> LowerResult<Option<HostExpr>> {
     try_lower_tensor_helper_call_inner(expr, program, scope, tensor_helpers, expected, None)
 }
 
@@ -5826,7 +6028,7 @@ fn try_lower_tensor_helper_call_with_context(
     tensor_helpers: &mut TensorHelperSink,
     expected: TensorType,
     lowering_context: &crate::lower::SubexprLoweringContext,
-) -> Option<HostExpr> {
+) -> LowerResult<Option<HostExpr>> {
     try_lower_tensor_helper_call_inner(
         expr,
         program,
@@ -5844,15 +6046,15 @@ fn try_lower_tensor_helper_call_inner(
     tensor_helpers: &mut TensorHelperSink,
     expected: TensorType,
     lowering_context: Option<&crate::lower::SubexprLoweringContext>,
-) -> Option<HostExpr> {
+) -> LowerResult<Option<HostExpr>> {
     if let Expr::List(list, _) = expr
         && tag(list) == Some(DeepTag::Var)
         && let Some(name) = children(list).first().and_then(symbol_name)
     {
-        return Some(HostExpr::new(HostExprKind::Var(
+        return Ok(Some(HostExpr::new(HostExprKind::Var(
             name.to_string(),
             HostTypeTerm::Tensor(expected),
-        )));
+        ))));
     }
     let _preflight_guard = TensorHelperPreflightGuard::begin_if_uncovered(expr, program);
     if tensor_helper_preflight_rejects(expr, program) {
@@ -5860,7 +6062,7 @@ fn try_lower_tensor_helper_call_inner(
             profile.tensor_helper_fallbacks += 1;
             profile.tensor_helper_preflight_rejections += 1;
         });
-        return None;
+        return Ok(None);
     }
     record_host_work(|profile| {
         profile.tensor_helper_attempts += 1;
@@ -5874,9 +6076,10 @@ fn try_lower_tensor_helper_call_inner(
         tensor_helpers.collect_execution,
         tensor_helpers.collect_trace,
         lowering_context,
-    ) else {
+    )?
+    else {
         record_host_work(|profile| profile.tensor_helper_fallbacks += 1);
-        return None;
+        return Ok(None);
     };
     // Reject unresolved builtin inputs. A typed lexical input named `fold`
     // still denotes that input (spec/04 section 8.6, chelis#2023). Otherwise
@@ -5890,10 +6093,10 @@ fn try_lower_tensor_helper_call_inner(
             profile.tensor_helper_fallbacks += 1;
             profile.tensor_helper_builtin_load_rejections += 1;
         });
-        return None;
+        return Ok(None);
     }
     record_host_work(|profile| profile.tensor_helper_successes += 1);
-    Some(finish_tensor_helper_product(
+    Ok(Some(finish_tensor_helper_product(
         product.dag,
         product.execution,
         #[cfg(feature = "lowering-trace")]
@@ -5901,7 +6104,7 @@ fn try_lower_tensor_helper_call_inner(
         scope,
         tensor_helpers,
         expected,
-    ))
+    )))
 }
 
 /// A tensor-typed field projection lifted out of a tensor-helper subtree
@@ -5968,13 +6171,13 @@ fn hoist_record_projections(
     scope: &UnordMap<String, HostTypeTerm>,
     bound: &UnordSet<String>,
     hoists: &mut Vec<HoistedProjection>,
-) -> Expr {
-    match expr {
+) -> LowerResult<Expr> {
+    Ok(match expr {
         Expr::Node(node, span) => {
             if node.tag() == DeepTag::Access
-                && let Some(hoist) = record_projection_hoist(expr, program, scope, bound)
+                && let Some(hoist) = record_projection_hoist(expr, program, scope, bound)?
             {
-                return var_expr_node(&hoisted_local_name(hoists, hoist), *span);
+                return Ok(var_expr_node(&hoisted_local_name(hoists, hoist), *span));
             }
             let children = node
                 .children_slice()
@@ -5982,25 +6185,25 @@ fn hoist_record_projections(
                 .enumerate()
                 .map(|(index, child)| {
                     if is_bound_bare_projection(node.tag(), index, child) {
-                        child.clone()
+                        Ok(child.clone())
                     } else {
                         hoist_record_projections(child, program, scope, bound, hoists)
                     }
                 })
-                .collect();
+                .collect::<LowerResult<_>>()?;
             let mut rewritten = node.clone();
             // A rewrite that the node gate refuses leaves the subtree alone;
             // the caller then takes the unhoisted path it takes today.
             if rewritten.try_replace_children(children).is_err() {
-                return expr.clone();
+                return Ok(expr.clone());
             }
             Expr::Node(rewritten, *span)
         }
         Expr::List(list, span) => {
             if tag(list) == Some(DeepTag::Access)
-                && let Some(hoist) = record_projection_hoist(expr, program, scope, bound)
+                && let Some(hoist) = record_projection_hoist(expr, program, scope, bound)?
             {
-                return var_expr_node(&hoisted_local_name(hoists, hoist), *span);
+                return Ok(var_expr_node(&hoisted_local_name(hoists, hoist), *span));
             }
             let elements = list
                 .elements
@@ -6013,19 +6216,19 @@ fn hoist_record_projections(
                         index.wrapping_sub(2),
                         child,
                     ) {
-                        child.clone()
+                        Ok(child.clone())
                     } else {
                         hoist_record_projections(child, program, scope, bound, hoists)
                     }
                 })
-                .collect();
+                .collect::<LowerResult<_>>()?;
             Expr::List(List { elements }, *span)
         }
         Expr::BareList(items, span) => Expr::BareList(
             items
                 .iter()
                 .map(|item| hoist_record_projections(item, program, scope, bound, hoists))
-                .collect(),
+                .collect::<LowerResult<_>>()?,
             *span,
         ),
         // Round 2, P3: an unstamped form carries children like any other, and
@@ -6038,7 +6241,7 @@ fn hoist_record_projections(
                 .children
                 .iter()
                 .map(|child| hoist_record_projections(child, program, scope, bound, hoists))
-                .collect(),
+                .collect::<LowerResult<_>>()?,
             span: data.span,
         })),
         Expr::MetaExpr(meta, span) => Expr::MetaExpr(
@@ -6046,12 +6249,12 @@ fn hoist_record_projections(
                 metadata: meta.metadata.clone(),
                 expr: Box::new(hoist_record_projections(
                     &meta.expr, program, scope, bound, hoists,
-                )),
+                )?),
             },
             *span,
         ),
         _ => expr.clone(),
-    }
+    })
 }
 
 /// Lower a host-lane def body, binding any tensor-typed runtime-record
@@ -6063,7 +6266,7 @@ fn lower_host_body_with_record_locals(
     signature: &HostDefSignature,
     program: &HostLoweringSession<'_>,
     tensor_helpers: &mut TensorHelperSink,
-) -> Result<HostExpr, crate::lower::LowerDiagnostic> {
+) -> LowerResult<Result<HostExpr, crate::lower::LowerDiagnostic>> {
     let mut bound = UnordSet::new();
     if names_bound_in(&signature.body_expr, &mut bound).is_err() {
         // Fail closed: hoist nothing, and the definition lowers exactly as it
@@ -6082,7 +6285,7 @@ fn lower_host_body_with_record_locals(
         &signature.scope,
         &bound,
         &mut hoists,
-    );
+    )?;
     if hoists.is_empty() {
         return lower_host_expr(
             &signature.body_expr,
@@ -6124,13 +6327,27 @@ fn lower_host_body_with_record_locals(
         ret_ty: signature.ret_ty.clone(),
         body_expr: rewritten.clone(),
     };
-    let body = match lower_def_body_kernel(program, &rewritten_signature, tensor_helpers)? {
+    let body = match try_ok!(lower_def_body_kernel(
+        program,
+        &rewritten_signature,
+        tensor_helpers
+    )?) {
         Some(kernel_call) => kernel_call,
-        None => lower_host_expr(&rewritten, program, &scope, tensor_helpers)?,
+        None => try_ok!(lower_host_expr(
+            &rewritten,
+            program,
+            &scope,
+            tensor_helpers
+        )?),
     };
     let mut bindings = Vec::with_capacity(hoists.len());
     for hoist in &hoists {
-        let value = lower_host_expr(&hoist.source, program, &signature.scope, tensor_helpers)?;
+        let value = try_ok!(lower_host_expr(
+            &hoist.source,
+            program,
+            &signature.scope,
+            tensor_helpers
+        )?);
         bindings.push(HostBinding {
             name: hoist.name.clone(),
             display_name: None,
@@ -6140,11 +6357,11 @@ fn lower_host_body_with_record_locals(
         });
     }
     let ty = host_expr_type(&body);
-    Ok(HostExpr::new(HostExprKind::Let {
+    Ok(Ok(HostExpr::new(HostExprKind::Let {
         bindings,
         body: Box::new(body),
         ty,
-    }))
+    })))
 }
 
 /// Every name bound anywhere in `expr`, read from the closed vocabulary's own
@@ -6300,30 +6517,30 @@ fn record_projection_hoist(
     program: &HostLoweringSession<'_>,
     scope: &UnordMap<String, HostTypeTerm>,
     bound: &UnordSet<String>,
-) -> Option<HoistedProjection> {
-    let HostTypeTerm::Tensor(ty) = expr_host_type(expr, program, scope) else {
-        return None;
+) -> LowerResult<Option<HoistedProjection>> {
+    let HostTypeTerm::Tensor(ty) = expr_host_type(expr, program, scope)? else {
+        return Ok(None);
     };
-    let path = record_projection_path(expr)?;
-    let base = path.first()?;
+    let path = try_some!(record_projection_path(expr));
+    let base = try_some!(path.first());
     // Rebound anywhere under this body: leave the projection where it is.
     if bound.contains(base) {
-        return None;
+        return Ok(None);
     }
     // The base must be a host value this scope carries and NOT itself a
     // tensor: a tensor base is not a record, and a name the scope does not
     // carry is not this subtree's to lift.
-    let base_ty = scope.get(base)?;
+    let base_ty = try_some!(scope.get(base));
     if tensor_type_from_host_input(base_ty).is_some() {
-        return None;
+        return Ok(None);
     }
-    Some(HoistedProjection {
+    Ok(Some(HoistedProjection {
         path,
         // `hoisted_local_name` renders this; the path is the identity.
         name: String::new(),
         source: expr.clone(),
         ty,
-    })
+    }))
 }
 
 /// The `[base, field, ..]` path of a projection chain whose root is a bare
@@ -6350,7 +6567,7 @@ fn lower_tensor_helper_with<T>(
     expr: &Expr,
     program: &HostLoweringSession<'_>,
     lower: impl FnOnce() -> Result<T, crate::lower::LowerDiagnostic>,
-) -> Option<T> {
+) -> LowerResult<Option<T>> {
     let runtime = program.runtime();
     // Do not lower a returned/dynamically-computed callable through the DAG:
     // that path beta-reduces the inner application and loses the outer call.
@@ -6358,7 +6575,7 @@ fn lower_tensor_helper_with<T>(
     // callable marker for the C ABI fence (#1951).
     if contains_computed_callable_application(expr) {
         record_host_work(|profile| profile.tensor_helper_dag_rejections += 1);
-        return None;
+        return Ok(None);
     }
     let defs = cached_program_defs(program);
     // chelis#631: never swallow a fail-reaching FORWARD body into a
@@ -6376,20 +6593,22 @@ fn lower_tensor_helper_with<T>(
     // through real host control flow.
     if expr_reaches_forward_fail(expr, &defs, &mut UnordSet::new()) {
         record_host_work(|profile| profile.tensor_helper_fail_guard_rejections += 1);
-        return None;
+        return Ok(None);
     }
     // Issue #197: surface a fatal AD rejection from the tensor-
     // helper sub-lowering instead of swallowing it; the host
     // fallback would otherwise emit an undefined-symbol call to
     // the rejected grad function.
-    match lower() {
+    Ok(match lower() {
         Ok(product) => Some(product),
-        Err(diagnostic) if diagnostic.fatal => runtime.raise_fatal_lowering_diagnostic(diagnostic),
+        Err(diagnostic) if diagnostic.fatal => {
+            return Err(runtime.raise_fatal_lowering_diagnostic(diagnostic));
+        }
         Err(_) => {
             record_host_work(|profile| profile.tensor_helper_dag_rejections += 1);
             None
         }
-    }
+    })
 }
 
 fn lower_tensor_helper_dag(
@@ -6398,7 +6617,7 @@ fn lower_tensor_helper_dag(
     scope: &UnordMap<String, HostTypeTerm>,
     expected: &TensorType,
     context: &crate::lower::SubexprLoweringContext,
-) -> Option<crate::Dag> {
+) -> LowerResult<Option<crate::Dag>> {
     let runtime = program.runtime();
     lower_tensor_helper_with(expr, program, || {
         let (dag, _) = crate::lower::try_lower_tensor_helper_program_with_ordered_inputs(
@@ -6432,7 +6651,7 @@ fn lower_tensor_helper_product(
     collect_execution: bool,
     collect_trace: bool,
     lowering_context: Option<&crate::lower::SubexprLoweringContext>,
-) -> Option<LoweredTensorHelper> {
+) -> LowerResult<Option<LoweredTensorHelper>> {
     let runtime = program.runtime();
     #[cfg(not(feature = "lowering-trace"))]
     let _ = collect_trace;
@@ -6442,14 +6661,14 @@ fn lower_tensor_helper_product(
     // and erase its application.
     if contains_computed_callable_application(expr) {
         record_host_work(|profile| profile.tensor_helper_dag_rejections += 1);
-        return None;
+        return Ok(None);
     }
     let context = lowering_context
         .cloned()
         .unwrap_or_else(|| cached_subexpr_lowering_context(program));
     if collect_execution {
         let scoped = collect_tensor_scope(scope).into_sorted();
-        if context.c_execution_profile(expr, &scoped, runtime)
+        if context.c_execution_profile(expr, &scoped, runtime)?
             == crate::evaluation::EvaluationProfile::FixedControl
         {
             let planning = crate::evaluation::RandomExecutionContext::new(RandomLoweringState {
@@ -6466,7 +6685,7 @@ fn lower_tensor_helper_product(
                     false,
                     &planning,
                     runtime,
-                )
+                )?
                 .map(|(plan, trace)| (plan, Some(trace)))
             } else {
                 crate::lower::try_lower_tensor_helper_c_execution_with_ordered_inputs(
@@ -6477,7 +6696,7 @@ fn lower_tensor_helper_product(
                     false,
                     &planning,
                     runtime,
-                )
+                )?
                 .map(|plan| (plan, None))
             };
             #[cfg(not(feature = "lowering-trace"))]
@@ -6489,22 +6708,22 @@ fn lower_tensor_helper_product(
                 false,
                 &planning,
                 runtime,
-            )
+            )?
             .map(|plan| (plan, ()));
             let (plan, _trace) = match lowered {
                 Ok(lowered) => lowered,
                 Err(diagnostic) if diagnostic.fatal => {
-                    runtime.raise_fatal_lowering_diagnostic(diagnostic)
+                    return Err(runtime.raise_fatal_lowering_diagnostic(diagnostic));
                 }
-                Err(_) => return None,
+                Err(_) => return Ok(None),
             };
             let rebound =
                 remap_tensor_helper_dim_symbols(plan.dag_for_inspection(), scope, expected);
-            let plan = plan.rebind_dimensions(rebound).unwrap_or_else(|message| {
+            let plan = plan.rebind_dimensions(rebound).map_err(|message| {
                 runtime.raise_fatal_lowering_diagnostic(
                     crate::lower::LowerDiagnostic::new(message, None, None).fatal(),
                 )
-            });
+            })?;
             #[cfg(feature = "lowering-trace")]
             let mut trace = _trace;
             #[cfg(feature = "lowering-trace")]
@@ -6512,12 +6731,12 @@ fn lower_tensor_helper_product(
                 trace.record_dimension_rebinding(plan.dag_for_inspection());
             }
             let (dag, metadata) = plan.into_parts();
-            return Some(LoweredTensorHelper {
+            return Ok(Some(LoweredTensorHelper {
                 dag,
                 execution: Some(metadata),
                 #[cfg(feature = "lowering-trace")]
                 trace,
-            });
+            }));
         }
     }
     #[cfg(feature = "lowering-trace")]
@@ -6547,14 +6766,16 @@ fn lower_tensor_helper_product(
             })
         });
     }
-    lower_tensor_helper_dag(expr, program, scope, expected, &context).map(|dag| {
-        LoweredTensorHelper {
-            dag,
-            execution: None,
-            #[cfg(feature = "lowering-trace")]
-            trace: None,
-        }
-    })
+    Ok(
+        lower_tensor_helper_dag(expr, program, scope, expected, &context)?.map(|dag| {
+            LoweredTensorHelper {
+                dag,
+                execution: None,
+                #[cfg(feature = "lowering-trace")]
+                trace: None,
+            }
+        }),
+    )
 }
 
 fn lower_tensor_helper_dag_with_controls(
@@ -6562,12 +6783,12 @@ fn lower_tensor_helper_dag_with_controls(
     program: &HostLoweringSession<'_>,
     scope: &UnordMap<String, HostTypeTerm>,
     expected: &TensorType,
-) -> Option<crate::lower::LoweredSubexprWithControls> {
+) -> LowerResult<Option<crate::lower::LoweredSubexprWithControls>> {
     let runtime = program.runtime();
     let defs = cached_program_defs(program);
     if expr_reaches_forward_fail(expr, &defs, &mut UnordSet::new()) {
         record_host_work(|profile| profile.tensor_helper_fail_guard_rejections += 1);
-        return None;
+        return Ok(None);
     }
     let context = cached_subexpr_lowering_context(program);
     let mut lowered = match crate::lower::try_lower_subexpr_program_with_context_and_controls(
@@ -6577,14 +6798,16 @@ fn lower_tensor_helper_dag_with_controls(
         runtime,
     ) {
         Ok(lowered) => lowered,
-        Err(diagnostic) if diagnostic.fatal => runtime.raise_fatal_lowering_diagnostic(diagnostic),
+        Err(diagnostic) if diagnostic.fatal => {
+            return Err(runtime.raise_fatal_lowering_diagnostic(diagnostic));
+        }
         Err(_) => {
             record_host_work(|profile| profile.tensor_helper_dag_rejections += 1);
-            return None;
+            return Ok(None);
         }
     };
     lowered.dag = remap_tensor_helper_dim_symbols(&lowered.dag, scope, expected);
-    Some(lowered)
+    Ok(Some(lowered))
 }
 
 fn finish_tensor_helper_call(
@@ -6707,7 +6930,7 @@ fn lower_staged_host_plan(
     program: &HostLoweringSession<'_>,
     scope: &UnordMap<String, HostTypeTerm>,
     helpers: &mut TensorHelperSink,
-) -> Result<HostExpr, crate::lower::LowerDiagnostic> {
+) -> LowerResult<Result<HostExpr, crate::lower::LowerDiagnostic>> {
     let mut scope = scope.clone();
     let mut reserved = scope
         .to_sorted()
@@ -6739,29 +6962,33 @@ fn lower_staged_host_plan(
                 ty,
             } => {
                 if matches!(ty, HostTypeTerm::Fn(..)) {
-                    let reference = stamped_parts(expression)
-                        .filter(|(tag, _, _)| *tag == DeepTag::Var)
-                        .and_then(|(_, _, kids)| kids.first().and_then(symbol_name))
+                    let reference = try_ok!(
+                        stamped_parts(expression)
+                            .filter(|(tag, _, _)| *tag == DeepTag::Var)
+                            .and_then(|(_, _, kids)| kids.first().and_then(symbol_name))
+                            .ok_or_else(|| {
+                                host_expr_lowering_error(
+                                    expression,
+                                    "a staged callable needs a resolved definition reference",
+                                )
+                            })
+                    );
+                    let function = try_ok!(
+                        if let Some(capture) =
+                            captures.iter().find(|capture| capture.binding == reference)
+                        {
+                            callable_sources.get(&capture.value).cloned()
+                        } else {
+                            find_top_level_def_named(program.exprs(), reference)
+                                .map(|(name, _)| name.to_owned())
+                        }
                         .ok_or_else(|| {
                             host_expr_lowering_error(
                                 expression,
-                                "a staged callable needs a resolved definition reference",
+                                "a staged callable has no resolved definition",
                             )
-                        })?;
-                    let function = if let Some(capture) =
-                        captures.iter().find(|capture| capture.binding == reference)
-                    {
-                        callable_sources.get(&capture.value).cloned()
-                    } else {
-                        find_top_level_def_named(program.exprs(), reference)
-                            .map(|(name, _)| name.to_owned())
-                    }
-                    .ok_or_else(|| {
-                        host_expr_lowering_error(
-                            expression,
-                            "a staged callable has no resolved definition",
-                        )
-                    })?;
+                        })
+                    );
                     if let Some(span) = expression.span_id() {
                         callable_spans.push(span);
                     }
@@ -6803,13 +7030,13 @@ fn lower_staged_host_plan(
                     captured_scope.insert(capture.binding.clone(), capture.ty.clone());
                 }
                 let ty = ty.clone();
-                let mut body = lower_host_expr_with_expected(
+                let mut body = try_ok!(lower_host_expr_with_expected(
                     expression,
                     program,
                     &captured_scope,
                     helpers,
                     Some(&ty),
-                )?;
+                )?);
                 staged::resolve_callable_aliases(&mut body, &callable_aliases);
                 let value = HostExpr::new(HostExprKind::Let {
                     bindings: captured_bindings,
@@ -6892,7 +7119,7 @@ fn lower_staged_host_plan(
     for span in callable_spans {
         result.append_merged_span(Some(span));
     }
-    Ok(result)
+    Ok(Ok(result))
 }
 
 /// Outcome of the structured BLAS-helper recognizer (W6 Task A).
@@ -7703,7 +7930,7 @@ fn lower_host_expr(
     program: &HostLoweringSession<'_>,
     scope: &UnordMap<String, HostTypeTerm>,
     tensor_helpers: &mut TensorHelperSink,
-) -> Result<HostExpr, crate::lower::LowerDiagnostic> {
+) -> LowerResult<Result<HostExpr, crate::lower::LowerDiagnostic>> {
     lower_host_expr_with_expected(expr, program, scope, tensor_helpers, None)
 }
 
@@ -7716,7 +7943,7 @@ fn lower_host_expr_with_expected_opt(
     scope: &UnordMap<String, HostTypeTerm>,
     tensor_helpers: &mut TensorHelperSink,
     expected_ty: Option<&HostTypeTerm>,
-) -> Result<HostExpr, crate::lower::LowerDiagnostic> {
+) -> LowerResult<Result<HostExpr, crate::lower::LowerDiagnostic>> {
     lower_host_expr_with_expected(expr, program, scope, tensor_helpers, expected_ty)
 }
 
@@ -7726,10 +7953,16 @@ fn lower_host_expr_with_expected(
     scope: &UnordMap<String, HostTypeTerm>,
     tensor_helpers: &mut TensorHelperSink,
     expected_ty: Option<&HostTypeTerm>,
-) -> Result<HostExpr, crate::lower::LowerDiagnostic> {
+) -> LowerResult<Result<HostExpr, crate::lower::LowerDiagnostic>> {
     let _preflight_guard = TensorHelperPreflightGuard::begin_if_uncovered(expr, program);
     let _profile_guard = enter_host_expr_profile();
-    let mut result = lower_host_expr_kind(expr, program, scope, tensor_helpers, expected_ty)?;
+    let mut result = try_ok!(lower_host_expr_kind(
+        expr,
+        program,
+        scope,
+        tensor_helpers,
+        expected_ty
+    )?);
     // Per `spec/design/chelis_span_survival.md` §2.3 host-side table,
     // rule "Lowering": every freshly-produced HostExpr inherits the
     // enclosing Deep `Expr`'s `meta["span"]` as its `span_id`. When the
@@ -7746,7 +7979,7 @@ fn lower_host_expr_with_expected(
             result.append_merged_span(Some(span));
         }
     }
-    Ok(result)
+    Ok(Ok(result))
 }
 
 #[derive(Clone, Copy)]
@@ -7777,32 +8010,32 @@ fn sequential_host_let_chain<'expr>(
     expr: &'expr Expr,
     program: &HostLoweringSession<'_>,
     scope: &UnordMap<String, HostTypeTerm>,
-) -> Option<SequentialHostLetChain<'expr>> {
+) -> LowerResult<Option<SequentialHostLetChain<'expr>>> {
     let mut bindings = Vec::new();
     let mut layers = Vec::new();
     let mut current = expr;
     let mut layer = 0;
     let body = loop {
         let Expr::List(list, _) = current else {
-            return None;
+            return Ok(None);
         };
         if tag(list) != Some(DeepTag::Let) {
-            return None;
+            return Ok(None);
         }
         layers.push(SequentialHostLetLayer {
             span_id: current.span_id().map(str::to_owned),
-            explicit_ty: expr_host_type(current, program, scope),
+            explicit_ty: expr_host_type(current, program, scope)?,
         });
         let kids = children(list);
-        let bind_expr = kids.first()?;
-        let bind_list = as_list(bind_expr)?;
+        let bind_expr = try_some!(kids.first());
+        let bind_list = try_some!(as_list(bind_expr));
         if tag(bind_list) != Some(DeepTag::Bind) {
-            return None;
+            return Ok(None);
         }
         let bind_span = bind_expr.span_id();
         let bind_kids = children(bind_list);
         if !bind_kids.len().is_multiple_of(2) {
-            return None;
+            return Ok(None);
         }
         for pair in bind_kids.as_chunks::<2>().0 {
             bindings.push(SequentialHostLetBinding {
@@ -7812,7 +8045,7 @@ fn sequential_host_let_chain<'expr>(
                 layer,
             });
         }
-        let next = kids.get(1)?;
+        let next = try_some!(kids.get(1));
         if matches!(next, Expr::List(next_list, _) if tag(next_list) == Some(DeepTag::Let)) {
             current = next;
             layer += 1;
@@ -7830,7 +8063,7 @@ fn sequential_host_let_chain<'expr>(
         bind_elements.push(binding.binding.clone());
         bind_elements.push(binding.initializer.clone());
     }
-    Some(SequentialHostLetChain {
+    Ok(Some(SequentialHostLetChain {
         bindings,
         layers,
         bind_expr: Expr::List(
@@ -7840,7 +8073,7 @@ fn sequential_host_let_chain<'expr>(
             span,
         ),
         body,
-    })
+    }))
 }
 
 fn lower_checked_local_ascription_region(
@@ -7851,28 +8084,30 @@ fn lower_checked_local_ascription_region(
     program: &HostLoweringSession<'_>,
     scope: &UnordMap<String, HostTypeTerm>,
     tensor_helpers: &mut TensorHelperSink,
-) -> Result<HostExpr, crate::lower::LowerDiagnostic> {
+) -> LowerResult<Result<HostExpr, crate::lower::LowerDiagnostic>> {
     let region_context = checked_lowering.for_local_ascription_region(local_region);
-    let expected = expr_tensor_type(initializer, program, scope)
-        .or_else(|| tensor_type_from_host_input(&expr_host_type(initializer, program, scope)))
-        .ok_or_else(|| {
-            host_expr_lowering_error(
-                initializer,
-                format!(
-                    "checked local tensor-ascription region rooted at `{name}` has no concrete \
-                     tensor type at its initializer"
-                ),
-            )
-        })?;
+    let expected = match expr_tensor_type(initializer, program, scope)? {
+        Some(expected) => Some(expected),
+        None => tensor_type_from_host_input(&expr_host_type(initializer, program, scope)?),
+    };
+    let expected = try_ok!(expected.ok_or_else(|| {
+        host_expr_lowering_error(
+            initializer,
+            format!(
+                "checked local tensor-ascription region rooted at `{name}` has no concrete \
+                 tensor type at its initializer"
+            ),
+        )
+    }));
 
-    try_lower_tensor_helper_call_with_context(
+    Ok(try_lower_tensor_helper_call_with_context(
         local_region.expression(),
         program,
         scope,
         tensor_helpers,
         expected,
         &region_context,
-    )
+    )?
     .ok_or_else(|| {
         host_expr_lowering_error(
             initializer,
@@ -7881,7 +8116,7 @@ fn lower_checked_local_ascription_region(
                  by the tensor execution lane"
             ),
         )
-    })
+    }))
 }
 
 fn host_expr_lowering_error(
@@ -7961,16 +8196,16 @@ fn lower_host_expr_kind(
     scope: &UnordMap<String, HostTypeTerm>,
     tensor_helpers: &mut TensorHelperSink,
     expected_ty: Option<&HostTypeTerm>,
-) -> Result<HostExpr, crate::lower::LowerDiagnostic> {
+) -> LowerResult<Result<HostExpr, crate::lower::LowerDiagnostic>> {
     let runtime = program.runtime();
     let is_app_expr = matches!(expr, Expr::List(list, _) if tag(list) == Some(DeepTag::App));
     if !is_app_expr
-        && let Some(tensor_ty) = expr_tensor_type(expr, program, scope)
+        && let Some(tensor_ty) = expr_tensor_type(expr, program, scope)?
         && !should_keep_tensor_expr_in_host_lane(expr)
         && let Some(tensor_call) =
-            try_lower_tensor_helper_call(expr, program, scope, tensor_helpers, tensor_ty.clone())
+            try_lower_tensor_helper_call(expr, program, scope, tensor_helpers, tensor_ty.clone())?
     {
-        return Ok(tensor_call);
+        return Ok(Ok(tensor_call));
     }
 
     let lowered = match expr {
@@ -7980,13 +8215,13 @@ fn lower_host_expr_kind(
         Expr::Atom(Atom::Str(value), _) => HostExpr::new(HostExprKind::String(value.clone())),
         Expr::List(list, _) if tag(list) == Some(DeepTag::Tuple) => {
             if children(list).is_empty() {
-                return Ok(HostExpr::new(HostExprKind::Unit));
+                return Ok(Ok(HostExpr::new(HostExprKind::Unit)));
             }
-            let items = children(list)
-                .iter()
-                .map(|child| lower_host_expr(child, program, scope, tensor_helpers))
-                .collect::<Result<Vec<_>, _>>()?;
-            let ty = expr_host_type(expr, program, scope);
+            let items =
+                try_ok!(try_collect_results(children(list).iter().map(|child| {
+                    lower_host_expr(child, program, scope, tensor_helpers)
+                }))?);
+            let ty = expr_host_type(expr, program, scope)?;
             let ty = if ty.is_unresolved() {
                 HostTypeTerm::Tuple(items.iter().map(host_expr_type).collect())
             } else {
@@ -7995,13 +8230,19 @@ fn lower_host_expr_kind(
             HostExpr::new(HostExprKind::Tuple(items, ty))
         }
         Expr::List(list, _) if tag(list) == Some(DeepTag::Record) => {
-            lower_record_host_expr(list, program, scope, tensor_helpers, expected_ty)?
+            try_ok!(lower_record_host_expr(
+                list,
+                program,
+                scope,
+                tensor_helpers,
+                expected_ty
+            )?)
         }
         Expr::List(list, _) if tag(list) == Some(DeepTag::Lit) => {
-            let child = children(list).first().ok_or_else(|| {
+            let child = try_ok!(children(list).first().ok_or_else(|| {
                 host_expr_lowering_error(expr, "a `lit` node has no literal child")
-            })?;
-            let value = lower_host_expr(child, program, scope, tensor_helpers)?;
+            }));
+            let value = try_ok!(lower_host_expr(child, program, scope, tensor_helpers)?);
 
             // The lexical carriers are i64/f64, but the checked `lit` owns
             // the value's width ([04-LIT-1]). Finalize before any return,
@@ -8029,41 +8270,43 @@ fn lower_host_expr_kind(
             }
         }
         Expr::List(list, _) if tag(list) == Some(DeepTag::Var) => {
-            let name = children(list)
-                .first()
-                .and_then(symbol_name)
-                .ok_or_else(|| host_expr_lowering_error(expr, "a `var` node has no symbol"))?
-                .to_string();
-            let ty = expr_host_type(expr, program, scope);
+            let name = try_ok!(
+                children(list)
+                    .first()
+                    .and_then(symbol_name)
+                    .ok_or_else(|| host_expr_lowering_error(expr, "a `var` node has no symbol"))
+            )
+            .to_string();
+            let ty = expr_host_type(expr, program, scope)?;
             if name == "Nil" {
-                return Ok(HostExpr::new(HostExprKind::List(
+                return Ok(Ok(HostExpr::new(HostExprKind::List(
                     Vec::new(),
                     match ty {
                         HostTypeTerm::List(_) => ty,
                         _ => HostTypeTerm::List(Box::new(fresh_host_inference())),
                     },
-                )));
+                ))));
             }
             // An ordinary lexical binding wins in bare value position. Only
             // a name absent from host scope may lower as a nullary ADT
             // constructor (spec/01 §3.2; chelis#1076).
             if !scope.contains_key(&name) {
-                match resolve_adt_constructor_definition_for_type(program, &name, &ty) {
+                match resolve_adt_constructor_definition_for_type(program, &name, &ty)? {
                     AdtConstructorResolution::Unique(definition) if definition.is_nullary() => {
                         let instantiated =
-                            definition.instantiate_nullary_term(&ty).map_err(|error| {
+                            try_ok!(definition.instantiate_nullary_term(&ty).map_err(|error| {
                                 host_expr_lowering_error(
                                     expr,
                                     format!(
                                         "constructor `{name}` is not concretely instantiated: {error}"
                                     ),
                                 )
-                            })?;
-                        return Ok(HostExpr::new(HostExprKind::AdtConstruct {
+                            }));
+                        return Ok(Ok(HostExpr::new(HostExprKind::AdtConstruct {
                             ctor: name,
                             fields: Vec::new(),
                             ty: instantiated.ty,
-                        }));
+                        })));
                     }
                     // Whether this reference is a construction at all depends
                     // on which declaration answers it, so an ambiguous name
@@ -8072,7 +8315,7 @@ fn lower_host_expr_kind(
                     // rejection for a silently different lowering (chelis#730's
                     // shape). Fail closed instead.
                     AdtConstructorResolution::Ambiguous(candidates) => {
-                        return Err(ambiguous_constructor_error(expr, &name, &candidates));
+                        return Ok(Err(ambiguous_constructor_error(expr, &name, &candidates)));
                     }
                     AdtConstructorResolution::Unique(_) | AdtConstructorResolution::Missing => {}
                 }
@@ -8082,30 +8325,30 @@ fn lower_host_expr_kind(
         Expr::List(list, _) if tag(list) == Some(DeepTag::If) => {
             let kids = children(list);
             if kids.len() != 3 {
-                return Err(host_expr_lowering_error(
+                return Ok(Err(host_expr_lowering_error(
                     expr,
                     format!("an `if` node requires 3 children, found {}", kids.len()),
-                ));
+                )));
             }
             // chelis#1201: both branches are RESULT positions, so a generic
             // ADT constructed in one resolves its instantiation from the
             // caller's expected type — the same rule the match arms follow.
             // The condition is not a result position and keeps plain lowering.
-            let then_expr = lower_host_expr_with_expected_opt(
+            let then_expr = try_ok!(lower_host_expr_with_expected_opt(
                 &kids[1],
                 program,
                 scope,
                 tensor_helpers,
                 expected_ty,
-            )?;
-            let else_expr = lower_host_expr_with_expected_opt(
+            )?);
+            let else_expr = try_ok!(lower_host_expr_with_expected_opt(
                 &kids[2],
                 program,
                 scope,
                 tensor_helpers,
                 expected_ty,
-            )?;
-            let explicit_ty = expr_host_type(expr, program, scope);
+            )?);
+            let explicit_ty = expr_host_type(expr, program, scope)?;
             let ty = if explicit_ty.is_unresolved() {
                 let then_ty = host_expr_type(&then_expr);
                 if then_ty.is_unresolved() {
@@ -8117,14 +8360,25 @@ fn lower_host_expr_kind(
                 explicit_ty
             };
             HostExpr::new(HostExprKind::If {
-                cond: Box::new(lower_host_expr(&kids[0], program, scope, tensor_helpers)?),
+                cond: Box::new(try_ok!(lower_host_expr(
+                    &kids[0],
+                    program,
+                    scope,
+                    tensor_helpers
+                )?)),
                 then_expr: Box::new(then_expr),
                 else_expr: Box::new(else_expr),
                 ty,
             })
         }
         Expr::List(list, _) if tag(list) == Some(DeepTag::Match) => {
-            lower_match_host_expr(list, program, scope, tensor_helpers, expected_ty)?
+            try_ok!(lower_match_host_expr(
+                list,
+                program,
+                scope,
+                tensor_helpers,
+                expected_ty
+            )?)
         }
         Expr::List(list, _) if tag(list) == Some(DeepTag::Block) => {
             // chelis#859: sequenced expressions, value is the last child's
@@ -8134,14 +8388,14 @@ fn lower_host_expr_kind(
             // the eval lane's in-order evaluation.
             let kids = children(list);
             let Some((last, init)) = kids.split_last() else {
-                return Err(host_expr_lowering_error(
+                return Ok(Err(host_expr_lowering_error(
                     expr,
                     "a `block` node has no children",
-                ));
+                )));
             };
             let mut bindings = Vec::new();
             for (index, child) in init.iter().enumerate() {
-                let value = lower_host_expr(child, program, scope, tensor_helpers)?;
+                let value = try_ok!(lower_host_expr(child, program, scope, tensor_helpers)?);
                 let ty = host_expr_type(&value);
                 bindings.push(HostBinding {
                     name: format!("__chelis_block_{index}"),
@@ -8151,7 +8405,7 @@ fn lower_host_expr_kind(
                     value,
                 });
             }
-            let body = lower_host_expr(last, program, scope, tensor_helpers)?;
+            let body = try_ok!(lower_host_expr(last, program, scope, tensor_helpers)?);
             let body_ty = host_expr_type(&body);
             HostExpr::new(HostExprKind::Let {
                 bindings,
@@ -8164,7 +8418,7 @@ fn lower_host_expr_kind(
             let mut scoped = scope.clone();
             let mut bindings = Vec::new();
             let checked_lowering = cached_subexpr_lowering_context(program);
-            let flattened = sequential_host_let_chain(expr, program, scope);
+            let flattened = sequential_host_let_chain(expr, program, scope)?;
             let flattened_regions = if let Some(chain) = flattened.as_ref() {
                 checked_lowering.local_ascription_binding_regions(
                     &chain.bind_expr,
@@ -8192,17 +8446,17 @@ fn lower_host_expr_kind(
                     Some(chain.layers),
                 )
             } else {
-                let bind_first = kids.first().ok_or_else(|| {
+                let bind_first = try_ok!(kids.first().ok_or_else(|| {
                     host_expr_lowering_error(expr, "a `let` node has no bindings")
-                })?;
-                let bind_list = as_list(bind_first).ok_or_else(|| {
+                }));
+                let bind_list = try_ok!(as_list(bind_first).ok_or_else(|| {
                     host_expr_lowering_error(expr, "a `let` node has malformed bindings")
-                })?;
+                }));
                 if tag(bind_list) != Some(DeepTag::Bind) {
-                    return Err(host_expr_lowering_error(
+                    return Ok(Err(host_expr_lowering_error(
                         expr,
                         "a `let` node has malformed bindings",
-                    ));
+                    )));
                 }
                 let bind_span = bind_first.span_id();
                 let current = children(bind_list)
@@ -8219,9 +8473,9 @@ fn lower_host_expr_kind(
                 (
                     current,
                     Cow::Borrowed(bind_first),
-                    kids.get(1).ok_or_else(|| {
+                    try_ok!(kids.get(1).ok_or_else(|| {
                         host_expr_lowering_error(expr, "a `let` node has no body")
-                    })?,
+                    })),
                     None,
                 )
             };
@@ -8241,7 +8495,7 @@ fn lower_host_expr_kind(
                     let initializer = binding.initializer;
                     let index = ordinal * 2;
                     let mut value = if let Some(local_region) = local_regions.get(&index) {
-                        lower_checked_local_ascription_region(
+                        try_ok!(lower_checked_local_ascription_region(
                             name,
                             initializer,
                             local_region,
@@ -8249,9 +8503,14 @@ fn lower_host_expr_kind(
                             program,
                             &scoped,
                             tensor_helpers,
-                        )?
+                        )?)
                     } else {
-                        lower_host_expr(initializer, program, &scoped, tensor_helpers)?
+                        try_ok!(lower_host_expr(
+                            initializer,
+                            program,
+                            &scoped,
+                            tensor_helpers
+                        )?)
                     };
                     // The original `(bind {span: a} ...)` node wraps this
                     // value even when a cross-let local-ascription region
@@ -8273,7 +8532,12 @@ fn lower_host_expr_kind(
                     scoped.insert(name.to_string(), bind_ty);
                 }
             }
-            let mut body = lower_host_expr(body_expr, program, &scoped, tensor_helpers)?;
+            let mut body = try_ok!(lower_host_expr(
+                body_expr,
+                program,
+                &scoped,
+                tensor_helpers
+            )?);
             if let (Some(layers), Some(mut nested_bindings)) = (nested_layers, nested_bindings) {
                 for (layer, layer_bindings) in
                     layers.into_iter().zip(nested_bindings.drain(..)).rev()
@@ -8295,7 +8559,7 @@ fn lower_host_expr_kind(
                 }
                 body
             } else {
-                let explicit_ty = expr_host_type(expr, program, scope);
+                let explicit_ty = expr_host_type(expr, program, scope)?;
                 HostExpr::new(HostExprKind::Let {
                     bindings,
                     body: Box::new(body.clone()),
@@ -8308,10 +8572,20 @@ fn lower_host_expr_kind(
             }
         }
         Expr::List(list, _) if tag(list) == Some(DeepTag::TupleGet) => {
-            lower_tuple_get_host_expr(list, program, scope, tensor_helpers)?
+            try_ok!(lower_tuple_get_host_expr(
+                list,
+                program,
+                scope,
+                tensor_helpers
+            )?)
         }
         Expr::List(list, _) if tag(list) == Some(DeepTag::Access) => {
-            lower_access_host_expr(list, program, scope, tensor_helpers)?
+            try_ok!(lower_access_host_expr(
+                list,
+                program,
+                scope,
+                tensor_helpers
+            )?)
         }
         Expr::List(list, _) if tag(list) == Some(DeepTag::Cast) => {
             // chelis#730 Phase 1 (census row 13's host-lane half,
@@ -8326,7 +8600,7 @@ fn lower_host_expr_kind(
             // The result metadata uses checker IDs, unlike the authored
             // target spelling; expr_host_type applies the matching active
             // substitution. Never select the target from the operand.
-            let ty = expr_host_type(expr, program, scope);
+            let ty = expr_host_type(expr, program, scope)?;
             let bogus_target_name =
                 match children(list).get(1) {
                     Some(Expr::List(tlist, _))
@@ -8369,19 +8643,21 @@ fn lower_host_expr_kind(
                          (chelis#744, chelis#730 census row 13)"
                     ),
                 );
-                runtime.raise_fatal_lowering_diagnostic(
+                return Err(runtime.raise_fatal_lowering_diagnostic(
                     crate::lower::LowerDiagnostic::from_unsupported(
                         unsupported,
                         None,
                         expr.span_id().map(ToOwned::to_owned),
                     )
                     .fatal(),
-                );
+                ));
             }
-            let operand = children(list)
-                .first()
-                .ok_or_else(|| host_expr_lowering_error(expr, "a `cast` node has no operand"))?;
-            let mut value = lower_host_expr(operand, program, scope, tensor_helpers)?;
+            let operand = try_ok!(
+                children(list)
+                    .first()
+                    .ok_or_else(|| host_expr_lowering_error(expr, "a `cast` node has no operand"))
+            );
+            let mut value = try_ok!(lower_host_expr(operand, program, scope, tensor_helpers)?);
             if binder_float_literal_keeps_f32_source(operand, &ty) {
                 value = HostExpr::new(HostExprKind::Builtin {
                     name: "cast".to_string(),
@@ -8394,10 +8670,10 @@ fn lower_host_expr_kind(
             let name = match chelis_deep::cast_mode_of(children(list)) {
                 Ok(mode) => mode.keyword().to_string(),
                 Err(selector) => {
-                    return Err(host_expr_lowering_error(
+                    return Ok(Err(host_expr_lowering_error(
                         expr,
                         format!("`{selector}` is not a recognized cast mode selector"),
-                    ));
+                    )));
                 }
             };
             HostExpr::new(HostExprKind::Builtin {
@@ -8407,7 +8683,14 @@ fn lower_host_expr_kind(
             })
         }
         Expr::List(list, _) if tag(list) == Some(DeepTag::App) => {
-            lower_app_host_expr(expr, list, program, scope, tensor_helpers, expected_ty)?
+            try_ok!(lower_app_host_expr(
+                expr,
+                list,
+                program,
+                scope,
+                tensor_helpers,
+                expected_ty
+            )?)
         }
         Expr::List(list, _) if tag(list) == Some(DeepTag::Pipe) => {
             // A pipe must never reach the host lowerer either. The checker's
@@ -8418,10 +8701,10 @@ fn lower_host_expr_kind(
             // second derivation of one sentence that chelis#1923 and
             // chelis#1791 came from; it fails closed instead.
             let _ = list;
-            return Err(host_expr_lowering_error(
+            return Ok(Err(host_expr_lowering_error(
                 expr,
                 "a pipe reached lowering unfolded",
-            ));
+            )));
         }
         Expr::List(list, _) if tag(list) == Some(DeepTag::HandleEffect) => {
             // `with seed(...) { body }` and similar effect handlers are
@@ -8438,7 +8721,7 @@ fn lower_host_expr_kind(
             // exhaustive `match` (no `_` arm), so a new kind is a compile
             // error here. A decode error raises the same
             // fatal branded diagnostic as the IR-lane arm.
-            let effect_kind = decode_effect_kind(list).map_err(|error| {
+            let effect_kind = try_ok!(decode_effect_kind(list).map_err(|error| {
                 let unsupported = chelis_types::unsupported::Unsupported::new(
                     chelis_types::unsupported::UnsupportedKind::EffectKind(error.to_string()),
                     "a `handle-effect` form in host lowering",
@@ -8456,38 +8739,46 @@ fn lower_host_expr_kind(
                     expr.span_id().map(ToOwned::to_owned),
                 )
                 .fatal()
-            })?;
-            let body = kids.get(1).or_else(|| kids.first()).ok_or_else(|| {
+            }));
+            let body = try_ok!(kids.get(1).or_else(|| kids.first()).ok_or_else(|| {
                 host_expr_lowering_error(expr, "a `handle-effect` node has no body")
-            })?;
+            }));
             match effect_kind {
                 EffectKind::Random => {
-                    let seed_expr = kids.first().ok_or_else(|| {
+                    let seed_expr = try_ok!(kids.first().ok_or_else(|| {
                         host_expr_lowering_error(expr, "a random handler has no seed")
-                    })?;
-                    let seed = lower_host_expr(seed_expr, program, scope, tensor_helpers)?;
-                    let body = lower_host_expr(body, program, scope, tensor_helpers)?;
+                    }));
+                    let seed = try_ok!(lower_host_expr(seed_expr, program, scope, tensor_helpers)?);
+                    let body = try_ok!(lower_host_expr(body, program, scope, tensor_helpers)?);
                     let ty = host_expr_type(&body);
-                    return Ok(HostExpr::new(HostExprKind::WithSeed {
+                    return Ok(Ok(HostExpr::new(HostExprKind::WithSeed {
                         seed: Box::new(seed),
                         body: Box::new(body),
                         ty,
-                    }));
+                    })));
                 }
-                EffectKind::Resource => lower_host_expr(body, program, scope, tensor_helpers)?,
+                EffectKind::Resource => {
+                    try_ok!(lower_host_expr(body, program, scope, tensor_helpers)?)
+                }
             }
         }
         Expr::MetaExpr(meta, _) => {
-            lower_host_expr_with_expected(&meta.expr, program, scope, tensor_helpers, expected_ty)?
+            try_ok!(lower_host_expr_with_expected(
+                &meta.expr,
+                program,
+                scope,
+                tensor_helpers,
+                expected_ty
+            )?)
         }
         Expr::List(list, _)
             if matches!(tag(list), Some(DeepTag::Grad | DeepTag::Vmap))
                 || list.unknown_tag_symbol() == Some("vmap-grad") =>
         {
-            return Err(host_expr_lowering_error(
+            return Ok(Err(host_expr_lowering_error(
                 expr,
                 "a higher-order transform appeared as a value instead of a supported direct call",
-            ));
+            )));
         }
         Expr::List(list, _) if tag(list) == Some(DeepTag::Copy) => {
             // `(copy {} x)` exists for linearity bookkeeping. In the host
@@ -8496,16 +8787,16 @@ fn lower_host_expr_kind(
             // arm the `copy` tag silently fell through to `HostExpr::new(HostExprKind::Unit)`,
             // which caused tensor-if bodies in folds to collapse to
             // `int new_t; new_t = 0;` (Nautilus P2 tensor-if-in-fold).
-            let inner = lower_host_expr(
-                children(list).first().ok_or_else(|| {
+            let inner = try_ok!(lower_host_expr(
+                try_ok!(children(list).first().ok_or_else(|| {
                     host_expr_lowering_error(expr, "a `copy` node has no operand")
-                })?,
+                })),
                 program,
                 scope,
                 tensor_helpers,
-            )?;
+            )?);
             let inner_ty = host_expr_type(&inner);
-            let explicit = expr_host_type(expr, program, scope);
+            let explicit = expr_host_type(expr, program, scope)?;
             let ty = if explicit.is_unresolved() {
                 inner_ty
             } else {
@@ -8520,14 +8811,14 @@ fn lower_host_expr_kind(
         Expr::List(list, _) if tag(list) == Some(DeepTag::Realize) => {
             // Passthrough for phase-0 semantics: realize is an identity in
             // host lane.
-            lower_host_expr(
-                children(list).first().ok_or_else(|| {
+            try_ok!(lower_host_expr(
+                try_ok!(children(list).first().ok_or_else(|| {
                     host_expr_lowering_error(expr, "a `realize` node has no operand")
-                })?,
+                })),
                 program,
                 scope,
                 tensor_helpers,
-            )?
+            )?)
         }
         Expr::List(list, _) if tag(list) == Some(DeepTag::Jit) => {
             // `spec/03-deep-syntax.md` §2.7: jit is a compilation trigger
@@ -8539,14 +8830,19 @@ fn lower_host_expr_kind(
             // binding like `result = jit(to_tensor([...]))` emitted
             // `int result = 0; printf("()\n");` — silent data loss
             // (Finding 1 of red-team PR #51).
-            lower_host_expr(
-                children(list)
-                    .first()
-                    .ok_or_else(|| host_expr_lowering_error(expr, "a `jit` node has no operand"))?,
+            try_ok!(lower_host_expr(
+                try_ok!(
+                    children(list)
+                        .first()
+                        .ok_or_else(|| host_expr_lowering_error(
+                            expr,
+                            "a `jit` node has no operand"
+                        ))
+                ),
                 program,
                 scope,
                 tensor_helpers,
-            )?
+            )?)
         }
         Expr::List(list, _) if tag(list) == Some(DeepTag::Par) => {
             // `spec/03-deep-syntax.md` §2.3: par v1 is sequential
@@ -8567,18 +8863,25 @@ fn lower_host_expr_kind(
             let kids = children(list);
             let mut last: Option<HostExpr> = None;
             for child in kids {
-                last = Some(lower_host_expr(child, program, scope, tensor_helpers)?);
+                last = Some(try_ok!(lower_host_expr(
+                    child,
+                    program,
+                    scope,
+                    tensor_helpers
+                )?));
             }
-            last.ok_or_else(|| host_expr_lowering_error(expr, "an empty `par` has no value"))?
+            try_ok!(
+                last.ok_or_else(|| host_expr_lowering_error(expr, "an empty `par` has no value"))
+            )
         }
         _ => {
-            return Err(host_expr_lowering_error(
+            return Ok(Err(host_expr_lowering_error(
                 expr,
                 "no host-expression lowering rule exists for this checked form",
-            ));
+            )));
         }
     };
-    Ok(lowered)
+    Ok(Ok(lowered))
 }
 
 fn refine_function_params_from_body(params: &mut [HostParam], body: &HostExpr) {
@@ -9548,14 +9851,21 @@ fn lower_match_host_expr(
     // `lower_mono_specialized_function` already knows the concrete return
     // type. The scrutinee is NOT a result position and keeps plain lowering.
     expected_ty: Option<&HostTypeTerm>,
-) -> Result<HostExpr, crate::lower::LowerDiagnostic> {
+) -> LowerResult<Result<HostExpr, crate::lower::LowerDiagnostic>> {
     let runtime = program.runtime();
     let kids = children(list);
     let match_expr = Expr::List(list.clone(), list_span(list));
-    let scrutinee_node = kids
-        .first()
-        .ok_or_else(|| host_expr_lowering_error(&match_expr, "a `match` node has no scrutinee"))?;
-    let scrutinee = lower_host_expr(scrutinee_node, program, scope, tensor_helpers)?;
+    let scrutinee_node =
+        try_ok!(kids.first().ok_or_else(|| host_expr_lowering_error(
+            &match_expr,
+            "a `match` node has no scrutinee"
+        )));
+    let scrutinee = try_ok!(lower_host_expr(
+        scrutinee_node,
+        program,
+        scope,
+        tensor_helpers
+    )?);
     let scrutinee_ty = host_expr_type(&scrutinee);
     if matches!(
         scrutinee_ty,
@@ -9593,16 +9903,16 @@ fn lower_match_host_expr(
             continue;
         };
         if tag(pattern) == Some(DeepTag::PatWild) {
-            let body = arm_kids.get(2).ok_or_else(|| {
+            let body = try_ok!(arm_kids.get(2).ok_or_else(|| {
                 host_expr_lowering_error(&match_expr, "a wildcard match arm has no body")
-            })?;
-            generic_default = Some(Box::new(lower_host_expr_with_expected_opt(
+            }));
+            generic_default = Some(Box::new(try_ok!(lower_host_expr_with_expected_opt(
                 body,
                 program,
                 scope,
                 tensor_helpers,
                 expected_ty,
-            )?));
+            )?)));
             continue;
         }
         if let Some(DeepTag::PatCtor | DeepTag::PatRecord) = tag(pattern) {
@@ -9617,37 +9927,37 @@ fn lower_match_host_expr(
                     }
                     let mut scoped = scope.clone();
                     scoped.insert(bind_name.clone(), option_inner_type(&scrutinee));
-                    let body = arm_kids.get(2).ok_or_else(|| {
+                    let body = try_ok!(arm_kids.get(2).ok_or_else(|| {
                         host_expr_lowering_error(&match_expr, "a `Some` match arm has no body")
-                    })?;
-                    some_expr = Some(lower_host_expr_with_expected_opt(
+                    }));
+                    some_expr = Some(try_ok!(lower_host_expr_with_expected_opt(
                         body,
                         program,
                         &scoped,
                         tensor_helpers,
                         expected_ty,
-                    )?);
+                    )?));
                 }
                 Some("None") if option_match => {
-                    let body = arm_kids.get(2).ok_or_else(|| {
+                    let body = try_ok!(arm_kids.get(2).ok_or_else(|| {
                         host_expr_lowering_error(&match_expr, "a `None` match arm has no body")
-                    })?;
-                    none_expr = Some(lower_host_expr_with_expected_opt(
+                    }));
+                    none_expr = Some(try_ok!(lower_host_expr_with_expected_opt(
                         body,
                         program,
                         scope,
                         tensor_helpers,
                         expected_ty,
-                    )?);
+                    )?));
                 }
                 Some(ctor_name) => {
                     let ctor_fields = match resolve_adt_constructor_definition_for_type(
                         program,
                         ctor_name,
                         &scrutinee_ty,
-                    ) {
+                    )? {
                         AdtConstructorResolution::Unique(definition) => {
-                            instantiate_adt_constructor(program, &definition, &scrutinee_ty)
+                            try_ok!(instantiate_adt_constructor(program, &definition, &scrutinee_ty)?
                                 .map_err(|error| {
                                     host_expr_lowering_error(
                                         &match_expr,
@@ -9655,7 +9965,7 @@ fn lower_match_host_expr(
                                             "match constructor `{ctor_name}` is not concretely instantiated: {error}"
                                         ),
                                     )
-                                })?
+                                }))
                                 .fields
                         }
                         // The field list decides which index each binder
@@ -9665,16 +9975,18 @@ fn lower_match_host_expr(
                         // fallback below is for names that are not
                         // constructors at all and must not absorb this.
                         AdtConstructorResolution::Ambiguous(candidates) => {
-                            return Err(ambiguous_constructor_error(
+                            return Ok(Err(ambiguous_constructor_error(
                                 &match_expr,
                                 ctor_name,
                                 &candidates,
-                            ));
+                            )));
                         }
                         AdtConstructorResolution::Missing => program
                             .type_env()
                             .get(ctor_name)
-                            .and_then(|ty| parse_fn_type_expr(ty, runtime))
+                            .map(|ty| parse_fn_type_expr(ty, runtime))
+                            .transpose()?
+                            .flatten()
                             .map(|(args, _)| {
                                 args.into_iter()
                                     .map(|ty| HostAdtField { name: None, ty })
@@ -9696,11 +10008,13 @@ fn lower_match_host_expr(
                         let Some(name) = children(subpat_list).first().and_then(symbol_name) else {
                             continue;
                         };
-                        let ty = field_ty
-                            .or_else(|| {
-                                expr_type(subpat, &program.invocation.type_subst.borrow(), runtime)
-                            })
-                            .unwrap_or_else(fresh_host_inference);
+                        let ty = match field_ty {
+                            Some(ty) => Some(ty),
+                            None => {
+                                expr_type(subpat, &program.invocation.type_subst.borrow(), runtime)?
+                            }
+                        }
+                        .unwrap_or_else(fresh_host_inference);
                         scoped.insert(name.to_string(), ty.clone());
                         bindings.push(HostPatternBinding {
                             name: name.to_string(),
@@ -9711,18 +10025,18 @@ fn lower_match_host_expr(
                     generic_arms.push(HostMatchArm {
                         ctor: ctor_name.to_string(),
                         bindings,
-                        expr: lower_host_expr_with_expected_opt(
-                            arm_kids.get(2).ok_or_else(|| {
+                        expr: try_ok!(lower_host_expr_with_expected_opt(
+                            try_ok!(arm_kids.get(2).ok_or_else(|| {
                                 host_expr_lowering_error(
                                     &match_expr,
                                     "an ADT match arm has no body",
                                 )
-                            })?,
+                            })),
                             program,
                             &scoped,
                             tensor_helpers,
                             expected_ty,
-                        )?,
+                        )?),
                     });
                 }
                 None => {}
@@ -9735,7 +10049,7 @@ fn lower_match_host_expr(
             &Expr::List(list.clone(), chelis_deep::Span::new(0, 0)),
             program,
             scope,
-        );
+        )?;
         if explicit.is_unresolved() {
             // For ADT matches with multiple arms, Some/None exprs aren't set —
             // the arm bodies live in `generic_arms` / `generic_default`. Fall
@@ -9757,12 +10071,12 @@ fn lower_match_host_expr(
             if let Some(ty) = arm_ty {
                 ty
             } else {
-                let some = some_expr.as_ref().ok_or_else(|| {
+                let some = try_ok!(some_expr.as_ref().ok_or_else(|| {
                     host_expr_lowering_error(&match_expr, "an Option match has no `Some` arm")
-                })?;
-                let none = none_expr.as_ref().ok_or_else(|| {
+                }));
+                let none = try_ok!(none_expr.as_ref().ok_or_else(|| {
                     host_expr_lowering_error(&match_expr, "an Option match has no `None` arm")
-                })?;
+                }));
                 let some_ty = host_expr_type(some);
                 if some_ty.is_unresolved() {
                     host_expr_type(none)
@@ -9776,27 +10090,27 @@ fn lower_match_host_expr(
     };
 
     if matches!(scrutinee_ty, HostTypeTerm::Adt(_, _)) {
-        return Ok(HostExpr::new(HostExprKind::MatchAdt {
+        return Ok(Ok(HostExpr::new(HostExprKind::MatchAdt {
             scrutinee: Box::new(scrutinee),
             arms: generic_arms,
             default_expr: generic_default,
             ty,
-        }));
+        })));
     }
 
-    let some_expr = some_expr.ok_or_else(|| {
+    let some_expr = try_ok!(some_expr.ok_or_else(|| {
         host_expr_lowering_error(&match_expr, "an Option match has no `Some` arm")
-    })?;
-    let none_expr = none_expr.ok_or_else(|| {
+    }));
+    let none_expr = try_ok!(none_expr.ok_or_else(|| {
         host_expr_lowering_error(&match_expr, "an Option match has no `None` arm")
-    })?;
-    Ok(HostExpr::new(HostExprKind::MatchOption {
+    }));
+    Ok(Ok(HostExpr::new(HostExprKind::MatchOption {
         scrutinee: Box::new(scrutinee),
         bind_name,
         some_expr: Box::new(some_expr),
         none_expr: Box::new(none_expr),
         ty,
-    }))
+    })))
 }
 
 fn lower_literal_match_host_expr(
@@ -9806,7 +10120,7 @@ fn lower_literal_match_host_expr(
     tensor_helpers: &mut TensorHelperSink,
     scrutinee: HostExpr,
     scrutinee_ty: HostTypeTerm,
-) -> Result<HostExpr, crate::lower::LowerDiagnostic> {
+) -> LowerResult<Result<HostExpr, crate::lower::LowerDiagnostic>> {
     let kids = children(list);
     let mut literal_arms = Vec::new();
     let mut default_expr = None;
@@ -9822,14 +10136,14 @@ fn lower_literal_match_host_expr(
         let Some(pattern) = arm_kids.first().and_then(as_list) else {
             continue;
         };
-        let body = lower_host_expr(
-            arm_kids.get(2).ok_or_else(|| {
+        let body = try_ok!(lower_host_expr(
+            try_ok!(arm_kids.get(2).ok_or_else(|| {
                 host_expr_lowering_error(&match_expr, "a literal match arm has no body")
-            })?,
+            })),
             program,
             scope,
             tensor_helpers,
-        )?;
+        )?);
         match tag(pattern) {
             Some(DeepTag::PatWild) => default_expr = Some(body),
             Some(DeepTag::PatLit) => {
@@ -9848,13 +10162,13 @@ fn lower_literal_match_host_expr(
         &Expr::List(list.clone(), chelis_deep::Span::new(0, 0)),
         program,
         scope,
-    );
-    let mut body = default_expr.ok_or_else(|| {
+    )?;
+    let mut body = try_ok!(default_expr.ok_or_else(|| {
         host_expr_lowering_error(
             &match_expr,
             "a host-lowered literal match requires an explicit default arm",
         )
-    })?;
+    }));
     let result_ty = if explicit.is_unresolved() {
         host_expr_type(&body)
     } else {
@@ -9872,7 +10186,7 @@ fn lower_literal_match_host_expr(
             ty: result_ty.clone(),
         });
     }
-    Ok(body)
+    Ok(Ok(body))
 }
 
 fn host_literal_expr(expr: &Expr, expected_ty: &HostTypeTerm) -> Option<HostExpr> {
@@ -9905,21 +10219,18 @@ fn lower_record_host_expr(
     scope: &UnordMap<String, HostTypeTerm>,
     tensor_helpers: &mut TensorHelperSink,
     expected_ty: Option<&HostTypeTerm>,
-) -> Result<HostExpr, crate::lower::LowerDiagnostic> {
+) -> LowerResult<Result<HostExpr, crate::lower::LowerDiagnostic>> {
     let kids = children(list);
     let record_expr = Expr::List(list.clone(), list_span(list));
-    let ctor = kids
-        .first()
-        .and_then(symbol_name)
-        .ok_or_else(|| {
-            host_expr_lowering_error(&record_expr, "a `record` node has no constructor symbol")
-        })?
-        .to_string();
+    let ctor = try_ok!(kids.first().and_then(symbol_name).ok_or_else(|| {
+        host_expr_lowering_error(&record_expr, "a `record` node has no constructor symbol")
+    }))
+    .to_string();
     let checked_ty = expr_host_type(
         &Expr::List(list.clone(), chelis_deep::Span::new(0, 0)),
         program,
         scope,
-    );
+    )?;
     let resolution_ty = expected_ty
         .filter(|_| checked_ty.is_unresolved())
         .unwrap_or(&checked_ty);
@@ -9928,24 +10239,24 @@ fn lower_record_host_expr(
     // fields so same-named declarations cannot be selected by registry order
     // (chelis#1076/#1271).
     let ctor_definition =
-        match resolve_adt_constructor_definition_for_type(program, &ctor, resolution_ty) {
+        match resolve_adt_constructor_definition_for_type(program, &ctor, resolution_ty)? {
             AdtConstructorResolution::Unique(definition) => definition,
             // The field-name check below reports the AUTHORED constructor, so
             // validating against a different declaration produced a
             // self-contradicting "has no field" rejection of a valid program
             // (chelis#1271). Name both candidates instead of choosing.
             AdtConstructorResolution::Ambiguous(candidates) => {
-                return Err(ambiguous_constructor_error(
+                return Ok(Err(ambiguous_constructor_error(
                     &record_expr,
                     &ctor,
                     &candidates,
-                ));
+                )));
             }
             AdtConstructorResolution::Missing => {
-                return Err(host_expr_lowering_error(
+                return Ok(Err(host_expr_lowering_error(
                     &record_expr,
                     format!("record constructor `{ctor}` has no matching ADT declaration"),
-                ));
+                )));
             }
         };
     let explicit_ty = expected_ty
@@ -9955,92 +10266,102 @@ fn lower_record_host_expr(
         })
         .cloned()
         .unwrap_or(checked_ty);
-    let ctor_info =
-        instantiate_adt_constructor(program, &ctor_definition, &explicit_ty).map_err(|error| {
+    let ctor_info = try_ok!(
+        instantiate_adt_constructor(program, &ctor_definition, &explicit_ty)?.map_err(|error| {
             host_expr_lowering_error(
                 &record_expr,
                 format!("record constructor `{ctor}` is not concretely instantiated: {error}"),
             )
-        })?;
+        })
+    );
     let mut supplied = UnordMap::new();
     for field in kids.iter().skip(1) {
-        let kv_list = as_list(field).ok_or_else(|| {
+        let kv_list = try_ok!(as_list(field).ok_or_else(|| {
             host_expr_lowering_error(&record_expr, "a record field is not a `kv` node")
-        })?;
+        }));
         if tag(kv_list) != Some(DeepTag::Kv) {
-            return Err(host_expr_lowering_error(
+            return Ok(Err(host_expr_lowering_error(
                 &record_expr,
                 "a record field is not a `kv` node",
-            ));
+            )));
         }
         let kv_kids = children(kv_list);
-        let name = kv_kids
-            .first()
-            .and_then(symbol_name)
-            .ok_or_else(|| host_expr_lowering_error(&record_expr, "a record field has no name"))?;
-        let expected_field = ctor_info
-            .fields
-            .iter()
-            .find(|field| field.name.as_deref() == Some(name))
-            .ok_or_else(|| {
-                host_expr_lowering_error(
+        let name = try_ok!(
+            kv_kids
+                .first()
+                .and_then(symbol_name)
+                .ok_or_else(|| host_expr_lowering_error(
                     &record_expr,
-                    format!("record constructor `{ctor}` has no field `{name}`"),
-                )
-            })?;
+                    "a record field has no name"
+                ))
+        );
+        let expected_field = try_ok!(
+            ctor_info
+                .fields
+                .iter()
+                .find(|field| field.name.as_deref() == Some(name))
+                .ok_or_else(|| {
+                    host_expr_lowering_error(
+                        &record_expr,
+                        format!("record constructor `{ctor}` has no field `{name}`"),
+                    )
+                })
+        );
         // The instantiated constructor field is the checker-owned expected
         // type. Thread it into nested generic calls before lowering rather
         // than forcing it afterward: `Frame[Unit].cols` must specialize
         // `singleton` as `Hamt[Column[Unit]]` before its `Leaf` body lowers.
-        let value = lower_host_expr_with_expected(
-            kv_kids.get(1).ok_or_else(|| {
+        let value = try_ok!(lower_host_expr_with_expected(
+            try_ok!(kv_kids.get(1).ok_or_else(|| {
                 host_expr_lowering_error(
                     &record_expr,
                     format!("record field `{name}` has no value"),
                 )
-            })?,
+            })),
             program,
             scope,
             tensor_helpers,
             Some(&expected_field.ty),
-        )?;
+        )?);
         if supplied.insert(name.to_string(), value).is_some() {
-            return Err(host_expr_lowering_error(
+            return Ok(Err(host_expr_lowering_error(
                 &record_expr,
                 format!("record field `{name}` is supplied more than once"),
-            ));
+            )));
         }
     }
-    let fields = ctor_info
-        .fields
-        .iter()
-        .map(|field| {
-            let name = field.name.as_ref().ok_or_else(|| {
-                host_expr_lowering_error(
-                    &record_expr,
-                    format!("constructor `{ctor}` contains an unnamed record field"),
-                )
-            })?;
-            let value = supplied.remove(name).ok_or_else(|| {
-                host_expr_lowering_error(
-                    &record_expr,
-                    format!("record constructor `{ctor}` is missing field `{name}`"),
-                )
-            })?;
-            Ok(force_host_expr_type(value, field.ty.clone()))
-        })
-        .collect::<Result<Vec<_>, crate::lower::LowerDiagnostic>>()?;
+    let fields = try_ok!(
+        ctor_info
+            .fields
+            .iter()
+            .map(|field| {
+                let name = field.name.as_ref().ok_or_else(|| {
+                    host_expr_lowering_error(
+                        &record_expr,
+                        format!("constructor `{ctor}` contains an unnamed record field"),
+                    )
+                })?;
+                let value = supplied.remove(name).ok_or_else(|| {
+                    host_expr_lowering_error(
+                        &record_expr,
+                        format!("record constructor `{ctor}` is missing field `{name}`"),
+                    )
+                })?;
+                Ok(force_host_expr_type(value, field.ty.clone()))
+            })
+            .collect::<Result<Vec<_>, crate::lower::LowerDiagnostic>>()
+    );
     if let Some((extra, _)) = supplied.to_sorted().into_iter().next() {
-        return Err(host_expr_lowering_error(
+        return Ok(Err(host_expr_lowering_error(
             &record_expr,
             format!("record constructor `{ctor}` has no field `{extra}`"),
-        ));
+        )));
     }
-    Ok(HostExpr::new(HostExprKind::AdtConstruct {
+    Ok(Ok(HostExpr::new(HostExprKind::AdtConstruct {
         ctor,
         fields,
         ty: ctor_info.ty,
-    }))
+    })))
 }
 
 fn lower_access_host_expr(
@@ -10048,39 +10369,42 @@ fn lower_access_host_expr(
     program: &HostLoweringSession<'_>,
     scope: &UnordMap<String, HostTypeTerm>,
     tensor_helpers: &mut TensorHelperSink,
-) -> Result<HostExpr, crate::lower::LowerDiagnostic> {
+) -> LowerResult<Result<HostExpr, crate::lower::LowerDiagnostic>> {
     let kids = children(list);
     let access_expr = Expr::List(list.clone(), list_span(list));
-    let base = lower_host_expr(
-        kids.first().ok_or_else(|| {
+    let base = try_ok!(lower_host_expr(
+        try_ok!(kids.first().ok_or_else(|| {
             host_expr_lowering_error(&access_expr, "an `access` node has no base expression")
-        })?,
+        })),
         program,
         scope,
         tensor_helpers,
-    )?;
-    let field_name = kids.get(1).and_then(symbol_name).ok_or_else(|| {
+    )?);
+    let field_name = try_ok!(kids.get(1).and_then(symbol_name).ok_or_else(|| {
         host_expr_lowering_error(&access_expr, "an `access` node has no field symbol")
-    })?;
-    let (field_index, field_ty) = lookup_access_field(program, &base, field_name)
-        .map_err(|error| {
-            host_expr_lowering_error(
-                &access_expr,
-                format!("field `{field_name}` has no concrete ADT instantiation: {error}"),
-            )
-        })?
+    }));
+    let (field_index, field_ty) = try_ok!(
+        try_ok!(
+            lookup_access_field(program, &base, field_name)?.map_err(|error| {
+                host_expr_lowering_error(
+                    &access_expr,
+                    format!("field `{field_name}` has no concrete ADT instantiation: {error}"),
+                )
+            })
+        )
         .ok_or_else(|| {
             host_expr_lowering_error(
                 &access_expr,
                 format!("field `{field_name}` is absent or ambiguous on the resolved ADT type"),
             )
-        })?;
+        })
+    );
     let explicit_ty = expr_host_type(
         &Expr::List(list.clone(), chelis_deep::Span::new(0, 0)),
         program,
         scope,
-    );
-    Ok(HostExpr::new(HostExprKind::AdtFieldAccess {
+    )?;
+    Ok(Ok(HostExpr::new(HostExprKind::AdtFieldAccess {
         base: Box::new(base),
         field_index,
         ty: if !explicit_ty.is_unresolved() {
@@ -10088,7 +10412,7 @@ fn lower_access_host_expr(
         } else {
             field_ty
         },
-    }))
+    })))
 }
 
 fn pattern_field_bindings<'a>(
@@ -10136,37 +10460,37 @@ fn lower_tuple_get_host_expr(
     program: &HostLoweringSession<'_>,
     scope: &UnordMap<String, HostTypeTerm>,
     tensor_helpers: &mut TensorHelperSink,
-) -> Result<HostExpr, crate::lower::LowerDiagnostic> {
+) -> LowerResult<Result<HostExpr, crate::lower::LowerDiagnostic>> {
     let kids = children(list);
     let tuple_get_expr = Expr::List(list.clone(), list_span(list));
     if kids.len() != 2 {
-        return Err(host_expr_lowering_error(
+        return Ok(Err(host_expr_lowering_error(
             &tuple_get_expr,
             format!(
                 "a `tuple-get` node requires 2 children, found {}",
                 kids.len()
             ),
-        ));
+        )));
     }
     let args = vec![
-        lower_host_expr(&kids[0], program, scope, tensor_helpers)?,
-        lower_host_expr(&kids[1], program, scope, tensor_helpers)?,
+        try_ok!(lower_host_expr(&kids[0], program, scope, tensor_helpers)?),
+        try_ok!(lower_host_expr(&kids[1], program, scope, tensor_helpers)?),
     ];
     let explicit_ty = expr_host_type(
         &Expr::List(list.clone(), chelis_deep::Span::new(0, 0)),
         program,
         scope,
-    );
+    )?;
     let ty = if explicit_ty.is_unresolved() {
         infer_builtin_host_type("tuple-get", &args).unwrap_or_else(fresh_host_inference)
     } else {
         explicit_ty
     };
-    Ok(HostExpr::new(HostExprKind::Builtin {
+    Ok(Ok(HostExpr::new(HostExprKind::Builtin {
         name: "tuple-get".to_string(),
         args,
         ty,
-    }))
+    })))
 }
 
 // ---------------------------------------------------------------------------
@@ -10236,13 +10560,16 @@ fn is_dual_scalar_type(ty: &HostTypeTerm) -> bool {
     )
 }
 
+/// A resolved scalar def: `(param_names, param_tys, body)`.
+type ScalarDef<'a> = (Vec<String>, Vec<HostTypeTerm>, &'a Expr);
+
 /// Resolve a top-level scalar def by name into `(param_names, param_tys, body)`.
 /// Returns `None` if the def is not a `(fn (params ...) body)` form or any
 /// parameter is non-scalar.
 fn resolve_scalar_def<'a>(
     program: &'a HostLoweringSession<'a>,
     name: &str,
-) -> Option<(Vec<String>, Vec<HostTypeTerm>, &'a Expr)> {
+) -> LowerResult<Option<ScalarDef<'a>>> {
     let runtime = program.runtime();
     let mut found: Option<(&'a List,)> = None;
     for expr in top_level_items(program.exprs()) {
@@ -10268,26 +10595,28 @@ fn resolve_scalar_def<'a>(
         found = Some((body_list,));
         break;
     }
-    let (fn_list,) = found?;
+    let (fn_list,) = try_some!(found);
     let fn_kids = children(fn_list);
-    let params_list = fn_kids.first().and_then(as_list)?;
+    let params_list = try_some!(fn_kids.first().and_then(as_list));
     if tag(params_list) != Some(DeepTag::Params) {
-        return None;
+        return Ok(None);
     }
     let mut param_names = Vec::new();
     let mut param_tys = Vec::new();
     for param in children(params_list) {
-        let pname = param_name(param)?;
-        let pty = param_host_type(param, &program.invocation.type_subst.borrow(), runtime)
-            .or_else(|| {
-                lookup_declared_fn_type(program, name).and_then(|(tys, _)| tys.first().cloned())
-            })
-            .unwrap_or(HostTypeTerm::Float64);
+        let pname = try_some!(param_name(param));
+        let pty = match param_host_type(param, &program.invocation.type_subst.borrow(), runtime)? {
+            Some(ty) => Some(ty),
+            None => {
+                lookup_declared_fn_type(program, name)?.and_then(|(tys, _)| tys.first().cloned())
+            }
+        }
+        .unwrap_or(HostTypeTerm::Float64);
         param_names.push(pname);
         param_tys.push(pty);
     }
-    let body = fn_kids.get(1)?;
-    Some((param_names, param_tys, body))
+    let body = try_some!(fn_kids.get(1));
+    Ok(Some((param_names, param_tys, body)))
 }
 
 /// Try to lower `app(grad(f, wrt=...), arg0, ...)` as a host-lane scalar
@@ -10300,65 +10629,65 @@ fn try_lower_scalar_grad_app(
     program: &HostLoweringSession<'_>,
     scope: &UnordMap<String, HostTypeTerm>,
     tensor_helpers: &mut TensorHelperSink,
-) -> Result<Option<HostExpr>, crate::lower::LowerDiagnostic> {
+) -> LowerResult<Result<Option<HostExpr>, crate::lower::LowerDiagnostic>> {
     let kids = children(list);
     let Some(callee) = kids.first().and_then(as_list) else {
-        return Ok(None);
+        return Ok(Ok(None));
     };
     if tag(callee) != Some(DeepTag::Grad) {
-        return Ok(None);
+        return Ok(Ok(None));
     }
     // The function being differentiated: `(grad {wrt:...} (var f) (lit 0))`.
     let grad_kids = children(callee);
     let Some(fn_var) = grad_kids.first().and_then(as_list) else {
-        return Ok(None);
+        return Ok(Ok(None));
     };
     if tag(fn_var) != Some(DeepTag::Var) {
-        return Ok(None);
+        return Ok(Ok(None));
     }
     let Some(fn_name) = children(fn_var).first().and_then(symbol_name) else {
-        return Ok(None);
+        return Ok(Ok(None));
     };
     let fn_name = fn_name.to_string();
 
-    let Some((param_names, param_tys, body)) = resolve_scalar_def(program, &fn_name) else {
-        return Ok(None);
+    let Some((param_names, param_tys, body)) = resolve_scalar_def(program, &fn_name)? else {
+        return Ok(Ok(None));
     };
 
     // Return type must be scalar; reject (fall through) otherwise. We infer
     // it from the def's declared signature when available.
-    if let Some((_, ret_ty)) = lookup_declared_fn_type(program, &fn_name)
+    if let Some((_, ret_ty)) = lookup_declared_fn_type(program, &fn_name)?
         && !is_dual_scalar_type(&ret_ty)
     {
-        return Ok(None);
+        return Ok(Ok(None));
     }
     // Every parameter must be a scalar. A structured parameter that is not the
     // `wrt` target is still fine to treat as a constant, but the call args
     // would be containers we cannot evaluate in the dual tree, so reject the
     // whole app (the recursive structured-AD lane below owns those calls).
     if param_tys.iter().any(|ty| !is_dual_scalar_type(ty)) {
-        return Ok(None);
+        return Ok(Ok(None));
     }
 
     // Resolve the `wrt` parameter names from the grad meta. Absent `wrt`
     // means "all parameters" (single-param defs commonly omit it).
     let Some(wrt_names) = grad_wrt_param_names(callee, &param_names) else {
-        return Ok(None);
+        return Ok(Ok(None));
     };
     if wrt_names.is_empty() {
-        return Ok(None);
+        return Ok(Ok(None));
     }
 
     // Lower each call argument once into a value HostExpr. Their derivative
     // seed is determined per `wrt` pass below.
     let call_args = &kids[1..];
     if call_args.len() != param_names.len() {
-        return Ok(None);
+        return Ok(Ok(None));
     }
-    let arg_values: Vec<HostExpr> = call_args
-        .iter()
-        .map(|arg| lower_host_expr(arg, program, scope, tensor_helpers))
-        .collect::<Result<Vec<_>, _>>()?;
+    let arg_values: Vec<HostExpr> =
+        try_ok!(try_collect_results(call_args.iter().map(|arg| {
+            lower_host_expr(arg, program, scope, tensor_helpers)
+        }))?);
 
     // One forward pass per `wrt` parameter.
     let mut derivs = Vec::new();
@@ -10374,13 +10703,13 @@ fn try_lower_scalar_grad_app(
                 },
             );
         }
-        let Some(dual) = dual_eval(body, &env, program, 0) else {
-            return Ok(None);
+        let Some(dual) = dual_eval(body, &env, program, 0)? else {
+            return Ok(Ok(None));
         };
         derivs.push(dual.deriv);
     }
 
-    if derivs.len() == 1 {
+    Ok(if derivs.len() == 1 {
         Ok(derivs.pop())
     } else {
         let tys = derivs.iter().map(|_| HostTypeTerm::Float64).collect();
@@ -10388,7 +10717,7 @@ fn try_lower_scalar_grad_app(
             derivs,
             HostTypeTerm::Tuple(tys),
         ))))
-    }
+    })
 }
 
 #[derive(Clone)]
@@ -10511,7 +10840,7 @@ fn grad_pack_plan(
     ty: &HostTypeTerm,
     actual: &Expr,
     program: &HostLoweringSession<'_>,
-) -> Option<GradPackPlan> {
+) -> LowerResult<Option<GradPackPlan>> {
     let runtime = program.runtime();
     if let HostTypeTerm::Adt(name, arguments) = ty
         && let Some((_, alias)) = program
@@ -10527,7 +10856,7 @@ fn grad_pack_plan(
             .map(|(variable, name)| (format!("t{}", variable.0), name.clone()))
             .collect::<UnordMap<_, _>>();
         let expanded = rename_host_type_variables(
-            decode_host_type_or_raise(&type_to_deep_expr(&alias.body), &UnordMap::new(), runtime),
+            decode_host_type_or_raise(&type_to_deep_expr(&alias.body), &UnordMap::new(), runtime)?,
             &checker_parameter_names,
         );
         let substitutions = alias
@@ -10542,30 +10871,32 @@ fn grad_pack_plan(
             program,
         );
     }
-    match ty {
+    Ok(match ty {
         HostTypeTerm::List(element_ty) => {
-            let items = static_list_spine_items(actual)?;
-            let items = items
-                .iter()
-                .map(|item| grad_pack_plan(element_ty, item, program))
-                .collect::<Option<Vec<_>>>()?;
+            let items = try_some!(static_list_spine_items(actual));
+            let items = try_some!(try_collect_options(
+                items
+                    .iter()
+                    .map(|item| grad_pack_plan(element_ty, item, program))
+            )?);
             Some(GradPackPlan::List {
                 ty: ty.clone(),
                 items,
             })
         }
         HostTypeTerm::Tuple(item_tys) => {
-            let (DeepTag::Tuple, _, item_exprs) = stamped_parts(actual)? else {
-                return None;
+            let (DeepTag::Tuple, _, item_exprs) = try_some!(stamped_parts(actual)) else {
+                return Ok(None);
             };
             if item_tys.len() != item_exprs.len() {
-                return None;
+                return Ok(None);
             }
-            let items = item_tys
-                .iter()
-                .zip(item_exprs)
-                .map(|(item_ty, item)| grad_pack_plan(item_ty, item, program))
-                .collect::<Option<Vec<_>>>()?;
+            let items = try_some!(try_collect_options(
+                item_tys
+                    .iter()
+                    .zip(item_exprs)
+                    .map(|(item_ty, item)| grad_pack_plan(item_ty, item, program))
+            )?);
             Some(GradPackPlan::Tuple {
                 ty: HostTypeTerm::Tuple(items.iter().map(GradPackPlan::host_type).collect()),
                 items,
@@ -10573,65 +10904,70 @@ fn grad_pack_plan(
         }
         HostTypeTerm::Adt(_, _) => {
             let (ctor, supplied): (String, Vec<(Option<String>, &Expr)>) =
-                match stamped_parts(actual)? {
+                match try_some!(stamped_parts(actual)) {
                     (DeepTag::Record, _, kids) => {
-                        let ctor = kids.first().and_then(symbol_name)?.to_string();
-                        let fields = kids
-                            .iter()
-                            .skip(1)
-                            .map(|field| {
-                                let (DeepTag::Kv, _, kv) = stamped_parts(field)? else {
-                                    return None;
-                                };
-                                Some((
-                                    Some(kv.first().and_then(symbol_name)?.to_string()),
-                                    kv.get(1)?,
-                                ))
-                            })
-                            .collect::<Option<Vec<_>>>()?;
+                        let ctor = try_some!(kids.first().and_then(symbol_name)).to_string();
+                        let fields = try_some!(
+                            kids.iter()
+                                .skip(1)
+                                .map(|field| {
+                                    let (DeepTag::Kv, _, kv) = stamped_parts(field)? else {
+                                        return None;
+                                    };
+                                    Some((
+                                        Some(kv.first().and_then(symbol_name)?.to_string()),
+                                        kv.get(1)?,
+                                    ))
+                                })
+                                .collect::<Option<Vec<_>>>()
+                        );
                         (ctor, fields)
                     }
                     (DeepTag::App, _, kids) => {
-                        let ctor = kids.first().and_then(direct_var_name)?.to_string();
+                        let ctor = try_some!(kids.first().and_then(direct_var_name)).to_string();
                         (
                             ctor,
                             kids.iter().skip(1).map(|field| (None, field)).collect(),
                         )
                     }
-                    (DeepTag::Var, _, kids) => {
-                        (kids.first().and_then(symbol_name)?.to_string(), Vec::new())
-                    }
-                    _ => return None,
+                    (DeepTag::Var, _, kids) => (
+                        try_some!(kids.first().and_then(symbol_name)).to_string(),
+                        Vec::new(),
+                    ),
+                    _ => return Ok(None),
                 };
             let AdtConstructorResolution::Unique(definition) =
-                resolve_adt_constructor_definition_for_type(program, &ctor, ty)
+                resolve_adt_constructor_definition_for_type(program, &ctor, ty)?
             else {
-                return None;
+                return Ok(None);
             };
-            let instantiated = definition.instantiate(ty).ok()?;
+            let instantiated = try_some!(definition.instantiate(ty).ok());
             let field_exprs = if supplied.iter().all(|(name, _)| name.is_some()) {
-                instantiated
-                    .fields
-                    .iter()
-                    .map(|field| {
-                        supplied
-                            .iter()
-                            .find(|(name, _)| name.as_ref() == field.name.as_ref())
-                            .map(|(_, expr)| *expr)
-                    })
-                    .collect::<Option<Vec<_>>>()?
+                try_some!(
+                    instantiated
+                        .fields
+                        .iter()
+                        .map(|field| {
+                            supplied
+                                .iter()
+                                .find(|(name, _)| name.as_ref() == field.name.as_ref())
+                                .map(|(_, expr)| *expr)
+                        })
+                        .collect::<Option<Vec<_>>>()
+                )
             } else {
                 supplied.iter().map(|(_, expr)| *expr).collect()
             };
             if instantiated.fields.len() != field_exprs.len() {
-                return None;
+                return Ok(None);
             }
-            let items = instantiated
-                .fields
-                .iter()
-                .zip(field_exprs)
-                .map(|(field, expr)| grad_pack_plan(&field.ty, expr, program))
-                .collect::<Option<Vec<_>>>()?;
+            let items = try_some!(try_collect_options(
+                instantiated
+                    .fields
+                    .iter()
+                    .zip(field_exprs)
+                    .map(|(field, expr)| grad_pack_plan(&field.ty, expr, program))
+            )?);
             Some(GradPackPlan::Adt {
                 ty: ty.clone(),
                 ctor,
@@ -10645,7 +10981,7 @@ fn grad_pack_plan(
             Some(GradPackPlan::Leaf(ty.clone()))
         }
         _ => Some(GradPackPlan::Unit),
-    }
+    })
 }
 
 fn tensor_helper_root_expr(
@@ -10736,10 +11072,10 @@ fn scalar_grad_body_requirements(
     program: &HostLoweringSession<'_>,
     scope: &UnordMap<String, HostTypeTerm>,
     visiting: &mut UnordSet<String>,
-) -> ScalarGradBodyRequirements {
+) -> LowerResult<ScalarGradBodyRequirements> {
     let mut requirements = ScalarGradBodyRequirements {
         has_tensor_value: matches!(
-            expr_host_type(expr, program, scope),
+            expr_host_type(expr, program, scope)?,
             HostTypeTerm::Tensor(_)
         ),
         reaches_host_collection_transform: false,
@@ -10748,7 +11084,7 @@ fn scalar_grad_body_requirements(
     if let Some((DeepTag::App, _, kids)) = stamped_parts(expr)
         && let Some(name) = kids.first().and_then(direct_var_name)
     {
-        let scalar_def = resolve_scalar_def(program, name);
+        let scalar_def = resolve_scalar_def(program, name)?;
         if scalar_def.is_none() {
             requirements.reaches_host_collection_transform |= matches!(
                 terminal_name(name),
@@ -10769,7 +11105,7 @@ fn scalar_grad_body_requirements(
                 program,
                 &callee_scope,
                 visiting,
-            ));
+            )?);
             visiting.remove(name);
         }
     }
@@ -10777,17 +11113,21 @@ fn scalar_grad_body_requirements(
     visit_semantic_expr_children(expr, |child| {
         requirements.merge(scalar_grad_body_requirements(
             child, program, scope, visiting,
-        ));
-    });
-    requirements
+        )?);
+        Ok(())
+    })?;
+    Ok(requirements)
 }
 
-fn pure_scalar_callable_needs_reverse_dag(program: &HostLoweringSession<'_>, name: &str) -> bool {
+fn pure_scalar_callable_needs_reverse_dag(
+    program: &HostLoweringSession<'_>,
+    name: &str,
+) -> LowerResult<bool> {
     if top_level_fn_needs_host_lane_tensor_lowering(program, name) {
-        return false;
+        return Ok(false);
     }
-    let Some((param_names, param_tys, body)) = resolve_scalar_def(program, name) else {
-        return false;
+    let Some((param_names, param_tys, body)) = resolve_scalar_def(program, name)? else {
+        return Ok(false);
     };
     let scope = param_names
         .iter()
@@ -10796,8 +11136,8 @@ fn pure_scalar_callable_needs_reverse_dag(program: &HostLoweringSession<'_>, nam
         .collect();
     let mut visiting = UnordSet::new();
     visiting.insert(name.to_string());
-    let requirements = scalar_grad_body_requirements(body, program, &scope, &mut visiting);
-    requirements.has_tensor_value && !requirements.reaches_host_collection_transform
+    let requirements = scalar_grad_body_requirements(body, program, &scope, &mut visiting)?;
+    Ok(requirements.has_tensor_value && !requirements.reaches_host_collection_transform)
 }
 
 /// Reconstruct primitive and finite recursive cotangents from one reverse DAG.
@@ -10812,19 +11152,19 @@ fn try_lower_general_list_grad_app(
     scope: &UnordMap<String, HostTypeTerm>,
     tensor_helpers: &mut TensorHelperSink,
     expected_ty: Option<&HostTypeTerm>,
-) -> Result<Option<HostExpr>, crate::lower::LowerDiagnostic> {
+) -> LowerResult<Result<Option<HostExpr>, crate::lower::LowerDiagnostic>> {
     let runtime = program.runtime();
     let kids = children(list);
     let Some(callee) = kids.first().and_then(as_list) else {
-        return Ok(None);
+        return Ok(Ok(None));
     };
     if tag(callee) != Some(DeepTag::Grad) {
-        return Ok(None);
+        return Ok(Ok(None));
     }
     let defs = cached_program_defs(program);
     let grad_kids = children(callee);
     let Some(fn_name) = grad_kids.first().and_then(direct_var_name) else {
-        return Ok(None);
+        return Ok(Ok(None));
     };
     // A scalar signature does not determine the lowering route. Pure scalar
     // arithmetic stays at the scalar-host AD boundary, and an unsupported
@@ -10837,32 +11177,32 @@ fn try_lower_general_list_grad_app(
     // forward extent failures and deliberate DAG diagnostics propagate
     // without fallback.
     let pure_scalar_callable =
-        lookup_declared_fn_type(program, fn_name).is_some_and(|(parameters, result)| {
+        lookup_declared_fn_type(program, fn_name)?.is_some_and(|(parameters, result)| {
             parameters.iter().all(is_dual_scalar_type) && is_dual_scalar_type(&result)
         });
-    if pure_scalar_callable && !pure_scalar_callable_needs_reverse_dag(program, fn_name) {
-        return Ok(None);
+    if pure_scalar_callable && !pure_scalar_callable_needs_reverse_dag(program, fn_name)? {
+        return Ok(Ok(None));
     }
     let Some(Expr::List(fn_list, _)) = lookup_program_def(&defs, fn_name) else {
-        return Ok(None);
+        return Ok(Ok(None));
     };
     if tag(fn_list) != Some(DeepTag::Fn) {
-        return Ok(None);
+        return Ok(Ok(None));
     }
     let fn_kids = children(fn_list);
     let Some(params) = fn_kids.first().and_then(as_list) else {
-        return Ok(None);
+        return Ok(Ok(None));
     };
     let params = children(params);
     if params.len() != kids.len().saturating_sub(1) {
-        return Ok(None);
+        return Ok(Ok(None));
     }
     let param_names = params.iter().map(param_name).collect::<Option<Vec<_>>>();
     let Some(param_names) = param_names else {
-        return Ok(None);
+        return Ok(Ok(None));
     };
     let Some(wrt_names) = grad_wrt_param_names(callee, &param_names) else {
-        return Ok(None);
+        return Ok(Ok(None));
     };
     let has_explicit_wrt = matches!(
         callee.elements.get(1),
@@ -10873,13 +11213,13 @@ fn try_lower_general_list_grad_app(
     let mut parameter_plans = UnordMap::new();
     for (param_index, param) in params.iter().enumerate() {
         let Some(param_ty) =
-            param_host_type(param, &program.invocation.type_subst.borrow(), runtime)
+            param_host_type(param, &program.invocation.type_subst.borrow(), runtime)?
         else {
-            return Ok(None);
+            return Ok(Ok(None));
         };
         let actual_index = param_index + 1;
         let Some(actual) = kids.get(actual_index) else {
-            return Ok(None);
+            return Ok(Ok(None));
         };
         let mut rewritten_actual = actual.clone();
         if matches!(param_ty, HostTypeTerm::List(_))
@@ -10892,8 +11232,8 @@ fn try_lower_general_list_grad_app(
         if wrt_names.contains(&param_names[param_index]) {
             let shape_actual =
                 resolve_list_grad_shape_expr(&rewritten_actual, program, defs.as_ref());
-            let Some(plan) = grad_pack_plan(&param_ty, &shape_actual, program) else {
-                return Ok(None);
+            let Some(plan) = grad_pack_plan(&param_ty, &shape_actual, program)? else {
+                return Ok(Ok(None));
             };
             rewritten_actual = shape_actual;
             rewritten_elements[actual_index + 2] = rewritten_actual;
@@ -10917,12 +11257,12 @@ fn try_lower_general_list_grad_app(
         } else if has_explicit_wrt {
             // Explicit names were validated against the parameters and each
             // selected parameter must have a plan, even with zero leaves.
-            return Err(crate::lower::LowerDiagnostic::new(
+            return Ok(Err(crate::lower::LowerDiagnostic::new(
                 format!("gradient target `{name}` has no result reconstruction plan"),
                 Some(app_expr.span()),
                 None,
             )
-            .fatal());
+            .fatal()));
         }
         // An implicit selection intentionally excludes nondifferentiable
         // parameters, whose plans were omitted above.
@@ -10931,10 +11271,10 @@ fn try_lower_general_list_grad_app(
         .iter()
         .any(GradPackPlan::needs_host_reconstruction)
     {
-        return Ok(None);
+        return Ok(Ok(None));
     }
 
-    let checked_ty = expr_host_type(app_expr, program, scope);
+    let checked_ty = expr_host_type(app_expr, program, scope)?;
     let inferred_result_ty = if selected_plans.len() == 1 {
         selected_plans[0].host_type()
     } else {
@@ -10963,12 +11303,12 @@ fn try_lower_general_list_grad_app(
         app_expr.span(),
     );
     let Some(lowered) =
-        lower_tensor_helper_dag_with_controls(&rewritten, program, scope, &expected)
+        lower_tensor_helper_dag_with_controls(&rewritten, program, scope, &expected)?
     else {
-        return Ok(None);
+        return Ok(Ok(None));
     };
     if lowered.value_root_count != plan.leaf_count() {
-        return Ok(None);
+        return Ok(Ok(None));
     }
     let root_tys = lowered
         .dag
@@ -10985,11 +11325,11 @@ fn try_lower_general_list_grad_app(
         })
         .sum::<usize>();
     if root_tys.len() != lowered.value_root_count + expected_control_roots {
-        return Ok(None);
+        return Ok(Ok(None));
     }
     if root_tys.is_empty() {
         let mut roots = std::iter::empty();
-        return Ok(Some(pack_grad_roots(&plan, &mut roots)));
+        return Ok(Ok(Some(pack_grad_roots(&plan, &mut roots))));
     }
 
     let helper_number = tensor_helpers.len();
@@ -11104,7 +11444,7 @@ fn try_lower_general_list_grad_app(
         }
     }
     debug_assert_eq!(control_offset, lowered.value_root_count);
-    Ok(Some(HostExpr::new(HostExprKind::Let {
+    Ok(Ok(Some(HostExpr::new(HostExprKind::Let {
         bindings: vec![HostBinding {
             name: binding_name,
             display_name: None,
@@ -11114,7 +11454,7 @@ fn try_lower_general_list_grad_app(
         }],
         body: Box::new(body),
         ty: result_ty,
-    })))
+    }))))
 }
 
 /// Read the `wrt` meta off a `grad` list and resolve it to a list of
@@ -11160,27 +11500,27 @@ fn dual_eval(
     env: &UnordMap<String, Dual>,
     program: &HostLoweringSession<'_>,
     depth: usize,
-) -> Option<Dual> {
+) -> LowerResult<Option<Dual>> {
     if depth > MAX_DUAL_INLINE_DEPTH {
-        return None;
+        return Ok(None);
     }
-    match expr {
+    Ok(match expr {
         Expr::Atom(Atom::Float(v), _) => Some(dual_float(*v, 0.0)),
         Expr::Atom(Atom::Int(v), _) => Some(dual_float(*v as f64, 0.0)),
         Expr::List(list, _) => match tag(list) {
             Some(DeepTag::Lit) => {
-                let inner = children(list).first()?;
-                dual_eval(inner, env, program, depth)
+                let inner = try_some!(children(list).first());
+                dual_eval(inner, env, program, depth)?
             }
             Some(DeepTag::Var) => {
-                let name = children(list).first().and_then(symbol_name)?;
-                let dual = env.get(name)?;
+                let name = try_some!(children(list).first().and_then(symbol_name));
+                let dual = try_some!(env.get(name));
                 Some(Dual {
                     value: dual.value.clone(),
                     deriv: dual.deriv.clone(),
                 })
             }
-            Some(DeepTag::App) => dual_eval_app(list, env, program, depth),
+            Some(DeepTag::App) => dual_eval_app(list, env, program, depth)?,
             // `(let (bind n0 v0 n1 v1 ...) body)`: forward-mode through a
             // block body. Each binding's value is dual-evaluated in the
             // environment built so far (sequential scoping — a later binding
@@ -11192,23 +11532,23 @@ fn dual_eval(
             // canonical scalar-AD shapes (single-variable derivatives,
             // Black-Scholes Greeks) reuse each intermediate a small number of
             // times, so the substituted trees stay small.
-            Some(DeepTag::Let) => dual_eval_let(list, env, program, depth),
+            Some(DeepTag::Let) => dual_eval_let(list, env, program, depth)?,
             Some(DeepTag::Block) => {
                 // chelis#859: dual-eval every child in order; the value is
                 // the last child's. Host scalar bodies are pure, so the
                 // non-last children contribute nothing to the duals.
                 let kids = children(list);
-                let (last, init) = kids.split_last()?;
+                let (last, init) = try_some!(kids.split_last());
                 for child in init {
-                    let _ = dual_eval(child, env, program, depth)?;
+                    let _ = try_some!(dual_eval(child, env, program, depth)?);
                 }
-                dual_eval(last, env, program, depth)
+                dual_eval(last, env, program, depth)?
             }
             _ => None,
         },
-        Expr::MetaExpr(meta, _) => dual_eval(&meta.expr, env, program, depth),
+        Expr::MetaExpr(meta, _) => dual_eval(&meta.expr, env, program, depth)?,
         _ => None,
-    }
+    })
 }
 
 /// Forward-mode dual evaluation of a `(let (bind ...) body)` block. Returns
@@ -11219,22 +11559,22 @@ fn dual_eval_let(
     env: &UnordMap<String, Dual>,
     program: &HostLoweringSession<'_>,
     depth: usize,
-) -> Option<Dual> {
+) -> LowerResult<Option<Dual>> {
     let kids = children(list);
-    let bind_list = kids.first().and_then(as_list)?;
+    let bind_list = try_some!(kids.first().and_then(as_list));
     if tag(bind_list) != Some(DeepTag::Bind) {
-        return None;
+        return Ok(None);
     }
-    let body = kids.get(1)?;
+    let body = try_some!(kids.get(1));
     let bind_kids = children(bind_list);
     // Bindings are alternating `name value` pairs; an odd count is malformed.
     if !bind_kids.len().is_multiple_of(2) {
-        return None;
+        return Ok(None);
     }
     let mut local_env = env.clone();
     for pair in bind_kids.as_chunks::<2>().0 {
-        let name = symbol_name(&pair[0])?;
-        let dual = dual_eval(&pair[1], &local_env, program, depth + 1)?;
+        let name = try_some!(symbol_name(&pair[0]));
+        let dual = try_some!(dual_eval(&pair[1], &local_env, program, depth + 1)?);
         local_env.insert(name.to_string(), dual);
     }
     dual_eval(body, &local_env, program, depth + 1)
@@ -11245,24 +11585,24 @@ fn dual_eval_app(
     env: &UnordMap<String, Dual>,
     program: &HostLoweringSession<'_>,
     depth: usize,
-) -> Option<Dual> {
+) -> LowerResult<Option<Dual>> {
     let kids = children(list);
-    let callee = kids.first().and_then(as_list)?;
+    let callee = try_some!(kids.first().and_then(as_list));
     if tag(callee) != Some(DeepTag::Var) {
-        return None;
+        return Ok(None);
     }
-    let op = children(callee).first().and_then(symbol_name)?;
+    let op = try_some!(children(callee).first().and_then(symbol_name));
     let arg_exprs = &kids[1..];
     let mut args: Vec<Dual> = Vec::new();
     for a in arg_exprs {
-        args.push(dual_eval(a, env, program, depth)?);
+        args.push(try_some!(dual_eval(a, env, program, depth)?));
     }
 
     // Helper closures over scalar builtins.
     let v = |d: &Dual| d.value.clone();
     let dv = |d: &Dual| d.deriv.clone();
 
-    match (op, args.len()) {
+    Ok(match (op, args.len()) {
         ("add", 2) => Some(Dual {
             value: scalar_builtin("add", vec![v(&args[0]), v(&args[1])]),
             deriv: scalar_builtin("add", vec![dv(&args[0]), dv(&args[1])]),
@@ -11351,9 +11691,9 @@ fn dual_eval_app(
             // (u^c)' = c * u^(c-1) * u'. A non-constant exponent (`deriv`
             // not identically zero) needs the general
             // u^v * (v' ln u + v u'/u) form; reject to stay correct.
-            let exponent = float_const(&args[1].value)?;
+            let exponent = try_some!(float_const(&args[1].value));
             if !is_zero_float(&args[1].deriv) {
-                return None;
+                return Ok(None);
             }
             let pow_inner = scalar_builtin("pow", vec![v(&args[0]), host_float(exponent - 1.0)]);
             let coeff = scalar_builtin("mul", vec![host_float(exponent), pow_inner]);
@@ -11382,8 +11722,8 @@ fn dual_eval_app(
         // non-scalar parameters, and `dual_eval` rejects any body construct
         // this pass does not support, so an unsupported callee falls through
         // to `None` (the unresolved-callable-marker rejection path).
-        _ => dual_eval_user_call(op, &args, program, depth),
-    }
+        _ => dual_eval_user_call(op, &args, program, depth)?,
+    })
 }
 
 /// Inline a call to a user-defined scalar def into the dual tree. Returns
@@ -11394,13 +11734,13 @@ fn dual_eval_user_call(
     args: &[Dual],
     program: &HostLoweringSession<'_>,
     depth: usize,
-) -> Option<Dual> {
-    let (param_names, param_tys, body) = resolve_scalar_def(program, op)?;
+) -> LowerResult<Option<Dual>> {
+    let (param_names, param_tys, body) = try_some!(resolve_scalar_def(program, op)?);
     if param_names.len() != args.len() {
-        return None;
+        return Ok(None);
     }
     if param_tys.iter().any(|ty| !is_dual_scalar_type(ty)) {
-        return None;
+        return Ok(None);
     }
     let mut call_env: UnordMap<String, Dual> = UnordMap::new();
     for (name, arg) in param_names.iter().zip(args.iter()) {
@@ -11430,16 +11770,16 @@ fn lower_app_host_expr(
     scope: &UnordMap<String, HostTypeTerm>,
     tensor_helpers: &mut TensorHelperSink,
     expected_ty: Option<&HostTypeTerm>,
-) -> Result<HostExpr, crate::lower::LowerDiagnostic> {
-    if let Some(grad_lowered) = try_lower_general_list_grad_app(
+) -> LowerResult<Result<HostExpr, crate::lower::LowerDiagnostic>> {
+    if let Some(grad_lowered) = try_ok!(try_lower_general_list_grad_app(
         app_expr,
         list,
         program,
         scope,
         tensor_helpers,
         expected_ty,
-    )? {
-        return Ok(grad_lowered);
+    )?) {
+        return Ok(Ok(grad_lowered));
     }
     // chelis#405: host-lane scalar forward-mode AD. When the callee is a
     // `grad(...)` form differentiating a scalar `f32 -> f32` (or
@@ -11449,8 +11789,13 @@ fn lower_app_host_expr(
     // programs get the `cmd_build` workaround text and everything else
     // is rejected at ABI projection (container `wrt`, tensor-lane grad,
     // unsupported op).
-    if let Some(grad_lowered) = try_lower_scalar_grad_app(list, program, scope, tensor_helpers)? {
-        return Ok(grad_lowered);
+    if let Some(grad_lowered) = try_ok!(try_lower_scalar_grad_app(
+        list,
+        program,
+        scope,
+        tensor_helpers
+    )?) {
+        return Ok(Ok(grad_lowered));
     }
     let kids = children(list);
     // Anonymous functions are represented at a statically-known call site by
@@ -11458,10 +11803,14 @@ fn lower_app_host_expr(
     // is also the terminal step after a higher-order top-level call is
     // specialized below: substituting an `fn` argument into `f(x)` creates an
     // app whose callee is that inline function.
-    if let Some(lowered) =
-        lower_inline_host_invocation(app_expr, program, scope, tensor_helpers, expected_ty)?
-    {
-        return Ok(lowered);
+    if let Some(lowered) = try_ok!(lower_inline_host_invocation(
+        app_expr,
+        program,
+        scope,
+        tensor_helpers,
+        expected_ty
+    )?) {
+        return Ok(Ok(lowered));
     }
     let name = kids
         .first()
@@ -11491,14 +11840,17 @@ fn lower_app_host_expr(
             }
         })
         .to_string();
-    let fn_sig = scope
-        .get(&name)
-        .and_then(host_fn_signature)
-        .or_else(|| lookup_declared_fn_type(program, &name))
-        .or_else(|| {
-            kids.first()
-                .and_then(|expr| expr_fn_type(expr, program.runtime()))
-        });
+    let fn_sig = match scope.get(&name).and_then(host_fn_signature) {
+        Some(signature) => Some(signature),
+        None => lookup_declared_fn_type(program, &name)?,
+    };
+    let fn_sig = match fn_sig {
+        Some(signature) => Some(signature),
+        None => match kids.first() {
+            Some(expr) => expr_fn_type(expr, program.runtime())?,
+            None => None,
+        },
+    };
     // Ordinary lexical lookup precedes builtin callable routes. A
     // function-typed parameter named `round_to` or `map` is a call through
     // that parameter, not a builtin selected by spelling
@@ -11510,7 +11862,7 @@ fn lower_app_host_expr(
         .is_some_and(|ty| matches!(ty, HostTypeTerm::Fn(_, _)));
     let callee_shadows_builtin = BUILTIN_NAMES.contains(&name.as_str()) && callee_is_local_callable;
     let active_compiler_name = (!callee_shadows_builtin).then_some(name.as_str());
-    let checked_ty = expr_host_type(app_expr, program, scope);
+    let checked_ty = expr_host_type(app_expr, program, scope)?;
     let explicit_ty = expected_ty
         .filter(|_| checked_ty.is_unresolved())
         .cloned()
@@ -11529,15 +11881,16 @@ fn lower_app_host_expr(
             )
         })
     {
-        let entries = lower_host_expr(&kids[1], program, scope, tensor_helpers)?;
-        return Ok(HostExpr::new(HostExprKind::Builtin {
+        let entries = try_ok!(lower_host_expr(&kids[1], program, scope, tensor_helpers)?);
+        return Ok(Ok(HostExpr::new(HostExprKind::Builtin {
             name: "__json_canonical_object_entries".to_string(),
             args: vec![entries],
             ty: explicit_ty,
-        }));
+        })));
     }
     let ctor_definition = match active_compiler_name
         .map(|_| resolve_adt_constructor_definition_for_type(program, &name, &explicit_ty))
+        .transpose()?
         .unwrap_or(AdtConstructorResolution::Missing)
     {
         AdtConstructorResolution::Unique(definition) => Some(definition),
@@ -11547,7 +11900,11 @@ fn lower_app_host_expr(
         // wrong package's declaration silently rewrote a payload's dtype
         // (chelis#1271), so refuse rather than pick.
         AdtConstructorResolution::Ambiguous(candidates) => {
-            return Err(ambiguous_constructor_error(app_expr, &name, &candidates));
+            return Ok(Err(ambiguous_constructor_error(
+                app_expr,
+                &name,
+                &candidates,
+            )));
         }
         // Not a constructor: this is the ordinary call path.
         AdtConstructorResolution::Missing => None,
@@ -11561,7 +11918,7 @@ fn lower_app_host_expr(
     // The checked application metadata is the authoritative applied result
     // type; source-level reconstruction is neither needed nor allowed.
     let callee_is_nullary_generic_constructor_wrapper =
-        top_level_fn_is_nullary_generic_constructor_wrapper(program, &name);
+        top_level_fn_is_nullary_generic_constructor_wrapper(program, &name)?;
     // Precision and rank polymorphism have dedicated tensor-aware
     // specialization paths below. A nested rank parameter also appears as a
     // stored ADT type variable, so the broad ordinary-generic predicate must
@@ -11584,7 +11941,7 @@ fn lower_app_host_expr(
         && let Some(specialized) = inline_top_level_host_call(app_expr, program)
     {
         let inlining_guard = InliningGuard::begin(&name, program);
-        let definitions = adt_constructor_definitions(program);
+        let definitions = adt_constructor_definitions(program)?;
         let specialized_ty =
             canonicalize_representation_erased_adt_args(explicit_ty.clone(), &definitions);
         let lowered = lower_host_expr_with_expected(
@@ -11593,7 +11950,7 @@ fn lower_app_host_expr(
             scope,
             tensor_helpers,
             (!specialized_ty.is_unresolved()).then_some(&specialized_ty),
-        )
+        )?
         .map(|body| {
             if specialized_ty.is_unresolved() {
                 body
@@ -11602,12 +11959,17 @@ fn lower_app_host_expr(
             }
         });
         drop(inlining_guard);
-        return lowered;
+        return Ok(lowered);
     }
     if active_compiler_name == Some("Cons") && kids.len() == 3 {
         let expr = Expr::List(list.clone(), chelis_deep::Span::new(0, 0));
-        if let Some(items) = lower_list_literal_items(&expr, program, scope, tensor_helpers)? {
-            let ty = expr_host_type(&expr, program, scope);
+        if let Some(items) = try_ok!(lower_list_literal_items(
+            &expr,
+            program,
+            scope,
+            tensor_helpers
+        )?) {
+            let ty = expr_host_type(&expr, program, scope)?;
             let ty = if ty.is_unresolved() {
                 HostTypeTerm::List(Box::new(
                     items
@@ -11618,7 +11980,7 @@ fn lower_app_host_expr(
             } else {
                 ty
             };
-            return Ok(HostExpr::new(HostExprKind::List(items, ty)));
+            return Ok(Ok(HostExpr::new(HostExprKind::List(items, ty))));
         }
     }
     // `Some` has a dedicated Option ABI only when no checked user ADT
@@ -11626,8 +11988,8 @@ fn lower_app_host_expr(
     // spelling but lowers through the generic ADT path below; raw-name
     // dispatch would contradict the checker's nominal result type.
     if active_compiler_name == Some("Some") && kids.len() == 2 && ctor_definition.is_none() {
-        let arg = lower_host_expr(&kids[1], program, scope, tensor_helpers)?;
-        return Ok(HostExpr::new(HostExprKind::Builtin {
+        let arg = try_ok!(lower_host_expr(&kids[1], program, scope, tensor_helpers)?);
+        return Ok(Ok(HostExpr::new(HostExprKind::Builtin {
             name,
             args: vec![arg.clone()],
             ty: if !explicit_ty.is_unresolved() {
@@ -11635,49 +11997,70 @@ fn lower_app_host_expr(
             } else {
                 HostTypeTerm::Option(Box::new(host_expr_type(&arg)))
             },
-        }));
+        })));
     }
     if active_compiler_name == Some("map") && kids.len() == 3 {
-        let callback =
-            lower_host_callback(&kids[1], program, scope, tensor_helpers)?.ok_or_else(|| {
+        let callback = try_ok!(
+            try_ok!(lower_host_callback(
+                &kids[1],
+                program,
+                scope,
+                tensor_helpers
+            )?)
+            .ok_or_else(|| {
                 host_expr_lowering_error(app_expr, "`map` requires a lowerable callback")
-            })?;
-        let list_expr = lower_host_expr(&kids[2], program, scope, tensor_helpers)?;
-        let ty = expr_host_type(app_expr, program, scope);
+            })
+        );
+        let list_expr = try_ok!(lower_host_expr(&kids[2], program, scope, tensor_helpers)?);
+        let ty = expr_host_type(app_expr, program, scope)?;
         let ty = if ty.is_unresolved() {
             HostTypeTerm::List(Box::new(callback.ret_ty.clone()))
         } else {
             ty
         };
-        return Ok(HostExpr::new(HostExprKind::Map {
+        return Ok(Ok(HostExpr::new(HostExprKind::Map {
             callback,
             list: Box::new(list_expr),
             ty,
-        }));
+        })));
     }
     if active_compiler_name == Some("filter") && kids.len() == 3 {
-        let callback =
-            lower_host_callback(&kids[1], program, scope, tensor_helpers)?.ok_or_else(|| {
+        let callback = try_ok!(
+            try_ok!(lower_host_callback(
+                &kids[1],
+                program,
+                scope,
+                tensor_helpers
+            )?)
+            .ok_or_else(|| {
                 host_expr_lowering_error(app_expr, "`filter` requires a lowerable callback")
-            })?;
-        let list_expr = lower_host_expr(&kids[2], program, scope, tensor_helpers)?;
-        let ty = expr_host_type(app_expr, program, scope);
+            })
+        );
+        let list_expr = try_ok!(lower_host_expr(&kids[2], program, scope, tensor_helpers)?);
+        let ty = expr_host_type(app_expr, program, scope)?;
         let ty = if ty.is_unresolved() {
             host_expr_type(&list_expr)
         } else {
             ty
         };
-        return Ok(HostExpr::new(HostExprKind::Filter {
+        return Ok(Ok(HostExpr::new(HostExprKind::Filter {
             callback,
             list: Box::new(list_expr),
             ty,
-        }));
+        })));
     }
     if active_compiler_name == Some("fold") && kids.len() == 4 {
-        let callback =
-            lower_host_callback(&kids[1], program, scope, tensor_helpers)?.ok_or_else(|| {
+        let callback = try_ok!(
+            try_ok!(lower_host_callback(
+                &kids[1],
+                program,
+                scope,
+                tensor_helpers
+            )?)
+            .ok_or_else(|| {
                 host_expr_lowering_error(app_expr, "`fold` requires a lowerable callback")
-            })?;
+            })
+        );
         // chelis#939: the checked callback signature owns the accumulator
         // type. Materialize it onto an empty/unresolved initializer rather
         // than reconstructing the element type from source syntax.
@@ -11688,72 +12071,93 @@ fn lower_app_host_expr(
         }
         .filter(|ty| !ty.is_unresolved())
         .unwrap_or_else(|| callback.ret_ty.clone());
-        let init_expr = lower_host_expr(&kids[2], program, scope, tensor_helpers)?;
+        let init_expr = try_ok!(lower_host_expr(&kids[2], program, scope, tensor_helpers)?);
         let init_expr = if accumulator_ty.is_unresolved() {
             init_expr
         } else {
             force_host_expr_type(init_expr, accumulator_ty.clone())
         };
-        let list_expr = lower_host_expr(&kids[3], program, scope, tensor_helpers)?;
-        let ty = expr_host_type(app_expr, program, scope);
+        let list_expr = try_ok!(lower_host_expr(&kids[3], program, scope, tensor_helpers)?);
+        let ty = expr_host_type(app_expr, program, scope)?;
         let ty = if ty.is_unresolved() {
             accumulator_ty
         } else {
             ty
         };
-        return Ok(HostExpr::new(HostExprKind::Fold {
+        return Ok(Ok(HostExpr::new(HostExprKind::Fold {
             callback,
             init: Box::new(init_expr),
             list: Box::new(list_expr),
             ty,
-        }));
+        })));
     }
     if active_compiler_name == Some("scan") && kids.len() == 4 {
-        let callback =
-            lower_host_callback(&kids[1], program, scope, tensor_helpers)?.ok_or_else(|| {
+        let callback = try_ok!(
+            try_ok!(lower_host_callback(
+                &kids[1],
+                program,
+                scope,
+                tensor_helpers
+            )?)
+            .ok_or_else(|| {
                 host_expr_lowering_error(app_expr, "`scan` requires a lowerable callback")
-            })?;
-        let init_expr = lower_host_expr(&kids[2], program, scope, tensor_helpers)?;
-        let list_expr = lower_host_expr(&kids[3], program, scope, tensor_helpers)?;
-        let ty = expr_host_type(app_expr, program, scope);
+            })
+        );
+        let init_expr = try_ok!(lower_host_expr(&kids[2], program, scope, tensor_helpers)?);
+        let list_expr = try_ok!(lower_host_expr(&kids[3], program, scope, tensor_helpers)?);
+        let ty = expr_host_type(app_expr, program, scope)?;
         let ty = if ty.is_unresolved() {
             HostTypeTerm::List(Box::new(host_expr_type(&init_expr)))
         } else {
             ty
         };
-        return Ok(HostExpr::new(HostExprKind::Scan {
+        return Ok(Ok(HostExpr::new(HostExprKind::Scan {
             callback,
             init: Box::new(init_expr),
             list: Box::new(list_expr),
             ty,
-        }));
+        })));
     }
     if active_compiler_name == Some("partition") && kids.len() == 3 {
-        let callback =
-            lower_host_callback(&kids[1], program, scope, tensor_helpers)?.ok_or_else(|| {
+        let callback = try_ok!(
+            try_ok!(lower_host_callback(
+                &kids[1],
+                program,
+                scope,
+                tensor_helpers
+            )?)
+            .ok_or_else(|| {
                 host_expr_lowering_error(app_expr, "`partition` requires a lowerable callback")
-            })?;
-        let list_expr = lower_host_expr(&kids[2], program, scope, tensor_helpers)?;
-        let ty = expr_host_type(app_expr, program, scope);
+            })
+        );
+        let list_expr = try_ok!(lower_host_expr(&kids[2], program, scope, tensor_helpers)?);
+        let ty = expr_host_type(app_expr, program, scope)?;
         let ty = if ty.is_unresolved() {
             let list_ty = host_expr_type(&list_expr);
             HostTypeTerm::Tuple(vec![list_ty.clone(), list_ty])
         } else {
             ty
         };
-        return Ok(HostExpr::new(HostExprKind::Partition {
+        return Ok(Ok(HostExpr::new(HostExprKind::Partition {
             callback,
             list: Box::new(list_expr),
             ty,
-        }));
+        })));
     }
     if active_compiler_name == Some("flat_map") && kids.len() == 3 {
-        let callback =
-            lower_host_callback(&kids[1], program, scope, tensor_helpers)?.ok_or_else(|| {
+        let callback = try_ok!(
+            try_ok!(lower_host_callback(
+                &kids[1],
+                program,
+                scope,
+                tensor_helpers
+            )?)
+            .ok_or_else(|| {
                 host_expr_lowering_error(app_expr, "`flat_map` requires a lowerable callback")
-            })?;
-        let list_expr = lower_host_expr(&kids[2], program, scope, tensor_helpers)?;
-        let ty = expr_host_type(app_expr, program, scope);
+            })
+        );
+        let list_expr = try_ok!(lower_host_expr(&kids[2], program, scope, tensor_helpers)?);
+        let ty = expr_host_type(app_expr, program, scope)?;
         let ty = if ty.is_unresolved() {
             match callback.ret_ty.clone() {
                 HostTypeTerm::List(inner) => HostTypeTerm::List(inner),
@@ -11762,39 +12166,45 @@ fn lower_app_host_expr(
         } else {
             ty
         };
-        return Ok(HostExpr::new(HostExprKind::FlatMap {
+        return Ok(Ok(HostExpr::new(HostExprKind::FlatMap {
             callback,
             list: Box::new(list_expr),
             ty,
-        }));
+        })));
     }
-    let helper_tensor_ty = expr_tensor_type(app_expr, program, scope)
-        .or_else(|| {
-            if let HostTypeTerm::Tensor(tensor_ty) = &inferred_ret_ty {
-                Some(tensor_ty.clone())
-            } else if let HostTypeTerm::Tensor(tensor_ty) = &explicit_ty {
-                Some(tensor_ty.clone())
-            } else {
-                None
-            }
-        })
-        .or_else(|| {
-            // When the callee is a `(grad {} fn_arg)` node (not a plain `var`),
-            // `infer_app_expr_host_type` returns None because it only handles `var`
-            // callees — so `helper_tensor_ty` is None and the tensor-helper path is
-            // skipped entirely.  For `grad(named_fn)(x)` the output shape equals the
-            // shape of the first differentiable argument `x`, so infer it from there.
-            // This lets `try_lower_tensor_helper_call` succeed even when the outer
-            // `app` node carries no explicit type annotation.
-            let callee = kids.first().and_then(as_list)?;
-            if tag(callee) != Some(DeepTag::Grad) {
-                return None;
-            }
-            kids.get(1)
-                .and_then(|first_arg| expr_tensor_type(first_arg, program, scope))
-        });
-    let (helper_expr, helper_scope, helper_bindings) =
-        hoist_host_lane_tensor_bindings(app_expr, program, scope, fn_sig.as_ref(), tensor_helpers)?;
+    let helper_tensor_ty = expr_tensor_type(app_expr, program, scope)?.or_else(|| {
+        if let HostTypeTerm::Tensor(tensor_ty) = &inferred_ret_ty {
+            Some(tensor_ty.clone())
+        } else if let HostTypeTerm::Tensor(tensor_ty) = &explicit_ty {
+            Some(tensor_ty.clone())
+        } else {
+            None
+        }
+    });
+    let helper_tensor_ty = match helper_tensor_ty {
+        Some(tensor_ty) => Some(tensor_ty),
+        // When the callee is a `(grad {} fn_arg)` node (not a plain `var`),
+        // `infer_app_expr_host_type` returns None because it only handles `var`
+        // callees — so `helper_tensor_ty` is None and the tensor-helper path is
+        // skipped entirely.  For `grad(named_fn)(x)` the output shape equals the
+        // shape of the first differentiable argument `x`, so infer it from there.
+        // This lets `try_lower_tensor_helper_call` succeed even when the outer
+        // `app` node carries no explicit type annotation.
+        None => match kids.first().and_then(as_list) {
+            Some(callee) if tag(callee) == Some(DeepTag::Grad) => match kids.get(1) {
+                Some(first_arg) => expr_tensor_type(first_arg, program, scope)?,
+                None => None,
+            },
+            _ => None,
+        },
+    };
+    let (helper_expr, helper_scope, helper_bindings) = try_ok!(hoist_host_lane_tensor_bindings(
+        app_expr,
+        program,
+        scope,
+        fn_sig.as_ref(),
+        tensor_helpers
+    )?);
     // Local callable params (e.g. `f` in `def apply(f: fn, x) = f(x)`) are
     // not representable in the tensor-helper DAG — the DAG path would box
     // the fn pointer into `chelis_scalar_tensor_from_f64` and emit C that
@@ -11820,7 +12230,7 @@ fn lower_app_host_expr(
     let helper_summary_rejects = if has_callable_params {
         false
     } else {
-        top_level_fn_helper_summary_rejects(program, &name)?
+        try_ok!(top_level_fn_helper_summary_rejects(program, &name)?)
     };
     // A call into a staged function must retain that function's shared plan.
     // Re-extracting a tensor-only summary here loses its host scalar producers
@@ -11829,10 +12239,10 @@ fn lower_app_host_expr(
         && !callee_is_polymorphic_precision
         && !callee_is_polymorphic_rank
         && let Some((canonical, body)) = find_top_level_def_named(program.exprs(), &name)
-        && let Some(signature) = host_def_signature(canonical, body, None, program)
+        && let Some(signature) = host_def_signature(canonical, body, None, program)?
     {
         !matches!(
-            staged_def_kernel(program, &signature, None)?,
+            try_ok!(staged_def_kernel(program, &signature, None)),
             staged::StagingAttempt::NotApplicable
         )
     } else {
@@ -11851,17 +12261,17 @@ fn lower_app_host_expr(
             helper_scope.as_ref(),
             tensor_helpers,
             tensor_ty.clone(),
-        )
+        )?
     {
         if helper_bindings.is_empty() {
-            return Ok(tensor_call);
+            return Ok(Ok(tensor_call));
         }
         let ty = host_expr_type(&tensor_call);
-        return Ok(HostExpr::new(HostExprKind::Let {
+        return Ok(Ok(HostExpr::new(HostExprKind::Let {
             bindings: helper_bindings,
             body: Box::new(tensor_call),
             ty,
-        }));
+        })));
     }
     if let Some(tensor_ty) = helper_tensor_ty
         && !callee_is_local_callable
@@ -11874,10 +12284,10 @@ fn lower_app_host_expr(
     {
         let inlining_guard = InliningGuard::begin(&name, program);
         let lowered =
-            try_lower_tensor_helper_call(&specialized, program, scope, tensor_helpers, tensor_ty);
+            try_lower_tensor_helper_call(&specialized, program, scope, tensor_helpers, tensor_ty)?;
         drop(inlining_guard);
         if let Some(tensor_call) = lowered {
-            return Ok(tensor_call);
+            return Ok(Ok(tensor_call));
         }
     }
     // WS-A8: if the callee is a polymorphic-precision sig, the host
@@ -11904,7 +12314,7 @@ fn lower_app_host_expr(
         && let Some(specialized) = inline_top_level_host_call(app_expr, program)
     {
         let inlining_guard = InliningGuard::begin(&name, program);
-        let definitions = adt_constructor_definitions(program);
+        let definitions = adt_constructor_definitions(program)?;
         let specialized_ty =
             canonicalize_representation_erased_adt_args(explicit_ty.clone(), &definitions);
         let lowered = lower_host_expr_with_expected(
@@ -11913,21 +12323,21 @@ fn lower_app_host_expr(
             scope,
             tensor_helpers,
             (!specialized_ty.is_unresolved()).then_some(&specialized_ty),
-        );
+        )?;
         drop(inlining_guard);
-        return lowered;
+        return Ok(lowered);
     }
     if has_callable_params
-        && let Some(guarded) = lower_guarded_host_invocation(
+        && let Some(guarded) = try_ok!(lower_guarded_host_invocation(
             app_expr,
             &name,
             &explicit_ty,
             program,
             scope,
             tensor_helpers,
-        )?
+        )?)
     {
-        return Ok(guarded);
+        return Ok(Ok(guarded));
     }
     if has_callable_params && let Some(specialized) = inline_top_level_host_call(app_expr, program)
     {
@@ -11938,7 +12348,7 @@ fn lower_app_host_expr(
         // callable-parameter callee's body — whose instantiation is only
         // recoverable from the call-site result type — stayed unresolved and
         // failed closed (`apply[a](f: (a) -> a, x: a) -> Box[a]`).
-        let definitions = adt_constructor_definitions(program);
+        let definitions = adt_constructor_definitions(program)?;
         let specialized_ty =
             canonicalize_representation_erased_adt_args(explicit_ty.clone(), &definitions);
         let lowered = lower_host_expr_with_expected(
@@ -11947,9 +12357,9 @@ fn lower_app_host_expr(
             scope,
             tensor_helpers,
             (!specialized_ty.is_unresolved()).then_some(&specialized_ty),
-        );
+        )?;
         drop(inlining_guard);
-        return lowered;
+        return Ok(lowered);
     }
     // chelis#1158: a recursive ordinary-generic function has no standalone
     // C symbol and cannot be inlined (the call graph has a cycle). Compile
@@ -11982,10 +12392,10 @@ fn lower_app_host_expr(
             tensor_helpers,
         );
     }
-    let args = kids[1..]
-        .iter()
-        .map(|arg| lower_host_expr(arg, program, scope, tensor_helpers))
-        .collect::<Result<Vec<_>, _>>()?;
+    let args =
+        try_ok!(try_collect_results(kids[1..].iter().map(|arg| {
+            lower_host_expr(arg, program, scope, tensor_helpers)
+        }))?);
     let construct_ty = if let Some(definition) = &ctor_definition {
         if matches!(explicit_ty, HostTypeTerm::Adt(_, _)) {
             explicit_ty.clone()
@@ -11996,13 +12406,14 @@ fn lower_app_host_expr(
         inferred_ret_ty.clone()
     };
     if let Some(definition) = ctor_definition {
-        let instantiated = instantiate_adt_constructor(program, &definition, &construct_ty)
-            .map_err(|error| {
+        let instantiated = try_ok!(
+            instantiate_adt_constructor(program, &definition, &construct_ty)?.map_err(|error| {
                 host_expr_lowering_error(
                     app_expr,
                     format!("constructor `{name}` is not concretely instantiated: {error}"),
                 )
-            })?;
+            })
+        );
         let expected_fields = instantiated.fields;
         let fields = args
             .into_iter()
@@ -12015,11 +12426,11 @@ fn lower_app_host_expr(
                 }
             })
             .collect();
-        return Ok(HostExpr::new(HostExprKind::AdtConstruct {
+        return Ok(Ok(HostExpr::new(HostExprKind::AdtConstruct {
             ctor: name,
             fields,
             ty: instantiated.ty,
-        }));
+        })));
     }
     if (callee_shadows_builtin || !BUILTIN_NAMES.contains(&name.as_str()))
         && name != "Some"
@@ -12033,7 +12444,7 @@ fn lower_app_host_expr(
         // node-level annotator re-runs inference with a fresh subst that
         // doesn't share the outer pass's tvar bindings.
         let prefer_inferred = host_type_is_unresolved(&explicit_ty);
-        return Ok(HostExpr::new(HostExprKind::Call {
+        return Ok(Ok(HostExpr::new(HostExprKind::Call {
             function: name,
             args,
             arg_tys: fn_sig
@@ -12045,14 +12456,14 @@ fn lower_app_host_expr(
             } else {
                 explicit_ty
             },
-        }));
+        })));
     }
     let ty = if !explicit_ty.is_unresolved() {
         explicit_ty
     } else {
         infer_builtin_host_type(&name, &args).unwrap_or_else(fresh_host_inference)
     };
-    Ok(HostExpr::new(HostExprKind::Builtin { name, args, ty }))
+    Ok(Ok(HostExpr::new(HostExprKind::Builtin { name, args, ty })))
 }
 
 /// Beta-reduce an anonymous call for structural shape evidence only.
@@ -12412,20 +12823,20 @@ fn lower_inline_host_invocation(
     scope: &UnordMap<String, HostTypeTerm>,
     tensor_helpers: &mut TensorHelperSink,
     expected: Option<&HostTypeTerm>,
-) -> Result<Option<HostExpr>, crate::lower::LowerDiagnostic> {
+) -> LowerResult<Result<Option<HostExpr>, crate::lower::LowerDiagnostic>> {
     let runtime = program.runtime();
     let Some(call) = as_list(expr) else {
-        return Ok(None);
+        return Ok(Ok(None));
     };
     let Some(callee) = children(call).first() else {
-        return Ok(None);
+        return Ok(Ok(None));
     };
     let callee = match callee {
         Expr::MetaExpr(meta, _) => &meta.expr,
         direct => direct,
     };
     let Some(function) = as_list(callee).filter(|list| tag(list) == Some(DeepTag::Fn)) else {
-        return Ok(None);
+        return Ok(Ok(None));
     };
     let children = children(function);
     let Some(declarations) = children
@@ -12433,25 +12844,25 @@ fn lower_inline_host_invocation(
         .and_then(as_list)
         .filter(|list| tag(list) == Some(DeepTag::Params))
     else {
-        return Err(host_expr_lowering_error(
+        return Ok(Err(host_expr_lowering_error(
             expr,
             "inline invocation lost its parameters",
-        ));
+        )));
     };
     let Some(body) = children.get(1) else {
-        return Err(host_expr_lowering_error(
+        return Ok(Err(host_expr_lowering_error(
             expr,
             "inline invocation lost its body",
-        ));
+        )));
     };
-    let inferred = expr_fn_type(callee, runtime).map(|(params, _)| params);
+    let inferred = expr_fn_type(callee, runtime)?.map(|(params, _)| params);
     let mut params = Vec::new();
     for (index, declaration) in self::children(declarations).iter().enumerate() {
         let Some(name) = param_name(declaration) else {
-            return Err(host_expr_lowering_error(
+            return Ok(Err(host_expr_lowering_error(
                 expr,
                 "inline invocation lost a parameter name",
-            ));
+            )));
         };
         // The authored annotation is the obligation. Actualized expression
         // metadata supplies only parameters whose annotation is absent.
@@ -12459,7 +12870,7 @@ fn lower_inline_host_invocation(
             declaration,
             &program.invocation.type_subst.borrow(),
             runtime,
-        )
+        )?
         .or_else(|| {
             inferred
                 .as_ref()
@@ -12467,18 +12878,19 @@ fn lower_inline_host_invocation(
                 .cloned()
         })
         .map(|ty| expand_host_type_aliases(program, ty))
+        .transpose()?
         .unwrap_or_else(fresh_host_inference);
         params.push(HostParam { name, ty });
     }
-    lower_retained_host_invocation(
+    Ok(lower_retained_host_invocation(
         expr,
         RetainedHostInvocation::new(&params, body),
         expected,
         program,
         scope,
         tensor_helpers,
-    )
-    .map(Some)
+    )?
+    .map(Some))
 }
 
 /// Keep the signature boundary which named body substitution otherwise erases.
@@ -12489,30 +12901,30 @@ fn lower_guarded_host_invocation(
     program: &HostLoweringSession<'_>,
     scope: &UnordMap<String, HostTypeTerm>,
     tensor_helpers: &mut TensorHelperSink,
-) -> Result<Option<HostExpr>, crate::lower::LowerDiagnostic> {
+) -> LowerResult<Result<Option<HostExpr>, crate::lower::LowerDiagnostic>> {
     if is_inlining(name, program) {
-        return Ok(None);
+        return Ok(Ok(None));
     }
     let Some((canonical, body)) = find_top_level_def_named(program.exprs(), name) else {
-        return Ok(None);
+        return Ok(Ok(None));
     };
-    let Some(signature) = host_def_signature(canonical, body, None, program) else {
-        return Ok(None);
+    let Some(signature) = host_def_signature(canonical, body, None, program)? else {
+        return Ok(Ok(None));
     };
     let mut invocation = RetainedHostInvocation::new(&signature.params, &signature.body_expr);
     if !invocation.has_entry_obligations() {
-        return Ok(None);
+        return Ok(Ok(None));
     }
     invocation.name = Some(name);
-    lower_retained_host_invocation(
+    Ok(lower_retained_host_invocation(
         expr,
         invocation,
         Some(expected),
         program,
         scope,
         tensor_helpers,
-    )
-    .map(Some)
+    )?
+    .map(Some))
 }
 
 /// Evaluate payload actuals once in caller order, then execute the complete
@@ -12525,25 +12937,25 @@ fn lower_retained_host_invocation(
     program: &HostLoweringSession<'_>,
     scope: &UnordMap<String, HostTypeTerm>,
     tensor_helpers: &mut TensorHelperSink,
-) -> Result<HostExpr, crate::lower::LowerDiagnostic> {
+) -> LowerResult<Result<HostExpr, crate::lower::LowerDiagnostic>> {
     let Expr::List(call, span) = expr else {
-        return Err(host_expr_lowering_error(
+        return Ok(Err(host_expr_lowering_error(
             expr,
             "retained invocation is not an application",
-        ));
+        )));
     };
     let call_children = children(call);
     let Some((_, args)) = call_children.split_first() else {
-        return Err(host_expr_lowering_error(
+        return Ok(Err(host_expr_lowering_error(
             expr,
             "retained invocation lost its actuals",
-        ));
+        )));
     };
     if args.len() != invocation.params.len() {
-        return Err(host_expr_lowering_error(
+        return Ok(Err(host_expr_lowering_error(
             expr,
             "retained invocation argument count differs from its signature",
-        ));
+        )));
     }
     let mut reserved = scope
         .to_sorted()
@@ -12552,8 +12964,10 @@ fn lower_retained_host_invocation(
         .collect::<UnordSet<_>>();
     collect_deep_var_names(expr, &mut reserved);
     collect_deep_var_names(invocation.body, &mut reserved);
-    names_bound_in(invocation.body, &mut reserved)
-        .map_err(|detail| host_expr_lowering_error(expr, detail))?;
+    try_ok!(
+        names_bound_in(invocation.body, &mut reserved)
+            .map_err(|detail| host_expr_lowering_error(expr, detail))
+    );
     let mut substitutions = UnordMap::new();
     let mut local_scope = scope.clone();
     let mut bindings = Vec::new();
@@ -12582,7 +12996,7 @@ fn lower_retained_host_invocation(
             substitutions.insert(formal.name.clone(), arg.clone());
             continue;
         }
-        let value = lower_host_expr(arg, program, scope, tensor_helpers)?;
+        let value = try_ok!(lower_host_expr(arg, program, scope, tensor_helpers)?);
         let ty = host_expr_type(&value);
         let mut serial = index;
         let local = loop {
@@ -12642,7 +13056,7 @@ fn lower_retained_host_invocation(
             }),
         });
     }
-    let definitions = adt_constructor_definitions(program);
+    let definitions = adt_constructor_definitions(program)?;
     let expected = expected.map(|expected| {
         canonicalize_representation_erased_adt_args(expected.clone(), &definitions)
     });
@@ -12655,15 +13069,15 @@ fn lower_retained_host_invocation(
         &local_scope,
         tensor_helpers,
         expected.as_ref().filter(|ty| !ty.is_unresolved()),
-    );
+    )?;
     drop(inlining_guard);
-    let body = lowered?;
+    let body = try_ok!(lowered);
     let ty = host_expr_type(&body);
-    Ok(HostExpr::new(HostExprKind::Let {
+    Ok(Ok(HostExpr::new(HostExprKind::Let {
         bindings,
         body: Box::new(body),
         ty,
-    }))
+    })))
 }
 
 fn inline_top_level_host_call(expr: &Expr, program: &HostLoweringSession<'_>) -> Option<Expr> {
@@ -12725,20 +13139,20 @@ fn lower_recursive_generic_call(
     program: &HostLoweringSession<'_>,
     scope: &UnordMap<String, HostTypeTerm>,
     tensor_helpers: &mut TensorHelperSink,
-) -> Result<HostExpr, crate::lower::LowerDiagnostic> {
+) -> LowerResult<Result<HostExpr, crate::lower::LowerDiagnostic>> {
     let runtime = program.runtime();
     // Resolve the callee to its defining declaration first: the interned
     // identity is the definition's own name, never the call site's spelling,
     // so a qualified and a short reference to one def intern one
     // specialization per instantiation (harden-bounded-monomorphization D4).
     let Some((canonical_name, def_body)) = find_top_level_def_named(program.exprs(), name) else {
-        return Err(host_expr_lowering_error(
+        return Ok(Err(host_expr_lowering_error(
             app_expr,
             format!(
                 "generic host call `{name}` has no top-level definition to \
                  specialize (chelis#1226; [05-UNS-1])"
             ),
-        ));
+        )));
     };
     let canonical_name = canonical_name.to_string();
     let def_body = def_body.clone();
@@ -12751,11 +13165,11 @@ fn lower_recursive_generic_call(
     // each orbit member gets (and memoizes) its own specialized symbol.
     // Reusing the innermost in-progress symbol without checking the
     // instantiation would wire a permuted edge to a wrong-typed definition.
-    let definitions = adt_constructor_definitions(program);
+    let definitions = adt_constructor_definitions(program)?;
     let mut param_tys = Vec::with_capacity(args.len());
     for arg in args {
         let mut ty = canonicalize_representation_erased_adt_args(
-            expr_host_type(arg, program, scope),
+            expr_host_type(arg, program, scope)?,
             &definitions,
         );
         // chelis#1216: the structural walk does not reconstruct every node's
@@ -12768,7 +13182,7 @@ fn lower_recursive_generic_call(
         // whole application. A stamp that is still unresolved after erasure
         // is genuinely underconstrained and is left to the residue.
         if ty.is_unresolved()
-            && let Some(stamped) = expr_type(arg, &program.invocation.type_subst.borrow(), runtime)
+            && let Some(stamped) = expr_type(arg, &program.invocation.type_subst.borrow(), runtime)?
         {
             let stamped = canonicalize_representation_erased_adt_args(stamped, &definitions);
             if !stamped.is_unresolved() {
@@ -12843,7 +13257,7 @@ fn lower_recursive_generic_call(
                 && !actual.is_unresolved()
             {
                 let declared_term =
-                    decode_host_type_or_raise(declared_expr, &UnordMap::new(), runtime);
+                    decode_host_type_or_raise(declared_expr, &UnordMap::new(), runtime)?;
                 solve_host_type_vars(&declared_term, actual, &mut subst);
             }
         }
@@ -12858,7 +13272,7 @@ fn lower_recursive_generic_call(
             && let Some(declared_ret) = declared_return_type_expr(program.exprs(), &canonical_name)
         {
             let declared_ret_term =
-                decode_host_type_or_raise(&declared_ret, &UnordMap::new(), runtime);
+                decode_host_type_or_raise(&declared_ret, &UnordMap::new(), runtime)?;
             solve_host_type_vars(&declared_ret_term, &ret_ty, &mut subst);
         }
         if !subst.is_empty() {
@@ -12866,7 +13280,7 @@ fn lower_recursive_generic_call(
                 if param_ty.is_unresolved()
                     && let Some(Some(declared_expr)) = declared.get(slot)
                 {
-                    let completed = decode_host_type_or_raise(declared_expr, &subst, runtime);
+                    let completed = decode_host_type_or_raise(declared_expr, &subst, runtime)?;
                     if !completed.is_unresolved() {
                         *param_ty = completed;
                     }
@@ -12876,7 +13290,7 @@ fn lower_recursive_generic_call(
                 && let Some(declared_ret) =
                     declared_return_type_expr(program.exprs(), &canonical_name)
             {
-                let completed = decode_host_type_or_raise(&declared_ret, &subst, runtime);
+                let completed = decode_host_type_or_raise(&declared_ret, &subst, runtime)?;
                 if !completed.is_unresolved() {
                     ret_ty = completed;
                 }
@@ -12887,7 +13301,7 @@ fn lower_recursive_generic_call(
     let derived_concrete =
         !param_tys.iter().any(HostTypeTerm::is_unresolved) && !ret_ty.is_unresolved();
     if derived_concrete {
-        let symbol = ensure_mono_specialization(
+        let symbol = try_ok!(ensure_mono_specialization(
             app_expr,
             &canonical_name,
             &def_body,
@@ -12895,21 +13309,25 @@ fn lower_recursive_generic_call(
             &ret_ty,
             program,
             tensor_helpers,
-        )?;
-        let lowered_args = args
-            .iter()
-            .zip(param_tys.iter())
-            .map(|(arg, param_ty)| {
-                lower_host_expr_with_expected(arg, program, scope, tensor_helpers, Some(param_ty))
-                    .map(|lowered| force_host_expr_type(lowered, param_ty.clone()))
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        return Ok(HostExpr::new(HostExprKind::Call {
+        )?);
+        let lowered_args = try_ok!(try_collect_results(args.iter().zip(param_tys.iter()).map(
+            |(arg, param_ty)| {
+                Ok(lower_host_expr_with_expected(
+                    arg,
+                    program,
+                    scope,
+                    tensor_helpers,
+                    Some(param_ty),
+                )?
+                .map(|lowered| force_host_expr_type(lowered, param_ty.clone())))
+            }
+        ))?);
+        return Ok(Ok(HostExpr::new(HostExprKind::Call {
             function: symbol,
             args: lowered_args,
             arg_tys: param_tys,
             ty: ret_ty,
-        }));
+        })));
     }
 
     // PR #1215 review: a NON-recursive top-level call whose instantiation
@@ -12934,10 +13352,10 @@ fn lower_recursive_generic_call(
             scope,
             tensor_helpers,
             (!ret_ty.is_unresolved()).then_some(&ret_ty),
-        );
+        )?;
         drop(spelled_guard);
         drop(canonical_guard);
-        return lowered;
+        return Ok(lowered);
     }
 
     // Fail-closed residue: no concrete checked instantiation to key a
@@ -12951,13 +13369,13 @@ fn lower_recursive_generic_call(
     // tracker (chelis#1226): the call reaching here need not be recursive,
     // and chelis#1158 closed with its delivery ([05-UNS-5] requires a live
     // authority).
-    Err(host_expr_lowering_error(
+    Ok(Err(host_expr_lowering_error(
         app_expr,
         format!(
             "generic host call `{name}` has no concrete checked type \
              application to specialize (chelis#1226; [05-UNS-1])"
         ),
-    ))
+    )))
 }
 
 /// Deterministic specialized-symbol name: the def's canonical name plus an
@@ -13174,7 +13592,7 @@ fn ensure_mono_specialization(
     ret_ty: &HostTypeTerm,
     program: &HostLoweringSession<'_>,
     tensor_helpers: &TensorHelperSink,
-) -> Result<String, crate::lower::LowerDiagnostic> {
+) -> LowerResult<Result<String, crate::lower::LowerDiagnostic>> {
     let canonical_key = mono_specialization_key(name, param_tys, ret_ty);
     if let Some(symbol) = program
         .invocation
@@ -13184,7 +13602,7 @@ fn ensure_mono_specialization(
         .get(&canonical_key)
         .cloned()
     {
-        return Ok(symbol);
+        return Ok(Ok(symbol));
     }
     let symbol = mono_specialization_symbol(name, &canonical_key);
     let collision = register_mono_symbol_key(
@@ -13193,14 +13611,14 @@ fn ensure_mono_specialization(
         &canonical_key,
     );
     if let Err(existing_key) = collision {
-        return Err(host_expr_lowering_error(
+        return Ok(Err(host_expr_lowering_error(
             app_expr,
             format!(
                 "internal: specialized symbol `{symbol}` collides across two distinct \
                  canonical signatures (`{existing_key}` vs `{canonical_key}`); refusing to \
                  emit a definition that serves either (chelis#1226; [05-UNS-1])"
             ),
-        ));
+        )));
     }
 
     let params = as_list(body)
@@ -13215,16 +13633,16 @@ fn ensure_mono_specialization(
             Some((children(params_list).to_vec(), body_expr))
         });
     let Some((param_exprs, body_expr)) = params else {
-        return Err(host_expr_lowering_error(
+        return Ok(Err(host_expr_lowering_error(
             app_expr,
             format!(
                 "generic host call `{name}` does not name a function-bodied \
                  definition (chelis#1226; [05-UNS-1])"
             ),
-        ));
+        )));
     };
     if param_exprs.len() != param_tys.len() {
-        return Err(host_expr_lowering_error(
+        return Ok(Err(host_expr_lowering_error(
             app_expr,
             format!(
                 "generic host call `{name}` supplies {} argument(s) for {} \
@@ -13232,19 +13650,19 @@ fn ensure_mono_specialization(
                 param_tys.len(),
                 param_exprs.len()
             ),
-        ));
+        )));
     }
     let mut spec_scope = UnordMap::new();
     let mut spec_params = Vec::with_capacity(param_exprs.len());
     for (param, param_ty) in param_exprs.iter().zip(param_tys.iter()) {
         let Some(pname) = param_name(param) else {
-            return Err(host_expr_lowering_error(
+            return Ok(Err(host_expr_lowering_error(
                 app_expr,
                 format!(
                     "generic host call `{name}` has an unnameable parameter \
                      (chelis#1226; [05-UNS-1])"
                 ),
-            ));
+            )));
         };
         spec_scope.insert(pname.clone(), param_ty.clone());
         spec_params.push(HostParam {
@@ -13273,16 +13691,16 @@ fn ensure_mono_specialization(
         spec_scope: &spec_scope,
         collect_execution: tensor_helpers.collect_execution,
         collect_trace: tensor_helpers.collect_trace,
-    });
+    })?;
     program.invocation.mono.borrow_mut().in_progress.pop();
-    let function = lowered?;
+    let function = try_ok!(lowered);
     program
         .invocation
         .mono
         .borrow_mut()
         .functions
         .push(function);
-    Ok(symbol)
+    Ok(Ok(symbol))
 }
 
 struct MonoSpecializedFunctionInput<'a> {
@@ -13300,7 +13718,7 @@ struct MonoSpecializedFunctionInput<'a> {
 
 fn lower_mono_specialized_function(
     input: MonoSpecializedFunctionInput<'_>,
-) -> Result<LoweredHostFunction, crate::lower::LowerDiagnostic> {
+) -> LowerResult<Result<LoweredHostFunction, crate::lower::LowerDiagnostic>> {
     let runtime = input.program.runtime();
     let MonoSpecializedFunctionInput {
         symbol,
@@ -13329,20 +13747,20 @@ fn lower_mono_specialized_function(
     // correctly and then matches nothing, because no body node ever mentions
     // `a`. Only the recorded generic signature shares the body's namespace.
     let mut subst: UnordMap<String, HostTypeTerm> = UnordMap::new();
-    if let Some((generic_params, generic_ret)) = expr_fn_type(fn_expr, runtime) {
+    if let Some((generic_params, generic_ret)) = expr_fn_type(fn_expr, runtime)? {
         for (generic, actual) in generic_params.iter().zip(params.iter()) {
             solve_host_type_vars(generic, &actual.ty, &mut subst);
         }
         solve_host_type_vars(&generic_ret, ret_ty, &mut subst);
     }
     let _subst_guard = ActiveTypeSubstGuard::push(subst, program);
-    let mut host_body = lower_host_expr_with_expected(
+    let mut host_body = try_ok!(lower_host_expr_with_expected(
         &body_expr,
         program,
         spec_scope,
         &mut fn_tensor_helpers,
         Some(ret_ty),
-    )?;
+    )?);
     // Span survival (spec/design/chelis_span_survival.md §2.3): the fn
     // form's and body's source regions surface on the specialized body.
     host_body.append_merged_span(body_expr.span_id());
@@ -13354,7 +13772,7 @@ fn lower_mono_specialized_function(
         ret_ty.clone()
     };
     let (tensor_helpers, products) = fn_tensor_helpers.into_parts();
-    Ok(LoweredHostFunction {
+    Ok(Ok(LoweredHostFunction {
         function: HostFunction {
             helper_result_claim_axes: Vec::new(),
             name: symbol.to_string(),
@@ -13367,7 +13785,7 @@ fn lower_mono_specialized_function(
             summary_rejections: Vec::new(),
         },
         products,
-    })
+    }))
 }
 
 /// Whether `name` has the narrow chelis#935 specialization shape: a
@@ -13378,21 +13796,21 @@ fn lower_mono_specialized_function(
 fn top_level_fn_is_nullary_generic_constructor_wrapper(
     program: &HostLoweringSession<'_>,
     name: &str,
-) -> bool {
-    let Some((params, ret)) = lookup_declared_fn_type(program, name) else {
-        return false;
+) -> LowerResult<bool> {
+    let Some((params, ret)) = lookup_declared_fn_type(program, name)? else {
+        return Ok(false);
     };
     if !params.is_empty() || !ret.is_unresolved() {
-        return false;
+        return Ok(false);
     }
     let Some(body) = find_top_level_def_expr(program.exprs(), name) else {
-        return false;
+        return Ok(false);
     };
     let Expr::List(fn_list, _) = body else {
-        return false;
+        return Ok(false);
     };
     if tag(fn_list) != Some(DeepTag::Fn) {
-        return false;
+        return Ok(false);
     }
     let fn_kids = children(fn_list);
     if fn_kids
@@ -13400,27 +13818,27 @@ fn top_level_fn_is_nullary_generic_constructor_wrapper(
         .and_then(as_list)
         .is_none_or(|params| tag(params) != Some(DeepTag::Params) || !children(params).is_empty())
     {
-        return false;
+        return Ok(false);
     }
     let mut constructor = fn_kids.get(1);
     while let Some(Expr::MetaExpr(meta, _)) = constructor {
         constructor = Some(&meta.expr);
     }
     let Some(Expr::List(var, _)) = constructor else {
-        return false;
+        return Ok(false);
     };
     if tag(var) != Some(DeepTag::Var) {
-        return false;
+        return Ok(false);
     }
     let Some(ctor_name) = children(var).first().and_then(symbol_name) else {
-        return false;
+        return Ok(false);
     };
     // Predicate disposition (chelis#1271): an ambiguous constructor name
     // answers `false`, which only declines this narrow specialization.
     // The wrapper's body still lowers through the bare-variable path,
     // which rejects the same ambiguity, so the program fails closed.
-    lookup_adt_constructor_definition(program, ctor_name)
-        .is_some_and(|definition| !definition.parameters.is_empty() && definition.is_nullary())
+    Ok(lookup_adt_constructor_definition(program, ctor_name)?
+        .is_some_and(|definition| !definition.parameters.is_empty() && definition.is_nullary()))
 }
 
 /// Every name this expression REFERENCES, as a `(var {} name)` node
@@ -14132,7 +14550,7 @@ fn top_level_fn_needs_host_lane_tensor_lowering(
 fn top_level_fn_helper_summary_rejects(
     program: &HostLoweringSession<'_>,
     name: &str,
-) -> Result<bool, crate::lower::LowerDiagnostic> {
+) -> LowerResult<Result<bool, crate::lower::LowerDiagnostic>> {
     let runtime = program.runtime();
     // chelis#935/#936 bounded generic functions are specialized before
     // helper extraction. Probing their unspecialized body here would discard
@@ -14141,13 +14559,13 @@ fn top_level_fn_helper_summary_rejects(
     if top_level_fn_is_type_polymorphic(program, name)
         || top_level_fn_is_nested_rank_polymorphic(program, name)
     {
-        return Ok(false);
+        return Ok(Ok(false));
     }
     // Guard against unbounded re-entry: while we are already inlining
     // `name` we must not recursively re-lower it to probe its
     // rejections.
     if is_inlining(name, program) {
-        return Ok(false);
+        return Ok(Ok(false));
     }
     if let Some(cached) = program
         .facts
@@ -14156,23 +14574,23 @@ fn top_level_fn_helper_summary_rejects(
         .get(name)
         .copied()
     {
-        return Ok(cached);
+        return Ok(Ok(cached));
     }
     let Some(body) = find_top_level_def_expr(program.exprs(), name) else {
-        return Ok(false);
+        return Ok(Ok(false));
     };
     // Like a type-polymorphic declaration, an unresolved source-rate
     // template has no standalone helper summary. Its actual call is
     // classified and lowered with the caller's static controls (#1764).
-    if cached_subexpr_lowering_context(program).evaluation_profile(body, &[], runtime)
+    if cached_subexpr_lowering_context(program).evaluation_profile(body, &[], runtime)?
         == crate::evaluation::EvaluationProfile::Legacy(
             crate::evaluation::LegacyEvaluationReason::RuntimeRate,
         )
     {
-        return Ok(false);
+        return Ok(Ok(false));
     }
     if !matches!(body, Expr::List(list, _) if tag(list) == Some(DeepTag::Fn)) {
-        return Ok(false);
+        return Ok(Ok(false));
     }
     record_host_work(|profile| profile.helper_summary_builds += 1);
     // This is a diagnostic count, never a capacity key. The chelis#893
@@ -14200,7 +14618,7 @@ fn top_level_fn_helper_summary_rejects(
     // A fatal tensor-helper rejection can unwind from lower_host_function
     // (#1922). Return that diagnostic only after restoring the probe state
     // and inlining marker, and never cache it as "no summary rejection".
-    let lowered = lowered?;
+    let lowered = try_ok!(lowered);
     // An already-returned probe error is not a build failure, including an
     // error returned by a nested summary probe. Preserve that deferral
     // (harden-bounded-monomorphization D1): this lowering was speculative,
@@ -14216,7 +14634,7 @@ fn top_level_fn_helper_summary_rejects(
         .helper_summary_rejects
         .borrow_mut()
         .insert(name.to_string(), rejects);
-    Ok(rejects)
+    Ok(Ok(rejects))
 }
 
 /// A top-level expression body needs host-lane lowering when it calls a
@@ -14232,21 +14650,24 @@ fn top_level_fn_helper_summary_rejects(
 fn expr_calls_top_level_fn_with_callable_param(
     expr: &Expr,
     program: &HostLoweringSession<'_>,
-) -> bool {
+) -> LowerResult<bool> {
     let graph = top_level_fn_call_graph(program);
     let fn_names = graph.keys().cloned().collect::<BTreeSet<_>>();
-    collect_called_top_level_fns(expr, &fn_names)
-        .iter()
-        .any(|name| top_level_fn_has_callable_param(program, name))
+    try_any(&collect_called_top_level_fns(expr, &fn_names), |name| {
+        top_level_fn_has_callable_param(program, name)
+    })
 }
 
-fn top_level_fn_has_callable_param(program: &HostLoweringSession<'_>, name: &str) -> bool {
-    let Some((param_tys, _)) = lookup_declared_fn_type(program, name) else {
-        return false;
+fn top_level_fn_has_callable_param(
+    program: &HostLoweringSession<'_>,
+    name: &str,
+) -> LowerResult<bool> {
+    let Some((param_tys, _)) = lookup_declared_fn_type(program, name)? else {
+        return Ok(false);
     };
-    param_tys
+    Ok(param_tys
         .iter()
-        .any(|ty| matches!(ty, HostTypeTerm::Fn(_, _)))
+        .any(|ty| matches!(ty, HostTypeTerm::Fn(_, _))))
 }
 
 /// A tensor-returning body that calls a summary-rejecting top-level fn
@@ -14258,7 +14679,7 @@ fn top_level_fn_has_callable_param(program: &HostLoweringSession<'_>, name: &str
 fn expr_calls_summary_rejecting_top_level_fn(
     expr: &Expr,
     program: &HostLoweringSession<'_>,
-) -> Result<bool, crate::lower::LowerDiagnostic> {
+) -> LowerResult<Result<bool, crate::lower::LowerDiagnostic>> {
     let graph = top_level_fn_call_graph(program);
     let fn_names = graph.keys().cloned().collect::<BTreeSet<_>>();
     // Sorted, not UnordSet order: each probe is state-isolated by
@@ -14269,11 +14690,11 @@ fn expr_calls_summary_rejecting_top_level_fn(
         .collect();
     called.sort_unstable();
     for name in called {
-        if top_level_fn_helper_summary_rejects(program, &name)? {
-            return Ok(true);
+        if try_ok!(top_level_fn_helper_summary_rejects(program, &name)?) {
+            return Ok(Ok(true));
         }
     }
-    Ok(false)
+    Ok(Ok(false))
 }
 
 fn top_level_fn_call_graph(
@@ -14389,17 +14810,17 @@ fn hoist_host_lane_tensor_bindings<'expr, 'scope>(
     scope: &'scope UnordMap<String, HostTypeTerm>,
     fn_sig: Option<&(Vec<HostTypeTerm>, HostTypeTerm)>,
     tensor_helpers: &mut TensorHelperSink,
-) -> Result<HoistedHostLaneBindings<'expr, 'scope>, crate::lower::LowerDiagnostic> {
+) -> LowerResult<Result<HoistedHostLaneBindings<'expr, 'scope>, crate::lower::LowerDiagnostic>> {
     let Expr::List(list, span) = expr else {
-        return Ok((Cow::Borrowed(expr), Cow::Borrowed(scope), Vec::new()));
+        return Ok(Ok((Cow::Borrowed(expr), Cow::Borrowed(scope), Vec::new())));
     };
     if tag(list) != Some(DeepTag::App) {
-        return Ok((Cow::Borrowed(expr), Cow::Borrowed(scope), Vec::new()));
+        return Ok(Ok((Cow::Borrowed(expr), Cow::Borrowed(scope), Vec::new())));
     }
 
     let kids = children(list);
     if kids.is_empty() {
-        return Ok((Cow::Borrowed(expr), Cow::Borrowed(scope), Vec::new()));
+        return Ok(Ok((Cow::Borrowed(expr), Cow::Borrowed(scope), Vec::new())));
     }
     // A host-only descendant beneath a tensor expression still needs a
     // host boundary: matmul(softmax(where(...)), v) cannot lower as one
@@ -14415,7 +14836,7 @@ fn hoist_host_lane_tensor_bindings<'expr, 'scope>(
             .skip(1)
             .any(should_keep_tensor_expr_in_host_lane)
     {
-        return Ok((Cow::Borrowed(expr), Cow::Borrowed(scope), Vec::new()));
+        return Ok(Ok((Cow::Borrowed(expr), Cow::Borrowed(scope), Vec::new())));
     }
 
     let mut new_elements = vec![
@@ -14428,19 +14849,25 @@ fn hoist_host_lane_tensor_bindings<'expr, 'scope>(
 
     for (index, arg) in kids.iter().enumerate().skip(1) {
         if hoist_matmul_operands || should_keep_tensor_expr_in_host_lane(arg) {
-            let value = lower_host_expr(arg, program, scope, tensor_helpers)?;
+            let value = try_ok!(lower_host_expr(arg, program, scope, tensor_helpers)?);
             let preferred_ty = fn_sig
                 .and_then(|(param_tys, _)| param_tys.get(index - 1))
                 // The generic declaration is not an argument actualization.
                 // Keep the checked actual's dtype and extents so the helper's
                 // ordinary call inliner can bind the declaration identities.
                 .filter(|ty| !ty.is_unresolved())
-                .cloned()
-                .or_else(|| expr_tensor_type(arg, program, scope).map(HostTypeTerm::Tensor))
-                .or_else(|| {
-                    let ty = expr_host_type(arg, program, scope);
+                .cloned();
+            let preferred_ty = match preferred_ty {
+                Some(ty) => Some(ty),
+                None => expr_tensor_type(arg, program, scope)?.map(HostTypeTerm::Tensor),
+            };
+            let preferred_ty = match preferred_ty {
+                Some(ty) => Some(ty),
+                None => {
+                    let ty = expr_host_type(arg, program, scope)?;
                     (!ty.is_unresolved()).then_some(ty)
-                });
+                }
+            };
             let ty = preferred_ty.unwrap_or_else(|| host_expr_type(&value));
             let value = force_host_expr_type(value, ty.clone());
             let name = format!("__host_tensor_arg_{index}");
@@ -14474,7 +14901,7 @@ fn hoist_host_lane_tensor_bindings<'expr, 'scope>(
         *span,
     );
     record_host_work(|profile| profile.app_clone_nodes += deep_expr_nodes(&rewritten));
-    Ok((Cow::Owned(rewritten), Cow::Owned(scoped), bindings))
+    Ok(Ok((Cow::Owned(rewritten), Cow::Owned(scoped), bindings)))
 }
 
 fn host_fn_signature(ty: &HostTypeTerm) -> Option<(Vec<HostTypeTerm>, HostTypeTerm)> {
@@ -14677,62 +15104,68 @@ fn lower_host_callback(
     program: &HostLoweringSession<'_>,
     scope: &UnordMap<String, HostTypeTerm>,
     tensor_helpers: &mut TensorHelperSink,
-) -> Result<Option<HostCallback>, crate::lower::LowerDiagnostic> {
+) -> LowerResult<Result<Option<HostCallback>, crate::lower::LowerDiagnostic>> {
     let runtime = program.runtime();
-    match expr {
-        Expr::MetaExpr(meta, _) => lower_host_callback(&meta.expr, program, scope, tensor_helpers),
+    Ok(match expr {
+        Expr::MetaExpr(meta, _) => lower_host_callback(&meta.expr, program, scope, tensor_helpers)?,
         Expr::List(list, _) if tag(list) == Some(DeepTag::Fn) => {
             let kids = children(list);
             let Some(params_list) = kids.first().and_then(as_list) else {
-                return Ok(None);
+                return Ok(Ok(None));
             };
             if tag(params_list) != Some(DeepTag::Params) {
-                return Ok(None);
+                return Ok(Ok(None));
             }
             let (param_tys, ret_ty) =
-                expr_fn_type(expr, runtime).unwrap_or((Vec::new(), fresh_host_inference()));
+                expr_fn_type(expr, runtime)?.unwrap_or((Vec::new(), fresh_host_inference()));
             let mut callback_scope = scope.clone();
             let mut params = Vec::new();
             for (index, param) in children(params_list).iter().enumerate() {
                 let Some(name) = param_name(param) else {
-                    return Ok(None);
+                    return Ok(Ok(None));
                 };
-                let ty = param_tys
+                let ty = match param_tys
                     .get(index)
                     .cloned()
                     .filter(|ty| !ty.is_unresolved())
-                    .or_else(|| {
-                        param_host_type(param, &program.invocation.type_subst.borrow(), runtime)
-                    })
-                    .unwrap_or_else(fresh_host_inference);
+                {
+                    Some(ty) => Some(ty),
+                    None => {
+                        param_host_type(param, &program.invocation.type_subst.borrow(), runtime)?
+                    }
+                }
+                .unwrap_or_else(fresh_host_inference);
                 callback_scope.insert(name.clone(), ty.clone());
                 params.push(HostParam { name, ty });
             }
             let Some(body_expr) = kids.get(1) else {
-                return Ok(None);
+                return Ok(Ok(None));
             };
-            let mut body = lower_host_expr(body_expr, program, &callback_scope, tensor_helpers)?;
+            let mut body = try_ok!(lower_host_expr(
+                body_expr,
+                program,
+                &callback_scope,
+                tensor_helpers
+            )?);
             // Actualized callback types choose representation; the authored
             // parameter still supplies the obligation checked at invocation.
-            let plan =
-                SignatureEntryPlan::new(children(params_list).iter().zip(&params).filter_map(
-                    |(declaration, param)| {
-                        let declared = param_host_type(
-                            declaration,
-                            &program.invocation.type_subst.borrow(),
-                            runtime,
-                        )
-                        .filter(|ty| matches!(ty, HostTypeTerm::Tensor(_)))
-                        .unwrap_or_else(|| param.ty.clone());
-                        let HostTypeTerm::Tensor(ty) = declared else {
-                            return None;
-                        };
-                        Some(HostTensorInput {
-                            name: param.name.clone(),
-                            ty,
-                        })
-                    },
-                ));
+            let mut entry_inputs = Vec::new();
+            for (declaration, param) in children(params_list).iter().zip(&params) {
+                let declared = param_host_type(
+                    declaration,
+                    &program.invocation.type_subst.borrow(),
+                    runtime,
+                )?
+                .filter(|ty| matches!(ty, HostTypeTerm::Tensor(_)))
+                .unwrap_or_else(|| param.ty.clone());
+                if let HostTypeTerm::Tensor(ty) = declared {
+                    entry_inputs.push(HostTensorInput {
+                        name: param.name.clone(),
+                        ty,
+                    });
+                }
+            }
+            let plan = SignatureEntryPlan::new(entry_inputs);
             if !plan.guards().is_empty() {
                 let args = params
                     .iter()
@@ -14747,8 +15180,10 @@ fn lower_host_callback(
                     .map(|(name, _)| name.clone())
                     .collect::<UnordSet<_>>();
                 collect_deep_var_names(body_expr, &mut reserved);
-                names_bound_in(body_expr, &mut reserved)
-                    .map_err(|detail| host_expr_lowering_error(expr, detail))?;
+                try_ok!(
+                    names_bound_in(body_expr, &mut reserved)
+                        .map_err(|detail| host_expr_lowering_error(expr, detail))
+                );
                 let mut serial = 0;
                 let name = loop {
                     let candidate = format!("__chelis_callback_entry_{serial}");
@@ -14785,21 +15220,27 @@ fn lower_host_callback(
         }
         Expr::List(list, _) if tag(list) == Some(DeepTag::Var) => {
             let Some(name) = children(list).first().and_then(symbol_name) else {
-                return Ok(None);
+                return Ok(Ok(None));
             };
-            let Some((param_tys, ret_ty)) = scope
-                .get(name)
-                .and_then(host_fn_signature)
-                .or_else(|| {
-                    lookup_declared_host_type(program, name).and_then(|ty| host_fn_signature(&ty))
-                })
-                .or_else(|| lookup_declared_fn_type(program, name))
-                .or_else(|| {
-                    lookup_program_def(&cached_program_defs(program), name)
-                        .and_then(|expr| expr_fn_type(expr, program.runtime()))
-                })
-            else {
-                return Ok(None);
+            let signature = match scope.get(name).and_then(host_fn_signature) {
+                Some(signature) => Some(signature),
+                None => {
+                    lookup_declared_host_type(program, name)?.and_then(|ty| host_fn_signature(&ty))
+                }
+            };
+            let signature = match signature {
+                Some(signature) => Some(signature),
+                None => lookup_declared_fn_type(program, name)?,
+            };
+            let signature = match signature {
+                Some(signature) => Some(signature),
+                None => match lookup_program_def(&cached_program_defs(program), name) {
+                    Some(expr) => expr_fn_type(expr, program.runtime())?,
+                    None => None,
+                },
+            };
+            let Some((param_tys, ret_ty)) = signature else {
+                return Ok(Ok(None));
             };
             let params = param_tys
                 .into_iter()
@@ -14818,7 +15259,7 @@ fn lower_host_callback(
             }))
         }
         _ => Ok(None),
-    }
+    })
 }
 
 fn lower_list_literal_items(
@@ -14826,10 +15267,10 @@ fn lower_list_literal_items(
     program: &HostLoweringSession<'_>,
     scope: &UnordMap<String, HostTypeTerm>,
     tensor_helpers: &mut TensorHelperSink,
-) -> Result<Option<Vec<HostExpr>>, crate::lower::LowerDiagnostic> {
-    match expr {
+) -> LowerResult<Result<Option<Vec<HostExpr>>, crate::lower::LowerDiagnostic>> {
+    Ok(match expr {
         Expr::MetaExpr(meta, _) => {
-            lower_list_literal_items(&meta.expr, program, scope, tensor_helpers)
+            lower_list_literal_items(&meta.expr, program, scope, tensor_helpers)?
         }
         Expr::List(list, _) if tag(list) == Some(DeepTag::Var) => {
             Ok((children(list).first().and_then(symbol_name) == Some("Nil")).then(Vec::new))
@@ -14837,7 +15278,7 @@ fn lower_list_literal_items(
         Expr::List(list, _) if tag(list) == Some(DeepTag::App) => {
             let kids = children(list);
             if kids.len() != 3 {
-                return Ok(None);
+                return Ok(Ok(None));
             }
             let func_name = kids
                 .first()
@@ -14845,19 +15286,22 @@ fn lower_list_literal_items(
                 .and_then(|inner| (tag(inner) == Some(DeepTag::Var)).then_some(inner))
                 .and_then(|inner| children(inner).first().and_then(symbol_name));
             if func_name != Some("Cons") {
-                return Ok(None);
+                return Ok(Ok(None));
             }
-            let head = lower_host_expr(&kids[1], program, scope, tensor_helpers)?;
-            let Some(mut tail) =
-                lower_list_literal_items(&kids[2], program, scope, tensor_helpers)?
-            else {
-                return Ok(None);
+            let head = try_ok!(lower_host_expr(&kids[1], program, scope, tensor_helpers)?);
+            let Some(mut tail) = try_ok!(lower_list_literal_items(
+                &kids[2],
+                program,
+                scope,
+                tensor_helpers
+            )?) else {
+                return Ok(Ok(None));
             };
             tail.insert(0, head);
             Ok(Some(tail))
         }
         _ => Ok(None),
-    }
+    })
 }
 
 fn tensor_helper_args(
@@ -15947,13 +16391,14 @@ fn collect_dynamic_to_tensor_def_refs(
     }
 
     let Some((expr_tag, _, kids)) = stamped_parts(expr) else {
-        visit_semantic_expr_children(expr, |child| {
+        let Ok(()) = visit_semantic_expr_children(expr, |child| -> Result<(), Infallible> {
             directly_dynamic |= collect_dynamic_to_tensor_def_refs(
                 child,
                 def_names,
                 callable_scope,
                 referenced_defs,
             );
+            Ok(())
         });
         return directly_dynamic;
     };
@@ -16028,14 +16473,17 @@ fn collect_dynamic_to_tensor_def_refs(
             }
             callable_scope.restore(undos.into_iter().rev());
         }
-        _ => visit_semantic_expr_children(expr, |child| {
-            directly_dynamic |= collect_dynamic_to_tensor_def_refs(
-                child,
-                def_names,
-                callable_scope,
-                referenced_defs,
-            );
-        }),
+        _ => {
+            let Ok(()) = visit_semantic_expr_children(expr, |child| -> Result<(), Infallible> {
+                directly_dynamic |= collect_dynamic_to_tensor_def_refs(
+                    child,
+                    def_names,
+                    callable_scope,
+                    referenced_defs,
+                );
+                Ok(())
+            });
+        }
     }
     directly_dynamic
 }
@@ -16129,9 +16577,12 @@ fn analyze_tensor_helper_preflight_scoped(
             }
             callable_scope.restore(undos.into_iter().rev());
         }
-        _ => visit_semantic_expr_children(expr, |child| {
-            merge_child(&mut facts, child, callable_scope, out);
-        }),
+        _ => {
+            let Ok(()) = visit_semantic_expr_children(expr, |child| -> Result<(), Infallible> {
+                merge_child(&mut facts, child, callable_scope, out);
+                Ok(())
+            });
+        }
     }
     out.insert(expr as *const Expr as usize, facts);
     facts
@@ -16178,40 +16629,53 @@ fn resolve_top_level_callable_from_summaries(
     }
 }
 
-fn visit_semantic_expr_children(expr: &Expr, mut visit: impl FnMut(&Expr)) {
+/// Visit `expr`'s semantic children in order, stopping at the first error.
+fn visit_semantic_expr_children<E>(
+    expr: &Expr,
+    mut visit: impl FnMut(&Expr) -> Result<(), E>,
+) -> Result<(), E> {
     match expr {
         Expr::Atom(_, _) => {}
         Expr::List(list, _) => {
             if tag(list).is_some() {
                 for child in children(list) {
-                    visit(child);
+                    visit(child)?;
                 }
             } else {
                 for child in &list.elements {
-                    visit(child);
+                    visit(child)?;
                 }
             }
         }
         Expr::Node(node, _) => {
             for child in node.children_slice() {
-                visit(child);
+                visit(child)?;
             }
         }
         Expr::Map(map, _) => {
-            map.visit_expressions(&mut |value, _| visit(value));
+            // The metadata visitor cannot stop early; after an error it
+            // visits nothing further.
+            let mut outcome = Ok(());
+            map.visit_expressions(&mut |value, _| {
+                if outcome.is_ok() {
+                    outcome = visit(value);
+                }
+            });
+            outcome?;
         }
-        Expr::MetaExpr(meta, _) => visit(&meta.expr),
+        Expr::MetaExpr(meta, _) => visit(&meta.expr)?,
         Expr::BareList(elements, _) => {
             for child in elements {
-                visit(child);
+                visit(child)?;
             }
         }
         Expr::UnknownForm(data) => {
             for child in &data.children {
-                visit(child);
+                visit(child)?;
             }
         }
     }
+    Ok(())
 }
 
 fn expr_is_runtime_shaped_to_tensor(expr: &Expr) -> bool {
@@ -16345,8 +16809,8 @@ pub(crate) fn expr_host_type(
     expr: &Expr,
     program: &HostLoweringSession<'_>,
     scope: &UnordMap<String, HostTypeTerm>,
-) -> HostTypeTerm {
-    let raw = expr_host_type_raw(expr, program, scope);
+) -> LowerResult<HostTypeTerm> {
+    let raw = expr_host_type_raw(expr, program, scope)?;
     let specialized = {
         let subst = program.invocation.type_subst.borrow();
         if subst.is_empty() {
@@ -16389,24 +16853,27 @@ fn resolve_host_type_alias<'a>(registry: &'a AdtRegistry, name: &str) -> Option<
 /// tensor type. Dimension-kinded alias arguments remain dimensions during
 /// substitution; they are erased only when an enclosing nominal value's host
 /// layout deliberately has no slot for them.
-fn expand_host_type_aliases(program: &HostLoweringSession<'_>, ty: HostTypeTerm) -> HostTypeTerm {
+fn expand_host_type_aliases(
+    program: &HostLoweringSession<'_>,
+    ty: HostTypeTerm,
+) -> LowerResult<HostTypeTerm> {
     fn expand(
         program: &HostLoweringSession<'_>,
         ty: HostTypeTerm,
         visiting: &mut UnordSet<String>,
-    ) -> HostTypeTerm {
+    ) -> LowerResult<HostTypeTerm> {
         let runtime = program.runtime();
-        match ty {
+        Ok(match ty {
             HostTypeTerm::Adt(name, args) => {
                 let args = args
                     .into_iter()
                     .map(|argument| expand(program, argument, visiting))
-                    .collect::<Vec<_>>();
+                    .collect::<LowerResult<Vec<_>>>()?;
                 let Some(alias) = resolve_host_type_alias(program.adt_registry(), &name) else {
-                    return HostTypeTerm::Adt(name, args);
+                    return Ok(HostTypeTerm::Adt(name, args));
                 };
                 if alias.params.len() != args.len() || !visiting.insert(name.clone()) {
-                    return HostTypeTerm::Adt(name, args);
+                    return Ok(HostTypeTerm::Adt(name, args));
                 }
                 let checker_parameter_names = alias
                     .param_args
@@ -16427,7 +16894,7 @@ fn expand_host_type_aliases(program: &HostLoweringSession<'_>, ty: HostTypeTerm)
                         &type_to_deep_expr(&program.adt_registry().expand_aliases(&alias.body)),
                         &UnordMap::new(),
                         runtime,
-                    ),
+                    )?,
                     &checker_parameter_names,
                 );
                 let parameter_kinds = if alias.param_kinds.len() == alias.params.len() {
@@ -16458,7 +16925,7 @@ fn expand_host_type_aliases(program: &HostLoweringSession<'_>, ty: HostTypeTerm)
                         &dimension_substitutions,
                     ),
                     visiting,
-                );
+                )?;
                 visiting.remove(&name);
                 expanded
             }
@@ -16466,27 +16933,27 @@ fn expand_host_type_aliases(program: &HostLoweringSession<'_>, ty: HostTypeTerm)
                 params
                     .into_iter()
                     .map(|param| expand(program, param, visiting))
-                    .collect(),
-                Box::new(expand(program, *ret, visiting)),
+                    .collect::<LowerResult<_>>()?,
+                Box::new(expand(program, *ret, visiting)?),
             ),
             HostTypeTerm::List(inner) => {
-                HostTypeTerm::List(Box::new(expand(program, *inner, visiting)))
+                HostTypeTerm::List(Box::new(expand(program, *inner, visiting)?))
             }
             HostTypeTerm::Dict(key, value) => HostTypeTerm::Dict(
-                Box::new(expand(program, *key, visiting)),
-                Box::new(expand(program, *value, visiting)),
+                Box::new(expand(program, *key, visiting)?),
+                Box::new(expand(program, *value, visiting)?),
             ),
             HostTypeTerm::Tuple(items) => HostTypeTerm::Tuple(
                 items
                     .into_iter()
                     .map(|item| expand(program, item, visiting))
-                    .collect(),
+                    .collect::<LowerResult<_>>()?,
             ),
             HostTypeTerm::Option(inner) => {
-                HostTypeTerm::Option(Box::new(expand(program, *inner, visiting)))
+                HostTypeTerm::Option(Box::new(expand(program, *inner, visiting)?))
             }
             other => other,
-        }
+        })
     }
 
     expand(program, ty, &mut UnordSet::new())
@@ -16536,34 +17003,38 @@ fn expr_host_type_raw(
     expr: &Expr,
     program: &HostLoweringSession<'_>,
     scope: &UnordMap<String, HostTypeTerm>,
-) -> HostTypeTerm {
+) -> LowerResult<HostTypeTerm> {
     let runtime = program.runtime();
-    match expr {
+    Ok(match expr {
         Expr::Atom(Atom::Int(_), _) => HostTypeTerm::Int64,
         Expr::Atom(Atom::Float(_), _) => HostTypeTerm::Float64,
         Expr::Atom(Atom::Bool(_), _) => HostTypeTerm::Bool,
         Expr::Atom(Atom::Str(_), _) => HostTypeTerm::String,
         Expr::List(_, _) | Expr::Node(_, _) if expr.tag() == Some(DeepTag::Var) => {
-            stamped_parts(expr)
+            match stamped_parts(expr)
                 .and_then(|(_, _, kids)| kids.first())
                 .and_then(symbol_name)
-                .and_then(|name| {
-                    expr_type(expr, &program.invocation.type_subst.borrow(), runtime)
+            {
+                Some(name) => {
+                    match expr_type(expr, &program.invocation.type_subst.borrow(), runtime)?
                         .filter(|ty| !ty.is_unresolved())
-                        .or_else(|| {
-                            scope
-                                .get(name)
-                                .cloned()
-                                .or_else(|| lookup_declared_host_type(program, name))
-                        })
-                })
-                .unwrap_or_else(fresh_host_inference)
+                    {
+                        Some(ty) => Some(ty),
+                        None => match scope.get(name).cloned() {
+                            Some(ty) => Some(ty),
+                            None => lookup_declared_host_type(program, name)?,
+                        },
+                    }
+                }
+                None => None,
+            }
+            .unwrap_or_else(fresh_host_inference)
         }
         Expr::List(_, _) | Expr::Node(_, _) if expr.tag() == Some(DeepTag::App) => {
-            let explicit = expr_type(expr, &program.invocation.type_subst.borrow(), runtime)
+            let explicit = expr_type(expr, &program.invocation.type_subst.borrow(), runtime)?
                 .unwrap_or_else(fresh_host_inference);
             if app_expr_needs_inferred_type(&explicit) {
-                let inferred = infer_app_expr_host_type(expr, program, scope)
+                let inferred = infer_app_expr_host_type(expr, program, scope)?
                     .unwrap_or_else(fresh_host_inference);
                 if should_prefer_inferred_app_type(&explicit, &inferred) {
                     inferred
@@ -16576,9 +17047,9 @@ fn expr_host_type_raw(
                 explicit
             }
         }
-        _ => expr_type(expr, &program.invocation.type_subst.borrow(), runtime)
+        _ => expr_type(expr, &program.invocation.type_subst.borrow(), runtime)?
             .unwrap_or_else(fresh_host_inference),
-    }
+    })
 }
 
 fn app_expr_needs_inferred_type(explicit: &HostTypeTerm) -> bool {
@@ -16589,24 +17060,24 @@ fn infer_app_expr_host_type(
     expr: &Expr,
     program: &HostLoweringSession<'_>,
     scope: &UnordMap<String, HostTypeTerm>,
-) -> Option<HostTypeTerm> {
-    let (DeepTag::App, _, kids) = stamped_parts(expr)? else {
-        return None;
+) -> LowerResult<Option<HostTypeTerm>> {
+    let (DeepTag::App, _, kids) = try_some!(stamped_parts(expr)) else {
+        return Ok(None);
     };
-    let callee = kids.first()?;
-    let (DeepTag::Var, _, callee_kids) = stamped_parts(callee)? else {
-        return None;
+    let callee = try_some!(kids.first());
+    let (DeepTag::Var, _, callee_kids) = try_some!(stamped_parts(callee)) else {
+        return Ok(None);
     };
-    let name = callee_kids.first().and_then(symbol_name)?;
+    let name = try_some!(callee_kids.first().and_then(symbol_name));
     if !BUILTIN_NAMES.contains(&name) {
         // Predicate disposition (chelis#1271): this returns the type an
         // application would produce, so answering an ambiguous name would
         // stamp the wrong package's ADT name onto the expression. Decline
         // instead; the application itself rejects the same ambiguity.
-        if let Some(definition) = lookup_adt_constructor_definition(program, name) {
+        if let Some(definition) = lookup_adt_constructor_definition(program, name)? {
             let mut substitutions = UnordMap::new();
             for (field, argument) in definition.fields.iter().zip(kids.iter().skip(1)) {
-                let applied = expr_host_type(argument, program, scope);
+                let applied = expr_host_type(argument, program, scope)?;
                 collect_host_type_variable_substitutions(&field.term, &applied, &mut substitutions);
             }
             let result = HostTypeTerm::Adt(
@@ -16617,53 +17088,52 @@ fn infer_app_expr_host_type(
                     .map(HostTypeTerm::TypeVariable)
                     .collect(),
             );
-            return Some(substitute_host_type_term(result, &substitutions));
+            return Ok(Some(substitute_host_type_term(result, &substitutions)));
         }
-        let (params, ret) = lookup_declared_fn_type(program, name)?;
+        let (params, ret) = try_some!(lookup_declared_fn_type(program, name)?);
         let mut substitutions = UnordMap::new();
         for (pattern, argument) in params.iter().zip(kids.iter().skip(1)) {
-            let applied = expr_host_type(argument, program, scope);
+            let applied = expr_host_type(argument, program, scope)?;
             collect_host_type_variable_substitutions(pattern, &applied, &mut substitutions);
         }
         let ret = substitute_host_type_term(ret, &substitutions);
-        return Some(ret);
+        return Ok(Some(ret));
     }
     if name == "einsum" {
         let equation = match kids.get(1) {
             Some(Expr::Atom(Atom::Str(value), _)) => value.as_str(),
-            _ => return Some(fresh_host_inference()),
+            _ => return Ok(Some(fresh_host_inference())),
         };
-        let tensors = kids[2..]
-            .iter()
-            .map(|arg| match expr_host_type(arg, program, scope) {
+        let tensors = try_some!(try_collect_options(kids[2..].iter().map(|arg| {
+            Ok(match expr_host_type(arg, program, scope)? {
                 HostTypeTerm::Tensor(tensor_ty) => Some(tensor_ty),
                 _ => None,
             })
-            .collect::<Option<Vec<_>>>()?;
-        return infer_einsum_tensor_type(equation, &tensors).map(HostTypeTerm::Tensor);
+        }))?);
+        return Ok(infer_einsum_tensor_type(equation, &tensors).map(HostTypeTerm::Tensor));
     }
     if name == "count"
         && let Some(input) = kids.get(1)
-        && let HostTypeTerm::Tensor(tensor_ty) = expr_host_type(input, program, scope)
+        && let HostTypeTerm::Tensor(tensor_ty) = expr_host_type(input, program, scope)?
     {
         let rank = tensor_ty.dims.len();
         let mut axes = Vec::with_capacity(kids.len().saturating_sub(2));
         for axis_expr in &kids[2..] {
-            let raw = expr_int_literal(axis_expr)?;
+            let raw = try_some!(expr_int_literal(axis_expr));
             let axis = if raw < 0 {
-                rank.checked_sub(raw.unsigned_abs() as usize)?
+                try_some!(rank.checked_sub(raw.unsigned_abs() as usize))
             } else {
-                usize::try_from(raw).ok().filter(|&axis| axis < rank)?
+                try_some!(usize::try_from(raw).ok().filter(|&axis| axis < rank))
             };
             if axes.contains(&axis) {
-                return None;
+                return Ok(None);
             }
             axes.push(axis);
         }
         if axes.is_empty() {
-            return None;
+            return Ok(None);
         }
-        return Some(HostTypeTerm::Tensor(TensorType {
+        return Ok(Some(HostTypeTerm::Tensor(TensorType {
             dims: tensor_ty
                 .dims
                 .into_iter()
@@ -16671,7 +17141,7 @@ fn infer_app_expr_host_type(
                 .filter_map(|(axis, dim)| (!axes.contains(&axis)).then_some(dim))
                 .collect(),
             precision: Prim::Int64,
-        }));
+        })));
     }
     // chelis#340: the whole named-axis reduction family is type-inferred
     // here (the positional/int-literal axis form), not only `sum`/`mean`.
@@ -16692,29 +17162,29 @@ fn infer_app_expr_host_type(
             | "argmax_reduce"
             | "argmin_reduce"
     ) && let (Some(input), Some(axis_expr)) = (kids.get(1), kids.get(2))
-        && let HostTypeTerm::Tensor(tensor_ty) = expr_host_type(input, program, scope)
+        && let HostTypeTerm::Tensor(tensor_ty) = expr_host_type(input, program, scope)?
         && let Some(axis) = expr_int_literal(axis_expr)
     {
         let mut reduced = reduce_axis_tensor_type(&tensor_ty, axis as usize);
         if matches!(name, "argmax_reduce" | "argmin_reduce") {
             reduced.precision = chelis_types::types::Prim::Int64;
         }
-        return Some(HostTypeTerm::Tensor(reduced));
+        return Ok(Some(HostTypeTerm::Tensor(reduced)));
     }
     if (name == "expand" || name == "insert")
         && let (Some(input), Some(axis_expr), Some(size_expr)) =
             (kids.get(1), kids.get(2), kids.get(3))
-        && let HostTypeTerm::Tensor(tensor_ty) = expr_host_type(input, program, scope)
+        && let HostTypeTerm::Tensor(tensor_ty) = expr_host_type(input, program, scope)?
         && let (Some(axis), Some(size)) = (expr_int_literal(axis_expr), expr_int_literal(size_expr))
     {
         let mut dims = tensor_ty.dims.clone();
         let axis = axis as usize;
         if axis <= dims.len() {
             dims.insert(axis, crate::dag::DimInfo::Lit(size as usize));
-            return Some(HostTypeTerm::Tensor(TensorType {
+            return Ok(Some(HostTypeTerm::Tensor(TensorType {
                 dims,
                 precision: tensor_ty.precision,
-            }));
+            })));
         }
     }
     // Issue #308: `scalar_to_tensor` result precision must follow the
@@ -16731,10 +17201,10 @@ fn infer_app_expr_host_type(
         && let Some(arg) = kids.get(1)
         && let Some(precision) = expr_scalar_float_precision(arg)
     {
-        return Some(HostTypeTerm::Tensor(TensorType {
+        return Ok(Some(HostTypeTerm::Tensor(TensorType {
             dims: vec![],
             precision,
-        }));
+        })));
     }
     // chelis#631: a tensor-list `concat`'s concat axis is sized at run
     // time by `chelis_tensor_concat`; the coarse host type must not carry
@@ -16743,20 +17213,20 @@ fn infer_app_expr_host_type(
     // fires when the checker annotation is absent or synthetic.)
     if name == "concat"
         && let Some(input) = kids.get(1)
-        && let HostTypeTerm::List(inner) = expr_host_type(input, program, scope)
+        && let HostTypeTerm::List(inner) = expr_host_type(input, program, scope)?
         && let HostTypeTerm::Tensor(element) = inner.as_ref()
     {
         let axis = kids
             .get(2)
             .and_then(expr_int_literal)
             .and_then(|raw| normalize_host_axis(element.dims.len(), raw));
-        return Some(concat_host_tensor_type(element, axis));
+        return Ok(Some(concat_host_tensor_type(element, axis)));
     }
     let arg_tys = kids[1..]
         .iter()
         .map(|arg| expr_host_type(arg, program, scope))
-        .collect::<Vec<_>>();
-    must_infer_builtin_host_type_from_arg_tys(name, &arg_tys)
+        .collect::<LowerResult<Vec<_>>>()?;
+    Ok(must_infer_builtin_host_type_from_arg_tys(name, &arg_tys))
 }
 
 /// Issue #308: recover the float precision of a scalar Deep expression
@@ -17012,19 +17482,21 @@ fn lookup_declared_type_expr(program: &HostLoweringSession<'_>, name: &str) -> O
 fn lookup_declared_host_type(
     program: &HostLoweringSession<'_>,
     name: &str,
-) -> Option<HostTypeTerm> {
-    lookup_declared_type_expr(program, name)
-        .as_ref()
-        .and_then(|ty| decode_expanded_host_type_expr(program, ty))
+) -> LowerResult<Option<HostTypeTerm>> {
+    Ok(match lookup_declared_type_expr(program, name).as_ref() {
+        Some(ty) => decode_expanded_host_type_expr(program, ty)?,
+        None => None,
+    })
 }
 
 fn lookup_declared_fn_type(
     program: &HostLoweringSession<'_>,
     name: &str,
-) -> Option<(Vec<HostTypeTerm>, HostTypeTerm)> {
-    lookup_declared_type_expr(program, name)
-        .as_ref()
-        .and_then(|ty| parse_expanded_fn_type_expr(program, ty))
+) -> LowerResult<Option<(Vec<HostTypeTerm>, HostTypeTerm)>> {
+    Ok(match lookup_declared_type_expr(program, name).as_ref() {
+        Some(ty) => parse_expanded_fn_type_expr(program, ty)?,
+        None => None,
+    })
 }
 
 fn lookup_program_def<'a>(defs: &'a BTreeMap<String, Expr>, name: &str) -> Option<&'a Expr> {
@@ -17087,18 +17559,18 @@ fn expr_tensor_type(
     expr: &Expr,
     program: &HostLoweringSession<'_>,
     scope: &UnordMap<String, HostTypeTerm>,
-) -> Option<TensorType> {
-    match expr_host_type(expr, program, scope) {
+) -> LowerResult<Option<TensorType>> {
+    Ok(match expr_host_type(expr, program, scope)? {
         HostTypeTerm::Tensor(ty) => Some(ty),
         _ => None,
-    }
+    })
 }
 
 fn expr_type(
     expr: &Expr,
     subst: &UnordMap<String, HostTypeTerm>,
     runtime: &LoweringRuntime,
-) -> Option<HostTypeTerm> {
+) -> LowerResult<Option<HostTypeTerm>> {
     // Parameter binders are untagged list carriers `(name {type: ...})`,
     // not Deep vocabulary nodes. Preserve their source-authored metadata
     // while reading stamped vocabulary nodes directly; routing all Lists
@@ -17107,62 +17579,64 @@ fn expr_type(
     let meta = match expr {
         Expr::List(list, _) => match list.elements.get(1) {
             Some(Expr::Map(meta, _)) => meta,
-            _ => return None,
+            _ => return Ok(None),
         },
         Expr::BareList(elements, _) => match elements.get(1) {
             Some(Expr::Map(meta, _)) => meta,
-            _ => return None,
+            _ => return Ok(None),
         },
         Expr::Node(node, _) => node.meta(),
-        _ => return None,
+        _ => return Ok(None),
     };
     meta.ty()
         .map(|ty| ty.expression())
         .map(|value| decode_host_type_or_raise(value, subst, runtime))
+        .transpose()
 }
 
 fn expr_fn_type(
     expr: &Expr,
     runtime: &LoweringRuntime,
-) -> Option<(Vec<HostTypeTerm>, HostTypeTerm)> {
+) -> LowerResult<Option<(Vec<HostTypeTerm>, HostTypeTerm)>> {
     let meta = match expr {
         Expr::List(list, _) => match list.elements.get(1) {
             Some(Expr::Map(meta, _)) => meta,
-            _ => return None,
+            _ => return Ok(None),
         },
         Expr::Node(node, _) => node.meta(),
-        _ => return None,
+        _ => return Ok(None),
     };
-    meta.ty()
-        .map(|ty| ty.expression())
-        .and_then(|ty| parse_fn_type_expr(ty, runtime))
+    Ok(match meta.ty().map(|ty| ty.expression()) {
+        Some(ty) => parse_fn_type_expr(ty, runtime)?,
+        None => None,
+    })
 }
 
 fn parse_fn_type_expr(
     expr: &Expr,
     runtime: &LoweringRuntime,
-) -> Option<(Vec<HostTypeTerm>, HostTypeTerm)> {
-    let (args, ret) = parse_fn_type_expr_parts(expr)?;
-    Some((
+) -> LowerResult<Option<(Vec<HostTypeTerm>, HostTypeTerm)>> {
+    let (args, ret) = try_some!(parse_fn_type_expr_parts(expr));
+    Ok(Some((
         args.iter()
             .map(|arg| decode_host_type_or_raise(arg, &UnordMap::new(), runtime))
-            .collect(),
-        decode_host_type_or_raise(&ret, &UnordMap::new(), runtime),
-    ))
+            .collect::<LowerResult<_>>()?,
+        decode_host_type_or_raise(&ret, &UnordMap::new(), runtime)?,
+    )))
 }
 
 fn expand_host_fn_type_aliases(
     program: &HostLoweringSession<'_>,
     signature: (Vec<HostTypeTerm>, HostTypeTerm),
-) -> (Vec<HostTypeTerm>, HostTypeTerm) {
+) -> LowerResult<(Vec<HostTypeTerm>, HostTypeTerm)> {
     let (params, ret) = signature;
-    (
+    Ok((
         params
             .into_iter()
             .map(|param| expand_host_type_aliases(program, param))
-            .collect(),
-        expand_host_type_aliases(program, ret),
-    )
+            .collect::<LowerResult<_>>()?,
+        expand_host_type_aliases(program, ret)?,
+    ))
 }
 
 fn authored_nominal_dimension(expr: &Expr) -> Option<DimInfo> {
@@ -17196,7 +17670,7 @@ fn authored_nominal_dimension(expr: &Expr) -> Option<DimInfo> {
 fn decode_expanded_host_type_expr(
     program: &HostLoweringSession<'_>,
     expr: &Expr,
-) -> Option<HostTypeTerm> {
+) -> LowerResult<Option<HostTypeTerm>> {
     if let Expr::MetaExpr(meta, _) = expr {
         return decode_expanded_host_type_expr(program, &meta.expr);
     }
@@ -17224,12 +17698,14 @@ fn decode_expanded_host_type_expr(
                 NominalParamKind::Type => {
                     type_substitutions.insert(
                         parameter.clone(),
-                        decode_expanded_host_type_expr(program, argument)?,
+                        try_some!(decode_expanded_host_type_expr(program, argument)?),
                     );
                 }
                 NominalParamKind::Dimension => {
-                    dimension_substitutions
-                        .insert(parameter.clone(), authored_nominal_dimension(argument)?);
+                    dimension_substitutions.insert(
+                        parameter.clone(),
+                        try_some!(authored_nominal_dimension(argument)),
+                    );
                 }
             }
         }
@@ -17248,36 +17724,39 @@ fn decode_expanded_host_type_expr(
             })
             .collect::<UnordMap<_, _>>();
         let body = rename_host_type_variables(
-            decode_host_type(&type_to_deep_expr(
-                &program.adt_registry().expand_aliases(&alias.body),
-            ))
-            .ok()?,
+            try_some!(
+                decode_host_type(&type_to_deep_expr(
+                    &program.adt_registry().expand_aliases(&alias.body),
+                ))
+                .ok()
+            ),
             &checker_parameter_names,
         );
-        return Some(expand_host_type_aliases(
+        return Ok(Some(expand_host_type_aliases(
             program,
             substitute_host_dimension_terms(
                 substitute_host_type_term(body, &type_substitutions),
                 &dimension_substitutions,
             ),
-        ));
+        )?));
     }
     decode_host_type(expr)
         .ok()
         .map(|term| expand_host_type_aliases(program, term))
+        .transpose()
 }
 
 fn parse_expanded_fn_type_expr(
     program: &HostLoweringSession<'_>,
     expr: &Expr,
-) -> Option<(Vec<HostTypeTerm>, HostTypeTerm)> {
-    let (args, ret) = parse_fn_type_expr_parts(expr)?;
-    Some((
-        args.iter()
-            .map(|argument| decode_expanded_host_type_expr(program, argument))
-            .collect::<Option<Vec<_>>>()?,
-        decode_expanded_host_type_expr(program, &ret)?,
-    ))
+) -> LowerResult<Option<(Vec<HostTypeTerm>, HostTypeTerm)>> {
+    let (args, ret) = try_some!(parse_fn_type_expr_parts(expr));
+    Ok(Some((
+        try_some!(try_collect_options(args.iter().map(|argument| {
+            decode_expanded_host_type_expr(program, argument)
+        }))?),
+        try_some!(decode_expanded_host_type_expr(program, &ret)?),
+    )))
 }
 
 fn parse_fn_type_expr_parts(expr: &Expr) -> Option<(Vec<Expr>, Expr)> {
@@ -17500,8 +17979,8 @@ fn decode_host_type_or_raise(
     expr: &Expr,
     subst: &UnordMap<String, HostTypeTerm>,
     runtime: &LoweringRuntime,
-) -> HostTypeTerm {
-    decode_host_type_with_subst(expr, subst).unwrap_or_else(|error| {
+) -> LowerResult<HostTypeTerm> {
+    decode_host_type_with_subst(expr, subst).map_err(|error| {
         runtime.raise_fatal_lowering_diagnostic(
             crate::lower::LowerDiagnostic::new(
                 format!("invalid checked host type metadata: {error} ([05-UNS-1]; chelis#730)"),
@@ -18661,7 +19140,9 @@ impl GenericAdtConstructor {
     }
 }
 
-fn adt_constructor_definitions(program: &HostLoweringSession<'_>) -> Vec<GenericAdtConstructor> {
+fn adt_constructor_definitions(
+    program: &HostLoweringSession<'_>,
+) -> LowerResult<Vec<GenericAdtConstructor>> {
     let runtime = program.runtime();
     let mut definitions = Vec::new();
     for definition in program.adt_registry().defs.values() {
@@ -18707,18 +19188,20 @@ fn adt_constructor_definitions(program: &HostLoweringSession<'_>) -> Vec<Generic
             let fields = variant
                 .fields
                 .iter()
-                .map(|(name, ty)| GenericAdtField {
-                    name: name.clone(),
-                    term: rename_host_type_variables(
-                        decode_host_type_or_raise(
-                            &type_to_deep_expr(ty),
-                            &UnordMap::new(),
-                            runtime,
+                .map(|(name, ty)| {
+                    Ok(GenericAdtField {
+                        name: name.clone(),
+                        term: rename_host_type_variables(
+                            decode_host_type_or_raise(
+                                &type_to_deep_expr(ty),
+                                &UnordMap::new(),
+                                runtime,
+                            )?,
+                            &checker_parameter_names,
                         ),
-                        &checker_parameter_names,
-                    ),
+                    })
                 })
-                .collect();
+                .collect::<LowerResult<_>>()?;
             definitions.push(GenericAdtConstructor {
                 adt_name: definition.name.clone(),
                 ctor_name: variant.name.clone(),
@@ -18731,7 +19214,7 @@ fn adt_constructor_definitions(program: &HostLoweringSession<'_>) -> Vec<Generic
     definitions.sort_by(|left, right| {
         (&left.adt_name, &left.ctor_name).cmp(&(&right.adt_name, &right.ctor_name))
     });
-    definitions
+    Ok(definitions)
 }
 
 fn rename_host_type_variables(
@@ -18913,11 +19396,11 @@ fn instantiate_adt_constructor(
     program: &HostLoweringSession<'_>,
     definition: &GenericAdtConstructor,
     instantiated_ty: &HostTypeTerm,
-) -> Result<InstantiatedAdtConstructor, AdtInstantiationError> {
-    let definitions = adt_constructor_definitions(program);
+) -> LowerResult<Result<InstantiatedAdtConstructor, AdtInstantiationError>> {
+    let definitions = adt_constructor_definitions(program)?;
     let canonical =
         canonicalize_representation_erased_adt_args(instantiated_ty.clone(), &definitions);
-    definition.instantiate(&canonical)
+    Ok(definition.instantiate(&canonical))
 }
 
 fn canonicalize_representation_erased_adt_args(
@@ -19069,10 +19552,10 @@ enum AdtConstructorResolution {
 fn resolve_adt_constructor_definition(
     program: &HostLoweringSession<'_>,
     ctor_name: &str,
-) -> AdtConstructorResolution {
-    let definitions = adt_constructor_definitions(program);
+) -> LowerResult<AdtConstructorResolution> {
+    let definitions = adt_constructor_definitions(program)?;
     let owning = definitions_owning(&definitions, ctor_name, constructor_name_of);
-    resolve_adt_constructor_candidates(&owning)
+    Ok(resolve_adt_constructor_candidates(&owning))
 }
 
 /// Resolve a positional construction using the nominal result already
@@ -19083,8 +19566,8 @@ fn resolve_adt_constructor_definition_for_type(
     program: &HostLoweringSession<'_>,
     ctor_name: &str,
     checked_ty: &HostTypeTerm,
-) -> AdtConstructorResolution {
-    let definitions = adt_constructor_definitions(program);
+) -> LowerResult<AdtConstructorResolution> {
+    let definitions = adt_constructor_definitions(program)?;
     let owning = definitions_owning(&definitions, ctor_name, constructor_name_of);
     if let HostTypeTerm::Adt(adt_name, _) = checked_ty {
         let exact_owner = owning
@@ -19094,7 +19577,7 @@ fn resolve_adt_constructor_definition_for_type(
             .filter(|definition| definition.adt_name == *adt_name)
             .collect::<Vec<_>>();
         if let [only] = exact_owner.as_slice() {
-            return AdtConstructorResolution::Unique((*only).clone());
+            return Ok(AdtConstructorResolution::Unique((*only).clone()));
         }
         let terminal_owner = owning
             .candidates()
@@ -19103,10 +19586,10 @@ fn resolve_adt_constructor_definition_for_type(
             .filter(|definition| terminal_name_matches(&definition.adt_name, adt_name))
             .collect::<Vec<_>>();
         if let [only] = terminal_owner.as_slice() {
-            return AdtConstructorResolution::Unique((*only).clone());
+            return Ok(AdtConstructorResolution::Unique((*only).clone()));
         }
     }
-    resolve_adt_constructor_candidates(&owning)
+    Ok(resolve_adt_constructor_candidates(&owning))
 }
 
 fn resolve_adt_constructor_candidates(owning: &NameMatch<'_>) -> AdtConstructorResolution {
@@ -19179,19 +19662,21 @@ fn ambiguous_constructor_error(
 fn lookup_adt_constructor_definition(
     program: &HostLoweringSession<'_>,
     ctor_name: &str,
-) -> Option<GenericAdtConstructor> {
-    match resolve_adt_constructor_definition(program, ctor_name) {
-        AdtConstructorResolution::Unique(definition) => Some(definition),
-        AdtConstructorResolution::Missing | AdtConstructorResolution::Ambiguous(_) => None,
-    }
+) -> LowerResult<Option<GenericAdtConstructor>> {
+    Ok(
+        match resolve_adt_constructor_definition(program, ctor_name)? {
+            AdtConstructorResolution::Unique(definition) => Some(definition),
+            AdtConstructorResolution::Missing | AdtConstructorResolution::Ambiguous(_) => None,
+        },
+    )
 }
 
 fn lookup_access_field(
     program: &HostLoweringSession<'_>,
     base: &HostExpr,
     field_name: &str,
-) -> Result<Option<(usize, HostTypeTerm)>, AdtInstantiationError> {
-    match &base.kind {
+) -> LowerResult<Result<Option<(usize, HostTypeTerm)>, AdtInstantiationError>> {
+    Ok(match &base.kind {
         HostExprKind::AdtConstruct { ctor, ty, .. } => {
             // The base is an already-lowered construction, and every path
             // that builds one rejects an ambiguous constructor name, so a
@@ -19199,11 +19684,11 @@ fn lookup_access_field(
             // contested. The caller renders that as "absent or ambiguous
             // on the resolved ADT type" (chelis#1271).
             let AdtConstructorResolution::Unique(definition) =
-                resolve_adt_constructor_definition_for_type(program, ctor, ty)
+                resolve_adt_constructor_definition_for_type(program, ctor, ty)?
             else {
-                return Ok(None);
+                return Ok(Ok(None));
             };
-            let instantiated = instantiate_adt_constructor(program, &definition, ty)?;
+            let instantiated = try_ok!(instantiate_adt_constructor(program, &definition, ty)?);
             Ok(instantiated
                 .fields
                 .iter()
@@ -19214,11 +19699,11 @@ fn lookup_access_field(
         }
         _ => match host_expr_type(base) {
             HostTypeTerm::Adt(adt_name, args) => {
-                lookup_adt_field_on_type(program, &adt_name, &args, field_name)
+                lookup_adt_field_on_type(program, &adt_name, &args, field_name)?
             }
             _ => Ok(None),
         },
-    }
+    })
 }
 
 fn lookup_adt_field_on_type(
@@ -19226,7 +19711,7 @@ fn lookup_adt_field_on_type(
     adt_name: &str,
     args: &[HostTypeTerm],
     field_name: &str,
-) -> Result<Option<(usize, HostTypeTerm)>, AdtInstantiationError> {
+) -> LowerResult<Result<Option<(usize, HostTypeTerm)>, AdtInstantiationError>> {
     let mut found = None;
     let instantiated_ty = HostTypeTerm::Adt(adt_name.to_string(), args.to_vec());
     // Field access resolves through the ADT's own name, and it has the
@@ -19234,9 +19719,13 @@ fn lookup_adt_field_on_type(
     // terminal, so admitting both as candidates made them disagree on the
     // index of a field one of them really has, and a valid access was
     // rejected as "absent or ambiguous". An exact name answers alone.
-    let definitions = adt_constructor_definitions(program);
+    let definitions = adt_constructor_definitions(program)?;
     for definition in definitions_owning(&definitions, adt_name, adt_name_of).candidates() {
-        let instantiated = instantiate_adt_constructor(program, definition, &instantiated_ty)?;
+        let instantiated = try_ok!(instantiate_adt_constructor(
+            program,
+            definition,
+            &instantiated_ty
+        )?);
         if let Some((index, field)) = instantiated
             .fields
             .iter()
@@ -19247,12 +19736,12 @@ fn lookup_adt_field_on_type(
             if let Some(existing) = &found
                 && existing != &candidate
             {
-                return Ok(None);
+                return Ok(Ok(None));
             }
             found = Some(candidate);
         }
     }
-    Ok(found)
+    Ok(Ok(found))
 }
 
 fn tag(list: &List) -> Option<DeepTag> {
@@ -19350,16 +19839,19 @@ fn param_host_type(
     expr: &Expr,
     subst: &UnordMap<String, HostTypeTerm>,
     runtime: &LoweringRuntime,
-) -> Option<HostTypeTerm> {
-    match expr {
-        Expr::MetaExpr(meta, _) => expr_type(expr, subst, runtime)
-            .filter(|ty| !ty.is_unresolved())
-            .or_else(|| param_host_type(&meta.expr, subst, runtime)),
+) -> LowerResult<Option<HostTypeTerm>> {
+    Ok(match expr {
+        Expr::MetaExpr(meta, _) => {
+            match expr_type(expr, subst, runtime)?.filter(|ty| !ty.is_unresolved()) {
+                Some(ty) => Some(ty),
+                None => param_host_type(&meta.expr, subst, runtime)?,
+            }
+        }
         Expr::List(_, _) | Expr::BareList(_, _) => {
-            expr_type(expr, subst, runtime).filter(|ty| !ty.is_unresolved())
+            expr_type(expr, subst, runtime)?.filter(|ty| !ty.is_unresolved())
         }
         _ => None,
-    }
+    })
 }
 
 /// The innermost specialization's bindings replace, rather than extend, the
@@ -19500,6 +19992,7 @@ fn solve_host_type_vars(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::lower::top_level_lowering_map;
     use crate::{DimInfo, RiscOp};
     use chelis_types::types::Prim;
 
@@ -19627,7 +20120,7 @@ mod tests {
                         },
                     )])],
                 };
-                assert_eq!(walk.expr(&body).is_some(), host, "{tensor:?}");
+                assert_eq!(walk.expr(&body).unwrap().is_some(), host, "{tensor:?}");
                 if !host {
                     crate::lower::try_lower_subexpr_program(
                         &body,
@@ -19671,7 +20164,7 @@ mod tests {
                     },
                 )])],
             };
-            assert!(walk.expr(&body).is_none());
+            assert!(walk.expr(&body).unwrap().is_none());
         })
     }
 
@@ -19703,11 +20196,14 @@ mod tests {
                             &program.invocation.type_subst.borrow(),
                             runtime,
                         )
+                        .unwrap()
                         .unwrap(),
                     })
                     .collect();
                 assert_eq!(
-                    body_form_the_dag_cannot_carry(program, &run[1], &params, false).is_some(),
+                    body_form_the_dag_cannot_carry(program, &run[1], &params, false)
+                        .unwrap()
+                        .is_some(),
                     host,
                     "{source}"
                 );
@@ -19768,6 +20264,7 @@ mod tests {
             assert!(
                 walk.def("run", &defs["run"], None)
                     .unwrap()
+                    .unwrap()
                     .contains("rank")
             );
             assert_eq!(walk.def_visits, depth + 2);
@@ -19799,7 +20296,9 @@ mod tests {
                         vec![dynamic.clone(), fixed.clone()]
                     };
                     assert_eq!(
-                        walk.def("second", &defs["second"], Some(actuals)).is_some(),
+                        walk.def("second", &defs["second"], Some(actuals))
+                            .unwrap()
+                            .is_some(),
                         host
                     );
                 }
@@ -19833,6 +20332,7 @@ mod tests {
                 assert!(
                     walk.def("call", &defs["call"], None)
                         .unwrap()
+                        .unwrap()
                         .contains("rank")
                 );
                 assert_eq!(walk.bound("global"), Some(constructor));
@@ -19863,6 +20363,7 @@ mod tests {
             for name in ["a", "b", "a", "b"] {
                 assert!(
                     walk.def(name, &defs[name], Some(Vec::new()))
+                        .unwrap()
                         .unwrap()
                         .contains("rank")
                 );
@@ -20091,17 +20592,18 @@ mod tests {
                     &session,
                     &helpers,
                 )
+                .unwrap()
                 .expect("the concrete recursive specialization must lower")
             };
             let first = specialize(Prim::Int32);
             assert_eq!(
                 top_level_fn_helper_summary_rejects(&session, "bad_wrap"),
-                Ok(false),
+                Ok(Ok(false)),
                 "a speculative lowering error is not a summary rejection"
             );
             assert_eq!(
                 top_level_fn_helper_summary_rejects(&session, "good_probe"),
-                Ok(false)
+                Ok(Ok(false))
             );
             let error = lower_host_program(&session, &BTreeMap::new())
                 .expect_err("real lowering must report the genuine bad call");
@@ -20152,8 +20654,11 @@ mod tests {
                 ]),
                 &session,
             );
-            assert_eq!(expr_host_type(&a, &session, &scope), HostTypeTerm::Int64);
-            assert_eq!(expr_host_type(&a, &other, &scope), unbound_a);
+            assert_eq!(
+                expr_host_type(&a, &session, &scope),
+                Ok(HostTypeTerm::Int64)
+            );
+            assert_eq!(expr_host_type(&a, &other, &scope), Ok(unbound_a.clone()));
             let diagnostic = crate::lower::LowerDiagnostic::new(
                 "substitution scope unwind",
                 None,
@@ -20165,20 +20670,29 @@ mod tests {
                     UnordMap::from([("a".into(), HostTypeTerm::Float32)]),
                     &session,
                 );
-                assert_eq!(expr_host_type(&a, &session, &scope), HostTypeTerm::Float32);
-                assert_eq!(expr_host_type(&b, &session, &scope), unbound_b);
-                runtime.raise_fatal_lowering_diagnostic(diagnostic.clone());
+                assert_eq!(
+                    expr_host_type(&a, &session, &scope),
+                    Ok(HostTypeTerm::Float32)
+                );
+                assert_eq!(expr_host_type(&b, &session, &scope), Ok(unbound_b));
+                Err(runtime.raise_fatal_lowering_diagnostic(diagnostic.clone()))
             });
             assert_eq!(caught, Err(diagnostic));
-            assert_eq!(expr_host_type(&a, &session, &scope), HostTypeTerm::Int64);
-            assert_eq!(expr_host_type(&b, &session, &scope), HostTypeTerm::Bool);
+            assert_eq!(
+                expr_host_type(&a, &session, &scope),
+                Ok(HostTypeTerm::Int64)
+            );
+            assert_eq!(expr_host_type(&b, &session, &scope), Ok(HostTypeTerm::Bool));
             {
                 let _invocation = HostInvocationGuard::begin(&session);
-                assert_eq!(expr_host_type(&a, &session, &scope), unbound_a);
+                assert_eq!(expr_host_type(&a, &session, &scope), Ok(unbound_a.clone()));
             }
-            assert_eq!(expr_host_type(&a, &session, &scope), HostTypeTerm::Int64);
+            assert_eq!(
+                expr_host_type(&a, &session, &scope),
+                Ok(HostTypeTerm::Int64)
+            );
             drop(outer);
-            assert_eq!(expr_host_type(&a, &session, &scope), unbound_a);
+            assert_eq!(expr_host_type(&a, &session, &scope), Ok(unbound_a));
         })
     }
 
@@ -20203,6 +20717,7 @@ mod tests {
                     &UnordMap::new(),
                     &mut TensorHelperSink::new(false, false),
                 )
+                .unwrap()
                 .unwrap();
                 assert!(matches!(lowered.kind, HostExprKind::Int(7)));
             };
@@ -20220,7 +20735,7 @@ mod tests {
                 }
                 assert!(inline_top_level_host_call(&call, &session).is_none());
                 assert_value(&other);
-                runtime.raise_fatal_lowering_diagnostic(diagnostic.clone());
+                Err(runtime.raise_fatal_lowering_diagnostic(diagnostic.clone()))
             });
             assert_eq!(caught, Err(diagnostic));
             assert_value(&session);
@@ -20253,7 +20768,7 @@ mod tests {
                 let _inner = TensorHelperPreflightGuard::begin_if_uncovered(&call, &inner);
                 assert!(!tensor_helper_preflight_rejects(&call, &inner));
                 assert!(tensor_helper_preflight_rejects(&call, &outer));
-                runtime.raise_fatal_lowering_diagnostic(diagnostic.clone());
+                Err(runtime.raise_fatal_lowering_diagnostic(diagnostic.clone()))
             });
             assert_eq!(caught, Err(diagnostic));
             assert!(tensor_helper_preflight_rejects(&call, &outer));
@@ -20286,16 +20801,8 @@ mod tests {
                     .unwrap_or_else(|result| panic!("IR check failed: {:?}", result.errors));
             let session = HostLoweringSession::new(&checked, runtime);
             for _ in 0..2 {
-                let caught = std::panic::catch_unwind(|| {
-                    top_level_fn_helper_summary_rejects(&session, name)
-                });
-                if let Err(payload) = &caught {
-                    eprintln!(
-                        "escaped diagnostic: {:?}",
-                        payload.downcast_ref::<crate::lower::LowerDiagnostic>()
-                    );
-                }
-                let result = caught.expect("summary probe must not unwind");
+                let result = top_level_fn_helper_summary_rejects(&session, name)
+                    .expect("summary probe must not unwind");
                 if raises_here {
                     let error = result.expect_err("direct fatal diagnostic must not be deferred");
                     assert!(error.fatal, "{error:?}");
@@ -21377,7 +21884,7 @@ mod tests {
                 "../tests/fixtures/core/src/host/adt_constructor_layouts_come_from_checked_registry.deep"
             ));
             let definitions =
-                adt_constructor_definitions(&HostLoweringSession::new(&checked, runtime));
+                adt_constructor_definitions(&HostLoweringSession::new(&checked, runtime)).unwrap();
             assert!(
                 definitions
                     .iter()
@@ -21641,6 +22148,7 @@ mod tests {
                 &HostLoweringSession::new(&program, runtime),
                 &UnordMap::new(),
             )
+            .unwrap()
         })
     }
 
@@ -21755,6 +22263,7 @@ mod tests {
                 HostTypeTerm::List(Box::new(HostTypeTerm::Tensor(rank2_element()))),
             );
             infer_app_expr_host_type(&app, &HostLoweringSession::new(&program, runtime), &scope)
+                .unwrap()
         })
     }
 
@@ -22222,6 +22731,7 @@ mod tests {
             let session = HostLoweringSession::new(&checked, runtime);
             let context = cached_subexpr_lowering_context(&session);
             let dag = lower_tensor_helper_dag(body, &session, &scope, &expected, &context)
+                .unwrap()
                 .expect("helper dag");
             let root = dag.roots().first().and_then(|id| dag.get(*id)).unwrap();
             assert_eq!(root.op, RiscOp::Exp, "{:?}", dag.nodes());
@@ -23637,6 +24147,7 @@ mod tests {
             let program = &HostLoweringSession::new(program, runtime);
             let mut helpers = TensorHelperSink::new(false, false);
             lower_host_expr(&deep_expr(source), program, &UnordMap::new(), &mut helpers)
+                .unwrap()
                 .map_err(|diagnostic| diagnostic.message)
         })
     }
@@ -23651,7 +24162,8 @@ mod tests {
             let AdtConstructorResolution::Unique(definition) = resolve_adt_constructor_definition(
                 &HostLoweringSession::new(&checked, runtime),
                 "Blib__Wrapped",
-            ) else {
+            )
+            .unwrap() else {
                 panic!("an exactly-spelled constructor must resolve uniquely");
             };
             assert_eq!(definition.adt_name, "Blib__Wrapped");
@@ -23680,7 +24192,8 @@ mod tests {
             let AdtConstructorResolution::Unique(definition) = resolve_adt_constructor_definition(
                 &HostLoweringSession::new(&checked, runtime),
                 "Wrapped",
-            ) else {
+            )
+            .unwrap() else {
                 panic!("an uncontested terminal spelling must still resolve");
             };
             assert_eq!(definition.adt_name, "Blib__Wrapped");
@@ -23699,6 +24212,7 @@ mod tests {
                     &HostLoweringSession::new(&checked, runtime),
                     "Wrapped",
                 )
+                .unwrap()
             else {
                 panic!("a contested terminal spelling must not resolve");
             };
@@ -23733,7 +24247,8 @@ mod tests {
             let AdtConstructorResolution::Unique(definition) = resolve_adt_constructor_definition(
                 &HostLoweringSession::new(&checked, runtime),
                 "Boxed",
-            ) else {
+            )
+            .unwrap() else {
                 panic!("same-name declarations keep their existing deterministic choice");
             };
             assert_eq!(definition.adt_name, "AaaBox");
@@ -23753,6 +24268,7 @@ mod tests {
                 &[],
                 "amount",
             )
+            .unwrap()
             .expect("no instantiation error")
             .expect("`amount` is declared on Blib__Wrapped");
             assert_eq!(found.0, 1, "`amount` is field 1 in the exact declaration");
