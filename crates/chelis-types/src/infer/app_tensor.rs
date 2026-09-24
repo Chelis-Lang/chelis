@@ -217,7 +217,7 @@ pub(super) fn compute_concrete_conv_spatial(
     arg_exprs: &[deep::Expr],
     input_dims: &[Dim],
     kernel_dims: &[Dim],
-    subst: &Subst,
+    subst: &mut Subst,
     stack: &mut StackBudget<'_>,
 ) -> Option<Vec<i64>> {
     let rank = input_dims.len().checked_sub(2)?;
@@ -831,7 +831,7 @@ fn unit_extent_claim_error(
     builtin: &str,
     input_dims: &[Dim],
     axis: usize,
-    subst: &Subst,
+    subst: &mut Subst,
 ) -> Option<CheckError> {
     match input_dims
         .get(axis)

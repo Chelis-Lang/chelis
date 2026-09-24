@@ -476,7 +476,7 @@ fn vmap_transform_dims(
     axis: usize,
     batch_var: DimVar,
     vg: &mut VarGen,
-    subst: &Subst,
+    subst: &mut Subst,
     mapped_axis_renaming: &mut UnordMap<DimVar, DimVar>,
 ) -> Result<Vec<Dim>, String> {
     let has_rank_spread = dims.iter().any(|dim| matches!(dim, Dim::Rank(_)));
@@ -523,7 +523,7 @@ pub(super) fn vmap_transform_param_type(
     axis: usize,
     batch_var: DimVar,
     vg: &mut VarGen,
-    subst: &Subst,
+    subst: &mut Subst,
     mapped_axis_renaming: &mut UnordMap<DimVar, DimVar>,
 ) -> Result<Type, String> {
     match ty {
@@ -563,7 +563,7 @@ pub(super) fn vmap_transform_result_type(
     axis: usize,
     batch_var: DimVar,
     vg: &mut VarGen,
-    subst: &Subst,
+    subst: &mut Subst,
     mapped_axis_renaming: &mut UnordMap<DimVar, DimVar>,
 ) -> Result<Type, String> {
     match ty {

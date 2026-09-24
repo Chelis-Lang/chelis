@@ -1068,7 +1068,7 @@ pub(super) fn infer_var(
     list: &deep::List,
     env: &mut Env,
     vg: &mut VarGen,
-    subst: &Subst,
+    subst: &mut Subst,
     adt_reg: &AdtRegistry,
     errors: &mut DiagnosticSink<'_>,
     product: &mut InferenceProduct,

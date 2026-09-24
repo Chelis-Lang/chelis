@@ -805,7 +805,7 @@ impl CollectionConstraint {
 
     /// Rewrite every carried type with `f`. Instantiation passes the
     /// quantifier renaming; discharge passes the current substitution.
-    pub fn map_types(&self, f: impl Fn(&Type) -> Type) -> Self {
+    pub fn map_types(&self, mut f: impl FnMut(&Type) -> Type) -> Self {
         match self {
             Self::Len { operand, result } => Self::Len {
                 operand: f(operand),

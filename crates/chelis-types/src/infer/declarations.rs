@@ -2354,7 +2354,7 @@ pub(super) fn adt_carrier_set(adt_reg: &AdtRegistry) -> UnordSet<String> {
 ///     only after the borrow arm ran (so the arm's own `_ => TypeMismatch`
 ///     could not fire). Reject.
 pub(super) fn validate_deferred_borrow_vars(
-    subst: &Subst,
+    subst: &mut Subst,
     adt_reg: &AdtRegistry,
     declared_type_names: &UnordMap<TypeVar, String>,
     errors: &mut DiagnosticSink<'_>,
@@ -2435,7 +2435,7 @@ pub(super) fn validate_deferred_borrow_vars(
 /// prevents one def's deferrals from leaking into the next,
 /// mirroring `validate_deferred_borrow_vars`.
 pub(super) fn validate_deferred_opaque_uses(
-    subst: &Subst,
+    subst: &mut Subst,
     adt_reg: &AdtRegistry,
     errors: &mut DiagnosticSink<'_>,
 ) {

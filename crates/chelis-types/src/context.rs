@@ -369,7 +369,7 @@ mod tests {
         let imported =
             resumed
                 .env
-                .generalize(&Type::Var(child_tvar), &resumed.subst, &UnordSet::new());
+                .generalize(&Type::Var(child_tvar), &mut resumed.subst, &UnordSet::new());
         assert!(imported.tvars.is_empty());
 
         for cycle in 0..4 {
@@ -389,7 +389,7 @@ mod tests {
             let imported =
                 resumed
                     .env
-                    .generalize(&Type::Var(fresh), &resumed.subst, &UnordSet::new());
+                    .generalize(&Type::Var(fresh), &mut resumed.subst, &UnordSet::new());
             assert!(imported.tvars.is_empty());
         }
     }
@@ -429,7 +429,7 @@ mod tests {
             let Type::Fn(params, _) =
                 resumed
                     .env
-                    .instantiate(&scheme, &mut resumed.var_gen, &resumed.subst)
+                    .instantiate(&scheme, &mut resumed.var_gen, &mut resumed.subst)
             else {
                 panic!("operation remains callable");
             };
@@ -486,9 +486,10 @@ mod tests {
             scheme.tvar_restrictions,
             vec![(scheme.tvars[0], TypeVarRestriction::ActiveFloat)]
         );
-        let instantiated = resumed
-            .env
-            .instantiate(&scheme, &mut resumed.var_gen, &resumed.subst);
+        let instantiated =
+            resumed
+                .env
+                .instantiate(&scheme, &mut resumed.var_gen, &mut resumed.subst);
         let Type::Fn(params, _) = instantiated else {
             panic!("assert-close scheme must remain callable");
         };

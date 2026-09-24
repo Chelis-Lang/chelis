@@ -37,11 +37,10 @@ pub(super) fn fold_static_int_expr_with_stack<F>(
 where
     F: FnMut(&str) -> Option<i64>,
 {
-    fn walk(
-        expr: &deep::Expr,
-        resolve_name: &mut dyn FnMut(&str) -> Option<i64>,
-        stack: &mut StackBudget<'_>,
-    ) -> Option<i64> {
+    fn walk<F>(expr: &deep::Expr, resolve_name: &mut F, stack: &mut StackBudget<'_>) -> Option<i64>
+    where
+        F: FnMut(&str) -> Option<i64>,
+    {
         if let Some(value) = extract_int_for_dim(expr, stack) {
             return Some(value);
         }

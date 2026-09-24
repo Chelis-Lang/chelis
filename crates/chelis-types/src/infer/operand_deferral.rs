@@ -111,7 +111,7 @@ impl<'a> UnresolvedOperandSite<'a> {
         &self,
         arg_tys: &[Type],
         result_ty: &Type,
-        subst: &Subst,
+        subst: &mut Subst,
         product: &mut InferenceProduct,
     ) {
         // chelis#731 cascade suppression. An error witness never binds, the
@@ -183,7 +183,7 @@ impl<'a> DtypeAdmissibilitySite<'a> {
         &self,
         arg_tys: &[Type],
         result_ty: &Type,
-        subst: &Subst,
+        subst: &mut Subst,
         product: &mut InferenceProduct,
     ) {
         self.site

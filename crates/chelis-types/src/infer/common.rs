@@ -832,7 +832,7 @@ pub(super) struct DiagonalExtent {
 /// Callers that need the bound read it through [`diagonal_result_bound`], which
 /// maps the pair position back onto the operand's axes. Both readers go through
 /// this one function so the eager and deferred shape routes cannot drift.
-pub(super) fn select_diagonal_extent(a: &Dim, b: &Dim, subst: &Subst) -> DiagonalExtent {
+pub(super) fn select_diagonal_extent(a: &Dim, b: &Dim, subst: &mut Subst) -> DiagonalExtent {
     let left = subst.observe_dim(a);
     let right = subst.observe_dim(b);
     let same_name = left.name().is_some() && left.name() == right.name();
@@ -868,7 +868,7 @@ pub(super) fn diagonal_result_bound(
     tensor_ty: &Type,
     axis1: usize,
     axis2: usize,
-    subst: &Subst,
+    subst: &mut Subst,
 ) -> Option<(usize, usize, i64)> {
     let Type::Tensor(dims, _) = tensor_ty else {
         return None;
@@ -886,7 +886,7 @@ pub(super) fn infer_diagonal_result_type(
     tensor_ty: &Type,
     axis1: usize,
     axis2: usize,
-    subst: &Subst,
+    subst: &mut Subst,
 ) -> Result<Type, String> {
     let Type::Tensor(dims, precision) = tensor_ty else {
         return Err(format!("diagonal expects tensor input, got {tensor_ty}"));

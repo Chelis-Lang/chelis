@@ -28,7 +28,7 @@ fn declared_result_literal(
     env: &Env,
     vg: &mut VarGen,
     adt_reg: &AdtRegistry,
-    subst: &Subst,
+    subst: &mut Subst,
     errors: &mut DiagnosticSink<'_>,
 ) -> Option<i64> {
     // The rank-equality precondition matters as much as the literal does. A
@@ -38,7 +38,7 @@ fn declared_result_literal(
     // at most 4", which names a repair that would not fix the program, and the
     // `Type::Error` this path returns then suppresses the accurate diagnostic
     // (round 1 P2). Rank belongs to unification; the bound stands down.
-    let literal_at = |ty: &Type| -> Option<i64> {
+    let literal_at = |ty: &Type, subst: &mut Subst| -> Option<i64> {
         let Type::Tensor(dims, _) = ty else {
             return None;
         };
@@ -51,7 +51,7 @@ fn declared_result_literal(
     if let Some(found) = expected_result
         .map(|expected| subst.apply(expected))
         .as_ref()
-        .and_then(&literal_at)
+        .and_then(|ty| literal_at(ty, subst))
     {
         return Some(found);
     }
@@ -69,7 +69,7 @@ fn declared_result_literal(
         errors,
     );
     errors.retain_since(checkpoint, |_| false);
-    literal_at(&resolved.ok()?)
+    literal_at(&resolved.ok()?, subst)
 }
 
 /// chelis#1739. `[05-OP-33]` replaces the retained axis extent with the smaller
@@ -91,7 +91,7 @@ fn reject_unreachable_diagonal_extent(
     env: &Env,
     vg: &mut VarGen,
     adt_reg: &AdtRegistry,
-    subst: &Subst,
+    subst: &mut Subst,
     errors: &mut DiagnosticSink<'_>,
     expected_result: Option<&Type>,
 ) -> Option<Type> {

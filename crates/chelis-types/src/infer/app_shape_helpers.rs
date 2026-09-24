@@ -277,12 +277,12 @@ pub(super) fn classify_expand_size(
     expr: &deep::Expr,
     env: &Env,
     adt_reg: &AdtRegistry,
-    subst: &Subst,
+    subst: &mut Subst,
     stack: &mut StackBudget<'_>,
 ) -> SizeClass {
     classify_size_in(
         expr,
-        &SizeCtx {
+        &mut SizeCtx {
             env,
             adt_reg,
             subst,
@@ -299,7 +299,7 @@ pub(super) fn classify_expand_size(
 struct SizeCtx<'a> {
     env: &'a Env,
     adt_reg: &'a AdtRegistry,
-    subst: &'a Subst,
+    subst: &'a mut Subst,
     piped: &'a [PipedParam],
 }
 
@@ -328,7 +328,7 @@ impl SizeCtx<'_> {
 
 fn classify_size_in(
     expr: &deep::Expr,
-    ctx: &SizeCtx<'_>,
+    ctx: &mut SizeCtx<'_>,
     stack: &mut StackBudget<'_>,
 ) -> SizeClass {
     if stack.frame_exhausted("classify_expand_size", || expr.span_id()) {
@@ -341,7 +341,7 @@ fn classify_size_in(
 
 fn classify_size_in_frame(
     expr: &deep::Expr,
-    ctx: &SizeCtx<'_>,
+    ctx: &mut SizeCtx<'_>,
     stack: &mut StackBudget<'_>,
 ) -> SizeClass {
     let env = ctx.env;
@@ -384,7 +384,7 @@ fn classify_size_in_frame(
                 .map_or(SizeClass::Unknown, |param| param.class),
             // A name carried by an in-scope tensor's shape is a
             // Form-2 symbolic dim with a real source.
-            Some(name) if env.tensor_carries_dim_with_subst(name, ctx.subst) => {
+            Some(name) if env.tensor_carries_dim_with_subst(name, &mut *ctx.subst) => {
                 SizeClass::ShapeSourced
             }
             // A recorded `let` provenance (shape-sourced or static).
@@ -450,7 +450,7 @@ fn classify_size_in_frame(
 /// `&deep::List` to hand over).
 fn classify_arith_app(
     kids: &[deep::Expr],
-    ctx: &SizeCtx<'_>,
+    ctx: &mut SizeCtx<'_>,
     stack: &mut StackBudget<'_>,
 ) -> SizeClass {
     let Some(callee) = kids.first() else {
@@ -560,7 +560,7 @@ fn shape_read_operand_frame<'e>(
 /// a tensor type in `env`. A non-tensor operand cannot supply an extent.
 fn shape_operand_is_in_scope_tensor(
     operand: &deep::Expr,
-    ctx: &SizeCtx<'_>,
+    ctx: &mut SizeCtx<'_>,
     stack: &mut StackBudget<'_>,
 ) -> bool {
     shape_operand_type(operand, ctx, stack)
@@ -586,7 +586,7 @@ fn shape_operand_is_in_scope_tensor(
 /// `infer_access` itself projects.
 fn shape_operand_type(
     operand: &deep::Expr,
-    ctx: &SizeCtx<'_>,
+    ctx: &mut SizeCtx<'_>,
     stack: &mut StackBudget<'_>,
 ) -> Option<Type> {
     if stack.frame_exhausted("shape_operand_type", || operand.span_id()) {
@@ -599,7 +599,7 @@ fn shape_operand_type(
 
 fn shape_operand_type_frame(
     operand: &deep::Expr,
-    ctx: &SizeCtx<'_>,
+    ctx: &mut SizeCtx<'_>,
     stack: &mut StackBudget<'_>,
 ) -> Option<Type> {
     if let Some(name) = symbolic_dim_ref_name(operand) {
@@ -708,7 +708,7 @@ pub(super) fn check_authored_dvars_rigid(
     declaration: &str,
     decl_ty: &Type,
     dim_names: &UnordMap<DimVar, String>,
-    subst: &Subst,
+    subst: &mut Subst,
     errors: &mut DiagnosticSink<'_>,
 ) {
     let Type::Fn(decl_params, decl_ret) = decl_ty else {
@@ -867,7 +867,7 @@ pub(super) fn check_declared_dvars_rigid(
     declaration: Option<&str>,
     declared_dvars: &[DimVar],
     dim_names: &UnordMap<DimVar, String>,
-    subst: &Subst,
+    subst: &mut Subst,
     errors: &mut DiagnosticSink<'_>,
 ) {
     let render = |dv: DimVar| render_declared_dim(dim_names, dv);
