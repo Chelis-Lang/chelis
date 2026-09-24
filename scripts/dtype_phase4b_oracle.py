@@ -1095,9 +1095,9 @@ def validate_normative_contract(
     require_all(
         spec04,
         (
-            ("The active primitive set is exactly ten names", "ten active primitives"),
+            ("The active primitive set is exactly eleven names", "eleven active primitives"),
             (
-                "one of the ten active primitives is well-typed",
+                "one of the eleven active primitives is well-typed",
                 "backend-neutral active primitive set",
             ),
             ("nine active tensor element dtypes", "nine tensor element dtypes"),

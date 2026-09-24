@@ -1068,6 +1068,58 @@ compile-time-only alias.
 > assigns them as sequential evaluation of its branches in source order
 > would. (Not every lane meets this rule yet; chelis#2413 tracks the gaps.)
 
+### 2.7 Random Keys
+
+A `key` (spec/04 §1.1) names the stream of one random draw. The operations
+below create and derive keys; they are pure and deterministic, and each
+derivation consumes the key it is given. (These operations are not yet
+reachable from source; chelis#2413.)
+
+| Name | Signature | Semantics |
+|---|---|---|
+| `key_from_seed` | `(i64) -> key` | The root key of a seed ([05-OP-69]) |
+| `split_key` | `(key) -> (key, key)` | Two child keys ([05-OP-70]) |
+| `split_keys` | `(key, i64) -> tensor[n, key]` | `n` child keys ([05-OP-71]) |
+| `fold_in` | `(key, i64) -> key` | The child key of an integer ([05-OP-72]) |
+
+> **[05-RNG-2]** A key is a 64-bit word. For a key `k` and a 64-bit word
+> `j`, `derive(k, j) = splitmix64(k XOR rotl64(splitmix64(j), 29))`, where
+> `rotl64(x, r)` rotates `x` left by `r` bits modulo `2^64` and `splitmix64`
+> is [05-RNG-1]'s map. `derive` is a bijection in each argument when the
+> other is fixed. The source word of flat element index `i` of a draw keyed
+> by `k` is `word(k, i) = splitmix64(k XOR rotl64(splitmix64(i), 41))`, and
+> its unit value is the exact rational formed by the word's high 53 bits
+> divided by `2^53`. [05-RNG-1]'s draw with seed bits `s` and call ordinal
+> `c` is the draw keyed by `s XOR rotl64(splitmix64(c), 17)`. `derive` and
+> `word` are definitions, not callable operations.
+
+> **[05-OP-69]** `key_from_seed(seed) -> key` takes an `i64` seed and returns
+> the key whose 64 bits are the seed's two's-complement bits, with no mixing.
+> A `tensor[D, i64]` of seeds gives the `tensor[D, key]` of their keys element
+> by element. The operation is non-differentiable: the seed receives no
+> cotangent and the key carries none.
+
+> **[05-OP-70]** `split_key(k) -> (key, key)` consumes the key `k` and returns
+> the pair `(derive(k, 0), derive(k, 1))` of [05-RNG-2]. For a
+> `tensor[D, key]` operand each half is a `tensor[D, key]` computed element by
+> element. The two halves are distinct keys, each usable once, and neither
+> carries a cotangent.
+
+> **[05-OP-71]** `split_keys(k, n) -> tensor[n, key]` consumes the key `k` and
+> takes a runtime `i64` count `n`. Row `j` of the result, for `0 <= j < n`,
+> is `derive(derive(k, 2), j)` of [05-RNG-2], the key that folding `j` into
+> `k` yields. `n` SHALL be non-negative: a negative count traps before
+> allocation, as a negative runtime movement bound does, and `n = 0` gives an
+> empty tensor. For a `tensor[D, key]` operand the result is
+> `tensor[D ++ [n], key]`, the new axis last. No row carries a cotangent.
+
+> **[05-OP-72]** `fold_in(k, n) -> key` consumes the key `k` and returns
+> `derive(derive(k, 2), n)` of [05-RNG-2], reading the `i64` `n` as its
+> two's-complement 64 bits, so every `n`, negative ones included, is valid.
+> A `tensor[D, key]` and a `tensor[D, i64]` of exactly equal shape give the
+> `tensor[D, key]` computed element by element, with no broadcasting. The key
+> carries no cotangent and `n` receives none.
+
 ---
 
 ## 3. Derived Built-Ins (Tier 2)

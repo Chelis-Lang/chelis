@@ -26,7 +26,7 @@ Types are represented as Deep AST nodes using the `t-*` tag family.
 
 ### 1.1 Primitive Types
 
-The active primitive set is exactly ten names:
+The active primitive set is exactly eleven names:
 
 ```scheme
 (t-prim {} f32)       ;; 32-bit float
@@ -39,6 +39,7 @@ The active primitive set is exactly ten names:
 (t-prim {} i64)       ;; 64-bit signed integer
 (t-prim {} bool)      ;; boolean
 (t-prim {} string)    ;; UTF-8 string
+(t-prim {} key)       ;; random key
 ```
 
 These closed subsets are used throughout the specs:
@@ -48,7 +49,17 @@ These closed subsets are used throughout the specs:
 - the **nine active tensor element dtypes** are those eight numeric dtypes plus
   `bool`; and
 - `string` is an active host primitive, but is neither a numeric dtype nor a
-  tensor element dtype.
+  tensor element dtype; and
+- `key` is an active primitive and may be the element of a `tensor[D, key]`,
+  but is neither a numeric dtype nor one of the nine active tensor element
+  dtypes, so an operation that admits every active tensor element dtype does
+  not admit it.
+
+A `key` is a 64-bit random key ([05-RNG-2]). It has no arithmetic,
+comparison, cast, literal, or default value. [05-OP-69] creates keys and
+[05-OP-70] through [05-OP-72] derive them; an operation admits a key operand
+only where its own atom names `key`. (Source and Deep ingress do not yet
+accept the `key` spelling; chelis#2413.)
 
 Code, tests, examples, and stdlib signatures referenced from any active spec
 section must use these set names with exactly those meanings. The reserved
@@ -155,7 +166,7 @@ matching numpy and Arrow. All of these spellings are rejected under
 #### 1.1.3 Per-Backend Dtype Support Matrix
 
 The active primitive set in §1.1 is the **language-level** dtype contract: a
-program that mentions one of the ten active primitives is well-typed in
+program that mentions one of the eleven active primitives is well-typed in
 every Chelis pass that does not select a backend (parser, type checker, IR
 evaluator). Backend code generation is a separate surface; not every backend
 admits every active dtype. This sub-section is the authoritative per-backend
@@ -173,6 +184,7 @@ the spec or in user-facing docs must resolve to a cell in this table.
 | i32  | admitted                                                                                                          | admitted                                                                                                                                                                                                 | admitted                                     | admitted  |
 | i64  | admitted                                                                                                          | admitted                                                                                                                                                                                                 | admitted                                     | admitted  |
 | bool   | admitted                                                                                                          | admitted                                                                                                                                                                                                 | admitted                                     | admitted  |
+| key    | admitted                                                                                                          | **operation-limited**: [05-OP-69], [05-OP-70] and [05-OP-72] on rank-zero keys whose seed and count operands are literals, and [05-OP-8] keyed by such a key                                               | **operation-limited**: no operation          | admitted  |
 
 **Arithmetic width is not a cell of this table.** It is a target-independent
 property of the dtype, declared once by [04-NUM-8] and owned by the semantic

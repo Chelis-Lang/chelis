@@ -2723,11 +2723,11 @@ class ContractValidationTests(unittest.TestCase):
         self.assertIn("`bf16` | `f32`, `f64` | `bf16`", text)
         self.assertIn("`i32` | `i32`, `i64` | accumulator dtype `a`", text)
 
-    def test_backend_neutral_contract_keeps_all_ten_active_primitives(self) -> None:
+    def test_backend_neutral_contract_keeps_all_eleven_active_primitives(self) -> None:
         self.replace(
             Path("spec/04-type-system.md"),
+            "one of the eleven active primitives is well-typed",
             "one of the ten active primitives is well-typed",
-            "one of the nine active primitives is well-typed",
         )
         self.assert_contract_fails("backend-neutral active primitive set")
 
