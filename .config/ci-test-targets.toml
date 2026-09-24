@@ -817,6 +817,13 @@ name = "issue_2205_string_last_use"
 package = "chelis-cli"
 name = "issue_2334_skip_cursor"
 
+# chelis#2496: a Mac run of a test-authored C fixture is no portability
+# evidence, so every pull request proves that its Linux lane compiles with GCC
+# and that the strict fixture flags still reject both chelis#1864 shapes.
+[[standing_target]]
+package = "chelis-runtime"
+name = "c_fixture_portability"
+
 # All five rows in this published-stdlib acceptance target are intentionally
 # ignored. A direct modification remains required change-owned coverage: the
 # worker lists with ignored tests included, rejects this mode if any active
@@ -946,90 +953,6 @@ job = "full-workspace"
 cadence = "daily 03:17 UTC and workflow_dispatch"
 reason = "recursive composite cotangent parity compiles and executes generated C"
 tracking_issue = "chelis#1293"
-
-# chelis#2201: these eight default-off observer rows still assume obsolete
-# unmangled public C symbols. The feature-enabled nightly remains their owner
-# until that focused fixture migration lands; the three green rows stay in
-# change-owned/package-expansion execution.
-[[test_exclusion]]
-package = "chelis-compiler-api"
-target = "native_random_observer"
-name = "authored_observer_spellings_do_not_collide_with_private_support_or_wrappers"
-workflow = "heavy-e2e.yml"
-job = "native-random-observer-debt"
-cadence = "daily 03:17 UTC and workflow_dispatch"
-reason = "known failing-on-main observer fixture assumes obsolete public C symbols"
-tracking_issue = "chelis#2201"
-
-[[test_exclusion]]
-package = "chelis-compiler-api"
-target = "native_random_observer"
-name = "feature_on_ordinary_public_call_emits_no_observation"
-workflow = "heavy-e2e.yml"
-job = "native-random-observer-debt"
-cadence = "daily 03:17 UTC and workflow_dispatch"
-reason = "known failing-on-main observer fixture assumes obsolete public C symbols"
-tracking_issue = "chelis#2201"
-
-[[test_exclusion]]
-package = "chelis-compiler-api"
-target = "native_random_observer"
-name = "host_source_identity_qualifies_nested_and_following_helper_occurrences"
-workflow = "heavy-e2e.yml"
-job = "native-random-observer-debt"
-cadence = "daily 03:17 UTC and workflow_dispatch"
-reason = "known failing-on-main observer fixture assumes obsolete public C symbols"
-tracking_issue = "chelis#2201"
-
-[[test_exclusion]]
-package = "chelis-compiler-api"
-target = "native_random_observer"
-name = "nested_host_and_fixed_frames_record_actual_forward_replay_and_restoration"
-workflow = "heavy-e2e.yml"
-job = "native-random-observer-debt"
-cadence = "daily 03:17 UTC and workflow_dispatch"
-reason = "known failing-on-main observer fixture assumes obsolete public C symbols"
-tracking_issue = "chelis#2201"
-
-[[test_exclusion]]
-package = "chelis-compiler-api"
-target = "native_random_observer"
-name = "repeated_direct_callees_keep_linked_identity_and_restore_the_call_stack"
-workflow = "heavy-e2e.yml"
-job = "native-random-observer-debt"
-cadence = "daily 03:17 UTC and workflow_dispatch"
-reason = "known failing-on-main observer fixture assumes obsolete public C symbols"
-tracking_issue = "chelis#2201"
-
-[[test_exclusion]]
-package = "chelis-compiler-api"
-target = "native_random_observer"
-name = "repeated_observed_calls_restart_sequence_and_keep_invocation_identity"
-workflow = "heavy-e2e.yml"
-job = "native-random-observer-debt"
-cadence = "daily 03:17 UTC and workflow_dispatch"
-reason = "known failing-on-main observer fixture assumes obsolete public C symbols"
-tracking_issue = "chelis#2201"
-
-[[test_exclusion]]
-package = "chelis-compiler-api"
-target = "native_random_observer"
-name = "sink_error_is_not_silent_success"
-workflow = "heavy-e2e.yml"
-job = "native-random-observer-debt"
-cadence = "daily 03:17 UTC and workflow_dispatch"
-reason = "known failing-on-main observer fixture assumes obsolete public C symbols"
-tracking_issue = "chelis#2201"
-
-[[test_exclusion]]
-package = "chelis-compiler-api"
-target = "native_random_observer"
-name = "unsupported_argument_effects_cannot_certify_descendant_calls"
-workflow = "heavy-e2e.yml"
-job = "native-random-observer-debt"
-cadence = "daily 03:17 UTC and workflow_dispatch"
-reason = "known failing-on-main observer fixture assumes obsolete public C symbols"
-tracking_issue = "chelis#2201"
 
 # Cargo metadata classifies paths under workspace package roots directly.
 # Shared roots remain fail-closed unless this file records a current,
@@ -1753,8 +1676,8 @@ disposition = "owner"
 workflow = "ci.yml"
 job = "script-unit"
 cadence = "pull_request and push"
-reason = "the unattended owner graph, feature-gated debt command, exact selector, and nightly reporting are locked by script-unit"
-tracking_issue = "chelis#2201"
+reason = "the unattended owner graph and nightly reporting are locked by script-unit"
+tracking_issue = "chelis#2232"
 
 # The release workflow is text-parsed by the script-unit suites that lock its
 # job graph, cargo build targets, runtime-header manifests, glibc 2.31 lane,

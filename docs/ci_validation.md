@@ -17,7 +17,7 @@ Ordinary PRs and main pushes use Linux. Passing required PR checks is **not a ph
 | `pr-candidate-receipt.yml` | Completion of any workflow that can finish the required PR check set | Default-branch-owned receipt binding the exact PR head, synthetic candidate, patch identity, required check runs and their workflow/job provenance; eligible receipts can authorize the guarded targeted-rebase lane |
 | `ci.yml` retained workers | Ordinary PR and main push; accepted targeted rebases run only the owners selected by their interaction frontier | Rust policy and doctests, Python/script units selected by `ci_script_tests.py pr`, focused SMT plus its existing Deep-obligation integration target, Linux glibc compatibility, Docs, backend sanitizer units and explicit backend doctests; change-triggered diagnostic mutation and the offline rejection-authority boundary |
 | `conformance.yml` | PR and main push | Existing frozen Hull conformance gate |
-| `heavy-e2e.yml` | Daily 03:17 UTC and manual dispatch | Full non-ignored default workspace across four workspace shards, an exact feature-enabled owner for the known-red native Random observer debt, plus the dtype owner, script integrations, exhaustive generalization feature partitions, dtype Phases 0–3, faithful observation Phase 2, ownership Phase 2 and launch, runtime representation Phase 0, frontend/domain support, and full backend sanitizer integration coverage |
+| `heavy-e2e.yml` | Daily 03:17 UTC and manual dispatch | Full non-ignored default workspace across four workspace shards, plus the dtype owner, script integrations, exhaustive generalization feature partitions, dtype Phases 0–3, faithful observation Phase 2, ownership Phase 2 and launch, runtime representation Phase 0, frontend/domain support, and full backend sanitizer integration coverage |
 | `macos-nightly.yml` | Daily 04:17 UTC and manual dispatch | Both Mac workspace partitions, both Clippy configurations, architecture/ABI/Metal smokes, and Darwin SMT |
 | `build-cvc5.yml` Darwin producer | Daily 01:17 UTC and manual dispatch | Missing Darwin prebuilt assets; relevant main pushes may produce Linux assets only |
 | `smt-full-prove.yml` | Existing nightly/manual cadence | Full SMT proof validation |
@@ -211,6 +211,29 @@ required change-owned coverage. Its plan-bound execution mode lists ignored
 tests, rejects the row if any default-enabled test appears, and runs the complete
 ignored suite with the same target and per-test receipts. It is not an exclusion
 and zero active tests do not count as success.
+
+Test-authored C fixtures, the C a test writes and compiles with `cc`, are
+portability tests whether or not they were written as one (chelis#2496).
+Authors run them on macOS, where Apple clang accepts both defects that
+chelis#1864 merged: a `PRIu64` whose `<inttypes.h>` arrived only through the
+Accelerate framework that `chelis_math.h` includes on Apple, and an unbraced
+`if` followed by a second statement on its line, which GCC's `-Wall` rejects. A
+local run, `gate.py --validation` included, is therefore no portability evidence
+on macOS. The Linux GCC evidence before merge is the existing selection and
+nothing wider. An added or directly modified fixture target runs in the required
+change-owned lane with its Cargo `required-features` activated, so
+`chelis-compiler-api::native_random_observer` runs every row with
+`native-random-observer`. A change to a shared fixture helper, such as
+`crates/chelis-compiler-api/tests/ownership_support/`, reaches its dependents
+only through the package-expansion dispatch that precedes merge. Each fixture's
+own flags decide what fails it; one that must reject GCC warnings opts into
+`-std=c11 -Wall -Wextra -Werror`. The standing
+`chelis-runtime::c_fixture_portability` target keeps that evidence honest: on
+Linux it fails unless `cc` is GCC and those flags reject both chelis#1864 shapes
+while accepting their repaired twins, so a lane whose compiler or flags stop
+detecting them goes red rather than green. Making every fixture target standing
+would be the whole-workspace pull-request suite whose cost chelis#1824 weighs;
+generated-source portability as a class stays with chelis#2063.
 
 The Linux workspace worker executes as four shards of one
 `--partition hash:${{ matrix.shard }}/4` selection rather than as a single run.

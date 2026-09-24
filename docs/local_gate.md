@@ -180,7 +180,9 @@ runtime-representation Phase 2 oracle, and
 `origin/main` (committed diff plus uncommitted work; owning packages are
 resolved from each member's `Cargo.toml`, not the directory name). The derived
 crate list is always printed; "no crate changes detected" means the per-crate
-stage was skipped, not silently empty.
+stage was skipped, not silently empty. On macOS it compiles test-authored C
+fixtures with Apple clang, which is no portability evidence;
+[`ci_validation.md`](ci_validation.md) records where GCC sees them.
 
 The workspace nextest stage is CI-owned. Mac workspace validation runs daily at
 04:17 UTC in `macos-nightly.yml` and on manual dispatch; it is not a required
