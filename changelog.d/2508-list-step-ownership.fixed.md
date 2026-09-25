@@ -14,3 +14,9 @@ Releasing a deeply nested value no longer overflows the native stack: a
 Recursion over a large list parameter is linear again; every call used to walk
 the whole carried value. See
 [#2522](https://github.com/Chelis-Lang/chelis/issues/2522).
+
+A program whose definitions take a parameter the tensor entry cannot carry (a
+scalar, string, data-type, container or non-`f32` tensor parameter) now keeps
+each such definition as its own C function. Previously a constant body such as
+`def f(x: i64) -> i64 = 1i64` emitted only a zero-input program entry and
+dropped `f`. See [#2522](https://github.com/Chelis-Lang/chelis/issues/2522).

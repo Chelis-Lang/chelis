@@ -2869,11 +2869,47 @@ fn lower_host_program_with_execution(
                 .is_some_and(|row| !row.contains(&chelis_types::types::Effect::Random))
             && cached_dropout_reaching_defs(program).contains(name)
             && named_tensor_entry_lowering_inputs(program, name).is_some();
+        // chelis#2522: the DAG entry ABI carries only f32/bool tensors, so a
+        // DAG-lowered def with any other parameter (a scalar, string, ADT,
+        // container, or unit) lost that parameter and its authored signature:
+        // a constant body with such a parameter emitted only the zero-input
+        // direct entry. Such a def always gets its host wrapper. Callable
+        // and still-polymorphic parameters keep the rules above. A def that
+        // inherits Random keeps its lane: the DAG entry refuses an inherited
+        // draw at build time, while a host public entry has no handler to
+        // give it and aborts only when it draws (chelis#1872).
+        let inherits_random = cached_def_effect_rows(program)
+            .get(name)
+            .is_some_and(|row| row.contains(&chelis_types::types::Effect::Random));
+        let has_param_outside_dag_entry = !inherits_random
+            && lookup_declared_fn_type(program, name).is_some_and(|(params, _)| {
+                params.iter().any(|ty| match ty {
+                    HostTypeTerm::Tensor(tensor) => !matches!(
+                        tensor.precision,
+                        chelis_types::types::Prim::F32 | chelis_types::types::Prim::Bool
+                    ),
+                    HostTypeTerm::Fn(..) | HostTypeTerm::PolymorphicTensor(_) => false,
+                    HostTypeTerm::Scalar(_)
+                    | HostTypeTerm::Adt(..)
+                    | HostTypeTerm::List(_)
+                    | HostTypeTerm::Dict(..)
+                    | HostTypeTerm::Tuple(_)
+                    | HostTypeTerm::Option(_)
+                    | HostTypeTerm::MappedFile
+                    | HostTypeTerm::Unit
+                    | HostTypeTerm::TypeVariable(_)
+                    | HostTypeTerm::InferenceVariable(_)
+                    | HostTypeTerm::Never => true,
+                })
+            });
         let needs_host_wrapper = is_fn_body
             && (has_non_dag_tensor
                 || scalar_only_callable_signature
                 || closed_dropout_entry
-                || (!has_callable_params && (has_any_host_lane_def || lowered_fn_def_count > 1)));
+                || (!has_callable_params
+                    && (has_param_outside_dag_entry
+                        || has_any_host_lane_def
+                        || lowered_fn_def_count > 1)));
         // Issue #378: a non-`fn` value binding (a `(def name (lit ...))`)
         // that a host-lane function captures must reach `host.globals` so
         // the emitted C declares it; otherwise the function body references
