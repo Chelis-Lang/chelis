@@ -294,12 +294,15 @@ fn sweep_recursive_collection_contracts(
             ) {
                 deferred_bindings.push(binding);
             }
-            scratch.finish_deferred_shape_checks(Some(name), var_gen, subst, adt_reg, errors);
-            scratch.finish_deferred_literal_patterns(Some(name), env, subst, adt_reg, errors);
-            scratch.finish_root(subst, errors);
-            validate_deferred_borrow_vars(subst, adt_reg, env.active_declared_type_names(), errors);
-            validate_deferred_tensor_operands(subst, env.active_declared_type_names(), errors);
-            validate_deferred_opaque_uses(subst, adt_reg, errors);
+            close_declaration(
+                &mut scratch,
+                Some(name),
+                env,
+                var_gen,
+                subst,
+                adt_reg,
+                errors,
+            );
             if errors.iter_since(sweep_checkpoint).next().is_some() {
                 diagnosed = true;
                 break;
@@ -624,25 +627,18 @@ pub(super) fn infer_program_with_product_in_session(
             ) {
                 deferred_bindings.push(binding);
             }
-            product.finish_deferred_shape_checks(decl_name, &mut vg, &mut subst, &adt_reg, errors);
-            product.finish_deferred_literal_patterns(decl_name, &env, &subst, &adt_reg, errors);
-            product.finish_root(&subst, errors);
-            // Issue #256 round 2: re-check each deferred borrow against the
-            // now-complete substitution (see `validate_deferred_borrow_vars`).
-            validate_deferred_borrow_vars(
-                &subst,
+            // chelis#1489: one close per declaration. An earlier revision had
+            // a second, whole-program phase that three library lanes never
+            // reached.
+            close_declaration(
+                &mut product,
+                decl_name,
+                &env,
+                &mut vg,
+                &mut subst,
                 &adt_reg,
-                env.active_declared_type_names(),
                 errors,
             );
-            // chelis#1489: decide this def's deferred operands against the
-            // final substitution (see `validate_deferred_tensor_operands`).
-            // One pass, per def — an earlier revision had a second,
-            // whole-program phase that three library lanes never reached.
-            validate_deferred_tensor_operands(&mut subst, env.active_declared_type_names(), errors);
-            // D-CHECK: drain the per-def deferred-access ledger (see
-            // `validate_deferred_opaque_uses`).
-            validate_deferred_opaque_uses(&subst, &adt_reg, errors);
             #[cfg(test)]
             if cyclic {
                 primary_recursive_member_finished_for_test();
@@ -1694,45 +1690,20 @@ pub(super) fn infer_ir_program_with_state(
             ) {
                 deferred_bindings.push(binding);
             }
-            product.finish_deferred_shape_checks(
+            close_declaration(
+                &mut product,
                 top_level_decl_name(expr),
+                &state.env,
                 &mut state.var_gen,
                 &mut state.subst,
                 &state.adt_reg,
                 errors,
             );
-            product.finish_deferred_literal_patterns(
-                top_level_decl_name(expr),
-                &state.env,
-                &state.subst,
-                &state.adt_reg,
-                errors,
-            );
-            product.finish_root(&state.subst, errors);
             if let Some(t0) = t0 {
                 let elapsed = t0.elapsed();
                 let name = top_level_decl_name(expr).unwrap_or("<anon>");
                 eprintln!("infer_ir_decl: {:>8.4}s {}", elapsed.as_secs_f64(), name);
             }
-            // Issue #256 round 2: drain the deferred-borrow ledger for this
-            // def and re-check each recorded variable against the now-complete
-            // substitution. Draining per-def keeps error attribution local and
-            // prevents one def's deferrals from leaking into the next.
-            validate_deferred_borrow_vars(
-                &state.subst,
-                &state.adt_reg,
-                state.env.active_declared_type_names(),
-                errors,
-            );
-            // chelis#1489: see `validate_deferred_tensor_operands`.
-            validate_deferred_tensor_operands(
-                &mut state.subst,
-                state.env.active_declared_type_names(),
-                errors,
-            );
-            // D-CHECK: drain the per-def deferred-access ledger (see
-            // `validate_deferred_opaque_uses`).
-            validate_deferred_opaque_uses(&state.subst, &state.adt_reg, errors);
         }
         if cancelled() {
             if let Some(scope) = component_scope.take() {

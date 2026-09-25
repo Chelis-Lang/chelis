@@ -2438,6 +2438,7 @@ pub(super) fn infer_top_level(
         // source spelling.  Heterogeneous returns and bodies whose tail
         // is an `app` or other non-var expression still fail with the
         // existing TypeMismatch.
+        let mut binder_rigidity = None;
         let scheme_body = if is_exact_op35_wrapper(&name) {
             // These package-reserved wrappers intentionally consume contracts
             // delivered by sibling Phase-4 issues: all-dtype random parameters
@@ -2467,30 +2468,24 @@ pub(super) fn infer_top_level(
             let resolved_body = subst.apply(&body_ty);
             let resolved_decl = subst.apply(&decl_ty);
             // Declared-dim rigidity check (TypeCheck-FreeDimVarUnification-F1
-            // Path B). The declared signature's param positions introduce
-            // the universally-quantified dim parameters; after the
-            // post-body sig-unify above, two distinct declared dims must
-            // not have collapsed into one another (and none may have been
-            // pinned to a concrete literal). This runs here, not inside
-            // `infer_def_body_with_sig`, because the collapse for an
-            // annotated-param body happens in the sig-unify itself, not
-            // during body inference. The body's tail returns the wrong
-            // declared dim (`def g[n, m](x: tensor[n, f32],
-            // y: tensor[m, f32]) -> tensor[n, f32] = y`), and the
-            // structural relaxed-retry guard does not see it because the
+            // Path B), with its type and rank twins ([04-INF-6]). After the
+            // post-body sig-unify above, two distinct declared binders must not
+            // have collapsed into one another, and none may have been pinned to
+            // a concrete literal or type. The collapse for an annotated-param
+            // body happens in the sig-unify itself, not during body inference:
+            // the body's tail returns the wrong declared dim (`def g[n, m](x:
+            // tensor[n, f32], y: tensor[m, f32]) -> tensor[n, f32] = y`), and
+            // the structural relaxed-retry guard does not see it because the
             // initial unify already succeeded by collapsing `n` and `m`.
-            // Classify every authored dimension identity together. Parameter
-            // and body-only roles are rigid under [04-INF-6]; result-only
-            // roles retain §4.4.1 output inference and may collapse only with
-            // another result-only identity. This declaration-level path is
-            // shared by ordinary and recursive members.
-            check_authored_dvars_rigid(&name, &decl_ty, &declared_dim_names, subst, errors);
-            // [04-INF-6]: the type/rank twins of the dimension check above.
-            // Their key sets come from the same declaration-owned identity
-            // object, and inference holes ([04-INF-5]) are excluded by
-            // construction.
-            check_declared_tvars_rigid(&name, &declared_type_names, subst, errors);
-            check_declared_rvars_rigid(&name, &declared_rank_names, subst, errors);
+            //
+            // The contract is decided by `close_declaration`, not here: the
+            // declaration boundary still replays suspended calls after this
+            // point, and a replay can pin or narrow a binder (chelis#2537).
+            binder_rigidity = Some((
+                decl_ty.clone(),
+                declared_dim_names.clone(),
+                declared_rank_names.clone(),
+            ));
             // Tier-2 rank-polymorphism Body Discipline
             // (spec/design/rank_polymorphism.md §Soundness Boundary, spec §4.2):
             // a def whose signature mentions a rank variable `..r` may call only
@@ -2644,13 +2639,14 @@ pub(super) fn infer_top_level(
             body_ty
         };
 
-        check_declared_dtype_bounds(
-            &name,
-            &declared_type_names,
-            &declared_dtype_bounds,
-            subst,
-            errors,
-        );
+        let binder_contract =
+            AuthoredBinderContract::new(name.clone(), declared_type_names, declared_dtype_bounds);
+        product.record_authored_binder_contract(match binder_rigidity {
+            Some((decl_ty, dim_names, rank_names)) => {
+                binder_contract.with_rigidity(decl_ty, dim_names, rank_names)
+            }
+            None => binder_contract,
+        });
 
         // The private frame constrains this body, but never replaces the
         // rejected declaration with a callable public signature.

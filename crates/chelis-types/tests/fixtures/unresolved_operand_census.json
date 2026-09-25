@@ -460,46 +460,42 @@
       "file": "app_post.rs",
       "function": "finish_unified_app",
       "ordinal": 33,
-      "pattern": "Type::Var(_)",
+      "pattern": "(Type::Var(_) , _) |(_ , Type::Var(_))",
       "disposition": "deferred"
     },
     {
       "file": "app_post.rs",
       "function": "finish_unified_app",
       "ordinal": 34,
-      "pattern": "(Type::Var(_) , _) |(_ , Type::Var(_)) |(Type::Error(_) , _) |(_ , Type::Error(_))",
-      "disposition": "caught_downstream",
-      "witness": "a_route_whose_arm_admits_a_variable_is_still_rejected_by_a_later_rule"
+      "pattern": "(Type::Var(_) , _) |(_ , Type::Var(_))",
+      "disposition": "deferred"
     },
     {
       "file": "app_post.rs",
       "function": "finish_unified_app",
       "ordinal": 35,
-      "pattern": "(Type::Var(_) , _) |(_ , Type::Var(_)) |(Type::Error(_) , _) |(_ , Type::Error(_))",
-      "disposition": "caught_downstream",
-      "witness": "a_route_whose_arm_admits_a_variable_is_still_rejected_by_a_later_rule"
+      "pattern": "(Type::Var(_) , _) |(_ , Type::Var(_))",
+      "disposition": "deferred"
     },
     {
       "file": "app_post.rs",
       "function": "finish_unified_app",
       "ordinal": 36,
-      "pattern": "(Type::Var(_) , _) |(_ , Type::Var(_)) |(Type::Error(_) , _) |(_ , Type::Error(_))",
-      "disposition": "caught_downstream",
-      "witness": "a_route_whose_arm_admits_a_variable_is_still_rejected_by_a_later_rule"
+      "pattern": "(Type::Var(_) , _ , _) |(_ , Type::Var(_) , _) |(_ , _ , Type::Var(_))",
+      "disposition": "deferred"
     },
     {
       "file": "app_post.rs",
       "function": "finish_unified_app",
       "ordinal": 37,
-      "pattern": "(Type::Var(_) , _ , _) |(_ , Type::Var(_) , _) |(_ , _ , Type::Var(_)) |(Type::Error(_) , _ , _) |(_ , Type::Error(_) , _) |(_ , _ , Type::Error(_))",
-      "disposition": "caught_downstream",
-      "witness": "a_route_whose_arm_admits_a_variable_is_still_rejected_by_a_later_rule"
+      "pattern": "(Type::Var(_) , _) |(_ , Type::Var(_))",
+      "disposition": "deferred"
     },
     {
       "file": "app_post.rs",
       "function": "finish_unified_app",
       "ordinal": 38,
-      "pattern": "(Type::Var(_) , _) |(_ , Type::Var(_))",
+      "pattern": "Type::Var(_)",
       "disposition": "deferred"
     },
     {
@@ -548,13 +544,6 @@
       "file": "app_post.rs",
       "function": "finish_unified_app",
       "ordinal": 45,
-      "pattern": "Type::Var(_)",
-      "disposition": "deferred"
-    },
-    {
-      "file": "app_post.rs",
-      "function": "finish_unified_app",
-      "ordinal": 46,
       "pattern": "Type::Var(_)",
       "disposition": "deferred"
     },
@@ -746,7 +735,7 @@
       "ordinal": 2,
       "pattern": "Type::Var(_)",
       "disposition": "constrains_the_variable",
-      "reason": "spec/04-type-system.md \u00a74.7.2: expand's one shape follows from the operand, the axis and the size alone, all settled here, with nothing to record"
+      "reason": "spec/04-type-system.md §4.7.2: expand's one shape follows from the operand, the axis and the size alone, all settled here, with nothing to record"
     },
     {
       "file": "app_tensor.rs",
@@ -800,7 +789,7 @@
       "file": "app_tensor.rs",
       "function": "peel_to_tensor_argument",
       "ordinal": 1,
-      "pattern": "Type::Var(_) | Type::Error(_)",
+      "pattern": "Type::Var(element)",
       "disposition": "not_a_route"
     },
     {
@@ -817,20 +806,6 @@
       "pattern": "Type::Var(variable) | Type::Tensor(_ , TensorPrec::Var(variable))",
       "disposition": "not_a_route",
       "reason": "records constrained call-result variables for declaration-boundary admission checking; local bindings or authored givens discharge them, otherwise finish_admission_contracts rejects them under [04-INF-9]"
-    },
-    {
-      "file": "checked.rs",
-      "function": "resolve_deferred_type_derivations",
-      "ordinal": 1,
-      "pattern": "Type::Var(_)",
-      "disposition": "not_a_route"
-    },
-    {
-      "file": "checked.rs",
-      "function": "resolve_deferred_type_derivations",
-      "ordinal": 2,
-      "pattern": "Type::Var(_)",
-      "disposition": "not_a_route"
     },
     {
       "file": "checked.rs",
@@ -1035,9 +1010,16 @@
       "file": "static_value.rs",
       "function": "reject_non_int32_axis",
       "ordinal": 1,
-      "pattern": "Type::Prim(Prim::Int32) | Type::Var(_) | Type::Error(_)",
-      "disposition": "caught_downstream",
-      "witness": "a_route_whose_arm_admits_a_variable_is_still_rejected_by_a_later_rule"
+      "pattern": "Type::Var(var)",
+      "disposition": "constrains_the_variable",
+      "reason": "[05-DIM-3]: an axis-domain argument is exactly `i32`, so an unresolved axis is unified with `i32`, which pins an authored binder for its rigidity check (chelis#2523)"
+    },
+    {
+      "file": "type_derivation.rs",
+      "function": "resolve_type_derivation",
+      "ordinal": 1,
+      "pattern": "(Type::Var(_) , _)",
+      "disposition": "not_a_route"
     },
     {
       "file": "validate.rs",

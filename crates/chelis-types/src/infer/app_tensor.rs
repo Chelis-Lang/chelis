@@ -1397,9 +1397,10 @@ pub(super) fn check_named_expand_signature(
 pub(super) enum ToTensorPeel<'a> {
     /// Successfully peeled `rank` `List` layers down to a `Prim`.
     Ok { rank: usize, precision: Prim },
-    /// Some inner type is still a `Var(_)` or `Error`; the typer should
-    /// defer to the explicit result type rather than emit a diagnostic.
-    Pending,
+    /// The type `rank` `List` layers in is still a variable.
+    Pending { rank: usize, element: TypeVar },
+    /// Some inner type is an `Error` that already owns its diagnostic.
+    Poisoned,
     /// Reached a non-`List`, non-prim leaf — the innermost element is
     /// not numeric or bool, so emit a typed diagnostic.
     BadInner(&'a Type),
@@ -1422,9 +1423,13 @@ pub(super) fn peel_to_tensor_argument(ty: &Type) -> ToTensorPeel<'_> {
                     precision: *precision,
                 };
             }
-            Type::Var(_) | Type::Error(_) => {
-                return ToTensorPeel::Pending;
+            Type::Var(element) => {
+                return ToTensorPeel::Pending {
+                    rank,
+                    element: *element,
+                };
             }
+            Type::Error(_) => return ToTensorPeel::Poisoned,
             other => {
                 if rank == 0 {
                     return ToTensorPeel::NotList;

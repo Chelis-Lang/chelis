@@ -496,16 +496,6 @@ fn a_route_whose_arm_admits_a_variable_is_still_rejected_by_a_later_rule() {
             "precision mismatch: expected string, got i32",
         ),
         (
-            "dict_get",
-            "def f(d: Dict[string, i32], k: i32) -> i32 = {\n  g = fn (t) -> dict_get(d, t)\n  g(k)\n}\n",
-            "precision mismatch: expected string, got i32",
-        ),
-        (
-            "dict_insert",
-            "def f(d: Dict[string, i32], k: i32) -> Dict[string, i32] = {\n  g = fn (t) -> dict_insert(d, t, 1i32)\n  g(k)\n}\n",
-            "precision mismatch: expected string, got i32",
-        ),
-        (
             "expand",
             "def f(x: tensor[1, f32], a: i32) -> tensor[4, f32] = {\n  g = fn (v) -> expand(x, 0i32, v)\n  g(a)\n}\n",
             "but no tensor in scope carries it",
@@ -514,11 +504,6 @@ fn a_route_whose_arm_admits_a_variable_is_still_rejected_by_a_later_rule() {
             "cast",
             "def f(x: List[i32]) -> f32 = {\n  g = fn (t) -> cast(t, f32)\n  g(x)\n}\n",
             "cast requires tensor or prim type",
-        ),
-        (
-            "sum",
-            "def f(x: tensor[3, 2, f32], a: i64) -> tensor[2, f32] = {\n  g = fn (v) -> sum(x, v)\n  g(a)\n}\n",
-            "is neither a compile-time constant nor a named axis of the operand",
         ),
     ] {
         let errors = check(program).expect_err(&format!(
@@ -793,11 +778,14 @@ fn a_late_bound_secondary_operand_is_validated_too() {
 
 /// [04-INF-9] narrows the old route-kind boundary: a newly authored generic
 /// `len` or `index` wrapper may not publish its unresolved operation-admission
-/// contract, even when the local lambda is never applied. `where` retains the
-/// non-collection disposition this matrix established, and `dict_of([])` may
-/// still be decided by its declaration's explicit result type.
+/// contract, even when the local lambda is never applied. Since chelis#2518
+/// the collection operations are no hand-listed exception: every suspended
+/// call is decided at an arbitrary type when its operand never binds, and
+/// these name the operation and the declaration, as `where` does too. An
+/// empty `dict_of([])` is still decided by its declaration's explicit result
+/// type.
 #[test]
-fn never_bound_collection_contracts_reject_while_other_routes_keep_their_dispositions() {
+fn never_bound_collection_and_branch_operands_reject_at_the_boundary() {
     for (route, program) in [
         (
             "len",
@@ -810,30 +798,35 @@ fn never_bound_collection_contracts_reject_while_other_routes_keep_their_disposi
     ] {
         let errors =
             check(program).expect_err("an authored generic collection contract must be rejected");
-        let prefix =
-            format!("unresolved `{route}` shape obligation in `f` at declaration boundary");
+        let prefix = format!("`{route}` admits only some operand types");
         assert!(
             errors.iter().any(|error| {
                 matches!(
                     error.kind,
                     chelis_types::errors::CheckErrorKind::TypeMismatch
                 ) && error.message.starts_with(&prefix)
+                    && error.message.contains("never determined within `f`")
             }),
             "{route}: the declaration-boundary rejection must name the collection operation:\n{}",
             summary(&errors)
         );
     }
 
-    check(
-        "def f(c: tensor[3, bool], b: tensor[3, f32]) -> i32 = {\n  \
-         g = fn (t) -> where(c, t, b)\n  1i32\n}\n",
-    )
-    .unwrap_or_else(|e| {
-        panic!(
-            "where: the unchanged non-collection route must remain accepted:\n{}",
-            summary(&e)
-        )
-    });
+    // chelis#2518: `where` is no longer exempt. Its branch must be a tensor,
+    // so an unapplied lambda over it is rejected, and the annotated twin is
+    // accepted.
+    let unapplied = "def f(c: tensor[3, bool], b: tensor[3, f32]) -> i32 = {\n  \
+                     g = fn (t) -> where(c, t, b)\n  1i32\n}\n";
+    let errors = check(unapplied).expect_err("an undetermined `where` branch is decided");
+    assert!(
+        errors.iter().any(|error| error
+            .message
+            .starts_with("`where` admits only some operand types")),
+        "where: {}",
+        summary(&errors)
+    );
+    check(&unapplied.replace("fn (t)", "fn (t: tensor[3, f32])"))
+        .unwrap_or_else(|e| panic!("where: the annotated branch is accepted:\n{}", summary(&e)));
 
     // The standard library's own shape, reduced to one declaration.
     check("def f() -> Dict[string, i32] = dict_of([])\n").unwrap_or_else(|e| {
@@ -1122,10 +1115,13 @@ fn dtype_admissibility_validates_a_late_bound_operand() {
 /// The dtype half of the per-route-kind acceptance boundary.
 ///
 /// New unresolved Float/Int requirements cannot become implicit generic
-/// contracts. Concrete body inference and operations outside this family
-/// mechanism retain their previous disposition; do not reject all unused lambdas.
+/// contracts. An operation outside this family mechanism whose operand never
+/// binds is decided at an arbitrary type (chelis#2518): `uniform_like` requires
+/// a float tensor, so an unapplied lambda over it is rejected, and the
+/// annotated twin is accepted. An unused lambda whose operations hold at every
+/// type stays accepted.
 #[test]
-fn never_bound_dtype_operands_do_not_publish_new_family_requirements() {
+fn never_bound_dtype_operands_are_decided_at_the_boundary() {
     for (route, program) in [
         (
             "sqrt",
@@ -1162,12 +1158,17 @@ fn never_bound_dtype_operands_do_not_publish_new_family_requirements() {
                 .expect("the explicit concrete contract admits the operation");
             continue;
         }
-        check(program).unwrap_or_else(|e| {
-            panic!(
-                "{route}: a dtype operand that never binds must be accepted, not reported:\n{}",
-                summary(&e)
-            )
-        });
+        let errors =
+            check(program).expect_err("an undetermined operand is decided at the boundary");
+        assert!(
+            errors.iter().any(|error| error
+                .message
+                .starts_with(&format!("`{route}` admits only some operand types"))),
+            "{route}: {}",
+            summary(&errors)
+        );
+        check(&program.replace("fn (t)", "fn (t: tensor[3, f32])"))
+            .expect("the explicit tensor contract admits the operation");
     }
 }
 
@@ -1880,9 +1881,9 @@ fn a_match_destructured_matmul_operand_is_tied_to_the_bound_scrutinee() {
 /// `infer_access`'s `Type::Var` arm publishes a fresh variable and records the
 /// target on the deferred OPACITY ledger, which revisits the target but never
 /// ties the projected field type to the field the target turns out to have.
-/// The repair registers a `DeferredTypeDerivation::RecordField` beside the
-/// existing tuple-projection entry, resolved by ADT field lookup when the
-/// target binds.
+/// The repair registers a record-field derivation beside the existing
+/// tuple-projection entry, resolved by ADT field lookup when the target binds
+/// (a `DeferredShapeRule::Derivation` ledger entry since chelis#2523).
 ///
 /// This cell is why the widened readiness predicate is not the whole repair:
 /// with the predicate alone the projected variable never binds and this

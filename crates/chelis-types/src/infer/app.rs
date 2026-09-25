@@ -565,7 +565,7 @@ fn infer_app_inner(
     // `postprocess_application`; every unambiguous builtin is screened here.
     if let Some(fname) = func_name.as_deref()
         && fname != "concat"
-        && let Err(rejected) = enforce_registered_axis_dtypes(fname, &arg_tys, node, errors)
+        && let Err(rejected) = enforce_registered_axis_dtypes(fname, &arg_tys, node, subst, errors)
     {
         return_with_collection_cleanup!(rejected);
     }

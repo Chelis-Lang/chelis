@@ -13,11 +13,7 @@ See [#2216](https://github.com/Chelis-Lang/chelis/issues/2216).
 
 `cast_trunc` rejects a source whose dtype is an `Int` or `Numeric` binder, on
 tensor and scalar sources and with a concrete or binder target, and names the
-`Float` bound to declare ([05-OP-6]). A requirement that narrows the binder
-only after the declaration's bound check, such as a `cast_trunc` inside a
-returned closure whose parameter only the declared type fixes, is not yet
-reported ([#2537](https://github.com/Chelis-Lang/chelis/issues/2537)).
-A cast whose target is a binder applies
+`Float` bound to declare ([05-OP-6]). A cast whose target is a binder applies
 the float-source and integer-target rule to a concrete source or a source
 whose type is a binder at the cast, and rejects a source that is a binder with
 no dtype-family bound; a source that is still an inference variable at the cast,

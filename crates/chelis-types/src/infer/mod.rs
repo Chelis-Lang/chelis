@@ -111,6 +111,7 @@ mod app_tensor;
 mod binder_literal;
 mod checked;
 mod common;
+mod declaration_close;
 mod declarations;
 mod declared_surface;
 mod declared_type;
@@ -132,6 +133,7 @@ mod shape_honesty;
 mod slot;
 mod static_int;
 mod static_value;
+mod type_derivation;
 mod validate;
 mod vmap_extent;
 
@@ -153,6 +155,7 @@ use binder_literal::*;
 use checked::*;
 use common::*;
 pub(crate) use common::{decide_shape_route, shape_route_result};
+use declaration_close::*;
 use declared_type::*;
 // chelis#1654: the settled decision for transported checked collection
 // contracts. Direct syntactic calls keep the better-informed eager routes.
@@ -174,6 +177,7 @@ use rigid::*;
 use slot::*;
 pub use static_int::fold_static_int_expr;
 use static_value::*;
+use type_derivation::*;
 use validate::*;
 use vmap_extent::*;
 

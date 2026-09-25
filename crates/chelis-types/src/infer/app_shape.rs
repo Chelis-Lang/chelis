@@ -65,7 +65,7 @@ pub(super) fn infer_reduction_app(
     // generic application's registered axis-dtype gate. Apply the same
     // registry here so every Count axis is i32, including concrete
     // multi-axis calls whose constant values are otherwise extractable.
-    if let Err(rejected) = enforce_registered_axis_dtypes(fname, &arg_tys, node, errors) {
+    if let Err(rejected) = enforce_registered_axis_dtypes(fname, &arg_tys, node, subst, errors) {
         return rejected;
     }
 
