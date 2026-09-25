@@ -5,7 +5,8 @@
 //! or a constant. These tests exercise codecs and object admission, not
 //! random kernel output.
 use chelis_compiler_api::schema::{
-    CheckRequest, LowerRequest, SourceKind, WIRE_DAG_SCHEMA_VERSION, WireDag, WireDagDecodeError,
+    CheckRequest, GradRequest, LowerRequest, SourceKind, WIRE_DAG_SCHEMA_VERSION, WireDag,
+    WireDagDecodeError,
     WireDagNode,
 };
 use chelis_ir::dag::{Dag, DimInfo, KeyBranch, NodeId, RiscOp, RtDim, TensorType, UniformBound};
@@ -204,6 +205,74 @@ fn a_computed_key_is_consumed_by_its_draw_alone() {
             .count();
         assert_eq!(readers, 1, "key {key} has another reader: {dag}");
     }
+}
+
+/// The readers of `node`'s value in the wire graph.
+fn readers(dag: &Value, node: usize) -> Vec<usize> {
+    dag["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .enumerate()
+        .filter(|(_, reader)| {
+            reader["inputs"]
+                .as_array()
+                .unwrap()
+                .contains(&json!(node))
+        })
+        .map(|(index, _)| index)
+        .collect()
+}
+
+/// The sibling of [`a_computed_key_is_consumed_by_its_draw_alone`] for a key
+/// tensor and for the `grad` export. A `split_keys` key tensor is read by
+/// its batched draw alone, and a computed key in a differentiated program is
+/// read by its draw and by that draw's replay (a replay read is not a use),
+/// never by a `Drop`: a key is never dropped, at any rank.
+///
+/// Evidentiary status: the `lower` half is a REGRESSION TEST: at `6f42b4e92`
+/// it fails at the schema stage ("node N produces a key, but only a key
+/// operation or a Load produces one"). The `grad` half is a DISPOSITION LOCK:
+/// it passes there too, because the gradient graph is rebuilt without the
+/// forward graph's `Drop`s.
+#[test]
+fn a_computed_key_tensor_and_a_gradient_export_keep_one_consumer_per_key() {
+    let source = "def noisy(r: key, x: tensor[4, f32]) -> tensor[4, f32] = dropout(r, x, 0.5f32)\n\
+                  def sample(k: key, xs: tensor[3, 4, f32]) -> tensor[3, 4, f32] = vmap(noisy)(split_keys(k, 3i64), xs)\n";
+    let dag = lower(source, "sample");
+    accepts(&dag);
+    let split_n = first(&dag, "split_n");
+    assert_eq!(dag["nodes"][split_n]["output_type"]["precision"], "key");
+    assert_eq!(
+        dag["nodes"][split_n]["output_type"]["dims"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    let keys_readers = readers(&dag, split_n);
+    assert_eq!(keys_readers.len(), 1, "{dag}");
+    assert_eq!(dag["nodes"][keys_readers[0]]["op"]["kind"], "dropout");
+
+    let grad = chelis_compiler_api::compiler::grad(GradRequest {
+        source_kind: SourceKind::Surf,
+        source: "x = (x : tensor[4, f32])\n\
+                 loss = (sum(dropout(fold_in(key_from_seed(7i64), 1i64), x, 0.5f32), 0i32) : tensor[f32])\n"
+            .into(),
+        output_name: "loss".into(),
+        wrt_names: vec!["x".into()],
+        fuse: false,
+    })
+    .unwrap_or_else(|error| panic!("{error:?}"));
+    let grad = serde_json::to_value(grad.dag).unwrap();
+    accepts(&grad);
+    let fold = first(&grad, "fold_in");
+    let mut kinds = readers(&grad, fold)
+        .into_iter()
+        .map(|reader| grad["nodes"][reader]["op"]["kind"].as_str().unwrap().to_string())
+        .collect::<Vec<_>>();
+    kinds.sort();
+    assert_eq!(kinds, ["dropout", "dropout_replay"], "{grad}");
 }
 
 /// spec/10 §3.2: a key enters a graph as a key operation's output or as a

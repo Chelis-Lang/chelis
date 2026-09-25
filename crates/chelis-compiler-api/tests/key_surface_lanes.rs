@@ -111,6 +111,11 @@ const U_KEY7_2: [u64; 2] = [0x3e019516, 0x3f56526f];
 const U_KEY8_2: [u64; 2] = [0x3ed25d8d, 0x3f20c2f1];
 const U_FOLD3_1: [u64; 4] = [0x3f33bd78, 0x3f68a379, 0x3f7c3266, 0x3f1c6a92];
 const CHAIN3: [u64; 2] = [0x3fdef512, 0x3fcff383];
+/// `uniform(fold_in(key(1), 3), 4, f32, 0, 1)`.
+const U_FOLD1_3: [u64; 4] = [0x3cafe0e9, 0x3ed3d199, 0x3efb8c3f, 0x3f7baac5];
+/// `uniform(split(key(7)).0, 2, f32, 0, 1)` and `.1`.
+const U_LEFT7_2: [u64; 2] = [0x3f251727, 0x3f2c5b5b];
+const U_RIGHT7_2: [u64; 2] = [0x3ef80128, 0x3d52c14c];
 
 const FLOATS: [Prim; 4] = [Prim::F16, Prim::Bf16, Prim::F32, Prim::F64];
 
@@ -313,6 +318,41 @@ fn keys_cross_host_functions_recursion_tuples_and_data_types() {
         tensor(Prim::F32, &[2], &U_KEY8_2),
     ]);
     both_lanes(source, "host keys", &expected);
+}
+
+/// Keys computed inside tensor-lane definitions: `key_from_seed`, `fold_in`,
+/// both `split_key` halves and a `split_keys` key tensor each feed one draw,
+/// bit for bit against the reference, and the balanced ledger shows C
+/// releases every key tensor exactly once.
+///
+/// Evidentiary status: DISPOSITION LOCK. It passes at `6f42b4e92` too: eval
+/// and C lower these definitions through paths whose graphs carry no
+/// implicit `Drop`; `wire_random_domains` holds the regression tests for the
+/// `lower` export, which does.
+#[test]
+fn keys_computed_inside_lowered_definitions_draw_the_reference_bits_in_eval_and_c() {
+    let source = "def sample(k: key, x: tensor[4, f32], rate: f32) -> (tensor[4, f32], tensor[4, f32]) = (dropout(key_from_seed(7i64), copy(x), rate), uniform_like(fold_in(k, 3i64), x, 0.0f32, 1.0f32))\n\
+                  def halves(k: key, t: tensor[2, f32]) -> (tensor[2, f32], tensor[2, f32]) = {\n\
+                  \x20 (a, b) = split_key(k)\n\
+                  \x20 (uniform_like(a, t, 0.0f32, 1.0f32), uniform_like(b, t, 0.0f32, 1.0f32))\n\
+                  }\n\
+                  def noisy(k: key, x: tensor[4, f32]) -> tensor[4, f32] = dropout(k, x, 0.5f32)\n\
+                  def rows(k: key, xs: tensor[3, 4, f32]) -> tensor[3, 4, f32] = vmap(noisy)(split_keys(k, 3i64), xs)\n\
+                  def main() = {\n\
+                  \x20 x = to_tensor([1.0f32, 2.0f32, 3.0f32, 4.0f32])\n\
+                  \x20 xs = to_tensor([[1.0f32, 2.0f32, 3.0f32, 4.0f32], [5.0f32, 6.0f32, 7.0f32, 8.0f32], [9.0f32, 10.0f32, 11.0f32, 12.0f32]])\n\
+                  \x20 (d, u) = sample(key_from_seed(1i64), x, 0.5f32)\n\
+                  \x20 (l, r) = halves(key_from_seed(7i64), to_tensor([0.0f32, 0.0f32]))\n\
+                  \x20 (d, u, l, r, rows(key_from_seed(5i64), xs))\n\
+                  }\n";
+    let expected = main_lines(&[
+        tensor(Prim::F32, &[4], &DROP_KEY7),
+        tensor(Prim::F32, &[4], &U_FOLD1_3),
+        tensor(Prim::F32, &[2], &U_LEFT7_2),
+        tensor(Prim::F32, &[2], &U_RIGHT7_2),
+        tensor(Prim::F32, &[3, 4], &ROWS5_DROP),
+    ]);
+    both_lanes(source, "lowered keys", &expected);
 }
 
 /// `grad` treats the key as a discrete input: the gradient of a keyed

@@ -1062,14 +1062,18 @@ fn insert_drop_nodes_for_unconsumed_values(mut dag: Dag) -> Dag {
         .iter()
         .filter(|node| !roots.contains(&node.id))
         .filter(|node| !consumed.contains(&node.id))
-        // A key is a word with no storage to release; a Drop would also be a
-        // key reaching an operation other than a random primitive.
         .filter(|node| {
             !matches!(
                 node.op,
                 RiscOp::Load { .. } | RiscOp::Drop | RiscOp::Store { .. }
             )
         })
+        // A key, at any rank, is never dropped. Its one use is a draw, a key
+        // operation or a root (spec/10 §3.2), and a `Drop` would be a second
+        // reader and a key reaching an operation that does not consume keys.
+        // Its storage is still released exactly once: an owned value with no
+        // terminal of its own gets the ownership plan's scope-end release.
+        .filter(|node| node.output_type.precision != Prim::Key)
         .map(|node| {
             (
                 node.id,
