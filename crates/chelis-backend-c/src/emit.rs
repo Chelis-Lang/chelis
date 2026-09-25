@@ -2580,9 +2580,12 @@ impl CEmitter {
         let exact_int = value.as_i64_exact();
         match ty.precision {
             Prim::Int64 => {
+                // The exact-width signed spelling the pad fill uses too:
+                // i64::MIN's positive magnitude is no signed C literal, even
+                // under unary minus (chelis#1859).
                 self.line(&format!(
-                    "chelis_fill_scalar(t{id}_write_guard, chelis_scalar_from_bits(CHELIS_DTYPE_I64, (uint64_t)(int64_t){}));",
-                    exact_int.unwrap_or(wide as i64)
+                    "chelis_fill_scalar(t{id}_write_guard, chelis_scalar_from_bits(CHELIS_DTYPE_I64, (uint64_t){}));",
+                    Self::i64_c_literal(exact_int.unwrap_or(wide as i64))
                 ));
             }
             Prim::Int32 => {
@@ -8392,6 +8395,43 @@ mod tests {
             !c.contains("9007199254740992"),
             "the exact i64 fill must never pass through its rounded f64 image:\n{c}"
         );
+    }
+
+    /// chelis#1859's class at the integer-constant fill (chelis#2413 B5):
+    /// `key_from_seed(i64::MIN)` makes an `i64::MIN` `Const` reach this
+    /// fill, which must use the pad fill's exact-width signed spelling.
+    ///
+    /// Evidentiary status: REGRESSION TEST. At `b005bb19b` the fill spelled
+    /// `(uint64_t)(int64_t)-9223372036854775808`, whose positive magnitude
+    /// is no signed C literal.
+    #[test]
+    fn issue_1859_int64_constant_fill_emits_portable_signed_extremes() {
+        for (value, spelling) in [
+            (i64::MIN, "INT64_MIN"),
+            (i64::MIN + 1, "-INT64_C(9223372036854775807)"),
+            (-1, "-INT64_C(1)"),
+            (0, "INT64_C(0)"),
+            (i64::MAX, "INT64_C(9223372036854775807)"),
+        ] {
+            let mut dag = Dag::new();
+            let constant = dag.add_node(
+                RiscOp::Const {
+                    value: chelis_types::scalar_from_i64("const", Prim::Int64, value).unwrap(),
+                },
+                vec![],
+                tensor_ty(&[], Prim::Int64),
+                None,
+            );
+            dag.set_roots(vec![constant]);
+            let c = emit_test_dag(&dag, "int64_constant").unwrap();
+            assert!(
+                c.contains(&format!(
+                    "chelis_fill_scalar(t0_write_guard, chelis_scalar_from_bits(CHELIS_DTYPE_I64, (uint64_t){spelling}));"
+                )),
+                "{c}"
+            );
+            assert!(!c.contains("9223372036854775808"), "{c}");
+        }
     }
 
     #[test]
