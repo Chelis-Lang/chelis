@@ -232,9 +232,9 @@ fn complete_checks_returns_a_clean_checked_product() {
 
 #[test]
 fn effect_rejection_uses_the_narrow_semantic_error() {
-    let source = "def noisy(x: tensor[4, f32]) -> tensor[4, f32] ! { } = dropout(x, 0.5)\n";
+    let source = "def noisy(x: tensor[4, f32]) -> tensor[4, f32] ! { } = debug(x)\n";
     let rejection = complete_checks(accepted_analysis(source), SemanticContext::Isolated)
-        .expect_err("a pure declaration cannot perform Random");
+        .expect_err("a pure declaration cannot perform IO");
     assert!(matches!(rejection, SemanticRejection::Effects { .. }));
 
     let full_rejection = run_source(request(source, PipelineGoal::FullCheck))

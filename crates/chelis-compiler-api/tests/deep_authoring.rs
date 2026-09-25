@@ -55,6 +55,8 @@ const TENSOR_MODULE: &str = r#"(module {}
       (var {} x))))
 "#;
 
+/// A declared-pure function whose body performs `IO` through `debug`. (A
+/// random draw is no effect: it takes an explicit key.)
 const ADD_EFFECTING: &str = r#"(defsig {}
   noisy
   (t-fn {eff: (effects {})}
@@ -65,7 +67,7 @@ const ADD_EFFECTING: &str = r#"(defsig {}
   (fn {}
     (params {}
       (x {type: (t-tensor {} (d-lit {} 4) (t-prim {} f32))}))
-    (app {} (var {} dropout) (var {} x) (lit {type: (t-prim {} f32)} 0.5))))
+    (app {} (var {} debug) (var {} x))))
 "#;
 
 const ADD_LINEARITY_VIOLATION: &str = r#"(defsig {}
