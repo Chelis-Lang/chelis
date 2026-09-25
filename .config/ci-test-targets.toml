@@ -1094,6 +1094,11 @@ disposition = "packages"
 packages = ["chelis-cli"]
 
 [[path_rule]]
+prefix = "examples/generic_host_permutation.ch"
+disposition = "packages"
+packages = ["chelis-cli"]
+
+[[path_rule]]
 prefix = "examples/checked_runtime_extents.ch"
 disposition = "packages"
 packages = ["chelis-cli"]
@@ -3099,6 +3104,11 @@ tracking_issue = "chelis#1730"
 
 [[path_rule]]
 prefix = "examples/pure_helper_result_claims.ch"
+disposition = "packages"
+packages = ["chelis-cli"]
+
+[[path_rule]]
+prefix = "examples/grad_disconnected.ch"
 disposition = "packages"
 packages = ["chelis-cli"]
 

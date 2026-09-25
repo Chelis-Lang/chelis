@@ -1842,16 +1842,13 @@ impl CEmitter {
     }
 
     pub(crate) fn input_labels(dag: VerifiedDagView<'_>) -> Vec<String> {
-        let mut labels = Vec::new();
-        let mut seen = chelis_unord::UnordSet::new();
-        for node in dag.nodes() {
-            if let RiscOp::Load { name } = &node.op
-                && seen.insert(name.as_str().to_string())
-            {
-                labels.push(name.as_str().to_string());
-            }
-        }
-        labels
+        chelis_ir::axis_sources::ordered_interface_loads(dag.nodes())
+            .into_iter()
+            .map(|node| match &node.op {
+                RiscOp::Load { name } => name.as_str().to_string(),
+                _ => unreachable!("ordered interface input is a Load"),
+            })
+            .collect()
     }
 
     fn input_slots(labels: &[String]) -> chelis_unord::UnordMap<String, usize> {
@@ -2149,121 +2146,122 @@ impl CEmitter {
         }
     }
 
-    fn input_types(dag: VerifiedDagView<'_>) -> chelis_unord::UnordMap<String, TensorType> {
-        let mut seen = chelis_unord::UnordMap::<String, TensorType>::new();
-        for node in dag.nodes() {
-            if let RiscOp::Load { name } = &node.op {
-                seen.entry(name.as_str().to_string())
-                    .or_insert_with(|| node.output_type.clone());
-            }
-        }
-        seen
-    }
-
     fn emit_input_shape_preamble(
         &mut self,
         dag: VerifiedDagView<'_>,
         input_slots: &chelis_unord::UnordMap<String, usize>,
         func_name: &str,
     ) {
-        // Iteration order over `input_types` (a UnordMap) must be
-        // deterministic so the emitted C is byte-identical across runs
-        // for the same input. Sort by label; the lookup is by name and
-        // the emitted lines are independent per label.
-        // See spec/upstream-bugs/host-emit-hashmap-iteration-nondeterminism.md.
-        let input_types = Self::input_types(dag);
-        let sorted_labels = input_types.to_sorted();
         // Producer-supplied strings flowing into the fprintf format string
         // baked into a `"..."` C string literal. Sanitize once per emission
         // boundary per spec/upstream-bugs/producer-string-sanitization.md.
         let func_name_fmt = chelis_ir::span_sanitize::sanitize_for_format_string(func_name);
 
-        // chelis#1277 b2.4: the (slot, axis) pairs a `Literal` claim's entry
-        // guard already compares against that same literal. The static-dim
-        // check below and that guard are then the identical comparison
-        // written twice, and the ABI one runs first, so the kernel would
-        // `abort()` where `spec/04-type-system.md` section 4.7 requires the
-        // [04-NUM-9] trap.
-        //
-        // The narrowing is exactly that overlap and no wider. A `Name` claim
-        // is excluded because its guard compares against another input's
-        // RUNTIME extent, which does not imply the statically declared size;
-        // dropping the static check there would lose a comparison rather
-        // than rename one. The ABI check's own obligation - an external C
-        // caller passing a wrong-shaped tensor to an exported kernel -
-        // survives for every axis no class guards, including in programs
-        // that contain no runtime extent at all.
-        let entry_guards = dag.entry_extent_guards();
-        let mut literal_claim_pairs = chelis_unord::UnordMap::<(usize, i32), usize>::new();
-        for guard in &entry_guards {
-            if let chelis_ir::axis_sources::EntryExtentGuard::Literal {
-                required,
-                observed: (load, axis),
-            } = guard
-                && let RiscOp::Load { name } = &dag.get(*load).expect("entry input").op
-            {
-                literal_claim_pairs.insert((input_slots[name.as_str()], *axis as i32), *required);
-            }
-        }
-
-        for (label, _) in sorted_labels {
-            let ty = &input_types[label];
-            let slot = input_slots[label];
-            // `label` originates as `LoadStoreName::as_str()` (validated)
-            // but we route through the format-string sanitizer to lock the
-            // architectural pattern: every producer-supplied string into a
-            // format-string context goes through `sanitize_for_format_string`.
-            let label_fmt = chelis_ir::span_sanitize::sanitize_for_format_string(label);
-            self.line(&format!("if (inputs[{slot}] == NULL) {{"));
-            self.indent += 1;
-            self.line(&format!(
-                "fprintf(stderr, \"{func_name_fmt}: input `{label_fmt}` at slot {slot} is NULL\\n\");"
-            ));
-            self.line("abort();");
-            self.indent -= 1;
-            self.line("}");
-            for line in Self::entry_dtype_guard(
-                &format!("inputs[{slot}]"),
-                &format!("{func_name_fmt}: input `{label_fmt}`"),
-                "",
-                ty,
-            ) {
-                self.line(&line);
-            }
-            self.line(&format!(
-                "if (chelis_tensor_rank(inputs[{slot}]) != {}) {{",
-                Self::ndim(ty)
-            ));
-            self.indent += 1;
-            self.line(&format!(
-                "fprintf(stderr, \"{func_name_fmt}: input `{label_fmt}` expected rank {}, got %d\\n\", chelis_tensor_rank(inputs[{slot}]));",
-                Self::ndim(ty)
-            ));
-            self.line("abort();");
-            self.indent -= 1;
-            self.line("}");
-            for (axis, dim) in ty.dims.iter().enumerate() {
-                if let Some(expected) = Self::known_dim_size(dim) {
+        // The shared IR plan follows ABI slots, interleaves each input's
+        // metadata checks with its due extent witnesses, and excludes exact
+        // duplicate literal comparisons. A second label/guard traversal
+        // would give Eval and C different first failures (#2531).
+        for step in dag.entry_validation_plan() {
+            use chelis_ir::axis_sources::{EntryExtentGuard, EntryValidationStep};
+            let input = |load: NodeId| {
+                let node = dag.get(load).expect("entry input");
+                let RiscOp::Load { name } = &node.op else {
+                    unreachable!()
+                };
+                let slot = input_slots[name.as_str()];
+                let label = chelis_ir::span_sanitize::sanitize_for_format_string(name.as_str());
+                (node, slot, label)
+            };
+            match step {
+                EntryValidationStep::DType { load } => {
+                    let (node, slot, label) = input(load);
+                    self.line(&format!("if (inputs[{slot}] == NULL) {{"));
+                    self.indent += 1;
+                    self.line(&format!("fprintf(stderr, \"{func_name_fmt}: input `{label}` at slot {slot} is NULL\\n\");"));
+                    self.line("abort();");
+                    self.indent -= 1;
+                    self.line("}");
+                    for line in Self::entry_dtype_guard(
+                        &format!("inputs[{slot}]"),
+                        &format!("{func_name_fmt}: input `{label}`"),
+                        "",
+                        &node.output_type,
+                    ) {
+                        self.line(&line);
+                    }
+                }
+                EntryValidationStep::Rank { load } => {
+                    let (node, slot, label) = input(load);
+                    let rank = node.output_type.dims.len();
+                    self.line(&format!(
+                        "if (chelis_tensor_rank(inputs[{slot}]) != {rank}) {{"
+                    ));
+                    self.indent += 1;
+                    self.line(&format!("fprintf(stderr, \"{func_name_fmt}: input `{label}` expected rank {rank}, got %d\\n\", chelis_tensor_rank(inputs[{slot}]));"));
+                    self.line("chelis_numeric_trap(\"numeric trap: domain in load at i64\");");
+                    self.indent -= 1;
+                    self.line("}");
+                }
+                EntryValidationStep::LiteralAxis {
+                    load,
+                    axis,
+                    required,
+                } => {
                     if self.host_entry_coverage.iter().any(|guard| {
-                        matches!(guard, chelis_ir::axis_sources::EntryExtentGuard::Literal {
-                            required, observed: (load, observed_axis)
-                        } if *required == expected && *observed_axis == axis
-                            && matches!(&dag.get(*load).expect("covered input").op,
-                                RiscOp::Load { name } if name.as_str() == label))
+                        matches!(guard, EntryExtentGuard::Literal { required: covered, observed }
+                            if *covered == required && *observed == (load, axis))
                     }) {
                         continue;
                     }
-                    if literal_claim_pairs.get(&(slot, axis as i32)) == Some(&expected) {
-                        continue;
-                    }
+                    let (_, slot, label) = input(load);
                     self.line(&format!(
-                        "if (chelis_tensor_shape(inputs[{slot}], {axis}) != {expected}) {{"
+                        "if (chelis_tensor_shape(inputs[{slot}], {axis}) != {required}) {{"
                     ));
                     self.indent += 1;
-                    self.line(&format!(
-                        "fprintf(stderr, \"{func_name_fmt}: input `{label_fmt}` axis {axis} expected {expected}, got %lld\\n\", (long long)chelis_tensor_shape(inputs[{slot}], {axis}));"
-                    ));
-                    self.line("abort();");
+                    self.line(&format!("fprintf(stderr, \"{func_name_fmt}: input `{label}` axis {axis} expected {required}, got %lld\\n\", (long long)chelis_tensor_shape(inputs[{slot}], {axis}));"));
+                    self.line("chelis_numeric_trap(\"numeric trap: domain in load at i64\");");
+                    self.indent -= 1;
+                    self.line("}");
+                }
+                EntryValidationStep::Extent(guard) => {
+                    if self.host_entry_coverage.contains(&guard) {
+                        continue;
+                    }
+                    let input_read = |(load, axis): (NodeId, usize)| {
+                        let (_, slot, label) = input(load);
+                        (
+                            format!("chelis_tensor_shape(inputs[{slot}], {axis})"),
+                            label,
+                            axis,
+                        )
+                    };
+                    let (left, right, diagnostic) = match guard {
+                        EntryExtentGuard::Named {
+                            claim,
+                            canonical,
+                            observed,
+                        } => {
+                            let (left, canonical_label, canonical_axis) = input_read(canonical);
+                            let (right, label, axis) = input_read(observed);
+                            let claim =
+                                chelis_ir::span_sanitize::sanitize_for_format_string(&claim);
+                            let diagnostic = format!(
+                                "fprintf(stderr, \"extent `{claim}`: {canonical_label} axis {canonical_axis} = %lld, {label} axis {axis} = %lld\\n\", (long long)({left}), (long long)({right}));"
+                            );
+                            (left, right, diagnostic)
+                        }
+                        EntryExtentGuard::Literal { required, observed } => {
+                            let (right, label, axis) = input_read(observed);
+                            let diagnostic = format!(
+                                "fprintf(stderr, \"extent `{required}`: claimed = {required}, {label} axis {axis} = %lld\\n\", (long long)({right}));"
+                            );
+                            (required.to_string(), right, diagnostic)
+                        }
+                    };
+                    self.line(&format!("if ({right} != {left}) {{"));
+                    self.indent += 1;
+                    self.line(&diagnostic);
+                    self.line("chelis_numeric_trap(\"numeric trap: domain in load at i64\");");
                     self.indent -= 1;
                     self.line("}");
                 }
@@ -2305,55 +2303,6 @@ impl CEmitter {
                 name
             ));
             self.declared_dim_names.insert(name);
-        }
-
-        // Shared IR owns ordering and witness identity. Rendering never
-        // re-groups checks by class, name or guard kind.
-        for guard in entry_guards {
-            if self.host_entry_coverage.contains(&guard) {
-                continue;
-            }
-            use chelis_ir::axis_sources::EntryExtentGuard;
-            let input_read = |(load, axis): (NodeId, usize)| {
-                let RiscOp::Load { name } = &dag.get(load).expect("entry input").op else {
-                    unreachable!("entry witness must be an input");
-                };
-                let slot = input_slots[name.as_str()];
-                let label = chelis_ir::span_sanitize::sanitize_for_format_string(name.as_str());
-                (
-                    format!("chelis_tensor_shape(inputs[{slot}], {axis})"),
-                    label.to_string(),
-                    axis,
-                )
-            };
-            let (left, right, diagnostic) = match guard {
-                EntryExtentGuard::Named {
-                    claim,
-                    canonical,
-                    observed,
-                } => {
-                    let (left, canonical_label, canonical_axis) = input_read(canonical);
-                    let (right, label, axis) = input_read(observed);
-                    let claim = chelis_ir::span_sanitize::sanitize_for_format_string(&claim);
-                    let diagnostic = format!(
-                        "fprintf(stderr, \"extent `{claim}`: {canonical_label} axis {canonical_axis} = %lld, {label} axis {axis} = %lld\\n\", (long long)({left}), (long long)({right}));"
-                    );
-                    (left, right, diagnostic)
-                }
-                EntryExtentGuard::Literal { required, observed } => {
-                    let (right, label, axis) = input_read(observed);
-                    let diagnostic = format!(
-                        "fprintf(stderr, \"extent `{required}`: claimed = {required}, {label} axis {axis} = %lld\\n\", (long long)({right}));"
-                    );
-                    (required.to_string(), right, diagnostic)
-                }
-            };
-            self.line(&format!("if ({right} != {left}) {{"));
-            self.indent += 1;
-            self.line(&diagnostic);
-            self.line("chelis_numeric_trap(\"numeric trap: domain in load at i64\");");
-            self.indent -= 1;
-            self.line("}");
         }
     }
 

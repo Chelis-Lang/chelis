@@ -92,6 +92,93 @@
 
 mod common;
 
+/// #2083's rank-raising reproducer (explicit dimension binders are the
+/// sole syntax migration) and its width-three
+/// forward-failure twin. The agreeing case was repaired incidentally in #2144.
+#[test]
+fn issue_2083_rank_raising_gradient_keeps_geometry_and_forward_trap() {
+    assert!(
+        gcc_available(),
+        "this regression requires linked C execution"
+    );
+    let source = "def f[n, m](x: tensor[n, f32], y: tensor[m, f32]) -> tensor[1, n, f32] = permute(insert(insert(scalar_to_tensor(7.0f32), 0i32, add(shape(y, 0i32), 0i64)), 1i32, 1i64), 1i32, 0i32)\n\
+        def h(x: tensor[2, f32]) -> tensor[f32] = sum(sum(f(copy(x), to_tensor([1.0f32, 2.0f32])), 0i32), 0i32)\n\
+        def main() = grad(h)(to_tensor([1.0f32, 2.0f32]))\n";
+    let refuted = source.replacen(
+        "to_tensor([1.0f32, 2.0f32])",
+        "to_tensor([1.0f32, 2.0f32, 3.0f32])",
+        1,
+    );
+    let dir = tempfile::tempdir().unwrap();
+    for (stem, source, success) in [
+        ("agreeing", source, true),
+        ("refuted", refuted.as_str(), false),
+    ] {
+        let checked = check(&fixture(&dir, &format!("{stem}_check.ch"), source));
+        assert!(
+            checked.status.success(),
+            "{}{}",
+            String::from_utf8_lossy(&checked.stdout),
+            String::from_utf8_lossy(&checked.stderr)
+        );
+        for (ok, out) in [
+            eval_result(&dir, &format!("{stem}.ch"), source),
+            c_run_result(&dir, stem, source),
+        ] {
+            assert_eq!(ok, success, "{stem}: {out}");
+            if success {
+                assert!(
+                    out.contains("main = tensor(shape=[2], data=[0.0, 0.0])"),
+                    "{out}"
+                );
+            } else {
+                assert!(out.contains(&domain_trap_line("insert")), "{out}");
+                assert!(out.contains("axis 0"), "{out}");
+                assert!(!out.contains(&domain_trap_line("permute")), "{out}");
+            }
+        }
+    }
+}
+
+#[test]
+fn issue_1767_disconnected_gradient_preserves_false_declared_result_trap() {
+    assert!(
+        gcc_available(),
+        "this regression requires linked C execution"
+    );
+    let source = "def forward[n](x: tensor[n, f32]) -> tensor[3, f32] = insert(scalar_to_tensor(1.0f32), 0i32, add(shape(x, 0i32), 0i64))\n\
+        def loss(x: tensor[3, f32]) -> f32 = tensor_to_scalar(sum(forward(x), 0i32))\n\
+        def main() = grad(loss)(to_tensor([1.0f32, 2.0f32, 3.0f32]))\n";
+    let refuted = source.replacen("-> tensor[3, f32]", "-> tensor[4, f32]", 1);
+    let dir = tempfile::tempdir().unwrap();
+    for (stem, source, success) in [
+        ("agreeing_claim", source, true),
+        ("refuted_claim", refuted.as_str(), false),
+    ] {
+        let checked = check(&fixture(&dir, &format!("{stem}_check.ch"), source));
+        assert!(
+            checked.status.success(),
+            "{}{}",
+            String::from_utf8_lossy(&checked.stdout),
+            String::from_utf8_lossy(&checked.stderr)
+        );
+        for (ok, out) in [
+            eval_result(&dir, &format!("{stem}.ch"), source),
+            c_run_result(&dir, stem, source),
+        ] {
+            assert_eq!(ok, success, "{stem}: {out}");
+            if success {
+                assert!(
+                    out.contains("main = tensor(shape=[3], data=[0.0, 0.0, 0.0])"),
+                    "{out}"
+                );
+            } else {
+                assert!(out.contains(&domain_trap_line("insert")), "{out}");
+            }
+        }
+    }
+}
+
 use assert_cmd::Command;
 use sha2::{Digest, Sha256};
 use std::fs;
@@ -1490,9 +1577,12 @@ fn the_host_body_locator_refuses_a_forward_declaration_alone() {
 /// names; inside that kernel the entry guard before its first allocation.
 fn assert_effect_order_in_emitted_c(emitted: &str, effect_first: bool) {
     // The kernel C extracts for `f(seed, x)` is the `run__tensor_N` whose
-    // body carries the entry guard (`seed`'s own sub-expression is another
-    // `run__tensor_M`, called before the print in both variants).
+    // body carries the literal-extent entry guard (`seed`'s own
+    // sub-expression is another `run__tensor_M`, called before the print
+    // in both variants). Rank admission also emits an i64 load trap, so
+    // that generic trap text cannot identify this guarded kernel.
     let trap = "chelis_numeric_trap(\"numeric trap: domain in load at i64\")";
+    let claim = "extent `4`: claimed = 4, x axis 0 = %lld";
     let kernel_prefix = format!("static void {}__tensor_", authored_c_symbol("run"));
     let (kernel_name, kernel) = emitted
         .match_indices(&kernel_prefix)
@@ -1505,9 +1595,10 @@ fn assert_effect_order_in_emitted_c(emitted: &str, effect_first: bool) {
                 .map_or(rest.len(), |end| end + 1);
             (name, &rest[..body_end])
         })
-        .find(|(_, kernel)| kernel.contains(trap))
+        .find(|(_, kernel)| kernel.contains(claim))
         .expect("one extracted kernel carries the entry guard");
-    let guard_at = kernel.find(trap).expect("the guard");
+    let guard_at = kernel.find(claim).expect("the extent guard");
+    assert!(kernel[guard_at..].contains(trap), "the extent guard traps");
     let alloc_at = kernel.find("chelis_alloc(").expect("the kernel allocates");
     assert!(
         guard_at < alloc_at,
