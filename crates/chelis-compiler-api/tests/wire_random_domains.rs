@@ -6,8 +6,7 @@
 //! random kernel output.
 use chelis_compiler_api::schema::{
     CheckRequest, GradRequest, LowerRequest, SourceKind, WIRE_DAG_SCHEMA_VERSION, WireDag,
-    WireDagDecodeError,
-    WireDagNode,
+    WireDagDecodeError, WireDagNode,
 };
 use chelis_ir::dag::{Dag, DimInfo, KeyBranch, NodeId, RiscOp, RtDim, TensorType, UniformBound};
 use chelis_types::scalar_from_i64;
@@ -214,12 +213,7 @@ fn readers(dag: &Value, node: usize) -> Vec<usize> {
         .unwrap()
         .iter()
         .enumerate()
-        .filter(|(_, reader)| {
-            reader["inputs"]
-                .as_array()
-                .unwrap()
-                .contains(&json!(node))
-        })
+        .filter(|(_, reader)| reader["inputs"].as_array().unwrap().contains(&json!(node)))
         .map(|(index, _)| index)
         .collect()
 }
@@ -269,7 +263,12 @@ fn a_computed_key_tensor_and_a_gradient_export_keep_one_consumer_per_key() {
     let fold = first(&grad, "fold_in");
     let mut kinds = readers(&grad, fold)
         .into_iter()
-        .map(|reader| grad["nodes"][reader]["op"]["kind"].as_str().unwrap().to_string())
+        .map(|reader| {
+            grad["nodes"][reader]["op"]["kind"]
+                .as_str()
+                .unwrap()
+                .to_string()
+        })
         .collect::<Vec<_>>();
     kinds.sort();
     assert_eq!(kinds, ["dropout", "dropout_replay"], "{grad}");

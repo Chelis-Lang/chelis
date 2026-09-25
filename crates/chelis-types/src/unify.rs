@@ -93,7 +93,9 @@ pub enum TypeErrorKind {
     /// diagnostic. `value_binding` names the generic when it is a value
     /// binding rather than a function, such as a generalized `let` binding,
     /// whose repair is an ascription rather than a concrete key parameter.
-    KeyInstantiation { value_binding: Option<String> },
+    KeyInstantiation {
+        value_binding: Option<String>,
+    },
     DimensionMismatch,
     ArityMismatch,
     OccursCheck,

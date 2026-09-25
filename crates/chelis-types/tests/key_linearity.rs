@@ -85,10 +85,9 @@ fn rejects_value_binding_instantiation(name: &str, source: &str, binding: &str) 
         .find(|error| same_kind(&error.kind, &CheckErrorKind::KeyReuse))
         .expect("rejects found the kind");
     assert!(
-        error
-            .message
-            .contains(&format!("an inferred type parameter of generic `{binding}`"))
-            && error.message.contains("[04-LIN-10]"),
+        error.message.contains(&format!(
+            "an inferred type parameter of generic `{binding}`"
+        )) && error.message.contains("[04-LIN-10]"),
         "{name}: the diagnostic must name binding `{binding}`: {error:?}"
     );
     let suggestions = error.suggestions.join(" ");
@@ -651,7 +650,9 @@ fn a_generic_reached_indirectly_is_never_instantiated_at_a_key() {
         ),
         (
             "a generic returned from a function and then applied",
-            format!("{dup}def get[a]() -> (a) -> (a, a) = dup\ndef bad(k: key) -> (key, key) = (get())(k)\n"),
+            format!(
+                "{dup}def get[a]() -> (a) -> (a, a) = dup\ndef bad(k: key) -> (key, key) = (get())(k)\n"
+            ),
             "get",
             Some("a"),
         ),
