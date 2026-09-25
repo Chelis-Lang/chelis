@@ -140,8 +140,13 @@ nested_runtime = grad(nested_runtime_loss, wrt=values)(
     }
 }
 
+/// Keyed std draws under `grad` along computed runtime paths (chelis#1293 in
+/// the key form of chelis#2413): each grad or forward call is keyed by one
+/// half of a `split_key` and the draw after it by the other, and the grad and
+/// forward rows must agree in eval and C. The counter-stream version pinned
+/// that an untaken path's draws took no ordinal under grad.
 #[test]
-fn handled_random_grad_skips_untaken_computed_paths_in_eval_and_c() {
+fn keyed_random_grad_skips_untaken_computed_paths_in_eval_and_c() {
     let (_dir, reef_home, app_pkg) = make_app("issue-1293-random-computed-skipped-paths");
     write_file(
         &app_pkg.join("src/main.ch"),
@@ -156,54 +161,64 @@ def fresh_template() -> tensor[2, f32] =
 def sum_all(value: tensor[2, f32]) -> f32 =
   tensor_to_scalar(sum(value, cast(0, i32)))
 
-def float_condition(template: tensor[2, f32], scale: f32) -> f32 ! { Random } =
+def float_condition(k: key, template: tensor[2, f32], scale: f32) -> f32 =
   if gt(scale, cast(0.0, f32))
-  then sum_all(normal_like(template, cast(0.0, f32), scale))
+  then sum_all(normal_like(k, template, cast(0.0, f32), scale))
   else sum_all(template)
 
-def int_condition(template: tensor[2, f32], gate: i64, scale: f32) -> f32 ! { Random } =
+def int_condition(k: key, template: tensor[2, f32], gate: i64, scale: f32) -> f32 =
   if eq(gate, cast(1, i64))
-  then add(
-    sum_all(normal_like(template, cast(0.0, f32), scale)),
-    sum_all(xavier_uniform(template, scale, scale))
-  )
+  then {
+    (kn, kx) = split_key(k)
+    add(
+      sum_all(normal_like(kn, template, cast(0.0, f32), scale)),
+      sum_all(xavier_uniform(kx, template, scale, scale))
+    )
+  }
   else sum_all(template)
 
-def guarded_error(template: tensor[2, f32], scale: f32) -> f32 ! { Random } =
+def guarded_error(k: key, template: tensor[2, f32], scale: f32) -> f32 =
   if gt(scale, cast(0.0, f32))
-  then sum_all(normal_like(template, cast(0.0, f32), scale))
+  then sum_all(normal_like(k, template, cast(0.0, f32), scale))
   else fail("untaken error branch")
 
 false_mask: tensor[1, bool] = [false]
 runtime_zero: i64 = tensor_to_scalar(count(&false_mask, 0))
 
-after_float_grad = with seed(241i64) {
-  skipped = grad(float_condition, wrt=scale)(fresh_template(), cast(-1.0, f32))
-  sum_all(normal_like(fresh_template(), cast(0.0, f32), cast(1.0, f32)))
+after_float_grad = {
+  (kg, kn) = split_key(key_from_seed(241i64))
+  skipped = grad(float_condition, wrt=scale)(kg, fresh_template(), cast(-1.0, f32))
+  sum_all(normal_like(kn, fresh_template(), cast(0.0, f32), cast(1.0, f32)))
 }
-after_float_forward = with seed(241i64) {
-  skipped = float_condition(fresh_template(), cast(-1.0, f32))
-  sum_all(normal_like(fresh_template(), cast(0.0, f32), cast(1.0, f32)))
+after_float_forward = {
+  (kg, kn) = split_key(key_from_seed(241i64))
+  skipped = float_condition(kg, fresh_template(), cast(-1.0, f32))
+  sum_all(normal_like(kn, fresh_template(), cast(0.0, f32), cast(1.0, f32)))
 }
-after_int_grad = with seed(251i64) {
+after_int_grad = {
+  (kg, kn) = split_key(key_from_seed(251i64))
   skipped = grad(int_condition, wrt=scale)(
+    kg,
     fresh_template(),
     runtime_zero,
     cast(-1.0, f32)
   )
-  sum_all(normal_like(fresh_template(), cast(0.0, f32), cast(1.0, f32)))
+  sum_all(normal_like(kn, fresh_template(), cast(0.0, f32), cast(1.0, f32)))
 }
-after_int_forward = with seed(251i64) {
-  skipped = int_condition(fresh_template(), runtime_zero, cast(-1.0, f32))
-  sum_all(normal_like(fresh_template(), cast(0.0, f32), cast(1.0, f32)))
+after_int_forward = {
+  (kg, kn) = split_key(key_from_seed(251i64))
+  skipped = int_condition(kg, fresh_template(), runtime_zero, cast(-1.0, f32))
+  sum_all(normal_like(kn, fresh_template(), cast(0.0, f32), cast(1.0, f32)))
 }
-after_guarded_grad = with seed(269i64) {
-  used = grad(guarded_error, wrt=scale)(fresh_template(), cast(1.0, f32))
-  sum_all(normal_like(fresh_template(), cast(0.0, f32), cast(1.0, f32)))
+after_guarded_grad = {
+  (kg, kn) = split_key(key_from_seed(269i64))
+  used = grad(guarded_error, wrt=scale)(kg, fresh_template(), cast(1.0, f32))
+  sum_all(normal_like(kn, fresh_template(), cast(0.0, f32), cast(1.0, f32)))
 }
-after_guarded_forward = with seed(269i64) {
-  used = guarded_error(fresh_template(), cast(1.0, f32))
-  sum_all(normal_like(fresh_template(), cast(0.0, f32), cast(1.0, f32)))
+after_guarded_forward = {
+  (kg, kn) = split_key(key_from_seed(269i64))
+  used = guarded_error(kg, fresh_template(), cast(1.0, f32))
+  sum_all(normal_like(kn, fresh_template(), cast(0.0, f32), cast(1.0, f32)))
 }
 
 float_path_parity = eq(after_float_grad, after_float_forward)
@@ -230,8 +245,9 @@ guarded_error_parity = eq(after_guarded_grad, after_guarded_forward)
     }
 }
 
+/// Nested computed paths, in the key form described above.
 #[test]
-fn handled_random_grad_merges_nested_computed_paths_in_eval_and_c() {
+fn keyed_random_grad_merges_nested_computed_paths_in_eval_and_c() {
     let (_dir, reef_home, app_pkg) = make_app("issue-1293-random-computed-nested-paths");
     write_file(
         &app_pkg.join("src/main.ch"),
@@ -246,17 +262,20 @@ def fresh_template() -> tensor[2, f32] =
 def sum_all(value: tensor[2, f32]) -> f32 =
   tensor_to_scalar(sum(value, cast(0, i32)))
 
-def inner_condition(template: tensor[2, f32], gate: i64, scale: f32) -> f32 ! { Random } =
+def inner_condition(k: key, template: tensor[2, f32], gate: i64, scale: f32) -> f32 =
   if eq(gate, cast(1, i64))
-  then add(
-    sum_all(normal_like(template, cast(0.0, f32), scale)),
-    sum_all(xavier_uniform(template, scale, scale))
-  )
-  else sum_all(normal_like(template, cast(0.0, f32), scale))
+  then {
+    (kn, kx) = split_key(k)
+    add(
+      sum_all(normal_like(kn, template, cast(0.0, f32), scale)),
+      sum_all(xavier_uniform(kx, template, scale, scale))
+    )
+  }
+  else sum_all(normal_like(k, template, cast(0.0, f32), scale))
 
-def nested_condition(template: tensor[2, f32], gate: i64, scale: f32) -> f32 ! { Random } = {
+def nested_condition(k: key, template: tensor[2, f32], gate: i64, scale: f32) -> f32 = {
   positive = gt(scale, cast(0.0, f32))
-  selected = if positive then inner_condition(template, gate, scale) else sum_all(template)
+  selected = if positive then inner_condition(k, template, gate, scale) else sum_all(template)
   reused = if positive then cast(0.0, f32) else cast(0.0, f32)
   add(selected, reused)
 }
@@ -264,29 +283,35 @@ def nested_condition(template: tensor[2, f32], gate: i64, scale: f32) -> f32 ! {
 false_mask: tensor[1, bool] = [false]
 runtime_zero: i64 = tensor_to_scalar(count(&false_mask, 0))
 
-after_nested_two_grad = with seed(257i64) {
+after_nested_two_grad = {
+  (kg, kn) = split_key(key_from_seed(257i64))
   used = grad(nested_condition, wrt=(template, scale))(
+    kg,
     fresh_template(),
     cast(1, i64),
     cast(1.0, f32)
   )
-  sum_all(normal_like(fresh_template(), cast(0.0, f32), cast(1.0, f32)))
+  sum_all(normal_like(kn, fresh_template(), cast(0.0, f32), cast(1.0, f32)))
 }
-after_nested_two_forward = with seed(257i64) {
-  used = nested_condition(fresh_template(), cast(1, i64), cast(1.0, f32))
-  sum_all(normal_like(fresh_template(), cast(0.0, f32), cast(1.0, f32)))
+after_nested_two_forward = {
+  (kg, kn) = split_key(key_from_seed(257i64))
+  used = nested_condition(kg, fresh_template(), cast(1, i64), cast(1.0, f32))
+  sum_all(normal_like(kn, fresh_template(), cast(0.0, f32), cast(1.0, f32)))
 }
-after_nested_one_grad = with seed(259i64) {
+after_nested_one_grad = {
+  (kg, kn) = split_key(key_from_seed(259i64))
   used = grad(nested_condition, wrt=scale)(
+    kg,
     fresh_template(),
     runtime_zero,
     cast(1.0, f32)
   )
-  sum_all(normal_like(fresh_template(), cast(0.0, f32), cast(1.0, f32)))
+  sum_all(normal_like(kn, fresh_template(), cast(0.0, f32), cast(1.0, f32)))
 }
-after_nested_one_forward = with seed(259i64) {
-  used = nested_condition(fresh_template(), runtime_zero, cast(1.0, f32))
-  sum_all(normal_like(fresh_template(), cast(0.0, f32), cast(1.0, f32)))
+after_nested_one_forward = {
+  (kg, kn) = split_key(key_from_seed(259i64))
+  used = nested_condition(kg, fresh_template(), runtime_zero, cast(1.0, f32))
+  sum_all(normal_like(kn, fresh_template(), cast(0.0, f32), cast(1.0, f32)))
 }
 
 nested_two_word_parity = eq(after_nested_two_grad, after_nested_two_forward)

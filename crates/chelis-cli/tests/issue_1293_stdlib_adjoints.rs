@@ -97,9 +97,16 @@ drop_runtime = grad(drop_dynamic_loss, wrt=xs)(values, runtime_count)
     }
 }
 
+/// Keyed std draws under `grad` and runtime control flow (chelis#1293 in the
+/// key form of chelis#2413). Each row runs one `grad` or forward call keyed
+/// by one half of a `split_key`, then a draw keyed by the other half: the
+/// grad and forward rows must print the same after-draw in eval and in C, so
+/// a grad that read or disturbed a key it was not given fails. An invalid
+/// draw in an untaken branch traps in neither. The counter-stream version
+/// pinned that grad advanced the handler's ordinals as its forward did.
 #[test]
-fn handled_random_grad_advances_for_false_true_and_invalid_paths_in_eval_and_c() {
-    let (_dir, reef_home, app_pkg) = make_app("issue-1293-random-basic-branch-ordinals");
+fn keyed_random_grad_matches_forward_for_false_true_and_invalid_paths_in_eval_and_c() {
+    let (_dir, reef_home, app_pkg) = make_app("issue-1293-random-basic-branch-keys");
     write_file(
         &app_pkg.join("src/main.ch"),
         r#"module Demo.Main
@@ -109,44 +116,51 @@ import Std.Init.XavierExt (xavier_uniform)
 
 def fresh_template() -> tensor[2, f32] = to_tensor([cast(0.0, f32), cast(0.0, f32)])
 def sum_all(value: tensor[2, f32]) -> f32 = tensor_to_scalar(sum(value, cast(0, i32)))
-def combo(template: tensor[2, f32], scale: f32) -> f32 ! { Random } = {
-  normal = normal_like(template, cast(0.0, f32), scale)
-  xavier = xavier_uniform(template, scale, scale)
+def combo(k: key, template: tensor[2, f32], scale: f32) -> f32 = {
+  (kn, kx) = split_key(k)
+  normal = normal_like(kn, template, cast(0.0, f32), scale)
+  xavier = xavier_uniform(kx, template, scale, scale)
   add(sum_all(normal), sum_all(xavier))
 }
-def maybe_combo(template: tensor[2, f32], scale: f32, run: bool) -> f32 ! { Random } =
-  if run then combo(template, scale) else sum_all(template)
-def maybe_invalid(template: tensor[2, f32], scale: f32, run: bool) -> f32 ! { Random } =
-  if run then sum_all(normal_like(template, cast(0.0, f32), scale)) else sum_all(template)
+def maybe_combo(k: key, template: tensor[2, f32], scale: f32, run: bool) -> f32 =
+  if run then combo(k, template, scale) else sum_all(template)
+def maybe_invalid(k: key, template: tensor[2, f32], scale: f32, run: bool) -> f32 =
+  if run then sum_all(normal_like(k, template, cast(0.0, f32), scale)) else sum_all(template)
 
 false_mask: tensor[1, bool] = [false]
 false_count: i64 = tensor_to_scalar(count(&false_mask, 0))
 runtime_false: bool = eq(false_count, cast(1, i64))
 runtime_true: bool = eq(false_count, cast(0, i64))
 
-after_false_grad = with seed(211i64) {
-  skipped = grad(maybe_combo, wrt=scale)(fresh_template(), cast(1.0, f32), runtime_false)
-  sum_all(normal_like(fresh_template(), cast(0.0, f32), cast(1.0, f32)))
+after_false_grad = {
+  (kg, kn) = split_key(key_from_seed(211i64))
+  skipped = grad(maybe_combo, wrt=scale)(kg, fresh_template(), cast(1.0, f32), runtime_false)
+  sum_all(normal_like(kn, fresh_template(), cast(0.0, f32), cast(1.0, f32)))
 }
-after_false_forward = with seed(211i64) {
-  skipped = maybe_combo(fresh_template(), cast(1.0, f32), runtime_false)
-  sum_all(normal_like(fresh_template(), cast(0.0, f32), cast(1.0, f32)))
+after_false_forward = {
+  (kg, kn) = split_key(key_from_seed(211i64))
+  skipped = maybe_combo(kg, fresh_template(), cast(1.0, f32), runtime_false)
+  sum_all(normal_like(kn, fresh_template(), cast(0.0, f32), cast(1.0, f32)))
 }
-after_true_grad = with seed(223i64) {
-  used = grad(maybe_combo, wrt=scale)(fresh_template(), cast(1.0, f32), runtime_true)
-  sum_all(normal_like(fresh_template(), cast(0.0, f32), cast(1.0, f32)))
+after_true_grad = {
+  (kg, kn) = split_key(key_from_seed(223i64))
+  used = grad(maybe_combo, wrt=scale)(kg, fresh_template(), cast(1.0, f32), runtime_true)
+  sum_all(normal_like(kn, fresh_template(), cast(0.0, f32), cast(1.0, f32)))
 }
-after_true_forward = with seed(223i64) {
-  used = maybe_combo(fresh_template(), cast(1.0, f32), runtime_true)
-  sum_all(normal_like(fresh_template(), cast(0.0, f32), cast(1.0, f32)))
+after_true_forward = {
+  (kg, kn) = split_key(key_from_seed(223i64))
+  used = maybe_combo(kg, fresh_template(), cast(1.0, f32), runtime_true)
+  sum_all(normal_like(kn, fresh_template(), cast(0.0, f32), cast(1.0, f32)))
 }
-after_invalid_grad = with seed(227i64) {
-  skipped = grad(maybe_invalid, wrt=scale)(fresh_template(), cast(-1.0, f32), runtime_false)
-  sum_all(normal_like(fresh_template(), cast(0.0, f32), cast(1.0, f32)))
+after_invalid_grad = {
+  (kg, kn) = split_key(key_from_seed(227i64))
+  skipped = grad(maybe_invalid, wrt=scale)(kg, fresh_template(), cast(-1.0, f32), runtime_false)
+  sum_all(normal_like(kn, fresh_template(), cast(0.0, f32), cast(1.0, f32)))
 }
-after_invalid_forward = with seed(227i64) {
-  skipped = maybe_invalid(fresh_template(), cast(-1.0, f32), runtime_false)
-  sum_all(normal_like(fresh_template(), cast(0.0, f32), cast(1.0, f32)))
+after_invalid_forward = {
+  (kg, kn) = split_key(key_from_seed(227i64))
+  skipped = maybe_invalid(kg, fresh_template(), cast(-1.0, f32), runtime_false)
+  sum_all(normal_like(kn, fresh_template(), cast(0.0, f32), cast(1.0, f32)))
 }
 false_branch_parity = eq(after_false_grad, after_false_forward)
 true_branch_parity = eq(after_true_grad, after_true_forward)
@@ -172,9 +186,11 @@ invalid_untaken_parity = eq(after_invalid_grad, after_invalid_forward)
     }
 }
 
+/// Repeated grads, and a grad keyed independently of the draw after it (the
+/// key form of the nested-handler row), match their forwards in eval and C.
 #[test]
-fn handled_random_grad_advances_for_repeated_and_nested_handlers_in_eval_and_c() {
-    let (_dir, reef_home, app_pkg) = make_app("issue-1293-random-composed-branch-ordinals");
+fn keyed_random_grad_matches_forward_for_repeated_and_independent_keys_in_eval_and_c() {
+    let (_dir, reef_home, app_pkg) = make_app("issue-1293-random-composed-branch-keys");
     write_file(
         &app_pkg.join("src/main.ch"),
         r#"module Demo.Main
@@ -184,50 +200,51 @@ import Std.Init.XavierExt (xavier_uniform)
 
 def fresh_template() -> tensor[2, f32] = to_tensor([cast(0.0, f32), cast(0.0, f32)])
 def sum_all(value: tensor[2, f32]) -> f32 = tensor_to_scalar(sum(value, cast(0, i32)))
-def combo(template: tensor[2, f32], scale: f32) -> f32 ! { Random } = {
-  normal = normal_like(template, cast(0.0, f32), scale)
-  xavier = xavier_uniform(template, scale, scale)
+def combo(k: key, template: tensor[2, f32], scale: f32) -> f32 = {
+  (kn, kx) = split_key(k)
+  normal = normal_like(kn, template, cast(0.0, f32), scale)
+  xavier = xavier_uniform(kx, template, scale, scale)
   add(sum_all(normal), sum_all(xavier))
 }
-def maybe_combo(template: tensor[2, f32], scale: f32, run: bool) -> f32 ! { Random } =
-  if run then combo(template, scale) else sum_all(template)
+def maybe_combo(k: key, template: tensor[2, f32], scale: f32, run: bool) -> f32 =
+  if run then combo(k, template, scale) else sum_all(template)
 
 false_mask: tensor[1, bool] = [false]
 false_count: i64 = tensor_to_scalar(count(&false_mask, 0))
 runtime_false: bool = eq(false_count, cast(1, i64))
 runtime_true: bool = eq(false_count, cast(0, i64))
 
-after_repeated_grads = with seed(229i64) {
-  first = grad(maybe_combo, wrt=scale)(fresh_template(), cast(1.0, f32), runtime_false)
-  second = grad(maybe_combo, wrt=scale)(fresh_template(), cast(1.0, f32), runtime_true)
-  sum_all(normal_like(fresh_template(), cast(0.0, f32), cast(1.0, f32)))
+after_repeated_grads = {
+  (k1, rest) = split_key(key_from_seed(229i64))
+  (k2, kn) = split_key(rest)
+  first = grad(maybe_combo, wrt=scale)(k1, fresh_template(), cast(1.0, f32), runtime_false)
+  second = grad(maybe_combo, wrt=scale)(k2, fresh_template(), cast(1.0, f32), runtime_true)
+  sum_all(normal_like(kn, fresh_template(), cast(0.0, f32), cast(1.0, f32)))
 }
-after_repeated_forwards = with seed(229i64) {
-  first = maybe_combo(fresh_template(), cast(1.0, f32), runtime_false)
-  second = maybe_combo(fresh_template(), cast(1.0, f32), runtime_true)
-  sum_all(normal_like(fresh_template(), cast(0.0, f32), cast(1.0, f32)))
+after_repeated_forwards = {
+  (k1, rest) = split_key(key_from_seed(229i64))
+  (k2, kn) = split_key(rest)
+  first = maybe_combo(k1, fresh_template(), cast(1.0, f32), runtime_false)
+  second = maybe_combo(k2, fresh_template(), cast(1.0, f32), runtime_true)
+  sum_all(normal_like(kn, fresh_template(), cast(0.0, f32), cast(1.0, f32)))
 }
-after_nested_grad = with seed(233i64) {
-  used = with seed(17i64) {
-    grad(maybe_combo, wrt=scale)(fresh_template(), cast(1.0, f32), runtime_true)
-  }
-  sum_all(normal_like(fresh_template(), cast(0.0, f32), cast(1.0, f32)))
+after_independent_grad = {
+  used = grad(maybe_combo, wrt=scale)(key_from_seed(17i64), fresh_template(), cast(1.0, f32), runtime_true)
+  sum_all(normal_like(key_from_seed(233i64), fresh_template(), cast(0.0, f32), cast(1.0, f32)))
 }
-after_nested_forward = with seed(233i64) {
-  used = with seed(17i64) {
-    maybe_combo(fresh_template(), cast(1.0, f32), runtime_true)
-  }
-  sum_all(normal_like(fresh_template(), cast(0.0, f32), cast(1.0, f32)))
+after_independent_forward = {
+  used = maybe_combo(key_from_seed(17i64), fresh_template(), cast(1.0, f32), runtime_true)
+  sum_all(normal_like(key_from_seed(233i64), fresh_template(), cast(0.0, f32), cast(1.0, f32)))
 }
 
 repeated_parity = eq(after_repeated_grads, after_repeated_forwards)
-nested_parity = eq(after_nested_grad, after_nested_forward)
+independent_parity = eq(after_independent_grad, after_independent_forward)
 "#,
     );
 
     let eval = eval_app_stdout(&reef_home, &app_pkg);
     let compiled = build_and_run_app(&reef_home, &app_pkg, "main");
-    for expected in ["repeated_parity = true", "nested_parity = true"] {
+    for expected in ["repeated_parity = true", "independent_parity = true"] {
         assert!(
             eval.contains(expected),
             "eval missing `{expected}`:\n{eval}"
@@ -598,7 +615,7 @@ bad = grad(discrete_loss, wrt=xs)(values)
 }
 
 #[test]
-fn stdlib_normal_like_has_seeded_pathwise_scalar_parameter_adjoints() {
+fn stdlib_normal_like_has_keyed_pathwise_scalar_parameter_adjoints() {
     let (_dir, reef_home, app_pkg) = make_app("issue-1293-normal-like-adjoints");
     write_file(
         &app_pkg.join("src/main.ch"),
@@ -606,8 +623,8 @@ fn stdlib_normal_like_has_seeded_pathwise_scalar_parameter_adjoints() {
 
 import Std.Init.Random (normal_like)
 
-def total_normal(template: tensor[2, 2, f32], mean: f32, std: f32) -> f32 ! { Random } =
-  normal_like(template, mean, std)
+def total_normal(k: key, template: tensor[2, 2, f32], mean: f32, std: f32) -> f32 =
+  normal_like(k, template, mean, std)
   |> sum(cast(0, i32))
   |> sum(cast(0, i32))
   |> tensor_to_scalar
@@ -619,43 +636,15 @@ def fresh_template() -> tensor[2, 2, f32] =
   ])
 
 template = fresh_template()
-sample_sum = with seed(42i64) {
-  total_normal(copy(template), cast(0.0, f32), cast(1.0, f32))
-}
-normal_grads = with seed(42i64) {
-  grad(total_normal, wrt=(template, mean, std))(
-    template,
-    cast(0.0, f32),
-    cast(1.0, f32)
-  )
-}
-sample_after_grad = with seed(42i64) {
-  first_std_grad = grad(total_normal, wrt=std)(
-    fresh_template(),
-    cast(0.0, f32),
-    cast(1.0, f32)
-  )
-  later_sample = total_normal(
-    fresh_template(),
-    cast(0.0, f32),
-    cast(1.0, f32)
-  )
-  later_sample
-}
-sample_after_forward = with seed(42i64) {
-  first_sample = total_normal(
-    fresh_template(),
-    cast(0.0, f32),
-    cast(1.0, f32)
-  )
-  total_normal(
-    fresh_template(),
-    cast(0.0, f32),
-    cast(1.0, f32)
-  )
-}
-stream_advanced = not(eq(sample_sum, sample_after_grad))
-stream_ordinal_matches = eq(sample_after_grad, sample_after_forward)
+sample_sum = total_normal(key_from_seed(42i64), copy(template), cast(0.0, f32), cast(1.0, f32))
+normal_grads = grad(total_normal, wrt=(template, mean, std))(
+  key_from_seed(42i64),
+  template,
+  cast(0.0, f32),
+  cast(1.0, f32)
+)
+other_key_sum = total_normal(key_from_seed(43i64), fresh_template(), cast(0.0, f32), cast(1.0, f32))
+key_sensitive = not(eq(sample_sum, other_key_sum))
 "#,
     );
 
@@ -687,15 +676,15 @@ stream_ordinal_matches = eq(sample_after_grad, sample_after_forward)
     assert_eq!(scalar("normal_grads.1"), 4.0);
     assert!(
         (scalar("normal_grads.2") - scalar("sample_sum")).abs() < 1e-5,
-        "the std cotangent must reuse the fixed-seed standard-normal sample:\n{stdout}"
+        "the std cotangent must reuse the same key's standard-normal sample:\n{stdout}"
     );
+    // The key form of the retired stream-advance control: another key gives
+    // another sample, so the std-cotangent comparison above is not vacuous.
+    // The retired ordinal-match row has no separate key form: a grad reads
+    // the key it is given, which the std cotangent above already pins.
     assert!(
-        stdout.contains("stream_advanced = true"),
-        "a grad execution must advance the enclosing handled Random stream:\n{stdout}"
-    );
-    assert!(
-        stdout.contains("stream_ordinal_matches = true"),
-        "a grad execution must consume exactly the same Random ordinals as its forward body:\n{stdout}"
+        stdout.contains("key_sensitive = true"),
+        "different keys must give different normal samples:\n{stdout}"
     );
 }
 
@@ -706,9 +695,7 @@ fn stdlib_random_wrappers_validate_parameters_before_sampling() {
         r#"import Std.Init.Random (normal_like)
 
 template = to_tensor([cast(0.0, f32)])
-bad = with seed(42i64) {
-  normal_like(template, cast(0.0, f32), cast(-1.0, f32))
-}"#,
+bad = normal_like(key_from_seed(42i64), template, cast(0.0, f32), cast(-1.0, f32))"#,
         "numeric trap: domain in cast at bool",
     );
     assert_random_wrapper_rejects(
@@ -717,9 +704,7 @@ bad = with seed(42i64) {
 
 template = to_tensor([cast(0.0, f32)])
 nan = sqrt(cast(-1.0, f32))
-bad = with seed(42i64) {
-  normal_like(template, nan, cast(1.0, f32))
-}"#,
+bad = normal_like(key_from_seed(42i64), template, nan, cast(1.0, f32))"#,
         "numeric trap: domain in cast at bool",
     );
     assert_random_wrapper_rejects(
@@ -727,9 +712,7 @@ bad = with seed(42i64) {
         r#"import Std.Init.Kaiming (kaiming_uniform)
 
 template = to_tensor([cast(0.0, f32)])
-bad = with seed(42i64) {
-  kaiming_uniform(template, cast(0.0, f32))
-}"#,
+bad = kaiming_uniform(key_from_seed(42i64), template, cast(0.0, f32))"#,
         "numeric trap: domain in cast at bool",
     );
     assert_random_wrapper_rejects(
@@ -737,9 +720,7 @@ bad = with seed(42i64) {
         r#"import Std.Init.XavierExt (xavier_normal)
 
 template = to_tensor([cast(0.0, f32)])
-bad = with seed(42i64) {
-  xavier_normal(template, cast(1.0, f32), cast(-1.0, f32))
-}"#,
+bad = xavier_normal(key_from_seed(42i64), template, cast(1.0, f32), cast(-1.0, f32))"#,
         "numeric trap: domain in cast at bool",
     );
     assert_random_wrapper_rejects(
@@ -748,9 +729,7 @@ bad = with seed(42i64) {
 
 template = to_tensor([cast(0.0, f32)])
 large = cast(3.4e38, f32)
-bad = with seed(42i64) {
-  xavier_uniform(template, large, large)
-}"#,
+bad = xavier_uniform(key_from_seed(42i64), template, large, large)"#,
         "numeric trap: domain in cast at bool",
     );
     assert_random_wrapper_rejects(
@@ -758,15 +737,14 @@ bad = with seed(42i64) {
         r#"import Std.Init.XavierExt (trunc_normal)
 
 template = to_tensor([cast(0.0, f32)])
-bad = with seed(42i64) {
-  trunc_normal(
+bad = trunc_normal(
+    key_from_seed(42i64),
     template,
     cast(0.0, f32),
     cast(1.0, f32),
     cast(2.0, f32),
     cast(1.0, f32)
-  )
-}"#,
+  )"#,
         "numeric trap: domain in cast at bool",
     );
 }
