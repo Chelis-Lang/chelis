@@ -5897,6 +5897,82 @@ mod tests {
         }
     }
 
+    /// chelis#2440's trap seed meets chelis#2476's scoping. The integer
+    /// arithmetic in a declaration nobody selected can overflow, so the seed
+    /// would mark it live and `resolve_load_inputs` would then demand that
+    /// declaration's parameter — the chelis#991 shape, arriving through the
+    /// trap seed instead of the abort one.
+    ///
+    /// The float twin is the control: it cannot trap, so it is never seeded
+    /// and the scoping is not what keeps it dead.
+    #[test]
+    fn a_trapping_node_owned_by_an_unselected_root_is_not_this_evaluation_s_concern() {
+        fn program(precision: Prim) -> (Dag, NodeId, NodeId, NodeId) {
+            let ty = TensorType {
+                dims: vec![DimInfo::Lit(3)],
+                precision,
+            };
+            let mut dag = Dag::new();
+            let z = dag.add_node(RiscOp::Load { name: "z".into() }, vec![], ty.clone(), None);
+            let g = dag.add_node(RiscOp::Mul, vec![z, z], ty.clone(), None);
+            let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], ty.clone(), None);
+            let main = dag.add_node(RiscOp::Add, vec![x, x], ty, None);
+            dag.add_root(g);
+            dag.add_root(main);
+            (dag, z, g, main)
+        }
+
+        let (dag, z, g, main) = program(Prim::Int32);
+        assert!(
+            dag.get(g).expect("node").is_observable_root(),
+            "precondition: integer arithmetic must be a trapping node, or this \
+             test passes for the wrong reason"
+        );
+        let live = live_mask_for_roots(&dag, &[main]);
+        assert!(
+            !live[g.0],
+            "a trapping node owned by the unselected root is not seeded"
+        );
+        assert!(
+            !live[z.0],
+            "so its parameter never becomes a required input"
+        );
+        assert!(
+            live_mask_for_roots(&dag, &[main, g])[g.0],
+            "selecting its owner runs it, so the trap still occurs"
+        );
+
+        let (float_dag, float_z, float_g, float_main) = program(Prim::F32);
+        assert!(
+            !float_dag.get(float_g).expect("node").is_observable_root(),
+            "control: float arithmetic cannot trap, so it is never seeded at all"
+        );
+        let float_live = live_mask_for_roots(&float_dag, &[float_main]);
+        assert!(!float_live[float_g.0] && !float_live[float_z.0]);
+    }
+
+    /// With no declared roots the whole graph is the program, so the scoping
+    /// is a no-op and a discarded trapping node is still seeded — it must
+    /// execute, and its input is genuinely required.
+    #[test]
+    fn a_rootless_dag_still_seeds_its_discarded_trapping_node() {
+        let mut dag = Dag::new();
+        let ty = TensorType {
+            dims: vec![DimInfo::Lit(3)],
+            precision: Prim::Int32,
+        };
+        let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], ty.clone(), None);
+        let y = dag.add_node(RiscOp::Load { name: "y".into() }, vec![], ty.clone(), None);
+        let live_add = dag.add_node(RiscOp::Add, vec![x, x], ty.clone(), None);
+        let discarded = dag.add_node(RiscOp::Add, vec![y, y], ty, None);
+
+        let live = live_mask_for_roots(&dag, &[live_add]);
+        assert!(
+            live[discarded.0] && live[y.0],
+            "nothing was deselected, so the trap seed still reaches it"
+        );
+    }
+
     /// chelis#2413 put a trapping draw beside the `[05-OP-68]` abort in the
     /// same seed, and chelis#2476's rebase scoped both together: they are one
     /// class under `spec/06` §5.2, so leaving the newer one unscoped would

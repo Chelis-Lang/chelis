@@ -620,9 +620,18 @@ node and removing its execution preserves every effect and trap occurrence.
 Potentially effectful or trapping nodes are observable roots; purity alone does
 not make a possible trap dead.
 
+Observable roots are scoped to the activation being executed. A graph may hold
+several independently executed activations — one per declaration — and an
+evaluation that selects roots executes only the selected ones. A node reachable
+only from an unselected root belongs to a declaration that evaluation does not
+run, so it is not one of that evaluation's observable roots, and its inputs are
+not that evaluation's required inputs. A node the selection also reaches, and a
+node reachable from no root at all, both remain observable roots of every
+activation that contains them.
+
 **Algorithm:**
 1. Mark every effectful node, every potentially trapping node, every `Store`,
-   and every designated output as **live**.
+   and every designated output of the selected activation as **live**.
 2. Walk backward through the DAG: for each live node, mark all its input nodes as live.
 3. Remove all nodes not marked as live.
 

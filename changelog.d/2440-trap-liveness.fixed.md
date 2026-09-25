@@ -10,9 +10,10 @@ division can trap, float arithmetic cannot, and §5.2's own example of a
 removable dead float `add` still holds. Integer reductions and the
 movement-op domain traps are not yet covered, so `[05-OP-68]` keeps a
 non-normative note that its rule is not fully implemented for every trapping
-operation. Because a retained trap must execute, an input read only by a
-discarded integer node is now a required input under root-scoped strict
-evaluation, where its float twin still is not; that narrows the invariant
-stated in [#991](https://github.com/Chelis-Lang/chelis/issues/991), whose
-own reproduction is unaffected. Part of
+operation. §5.2 now also states what it always meant by an observable root:
+they are scoped to the activation being executed, so a node reachable only
+from a root the evaluation did not select belongs to a declaration it is not
+running. That is the rule [#2476](https://github.com/Chelis-Lang/chelis/issues/2476)
+implemented, and it is what makes this seed safe to carry; without it the
+trap seed would demand an uncalled declaration's parameters. Part of
 [#2440](https://github.com/Chelis-Lang/chelis/issues/2440).
