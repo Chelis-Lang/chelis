@@ -262,6 +262,9 @@ fn a_concrete_or_bounded_cast_target_still_checks_clean() {
 /// [04-DTYPE-1]. After this change the program carries both errors, because the
 /// target is independently a non-primitive.
 ///
+/// Since chelis#2158 the scalar-source message names `bool` too ("requires
+/// a numeric or bool scalar"), because [05-OP-63] admits a `bool` source.
+///
 /// This asserts only that both errors are present. **It decides nothing for
 /// chelis#1564**, which owns whether `cast(tensor, bounded_binder)` should be
 /// admitted at all; that question is about a BOUNDED target and this row's
@@ -280,7 +283,7 @@ fn a_tensor_source_carries_both_the_scalar_rule_and_the_dtype_rule() {
         assert!(
             messages
                 .iter()
-                .any(|m| m.contains("requires a numeric scalar")),
+                .any(|m| m.contains("requires a numeric or bool scalar")),
             "the pre-existing scalar-source rule must still fire at the {label} ingress; \
              got {messages:?}"
         );
