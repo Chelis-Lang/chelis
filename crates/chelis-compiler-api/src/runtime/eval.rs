@@ -721,6 +721,23 @@ impl<'a> EvalContext<'a> {
         Ok(kernel)
     }
 
+    /// spec/03 §4.4: a binding's initializer is evaluated whether or not the
+    /// binding is read. When the host hands a body to a tensor DAG (a kernel,
+    /// a transform target, a routed named-axis call) the DAG demands only the
+    /// values it reads, so the value declarations the body reaches
+    /// ([`super::program_scope::ProgramScope::reached_by_applying`]) are
+    /// initialized here, in the order it reaches them, where the caller's
+    /// sequential order reaches the body and a live capture's initializer
+    /// would run. A value the DAG already produced is not run again.
+    pub(super) fn initialize_reached_values(&mut self, reached: &[String]) -> Result<(), String> {
+        for key in reached {
+            if !self.tensor_bindings.contains_key(key) {
+                self.resolve_top_level(key)?;
+            }
+        }
+        Ok(())
+    }
+
     /// Apply def `name` through its kernel: the evaluated arguments become the
     /// kernel's `Load`s by declared parameter name (an unreferenced parameter
     /// is dropped, as the C wrapper drops it), a captured top-level tensor is
@@ -736,6 +753,7 @@ impl<'a> EvalContext<'a> {
         args: Vec<RuntimeValue>,
         inherited_claims: &[DeclaredResultClaim],
     ) -> Result<RuntimeValue, String> {
+        self.initialize_reached_values(&self.program.reached_by_call(name))?;
         if let Some(plan) = &kernel.staged {
             return self.apply_staged_host_plan(name, plan, params, args);
         }

@@ -248,6 +248,11 @@ impl<'a> EvalContext<'a> {
             staged.insert(placeholder, tensor_value);
         }
         let app_expr = Expr::node(DeepTag::App, Metadata::default(), app_children, span);
+        // spec/03 §4.4: the routed body runs here, after its actuals, so the
+        // value declarations it reaches initialize here even when the lowered
+        // DAG never demands them.
+        let reached = self.program.reached_by_call(resolved_name);
+        self.initialize_reached_values(&reached)?;
         // Source actuals and their checked types were prepared in the caller
         // above. Free loads in the named body belong to declaration scope.
         let saved = std::mem::take(&mut self.bindings);
