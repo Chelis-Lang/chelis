@@ -4004,80 +4004,139 @@ impl<'a> HostEmitter<'a> {
         target: &str,
     ) -> Result<(), Unsupported> {
         for action in &site.directives {
-            match action {
-                VerifiedHostAction::Operation(VerifiedHostOperation::Define {
-                    block: owner_block,
-                    dest,
-                    ..
-                }) if *owner_block == block => {
-                    self.owner_vars.insert(dest.id(), target.to_string());
-                }
-                VerifiedHostAction::Operation(VerifiedHostOperation::Apply {
-                    block: owner_block,
-                    dest: Some(dest),
-                    binding_name,
-                    label,
-                    ..
-                }) if *owner_block == block => {
-                    let value = binding_name
-                        .as_ref()
-                        .filter(|_| {
-                            label.starts_with("option_payload")
-                                || label.starts_with("adt_payload")
-                                || *label == "loop_item"
-                        })
-                        .map_or_else(
-                            || target.to_string(),
-                            |name| c_ident(name.as_str()).into_owned(),
-                        );
-                    self.owner_vars.insert(dest.id(), value);
-                }
-                VerifiedHostAction::Operation(VerifiedHostOperation::Discard {
-                    operation,
-                    block: owner_block,
-                    ..
-                }) if *owner_block == block
-                    && !self.pre_emitted_terminals.contains(&(site.id, *operation)) =>
-                {
-                    self.pre_emitted_terminals.insert((site.id, *operation));
-                }
-                VerifiedHostAction::Operation(VerifiedHostOperation::Discard { .. }) => {}
-                VerifiedHostAction::Operation(VerifiedHostOperation::Clone {
-                    block: owner_block,
-                    dest,
-                    source,
-                    ..
-                }) if *owner_block == block => self.emit_clone_to(*dest, *source, None)?,
-                VerifiedHostAction::Operation(VerifiedHostOperation::Project {
-                    block: owner_block,
-                    source,
-                    ..
-                }) if *owner_block == block => {
-                    self.owner_vars
-                        .insert(source.owner().id(), target.to_string());
-                }
-                VerifiedHostAction::Operation(VerifiedHostOperation::LoopItem { .. }) => {}
-                VerifiedHostAction::Operation(VerifiedHostOperation::Drop {
-                    operation,
-                    block: owner_block,
-                    owner,
-                    ..
-                }) if *owner_block == block
-                    && !self.pre_emitted_terminals.contains(&(site.id, *operation)) =>
-                {
-                    self.emit_owner_drop(owner.owner())?;
-                    self.pre_emitted_terminals.insert((site.id, *operation));
-                }
-                VerifiedHostAction::Operation(VerifiedHostOperation::Drop { .. }) => {}
-                VerifiedHostAction::Terminator(VerifiedHostTerminator::Jump {
-                    block: owner_block,
-                    edge,
-                }) if *owner_block == block && edge.params().len() == 1 => {
-                    self.owner_vars
-                        .insert(edge.params()[0].id(), target.to_string());
-                }
-                _ => {}
+            self.emit_expression_block_action(site, block, target, action)?;
+        }
+        Ok(())
+    }
+
+    /// Emit a list-building loop body's block actions in verified order, with
+    /// the loop's consuming step emitted at the step's own position.
+    ///
+    /// The step (`list_push`, `list_extend`, `filter_step`,
+    /// `partition_step`) moves an operand the body produced, and the actions
+    /// the schedule places before it (the copy that pays for a captured,
+    /// parameter or global owner the body returns, and every earlier release)
+    /// must run first: a consuming entry point may release its operand before
+    /// returning. Emitting the step from the verified action sequence, rather
+    /// than ahead of every block action, makes that order the schedule's
+    /// (chelis#2508).
+    fn emit_loop_step_block_actions(
+        &mut self,
+        site: &ProjectedHostSite<'a>,
+        block: VerifiedBlockId,
+        target: &str,
+        step: &str,
+        emit_step: impl FnOnce(&mut Self) -> Result<(), Unsupported>,
+    ) -> Result<(), Unsupported> {
+        let mut emit_step = Some(emit_step);
+        for action in &site.directives {
+            if let VerifiedHostAction::Operation(VerifiedHostOperation::Apply {
+                block: owner_block,
+                label,
+                ..
+            }) = action
+                && *owner_block == block
+                && *label == step
+            {
+                let emit = emit_step.take().ok_or_else(|| {
+                    invalid_abi_shape(
+                        format!("verified loop body repeats its `{step}` step"),
+                        "verified C host ownership emission",
+                    )
+                })?;
+                emit(self)?;
             }
+            self.emit_expression_block_action(site, block, target, action)?;
+        }
+        if emit_step.is_some() {
+            return Err(invalid_abi_shape(
+                format!("verified loop body has no `{step}` step"),
+                "verified C host ownership emission",
+            ));
+        }
+        Ok(())
+    }
+
+    fn emit_expression_block_action(
+        &mut self,
+        site: &ProjectedHostSite<'a>,
+        block: VerifiedBlockId,
+        target: &str,
+        action: &VerifiedHostAction<'a>,
+    ) -> Result<(), Unsupported> {
+        match action {
+            VerifiedHostAction::Operation(VerifiedHostOperation::Define {
+                block: owner_block,
+                dest,
+                ..
+            }) if *owner_block == block => {
+                self.owner_vars.insert(dest.id(), target.to_string());
+            }
+            VerifiedHostAction::Operation(VerifiedHostOperation::Apply {
+                block: owner_block,
+                dest: Some(dest),
+                binding_name,
+                label,
+                ..
+            }) if *owner_block == block => {
+                let value = binding_name
+                    .as_ref()
+                    .filter(|_| {
+                        label.starts_with("option_payload")
+                            || label.starts_with("adt_payload")
+                            || *label == "loop_item"
+                    })
+                    .map_or_else(
+                        || target.to_string(),
+                        |name| c_ident(name.as_str()).into_owned(),
+                    );
+                self.owner_vars.insert(dest.id(), value);
+            }
+            VerifiedHostAction::Operation(VerifiedHostOperation::Discard {
+                operation,
+                block: owner_block,
+                ..
+            }) if *owner_block == block
+                && !self.pre_emitted_terminals.contains(&(site.id, *operation)) =>
+            {
+                self.pre_emitted_terminals.insert((site.id, *operation));
+            }
+            VerifiedHostAction::Operation(VerifiedHostOperation::Discard { .. }) => {}
+            VerifiedHostAction::Operation(VerifiedHostOperation::Clone {
+                block: owner_block,
+                dest,
+                source,
+                ..
+            }) if *owner_block == block => self.emit_clone_to(*dest, *source, None)?,
+            VerifiedHostAction::Operation(VerifiedHostOperation::Project {
+                block: owner_block,
+                source,
+                ..
+            }) if *owner_block == block => {
+                self.owner_vars
+                    .insert(source.owner().id(), target.to_string());
+            }
+            VerifiedHostAction::Operation(VerifiedHostOperation::LoopItem { .. }) => {}
+            VerifiedHostAction::Operation(VerifiedHostOperation::Drop {
+                operation,
+                block: owner_block,
+                owner,
+                ..
+            }) if *owner_block == block
+                && !self.pre_emitted_terminals.contains(&(site.id, *operation)) =>
+            {
+                self.emit_owner_drop(owner.owner())?;
+                self.pre_emitted_terminals.insert((site.id, *operation));
+            }
+            VerifiedHostAction::Operation(VerifiedHostOperation::Drop { .. }) => {}
+            VerifiedHostAction::Terminator(VerifiedHostTerminator::Jump {
+                block: owner_block,
+                edge,
+            }) if *owner_block == block && edge.params().len() == 1 => {
+                self.owner_vars
+                    .insert(edge.params()[0].id(), target.to_string());
+            }
+            _ => {}
         }
         Ok(())
     }
@@ -8491,12 +8550,14 @@ impl<'a> HostEmitter<'a> {
         self.declare_result_origin(&arg_var, &param.ty, Some("load"));
         self.bind_loop_item(site, &arg_var)?;
         self.emit_callback_assign(callback, std::slice::from_ref(&arg_var), &result_var)?;
-        self.lines.push(format!(
-            "{}chelis_list_push_moved({target}, {});",
-            self.indent,
-            self.box_value_expr(&result_var, &callback.ret_ty)?
-        ));
-        self.emit_expression_block_actions(site, body_block, target)?;
+        let pushed = self.box_value_expr(&result_var, &callback.ret_ty)?;
+        self.emit_loop_step_block_actions(site, body_block, target, "list_push", |this| {
+            this.lines.push(format!(
+                "{}chelis_list_push_moved({target}, {pushed});",
+                this.indent
+            ));
+            Ok(())
+        })?;
         self.indent = previous;
         self.lines.push(format!("{}}}", self.indent));
         self.emit_edge_terminals(site.id, &exit_edge)?;
@@ -8550,24 +8611,19 @@ impl<'a> HostEmitter<'a> {
         self.declare_result_origin(&arg_var, &param.ty, Some("load"));
         self.bind_loop_item(site, &arg_var)?;
         self.emit_callback_assign(callback, std::slice::from_ref(&arg_var), &keep_var)?;
-        self.lines
-            .push(format!("{}if ({}) {{", self.indent, keep_var));
         // `filter_step` moves the item: a kept item moves into the result
         // and a rejected one is released here.
-        let nested_indent = format!("{}    ", self.indent);
-        let nested_previous = std::mem::replace(&mut self.indent, nested_indent);
-        self.lines.push(format!(
-            "{}chelis_list_push_moved({target}, {});",
-            self.indent, item_value
-        ));
-        self.indent = nested_previous;
-        self.lines.push(format!("{}}} else {{", self.indent));
-        self.lines.push(format!(
-            "{}    chelis_value_release({});",
-            self.indent, item_value
-        ));
-        self.lines.push(format!("{}}}", self.indent));
-        self.emit_expression_block_actions(site, body_block, target)?;
+        self.emit_loop_step_block_actions(site, body_block, target, "filter_step", |this| {
+            let indent = &this.indent;
+            this.lines.extend([
+                format!("{indent}if ({keep_var}) {{"),
+                format!("{indent}    chelis_list_push_moved({target}, {item_value});"),
+                format!("{indent}}} else {{"),
+                format!("{indent}    chelis_value_release({item_value});"),
+                format!("{indent}}}"),
+            ]);
+            Ok(())
+        })?;
         self.indent = previous;
         self.lines.push(format!("{}}}", self.indent));
         self.emit_edge_terminals(site.id, &exit_edge)?;
@@ -8775,12 +8831,14 @@ impl<'a> HostEmitter<'a> {
         self.declare_result_origin(&item_arg, &params[1].ty, Some("load"));
         self.bind_loop_item(site, &item_arg)?;
         self.emit_callback_assign(callback, &[acc_arg, item_arg], &acc_var)?;
-        self.lines.push(format!(
-            "{}chelis_list_push_moved({target}, {});",
-            self.indent,
-            self.box_value_expr(&acc_var, &acc_ty)?
-        ));
-        self.emit_expression_block_actions(site, body_block, target)?;
+        let pushed = self.box_value_expr(&acc_var, &acc_ty)?;
+        self.emit_loop_step_block_actions(site, body_block, target, "list_push", |this| {
+            this.lines.push(format!(
+                "{}chelis_list_push_moved({target}, {pushed});",
+                this.indent
+            ));
+            Ok(())
+        })?;
         self.indent = previous;
         self.lines.push(format!("{}}}", self.indent));
         self.emit_edge_terminals(site.id, &exit_edge)?;
@@ -8875,25 +8933,17 @@ impl<'a> HostEmitter<'a> {
         self.declare_result_origin(&arg_var, &param.ty, Some("load"));
         self.bind_loop_item(site, &arg_var)?;
         self.emit_callback_assign(callback, std::slice::from_ref(&arg_var), &keep_var)?;
-        self.lines
-            .push(format!("{}if ({}) {{", self.indent, keep_var));
-        let then_indent = format!("{}    ", self.indent);
-        let then_previous = std::mem::replace(&mut self.indent, then_indent);
-        self.lines.push(format!(
-            "{}chelis_list_push_moved({}, {});",
-            self.indent, pass_var, item_value
-        ));
-        self.indent = then_previous;
-        self.lines.push(format!("{}}} else {{", self.indent));
-        let else_indent = format!("{}    ", self.indent);
-        let else_previous = std::mem::replace(&mut self.indent, else_indent);
-        self.lines.push(format!(
-            "{}chelis_list_push_moved({}, {});",
-            self.indent, fail_var, item_value
-        ));
-        self.indent = else_previous;
-        self.lines.push(format!("{}}}", self.indent));
-        self.emit_expression_block_actions(site, body_block, target)?;
+        self.emit_loop_step_block_actions(site, body_block, target, "partition_step", |this| {
+            let indent = &this.indent;
+            this.lines.extend([
+                format!("{indent}if ({keep_var}) {{"),
+                format!("{indent}    chelis_list_push_moved({pass_var}, {item_value});"),
+                format!("{indent}}} else {{"),
+                format!("{indent}    chelis_list_push_moved({fail_var}, {item_value});"),
+                format!("{indent}}}"),
+            ]);
+            Ok(())
+        })?;
         self.indent = previous;
         self.lines.push(format!("{}}}", self.indent));
         self.emit_edge_terminals(site.id, &exit_edge)?;
@@ -8970,11 +9020,13 @@ impl<'a> HostEmitter<'a> {
         self.declare_result_origin(&arg_var, &param.ty, Some("load"));
         self.bind_loop_item(site, &arg_var)?;
         self.emit_callback_assign(callback, std::slice::from_ref(&arg_var), &result_var)?;
-        self.lines.push(format!(
-            "{}chelis_list_extend_moved({target}, {});",
-            self.indent, result_var
-        ));
-        self.emit_expression_block_actions(site, body_block, target)?;
+        self.emit_loop_step_block_actions(site, body_block, target, "list_extend", |this| {
+            this.lines.push(format!(
+                "{}chelis_list_extend_moved({target}, {result_var});",
+                this.indent
+            ));
+            Ok(())
+        })?;
         self.indent = previous;
         self.lines.push(format!("{}}}", self.indent));
         self.emit_edge_terminals(site.id, &exit_edge)?;

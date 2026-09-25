@@ -46,6 +46,9 @@ struct ItemKind {
     measure: &'static str,
     /// A freshly allocated item used as an initial accumulator.
     seed: &'static str,
+    /// Whether the checker treats a value of this type as linear: a closure
+    /// that captures one consumes it, so a later read is rejected.
+    linear: bool,
 }
 
 const KINDS: &[ItemKind] = &[
@@ -58,6 +61,7 @@ const KINDS: &[ItemKind] = &[
         predicate: "gt(string_len(x), 2i64)",
         measure: "string_len(x)",
         seed: "string_concat(\"in\", \"it\")",
+        linear: false,
     },
     ItemKind {
         name: "list_of_string",
@@ -68,6 +72,7 @@ const KINDS: &[ItemKind] = &[
         predicate: "gt(len(x), 1i64)",
         measure: "len(x)",
         seed: "[string_concat(\"in\", \"it\")]",
+        linear: false,
     },
     ItemKind {
         name: "adt_with_string",
@@ -78,6 +83,7 @@ const KINDS: &[ItemKind] = &[
         predicate: "match x with {\n    | Named(s, k) => gt(k, 2i64)\n  }",
         measure: "match x with {\n    | Named(s, k) => add(string_len(s), k)\n  }",
         seed: "Named(string_concat(\"in\", \"it\"), 0i64)",
+        linear: false,
     },
     ItemKind {
         name: "tensor",
@@ -88,6 +94,7 @@ const KINDS: &[ItemKind] = &[
         predicate: "gt(tensor_to_scalar(sum(x, 0)), 7.0)",
         measure: "len([x])",
         seed: "to_tensor([0.0, 0.0, 0.0])",
+        linear: true,
     },
 ];
 
@@ -227,6 +234,113 @@ fn instantiate(kind: &ItemKind, shape: &Shape) -> String {
     )
 }
 
+/// Callback shapes whose body returns, or reads, an owner from outside the
+/// loop by bare reference: `{y}` is an outer item and `{ys}` an outer list of
+/// items. The loop's step must not run before the copy that pays for that
+/// owner, or a consuming step releases the outer owner itself.
+const OUTER_SHAPES: &[Shape] = &[
+    Shape {
+        name: "map_returns_outer",
+        result: "List[{T}]",
+        body: "map(fn (x: {T}) -> {y}, {items})",
+    },
+    Shape {
+        name: "flat_map_returns_outer",
+        result: "List[{T}]",
+        body: "flat_map(fn (x: {T}) -> {ys}, {items})",
+    },
+    Shape {
+        name: "filter_reads_outer",
+        result: "List[{T}]",
+        body: "filter(fn (x: {T}) -> gt(len({ys}), 0i64), {items})",
+    },
+    Shape {
+        name: "partition_reads_outer",
+        result: "(List[{T}], List[{T}])",
+        body: "partition(fn (x: {T}) -> gt(len({ys}), 0i64), {items})",
+    },
+    Shape {
+        name: "fold_returns_outer",
+        result: "{T}",
+        body: "fold(fn (acc: {T}, x: {T}) -> {y}, {seed}, {items})",
+    },
+    Shape {
+        name: "scan_returns_outer",
+        result: "List[{T}]",
+        body: "scan(fn (acc: {T}, x: {T}) -> {y}, {seed}, {items})",
+    },
+];
+
+/// Where the outer owner lives.
+#[derive(Clone, Copy)]
+enum OuterOwner {
+    /// A local of the calling function, not used after the loop.
+    Local,
+    /// A local of the calling function, read again after the loop.
+    LocalUsedAfter,
+    /// A parameter, so the caller's storage owns it.
+    Parameter,
+    /// A top-level binding.
+    Global,
+}
+
+const OUTER_OWNERS: &[(&str, OuterOwner)] = &[
+    ("local", OuterOwner::Local),
+    ("local_used_after", OuterOwner::LocalUsedAfter),
+    ("parameter", OuterOwner::Parameter),
+    ("global", OuterOwner::Global),
+];
+
+fn instantiate_outer(kind: &ItemKind, shape: &Shape, owner: OuterOwner) -> String {
+    let (y, ys) = match owner {
+        OuterOwner::Global => ("outer_y", "outer_ys"),
+        _ => ("y", "ys"),
+    };
+    let fill = |text: &str| {
+        text.replace("{items}", kind.items)
+            .replace("{seed}", kind.seed)
+            .replace("{y}", y)
+            .replace("{ys}", ys)
+            .replace("{T}", kind.ty)
+    };
+    let result = fill(shape.result);
+    let body = fill(shape.body);
+    let seed = kind.seed;
+    let prelude = kind.prelude;
+    let ty = kind.ty;
+    match owner {
+        OuterOwner::Local => format!(
+            "{prelude}def case(flag: bool) -> {result} = {{\n  y = {seed}\n  ys = [{seed}]\n  {body}\n}}\n\
+             a = case(true)\nb = case(false)\n"
+        ),
+        OuterOwner::LocalUsedAfter => format!(
+            "{prelude}def case(flag: bool) -> ({result}, {ty}, i64) = {{\n  y = {seed}\n  ys = [{seed}]\n  \
+             r = {body}\n  (r, y, len(ys))\n}}\n\
+             a = case(true)\nb = case(false)\n"
+        ),
+        OuterOwner::Parameter => format!(
+            "{prelude}def case(flag: bool, y: {ty}, ys: List[{ty}]) -> {result} =\n  {body}\n\
+             a = case(true, {seed}, [{seed}])\nb = case(false, {seed}, [{seed}])\n"
+        ),
+        OuterOwner::Global => format!(
+            "{prelude}outer_y = {seed}\nouter_ys = [{seed}]\n\
+             def case(flag: bool) -> {result} =\n  {body}\n\
+             a = case(true)\nb = case(false)\n"
+        ),
+    }
+}
+
+/// The evaluator's rejection of a program it must not run.
+fn eval_error(source: &str) -> String {
+    let error = eval(EvalRequest {
+        source_kind: SourceKind::Surf,
+        source: source.to_string(),
+        bindings: BTreeMap::new(),
+    })
+    .expect_err("the evaluator must reject this case");
+    format!("{error:?}")
+}
+
 /// The evaluator's rendering of every root, in the compiled driver's format.
 fn evaluated(source: &str) -> String {
     let result = eval(EvalRequest {
@@ -249,12 +363,44 @@ fn evaluated(source: &str) -> String {
 }
 
 fn check(name: &str, source: &str) -> Result<(), String> {
-    catch_unwind(AssertUnwindSafe(|| {
-        let expected = evaluated(source);
-        let generated = ownership_support::emit(source, name);
-        let (summary, stdout) = ownership_support::run_program(&generated);
-        ownership_support::balanced(&summary);
-        assert_eq!(stdout, expected, "compiled output differs from eval");
+    check_expecting(name, source, Expectation::AgreesWithEval)
+}
+
+/// What one corpus case must do.
+#[derive(Clone, Copy)]
+enum Expectation {
+    /// Compiled C returns every allocation and prints what eval prints.
+    AgreesWithEval,
+    /// The checker rejects the program with this diagnostic kind.
+    CheckerRejects(&'static str),
+    /// Compiled C returns every allocation; eval still rejects the program
+    /// with this message, a known eval-lane gap tracked by its own issue.
+    EvalGap(&'static str),
+}
+
+fn check_expecting(name: &str, source: &str, expectation: Expectation) -> Result<(), String> {
+    catch_unwind(AssertUnwindSafe(|| match expectation {
+        Expectation::AgreesWithEval => {
+            let expected = evaluated(source);
+            let generated = ownership_support::emit(source, name);
+            let (summary, stdout) = ownership_support::run_program(&generated);
+            ownership_support::balanced(&summary);
+            assert_eq!(stdout, expected, "compiled output differs from eval");
+        }
+        Expectation::CheckerRejects(kind) => {
+            let error = eval_error(source);
+            assert!(
+                error.contains(kind),
+                "expected a `{kind}` rejection: {error}"
+            );
+        }
+        Expectation::EvalGap(message) => {
+            let error = eval_error(source);
+            assert!(error.contains(message), "the eval gap changed: {error}");
+            let generated = ownership_support::emit(source, name);
+            let (summary, _) = ownership_support::run_program(&generated);
+            ownership_support::balanced(&summary);
+        }
     }))
     .map_err(|payload| {
         let message = payload
@@ -290,6 +436,42 @@ fn every_shape_over(kind_name: &str) {
     );
 }
 
+/// Run every outer-owner shape and owner form over one item kind.
+fn every_outer_owner_over(kind_name: &str) {
+    let kind = KINDS
+        .iter()
+        .find(|kind| kind.name == kind_name)
+        .expect("declared item kind");
+    let failures: Vec<String> = OUTER_SHAPES
+        .iter()
+        .flat_map(|shape| OUTER_OWNERS.iter().map(move |owner| (shape, owner)))
+        .filter_map(|(shape, (owner_name, owner))| {
+            let name = format!("{}_{owner_name}_{}", shape.name, kind.name);
+            let expectation = match owner {
+                // A closure capture consumes a linear value, so the program
+                // that reads it after the loop is not a program.
+                OuterOwner::LocalUsedAfter if kind.linear => {
+                    Expectation::CheckerRejects("UseAfterConsume")
+                }
+                // chelis#2574: eval refuses this valid program.
+                OuterOwner::Local if kind.linear && shape.name == "fold_returns_outer" => {
+                    Expectation::EvalGap("reaches the host-only builtin `fold`")
+                }
+                _ => Expectation::AgreesWithEval,
+            };
+            check_expecting(&name, &instantiate_outer(kind, shape, *owner), expectation).err()
+        })
+        .collect();
+    assert!(
+        failures.is_empty(),
+        "{} of {} `{}` outer-owner cases failed:\n\n{}",
+        failures.len(),
+        OUTER_SHAPES.len() * OUTER_OWNERS.len(),
+        kind.name,
+        failures.join("\n\n")
+    );
+}
+
 // REGRESSION TESTS for the whole family, one per item kind so the kinds run
 // in parallel. On `32e4122e4` 51 of the 76 cases failed: every owned-result
 // `map`, nested `map`, `flat_map`, `filter`, `partition` and `scan` over a
@@ -318,6 +500,78 @@ fn every_list_step_over_tensor_items_returns_every_allocation() {
     every_shape_over("tensor");
 }
 
+// REGRESSION TESTS, chelis#2571 round 1: a callback that returns an outer
+// owner by bare reference. At `89d706ee9` the loop's consuming step ran before
+// the copy that pays for that owner, so `flat_map` released the caller's,
+// the closure's or the global's list on the first iteration.
+
+#[test]
+fn every_list_step_over_an_outer_string_owner_runs_its_copy_first() {
+    every_outer_owner_over("string");
+}
+
+#[test]
+fn every_list_step_over_an_outer_list_owner_runs_its_copy_first() {
+    every_outer_owner_over("list_of_string");
+}
+
+#[test]
+fn every_list_step_over_an_outer_adt_owner_runs_its_copy_first() {
+    every_outer_owner_over("adt_with_string");
+}
+
+#[test]
+fn every_list_step_over_an_outer_tensor_owner_runs_its_copy_first() {
+    every_outer_owner_over("tensor");
+}
+
+/// Run one named witness and fail with its report.
+fn witness(name: &str, source: &str) {
+    if let Err(report) = check(name, source) {
+        panic!("{report}");
+    }
+}
+
+/// REGRESSION TEST, round-1 witness c03: at `89d706ee9` the extend released
+/// the captured local on the first iteration and the run aborted.
+#[test]
+fn flat_map_returning_a_captured_local_list_keeps_it_for_later_use() {
+    witness(
+        "c03_flat_map_captured_list",
+        "def case(flag: bool) -> (List[string], List[string]) = {\n  \
+         ys = [string_concat(\"y\", \"s\")]\n  \
+         r = flat_map(fn (x: string) -> ys, [string_concat(\"ab\", \"c\"), string_concat(\"x\", \"\")])\n  \
+         (r, ys)\n}\n\
+         a = case(true)\n",
+    );
+}
+
+/// REGRESSION TEST, round-1 witness c21: the captured list is the caller's
+/// argument, and the extend released the caller's storage.
+#[test]
+fn flat_map_returning_a_captured_parameter_leaves_the_caller_its_list() {
+    witness(
+        "c21_flat_map_captured_param",
+        "def case(ys: List[string]) -> List[string] =\n  \
+         flat_map(fn (x: string) -> ys, [string_concat(\"ab\", \"c\"), string_concat(\"x\", \"\")])\n\
+         a = case([string_concat(\"y\", \"s\")])\n",
+    );
+}
+
+/// REGRESSION TEST, round-1 witness c28: the captured list is a top-level
+/// binding, printed after the call.
+#[test]
+fn flat_map_returning_a_global_list_leaves_the_global_intact() {
+    witness(
+        "c28_flat_map_global_list",
+        "ys = [string_concat(\"y\", \"s\")]\n\
+         def case(flag: bool) -> List[string] =\n  \
+         flat_map(fn (x: string) -> ys, [string_concat(\"ab\", \"c\"), string_concat(\"x\", \"\")])\n\
+         a = case(true)\n\
+         c = ys\n",
+    );
+}
+
 /// Every declared kind has a test above, so a kind added to the table
 /// cannot go unrun.
 #[test]
@@ -325,7 +579,8 @@ fn every_item_kind_has_a_test() {
     let source = include_str!("issue_2508_list_step_ownership.rs");
     for kind in KINDS {
         assert!(
-            source.contains(&format!("every_shape_over(\"{}\");", kind.name)),
+            source.contains(&format!("every_shape_over(\"{}\");", kind.name))
+                && source.contains(&format!("every_outer_owner_over(\"{}\");", kind.name)),
             "item kind `{}` has no test",
             kind.name
         );
