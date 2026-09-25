@@ -3043,7 +3043,7 @@ class ContractValidationTests(unittest.TestCase):
         block = self.repository_atom("05-OP-35")
         for signature in (
             "`contracts::normal_cdf` | `(p_float)->p_float`",
-            "`init/random::normal_like` | `(&tensor[..r,p_float],p_float,p_float)->tensor[..r,p_float]!{Random}`",
+            "`init/random::normal_like` | `(key,&tensor[..r,p_float],p_float,p_float)->tensor[..r,p_float]`",
             "`tensor/construct::linspace` | `(p_float,p_float,i64)->tensor[n,p_float]`",
             "`tensor/construct::stack` | `(List[tensor[..pre,..post,p]],i32)->tensor[..pre,rows,..post,p]`",
             "`test::assert_close_tensor` | `(&tensor[..r,p_float],&tensor[..r,p_float],p_float,string)->unit!{Test}`",
@@ -3057,8 +3057,8 @@ class ContractValidationTests(unittest.TestCase):
         path = self.root / "spec/registry/stdlib_numeric_manifest.md"
         mutations = (
             (
-                "(&tensor[..r,p_float],p_float)->tensor[..r,p_float]!{Random}",
-                "(&tensor[n,p_float],p_float)->tensor[n,p_float]!{Random}",
+                "(key,&tensor[..r,p_float],p_float)->tensor[..r,p_float]",
+                "(key,&tensor[n,p_float],p_float)->tensor[n,p_float]",
             ),
             (
                 "(&tensor[..pre,1,..post,p],i32)->tensor[..pre,..post,p]",

@@ -1216,42 +1216,42 @@ const FINAL_NUMERIC_OPERATION_ROWS: &[FinalNumericOperationRegistration] = &[
     ),
     final_numeric_row!(
         "std-def-numeric",
-        "init/kaiming::kaiming_normal: [p: Float] (t-fn {eff: (effects {} random)} (t-ref {} (t-tensor {} (d-rank {} r) (t-var {} p))) (t-var {} p) (t-tensor {} (d-rank {} r) (t-var {} p)))",
+        "init/kaiming::kaiming_normal: [p: Float] (t-fn {} (t-prim {} key) (t-ref {} (t-tensor {} (d-rank {} r) (t-var {} p))) (t-var {} p) (t-tensor {} (d-rank {} r) (t-var {} p)))",
         &[],
         "[05-OP-35]",
         "stdlib_numeric_def"
     ),
     final_numeric_row!(
         "std-def-numeric",
-        "init/kaiming::kaiming_uniform: [p: Float] (t-fn {eff: (effects {} random)} (t-ref {} (t-tensor {} (d-rank {} r) (t-var {} p))) (t-var {} p) (t-tensor {} (d-rank {} r) (t-var {} p)))",
+        "init/kaiming::kaiming_uniform: [p: Float] (t-fn {} (t-prim {} key) (t-ref {} (t-tensor {} (d-rank {} r) (t-var {} p))) (t-var {} p) (t-tensor {} (d-rank {} r) (t-var {} p)))",
         &[],
         "[05-OP-35]",
         "stdlib_numeric_def"
     ),
     final_numeric_row!(
         "std-def-numeric",
-        "init/random::normal_like: [p: Float] (t-fn {eff: (effects {} random)} (t-ref {} (t-tensor {} (d-rank {} r) (t-var {} p))) (t-var {} p) (t-var {} p) (t-tensor {} (d-rank {} r) (t-var {} p)))",
+        "init/random::normal_like: [p: Float] (t-fn {} (t-prim {} key) (t-ref {} (t-tensor {} (d-rank {} r) (t-var {} p))) (t-var {} p) (t-var {} p) (t-tensor {} (d-rank {} r) (t-var {} p)))",
         &[],
         "[05-OP-35]",
         "stdlib_numeric_def"
     ),
     final_numeric_row!(
         "std-def-numeric",
-        "init/xavierext::trunc_normal: [p: Float] (t-fn {eff: (effects {} random)} (t-ref {} (t-tensor {} (d-rank {} r) (t-var {} p))) (t-var {} p) (t-var {} p) (t-var {} p) (t-var {} p) (t-tensor {} (d-rank {} r) (t-var {} p)))",
+        "init/xavierext::trunc_normal: [p: Float] (t-fn {} (t-prim {} key) (t-ref {} (t-tensor {} (d-rank {} r) (t-var {} p))) (t-var {} p) (t-var {} p) (t-var {} p) (t-var {} p) (t-tensor {} (d-rank {} r) (t-var {} p)))",
         &[],
         "[05-OP-35]",
         "stdlib_numeric_def"
     ),
     final_numeric_row!(
         "std-def-numeric",
-        "init/xavierext::xavier_normal: [p: Float] (t-fn {eff: (effects {} random)} (t-ref {} (t-tensor {} (d-rank {} r) (t-var {} p))) (t-var {} p) (t-var {} p) (t-tensor {} (d-rank {} r) (t-var {} p)))",
+        "init/xavierext::xavier_normal: [p: Float] (t-fn {} (t-prim {} key) (t-ref {} (t-tensor {} (d-rank {} r) (t-var {} p))) (t-var {} p) (t-var {} p) (t-tensor {} (d-rank {} r) (t-var {} p)))",
         &[],
         "[05-OP-35]",
         "stdlib_numeric_def"
     ),
     final_numeric_row!(
         "std-def-numeric",
-        "init/xavierext::xavier_uniform: [p: Float] (t-fn {eff: (effects {} random)} (t-ref {} (t-tensor {} (d-rank {} r) (t-var {} p))) (t-var {} p) (t-var {} p) (t-tensor {} (d-rank {} r) (t-var {} p)))",
+        "init/xavierext::xavier_uniform: [p: Float] (t-fn {} (t-prim {} key) (t-ref {} (t-tensor {} (d-rank {} r) (t-var {} p))) (t-var {} p) (t-var {} p) (t-tensor {} (d-rank {} r) (t-var {} p)))",
         &[],
         "[05-OP-35]",
         "stdlib_numeric_def"

@@ -1576,32 +1576,32 @@
     },
     {
       "kind": "std-def-numeric",
-      "id": "init/kaiming::kaiming_normal: [p: Float] (t-fn {eff: (effects {} random)} (t-ref {} (t-tensor {} (d-rank {} r) (t-var {} p))) (t-var {} p) (t-tensor {} (d-rank {} r) (t-var {} p)))",
+      "id": "init/kaiming::kaiming_normal: [p: Float] (t-fn {} (t-prim {} key) (t-ref {} (t-tensor {} (d-rank {} r) (t-var {} p))) (t-var {} p) (t-tensor {} (d-rank {} r) (t-var {} p)))",
       "flags": []
     },
     {
       "kind": "std-def-numeric",
-      "id": "init/kaiming::kaiming_uniform: [p: Float] (t-fn {eff: (effects {} random)} (t-ref {} (t-tensor {} (d-rank {} r) (t-var {} p))) (t-var {} p) (t-tensor {} (d-rank {} r) (t-var {} p)))",
+      "id": "init/kaiming::kaiming_uniform: [p: Float] (t-fn {} (t-prim {} key) (t-ref {} (t-tensor {} (d-rank {} r) (t-var {} p))) (t-var {} p) (t-tensor {} (d-rank {} r) (t-var {} p)))",
       "flags": []
     },
     {
       "kind": "std-def-numeric",
-      "id": "init/random::normal_like: [p: Float] (t-fn {eff: (effects {} random)} (t-ref {} (t-tensor {} (d-rank {} r) (t-var {} p))) (t-var {} p) (t-var {} p) (t-tensor {} (d-rank {} r) (t-var {} p)))",
+      "id": "init/random::normal_like: [p: Float] (t-fn {} (t-prim {} key) (t-ref {} (t-tensor {} (d-rank {} r) (t-var {} p))) (t-var {} p) (t-var {} p) (t-tensor {} (d-rank {} r) (t-var {} p)))",
       "flags": []
     },
     {
       "kind": "std-def-numeric",
-      "id": "init/xavierext::trunc_normal: [p: Float] (t-fn {eff: (effects {} random)} (t-ref {} (t-tensor {} (d-rank {} r) (t-var {} p))) (t-var {} p) (t-var {} p) (t-var {} p) (t-var {} p) (t-tensor {} (d-rank {} r) (t-var {} p)))",
+      "id": "init/xavierext::trunc_normal: [p: Float] (t-fn {} (t-prim {} key) (t-ref {} (t-tensor {} (d-rank {} r) (t-var {} p))) (t-var {} p) (t-var {} p) (t-var {} p) (t-var {} p) (t-tensor {} (d-rank {} r) (t-var {} p)))",
       "flags": []
     },
     {
       "kind": "std-def-numeric",
-      "id": "init/xavierext::xavier_normal: [p: Float] (t-fn {eff: (effects {} random)} (t-ref {} (t-tensor {} (d-rank {} r) (t-var {} p))) (t-var {} p) (t-var {} p) (t-tensor {} (d-rank {} r) (t-var {} p)))",
+      "id": "init/xavierext::xavier_normal: [p: Float] (t-fn {} (t-prim {} key) (t-ref {} (t-tensor {} (d-rank {} r) (t-var {} p))) (t-var {} p) (t-var {} p) (t-tensor {} (d-rank {} r) (t-var {} p)))",
       "flags": []
     },
     {
       "kind": "std-def-numeric",
-      "id": "init/xavierext::xavier_uniform: [p: Float] (t-fn {eff: (effects {} random)} (t-ref {} (t-tensor {} (d-rank {} r) (t-var {} p))) (t-var {} p) (t-var {} p) (t-tensor {} (d-rank {} r) (t-var {} p)))",
+      "id": "init/xavierext::xavier_uniform: [p: Float] (t-fn {} (t-prim {} key) (t-ref {} (t-tensor {} (d-rank {} r) (t-var {} p))) (t-var {} p) (t-var {} p) (t-tensor {} (d-rank {} r) (t-var {} p)))",
       "flags": []
     },
     {

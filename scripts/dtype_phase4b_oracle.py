@@ -371,12 +371,12 @@ EXPECTED_OP_MANIFESTS = {
 | `index::list_index` | `(List[T],i64)->T` |
 | `index::skip_list` | `(List[T],i64)->List[T]` |
 | `index::take_list` | `(List[T],i64)->List[T]` |
-| `init/kaiming::kaiming_normal` | `(&tensor[..r,p_float],p_float)->tensor[..r,p_float]!{Random}` |
-| `init/kaiming::kaiming_uniform` | `(&tensor[..r,p_float],p_float)->tensor[..r,p_float]!{Random}` |
-| `init/random::normal_like` | `(&tensor[..r,p_float],p_float,p_float)->tensor[..r,p_float]!{Random}` |
-| `init/xavierext::trunc_normal` | `(&tensor[..r,p_float],p_float,p_float,p_float,p_float)->tensor[..r,p_float]!{Random}` |
-| `init/xavierext::xavier_normal` | `(&tensor[..r,p_float],p_float,p_float)->tensor[..r,p_float]!{Random}` |
-| `init/xavierext::xavier_uniform` | `(&tensor[..r,p_float],p_float,p_float)->tensor[..r,p_float]!{Random}` |
+| `init/kaiming::kaiming_normal` | `(key,&tensor[..r,p_float],p_float)->tensor[..r,p_float]` |
+| `init/kaiming::kaiming_uniform` | `(key,&tensor[..r,p_float],p_float)->tensor[..r,p_float]` |
+| `init/random::normal_like` | `(key,&tensor[..r,p_float],p_float,p_float)->tensor[..r,p_float]` |
+| `init/xavierext::trunc_normal` | `(key,&tensor[..r,p_float],p_float,p_float,p_float,p_float)->tensor[..r,p_float]` |
+| `init/xavierext::xavier_normal` | `(key,&tensor[..r,p_float],p_float,p_float)->tensor[..r,p_float]` |
+| `init/xavierext::xavier_uniform` | `(key,&tensor[..r,p_float],p_float,p_float)->tensor[..r,p_float]` |
 | `io/json::json_array` | `(Option[Json])->Option[List[Json]]` |
 | `io/json::json_bigint` | `(Option[Json])->Option[string]` |
 | `io/json::json_bool` | `(Option[Json])->Option[bool]` |
@@ -2314,7 +2314,7 @@ def validate_normative_contract(
             "`process::run` | `(string,List[string])->(i64,string,string)!{IO}`",
             "`contracts::normal_cdf` | `(p_float)->p_float`",
             "`init/random::normal_like` | "
-            "`(&tensor[..r,p_float],p_float,p_float)->tensor[..r,p_float]!{Random}`",
+            "`(key,&tensor[..r,p_float],p_float,p_float)->tensor[..r,p_float]`",
             "`tensor/construct::linspace` | "
             "`(p_float,p_float,i64)->tensor[n,p_float]`",
             "`tensor/construct::arange` | "
