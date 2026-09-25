@@ -17412,6 +17412,31 @@ fn app_expr_needs_inferred_type(explicit: &HostTypeTerm) -> bool {
     explicit.is_unresolved() || host_type_has_synthetic_tensor_dims(explicit)
 }
 
+/// A permutation carries physical axis positions through host extraction.
+/// Validate the full mapping before publishing a type; a same-rank operand
+/// type is only a routing hint and cannot serve as the permuted result type.
+fn permute_host_tensor_type(input: &TensorType, axes: &[i64]) -> Option<TensorType> {
+    if axes.len() != input.dims.len() {
+        return None;
+    }
+    let mut seen = vec![false; input.dims.len()];
+    let dims = axes
+        .iter()
+        .map(|axis| {
+            let axis = usize::try_from(*axis).ok()?;
+            let visited = seen.get_mut(axis)?;
+            if std::mem::replace(visited, true) {
+                return None;
+            }
+            input.dims.get(axis).cloned()
+        })
+        .collect::<Option<Vec<_>>>()?;
+    Some(TensorType {
+        dims,
+        precision: input.precision,
+    })
+}
+
 fn infer_app_expr_host_type(
     expr: &Expr,
     program: &HostLoweringSession<'_>,
@@ -17468,6 +17493,16 @@ fn infer_app_expr_host_type(
             })
             .collect::<Option<Vec<_>>>()?;
         return infer_einsum_tensor_type(equation, &tensors).map(HostTypeTerm::Tensor);
+    }
+    if name == "permute" {
+        let HostTypeTerm::Tensor(input) = expr_host_type(kids.get(1)?, program, scope) else {
+            return None;
+        };
+        let axes = kids[2..]
+            .iter()
+            .map(expr_int_literal)
+            .collect::<Option<Vec<_>>>()?;
+        return permute_host_tensor_type(&input, &axes).map(HostTypeTerm::Tensor);
     }
     if name == "count"
         && let Some(input) = kids.get(1)
@@ -23534,6 +23569,44 @@ def from_column[n, a](column: Column[n, a]) -> Frame[n, a] =
                 bincode::serialize(trace.after_dimension_rebinding.as_ref().unwrap()).unwrap(),
                 bincode::serialize(&after).unwrap(),
             );
+        }
+    }
+
+    #[test]
+    fn host_permutation_retains_ordered_physical_axes() {
+        use crate::dag::{DimInfo, TensorType};
+        for name in ["n", "d77"] {
+            for dimension in [
+                DimInfo::Named(name.into(), None),
+                DimInfo::Lit(2),
+                DimInfo::Lit(3),
+            ] {
+                let input = TensorType {
+                    dims: vec![DimInfo::Lit(4), dimension.clone(), DimInfo::Lit(7)],
+                    precision: Prim::F64,
+                };
+                let permuted = permute_host_tensor_type(&input, &[2, 0, 1]).unwrap();
+                assert_eq!(
+                    permuted.dims,
+                    vec![DimInfo::Lit(7), DimInfo::Lit(4), dimension]
+                );
+                assert_eq!(permuted.precision, Prim::F64);
+                assert_eq!(
+                    permute_host_tensor_type(&permuted, &[1, 2, 0]).unwrap(),
+                    input
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn host_permutation_rejects_incomplete_or_nonbijective_axes() {
+        let input = TensorType {
+            dims: vec![DimInfo::Lit(4), DimInfo::Lit(2)],
+            precision: Prim::F64,
+        };
+        for axes in [&[0][..], &[0, 0], &[0, 2], &[-1, 0], &[0, 1, 2]] {
+            assert!(permute_host_tensor_type(&input, axes).is_none(), "{axes:?}");
         }
     }
 

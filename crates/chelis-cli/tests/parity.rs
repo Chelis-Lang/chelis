@@ -871,3 +871,8 @@ fn parity_comparator_rejects_non_tensor_diff() {
     let b = b"len=5, items=4, shape=2x2\n";
     assert!(assert_parity(a, b, "byte-diff").is_err());
 }
+
+#[test]
+fn parity_generic_host_permutation() {
+    drive_parity(&examples_root().join("generic_host_permutation.ch"), true);
+}
