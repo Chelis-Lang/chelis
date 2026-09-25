@@ -1738,6 +1738,12 @@ Load that resolved each supplied name, retaining that name's original ABI
 slot when an earlier same-named Load is unselected. Missing inputs and
 unrelated unselected roots keep their existing selection rules.
 
+A checked value declaration with a bare tensor signature actualizes a freshly
+lowered direct external `Load` from that declaration before entry admission.
+The lowering default's scalar shape is only a placeholder when the free read
+has no type metadata; it cannot override the checked declaration. An authored
+scalar parameter or scalar value declaration still requires rank zero.
+
 An interface extent claim executes when its later witness is admitted,
 after that witness's dtype and rank have been validated. Keep its independent
 claim token and compare its source values once; do not replace it with a

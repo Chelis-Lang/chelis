@@ -1490,9 +1490,12 @@ fn the_host_body_locator_refuses_a_forward_declaration_alone() {
 /// names; inside that kernel the entry guard before its first allocation.
 fn assert_effect_order_in_emitted_c(emitted: &str, effect_first: bool) {
     // The kernel C extracts for `f(seed, x)` is the `run__tensor_N` whose
-    // body carries the entry guard (`seed`'s own sub-expression is another
-    // `run__tensor_M`, called before the print in both variants).
+    // body carries the literal-extent entry guard (`seed`'s own
+    // sub-expression is another `run__tensor_M`, called before the print
+    // in both variants). Rank admission also emits an i64 load trap, so
+    // that generic trap text cannot identify this guarded kernel.
     let trap = "chelis_numeric_trap(\"numeric trap: domain in load at i64\")";
+    let claim = "extent `4`: claimed = 4, x axis 0 = %lld";
     let kernel_prefix = format!("static void {}__tensor_", authored_c_symbol("run"));
     let (kernel_name, kernel) = emitted
         .match_indices(&kernel_prefix)
@@ -1505,9 +1508,10 @@ fn assert_effect_order_in_emitted_c(emitted: &str, effect_first: bool) {
                 .map_or(rest.len(), |end| end + 1);
             (name, &rest[..body_end])
         })
-        .find(|(_, kernel)| kernel.contains(trap))
+        .find(|(_, kernel)| kernel.contains(claim))
         .expect("one extracted kernel carries the entry guard");
-    let guard_at = kernel.find(trap).expect("the guard");
+    let guard_at = kernel.find(claim).expect("the extent guard");
+    assert!(kernel[guard_at..].contains(trap), "the extent guard traps");
     let alloc_at = kernel.find("chelis_alloc(").expect("the kernel allocates");
     assert!(
         guard_at < alloc_at,
