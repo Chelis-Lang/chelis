@@ -1608,8 +1608,7 @@ class ContractValidationTests(unittest.TestCase):
                 "top-level tuple external owner",
             ),
             (
-                "Runtime-valued `with seed` remains [#735] syntax/semantics work; "
-                "recursive-host operation support remains [#729]/[#730] capability "
+                "Recursive-host operation support remains [#729]/[#730] capability "
                 "work",
                 "All secondary recursion observations join this oracle",
                 "recursive support external owners",

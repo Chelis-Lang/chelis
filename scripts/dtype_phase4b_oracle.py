@@ -1421,8 +1421,7 @@ def validate_normative_contract(
                 "top-level tuple external owner",
             ),
             (
-                "Runtime-valued `with seed` remains [#735] syntax/semantics work; "
-                "recursive-host operation support remains [#729]/[#730] capability "
+                "Recursive-host operation support remains [#729]/[#730] capability "
                 "work",
                 "recursive support external owners",
             ),
