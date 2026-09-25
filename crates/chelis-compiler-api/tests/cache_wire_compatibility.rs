@@ -101,7 +101,7 @@ fn version_changes_alone_reject_old_subcontexts_before_payload_decode() {
             "library-v11-key-input.bin",
             "library-v11.tc",
             b"chelis_library_typecheck_v".as_slice(),
-            19_u32,
+            20_u32,
             library_cache_key_input_bytes(&dep_decls, std_key),
             lib_key,
         ),

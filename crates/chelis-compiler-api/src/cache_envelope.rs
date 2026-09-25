@@ -84,7 +84,9 @@ impl CachePayload for crate::LibraryContext {
     // V19 (chelis#1125): Deep `Expr` and `Atom` lost the legacy list and tag
     // variants, so bincode variant indices shifted, and checked type
     // annotations are node-spelled on every ingress.
-    const FORMAT_VERSION: u32 = 19;
+    // V20 (chelis#2413): `Effect::Random` is gone, so every effect's bincode
+    // variant index shifted, and Deep lost the `random` handler kind.
+    const FORMAT_VERSION: u32 = 20;
     const KEY_DOMAIN: &'static [u8] = b"chelis_library_typecheck_v";
 }
 
