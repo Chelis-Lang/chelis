@@ -37,11 +37,13 @@
 //! "All reef-context acceptance checks passed."
 //!
 //! NOTE (Shoals — chelis#825): the plan's original acceptance imported
-//! `Shoals.Pricing` (Black-Scholes → 10.4506). On this branch the post-0.16.1
-//! compiler tightened the `with seed(...)` i64 rule, which the published
-//! Shoals 0.23.1 dependency graph (built for the `=0.16.1` toolchain) trips
-//! during library-context compilation — reproducible with the branch's own CLI
-//! (`chelis eval --file`), independent of these bindings. Tracked as chelis#825
+//! `Shoals.Pricing` (Black-Scholes → 10.4506). The post-0.16.1 compiler
+//! tightened the `with seed(...)` i64 rule, and the explicit-key switch
+//! (chelis#2413) retired `with seed` altogether (a typed parse error); the
+//! published Shoals 0.23.1 dependency graph (built for the `=0.16.1`
+//! toolchain) uses that surface and fails library-context compilation —
+//! reproducible with the branch's own CLI (`chelis eval --file`), independent
+//! of these bindings. Tracked as chelis#825
 //! (the ecosystem-drift canary checks Shoals `main`, not the published 0.23.1
 //! artifact). The acceptance therefore uses `chelis-std` + a sibling module,
 //! which is dev-compiler-clean and exercises the identical resolution
