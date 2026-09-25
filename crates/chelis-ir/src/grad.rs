@@ -2131,9 +2131,10 @@ fn compute_adjoints(
                 // `AdRejectionReason::Other`, which `spec/06` §7.5
                 // forbids -- it requires the atom's exact reason. The
                 // two sites disagreeing is a pre-existing defect that
-                // `CastTrunc` shares (chelis#197's residue, tracked
-                // under chelis#730); rejecting is still correct here,
-                // only the reason is wrong.
+                // `CastTrunc` shares: residue of chelis#197, and it
+                // belongs to the chelis#730 loud-unsupported class, but
+                // no sub-issue has been filed for it yet. Rejecting is
+                // still correct here; only the reason is wrong.
                 None
             } else {
                 // Every remaining pair. In practice that is a discrete
