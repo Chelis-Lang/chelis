@@ -492,14 +492,30 @@ pub(crate) const KEY_PARAMETER_SUGGESTION: &str = "Pass keys through a concrete 
      `tensor[n, key]` parameter rather than a type parameter; derive fresh keys with \
      `split_key(k)` or `split_keys(k, n)` where more than one is needed";
 
+/// [04-LIN-10]: the repair for a generic that is a value binding rather than a
+/// function, such as a generalized `let` binding: an ascription gives the
+/// binding a type with no type parameter, and a value written where it is
+/// used is never generalized.
+fn key_value_binding_suggestion(binding: &str) -> String {
+    format!(
+        "Ascribe `{binding}` a type with no type parameter where it is bound, such as \
+         `{binding}: List[key] = Nil`, or write its value where it is used; a binding without an \
+         ascription is generalized, and a generic never stands for a key"
+    )
+}
+
 impl From<TypeError> for CheckError {
     fn from(te: TypeError) -> Self {
+        let value_binding = match &te.kind {
+            TypeErrorKind::KeyInstantiation { value_binding } => value_binding.clone(),
+            _ => None,
+        };
         let kind = match te.kind {
             TypeErrorKind::TypeMismatch => CheckErrorKind::TypeMismatch,
             TypeErrorKind::PrecisionMismatch | TypeErrorKind::DtypeFamilyMismatch => {
                 CheckErrorKind::PrecisionMismatch
             }
-            TypeErrorKind::KeyInstantiation => CheckErrorKind::KeyReuse,
+            TypeErrorKind::KeyInstantiation { .. } => CheckErrorKind::KeyReuse,
             TypeErrorKind::DimensionMismatch => CheckErrorKind::DimensionMismatch,
             TypeErrorKind::ArityMismatch => CheckErrorKind::ArityMismatch,
             TypeErrorKind::OccursCheck => CheckErrorKind::OccursCheck,
@@ -514,7 +530,10 @@ impl From<TypeError> for CheckError {
         };
         let mut suggestions = match &kind {
             CheckErrorKind::PrecisionMismatch => vec!["Insert explicit cast".to_string()],
-            CheckErrorKind::KeyReuse => vec![KEY_PARAMETER_SUGGESTION.to_string()],
+            CheckErrorKind::KeyReuse => vec![match &value_binding {
+                Some(binding) => key_value_binding_suggestion(binding),
+                None => KEY_PARAMETER_SUGGESTION.to_string(),
+            }],
             _ => vec![],
         };
         // Enrich TypeMismatch with opaque/option hints.

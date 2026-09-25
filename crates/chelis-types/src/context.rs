@@ -133,8 +133,10 @@ pub struct TypeEnv {
 // provenance; reading v3 as an empty map would reject valid contextual named
 // gradient selectors. v5 adds [04-LIN-10]'s key-free type-variable marks and
 // key-carrying data types; reading v4 as empty sets would let a library generic
-// be instantiated at a key.
-const TYPE_ENV_FORMAT_VERSION: u32 = 5;
+// be instantiated at a key. v6 records whether each mark's generic is a value
+// binding; reading v5 as function generics would change a value binding's
+// suggested repair after a round trip.
+const TYPE_ENV_FORMAT_VERSION: u32 = 6;
 
 #[derive(Serialize)]
 struct TypeEnvWireRef<'a> {

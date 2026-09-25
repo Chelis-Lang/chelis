@@ -74,6 +74,34 @@ fn rejects_key_instantiation(name: &str, source: &str, generic: &str, parameter:
     );
 }
 
+/// [04-LIN-10] for a generic that is a value binding, such as a generalized
+/// `let` binding: the diagnostic names the binding, and its suggested repair
+/// ascribes the binding a type or writes the value where it is used, never a
+/// concrete key parameter (the binding has none) and never `copy`.
+fn rejects_value_binding_instantiation(name: &str, source: &str, binding: &str) {
+    let errors = rejects(name, source, CheckErrorKind::KeyReuse);
+    let error = errors
+        .iter()
+        .find(|error| same_kind(&error.kind, &CheckErrorKind::KeyReuse))
+        .expect("rejects found the kind");
+    assert!(
+        error
+            .message
+            .contains(&format!("an inferred type parameter of generic `{binding}`"))
+            && error.message.contains("[04-LIN-10]"),
+        "{name}: the diagnostic must name binding `{binding}`: {error:?}"
+    );
+    let suggestions = error.suggestions.join(" ");
+    assert!(
+        suggestions.contains(&format!("Ascribe `{binding}`"))
+            && suggestions.contains(&format!("`{binding}: List[key] = Nil`"))
+            && suggestions.contains("write its value where it is used")
+            && !suggestions.contains("concrete `key` or `tensor[n, key]` parameter")
+            && !suggestions.contains("copy("),
+        "{name}: a value binding's repair is an ascription or the value in place: {error:?}"
+    );
+}
+
 /// A `KeyReuse` diagnostic names the derivations, never `copy`.
 fn rejects_reuse(name: &str, source: &str) {
     for error in rejects(name, source, CheckErrorKind::KeyReuse) {
@@ -582,7 +610,7 @@ fn a_type_parameter_is_never_instantiated_at_a_key() {
 #[test]
 fn a_generic_reached_indirectly_is_never_instantiated_at_a_key() {
     let dup = "def dup[a](x: a) -> (a, a) = (x, x)\n";
-    let cases: [(&str, String, &str, Option<&str>); 10] = [
+    let cases: [(&str, String, &str, Option<&str>); 9] = [
         (
             "map(dup, keys)",
             format!("{dup}def bad(ks: List[key]) -> List[(key, key)] = map(dup, ks)\n"),
@@ -647,32 +675,35 @@ fn a_generic_reached_indirectly_is_never_instantiated_at_a_key() {
             "g",
             None,
         ),
-        (
-            "a closure held in a let-generalized data value",
-            "type Twice[a] =\n  | Twice { f: (a) -> (a, a) }\ndef bad(k: key) -> (key, key) = {\n  \
-             d = Twice { f: fn (y) -> (y, y) }\n  match d with {\n    | Twice { f } => f(k)\n  \
-             }\n}\n"
-                .to_string(),
-            "d",
-            None,
-        ),
     ];
     for (name, source, generic, parameter) in cases {
         rejects_key_instantiation(name, &source, generic, parameter);
     }
+    rejects_value_binding_instantiation(
+        "a closure held in a let-generalized data value",
+        "type Twice[a] =\n  | Twice { f: (a) -> (a, a) }\ndef bad(k: key) -> (key, key) = {\n  \
+         d = Twice { f: fn (y) -> (y, y) }\n  match d with {\n    | Twice { f } => f(k)\n  \
+         }\n}\n",
+        "d",
+    );
 }
 
 /// [04-LIN-10] covers every variable a `let` generalizes, not only a
 /// closure's, because a tuple or data value can hold a closure over it. A
 /// generic `let` value is therefore never instantiated at a key; the repair
-/// writes the value in place or annotates it.
+/// writes the value in place or annotates it, and the diagnostic suggests
+/// exactly that repair for a value binding, not a concrete key parameter.
+///
+/// Evidentiary status: the refusal and the accepted twins are DISPOSITION
+/// LOCKS (they hold at `6f42b4e92`); the suggestion assertion is a
+/// REGRESSION TEST (at `6f42b4e92` the refusal suggested a concrete key
+/// parameter, which does not repair a `let` value).
 #[test]
 fn a_let_generalized_value_is_never_instantiated_at_a_key() {
-    rejects_key_instantiation(
+    rejects_value_binding_instantiation(
         "a let-bound empty list",
         "def bad(k: key) -> List[key] = {\n  e = Nil\n  Cons(k, e)\n}\n",
         "e",
-        None,
     );
     accepts(
         "the empty list written in place",

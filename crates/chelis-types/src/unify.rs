@@ -90,8 +90,10 @@ pub enum TypeErrorKind {
     DtypeFamilyMismatch,
     /// [04-LIN-10]: a function's type parameter was instantiated at a
     /// key-carrying type. Rendered publicly as KeyReuse, the key-affinity
-    /// diagnostic.
-    KeyInstantiation,
+    /// diagnostic. `value_binding` names the generic when it is a value
+    /// binding rather than a function, such as a generalized `let` binding,
+    /// whose repair is an ascription rather than a concrete key parameter.
+    KeyInstantiation { value_binding: Option<String> },
     DimensionMismatch,
     ArityMismatch,
     OccursCheck,
@@ -109,6 +111,10 @@ pub struct GenericParameter {
     pub generic: Option<String>,
     /// The authored binder the variable instantiates, when there is one.
     pub binder: Option<String>,
+    /// Whether `generic` is a value binding, one whose type is not a function
+    /// type, such as `e = Nil`. Its repair ascribes the binding a type with no
+    /// type parameter, or writes the value where it is used.
+    pub value: bool,
 }
 
 impl GenericParameter {
@@ -1317,6 +1323,7 @@ impl Subst {
                 GenericParameter {
                     generic: Some(generic.to_string()),
                     binder,
+                    value: !matches!(scheme.body, Type::Fn(_, _)),
                 },
             );
         }
@@ -3477,7 +3484,9 @@ fn ensure_key_free(
     subst: &Subst,
 ) -> Result<(), TypeError> {
     let refuse = || TypeError {
-        kind: TypeErrorKind::KeyInstantiation,
+        kind: TypeErrorKind::KeyInstantiation {
+            value_binding: origin.generic.clone().filter(|_| origin.value),
+        },
         message: format!(
             "{} cannot be instantiated at the key-carrying type `{}`: a function's type \
              parameter never stands for a key or a value that carries one, because a generic \

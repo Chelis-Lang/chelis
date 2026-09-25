@@ -306,7 +306,7 @@ pub(super) fn check_error_kind_from_type_error_kind(kind: &TypeErrorKind) -> Che
         TypeErrorKind::PrecisionMismatch | TypeErrorKind::DtypeFamilyMismatch => {
             CheckErrorKind::PrecisionMismatch
         }
-        TypeErrorKind::KeyInstantiation => CheckErrorKind::KeyReuse,
+        TypeErrorKind::KeyInstantiation { .. } => CheckErrorKind::KeyReuse,
         TypeErrorKind::DimensionMismatch => CheckErrorKind::DimensionMismatch,
         TypeErrorKind::ArityMismatch => CheckErrorKind::ArityMismatch,
         TypeErrorKind::OccursCheck => CheckErrorKind::OccursCheck,

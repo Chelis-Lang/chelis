@@ -3137,11 +3137,15 @@ lexical binding, change which callable is selected, or memoize function results.
 > **[04-LIN-10]** A function's type parameter SHALL NOT be instantiated at a
 > key-carrying type (§8.4.1), because a generic body may use a value of its
 > parameter type more than once. Every type variable that a definition's or
-> a `let` binding's type scheme quantifies is such a parameter, authored or
-> inferred: an authored type binder, including one that names a tensor
-> element dtype with or without a dtype-family bound, and a variable that
-> inference leaves free in the binding's type, whatever the bound value is,
-> since a tuple or a data value can hold a closure over it. The rule holds
+> a generalized `let` binding's type scheme quantifies is such a parameter,
+> authored or inferred: an authored type binder, including one that names a
+> tensor element dtype with or without a dtype-family bound, and a variable
+> that inference leaves free in the binding's type, whatever the bound value
+> is, since a tuple or a data value can hold a closure over it. A `let`
+> binding without an ascription is generalized: `e = Nil` followed by
+> `Cons(k, e)` instantiates `e`'s type parameter at `key` and is refused,
+> while the ascribed `e: List[key] = Nil` and the value written where it is
+> used, `Cons(k, Nil)`, quantify nothing. The rule holds
 > however the generic is reached: called directly, bound to another name,
 > stored in a tuple or a data value, returned from a function, or passed as
 > an argument to another function, a builtin operation included. A key
@@ -3152,7 +3156,10 @@ lexical binding, change which callable is selected, or memoize function results.
 > at a key are key-carrying types that construction, matching, and the
 > builtin operations handle under [04-LIN-9]. A violation is a type error
 > that names the generic, and the type parameter when the program spells
-> one, and whose suggested repair passes the key through such a parameter.
+> one. Its suggested repair passes the key through such a parameter or, when
+> the generic is a value binding rather than a function, ascribes the
+> binding a type with no type parameter or writes its value where it is
+> used.
 
 Diagnostics for violations of these rules SHALL name a binding the
 program's source spells — the alias or component name written at the
