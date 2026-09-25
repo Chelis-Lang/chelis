@@ -4,7 +4,7 @@ use super::{
     WireExtentWitnessSite, WireFusedInput, WireKeyBranch, WireLogicalKind, WireRiscOp, WireRtAxis,
     WireRtDim, host_index, wire_dim_info_equal,
 };
-use chelis_ir::dag::{DimInfo, KeyBranch, RandomDraw};
+use chelis_ir::dag::{DimInfo, KeyBranch};
 use chelis_ir::verify::{
     KeyGraph, KeyRole, SplitCount, is_const_false, verify_key_rules, verify_random_operands,
 };
@@ -94,26 +94,6 @@ impl KeyGraph for DecodedKeys<'_> {
 
     fn role(&self, node: usize) -> KeyRole {
         match self.0.nodes.get(node).map(|node| &node.op) {
-            Some(WireRiscOp::DrawKey {
-                handler,
-                draw,
-                dtype,
-            }) => {
-                // `random_node` has already rejected a draw key whose dtype
-                // is not an active float. Were one to reach the rules, it
-                // would read as no draw key, and its key output would fail.
-                let Some(dtype) = Prim::parse_interchange_name(dtype) else {
-                    return KeyRole::Other;
-                };
-                KeyRole::DrawKey {
-                    scoped: matches!(handler, super::WireRandomHandler::Scoped { .. }),
-                    draw: match draw {
-                        super::WireRandomDraw::Dropout => RandomDraw::Dropout,
-                        super::WireRandomDraw::UniformLike => RandomDraw::UniformLike,
-                    },
-                    dtype,
-                }
-            }
             Some(WireRiscOp::KeyFromSeed {}) => KeyRole::KeyFromSeed,
             Some(WireRiscOp::Split { branch }) => KeyRole::Split {
                 branch: match branch {
@@ -213,13 +193,6 @@ impl KeyGraph for DecodedKeys<'_> {
             })
             .collect::<Option<Vec<_>>>()
             .map(Cow::Owned)
-    }
-
-    fn is_const(&self, node: usize) -> bool {
-        matches!(
-            self.0.nodes.get(node).map(|node| &node.op),
-            Some(WireRiscOp::Const { .. })
-        )
     }
 }
 
@@ -898,11 +871,6 @@ pub(super) fn validate(dag: &WireDag) -> Result<()> {
             // The random and key operations' operand rules are the IR
             // verifier's, applied by `key_rules`; only the wire's own
             // encodings are checked here.
-            WireRiscOp::DrawKey { dtype, .. } => {
-                if Prim::parse_interchange_name(dtype).is_none() {
-                    return Err(reject("draw key requires an active float draw dtype"));
-                }
-            }
             WireRiscOp::SplitN { count } => bound(count)?,
             _ => {}
         }

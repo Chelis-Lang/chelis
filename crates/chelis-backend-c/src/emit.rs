@@ -17,16 +17,6 @@ use chelis_types::{CheckedCastKind, CheckedCastPlan, ElementRef, NumericTrap, Sc
 
 use crate::memory::{MemoryPlan, NodeMemoryKind};
 
-#[cfg(not(feature = "native-random-observer"))]
-fn private_random_context_param() -> &'static str {
-    ", chelis_rng_state *__chelis_rng"
-}
-
-#[cfg(feature = "native-random-observer")]
-fn private_random_context_param() -> &'static str {
-    ", chelis_rng_state *__chelis_rng, __chelis_random_observer *__chelis_observer"
-}
-
 fn unsupported_verified_dag_action(node: NodeId, detail: &str) -> Unsupported {
     Unsupported::new(
         UnsupportedKind::Op("Drop".to_string()),
@@ -98,16 +88,6 @@ pub struct CEmitter {
     /// while the generated kernel fills and consumes its private storage.
     /// All leases are ended before any descriptor is returned or released.
     write_nodes: chelis_unord::UnordSet<usize>,
-    /// Whether this function receives the host's private `__chelis_rng`
-    /// frame. Only such a helper can take an inherited draw key.
-    private_random_context: bool,
-    /// Each draw key's observed `(draw, scope)` identity
-    /// (`random_observer::draw_key_identities`).
-    #[cfg(feature = "native-random-observer")]
-    observed_draws: BTreeMap<NodeId, (usize, usize)>,
-    /// The producer label an observed event carries: this function's name.
-    #[cfg(feature = "native-random-observer")]
-    observer_producer: String,
 }
 
 #[derive(Debug, Clone)]
@@ -146,19 +126,6 @@ impl UnaryEmission {
 /// the runtime's key helpers.
 const RANDOM_WORD_C_TYPE: &str = "unsigned long long";
 
-/// A draw key the emitter cannot take.
-fn unsupported_random_emission(detail: impl Into<String>) -> Unsupported {
-    Unsupported::new(
-        UnsupportedKind::Op("Random draw key".into()),
-        detail.into(),
-        Stage::Codegen("c"),
-        chelis_types::deliberate_rejection!(
-            "[04-TOT-2]",
-            "native draw-key emission requires the handler the key belongs to"
-        ),
-    )
-}
-
 struct MatmulEmitSpec {
     a: NodeId,
     b: NodeId,
@@ -188,10 +155,8 @@ struct CFusedReuse {
 /// Private invocation evidence accompanies the exact verified helper graph.
 /// Public tensor entries construct this without discharged host obligations.
 struct InvocationEmission<'a> {
-    private_random_context: bool,
+    private_invocation_context: bool,
     entry_coverage: &'a [chelis_ir::axis_sources::EntryExtentGuard],
-    #[cfg(feature = "native-random-observer")]
-    source_location: Option<(usize, usize)>,
 }
 
 impl CEmitter {
@@ -239,10 +204,8 @@ impl CEmitter {
             func_name,
             options,
             InvocationEmission {
-                private_random_context: false,
+                private_invocation_context: false,
                 entry_coverage: &[],
-                #[cfg(feature = "native-random-observer")]
-                source_location: None,
             },
         )
     }
@@ -254,7 +217,6 @@ impl CEmitter {
         func_name: &str,
         options: crate::CodegenOptions,
         entry_coverage: &[chelis_ir::axis_sources::EntryExtentGuard],
-        #[cfg(feature = "native-random-observer")] source_location: Option<(usize, usize)>,
     ) -> Result<String, Unsupported> {
         let mut plan = plan_c_storage_layout(dag).map_err(unsupported_storage_plan)?;
         let memory_plan = MemoryPlan::from_layout(&plan);
@@ -275,10 +237,8 @@ impl CEmitter {
             func_name,
             options,
             InvocationEmission {
-                private_random_context: true,
+                private_invocation_context: true,
                 entry_coverage,
-                #[cfg(feature = "native-random-observer")]
-                source_location,
             },
         )
     }
@@ -292,10 +252,8 @@ impl CEmitter {
         invocation: InvocationEmission<'_>,
     ) -> Result<String, Unsupported> {
         let InvocationEmission {
-            private_random_context,
+            private_invocation_context,
             entry_coverage,
-            #[cfg(feature = "native-random-observer")]
-            source_location,
         } = invocation;
         // chelis#1277 C4.1/C4.3: before anything reads a shape, every
         // realized output axis must have one checked extent source. This
@@ -433,7 +391,7 @@ impl CEmitter {
             local_dim_guard_sites,
             emitted_local_dim_guards: Vec::new(),
             declared_dim_names: chelis_unord::UnordSet::new(),
-            inherited_result_sites: if private_random_context && dag.roots().len() == 1 {
+            inherited_result_sites: if private_invocation_context && dag.roots().len() == 1 {
                 dag.result_extent_sites(dag.roots()[0])
             } else {
                 Vec::new()
@@ -444,11 +402,6 @@ impl CEmitter {
                 .and_then(|id| dag.get(*id))
                 .map(|node| node.output_type.dims.len()),
             write_nodes: chelis_unord::UnordSet::new(),
-            private_random_context,
-            #[cfg(feature = "native-random-observer")]
-            observed_draws: crate::random_observer::draw_key_identities(dag),
-            #[cfg(feature = "native-random-observer")]
-            observer_producer: String::new(),
         };
 
         e.line("#include \"chelis_runtime.h\"");
@@ -460,10 +413,9 @@ impl CEmitter {
         if e.math_lib != crate::MathLib::None {
             e.line("#include \"chelis_math.h\"");
         }
-        // The C port of the Random effect's one kernel boundary
-        // (chelis#2408): `chelis_random_key` is `chelis_types::random_draw_key`
-        // and `chelis_random_unit` is `[05-RNG-1]`'s unit value of the word
-        // under a draw key. The `[05-OP-8]` samplers take a draw key, never a
+        // The C port of the random kernels' one boundary (chelis#2408):
+        // `chelis_random_unit` is `[05-RNG-1]`'s unit value of the word under
+        // a draw's key. The `[05-OP-8]` samplers take a draw key, never a
         // seed. `host_emit`'s `append_uniform_sample_helper` carries the same
         // lines, and a unit test there holds the two copies equal.
         e.line("/* CHELIS_UNIFORM_HELPERS_BEGIN */");
@@ -472,10 +424,6 @@ impl CEmitter {
         e.line("    value = (value ^ (value >> 30)) * 0xBF58476D1CE4E5B9ULL;");
         e.line("    value = (value ^ (value >> 27)) * 0x94D049BB133111EBULL;");
         e.line("    return value ^ (value >> 31);");
-        e.line("}");
-        e.line("static inline uint64_t chelis_random_key(uint64_t seed, uint64_t ordinal) {");
-        e.line("    uint64_t call = chelis_random_mix(ordinal);");
-        e.line("    return seed ^ ((call << 17) | (call >> 47));");
         e.line("}");
         e.line("static inline double chelis_random_unit(uint64_t key, uint64_t index) {");
         e.line("    uint64_t element = chelis_random_mix(index);");
@@ -563,22 +511,15 @@ impl CEmitter {
         // contains non-identifier bytes the emitted C will fail to compile,
         // which is the desired outcome (loud failure, not silent injection).
         let func_name_fmt = chelis_ir::span_sanitize::sanitize_for_format_string(func_name);
-        #[cfg(feature = "native-random-observer")]
-        {
-            e.observer_producer = format!("\"{func_name_fmt}\"");
-        }
         // Only host-owned tensor helpers receive the invocation context.
         // Standalone/public kernels keep the four-argument tensor ABI.
-        let random_param = if private_random_context {
-            format!(
-                "{}, const __chelis_host_result_claim *__chelis_caller_result_claims",
-                private_random_context_param()
-            )
+        let invocation_param = if private_invocation_context {
+            ", const __chelis_host_result_claim *__chelis_caller_result_claims".to_string()
         } else {
             String::new()
         };
         let declaration = format!(
-            "void {func_name}(chelis_tensor **inputs, int n_in, chelis_tensor **outputs, int n_out{random_param});"
+            "void {func_name}(chelis_tensor **inputs, int n_in, chelis_tensor **outputs, int n_out{invocation_param});"
         );
         if !options.static_entry {
             e.line(&crate::generated_header::render_direct_export_begin(
@@ -592,20 +533,6 @@ impl CEmitter {
             declaration.trim_end_matches(';')
         ));
         e.indent = 1;
-
-        #[cfg(feature = "native-random-observer")]
-        if let Some((unit, helper)) = source_location {
-            e.line("int __chelis_helper_saved_admitted = __chelis_observer != NULL ? __chelis_observer->admitted : 0;");
-            e.line(&format!("if (__chelis_observer != NULL) {{ const __chelis_random_call_frame *call = __chelis_observer->calls; __chelis_observer->admitted = __chelis_helper_saved_admitted && call != NULL && call->certified && call->source != NULL && call->source->kind == 3 && call->source->unit.value == {unit}ULL && call->source->target.value == {helper}ULL; }}"));
-        }
-
-        if private_random_context {
-            e.line("(void)__chelis_rng;");
-        }
-        #[cfg(feature = "native-random-observer")]
-        if private_random_context {
-            e.line("(void)__chelis_observer;");
-        }
 
         let input_labels = Self::input_labels(dag);
         let input_slots = Self::input_slots(&input_labels);
@@ -651,7 +578,6 @@ impl CEmitter {
         }
 
         e.emit_input_shape_preamble(dag, &input_slots, func_name);
-        e.emit_scoped_random_counters(dag)?;
 
         for node in dag.nodes() {
             // Skip FusedElem nodes inlined into a trailing reduction.
@@ -750,10 +676,6 @@ impl CEmitter {
             e.lines.push(line);
         }
 
-        #[cfg(feature = "native-random-observer")]
-        if source_location.is_some() {
-            e.line("if (__chelis_observer != NULL) __chelis_observer->admitted = __chelis_helper_saved_admitted;");
-        }
         e.indent = 0;
         e.line("}");
         if !options.static_entry {
@@ -1504,25 +1426,14 @@ impl CEmitter {
             // which defaults to ties-to-even — matching the evaluator's
             // `f64::round_ties_even`. (`roundf` would be ties-away-from-zero.)
             RiscOp::Round => self.emit_unary_func(id, "rintf", &node.inputs, &node.output_type),
-            RiscOp::DrawKey {
-                handler,
-                draw,
-                dtype,
-            } => self.emit_draw_key(node, *handler, *draw, *dtype, dag)?,
             RiscOp::KeyFromSeed => self.emit_key_from_seed(node, dag),
             RiscOp::Split { branch } => self.emit_split_key(node, *branch, dag),
             RiscOp::FoldIn => self.emit_fold_in(node, dag),
             RiscOp::SplitN { count } => self.emit_split_keys(node, count),
             RiscOp::Dropout => self.emit_keyed_dropout(node, dag),
-            RiscOp::DropoutReplay => {
-                #[cfg(feature = "native-random-observer")]
-                self.record_observed_replay(node);
-                self.emit_keyed_dropout(node, dag)
-            }
+            RiscOp::DropoutReplay => self.emit_keyed_dropout(node, dag),
             RiscOp::UniformLike => self.emit_keyed_uniform_like(node, dag),
             RiscOp::UniformBoundAdjoint { bound } => {
-                #[cfg(feature = "native-random-observer")]
-                self.record_observed_replay(node);
                 self.emit_uniform_bound_adjoint(node, *bound, dag)
             }
             RiscOp::Copy => self.emit_realize(id, &node.inputs, &node.output_type),
@@ -4400,39 +4311,6 @@ impl CEmitter {
         }
     }
 
-    /// Declare one zero-based counter per scoped handler region whose draw
-    /// keys this function takes (`spec/design/randomness_counter_stream.md`
-    /// §2). An inherited draw needs the host's private Random frame, which a
-    /// public tensor entry does not receive.
-    fn emit_scoped_random_counters(&mut self, dag: VerifiedDagView<'_>) -> Result<(), Unsupported> {
-        let mut instances = BTreeSet::new();
-        for node in dag.nodes() {
-            match node.op {
-                RiscOp::DrawKey {
-                    handler: chelis_ir::dag::RandomHandler::Scoped { instance },
-                    ..
-                } => {
-                    instances.insert(instance);
-                }
-                RiscOp::DrawKey {
-                    handler: chelis_ir::dag::RandomHandler::Inherited,
-                    ..
-                } if !self.private_random_context => {
-                    return Err(unsupported_random_emission(
-                        "public tensor entry cannot receive inherited Random",
-                    ));
-                }
-                _ => {}
-            }
-        }
-        for instance in instances {
-            self.line(&format!(
-                "{RANDOM_WORD_C_TYPE} __chelis_scoped_counter_{instance} = 0ULL;"
-            ));
-        }
-        Ok(())
-    }
-
     /// A rank-0 float input at its exact arithmetic reading: f16 and bf16
     /// widen to `float`, f32 is `float`, f64 is `double`.
     fn rank0_float_expr(dag: VerifiedDagView<'_>, input: NodeId) -> String {
@@ -4466,326 +4344,24 @@ impl CEmitter {
         }
     }
 
-    /// The counter-stream bridge: when active, validate the draw's controls
-    /// for its dtype and only then take the handler's next key; when
-    /// inactive, neither. The key lives in `t{id}_key`.
-    fn emit_draw_key(
-        &mut self,
-        node: &DagNode,
-        handler: chelis_ir::dag::RandomHandler,
-        draw: chelis_ir::dag::RandomDraw,
-        dtype: Prim,
-        dag: VerifiedDagView<'_>,
-    ) -> Result<(), Unsupported> {
-        let id = node.id.0;
-        let seed_slots = usize::from(matches!(
-            handler,
-            chelis_ir::dag::RandomHandler::Scoped { .. }
-        ));
-        let active = Self::rank0_bool_expr(node.inputs.get(seed_slots + draw.control_count()));
-        self.line(&format!("int t{id}_active = {active};"));
-        self.line(&format!("{RANDOM_WORD_C_TYPE} t{id}_key = 0ULL;"));
-        // The observer reports the seed and ordinal a key was taken from.
-        #[cfg(feature = "native-random-observer")]
-        let observed = self.private_random_context;
-        #[cfg(feature = "native-random-observer")]
-        if observed {
-            self.line(&format!(
-                "{RANDOM_WORD_C_TYPE} t{id}_seed = 0ULL, t{id}_ordinal = 0ULL;"
-            ));
-        }
-        self.line(&format!("if (t{id}_active) {{"));
-        self.indent += 1;
-        // Controls are validated at binary64; a non-f64 span at binary32.
-        let binary64 = Self::prim_elem_type(Prim::F64);
-        match draw {
-            chelis_ir::dag::RandomDraw::Dropout => {
-                let trap = NumericTrap::Domain {
-                    op: "dropout",
-                    prim: dtype,
-                }
-                .to_string();
-                let rate = Self::rank0_float_expr(dag, node.inputs[seed_slots]);
-                self.line(&format!("{binary64} t{id}_rate = ({binary64})({rate});"));
-                self.line(&format!(
-                    "if (!(t{id}_rate >= 0.0 && t{id}_rate < 1.0)) chelis_numeric_trap({trap:?});"
-                ));
-            }
-            chelis_ir::dag::RandomDraw::UniformLike => {
-                let trap = NumericTrap::Domain {
-                    op: "uniform_like",
-                    prim: dtype,
-                }
-                .to_string();
-                let low = Self::rank0_float_expr(dag, node.inputs[seed_slots]);
-                let high = Self::rank0_float_expr(dag, node.inputs[seed_slots + 1]);
-                self.line(&format!(
-                    "{binary64} t{id}_low = ({binary64})({low}), t{id}_high = ({binary64})({high});"
-                ));
-                if dtype == Prim::F64 {
-                    self.line(&format!("{binary64} t{id}_span = t{id}_high - t{id}_low;"));
-                } else {
-                    let binary32 = Self::prim_elem_type(Prim::F32);
-                    self.line(&format!(
-                        "{binary32} t{id}_span = ({binary32})t{id}_high - ({binary32})t{id}_low;"
-                    ));
-                }
-                self.line(&format!(
-                    "if (!(isfinite(t{id}_low) && isfinite(t{id}_high) && t{id}_low <= t{id}_high && isfinite(t{id}_span))) chelis_numeric_trap({trap:?});"
-                ));
-            }
-        }
-        match handler {
-            chelis_ir::dag::RandomHandler::Inherited => {
-                self.line("if (__chelis_rng == NULL || !__chelis_rng->active) {");
-                self.indent += 1;
-                self.line(
-                    "fprintf(stderr, \"inherited Random requires an active host RNG scope\\n\");",
-                );
-                self.line("abort();");
-                self.indent -= 1;
-                self.line("}");
-                #[cfg(feature = "native-random-observer")]
-                if observed {
-                    self.line(&format!(
-                        "t{id}_seed = __chelis_rng->seed; t{id}_ordinal = __chelis_rng->counter++;"
-                    ));
-                    self.line(&format!(
-                        "t{id}_key = chelis_random_key(t{id}_seed, t{id}_ordinal);"
-                    ));
-                    self.record_observed_forward(node.id, "*__chelis_rng".to_string());
-                    self.indent -= 1;
-                    self.line("}");
-                    return Ok(());
-                }
-                self.line(&format!(
-                    "t{id}_key = chelis_random_key(__chelis_rng->seed, __chelis_rng->counter++);"
-                ));
-            }
-            chelis_ir::dag::RandomHandler::Scoped { instance } => {
-                let seed = dag
-                    .get(node.inputs[0])
-                    .and_then(|seed| match &seed.op {
-                        RiscOp::Const { value } => value.as_i64_exact(),
-                        _ => None,
-                    })
-                    .ok_or_else(|| {
-                        unsupported_random_emission("a scoped draw key requires its literal seed")
-                    })?;
-                #[cfg(feature = "native-random-observer")]
-                if observed {
-                    self.line(&format!(
-                        "t{id}_seed = UINT64_C(0x{:016x}); t{id}_ordinal = __chelis_scoped_counter_{instance}++;",
-                        seed as u64
-                    ));
-                    self.line(&format!(
-                        "t{id}_key = chelis_random_key(t{id}_seed, t{id}_ordinal);"
-                    ));
-                    self.record_observed_forward(
-                        node.id,
-                        format!("(chelis_rng_state){{t{id}_seed, __chelis_scoped_counter_{instance}, 1}}"),
-                    );
-                    self.indent -= 1;
-                    self.line("}");
-                    return Ok(());
-                }
-                self.line(&format!(
-                    "t{id}_key = chelis_random_key(UINT64_C(0x{:016x}), __chelis_scoped_counter_{instance}++);",
-                    seed as u64
-                ));
-            }
-        }
-        self.indent -= 1;
-        self.line("}");
-        Ok(())
-    }
-
     /// Record a forward draw: the key's handler state after the draw, and the
     /// seed and ordinal it used.
-    #[cfg(feature = "native-random-observer")]
-    fn record_observed_forward(&mut self, key: NodeId, state: String) {
-        let (draw, scope) = self.observed_draws[&key];
-        let id = key.0;
-        let line = crate::random_observer::record(
-            "",
-            "__CHELIS_RANDOM_OBSERVER_FORWARD",
-            "__CHELIS_RANDOM_OBSERVER_FIXED_IDENTITY",
-            &self.observer_producer,
-            Some(draw),
-            Some(draw),
-            Some(scope),
-            &state,
-            Some((&format!("t{id}_seed"), &format!("t{id}_ordinal"))),
-        );
-        self.line(&line);
-    }
 
     /// Record a replay reading its forward draw's key, when that draw ran.
-    #[cfg(feature = "native-random-observer")]
-    fn record_observed_replay(&mut self, node: &DagNode) {
-        if !self.private_random_context {
-            return;
-        }
-        let key = node.inputs[2];
-        let (draw, scope) = self.observed_draws[&key];
-        let id = key.0;
-        let line = crate::random_observer::record(
-            "",
-            "__CHELIS_RANDOM_OBSERVER_REPLAY",
-            "__CHELIS_RANDOM_OBSERVER_FIXED_IDENTITY",
-            &self.observer_producer,
-            None,
-            Some(draw),
-            Some(scope),
-            "*__chelis_rng",
-            Some((&format!("t{id}_seed"), &format!("t{id}_ordinal"))),
-        );
-        self.line(&format!("if (t{id}_active) {{"));
-        self.indent += 1;
-        self.line(&line);
-        self.indent -= 1;
-        self.line("}");
-    }
-
-    /// Fill `t{id}` with positive zeros: an inactive draw's discarded value.
-    fn emit_random_zero_fill(&mut self, id: usize, ty: &TensorType) {
-        let storage = Self::elem_type(ty);
-        let index = Self::prim_elem_type(Prim::Int64);
-        self.line("#pragma omp parallel for");
-        self.line(&format!("for ({index} i = 0; i < t{id}_size; i++) {{"));
-        self.indent += 1;
-        self.line(&format!("(({storage}*)t{id}_data)[i] = ({storage})0;"));
-        self.indent -= 1;
-        self.line("}");
-    }
 
     /// [05-OP-37] over an operand rate and a key, and its pathwise replay
     /// over a cotangent: drop where the arithmetic-width unit is below the
     /// rate, else the finalized `div(x, sub(1p, rate))`.
     fn emit_keyed_dropout(&mut self, node: &DagNode, dag: VerifiedDagView<'_>) {
         self.emit_draw_extent_guards(node, dag);
-        if !Self::is_draw_key(dag, node.inputs[2]) {
-            return self.emit_explicitly_keyed_dropout(node, dag);
-        }
-        let id = node.id.0;
-        let ty = &node.output_type;
-        let prim = ty.precision;
-        let data = node.inputs[0].0;
-        let key = node.inputs[2].0;
-        let rate = Self::rank0_float_expr(dag, node.inputs[1]);
-        let active = Self::rank0_bool_expr(node.inputs.get(3));
-        let index = Self::prim_elem_type(Prim::Int64);
-        let unit = format!("chelis_random_unit(t{key}_key, ({RANDOM_WORD_C_TYPE})i)");
-        self.emit_slot_wrapper(id, ty);
-        self.line(&format!("if ({active}) {{"));
-        self.indent += 1;
-        match prim {
-            Prim::F64 => {
-                let binary64 = Self::elem_type(ty);
-                self.line(&format!("{binary64} t{id}_rate = {rate};"));
-                self.line(&format!("{binary64} t{id}_denom = 1.0 - t{id}_rate;"));
-                self.line("#pragma omp parallel for");
-                self.line(&format!("for ({index} i = 0; i < t{id}_size; i++) {{"));
-                self.indent += 1;
-                self.line(&format!(
-                    "(({binary64}*)t{id}_data)[i] = {unit} < t{id}_rate ? 0.0 : ((const {binary64}*)t{data}_data)[i] / t{id}_denom;"
-                ));
-            }
-            Prim::F32 => {
-                let binary32 = Self::elem_type(ty);
-                self.line(&format!("{binary32} t{id}_rate = {rate};"));
-                self.line(&format!("{binary32} t{id}_denom = 1.0f - t{id}_rate;"));
-                self.line("#pragma omp parallel for");
-                self.line(&format!("for ({index} i = 0; i < t{id}_size; i++) {{"));
-                self.indent += 1;
-                self.line(&format!(
-                    "(({binary32}*)t{id}_data)[i] = ({binary32}){unit} < t{id}_rate ? 0.0f : ((const {binary32}*)t{data}_data)[i] / t{id}_denom;"
-                ));
-            }
-            Prim::F16 | Prim::Bf16 => {
-                let widen = Self::reduced_to_f32_fn(prim);
-                let narrow = Self::f32_to_reduced_fn(prim);
-                let binary32 = Self::prim_elem_type(Prim::F32);
-                let storage = Self::elem_type(ty);
-                self.line(&format!("{binary32} t{id}_rate = {rate};"));
-                self.line(&format!(
-                    "{binary32} t{id}_denom = {widen}({narrow}(1.0f - t{id}_rate));"
-                ));
-                self.line("#pragma omp parallel for");
-                self.line(&format!("for ({index} i = 0; i < t{id}_size; i++) {{"));
-                self.indent += 1;
-                self.line(&format!(
-                    "(({storage}*)t{id}_data)[i] = ({binary32}){unit} < t{id}_rate ? {narrow}(0.0f) : {narrow}({widen}(((const {storage}*)t{data}_data)[i]) / t{id}_denom);"
-                ));
-            }
-            other => panic!(
-                "dropout of dtype `{}` is not f16, bf16, f32 or f64",
-                other.name()
-            ),
-        }
-        self.indent -= 1;
-        self.line("}");
-        self.indent -= 1;
-        self.line("} else {");
-        self.indent += 1;
-        self.emit_random_zero_fill(id, ty);
-        self.indent -= 1;
-        self.line("}");
+        self.emit_explicitly_keyed_dropout(node, dag);
     }
 
     /// [05-OP-8] over operand bounds and a key, with the same samplers the
     /// baked node uses.
     fn emit_keyed_uniform_like(&mut self, node: &DagNode, dag: VerifiedDagView<'_>) {
         self.emit_draw_extent_guards(node, dag);
-        if !Self::is_draw_key(dag, node.inputs[3]) {
-            return self.emit_explicitly_keyed_uniform_like(node, dag);
-        }
-        let id = node.id.0;
-        let ty = &node.output_type;
-        let key = node.inputs[3].0;
-        let low = Self::rank0_float_expr(dag, node.inputs[1]);
-        let high = Self::rank0_float_expr(dag, node.inputs[2]);
-        let active = Self::rank0_bool_expr(node.inputs.get(4));
-        let index = Self::prim_elem_type(Prim::Int64);
-        self.emit_slot_wrapper(id, ty);
-        self.line(&format!("if ({active}) {{"));
-        self.indent += 1;
-        let (wide, sampler) = if ty.precision == Prim::F64 {
-            (Self::prim_elem_type(Prim::F64), "chelis_uniform_sample_f64")
-        } else {
-            (Self::prim_elem_type(Prim::F32), "chelis_uniform_sample_f32")
-        };
-        self.line(&format!(
-            "{wide} t{id}_low = ({wide})({low}), t{id}_high = ({wide})({high});"
-        ));
-        self.line("#pragma omp parallel for");
-        self.line(&format!("for ({index} i = 0; i < t{id}_size; i++) {{"));
-        self.indent += 1;
-        let sample =
-            format!("{sampler}(t{key}_key, ({RANDOM_WORD_C_TYPE})i, t{id}_low, t{id}_high)");
-        match ty.precision {
-            Prim::F64 | Prim::F32 => self.line(&format!(
-                "(({}*)t{id}_data)[i] = {sample};",
-                Self::elem_type(ty)
-            )),
-            Prim::F16 | Prim::Bf16 => self.line(&format!(
-                "(({}*)t{id}_data)[i] = {}({sample});",
-                Self::elem_type(ty),
-                Self::f32_to_reduced_fn(ty.precision)
-            )),
-            other => panic!(
-                "uniform_like of dtype `{}` is not f16, bf16, f32 or f64",
-                other.name()
-            ),
-        }
-        self.indent -= 1;
-        self.line("}");
-        self.indent -= 1;
-        self.line("} else {");
-        self.indent += 1;
-        self.emit_random_zero_fill(id, ty);
-        self.indent -= 1;
-        self.line("}");
+        self.emit_explicitly_keyed_uniform_like(node, dag);
     }
 
     /// [05-OP-8]'s bound adjoint: contributions `g_i * (1 - u_i)` or
@@ -4798,109 +4374,10 @@ impl CEmitter {
         dag: VerifiedDagView<'_>,
     ) {
         self.emit_draw_extent_guards(node, dag);
-        if !Self::is_draw_key(dag, node.inputs[2]) {
-            return self.emit_explicitly_keyed_bound_adjoint(node, bound, dag);
-        }
-        let id = node.id.0;
-        let ty = &node.output_type;
-        let prim = ty.precision;
-        let cotangent = node.inputs[1].0;
-        let key = node.inputs[2].0;
-        let active = Self::rank0_bool_expr(node.inputs.get(3));
-        let arithmetic_ty = TensorType {
-            dims: vec![],
-            precision: if prim == Prim::F64 {
-                Prim::F64
-            } else {
-                Prim::F32
-            },
-        };
-        let arithmetic = Self::elem_type(&arithmetic_ty);
-        let arithmetic_dtype = Self::dtype_macro(&arithmetic_ty);
-        let index = Self::prim_elem_type(Prim::Int64);
-        let load_g = match prim {
-            Prim::F64 | Prim::F32 => {
-                format!("((const {}*)t{cotangent}_data)[i]", Self::elem_type(ty))
-            }
-            Prim::F16 | Prim::Bf16 => format!(
-                "{}(((const {}*)t{cotangent}_data)[i])",
-                Self::reduced_to_f32_fn(prim),
-                Self::elem_type(ty)
-            ),
-            other => panic!(
-                "uniform bound adjoint of dtype `{}` is not f16, bf16, f32 or f64",
-                other.name()
-            ),
-        };
-        let weight = match bound {
-            chelis_ir::dag::UniformBound::Low => format!("(({arithmetic})1 - u)"),
-            chelis_ir::dag::UniformBound::High => "u".to_string(),
-        };
-        self.emit_slot_wrapper(id, ty);
-        self.line(&format!("{arithmetic} t{id}_sum = ({arithmetic})0;"));
-        self.line(&format!("if (({active}) && t{cotangent}_size > 0) {{"));
-        self.indent += 1;
-        self.line(&format!("{index} t{id}_n = t{cotangent}_size;"));
-        self.line(&format!(
-            "chelis_tensor *t{id}_leaves_tensor = chelis_alloc(1, &t{id}_n, {arithmetic_dtype});"
-        ));
-        self.line(&format!(
-            "chelis_tensor_write *t{id}_leaves_guard = chelis_tensor_begin_write(t{id}_leaves_tensor);"
-        ));
-        self.line(&format!(
-            "{arithmetic} *t{id}_leaves = ({arithmetic}*)chelis_tensor_write_view(t{id}_leaves_guard).data;"
-        ));
-        self.line(&format!("for ({index} i = 0; i < t{id}_n; i++) {{"));
-        self.indent += 1;
-        self.line(&format!(
-            "{arithmetic} u = ({arithmetic})chelis_random_unit(t{key}_key, ({RANDOM_WORD_C_TYPE})i);"
-        ));
-        self.line(&format!(
-            "t{id}_leaves[i] = ({arithmetic})({load_g}) * {weight};"
-        ));
-        self.indent -= 1;
-        self.line("}");
-        self.line(&format!("while (t{id}_n > 1) {{"));
-        self.indent += 1;
-        self.line(&format!("{index} next_n = t{id}_n / 2 + t{id}_n % 2;"));
-        self.line(&format!("for ({index} pair = 0; pair < next_n; pair++) {{"));
-        self.indent += 1;
-        self.line(&format!("{index} left = 2 * pair;"));
-        self.line(&format!("{index} right = left + 1;"));
-        self.line(&format!(
-            "t{id}_leaves[pair] = right < t{id}_n ? t{id}_leaves[left] + t{id}_leaves[right] : t{id}_leaves[left];"
-        ));
-        self.indent -= 1;
-        self.line("}");
-        self.line(&format!("t{id}_n = next_n;"));
-        self.indent -= 1;
-        self.line("}");
-        self.line(&format!("t{id}_sum = t{id}_leaves[0];"));
-        self.line(&format!("chelis_tensor_end_write(t{id}_leaves_guard);"));
-        self.line(&format!("chelis_tensor_release(t{id}_leaves_tensor);"));
-        self.indent -= 1;
-        self.line("}");
-        let storage = Self::elem_type(ty);
-        match prim {
-            Prim::F64 | Prim::F32 => {
-                self.line(&format!("(({storage}*)t{id}_data)[0] = t{id}_sum;"));
-            }
-            _ => self.line(&format!(
-                "(({storage}*)t{id}_data)[0] = {}(t{id}_sum);",
-                Self::f32_to_reduced_fn(prim)
-            )),
-        }
+        self.emit_explicitly_keyed_bound_adjoint(node, bound, dag);
     }
 
     // ---- Explicit keys ([05-RNG-2], [05-OP-69..72]) ----
-
-    /// Whether a random primitive's key is a counter-stream draw key, whose
-    /// word lives in the `t{id}_key` local and whose `DrawKey` already
-    /// validated the draw's controls.
-    fn is_draw_key(dag: VerifiedDagView<'_>, key: NodeId) -> bool {
-        dag.get(key)
-            .is_some_and(|node| matches!(node.op, RiscOp::DrawKey { .. }))
-    }
 
     /// Element `row` of a key tensor, or of a rank-0 key at row 0.
     fn key_word_expr(key: NodeId, row: &str) -> String {
@@ -9918,7 +9395,7 @@ mod tests {
     }
 
     #[test]
-    fn path_sensitive_uniform_reads_uint8_bool_and_gates_counter() {
+    fn path_sensitive_uniform_reads_uint8_bool() {
         let mut dag = Dag::new();
         let rank0 = |precision| TensorType {
             dims: vec![],
@@ -9956,16 +9433,7 @@ mod tests {
             rank0(Prim::F32),
             None,
         );
-        let key = dag.add_node(
-            RiscOp::DrawKey {
-                handler: chelis_ir::dag::RandomHandler::Scoped { instance: 0 },
-                draw: chelis_ir::dag::RandomDraw::UniformLike,
-                dtype: Prim::F32,
-            },
-            vec![seed, low, high, activation],
-            rank0(Prim::Key),
-            None,
-        );
+        let key = dag.add_node(RiscOp::KeyFromSeed, vec![seed], rank0(Prim::Key), None);
         let draw = dag.add_node(
             RiscOp::UniformLike,
             vec![template, low, high, key, activation],
@@ -9979,10 +9447,7 @@ mod tests {
         // read of the one-byte allocation is out of bounds and
         // platform-divergent (the Linux-only RNG parity break on PR #1302).
         let gate = format!("(((const uint8_t*)t{}_data)[0] != 0)", activation.0);
-        assert!(
-            c.contains(&format!("int t{}_active = {gate};", key.0)),
-            "{c}"
-        );
+        assert!(c.contains(&gate), "{c}");
         assert!(!c.contains(&format!("((float*)t{}_data)[0] != 0.0f", activation.0)));
         assert!(!c.contains(&format!("((bool*)t{}_data)", activation.0)));
         // An inactive draw neither takes the scoped counter's next ordinal

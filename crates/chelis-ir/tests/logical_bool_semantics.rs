@@ -1488,16 +1488,7 @@ fn logical_random_activation_is_control_only_during_grad() {
         scalar(Prim::Int64),
         None,
     );
-    let key = dag.add_node(
-        RiscOp::DrawKey {
-            handler: chelis_ir::dag::RandomHandler::Scoped { instance: 0 },
-            draw: chelis_ir::dag::RandomDraw::UniformLike,
-            dtype: Prim::F64,
-        },
-        vec![seed, low, high, activation],
-        scalar(Prim::Key),
-        None,
-    );
+    let key = dag.add_node(RiscOp::KeyFromSeed, vec![seed], scalar(Prim::Key), None);
     let output = dag.add_node(
         RiscOp::UniformLike,
         vec![template, low, high, key, activation],

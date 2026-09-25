@@ -722,7 +722,7 @@ impl GradSelectorResolver {
                 self.visit_expr(function, scope)?;
                 CallableOrigin::Unknown
             }
-            Expr::WithSeed(argument, body, _) | Expr::WithDevice(argument, body, _) => {
+            Expr::WithDevice(argument, body, _) => {
                 self.visit_expr(argument, scope)?;
                 self.visit_expr(body, scope)?
             }
@@ -1370,7 +1370,6 @@ fn expr_span(expr: &Expr) -> Span {
         | Expr::Realize(_, span)
         | Expr::Copy(_, span)
         | Expr::Borrow(_, span)
-        | Expr::WithSeed(_, _, span)
         | Expr::WithDevice(_, _, span)
         | Expr::Par(_, span)
         | Expr::Do(_, span)
@@ -1502,7 +1501,6 @@ fn desugar_effect_set(effects: &[EffectExpr]) -> AstEffectSet {
         .iter()
         .map(|effect| match effect {
             EffectExpr::Diff(_) => EffectMember::Name(Spanned::new("diff".into(), sp())),
-            EffectExpr::Random(_) => EffectMember::Name(Spanned::new("random".into(), sp())),
             EffectExpr::Accum(_) => EffectMember::Name(Spanned::new("accum".into(), sp())),
             EffectExpr::Io(_) => EffectMember::Name(Spanned::new("io".into(), sp())),
             EffectExpr::Test(_) => EffectMember::Name(Spanned::new("test".into(), sp())),
@@ -1661,8 +1659,8 @@ fn expr_mentions_name(expr: &Expr, name: &str) -> bool {
         | Expr::Unquote(expr, _)
         | Expr::Splice(expr, _)
         | Expr::Annotate(expr, _, _) => expr_mentions_name(expr, name),
-        Expr::WithSeed(seed, body, _) | Expr::WithDevice(seed, body, _) => {
-            expr_mentions_name(seed, name) || expr_mentions_name(body, name)
+        Expr::WithDevice(device, body, _) => {
+            expr_mentions_name(device, name) || expr_mentions_name(body, name)
         }
     }
 }
@@ -2766,14 +2764,6 @@ impl DesugarCtx {
             Expr::Borrow(f, _) => node(
                 DeepTag::Borrow,
                 vec![self.desugar_expr_with_scope(f, local_fn_params)],
-            ),
-            Expr::WithSeed(seed, body, _) => node_meta(
-                DeepTag::HandleEffect,
-                meta_with_entries(vec![M::Effect(Spanned::new(EffectKind::Random, sp()))]),
-                vec![
-                    self.desugar_expr_with_scope(seed, local_fn_params),
-                    self.desugar_expr_with_scope(body, local_fn_params),
-                ],
             ),
             Expr::WithDevice(device, body, _) => node_meta(
                 DeepTag::HandleEffect,

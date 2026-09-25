@@ -55,14 +55,6 @@ def structural_contracts():
         "WireExtentWitnessSite::LocalAscriptionClaim.ascription_id",
         "local-ascription-identity",
     )
-    # Wire v17 (chelis#2413): an opaque `with seed` region identity, not a
-    # count or numeric value; the seed itself is an earlier int64 node.
-    add(
-        "WireRandomHandler::Scoped.instance",
-        "random-handler-instance",
-        u32,
-        primitive="u32",
-    )
     for owner in ("WireDag", "WireDagFields", "WireDagFieldsRef"):
         ty = (
             ("borrow", False, "'a", ("slice", u64)) if owner.endswith("Ref") else vector
@@ -259,15 +251,6 @@ def structural_evidence():
             "WireDag",
             "local-ascription-owned",
             ("local-ascription-id-negative", "local-ascription-id-float"),
-        ),
-        "random-handler-instance": pairs(
-            "WireDag",
-            "random-scoped-owned",
-            (
-                "random-instance-negative",
-                "random-instance-4294967296",
-                "random-instance-float",
-            ),
         ),
         "lower-result-node": pairs("LowerResult", "owned", ("named_roots-1",)),
         "grad-result-node": pairs(

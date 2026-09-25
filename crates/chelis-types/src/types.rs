@@ -686,7 +686,6 @@ pub enum Type {
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub enum Effect {
-    Random,
     Accum,
     Io,
     /// Chelis-native testing effect. Pinned at the root, no handler.
@@ -700,7 +699,6 @@ pub enum Effect {
 impl fmt::Display for Effect {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Random => f.write_str("Random"),
             Self::Accum => f.write_str("Accum"),
             Self::Io => f.write_str("IO"),
             Self::Test => f.write_str("Test"),

@@ -2444,7 +2444,7 @@ fn validate_surface_expression(expression: &Expr) -> Result<(), ResugarError> {
             }
         }
         Expr::Vmap(function, _, _) => validate_surface_expression(function)?,
-        Expr::WithSeed(argument, body, _) | Expr::WithDevice(argument, body, _) => {
+        Expr::WithDevice(argument, body, _) => {
             validate_surface_expression(argument)?;
             validate_surface_expression(body)?;
         }
@@ -2836,7 +2836,6 @@ fn resugar_node(node: NodeRef<'_>) -> Result<Expr, ResugarError> {
             let argument = Box::new(resugar_expression_inner(&node.children[0])?);
             let body = Box::new(resugar_expression_inner(&node.children[1])?);
             match effect {
-                EffectKind::Random => Ok(Expr::WithSeed(argument, body, node.span)),
                 EffectKind::Resource => Ok(Expr::WithDevice(argument, body, node.span)),
             }
         }
@@ -4294,7 +4293,6 @@ fn resugar_effect_metadata(expr: &DeepExpr) -> Result<Option<Vec<EffectExpr>>, R
         .map(|effect| match effect {
             EffectMember::Name(name) => match name.value().as_str() {
                 "diff" => Ok(EffectExpr::Diff(name.span())),
-                "random" => Ok(EffectExpr::Random(name.span())),
                 "accum" => Ok(EffectExpr::Accum(name.span())),
                 "io" => Ok(EffectExpr::Io(name.span())),
                 "test" => Ok(EffectExpr::Test(name.span())),

@@ -239,7 +239,6 @@ fn check_finite_floats(wire_dag: &WireDag) -> Result<(), GraphExtractError> {
             | WireRiscOp::Dropout {}
             | WireRiscOp::DropoutReplay {}
             | WireRiscOp::UniformBoundAdjoint { .. }
-            | WireRiscOp::DrawKey { .. }
             | WireRiscOp::KeyFromSeed {}
             | WireRiscOp::Split { .. }
             | WireRiscOp::FoldIn {}
@@ -584,7 +583,9 @@ const _: () = {
     // Version 18 (chelis#2413) adds the explicit key operations. They produce
     // keys, not float values; `SplitN`'s count is the tagged `WireRtDim` an
     // `Expand` size is, so they join the same group.
-    assert!(WIRE_DAG_SCHEMA_VERSION == 18);
+    // Version 19 (chelis#2413) deletes the `DrawKey` bridge; it adds no
+    // operation.
+    assert!(WIRE_DAG_SCHEMA_VERSION == 19);
 };
 
 #[cfg(test)]

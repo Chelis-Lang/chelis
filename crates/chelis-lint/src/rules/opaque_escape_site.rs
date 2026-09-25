@@ -406,7 +406,6 @@ fn expr_offset(expr: &Expr) -> usize {
         | Expr::Realize(_, s)
         | Expr::Copy(_, s)
         | Expr::Borrow(_, s)
-        | Expr::WithSeed(_, _, s)
         | Expr::WithDevice(_, _, s)
         | Expr::Par(_, s)
         | Expr::Do(_, s)

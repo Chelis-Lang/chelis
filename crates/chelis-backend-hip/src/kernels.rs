@@ -2505,16 +2505,7 @@ mod tests {
             rank0(Prim::Int64),
             None,
         );
-        let key = dag.add_node(
-            RiscOp::DrawKey {
-                handler: chelis_ir::dag::RandomHandler::Scoped { instance: 0 },
-                draw: chelis_ir::dag::RandomDraw::UniformLike,
-                dtype: Prim::F32,
-            },
-            vec![seed, low, high],
-            rank0(Prim::Key),
-            None,
-        );
+        let key = dag.add_node(RiscOp::KeyFromSeed, vec![seed], rank0(Prim::Key), None);
         let draw = dag.add_node(
             RiscOp::UniformLike,
             vec![template, low, high, key],

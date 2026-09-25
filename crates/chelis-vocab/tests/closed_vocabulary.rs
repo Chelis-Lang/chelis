@@ -166,10 +166,7 @@ fn diagnostic_kind_consumer_match_is_a_compile_time_ratchet() {
 
 #[test]
 fn effect_kind_canonical_symbols_round_trip() {
-    let expected = [
-        (EffectKind::Random, "random"),
-        (EffectKind::Resource, "resource"),
-    ];
+    let expected = [(EffectKind::Resource, "resource")];
     assert_eq!(EffectKind::ALL, expected.map(|(kind, _)| kind));
 
     for (kind, symbol) in expected {
@@ -206,6 +203,17 @@ fn effect_kind_missing_malformed_and_unknown_are_distinct_errors() {
 }
 
 #[test]
+fn effect_kind_random_is_an_unknown_symbol() {
+    // The `random` handler kind was retired with the counter stream (#2413):
+    // randomness flows through explicit key values, so `random` decodes as an
+    // unknown symbol rather than a handler kind.
+    assert_eq!(
+        EffectKind::decode(EffectKindInput::Symbol("random")),
+        Err(EffectKindDecodeError::Unknown { symbol: "random" })
+    );
+}
+
+#[test]
 fn effect_kind_decoder_never_returns_option_or_a_default_kind() {
     let decoded: Result<EffectKind, EffectKindDecodeError<'_>> =
         EffectKind::decode(EffectKindInput::Symbol("not-a-kind"));
@@ -219,7 +227,6 @@ fn effect_kind_decoder_never_returns_option_or_a_default_kind() {
 fn effect_kind_consumer_match_is_a_compile_time_ratchet() {
     fn semantic_decision(kind: EffectKind) -> &'static str {
         match kind {
-            EffectKind::Random => "seed scope",
             EffectKind::Resource => "device scope",
         }
     }

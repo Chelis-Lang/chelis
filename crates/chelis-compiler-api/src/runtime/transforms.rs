@@ -488,12 +488,12 @@ impl<'a> EvalContext<'a> {
                 ));
             }
         };
-        // A draw key advances the handler whether or not a root reads it, so
-        // a graph that draws executes even when it has no roots.
+        // A random node that can trap is an observation (spec/06 section
+        // 5.2), so a graph that draws executes even when it has no roots.
         let draws = dag
             .nodes()
             .iter()
-            .any(|node| matches!(node.op, chelis_ir::dag::RiscOp::DrawKey { .. }));
+            .any(|node| dag.random_node_may_trap(node));
 
         // Forward-evaluate the lowered DAG, satisfying `RiscOp::Load`
         // by looking up placeholder names in our staged inputs (or
@@ -657,9 +657,7 @@ impl<'a> EvalContext<'a> {
             }
         }
         let load = |name: &str| prepared_inputs.get(name).cloned();
-        let mut frame = self.random_frame();
-        let result = chelis_ir::eval::eval_tensor_roots_with_frame(&dag, &roots, &mut frame, load);
-        self.commit_random_frame(&frame);
+        let result = chelis_ir::eval::eval_tensor_roots_exact(&dag, &roots, load);
         let values = result.map_err(|err| {
             // [04-NUM-9]: a numeric trap renders byte-identically on every
             // surface, so it takes no prefix.

@@ -38,12 +38,6 @@ mod tests {
     fn decodes_each_known_kind() {
         assert_eq!(
             decode_effect_kind(&metadata(
-                "(handle-effect {effect: random} (lit {} 1) (lit {} 2))"
-            )),
-            Ok(EffectKind::Random)
-        );
-        assert_eq!(
-            decode_effect_kind(&metadata(
                 "(handle-effect {effect: resource} (lit {} 1) (lit {} 2))"
             )),
             Ok(EffectKind::Resource)
@@ -58,8 +52,11 @@ mod tests {
         );
         for metadata in [
             "effect: 1",
-            "effect: random, effect: resource",
+            "effect: resource, effect: resource",
             "effect: teleport",
+            // The `random` handler kind was retired with the counter stream
+            // (#2413); Deep naming it is rejected like any unknown kind.
+            "effect: random",
         ] {
             let source = format!("(handle-effect {{{metadata}}} (lit {{}} 1) (lit {{}} 2))");
             assert!(

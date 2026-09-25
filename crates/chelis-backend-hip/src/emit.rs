@@ -122,12 +122,9 @@ pub struct HipEmitter {
     device_entrypoint_mode: bool,
     /// Shared specialization for every kernel and its launch arguments.
     kernel_rank: usize,
-    /// The next ordinal of each scoped Random handler region, advanced in
-    /// node order as each of its draw keys is emitted. One entry point's walk
-    /// is one activation, so [`Self::begin_activation`] resets it per entry.
-    scoped_draws: BTreeMap<u32, u64>,
-    /// The emission-time key of each emitted draw key and rank-0 key
-    /// derivation, by node.
+    /// The emission-time key of each rank-0 key derivation, by node. One
+    /// entry point's walk is one activation, so [`Self::begin_activation`]
+    /// resets it per entry.
     draw_keys: BTreeMap<NodeId, chelis_types::RandomKey>,
 }
 
@@ -440,7 +437,6 @@ impl HipEmitter {
                 .collect(),
             extra_peak_device_bytes_estimate: 0,
             device_entrypoint_mode: false,
-            scoped_draws: BTreeMap::new(),
             draw_keys: BTreeMap::new(),
             kernel_rank: match dag
                 .nodes()
@@ -642,10 +638,8 @@ impl HipEmitter {
     }
 
     /// Start one entry point's walk. Each entry runs the graph as its own
-    /// activation, so every scoped region's ordinals count from zero again
-    /// (`spec/design/randomness_counter_stream.md` §2).
+    /// activation, so its emission-time keys are its own.
     fn begin_activation(&mut self) {
-        self.scoped_draws.clear();
         self.draw_keys.clear();
     }
 
@@ -1436,7 +1430,6 @@ impl HipEmitter {
             | RiscOp::Dropout
             | RiscOp::DropoutReplay
             | RiscOp::UniformBoundAdjoint { .. }
-            | RiscOp::DrawKey { .. }
             | RiscOp::KeyFromSeed
             | RiscOp::Split { .. }
             | RiscOp::FoldIn
@@ -2326,11 +2319,6 @@ impl HipEmitter {
                 &node.inputs,
                 &node.output_type,
             ),
-            RiscOp::DrawKey {
-                handler,
-                draw: chelis_ir::dag::RandomDraw::UniformLike,
-                dtype,
-            } => self.record_scoped_draw_key(node, *handler, *dtype, dag)?,
             RiscOp::UniformLike => {
                 let (low, high, key) = self.keyed_uniform_like_parameters(node, dag)?;
                 self.emit_uniform_like_launch(id, low, high, key, &node.output_type)?
@@ -2341,7 +2329,6 @@ impl HipEmitter {
             RiscOp::Dropout
             | RiscOp::DropoutReplay
             | RiscOp::UniformBoundAdjoint { .. }
-            | RiscOp::DrawKey { .. }
             | RiscOp::SplitN { .. } => {
                 return Err(Unsupported::new(
                     UnsupportedKind::Op(chelis_ir::grad::risc_op_name(&node.op).to_string()),
@@ -3055,64 +3042,12 @@ impl HipEmitter {
     }
 
     /// A constant the storage plan gives no storage because only draw
-    /// emission reads it, as a literal: a `with seed` region's seed and a
-    /// draw's bounds, which [`Self::record_scoped_draw_key`] and
+    /// emission reads it, as a literal: a key derivation's seed or index and
+    /// a draw's bounds, which [`Self::record_derived_key`] and
     /// [`Self::keyed_uniform_like_parameters`] fold into the launch.
     fn is_emission_literal(&self, node: &DagNode) -> bool {
         matches!(node.op, RiscOp::Const { .. })
             && *self.plan.node_kind(node.id) == NodeMemoryKind::Skipped
-    }
-
-    /// The HIP lane's counter-stream bridge
-    /// (`spec/design/randomness_counter_stream.md` §2): a device kernel has no
-    /// host Random frame, so only a draw key of a `with seed` region lowered
-    /// inside this graph, with literal bounds and no activation, has a key the
-    /// emitter can compute. Each region's ordinals count from zero in node
-    /// order, as its scoped counter does in the other lanes, and the bounds
-    /// are validated before the ordinal is taken ([05-OP-8]).
-    fn record_scoped_draw_key(
-        &mut self,
-        node: &DagNode,
-        handler: chelis_ir::dag::RandomHandler,
-        dtype: Prim,
-        dag: VerifiedDagView<'_>,
-    ) -> Result<(), Unsupported> {
-        let bridge = |reason: &str| {
-            Unsupported::new(
-                UnsupportedKind::Op("DrawKey".to_string()),
-                format!("a HIP draw key {reason}"),
-                Stage::Codegen("hip"),
-                chelis_types::unimplemented_rejection!(
-                    1192,
-                    "the HIP lane computes a draw key only for a `with seed` region in the \
-                     same kernel with literal bounds; compiled randomness on every target is \
-                     phase 6 of chelis#2413"
-                ),
-            )
-        };
-        let chelis_ir::dag::RandomHandler::Scoped { instance } = handler else {
-            return Err(bridge("that inherits its caller's Random stream"));
-        };
-        if node.inputs.len() != 3 {
-            return Err(bridge("under a runtime activation"));
-        }
-        let literal = |input: NodeId| match dag.get(input).map(|node| &node.op) {
-            Some(RiscOp::Const { value }) => Some(*value),
-            _ => None,
-        };
-        let seed = literal(node.inputs[0])
-            .and_then(|seed| seed.as_i64_exact())
-            .ok_or_else(|| bridge("without its literal seed"))?;
-        let (Some(low), Some(high)) = (literal(node.inputs[1]), literal(node.inputs[2])) else {
-            return Err(bridge("with runtime bounds"));
-        };
-        chelis_types::dtype_semantics::UniformLikeParameters::new(dtype, low, high)
-            .map_err(|error| bridge(&format!("whose literal bounds trap: {error}")))?;
-        let ordinal = self.scoped_draws.entry(instance).or_insert(0);
-        let key = chelis_types::RandomKey::from_counter(seed as u64, *ordinal);
-        *ordinal += 1;
-        self.draw_keys.insert(node.id, key);
-        Ok(())
     }
 
     /// A key the HIP lane computes at emission has no device value, so no
@@ -3140,8 +3075,8 @@ impl HipEmitter {
 
     /// A rank-0 key operation ([05-OP-69], [05-OP-70], [05-OP-72]) whose
     /// operands are literals or emission-time keys: the HIP lane computes its
-    /// key while it emits, as it does a scoped draw key, since a device kernel
-    /// receives keys only as launch arguments.
+    /// key while it emits, since a device kernel receives keys only as launch
+    /// arguments.
     fn record_derived_key(
         &mut self,
         node: &DagNode,
@@ -3202,7 +3137,7 @@ impl HipEmitter {
     }
 
     /// The literal f32 bounds and emission-time key of a keyed `UniformLike`
-    /// whose draw key [`Self::record_scoped_draw_key`] computed.
+    /// whose key [`Self::record_derived_key`] computed.
     fn keyed_uniform_like_parameters(
         &self,
         node: &DagNode,
@@ -3211,13 +3146,13 @@ impl HipEmitter {
         let unsupported = || {
             Unsupported::new(
                 UnsupportedKind::Op("UniformLike".to_string()),
-                "a HIP uniform_like without an emission-time draw key",
+                "a HIP uniform_like without an emission-time key",
                 Stage::Codegen("hip"),
                 chelis_types::unimplemented_rejection!(
                     1192,
-                    "the HIP lane computes a draw key only for a `with seed` region in the \
-                     same kernel with literal bounds; compiled randomness on every target is \
-                     phase 6 of chelis#2413"
+                    "the HIP lane draws only with a rank-0 key it derives at emission from \
+                     literal seeds and indices, with literal bounds; compiled randomness on \
+                     every target is phase 6 of chelis#2413"
                 ),
             )
         };
@@ -3233,27 +3168,20 @@ impl HipEmitter {
             .get(&node.inputs[3])
             .copied()
             .ok_or_else(unsupported)?;
-        // A counter-stream draw key validated these bounds before it took
-        // its ordinal; a derived key validates nothing, so the draw does.
-        let derived = !matches!(
-            dag.get(node.inputs[3]).map(|key| &key.op),
-            Some(RiscOp::DrawKey { .. })
-        );
-        if derived {
-            let literal = |input: NodeId| match dag.get(input).map(|node| &node.op) {
-                Some(RiscOp::Const { value }) => Some(*value),
-                _ => None,
-            };
-            let (Some(low), Some(high)) = (literal(node.inputs[1]), literal(node.inputs[2])) else {
-                return Err(unsupported());
-            };
-            chelis_types::dtype_semantics::UniformLikeParameters::new(
-                node.output_type.precision,
-                low,
-                high,
-            )
-            .map_err(|_| unsupported())?;
-        }
+        // A key validates nothing, so the draw validates its bounds.
+        let literal = |input: NodeId| match dag.get(input).map(|node| &node.op) {
+            Some(RiscOp::Const { value }) => Some(*value),
+            _ => None,
+        };
+        let (Some(low), Some(high)) = (literal(node.inputs[1]), literal(node.inputs[2])) else {
+            return Err(unsupported());
+        };
+        chelis_types::dtype_semantics::UniformLikeParameters::new(
+            node.output_type.precision,
+            low,
+            high,
+        )
+        .map_err(|_| unsupported())?;
         match (bound(node.inputs[1]), bound(node.inputs[2])) {
             (Some(low), Some(high)) => Ok((low, high, key.bits())),
             _ => Err(unsupported()),
@@ -4920,7 +4848,6 @@ impl HipEmitter {
             | RiscOp::Dropout
             | RiscOp::DropoutReplay
             | RiscOp::UniformBoundAdjoint { .. }
-            | RiscOp::DrawKey { .. }
             | RiscOp::KeyFromSeed
             | RiscOp::Split { .. }
             | RiscOp::FoldIn
@@ -5865,9 +5792,9 @@ mod tests {
         );
     }
 
-    /// `uniform_like(template, low, high)` as the first draw of a `with
-    /// seed(seed)` region in the graph, whose key the HIP lane computes.
-    fn scoped_uniform(
+    /// `uniform_like(key_from_seed(seed), template, low, high)`, whose key
+    /// the HIP lane computes at emission.
+    fn seeded_uniform(
         dag: &mut Dag,
         template: NodeId,
         ty: TensorType,
@@ -5896,16 +5823,7 @@ mod tests {
             rank0(Prim::Int64),
             None,
         );
-        let key = dag.add_node(
-            RiscOp::DrawKey {
-                handler: chelis_ir::dag::RandomHandler::Scoped { instance: 0 },
-                draw: chelis_ir::dag::RandomDraw::UniformLike,
-                dtype: ty.precision,
-            },
-            vec![seed, low, high],
-            rank0(Prim::Key),
-            None,
-        );
+        let key = dag.add_node(RiscOp::KeyFromSeed, vec![seed], rank0(Prim::Key), None);
         dag.add_node(
             RiscOp::UniformLike,
             vec![template, low, high, key],
@@ -5930,7 +5848,7 @@ mod tests {
             vec_f32(8),
             None,
         );
-        let u = scoped_uniform(&mut dag, like, vec_f32(8), (low, high), 7);
+        let u = seeded_uniform(&mut dag, like, vec_f32(8), (low, high), 7);
         dag.add_root(u);
         let (hip, _) = emit_test_dag(&dag, "test_fn").unwrap();
 
@@ -5960,56 +5878,6 @@ mod tests {
         );
     }
 
-    /// [05-RNG-1]: each generated entry point runs the graph as its own
-    /// activation, so a `with seed` region's two draws take ordinals 0 and 1
-    /// in the host entry and again in its device twin. The expected keys are
-    /// transcribed from the spec, not from `RandomKey`.
-    ///
-    /// Evidentiary status: REGRESSION TEST. At 3b5f029d8 the region counter
-    /// was set once per emitter, so the device entry took ordinals 2 and 3.
-    #[test]
-    fn each_entry_point_keys_its_scoped_draws_from_ordinal_zero() {
-        fn splitmix64(mut value: u64) -> u64 {
-            value = value.wrapping_add(0x9e37_79b9_7f4a_7c15);
-            value = (value ^ (value >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
-            value = (value ^ (value >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
-            value ^ (value >> 31)
-        }
-        let key = |ordinal: u64| 7 ^ splitmix64(ordinal).rotate_left(17);
-        let mut dag = Dag::new();
-        let like = dag.add_node(
-            RiscOp::Load {
-                name: "like".into(),
-            },
-            vec![],
-            vec_f32(8),
-            None,
-        );
-        let first = scoped_uniform(&mut dag, like, vec_f32(8), (0.0, 1.0), 7);
-        let second = scoped_uniform(&mut dag, first, vec_f32(8), (-1.0, 1.0), 7);
-        dag.add_root(second);
-        let (hip, _) = emit_test_dag(&dag, "test_fn").unwrap();
-        let entry_keys = |signature: &str| {
-            let body = hip
-                .split_once(signature)
-                .unwrap_or_else(|| panic!("no `{signature}` in:\n{hip}"))
-                .1;
-            let body = body.split("\nextern \"C\"").next().unwrap();
-            body.lines()
-                .filter_map(|line| {
-                    let (name, value) = line.trim().split_once(" = ")?;
-                    name.strip_prefix("unsigned long long t")?
-                        .strip_suffix("_key")?;
-                    value.strip_suffix("ULL;")?.parse::<u64>().ok()
-                })
-                .collect::<Vec<_>>()
-        };
-        let expected = vec![key(0), key(1)];
-        assert_ne!(expected[0], expected[1]);
-        assert_eq!(entry_keys("extern \"C\" void test_fn("), expected);
-        assert_eq!(entry_keys("extern \"C\" void test_fn_device("), expected);
-    }
-
     /// A draw's seed and literal bounds are read only while the draw is
     /// emitted, so they take no device slot, fill launch or release, and
     /// every owner and slot an entry point names is one it declares.
@@ -6019,7 +5887,7 @@ mod tests {
     /// the host entry released an undeclared `o_t` and `chelis_slot`, and
     /// each bound was filled on the device by `kernel_fill_f32`.
     #[test]
-    fn scoped_draw_literals_take_no_device_storage() {
+    fn seeded_draw_literals_take_no_device_storage() {
         fn used_and_declared(body: &str, prefix: &str) -> (BTreeSet<String>, BTreeSet<String>) {
             let mut used = BTreeSet::new();
             let mut declared = BTreeSet::new();
@@ -6052,8 +5920,8 @@ mod tests {
                 ty.clone(),
                 None,
             );
-            let first = scoped_uniform(&mut dag, like, ty.clone(), (0.0, 1.0), 7);
-            let second = scoped_uniform(&mut dag, first, ty.clone(), (-1.0, 1.0), 7);
+            let first = seeded_uniform(&mut dag, like, ty.clone(), (0.0, 1.0), 7);
+            let second = seeded_uniform(&mut dag, first, ty.clone(), (-1.0, 1.0), 7);
             dag.add_root(second);
             let (hip, _) = emit_test_dag(&dag, "test_fn").unwrap();
             let entries = hip.split("extern \"C\" void ").skip(1).collect::<Vec<_>>();
@@ -6069,14 +5937,11 @@ mod tests {
         }
     }
 
-    /// `spec/design/randomness_counter_stream.md` §2: whether a draw under a
-    /// runtime activation takes its ordinal is decided when the graph runs,
-    /// so the HIP lane refuses an activated draw key with its typed rejection
-    /// instead of computing a key at emission.
-    ///
-    /// Evidentiary status: LOCK on behaviour present at 7d0b996ca.
+    /// Whether a draw under a runtime activation draws is decided when the
+    /// graph runs, so the HIP lane refuses an activated draw with its typed
+    /// rejection instead of launching it unconditionally.
     #[test]
-    fn an_activated_draw_key_is_refused_on_the_device() {
+    fn an_activated_draw_is_refused_on_the_device() {
         let rank0 = |precision| TensorType {
             dims: vec![],
             precision,
@@ -6116,16 +5981,7 @@ mod tests {
             rank0(Prim::Int64),
             None,
         );
-        let key = dag.add_node(
-            RiscOp::DrawKey {
-                handler: chelis_ir::dag::RandomHandler::Scoped { instance: 0 },
-                draw: chelis_ir::dag::RandomDraw::UniformLike,
-                dtype: Prim::F32,
-            },
-            vec![seed, low, high, active],
-            rank0(Prim::Key),
-            None,
-        );
+        let key = dag.add_node(RiscOp::KeyFromSeed, vec![seed], rank0(Prim::Key), None);
         let draw = dag.add_node(
             RiscOp::UniformLike,
             vec![like, low, high, key, active],
@@ -6138,13 +5994,7 @@ mod tests {
         };
         assert_eq!(
             *error.what,
-            UnsupportedKind::Op("DrawKey".to_string()),
-            "{error}"
-        );
-        assert!(
-            error
-                .context
-                .contains("a HIP draw key under a runtime activation"),
+            UnsupportedKind::Op("UniformLike".to_string()),
             "{error}"
         );
     }
@@ -6394,7 +6244,7 @@ mod tests {
             vec_f64(8),
             None,
         );
-        let u = scoped_uniform(&mut dag, like, vec_f64(8), (low, high), 17);
+        let u = seeded_uniform(&mut dag, like, vec_f64(8), (low, high), 17);
         dag.add_root(u);
         let (hip, _) = emit_test_dag(&dag, "test_fn").unwrap();
 

@@ -103,7 +103,10 @@ impl CachePayload for crate::StdLibContext {
     // change and never shipped.
     // V28 (chelis#2413): the explicit key operations join `RiscOp` and `key`
     // becomes a storage dtype, so bincode variant indices shift again.
-    const FORMAT_VERSION: u32 = 28;
+    // V29 (chelis#2413): `RiscOp::DrawKey`, the `Random` effect and the
+    // `random` handler kind are deleted with the counter stream, so bincode
+    // variant indices shift again.
+    const FORMAT_VERSION: u32 = 29;
     const KEY_DOMAIN: &'static [u8] = b"chelis_std_typecheck_v";
 }
 

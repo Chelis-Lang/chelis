@@ -335,9 +335,9 @@ fn children(expr: &Expr) -> Vec<&Expr> {
         | Expr::Splice(value, _)
         | Expr::Annotate(value, _, _)
         | Expr::Lambda(_, value, _) => vec![value.as_ref()],
-        Expr::Binary(_, left, right, _)
-        | Expr::WithSeed(left, right, _)
-        | Expr::WithDevice(left, right, _) => vec![left.as_ref(), right.as_ref()],
+        Expr::Binary(_, left, right, _) | Expr::WithDevice(left, right, _) => {
+            vec![left.as_ref(), right.as_ref()]
+        }
         Expr::Pipe(seed, stages, _) => {
             let mut kids = vec![seed.as_ref()];
             kids.extend(stages);

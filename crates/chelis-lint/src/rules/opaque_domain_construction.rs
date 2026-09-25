@@ -400,9 +400,7 @@ fn check_surf_expr(
         | surf::Expr::Annotate(target, _, _) => {
             check_surf_expr(ctx, source, target, catalog, module, out);
         }
-        surf::Expr::Binary(_, lhs, rhs, _)
-        | surf::Expr::WithSeed(lhs, rhs, _)
-        | surf::Expr::WithDevice(lhs, rhs, _) => {
+        surf::Expr::Binary(_, lhs, rhs, _) | surf::Expr::WithDevice(lhs, rhs, _) => {
             check_surf_expr(ctx, source, lhs, catalog, module, out);
             check_surf_expr(ctx, source, rhs, catalog, module, out);
         }

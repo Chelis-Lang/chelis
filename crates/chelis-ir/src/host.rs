@@ -642,32 +642,6 @@ impl HostExecutionPlan {
         }
     }
 
-    /// Whether a tensor helper of this program draws `dropout`. The C
-    /// execution lane selects the host program for such a program, so a
-    /// public entry that draws keeps the host ABI whether or not its dropout
-    /// result is read: the draw key stays in the helper when the value does
-    /// not (`spec/design/randomness_counter_stream.md` section 2).
-    pub fn has_dropout_helpers(&self) -> bool {
-        fn draws_dropout(helper: &HostTensorHelper) -> bool {
-            helper.dag.nodes().iter().any(|node| {
-                matches!(
-                    node.op,
-                    crate::dag::RiscOp::DrawKey {
-                        draw: crate::dag::RandomDraw::Dropout,
-                        ..
-                    }
-                )
-            })
-        }
-        self.program.global_tensor_helpers.iter().any(draws_dropout)
-            || self
-                .program
-                .functions
-                .iter()
-                .flat_map(|function| &function.tensor_helpers)
-                .any(draws_dropout)
-    }
-
     /// Apply a manifest-owned rewrite to global observation metadata. Tensor
     /// helpers and function bodies are not exposed through this capability.
     pub fn try_transform_globals<E>(
@@ -1827,11 +1801,6 @@ pub enum HostExprKind<T = HostTypeTerm> {
         list: Box<HostExpr<T>>,
         ty: T,
     },
-    WithSeed {
-        seed: Box<HostExpr<T>>,
-        body: Box<HostExpr<T>>,
-        ty: T,
-    },
     TensorCall {
         helper: usize,
         args: Vec<HostExpr<T>>,
@@ -2164,11 +2133,6 @@ fn resolve_host_expr(expr: HostExpr) -> Result<ConcreteHostExpr, crate::HostType
         HostExprKind::FlatMap { callback, list, ty } => ConcreteHostExprKind::FlatMap {
             callback: resolve_host_callback(callback)?,
             list: Box::new(resolve_host_expr(*list)?),
-            ty: ty.into_concrete()?,
-        },
-        HostExprKind::WithSeed { seed, body, ty } => ConcreteHostExprKind::WithSeed {
-            seed: Box::new(resolve_host_expr(*seed)?),
-            body: Box::new(resolve_host_expr(*body)?),
             ty: ty.into_concrete()?,
         },
         HostExprKind::TensorCall { helper, args, ty } => ConcreteHostExprKind::TensorCall {
@@ -2854,15 +2818,12 @@ fn lower_host_program_with_execution(
         // #1872: a tensor entry that reaches `dropout` gets its own host
         // wrapper on the C execution lane even when no sibling happens to
         // select the host lane, so its public entry keeps the host ABI. Only
-        // an inferred closed body may introduce this standalone wrapper,
-        // whose public ABI has no RNG frame; a body that inherits Random
-        // keeps its ordinary lane.
+        // a body with an inferred effect row may introduce this standalone
+        // wrapper.
         let closed_dropout_entry = c_execution_lane
             && is_fn_body
             && !has_callable_params
-            && cached_def_effect_rows(program)
-                .get(name)
-                .is_some_and(|row| !row.contains(&chelis_types::types::Effect::Random))
+            && cached_def_effect_rows(program).contains_key(name)
             && cached_dropout_reaching_defs(program).contains(name)
             && named_tensor_entry_lowering_inputs(program, name).is_some();
         let needs_host_wrapper = is_fn_body
@@ -3366,9 +3327,6 @@ fn host_body_uses_builtin<T>(expr: &HostExpr<T>, builtin: &str) -> bool {
                 || host_body_uses_builtin(init, builtin)
                 || host_body_uses_builtin(list, builtin)
         }
-        HostExprKind::WithSeed { seed, body, .. } => {
-            host_body_uses_builtin(seed, builtin) || host_body_uses_builtin(body, builtin)
-        }
         HostExprKind::Int(_)
         | HostExprKind::Float(_)
         | HostExprKind::Bool(_)
@@ -3545,10 +3503,6 @@ fn body_callsite_span_per_helper(expr: &HostExpr) -> UnordMap<usize, Option<Stri
             HostExprKind::Fold { init, list, .. } | HostExprKind::Scan { init, list, .. } => {
                 walk(init, out);
                 walk(list, out);
-            }
-            HostExprKind::WithSeed { seed, body, .. } => {
-                walk(seed, out);
-                walk(body, out);
             }
             HostExprKind::ResultClaimScope { body, .. } => walk(body, out),
             HostExprKind::FormalIngress { value, .. } => walk(value, out),
@@ -3857,7 +3811,6 @@ fn host_body_has_call_matching<T>(
                 || default_expr.as_ref().is_some_and(|d| recurse(d))
         }
         HostExprKind::AdtConstruct { fields, .. } => fields.iter().any(recurse),
-        HostExprKind::WithSeed { seed, body, .. } => recurse(seed) || recurse(body),
         HostExprKind::ResultClaimScope { body, .. } => recurse(body),
         HostExprKind::FormalIngress { value, .. } => recurse(value),
         _ => false,
@@ -7872,15 +7825,13 @@ fn lower_host_expr_kind(
             ));
         }
         Expr::Node(list, _) if list.tag() == DeepTag::HandleEffect => {
-            // `with seed(...) { body }` and similar effect handlers are
-            // pure-result from the host emitter's perspective. Random
-            // handlers still need a host-lane seed scope so calls into
-            // separately emitted stdlib/helper functions see the active seed.
+            // `with device(...) { body }` is pure-result from the host
+            // emitter's perspective.
             let kids = list.children_slice();
             // chelis#730 Phase 1 (census row 20; the host-lane sibling of
             // row 9, discovered during the row 9 conversion): the former
             // unconditional body-passthrough silently dropped the handler
-            // for every non-`random` effect kind, including unknown ones.
+            // for every effect kind, including unknown ones.
             // chelis#730 Phase 2 (section C4.4): the kind is parsed once
             // into the closed [`EffectKind`] set and dispatched with an
             // exhaustive `match` (no `_` arm), so a new kind is a compile
@@ -7893,7 +7844,7 @@ fn lower_host_expr_kind(
                     chelis_types::unsupported::Stage::Lowering,
                     chelis_types::deliberate_rejection!(
                         "[04-EFF-1]",
-                        "known effect kinds are `random` and `resource` \
+                        "the known effect kind is `resource` \
                          (spec/03-deep-syntax.md); an unknown kind previously dropped its \
                          handler silently (chelis#730 census rows 9/20)"
                     ),
@@ -7909,19 +7860,6 @@ fn lower_host_expr_kind(
                 host_expr_lowering_error(expr, "a `handle-effect` node has no body")
             })?;
             match effect_kind {
-                EffectKind::Random => {
-                    let seed_expr = kids.first().ok_or_else(|| {
-                        host_expr_lowering_error(expr, "a random handler has no seed")
-                    })?;
-                    let seed = lower_host_expr(seed_expr, program, scope, tensor_helpers)?;
-                    let body = lower_host_expr(body, program, scope, tensor_helpers)?;
-                    let ty = host_expr_type(&body);
-                    return Ok(HostExpr::new(HostExprKind::WithSeed {
-                        seed: Box::new(seed),
-                        body: Box::new(body),
-                        ty,
-                    }));
-                }
                 EffectKind::Resource => lower_host_expr(body, program, scope, tensor_helpers)?,
             }
         }
@@ -8337,10 +8275,6 @@ fn collect_named_callback_signatures(
                 collect_named_callback_signatures(arg, out);
             }
         }
-        HostExprKind::WithSeed { seed, body, .. } => {
-            collect_named_callback_signatures(seed, out);
-            collect_named_callback_signatures(body, out);
-        }
         HostExprKind::Var(_, _)
         | HostExprKind::Int(_)
         | HostExprKind::Float(_)
@@ -8516,10 +8450,6 @@ fn infer_callable_param_types_in_expr(
             for arg in args {
                 infer_callable_param_types_in_expr(arg, unknown, out);
             }
-        }
-        HostExprKind::WithSeed { seed, body, .. } => {
-            infer_callable_param_types_in_expr(seed, unknown, out);
-            infer_callable_param_types_in_expr(body, unknown, out);
         }
         HostExprKind::Var(_, _)
         | HostExprKind::Int(_)
@@ -8845,17 +8775,6 @@ fn refine_host_expr_types(
         HostExprKind::TensorCall { args, .. } => {
             for arg in args.iter_mut() {
                 changed |= refine_host_expr_types(arg, scope, signatures);
-            }
-        }
-        HostExprKind::WithSeed { seed, body, ty } => {
-            changed |= refine_host_expr_types(seed, scope, signatures);
-            changed |= refine_host_expr_types(body, scope, signatures);
-            if ty.is_unresolved() {
-                let inferred = host_expr_type(body);
-                if !inferred.is_unresolved() {
-                    *ty = inferred;
-                    changed = true;
-                }
             }
         }
         HostExprKind::Int(_)
@@ -9648,10 +9567,6 @@ fn collect_lowered_host_names(expr: &HostExpr, out: &mut UnordSet<String>) {
             collect_lowered_callback_names(callback, out);
             collect_lowered_host_names(init, out);
             collect_lowered_host_names(list, out);
-        }
-        HostExprKind::WithSeed { seed, body, .. } => {
-            collect_lowered_host_names(seed, out);
-            collect_lowered_host_names(body, out);
         }
     }
 }
@@ -18249,7 +18164,6 @@ fn host_expr_type(expr: &HostExpr) -> HostTypeTerm {
         | HostExprKind::Scan { ty, .. }
         | HostExprKind::Partition { ty, .. }
         | HostExprKind::FlatMap { ty, .. }
-        | HostExprKind::WithSeed { ty, .. }
         | HostExprKind::TensorCall { ty, .. }
         | HostExprKind::ResultClaimScope { ty, .. }
         | HostExprKind::FormalIngress { ty, .. } => ty.clone(),
@@ -18454,11 +18368,6 @@ fn force_host_expr_type(expr: HostExpr, ty: HostTypeTerm) -> HostExpr {
         HostExprKind::FlatMap { callback, list, .. } => {
             HostExprKind::FlatMap { callback, list, ty }
         }
-        HostExprKind::WithSeed { seed, body, .. } => HostExprKind::WithSeed {
-            seed: Box::new(force_host_expr_type(*seed, HostTypeTerm::Int64)),
-            body: Box::new(force_host_expr_type(*body, ty.clone())),
-            ty,
-        },
         HostExprKind::TensorCall { helper, args, .. } => {
             HostExprKind::TensorCall { helper, args, ty }
         }
@@ -21105,64 +21014,12 @@ def bad[b](box: Box[b]) -> bool =
         }
     }
 
-    fn draw_keys(dag: &crate::Dag) -> Vec<crate::dag::RandomHandler> {
-        dag.nodes()
-            .iter()
-            .filter_map(|node| match node.op {
-                crate::dag::RiscOp::DrawKey {
-                    handler,
-                    draw: crate::dag::RandomDraw::Dropout,
-                    ..
-                } => Some(handler),
-                _ => None,
-            })
-            .collect()
-    }
-
-    #[test]
-    fn named_tensor_entry_lowers_its_dropout_to_a_scoped_draw_key() {
-        let scoped = surf_check(
-            r#"
-def main(x: tensor[4, f32]) -> tensor[4, f32] = with seed(0i64) {
-  dropout(x, 0.5f32)
-}
-"#,
-        );
-        let dag = lower_named_tensor_entry_dag(&scoped, "main").expect("scoped entry lowers");
-        assert!(matches!(
-            draw_keys(&dag).as_slice(),
-            [crate::dag::RandomHandler::Scoped { .. }]
-        ));
-        assert!(
-            dag.nodes()
-                .iter()
-                .any(|node| matches!(node.op, crate::dag::RiscOp::Dropout)),
-            "the key-operand dropout consumes the draw key"
-        );
-
-        let ordinary = surf_check("def main(x: tensor[4, f32]) -> tensor[4, f32] = add(x, x)");
-        let dag = lower_named_tensor_entry_dag(&ordinary, "main").expect("ordinary entry lowers");
-        assert!(
-            draw_keys(&dag).is_empty(),
-            "a no-Dropout entry takes no key"
-        );
-
-        // chelis#2405: runtime control that reaches no draw lowers as before.
-        let control = surf_check(
-            "def main(x: tensor[4, f32], c: bool) -> tensor[4, f32] = if c then x else neg(x)",
-        );
-        let dag = lower_named_tensor_entry_dag(&control, "main")
-            .expect("a draw-free entry with runtime control lowers");
-        assert!(draw_keys(&dag).is_empty());
-    }
-
     #[test]
     fn named_entry_lowering_keeps_authored_unused_interface_obligations() {
         let checked = surf_check(
             r#"
-def main[n](x: tensor[n, f32], unused: tensor[n, f32]) -> tensor[n, f32] = with seed(0i64) {
-  dropout(x, 0.5f32)
-}
+def main[n](x: tensor[n, f32], unused: tensor[n, f32]) -> tensor[n, f32] =
+  dropout(key_from_seed(0i64), x, 0.5f32)
 "#,
         );
         let dag = lower_named_tensor_entry_dag(&checked, "main").expect("scoped entry lowers");
@@ -21190,9 +21047,8 @@ def main[n](x: tensor[n, f32], unused: tensor[n, f32]) -> tensor[n, f32] = with 
     fn named_tensor_entry_lowers_a_runtime_dropout_rate_as_an_operand() {
         let checked = surf_check(
             r#"
-def main(x: tensor[4, f32], rate: f32) -> tensor[4, f32] = with seed(0i64) {
-  dropout(x, rate)
-}
+def main(x: tensor[4, f32], rate: f32) -> tensor[4, f32] =
+  dropout(key_from_seed(0i64), x, rate)
 "#,
         );
         let dag =

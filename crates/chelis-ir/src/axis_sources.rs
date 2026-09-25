@@ -470,9 +470,8 @@ pub fn output_axis_sources(dag: &Dag, node: NodeId) -> Vec<AxisSource> {
             _ => op_computed(id, rank),
         },
 
-        // Rank-0 results: a bound adjoint is a scalar sum and a draw key is
-        // a key word; neither has an axis.
-        RiscOp::UniformBoundAdjoint { .. } | RiscOp::DrawKey { .. } => op_computed(id, rank),
+        // Rank-0 result: a bound adjoint is a scalar sum with no axis.
+        RiscOp::UniformBoundAdjoint { .. } => op_computed(id, rank),
 
         // chelis#1464 / [05-OP-68]: the result IS the fallback, so every
         // output axis comes from input slot 1.

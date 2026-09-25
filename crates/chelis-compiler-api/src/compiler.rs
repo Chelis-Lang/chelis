@@ -1184,10 +1184,6 @@ fn project_host_program_to_entry(
                 collect_expr(init, bound, out);
                 collect_expr(list, bound, out);
             }
-            ConcreteHostExprKind::WithSeed { seed, body, .. } => {
-                collect_expr(seed, bound, out);
-                collect_expr(body, bound, out);
-            }
             ConcreteHostExprKind::Int(_)
             | ConcreteHostExprKind::Float(_)
             | ConcreteHostExprKind::Bool(_)
@@ -1506,9 +1502,6 @@ fn entry_lane_decision<'a>(
     host_only: bool,
     strictness: EntryStrictness,
     allow_execution: bool,
-    #[cfg(feature = "compilation-trace")] trace_out: Option<
-        &mut Option<chelis_ir::lowering_trace::HelperLoweringTrace>,
-    >,
 ) -> Result<EntryLaneOutcome<'a>> {
     use EntryLaneOutcome::Decline;
 
@@ -1546,12 +1539,7 @@ fn entry_lane_decision<'a>(
             entry: entry.to_string(),
         }));
     }
-    let Some(dag) = lower_selected_entry_dag(
-        checked,
-        entry,
-        #[cfg(feature = "compilation-trace")]
-        trace_out,
-    ) else {
+    let Some(dag) = chelis_ir::host::lower_named_tensor_entry_dag(checked, entry) else {
         return Ok(Decline(EntryLaneDecline::LoweringFailed {
             entry: entry.to_string(),
         }));
@@ -1596,83 +1584,6 @@ fn entry_lane_decision<'a>(
 /// the legacy whole-program contract is [`compile`].
 pub fn compile_for_execution(request: CompileRequest) -> Result<CompiledExecutionArtifact> {
     compile_for_execution_impl(request, EntryStrictness::Strict)
-}
-
-/// Whether a lowered graph draws `dropout`.
-fn dag_draws_dropout(dag: &Dag) -> bool {
-    dag.nodes().iter().any(|node| {
-        matches!(
-            node.op,
-            RiscOp::DrawKey {
-                draw: chelis_ir::dag::RandomDraw::Dropout,
-                ..
-            }
-        )
-    })
-}
-
-/// The entry-scoped graph of a resolved entry. An entry whose projection of
-/// the program graph draws `dropout` is lowered again from its own checked
-/// source, as the host lane's entry decision lowers it, so the emitted graph
-/// and any trace capture come from one lowering; every other entry keeps its
-/// projection.
-fn entry_dag_from_source(
-    checked: &CheckedProgram,
-    entry: &str,
-    ordinary: Dag,
-    #[cfg(feature = "compilation-trace")] trace_out: Option<
-        &mut Option<chelis_ir::lowering_trace::HelperLoweringTrace>,
-    >,
-) -> Result<Dag> {
-    if !dag_draws_dropout(&ordinary) {
-        return Ok(ordinary);
-    }
-    let dag = lower_selected_entry_dag(
-        checked,
-        entry,
-        #[cfg(feature = "compilation-trace")]
-        trace_out,
-    )
-    .ok_or_else(|| {
-        stage_error(
-            "compile",
-            format!("tensor entry `{entry}` draws `dropout` but its own source did not lower"),
-            GeneralKind::CompileError,
-        )
-    })?;
-    Ok(chelis_ir::optimize::dead_code_eliminate(&dag))
-}
-
-/// Lower the selected tensor entry. Under `compilation-trace` the capture is
-/// the same lowering's trace, kept only for an entry that draws `dropout`, the
-/// entry whose lowering the trace contract observes; every other entry's
-/// capture stays explicitly unavailable.
-fn lower_selected_entry_dag(
-    checked: &CheckedProgram,
-    entry: &str,
-    #[cfg(feature = "compilation-trace")] trace_out: Option<
-        &mut Option<chelis_ir::lowering_trace::HelperLoweringTrace>,
-    >,
-) -> Option<Dag> {
-    #[cfg(feature = "compilation-trace")]
-    if let Some(trace_out) = trace_out {
-        let (dag, trace) =
-            chelis_ir::host::lower_named_tensor_entry_dag_with_trace(checked, entry)?;
-        let draws_dropout = dag.nodes().iter().any(|node| {
-            matches!(
-                node.op,
-                RiscOp::DrawKey {
-                    draw: chelis_ir::dag::RandomDraw::Dropout,
-                    ..
-                }
-            )
-        });
-        if draws_dropout {
-            *trace_out = Some(trace);
-        }
-        return Some(dag);
-    }
-    chelis_ir::host::lower_named_tensor_entry_dag(checked, entry)
 }
 
 /// Opt-in observation of the same strict compilation as [`compile_for_execution`].
@@ -1903,10 +1814,7 @@ fn resolve_in_context_entry<'a>(
     })?;
     let mut scoped = compiled.dag.clone();
     scoped.set_roots(vec![root]);
-    let scoped = chelis_ir::optimize::project_program_roots(
-        &scoped,
-        &compiled.random_regions.entered_by([selected.as_str()]),
-    );
+    let scoped = chelis_ir::optimize::dead_code_eliminate(&scoped);
     Ok(Some((selected.as_str(), scoped)))
 }
 
@@ -2013,8 +1921,6 @@ fn execution_artifact_from_compiled_observed(
     let collect_trace = observer
         .as_ref()
         .is_some_and(crate::emission_observer::Observer::captures_lowering);
-    #[cfg(feature = "compilation-trace")]
-    let mut entry_trace = None;
     reject_host_only_builtins_before_host_lowering(compiled.checked(), build_target)?;
     let (mut legacy_host, mut execution_host) = if target == CompileTarget::C
         && (compiled.host_execution.is_some() || compiled.host_ordinary.is_some())
@@ -2081,7 +1987,7 @@ fn execution_artifact_from_compiled_observed(
             // tensor program the scoped DAG equals the whole-program DAG, so
             // this is a no-op there.
             let mut entry_lane_decline = None;
-            let scoped_entry = if let Some(library) = compiled.library_runtime.as_ref() {
+            let scoped_entry = if compiled.library_runtime.is_some() {
                 // In-context (#816): a clean tensor entry lowers straight into
                 // `compiled.dag` as a DAG root — it is NOT a host-program
                 // function, so `entry_lane_decision` (which reads the host
@@ -2125,24 +2031,7 @@ fn execution_artifact_from_compiled_observed(
                             GeneralKind::CompileError,
                         ));
                     }
-                    Some((entry, ordinary)) => {
-                        let checked = CheckedProgram::compose(&library.checked, compiled.checked())
-                            .ok_or_else(|| {
-                                stage_error(
-                                    "compile",
-                                    "in-context execution program lost its checked library proof",
-                                    GeneralKind::CompileError,
-                                )
-                            })?;
-                        let dag = entry_dag_from_source(
-                            &checked,
-                            entry,
-                            ordinary,
-                            #[cfg(feature = "compilation-trace")]
-                            collect_trace.then_some(&mut entry_trace),
-                        )?;
-                        Some((entry, dag))
-                    }
+                    Some((entry, ordinary)) => Some((entry, ordinary)),
                     None => None,
                 }
             } else if let Some(host_program) = host_program {
@@ -2153,46 +2042,12 @@ fn execution_artifact_from_compiled_observed(
                     host_only,
                     strictness,
                     execution_host.is_some(),
-                    #[cfg(feature = "compilation-trace")]
-                    collect_trace.then_some(&mut entry_trace),
                 )? {
                     EntryLaneOutcome::Claim { entry, dag } => Some((entry, dag)),
                     EntryLaneOutcome::Decline(reason) => {
                         entry_lane_decline = Some(reason);
                         None
                     }
-                }
-            } else if !chelis_ir::host::program_has_top_level_value_bindings(compiled.checked())
-                && dag_draws_dropout(&compiled.dag)
-                && !(strictness == EntryStrictness::Legacy
-                    && (entry_name.is_some_and(|name| {
-                        !compiled
-                            .tensor_root_names
-                            .iter()
-                            .any(|root| root.as_str() == name)
-                    }) || (entry_name.is_none()
-                        && compiled.tensor_root_names.as_slice().len() > 1
-                        && !compiled
-                            .tensor_root_names
-                            .iter()
-                            .any(|root| root.as_str() == "main"))))
-            {
-                // A tensor-only def can be absent from the host program:
-                // resolve the exact source entry, then lower that entry from
-                // its own source. Keep legacy file-stem/whole-program
-                // selection out of this lane.
-                match resolve_in_context_entry(&compiled, entry_name)? {
-                    Some((entry, ordinary)) => {
-                        let dag = entry_dag_from_source(
-                            compiled.checked(),
-                            entry,
-                            ordinary,
-                            #[cfg(feature = "compilation-trace")]
-                            collect_trace.then_some(&mut entry_trace),
-                        )?;
-                        Some((entry, dag))
-                    }
-                    None => None,
                 }
             } else {
                 None
@@ -2233,10 +2088,7 @@ fn execution_artifact_from_compiled_observed(
                         selected: verified.emission(),
                     },
                     #[cfg(feature = "compilation-trace")]
-                    entry_trace.as_ref().map_or(
-                        crate::compilation_trace::SelectedLowering::Unavailable,
-                        crate::compilation_trace::SelectedLowering::Dag,
-                    ),
+                    crate::compilation_trace::SelectedLowering::Unavailable,
                 );
                 let result =
                     chelis_backend_c::codegen_with_options(verified, entry_symbol, options)
@@ -2871,7 +2723,6 @@ fn compile_rewritten_decls_in_context(
         tensor_root_names: new_tensor_root_names,
         named_roots: lowered_parts.named_roots,
         forward_node_index: lowered_parts.forward_node_index,
-        random_regions: lowered_parts.random_regions,
         library_runtime: Some(library_runtime),
     })
 }
@@ -3106,10 +2957,7 @@ fn eval_compiled(
     let tensor_values = if roots.is_empty() {
         UnordMap::new()
     } else {
-        let entered = compiled
-            .random_regions
-            .entered_by(tensor_entries.iter().map(|entry| entry.def_name.as_str()));
-        eval::eval_program_roots_with_strict(&compiled.dag, &roots, &entered, |name| {
+        eval::eval_tensor_roots_with_strict(&compiled.dag, &roots, |name| {
             bindings.get(name).cloned()
         })
         .map_err(eval_stage_error)?
@@ -3525,10 +3373,6 @@ struct CompiledSource {
     tensor_root_names: crate::pipeline::TensorRootNames,
     named_roots: crate::pipeline::NamedRoots,
     forward_node_index: crate::pipeline::ForwardNodeIndex,
-    /// The `with seed` regions each definition's activation enters. `dag`
-    /// holds every definition's activation, so evaluating or projecting
-    /// selected roots keeps exactly the regions their activations enter.
-    random_regions: chelis_ir::lower::RandomRegionOwners,
     /// Phase G' — optional library context payload threaded into the
     /// host evaluator so library `def` names resolve at runtime when
     /// new code calls them. `None` on the monolithic `compile_source`
@@ -4062,7 +3906,6 @@ fn compile_source_scoped_mode(
         tensor_root_names: root_metadata.tensor_names().clone(),
         named_roots: lowered_parts.named_roots,
         forward_node_index: lowered_parts.forward_node_index,
-        random_regions: lowered_parts.random_regions,
         library_runtime: None,
     })
 }
@@ -4997,10 +4840,6 @@ pub fn reject_host_only_builtins(
                 scan_callback(callback, found);
                 scan_expr(init, found);
                 scan_expr(list, found);
-            }
-            ConcreteHostExprKind::WithSeed { seed, body, .. } => {
-                scan_expr(seed, found);
-                scan_expr(body, found);
             }
             ConcreteHostExprKind::ResultClaimScope { body, .. } => scan_expr(body, found),
             ConcreteHostExprKind::FormalIngress { value, .. } => scan_expr(value, found),
@@ -5943,22 +5782,6 @@ pub fn reject_unsupported_hip_ops(dag: &Dag) -> std::result::Result<(), Compiler
         })
         .collect();
 
-    // A draw key has no device storage. The emitter computes a `DrawKey`'s
-    // key at emission time and passes it to the draw that consumes it, so
-    // only that node carries the `key` precision here.
-    let key_admissible: UnordSet<NodeId> = dag
-        .nodes()
-        .iter()
-        .filter(|node| matches!(node.op, RiscOp::DrawKey { .. }))
-        .filter(|node| {
-            dag.nodes().iter().any(|consumer| {
-                matches!(consumer.op, RiscOp::Dropout | RiscOp::UniformLike)
-                    && consumer.inputs.contains(&node.id)
-            })
-        })
-        .map(|node| node.id)
-        .collect();
-
     for node in dag.nodes() {
         match node.output_type.precision {
             chelis_types::types::Prim::F32
@@ -5968,7 +5791,6 @@ pub fn reject_unsupported_hip_ops(dag: &Dag) -> std::result::Result<(), Compiler
             | chelis_types::types::Prim::Int16
             | chelis_types::types::Prim::Int32
             | chelis_types::types::Prim::Int64 => {}
-            chelis_types::types::Prim::Key if key_admissible.contains(&node.id) => {}
             chelis_types::types::Prim::Bf16 | chelis_types::types::Prim::F16 => {
                 if !narrow_float_admissible.contains(&node.id) {
                     return Err(unsupported_gate_error(
@@ -6141,6 +5963,7 @@ fn parse_error_span_surf(source: &str, err: &chelis_surf::parser::ParseError) ->
         | chelis_surf::parser::ParseError::SemicolonBlockSeparator { offset }
         | chelis_surf::parser::ParseError::NonCanonicalLiteral { offset, .. }
         | chelis_surf::parser::ParseError::NonFiniteLiteral { offset, .. }
+        | chelis_surf::parser::ParseError::RetiredRandomness { offset, .. }
         | chelis_surf::parser::ParseError::SignedMinimumMagnitudeRequiresNegation {
             offset, ..
         } => *offset,
@@ -6546,11 +6369,6 @@ fn wire_expr(expr: &Expr) -> SourceWireResult<WireSurfExpr> {
             expr: Box::new(wire_expr(inner)?),
             span: span(*s),
         },
-        Expr::WithSeed(seed, body, s) => WireSurfExpr::WithSeed {
-            seed: Box::new(wire_expr(seed)?),
-            body: Box::new(wire_expr(body)?),
-            span: span(*s),
-        },
         Expr::WithDevice(device, body, s) => WireSurfExpr::WithDevice {
             device: Box::new(wire_expr(device)?),
             body: Box::new(wire_expr(body)?),
@@ -6931,29 +6749,6 @@ fn wire_op(op: &RiscOp) -> WireResult<WireRiscOp> {
         RiscOp::FoldIn => WireRiscOp::FoldIn {},
         RiscOp::SplitN { count } => WireRiscOp::SplitN {
             count: wire_bound(count)?,
-        },
-        RiscOp::DrawKey {
-            handler,
-            draw,
-            dtype,
-        } => WireRiscOp::DrawKey {
-            handler: match handler {
-                chelis_ir::dag::RandomHandler::Inherited => {
-                    crate::schema::WireRandomHandler::Inherited
-                }
-                chelis_ir::dag::RandomHandler::Scoped { instance } => {
-                    crate::schema::WireRandomHandler::Scoped {
-                        instance: *instance,
-                    }
-                }
-            },
-            draw: match draw {
-                chelis_ir::dag::RandomDraw::Dropout => crate::schema::WireRandomDraw::Dropout,
-                chelis_ir::dag::RandomDraw::UniformLike => {
-                    crate::schema::WireRandomDraw::UniformLike
-                }
-            },
-            dtype: dtype.interchange_name().to_string(),
         },
         RiscOp::Sum { axis, accumulator } => WireRiscOp::Sum {
             axis: wire_axis(*axis)?,
@@ -7454,7 +7249,7 @@ mod tests {
         dag.add_root(right);
         let projected = wire_dag(&dag).unwrap();
         let json = serde_json::to_value(&projected).unwrap();
-        assert_eq!(json["schema_version"], 18);
+        assert_eq!(json["schema_version"], 19);
         let kinds: Vec<&serde_json::Value> = json["nodes"]
             .as_array()
             .unwrap()

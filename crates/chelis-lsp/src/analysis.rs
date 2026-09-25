@@ -785,26 +785,6 @@ fn collect_expr_symbols(
                 completions,
             );
         }
-        Expr::WithSeed(body, seed, _) => {
-            collect_expr_symbols(
-                text,
-                body,
-                top_level,
-                locals,
-                references,
-                definitions,
-                completions,
-            );
-            collect_expr_symbols(
-                text,
-                seed,
-                top_level,
-                locals,
-                references,
-                definitions,
-                completions,
-            );
-        }
         Expr::WithDevice(body, device, _) => {
             collect_expr_symbols(
                 text,
@@ -1375,6 +1355,7 @@ fn parse_error_offset(text: &str, err: &chelis_surf::parser::ParseError) -> usiz
         | chelis_surf::parser::ParseError::SemicolonBlockSeparator { offset }
         | chelis_surf::parser::ParseError::NonCanonicalLiteral { offset, .. }
         | chelis_surf::parser::ParseError::NonFiniteLiteral { offset, .. }
+        | chelis_surf::parser::ParseError::RetiredRandomness { offset, .. }
         | chelis_surf::parser::ParseError::SignedMinimumMagnitudeRequiresNegation {
             offset, ..
         } => *offset,
@@ -1440,7 +1421,6 @@ fn range_for_expr(text: &str, expr: &Expr) -> Range {
         | Expr::Realize(_, span)
         | Expr::Copy(_, span)
         | Expr::Borrow(_, span)
-        | Expr::WithSeed(_, _, span)
         | Expr::WithDevice(_, _, span)
         | Expr::Par(_, span)
         | Expr::Do(_, span)

@@ -83,8 +83,8 @@ pub fn vectorize_axis0_with_node_map_and_captures(
         );
         // spec/design/randomness_explicit_keys.md §3: each row of a vmapped
         // draw consumes its own row of a mapped `tensor[n, key]`. Broadcasting
-        // one captured key to every row would consume it once per row, and a
-        // counter-stream draw key has no per-row key at all (chelis#2409).
+        // one captured key to every row would consume it once per row
+        // (chelis#2409).
         if captured_load
             && node.output_type.precision == chelis_types::types::Prim::Key
             && read_nodes.contains(&node.id)
@@ -93,12 +93,6 @@ pub fn vectorize_axis0_with_node_map_and_captures(
                 "vmap cannot broadcast captured key {:?} to every row; a vmapped key must be a mapped tensor of keys",
                 node.op
             ));
-        }
-        if matches!(node.op, RiscOp::DrawKey { .. }) {
-            return Err(
-                "vmap of a counter-stream draw key is refused: a draw key has no per-row key (chelis#2409)"
-                    .to_string(),
-            );
         }
         let output_type = if shared {
             node.output_type.clone()

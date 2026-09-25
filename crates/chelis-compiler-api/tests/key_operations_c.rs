@@ -5,11 +5,8 @@
 //! §1.1.3's HIP `key` cell against the HIP build.
 mod ownership_support;
 
-use chelis_ir::dag::{
-    Dag, DimInfo, KeyBranch, NodeId, RandomDraw, RandomHandler, RiscOp, RtDim, TensorType,
-    UniformBound,
-};
-use chelis_ir::eval::{RandomFrame, TensorValue, eval_tensor_roots_with_frame};
+use chelis_ir::dag::{Dag, DimInfo, KeyBranch, NodeId, RiscOp, RtDim, TensorType, UniformBound};
+use chelis_ir::eval::{TensorValue, eval_tensor_roots_exact};
 use chelis_types::dtype_semantics::{RawTensor, StorageView, TensorStorage, finalize_tensor};
 use chelis_types::types::Prim;
 use chelis_types::{RandomKey, scalar_from_i64};
@@ -349,10 +346,7 @@ fn run_eval(dag: &Dag, inputs: &[(&str, Input)]) -> Result<Vec<Vec<u64>>, String
             )
         })
         .collect::<UnordMap<_, _>>();
-    let out =
-        eval_tensor_roots_with_frame(dag, dag.roots(), &mut RandomFrame::unhandled(), |name| {
-            values.get(name).cloned()
-        })?;
+    let out = eval_tensor_roots_exact(dag, dag.roots(), |name| values.get(name).cloned())?;
     Ok(dag
         .roots()
         .iter()
@@ -1122,105 +1116,6 @@ fn an_empty_split_batch_with_an_invalid_control_is_empty_in_c_and_eval() {
 }
 
 // ---- oracle (c): the counter bridge, C lane ----
-
-#[test]
-fn a_loaded_bridge_key_draws_the_counter_streams_bits_in_c() {
-    let cases: Vec<(i64, u64, f64, usize)> = [(42i64, 0u64), (7, 1), (-1, 0), (0, 3)]
-        .into_iter()
-        .flat_map(|(seed, ordinal)| {
-            [(0.5, 4usize), (0.0, 3), (0.25, 32), (0.9, 1), (0.5, 0)]
-                .into_iter()
-                .map(move |(rate, len)| (seed, ordinal, rate, len))
-        })
-        .collect();
-    for prim in FLOATS {
-        // Every case in one graph per lane: case `c` owns scoped handler `c`,
-        // which takes `ordinal` earlier draws before the compared one.
-        let mut counter = Dag::new();
-        let mut keyed = Dag::new();
-        let mut inputs = Vec::new();
-        let names: Vec<(String, String)> = (0..cases.len())
-            .map(|case| (format!("x{case}"), format!("k{case}")))
-            .collect();
-        for (case, (seed, ordinal, rate, len)) in cases.iter().copied().enumerate() {
-            let data: Vec<f64> = (0..len).map(|i| 1.0 + i as f64).collect();
-            let x = load(&mut counter, &names[case].0, &[len], prim);
-            let rate_node = float_const(&mut counter, prim, rate);
-            let seed_node = i64_const(&mut counter, seed);
-            let mut compared = x;
-            for index in 0..=ordinal {
-                let key = node(
-                    &mut counter,
-                    RiscOp::DrawKey {
-                        handler: RandomHandler::Scoped {
-                            instance: case as u32,
-                        },
-                        draw: RandomDraw::Dropout,
-                        dtype: prim,
-                    },
-                    vec![seed_node, rate_node],
-                    &[],
-                    Prim::Key,
-                );
-                let drawn = node(
-                    &mut counter,
-                    RiscOp::Dropout,
-                    vec![x, rate_node, key],
-                    &[len],
-                    prim,
-                );
-                if index < ordinal {
-                    counter.add_root(drawn);
-                } else {
-                    compared = drawn;
-                }
-            }
-            counter.add_root(compared);
-
-            let x = load(&mut keyed, &names[case].0, &[len], prim);
-            let rate_node = float_const(&mut keyed, prim, rate);
-            let key = load(&mut keyed, &names[case].1, &[], Prim::Key);
-            let drawn = node(
-                &mut keyed,
-                RiscOp::Dropout,
-                vec![x, rate_node, key],
-                &[len],
-                prim,
-            );
-            keyed.add_root(drawn);
-            let bridge = RandomKey::from_counter(seed as u64, ordinal).bits();
-            inputs.push((case, Input::Floats(prim, vec![len], data), bridge));
-        }
-        let mut named: Vec<(&str, Input)> = Vec::new();
-        for (case, data, bridge) in &inputs {
-            named.push((names[*case].0.as_str(), data.clone()));
-            named.push((names[*case].1.as_str(), Input::Keys(vec![], vec![*bridge])));
-        }
-        // The compared draw of each case is the last root it added.
-        let mut compared_roots = Vec::new();
-        let mut root_index = 0;
-        for (_, ordinal, _, _) in &cases {
-            root_index += *ordinal as usize;
-            compared_roots.push(root_index);
-            root_index += 1;
-        }
-        let counter_bits = run_c(counter, &named);
-        let keyed_eval = run_eval(&keyed, &named).unwrap();
-        let keyed_c = run_c(keyed, &named);
-        for (case, root) in compared_roots.into_iter().enumerate() {
-            assert_eq!(
-                keyed_c[case], counter_bits[root],
-                "{prim:?} case {:?}",
-                cases[case]
-            );
-            assert_eq!(
-                keyed_eval[case], counter_bits[root],
-                "{prim:?} case {:?}",
-                cases[case]
-            );
-        }
-    }
-}
 
 // ---- rule V5 at run time: extents a draw checks before it reads ----
 
@@ -2080,16 +1975,6 @@ fn hip_build(dag: &Dag) -> Result<(), String> {
 /// How a draw's key reaches it, one case per clause of the HIP `key` cell.
 #[derive(Clone, Copy, Debug)]
 enum HipKey {
-    /// The key a `with seed` region lowered into the graph gives its draw.
-    WithSeed,
-    /// The same key for a draw under a runtime activation.
-    WithSeedActivated,
-    /// The same key for a draw with a runtime bound.
-    WithSeedRuntimeBound,
-    /// The key of the caller's stream: no `with seed` region in the graph.
-    Inherited,
-    /// A `with seed` key for a dropout rather than a `uniform_like`.
-    WithSeedDropout,
     /// `key_from_seed(7)`.
     FromSeed,
     /// `fold_in(split_key(key_from_seed(-3)).1, 9)`.
@@ -2107,20 +1992,6 @@ enum HipKey {
 /// verifier rejects a dangling node.
 fn hip_key_graph(how: HipKey, prim: Prim) -> Dag {
     let mut dag = Dag::new();
-    let scoped = RandomHandler::Scoped { instance: 0 };
-    let draw_key = |dag: &mut Dag, handler: RandomHandler, draw: RandomDraw, controls| {
-        node(
-            dag,
-            RiscOp::DrawKey {
-                handler,
-                draw,
-                dtype: prim,
-            },
-            controls,
-            &[],
-            Prim::Key,
-        )
-    };
     if let HipKey::Result = how {
         let seed = i64_const(&mut dag, 7);
         let key = node(&mut dag, RiscOp::KeyFromSeed, vec![seed], &[], Prim::Key);
@@ -2133,51 +2004,9 @@ fn hip_key_graph(how: HipKey, prim: Prim) -> Dag {
         vec![8]
     };
     let like = load(&mut dag, "like", &rows, prim);
-    if let HipKey::WithSeedDropout = how {
-        let seed = i64_const(&mut dag, 7);
-        let rate = float_const(&mut dag, prim, 0.5);
-        let key = draw_key(&mut dag, scoped, RandomDraw::Dropout, vec![seed, rate]);
-        let dropped = node(
-            &mut dag,
-            RiscOp::Dropout,
-            vec![like, rate, key],
-            &rows,
-            prim,
-        );
-        dag.add_root(dropped);
-        return dag;
-    }
-    let low = match how {
-        HipKey::WithSeedRuntimeBound => load(&mut dag, "low", &[], Prim::F32),
-        _ => float_const(&mut dag, Prim::F32, 0.0),
-    };
+    let low = float_const(&mut dag, Prim::F32, 0.0);
     let high = float_const(&mut dag, Prim::F32, 1.0);
     let (key, active) = match how {
-        HipKey::WithSeed | HipKey::WithSeedRuntimeBound => {
-            let seed = i64_const(&mut dag, 7);
-            let controls = vec![seed, low, high];
-            (
-                draw_key(&mut dag, scoped, RandomDraw::UniformLike, controls),
-                None,
-            )
-        }
-        HipKey::WithSeedActivated => {
-            let seed = i64_const(&mut dag, 7);
-            let active = load(&mut dag, "active", &[], Prim::Bool);
-            let controls = vec![seed, low, high, active];
-            (
-                draw_key(&mut dag, scoped, RandomDraw::UniformLike, controls),
-                Some(active),
-            )
-        }
-        HipKey::Inherited => {
-            let handler = RandomHandler::Inherited;
-            let controls = vec![low, high];
-            (
-                draw_key(&mut dag, handler, RandomDraw::UniformLike, controls),
-                None,
-            )
-        }
         HipKey::FromSeed => {
             let seed = i64_const(&mut dag, 7);
             (
@@ -2207,7 +2036,7 @@ fn hip_key_graph(how: HipKey, prim: Prim) -> Dag {
             (node(&mut dag, split, vec![root], &[3], Prim::Key), None)
         }
         HipKey::Parameter => (load(&mut dag, "k", &[], Prim::Key), None),
-        HipKey::Result | HipKey::WithSeedDropout => unreachable!("built above"),
+        HipKey::Result => unreachable!("built above"),
     };
     let inputs = [like, low, high, key].into_iter().chain(active).collect();
     let drawn = node(&mut dag, RiscOp::UniformLike, inputs, &rows, prim);
@@ -2228,23 +2057,6 @@ fn hip_key_graph(how: HipKey, prim: Prim) -> Dag {
 fn the_hip_build_admits_only_a_with_seed_draws_key() {
     let gate = "does not support tensor precision `key`";
     let cases = [
-        (HipKey::WithSeed, None),
-        (
-            HipKey::WithSeedActivated,
-            Some("a HIP draw key under a runtime activation"),
-        ),
-        (
-            HipKey::WithSeedRuntimeBound,
-            Some("a HIP draw key with runtime bounds"),
-        ),
-        (
-            HipKey::Inherited,
-            Some("a HIP draw key that inherits its caller's Random stream"),
-        ),
-        (
-            HipKey::WithSeedDropout,
-            Some("a key-operand random node in the HIP DAG emitter"),
-        ),
         (HipKey::FromSeed, Some(gate)),
         (HipKey::Derived, Some(gate)),
         (HipKey::SplitRows, Some(gate)),

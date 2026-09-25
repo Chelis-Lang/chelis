@@ -499,7 +499,7 @@ fn trailing_separators_parse_and_format_to_a_fixed_point() {
         "result = quote(x,)",
         "result = unquote(x,)",
         "result = splice(xs,)",
-        "result = with seed(1,) { x }",
+        "result = with device(\"cpu\",) { x }",
         "def resource() ! { Resource(\"gpu:0\",) } = ()",
     ] {
         let formatted = format_source(source)
@@ -1195,7 +1195,7 @@ fn opaque_invariants_properties_and_resource_effects_round_trip() {
         "@invariant(p) ((0.0 <= p.value) && (p.value <= 1.0))\n",
         "type Probability =\n",
         "  | Probability { value: f32 }\n",
-        "def sample(p: Probability) -> Probability ! { Random, Resource(\"gpu:0\") } = with device(\"gpu:0\") { with seed(42i64) { p } }\n",
+        "def sample(p: Probability) -> Probability ! { Resource(\"gpu:0\") } = with device(\"gpu:0\") { p }\n",
         "@property bounded forall(p: Probability) where 0.0 <= p.value:\n",
         "  (p.value <= 1.0)\n",
         "  with tolerance = 0.001\n",
@@ -1362,7 +1362,7 @@ fn explicit_v018_migration_removes_trailing_separators_from_special_forms() {
         "q = quote(x,)\n",
         "u = unquote(x,)\n",
         "s = splice(xs,)\n",
-        "seeded = with seed(1,) { x }\n",
+        "placed = with device(\"cpu\",) { x }\n",
         "def effectful() ! { Resource(\"gpu:0\",), } = ()\n",
     );
     let expected = concat!(
@@ -1377,7 +1377,7 @@ fn explicit_v018_migration_removes_trailing_separators_from_special_forms() {
         "q = quote(x)\n",
         "u = unquote(x)\n",
         "s = splice(xs)\n",
-        "seeded = with seed(1) { x }\n",
+        "placed = with device(\"cpu\") { x }\n",
         "def effectful() ! { Resource(\"gpu:0\") } = ()\n",
     );
 

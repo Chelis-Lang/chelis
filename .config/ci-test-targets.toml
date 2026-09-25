@@ -446,10 +446,6 @@ name = "invocation_local_random"
 
 [[standing_target]]
 package = "chelis-compiler-api"
-name = "fixed_control_c"
-
-[[standing_target]]
-package = "chelis-compiler-api"
 name = "fixed_control_host_c"
 
 [[standing_target]]
@@ -542,10 +538,6 @@ name = "diagnostic_kind_pipeline"
 [[standing_target]]
 package = "chelis-compiler-api"
 name = "fragment_parity"
-
-[[standing_target]]
-package = "chelis-ir"
-name = "dropout_fixed_stream_ir"
 
 [[standing_target]]
 package = "chelis-compiler-api"

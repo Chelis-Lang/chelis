@@ -1312,22 +1312,6 @@ impl<'a, 'sites> UnitLowerer<'a, 'sites> {
             ConcreteHostExprKind::FlatMap { callback, list, ty } => {
                 self.lower_flat_map(callback, list, ty)
             }
-            ConcreteHostExprKind::WithSeed { seed, body, ty } => {
-                let seed = self.with_site(HostSiteKind::Argument, |lowerer| {
-                    lowerer.lower_expr(seed, None)
-                })?;
-                let seed = self.consume(seed, None)?;
-                let body = self.with_site(HostSiteKind::Argument, |lowerer| {
-                    lowerer.lower_expr(body, tail)
-                })?;
-                let body = self.consume(body, tail)?;
-                self.apply(
-                    ty,
-                    "with_seed".to_string(),
-                    vec![super::ir::OwnershipUse::Move; 2],
-                    vec![seed, body],
-                )
-            }
         }
     }
 
@@ -2516,7 +2500,6 @@ fn expr_type(expr: &ConcreteHostExpr) -> ConcreteHostType {
         | ConcreteHostExprKind::Scan { ty, .. }
         | ConcreteHostExprKind::Partition { ty, .. }
         | ConcreteHostExprKind::FlatMap { ty, .. }
-        | ConcreteHostExprKind::WithSeed { ty, .. }
         | ConcreteHostExprKind::TensorCall { ty, .. }
         | ConcreteHostExprKind::ResultClaimScope { ty, .. }
         | ConcreteHostExprKind::FormalIngress { ty, .. } => ty.clone(),

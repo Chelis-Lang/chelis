@@ -254,8 +254,7 @@ fn grad_dag_checked_impl(
                 }
                 // A key and its i64 seed or index are discrete: nothing a
                 // key operation reads is on the gradient path.
-                RiscOp::DrawKey { .. }
-                | RiscOp::KeyFromSeed
+                RiscOp::KeyFromSeed
                 | RiscOp::Split { .. }
                 | RiscOp::FoldIn
                 | RiscOp::SplitN { .. } => {}
@@ -466,7 +465,7 @@ fn reject_random_selection_parameters(
             RiscOp::UniformBoundAdjoint { .. } => &node.inputs[1..2],
             RiscOp::GuardedFail { .. } => &node.inputs[1..2],
             RiscOp::Where => &node.inputs[1..],
-            RiscOp::Compare(_) | RiscOp::Shape { .. } | RiscOp::DrawKey { .. } => &[],
+            RiscOp::Compare(_) | RiscOp::Shape { .. } => &[],
             _ => &node.inputs,
         };
         reached[node.id.0] = carrying.iter().any(|input| reached[input.0]);
@@ -523,7 +522,6 @@ pub fn risc_op_name(op: &RiscOp) -> &'static str {
         RiscOp::Dropout => "dropout",
         RiscOp::DropoutReplay => "dropout_replay",
         RiscOp::UniformBoundAdjoint { .. } => "uniform_bound_adjoint",
-        RiscOp::DrawKey { .. } => "draw_key",
         RiscOp::KeyFromSeed => "key_from_seed",
         RiscOp::Split { .. } => "split_key",
         RiscOp::FoldIn => "fold_in",
@@ -811,10 +809,9 @@ fn prune_to_requested_outputs(
         // chelis#2368: `Store` and every unconditional effect. grad has its
         // own pruner, separate from `optimize::dead_code_eliminate`, so the
         // seed has to be repeated here — the definition is shared even where
-        // the loop is not. A forward draw key advances its handler whether or
-        // not the pruned gradient reads its key, and a key-sourced draw or a
-        // runtime-count `SplitN` can trap by itself (chelis#2413).
-        if matches!(node.op, RiscOp::Store { .. } | RiscOp::DrawKey { .. })
+        // the loop is not. A draw or a runtime-count `SplitN` can trap by
+        // itself (chelis#2413).
+        if matches!(node.op, RiscOp::Store { .. })
             || node.op.is_unconditional_effect()
             || dag.random_node_may_trap(node)
         {
@@ -1342,11 +1339,9 @@ fn compute_adjoints(
         RiscOp::UniformBoundAdjoint { .. } => None,
         // A key receives no cotangent, so no contribution ever reaches it,
         // and a key operation's i64 seed or index receives none either.
-        RiscOp::DrawKey { .. }
-        | RiscOp::KeyFromSeed
-        | RiscOp::Split { .. }
-        | RiscOp::FoldIn
-        | RiscOp::SplitN { .. } => Some(Vec::new()),
+        RiscOp::KeyFromSeed | RiscOp::Split { .. } | RiscOp::FoldIn | RiscOp::SplitN { .. } => {
+            Some(Vec::new())
+        }
         // --- Reduction ---
         RiscOp::Sum { axis, .. } => {
             // d/dx sum(x, axis) = expand(g, axis, original_size)

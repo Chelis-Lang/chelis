@@ -3,10 +3,8 @@
 //! and [05-OP-8] from the spec text, and against the DAG evaluator.
 mod ownership_support;
 
-use chelis_ir::dag::{
-    Dag, DimInfo, NodeId, RandomDraw, RandomHandler, RiscOp, TensorType, UniformBound,
-};
-use chelis_ir::eval::{RandomFrame, TensorValue, eval_tensor_roots_with_frame};
+use chelis_ir::dag::{Dag, DimInfo, NodeId, RiscOp, TensorType, UniformBound};
+use chelis_ir::eval::{TensorValue, eval_tensor_roots_exact};
 use chelis_types::dtype_semantics::{RawTensor, finalize_tensor};
 use chelis_types::scalar_from_f64;
 use chelis_types::types::Prim;
@@ -19,9 +17,9 @@ fn splitmix64(x: u64) -> u64 {
     z ^ (z >> 31)
 }
 
-fn spec_unit(seed: u64, ordinal: u64, index: u64) -> f64 {
-    let word =
-        splitmix64(seed ^ splitmix64(ordinal).rotate_left(17) ^ splitmix64(index).rotate_left(41));
+/// [05-RNG-1]'s unit value of `word(key, index)`.
+fn spec_unit(key: u64, index: u64) -> f64 {
+    let word = splitmix64(key ^ splitmix64(index).rotate_left(41));
     (word >> 11) as f64 / (1_u64 << 53) as f64
 }
 
@@ -29,13 +27,13 @@ fn stored(prim: Prim, value: f64) -> f64 {
     scalar_from_f64("test", prim, value).unwrap().as_f64_lossy()
 }
 
-fn spec_dropout(prim: Prim, input: &[f64], rate: f64, seed: u64, ordinal: u64) -> Vec<f64> {
+fn spec_dropout(prim: Prim, input: &[f64], rate: f64, key: u64) -> Vec<f64> {
     let rate = stored(prim, rate);
     input
         .iter()
         .enumerate()
         .map(|(i, x)| {
-            let unit = spec_unit(seed, ordinal, i as u64);
+            let unit = spec_unit(key, i as u64);
             let unit = if prim == Prim::F64 {
                 unit
             } else {
@@ -53,10 +51,10 @@ fn spec_dropout(prim: Prim, input: &[f64], rate: f64, seed: u64, ordinal: u64) -
         .collect()
 }
 
-fn spec_uniform(prim: Prim, len: usize, low: f32, high: f32, seed: u64, ordinal: u64) -> Vec<f64> {
+fn spec_uniform(prim: Prim, len: usize, low: f32, high: f32, key: u64) -> Vec<f64> {
     (0..len)
         .map(|i| {
-            let unit = spec_unit(seed, ordinal, i as u64);
+            let unit = spec_unit(key, i as u64);
             if prim == Prim::F64 {
                 (f64::from(high) - f64::from(low)).mul_add(unit, f64::from(low))
             } else {
@@ -84,27 +82,9 @@ fn load(dag: &mut Dag, name: &str, ty: TensorType) -> NodeId {
     dag.add_node(RiscOp::Load { name: name.into() }, vec![], ty, None)
 }
 
-fn key(
-    dag: &mut Dag,
-    seed: NodeId,
-    instance: u32,
-    draw: RandomDraw,
-    dtype: Prim,
-    controls: &[NodeId],
-) -> NodeId {
-    let inputs = std::iter::once(seed)
-        .chain(controls.iter().copied())
-        .collect();
-    dag.add_node(
-        RiscOp::DrawKey {
-            handler: RandomHandler::Scoped { instance },
-            draw,
-            dtype,
-        },
-        inputs,
-        scalar(Prim::Key),
-        None,
-    )
+/// `key_from_seed` of the rank-0 i64 `seed` node.
+fn key(dag: &mut Dag, seed: NodeId) -> NodeId {
+    dag.add_node(RiscOp::KeyFromSeed, vec![seed], scalar(Prim::Key), None)
 }
 
 fn dtype_tag(prim: Prim) -> (&'static str, usize) {
@@ -211,11 +191,7 @@ fn run_eval(dag: &Dag, inputs: &[(&str, Prim, Vec<usize>, Vec<f64>)]) -> Vec<Vec
             )
         })
         .collect::<UnordMap<_, _>>();
-    let out =
-        eval_tensor_roots_with_frame(dag, dag.roots(), &mut RandomFrame::unhandled(), |name| {
-            values.get(name).cloned()
-        })
-        .unwrap();
+    let out = eval_tensor_roots_exact(dag, dag.roots(), |name| values.get(name).cloned()).unwrap();
     dag.roots()
         .iter()
         .map(|root| {
@@ -230,7 +206,7 @@ fn run_eval(dag: &Dag, inputs: &[(&str, Prim, Vec<usize>, Vec<f64>)]) -> Vec<Vec
 }
 
 #[test]
-fn scoped_runtime_controls_match_the_spec_in_c_and_eval() {
+fn seeded_runtime_controls_match_the_spec_in_c_and_eval() {
     for prim in [Prim::F16, Prim::Bf16, Prim::F32, Prim::F64] {
         for (seed, len) in [(7_i64, 13_usize), (-1, 1), (42, 0)] {
             let mut dag = Dag::new();
@@ -244,21 +220,14 @@ fn scoped_runtime_controls_match_the_spec_in_c_and_eval() {
                 scalar(Prim::Int64),
                 None,
             );
-            let dropout_key = key(&mut dag, seed_node, 0, RandomDraw::Dropout, prim, &[rate]);
+            let dropout_key = key(&mut dag, seed_node);
             let dropped = dag.add_node(
                 RiscOp::Dropout,
                 vec![x, rate, dropout_key],
                 tensor(prim, len),
                 None,
             );
-            let uniform_key = key(
-                &mut dag,
-                seed_node,
-                0,
-                RandomDraw::UniformLike,
-                prim,
-                &[low, high],
-            );
+            let uniform_key = key(&mut dag, seed_node);
             let sampled = dag.add_node(
                 RiscOp::UniformLike,
                 vec![x, low, high, uniform_key],
@@ -280,11 +249,11 @@ fn scoped_runtime_controls_match_the_spec_in_c_and_eval() {
             ];
             let seed_bits = seed as u64;
             let expected = vec![
-                spec_dropout(prim, &stored_data, 0.3125, seed_bits, 0)
+                spec_dropout(prim, &stored_data, 0.3125, seed_bits)
                     .into_iter()
                     .map(|value| storage_bits(prim, value))
                     .collect::<Vec<_>>(),
-                spec_uniform(prim, len, -2.5, 0.75, seed_bits, 1)
+                spec_uniform(prim, len, -2.5, 0.75, seed_bits)
                     .into_iter()
                     .map(|value| storage_bits(prim, value))
                     .collect::<Vec<_>>(),
@@ -319,21 +288,14 @@ fn native_replay_and_bound_adjoints_match_eval() {
             scalar(Prim::Int64),
             None,
         );
-        let dropout_key = key(&mut dag, seed, 1, RandomDraw::Dropout, prim, &[rate]);
+        let dropout_key = key(&mut dag, seed);
         let dropped = dag.add_node(
             RiscOp::Dropout,
             vec![x, rate, dropout_key],
             tensor(prim, len),
             None,
         );
-        let uniform_key = key(
-            &mut dag,
-            seed,
-            1,
-            RandomDraw::UniformLike,
-            prim,
-            &[low, high],
-        );
+        let uniform_key = key(&mut dag, seed);
         let sampled = dag.add_node(
             RiscOp::UniformLike,
             vec![x, low, high, uniform_key],
@@ -393,85 +355,4 @@ fn native_replay_and_bound_adjoints_match_eval() {
         let eval = run_eval(&backward, &inputs);
         assert_eq!(run_c(backward, &inputs), eval, "{prim:?}");
     }
-}
-
-#[test]
-fn a_public_entry_refuses_an_inherited_draw_key() {
-    let mut dag = Dag::new();
-    let x = load(&mut dag, "x", tensor(Prim::F32, 2));
-    let rate = dag.add_node(
-        RiscOp::synth_const(Prim::F32, 0.5),
-        vec![],
-        scalar(Prim::F32),
-        None,
-    );
-    let draw = dag.add_node(
-        RiscOp::DrawKey {
-            handler: RandomHandler::Inherited,
-            draw: RandomDraw::Dropout,
-            dtype: Prim::F32,
-        },
-        vec![rate],
-        scalar(Prim::Key),
-        None,
-    );
-    let out = dag.add_node(
-        RiscOp::Dropout,
-        vec![x, rate, draw],
-        tensor(Prim::F32, 2),
-        None,
-    );
-    dag.add_root(out);
-    let verified = chelis_ir::ownership::lower_dag_ownership(dag)
-        .and_then(chelis_ir::ownership::verify_ownership)
-        .unwrap();
-    let Err(error) = chelis_backend_c::codegen(verified, "sample") else {
-        panic!("a public entry emitted an inherited draw");
-    };
-    assert!(
-        error
-            .to_string()
-            .contains("cannot receive inherited Random"),
-        "{error}"
-    );
-}
-
-#[test]
-fn native_controls_validate_before_the_scoped_counter_moves() {
-    let mut dag = Dag::new();
-    let x = load(&mut dag, "x", tensor(Prim::F32, 3));
-    let rate = load(&mut dag, "rate", scalar(Prim::F32));
-    let seed = dag.add_node(
-        RiscOp::synth_const(Prim::Int64, 3.0),
-        vec![],
-        scalar(Prim::Int64),
-        None,
-    );
-    let draw = key(&mut dag, seed, 0, RandomDraw::Dropout, Prim::F32, &[rate]);
-    let out = dag.add_node(
-        RiscOp::Dropout,
-        vec![x, rate, draw],
-        tensor(Prim::F32, 3),
-        None,
-    );
-    dag.add_root(out);
-    let verified = chelis_ir::ownership::lower_dag_ownership(dag)
-        .and_then(chelis_ir::ownership::verify_ownership)
-        .unwrap();
-    let artifact = chelis_backend_c::codegen(verified, "sample").unwrap();
-    let generated = ownership_support::GeneratedProgram::from_codegen(&artifact);
-    assert!(
-        generated.contains("numeric trap: domain in dropout at f32"),
-        "the key validates its rate with the frozen trap grammar"
-    );
-    let position = |needle: &str| {
-        generated
-            .find(needle)
-            .unwrap_or_else(|| panic!("missing `{needle}`"))
-    };
-    assert!(
-        position("numeric trap: domain in dropout at f32")
-            < position("__chelis_scoped_counter_0++"),
-        "validation precedes the counter advance"
-    );
 }

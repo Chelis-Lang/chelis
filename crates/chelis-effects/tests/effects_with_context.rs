@@ -173,52 +173,43 @@ def leak() -> unit ! {} = lib_check()
     );
 }
 
-/// Parity 5: library has a Random-effecting helper, snippet calls it from a
+/// Parity 5: library has an IO-effecting helper, snippet calls it from a
 /// Test-effecting context. The composed effect row must include BOTH
-/// Random and Test. Acceptance criterion: declared `! {Random,Test}` accepts;
-/// declared `! {Test}` rejects with UnhandledEffect mentioning Random.
+/// IO and Test. Acceptance criterion: declared `! {IO, Test}` accepts;
+/// declared `! {Test}` rejects with UnhandledEffect mentioning IO.
 #[test]
-fn parity_random_lib_helper_under_test_context_composes_both_effects() {
+fn parity_io_lib_helper_under_test_context_composes_both_effects() {
     let library = r#"
-def lib_drop(x: tensor[8, f32]) -> tensor[8, f32] = dropout(x, 0.5)
+def lib_log(x: string) -> string = debug(x)
 "#;
     let snippet_ok = r#"
-def use_drop(t: tensor[8, f32]) -> unit ! {Random, Test} =
-  test_assert(true, "before-drop")
-"#;
-    // Note: Surf doesn't easily let me thread `lib_drop` into the body and
-    // discard, so the snippet uses test_assert + a separate stmt is awkward.
-    // Use a let-binding form instead.
-    let snippet_ok2 = r#"
-def use_drop(t: tensor[8, f32]) -> unit ! {Random, Test} = {
-  y = lib_drop(t)
-  test_assert(true, "after-drop")
+def use_log(t: string) -> unit ! {IO, Test} = {
+  y = lib_log(t)
+  test_assert(true, "after-log")
 }
 "#;
     let snippet_bad = r#"
-def use_drop(t: tensor[8, f32]) -> unit ! {Test} = {
-  y = lib_drop(t)
-  test_assert(true, "after-drop")
+def use_log(t: string) -> unit ! {Test} = {
+  y = lib_log(t)
+  test_assert(true, "after-log")
 }
 "#;
 
-    let _ = snippet_ok; // silence dead
-
-    // Positive: declared {Random, Test} accepts.
+    // Positive: declared {IO, Test} accepts.
     let (typeenv, lib_checked) = build_library_pair(library);
-    let new_ok = build_new_code_checked(&typeenv, snippet_ok2);
+    let new_ok = build_new_code_checked(&typeenv, snippet_ok);
     check_effects_with_context(&lib_checked, &new_ok)
-        .expect("declared {Random,Test} must accept lib_drop + test_assert");
+        .expect("declared {IO,Test} must accept lib_log + test_assert");
 
-    // Negative: declared {Test} rejects with UnhandledEffect mentioning Random.
+    // Negative: declared {Test} rejects with UnhandledEffect mentioning IO.
     let new_bad = build_new_code_checked(&typeenv, snippet_bad);
     let ctx_errors = check_effects_with_context(&lib_checked, &new_bad)
-        .expect_err("declared {Test} must reject lib_drop's Random");
+        .expect_err("declared {Test} must reject lib_log's IO");
     assert!(
         ctx_errors
             .iter()
-            .any(|e| e.kind == EffectErrorKind::UnhandledEffect && e.message.contains("Random")),
-        "expected UnhandledEffect mentioning Random, got {ctx_errors:?}"
+            .any(|e| e.kind == EffectErrorKind::UnhandledEffect && e.message.contains("IO")),
+        "expected UnhandledEffect mentioning IO, got {ctx_errors:?}"
     );
 
     // Monolithic parity (negative case): same rejection.
@@ -228,8 +219,8 @@ def use_drop(t: tensor[8, f32]) -> unit ! {Test} = {
     assert!(
         mono_errors
             .iter()
-            .any(|e| e.kind == EffectErrorKind::UnhandledEffect && e.message.contains("Random")),
-        "monolithic must also flag Random, got {mono_errors:?}"
+            .any(|e| e.kind == EffectErrorKind::UnhandledEffect && e.message.contains("IO")),
+        "monolithic must also flag IO, got {mono_errors:?}"
     );
 }
 

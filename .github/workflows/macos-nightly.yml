@@ -213,7 +213,7 @@ jobs:
 
       - name: Clippy macOS solver-free features
         if: matrix.shard == 1
-        run: cargo clippy --workspace --all-targets --features chelis-backend-c/sleef,chelis-compiler-api/compilation-trace,chelis-compiler-api/native-random-observer,chelis-e2e/hip-local-gpu,chelis-ir/lowering-trace,chelis-prove/clarabel,chelis-python/extension-module,chelis-runtime/ownership-ledger,chelis-types/checkpoint-compile-probe,chelis-types/generalize-sweep-oracle -- -D warnings
+        run: cargo clippy --workspace --all-targets --features chelis-backend-c/sleef,chelis-compiler-api/compilation-trace,chelis-e2e/hip-local-gpu,chelis-ir/lowering-trace,chelis-prove/clarabel,chelis-python/extension-module,chelis-runtime/ownership-ledger,chelis-types/checkpoint-compile-probe,chelis-types/generalize-sweep-oracle -- -D warnings
 
       - name: Verify packaged binary architecture
         if: matrix.shard == 2

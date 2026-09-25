@@ -801,7 +801,6 @@ fn node_has_contiguous_matrix_slices(dag: &Dag, id: NodeId, matrix_rank: usize) 
         | RiscOp::Dropout
         | RiscOp::DropoutReplay
         | RiscOp::UniformBoundAdjoint { .. }
-        | RiscOp::DrawKey { .. }
         | RiscOp::KeyFromSeed
         | RiscOp::Split { .. }
         | RiscOp::FoldIn

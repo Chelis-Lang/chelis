@@ -1273,13 +1273,11 @@ pub enum WireInferredPrecision {
 /// Internally tagged on `kind`. The `kind` discriminant is the
 /// lowercase spelling; `Resource` additionally carries its `device`
 /// string. Consumers that want the human Display spelling
-/// (`Random`/`Accum`/`IO`/`Test`/`Resource("dev")`) can reconstruct it
+/// (`Accum`/`IO`/`Test`/`Resource("dev")`) can reconstruct it
 /// from `kind` + `device`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum WireInferredEffect {
-    /// `Effect::Random`.
-    Random,
     /// `Effect::Accum`.
     Accum,
     /// `Effect::Io`.
@@ -1802,11 +1800,6 @@ pub enum WireSurfExpr {
         expr: Box<WireSurfExpr>,
         span: Span,
     },
-    WithSeed {
-        seed: Box<WireSurfExpr>,
-        body: Box<WireSurfExpr>,
-        span: Span,
-    },
     WithDevice {
         device: Box<WireSurfExpr>,
         body: Box<WireSurfExpr>,
@@ -2105,7 +2098,7 @@ pub struct WireRecordPatternField {
 /// - `17`: random primitives take their controls and a key as operands
 ///   (chelis#2413). `UniformLike` and `Dropout` carry no fields; their inputs
 ///   are the data or template, the controls, the key and an optional Bool
-///   activation. `DrawKey` produces each key, `DropoutReplay` and
+///   activation. The bridge `DrawKey` produced each key, `DropoutReplay` and
 ///   `UniformBoundAdjoint` read a forward draw's key, and `key` is a
 ///   structural precision with no literal carrier. A version-16 random node's
 ///   baked controls and seed have no version-17 spelling.
@@ -2116,7 +2109,11 @@ pub struct WireRecordPatternField {
 ///   controls and activation shaped like a leading part of the batch. A
 ///   version-17 graph holds no key operation and is rejected like every
 ///   other earlier version.
-pub const WIRE_DAG_SCHEMA_VERSION: u32 = 18;
+/// - `19`: the counter-stream bridge `DrawKey` is deleted with the `with
+///   seed` handler (chelis#2413); a key comes only from a key operation or a
+///   key-typed `Load`. A version-18 graph may hold a `DrawKey`, which has no
+///   version-19 spelling, so it is rejected like every other earlier version.
+pub const WIRE_DAG_SCHEMA_VERSION: u32 = 19;
 
 /// A typed failure from validating a serialized [`WireDag`] against the
 /// supported schema version (WI-2). This is deliberately its own error
@@ -3427,7 +3424,6 @@ fn wire_axis_origin(
             }),
         WireRiscOp::Shape { .. }
         | WireRiscOp::UniformBoundAdjoint { .. }
-        | WireRiscOp::DrawKey { .. }
         | WireRiscOp::ExtentWitness { .. }
         | WireRiscOp::CheckedReshapeExtent { .. }
         | WireRiscOp::Sum { .. }
@@ -3711,24 +3707,6 @@ pub enum WireKeyBranch {
     Right,
 }
 
-/// The handler whose stream a `DrawKey` reads: the stream the graph's caller
-/// holds, or a `with seed` region lowered inside the graph. `instance` is an
-/// opaque region identity, not a count or a numeric value.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
-pub enum WireRandomHandler {
-    Inherited,
-    Scoped { instance: u32 },
-}
-
-/// The random primitive whose controls a `DrawKey` validates.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum WireRandomDraw {
-    Dropout,
-    UniformLike,
-}
-
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum WireExtremaKind {
@@ -3873,15 +3851,6 @@ pub enum WireRiscOp {
     /// forward `UniformLike`'s key without consuming it.
     UniformBoundAdjoint {
         bound: WireUniformBound,
-    },
-    /// The counter-stream bridge: the key of `handler`'s next `[05-RNG-1]`
-    /// ordinal for a `draw` of dtype `dtype`. Inputs are the rank-zero `int64`
-    /// literal seed when the handler is scoped, then the draw's controls,
-    /// then optionally one rank-zero Bool activation.
-    DrawKey {
-        handler: WireRandomHandler,
-        draw: WireRandomDraw,
-        dtype: String,
     },
     /// `[05-OP-69]`. Input is one `int64` tensor; the output is the `key`
     /// tensor of the same shape.

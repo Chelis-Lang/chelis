@@ -478,7 +478,7 @@ mod tests {
     /// a stale `Atom::Name` tag match can never half-work again.
     #[test]
     fn parsed_trees_carry_no_raw_vocabulary_tag_strings() {
-        let source = "(module {} m\n  (defsig {} f (t-fn {} (t-prim {} f32) (t-prim {} f32)))\n  (deftype {opaque: true, invariant: (fn {} (params {} p) (app {} (var {} gte) (access {} (var {} p) value) (lit {type: (t-prim {} f32)} 0.0)))} T () (variant {} T (field {} value (t-prim {} f32))))\n  (def {} f (fn {} (params {} (x {type: (t-prim {} f32)})) (handle-effect {effect: random} (lit {type: (t-prim {} i64)} 42) (var {} x)))))";
+        let source = "(module {} m\n  (defsig {} f (t-fn {} (t-prim {} f32) (t-prim {} f32)))\n  (deftype {opaque: true, invariant: (fn {} (params {} p) (app {} (var {} gte) (access {} (var {} p) value) (lit {type: (t-prim {} f32)} 0.0)))} T () (variant {} T (field {} value (t-prim {} f32))))\n  (def {} f (fn {} (params {} (x {type: (t-prim {} f32)})) (handle-effect {effect: resource} (lit {} \"gpu:0\") (var {} x)))))";
         let exprs = crate::parser::parse_str(source).expect("deep parses");
         assert_eq!(
             find_raw_vocabulary_tag(&exprs),

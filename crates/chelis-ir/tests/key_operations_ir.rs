@@ -10,10 +10,10 @@
 //! key rules V1 to V5, `grad`, the optimizer, and `vmap`.
 
 use chelis_ir::dag::{
-    Dag, DimInfo, KeyBranch, LogicalKind, NodeId, RandomDraw, RandomHandler, RiscOp, RtDim,
-    TensorType, UniformBound, record_runtime_dim_shape_deps,
+    Dag, DimInfo, KeyBranch, LogicalKind, NodeId, RiscOp, RtDim, TensorType, UniformBound,
+    record_runtime_dim_shape_deps,
 };
-use chelis_ir::eval::{RandomFrame, TensorValue, eval_tensor_roots_with_frame};
+use chelis_ir::eval::{TensorValue, eval_tensor_roots_exact};
 use chelis_ir::grad::grad_dag_checked;
 use chelis_ir::optimize::{common_subexpr_eliminate, constant_fold, dead_code_eliminate};
 use chelis_ir::verify::verify;
@@ -173,10 +173,7 @@ fn build_chain(dag: &mut Dag) -> Chain {
 
 fn run(dag: &Dag, inputs: &UnordMap<&str, TensorValue>) -> UnordMap<NodeId, TensorValue> {
     assert_eq!(verify(dag), Vec::<String>::new());
-    eval_tensor_roots_with_frame(dag, dag.roots(), &mut RandomFrame::unhandled(), |name| {
-        inputs.get(name).cloned()
-    })
-    .unwrap()
+    eval_tensor_roots_exact(dag, dag.roots(), |name| inputs.get(name).cloned()).unwrap()
 }
 
 fn stored_bits(value: &TensorValue) -> Vec<u64> {
@@ -442,12 +439,7 @@ fn per_row_controls_and_activations_select_each_row_independently() {
             ),
         ),
     ]);
-    assert!(
-        eval_tensor_roots_with_frame(&dag, dag.roots(), &mut RandomFrame::unhandled(), |n| bad
-            .get(n)
-            .cloned())
-        .is_ok()
-    );
+    assert!(eval_tensor_roots_exact(&dag, dag.roots(), |n| bad.get(n).cloned()).is_ok());
     let trapping = UnordMap::from_iter([
         ("x", floats(prim, vec![3, 4], row.repeat(3))),
         ("rates", floats(prim, vec![3], vec![0.5, 2.0, 0.5])),
@@ -460,53 +452,32 @@ fn per_row_controls_and_activations_select_each_row_independently() {
         ),
     ]);
     let error =
-        eval_tensor_roots_with_frame(&dag, dag.roots(), &mut RandomFrame::unhandled(), |n| {
-            trapping.get(n).cloned()
-        })
-        .unwrap_err();
+        eval_tensor_roots_exact(&dag, dag.roots(), |n| trapping.get(n).cloned()).unwrap_err();
     assert!(error.contains("dropout"), "{error}");
 }
 
 #[test]
 fn a_key_load_draws_with_its_bits_and_refuses_raw_ingress() {
-    // Oracle (c), eval lane: a draw keyed by a loaded key with bits
-    // ofDrawKey(s, c) equals the counter-stream draw of seed s, ordinal c.
-    for (seed, ordinal) in [(7i64, 0u64), (7, 1), (-1, 0), (0, 3)] {
+    // Oracle (c), eval lane: a draw keyed by a loaded key draws with the
+    // loaded bits, the same draw as `key_from_seed` of those bits.
+    for seed in [7i64, -1, 0, i64::MAX] {
         for prim in FLOATS {
             let row: Vec<f64> = (1..=6).map(f64::from).collect();
-            let mut counter = Dag::new();
-            let x = load(&mut counter, "x", &[6], prim);
-            let rate = float_const(&mut counter, prim, 0.3);
-            let seed_node = i64_const(&mut counter, seed);
-            // Draws in node order take ordinals 0, 1, ...; the last one here
-            // takes ordinal `ordinal`, and the earlier ones are roots too.
-            let mut drawn = x;
-            for index in 0..=ordinal {
-                let key = node(
-                    &mut counter,
-                    RiscOp::DrawKey {
-                        handler: RandomHandler::Scoped { instance: 0 },
-                        draw: RandomDraw::Dropout,
-                        dtype: prim,
-                    },
-                    vec![seed_node, rate],
-                    &[],
-                    Prim::Key,
-                );
-                drawn = node(
-                    &mut counter,
-                    RiscOp::Dropout,
-                    vec![x, rate, key],
-                    &[6],
-                    prim,
-                );
-                if index < ordinal {
-                    counter.add_root(drawn);
-                }
-            }
-            counter.add_root(drawn);
+            let mut seeded = Dag::new();
+            let x = load(&mut seeded, "x", &[6], prim);
+            let rate = float_const(&mut seeded, prim, 0.3);
+            let seed_node = i64_const(&mut seeded, seed);
+            let key = node(
+                &mut seeded,
+                RiscOp::KeyFromSeed,
+                vec![seed_node],
+                &[],
+                Prim::Key,
+            );
+            let drawn = node(&mut seeded, RiscOp::Dropout, vec![x, rate, key], &[6], prim);
+            seeded.add_root(drawn);
             let inputs = UnordMap::from_iter([("x", floats(prim, vec![6], row.clone()))]);
-            let counter_bits = stored_bits(&run(&counter, &inputs)[&drawn]);
+            let seeded_bits = stored_bits(&run(&seeded, &inputs)[&drawn]);
 
             let mut keyed = Dag::new();
             let x = load(&mut keyed, "x", &[6], prim);
@@ -514,15 +485,16 @@ fn a_key_load_draws_with_its_bits_and_refuses_raw_ingress() {
             let key = load(&mut keyed, "k", &[], Prim::Key);
             let drawn = node(&mut keyed, RiscOp::Dropout, vec![x, rate, key], &[6], prim);
             keyed.add_root(drawn);
-            let bridge = RandomKey::from_counter(seed as u64, ordinal);
+            let loaded =
+                RandomKey::from_seed(scalar_from_i64("test", Prim::Int64, seed).unwrap()).unwrap();
             let inputs = UnordMap::from_iter([
                 ("x", floats(prim, vec![6], row.clone())),
-                ("k", keys_value(vec![], vec![bridge])),
+                ("k", keys_value(vec![], vec![loaded])),
             ]);
             assert_eq!(
                 stored_bits(&run(&keyed, &inputs)[&drawn]),
-                counter_bits,
-                "seed {seed} ordinal {ordinal} {prim:?}"
+                seeded_bits,
+                "seed {seed} {prim:?}"
             );
         }
     }
@@ -538,14 +510,11 @@ fn a_key_load_draws_with_its_bits_and_refuses_raw_ingress() {
         Prim::F32,
     );
     dag.add_root(drawn);
-    let error =
-        eval_tensor_roots_with_frame(&dag, dag.roots(), &mut RandomFrame::unhandled(), |name| {
-            match name {
-                "x" => Some(floats(Prim::F32, vec![2], vec![1.0, 2.0])),
-                _ => Some(TensorValue::scalar(7.0)),
-            }
-        })
-        .unwrap_err();
+    let error = eval_tensor_roots_exact(&dag, dag.roots(), |name| match name {
+        "x" => Some(floats(Prim::F32, vec![2], vec![1.0, 2.0])),
+        _ => Some(TensorValue::scalar(7.0)),
+    })
+    .unwrap_err();
     assert!(error.contains("no raw numeric ingress"), "{error}");
 }
 
@@ -569,13 +538,12 @@ fn a_negative_runtime_split_count_traps_and_zero_is_empty() {
         );
         dag.add_root(rows);
         assert_eq!(verify(&dag), Vec::<String>::new());
-        let result =
-            eval_tensor_roots_with_frame(&dag, dag.roots(), &mut RandomFrame::unhandled(), |_| {
-                Some(TensorValue::from_storage(
-                    vec![],
-                    finalize_tensor("test", Prim::Int64, RawTensor::Int(vec![count])).unwrap(),
-                ))
-            });
+        let result = eval_tensor_roots_exact(&dag, dag.roots(), |_| {
+            Some(TensorValue::from_storage(
+                vec![],
+                finalize_tensor("test", Prim::Int64, RawTensor::Int(vec![count])).unwrap(),
+            ))
+        });
         match ok {
             false => assert_eq!(
                 result.unwrap_err(),
@@ -656,9 +624,7 @@ fn eval_split(dag: &Dag, count: i64) -> Result<UnordMap<NodeId, TensorValue>, St
         ),
         ("d", floats(Prim::F32, vec![4, 2], vec![1.0; 8])),
     ]);
-    eval_tensor_roots_with_frame(dag, dag.roots(), &mut RandomFrame::unhandled(), |name| {
-        inputs.get(name).cloned()
-    })
+    eval_tensor_roots_exact(dag, dag.roots(), |name| inputs.get(name).cloned())
 }
 
 /// A count that disagrees with its declared, elsewhere-bound axis traps
@@ -746,9 +712,7 @@ fn a_split_whose_declared_leading_axis_disagrees_with_its_key_traps() {
             ("k", keys_value(vec![3], vec![one; 3])),
             ("e", floats(Prim::F32, vec![b], vec![0.0; b])),
         ]);
-        eval_tensor_roots_with_frame(&dag, dag.roots(), &mut RandomFrame::unhandled(), |name| {
-            inputs.get(name).cloned()
-        })
+        eval_tensor_roots_exact(&dag, dag.roots(), |name| inputs.get(name).cloned())
     };
     let error = run(2).unwrap_err();
     assert!(
@@ -781,10 +745,9 @@ fn a_discarded_key_sourced_draw_with_an_invalid_rate_still_traps() {
         let out = node(&mut dag, RiscOp::Neg, vec![x], &[4], Prim::F32);
         dag.add_root(out);
         assert_eq!(verify(&dag), Vec::<String>::new());
-        let result =
-            eval_tensor_roots_with_frame(&dag, &[out], &mut RandomFrame::unhandled(), |_| {
-                Some(floats(Prim::F32, vec![4], vec![1.0, 2.0, 3.0, 4.0]))
-            });
+        let result = eval_tensor_roots_exact(&dag, &[out], |_| {
+            Some(floats(Prim::F32, vec![4], vec![1.0, 2.0, 3.0, 4.0]))
+        });
         assert_eq!(result.is_err(), traps, "rate {rate}: {result:?}");
         if traps {
             assert!(
@@ -796,10 +759,9 @@ fn a_discarded_key_sourced_draw_with_an_invalid_rate_still_traps() {
 }
 
 /// Dead-code elimination keeps exactly the random nodes that can trap by
-/// themselves: a key-sourced draw and a runtime-count `SplitN`. A draw keyed
-/// by a `DrawKey` leaves its trap to that `DrawKey`, and a literal-count
-/// `SplitN` and a `FoldIn` cannot trap, so all three are removed when dead.
-/// The verifier draws the same line: only those three are dangling.
+/// themselves: a draw and a runtime-count `SplitN`. A literal-count `SplitN`
+/// and a `FoldIn` cannot trap, so both are removed when dead. The verifier
+/// draws the same line: only those two are dangling.
 #[test]
 fn dead_code_elimination_keeps_only_the_random_nodes_that_can_trap() {
     let mut dag = Dag::new();
@@ -845,24 +807,6 @@ fn dead_code_elimination_keeps_only_the_random_nodes_that_can_trap() {
         &[],
         Prim::Key,
     );
-    let drawn = node(
-        &mut dag,
-        RiscOp::DrawKey {
-            handler: RandomHandler::Inherited,
-            draw: RandomDraw::Dropout,
-            dtype: Prim::F32,
-        },
-        vec![rate],
-        &[],
-        Prim::Key,
-    );
-    let bridged = node(
-        &mut dag,
-        RiscOp::Dropout,
-        vec![x, rate, drawn],
-        &[4],
-        Prim::F32,
-    );
     let out = node(&mut dag, RiscOp::Neg, vec![x], &[4], Prim::F32);
     dag.add_root(out);
     let dangling = |id: NodeId| {
@@ -871,10 +815,7 @@ fn dead_code_elimination_keeps_only_the_random_nodes_that_can_trap() {
             id.0
         )
     };
-    assert_eq!(
-        verify(&dag),
-        vec![dangling(literal_split), dangling(fold), dangling(bridged)]
-    );
+    assert_eq!(verify(&dag), vec![dangling(literal_split), dangling(fold)]);
 
     let kept = dead_code_eliminate(&dag);
     assert_eq!(verify(&kept), Vec::<String>::new());
@@ -941,12 +882,9 @@ fn grad_keeps_a_discarded_key_sourced_draw_that_can_trap() {
         "the discarded draw was pruned"
     );
     let gradient = grad.grad_nodes[&x];
-    let result = eval_tensor_roots_with_frame(
-        &grad.dag,
-        &[gradient],
-        &mut RandomFrame::unhandled(),
-        |_| Some(floats(prim, vec![4], vec![1.0, 2.0, 3.0, 4.0])),
-    );
+    let result = eval_tensor_roots_exact(&grad.dag, &[gradient], |_| {
+        Some(floats(prim, vec![4], vec![1.0, 2.0, 3.0, 4.0]))
+    });
     assert!(
         result.unwrap_err().contains("numeric trap: domain"),
         "the retained draw must trap"
@@ -1109,60 +1047,6 @@ fn a_root_and_every_load_of_one_parameter_count_as_uses_of_one_key() {
         dag.add_root(drawn);
     }
     assert_eq!(verify(&dag), Vec::<String>::new());
-}
-
-/// A `DrawKey`'s key is the counter bridge's word for exactly its draw, and
-/// neither lane derives from it or returns it, so only a draw consumes it.
-#[test]
-fn a_draw_keys_key_feeds_only_a_draw() {
-    for consumer in ["split", "fold_in", "split_n", "root"] {
-        let mut dag = Dag::new();
-        let rate = float_const(&mut dag, Prim::F32, 0.5);
-        let bridged = node(
-            &mut dag,
-            RiscOp::DrawKey {
-                handler: RandomHandler::Inherited,
-                draw: RandomDraw::Dropout,
-                dtype: Prim::F32,
-            },
-            vec![rate],
-            &[],
-            Prim::Key,
-        );
-        match consumer {
-            "split" => {
-                let left = split(&mut dag, bridged, KeyBranch::Left);
-                let drawn = draw(&mut dag, left, None);
-                dag.add_root(drawn);
-            }
-            "fold_in" => {
-                let three = i64_const(&mut dag, 3);
-                let folded = node(
-                    &mut dag,
-                    RiscOp::FoldIn,
-                    vec![bridged, three],
-                    &[],
-                    Prim::Key,
-                );
-                let drawn = draw(&mut dag, folded, None);
-                dag.add_root(drawn);
-            }
-            "split_n" => {
-                let rows = node(
-                    &mut dag,
-                    RiscOp::SplitN {
-                        count: RtDim::Lit(4),
-                    },
-                    vec![bridged],
-                    &[4],
-                    Prim::Key,
-                );
-                dag.add_root(rows);
-            }
-            _ => dag.add_root(bridged),
-        }
-        assert_rejected(&dag, "a draw key's key feeds only its draw");
-    }
 }
 
 #[test]
@@ -1373,10 +1257,7 @@ fn eval_roots(dag: &Dag) -> Vec<Vec<u64>> {
             ),
         ),
     ]);
-    let out = eval_tensor_roots_with_frame(dag, dag.roots(), &mut RandomFrame::unhandled(), |n| {
-        inputs.get(n).cloned()
-    })
-    .unwrap();
+    let out = eval_tensor_roots_exact(dag, dag.roots(), |n| inputs.get(n).cloned()).unwrap();
     dag.roots()
         .iter()
         .map(|root| stored_bits(&out[root]))
@@ -2043,7 +1924,9 @@ fn a_key_constant_is_rejected_and_folding_keeps_derivations_symbolic() {
     let constant = node(
         &mut dag,
         RiscOp::Const {
-            value: ScalarValue::from_key(RandomKey::from_counter(7, 0)),
+            value: ScalarValue::from_key(
+                RandomKey::from_seed(scalar_from_i64("test", Prim::Int64, 7).unwrap()).unwrap(),
+            ),
         },
         vec![],
         &[],
@@ -2051,10 +1934,7 @@ fn a_key_constant_is_rejected_and_folding_keeps_derivations_symbolic() {
     );
     let drawn = draw(&mut dag, constant, None);
     dag.add_root(drawn);
-    assert_rejected(
-        &dag,
-        "only a key operation, a draw key or a Load produces one",
-    );
+    assert_rejected(&dag, "only a key operation or a Load produces one");
 
     // Constant folding over literal seeds and indices leaves every key
     // operation in place, and CSE merges no two of them.
@@ -2115,11 +1995,10 @@ fn a_key_takes_no_cotangent_and_grad_replays_the_forward_key() {
     assert_eq!(verify(&grads), Vec::<String>::new());
     let gradient = grad.grad_nodes[&x];
     let row = vec![1.0, 2.0, 3.0, 4.0];
-    let out =
-        eval_tensor_roots_with_frame(&grads, &[gradient], &mut RandomFrame::unhandled(), |_| {
-            Some(floats(prim, vec![4], row.clone()))
-        })
-        .unwrap();
+    let out = eval_tensor_roots_exact(&grads, &[gradient], |_| {
+        Some(floats(prim, vec![4], row.clone()))
+    })
+    .unwrap();
     // d/dx sum(dropout(x)) keeps G's pattern with scale 1/(1-0.5) = 2.
     let expected: Vec<f64> = DROPOUT_KEPT[3]
         .iter()
@@ -2256,13 +2135,8 @@ fn vmap_maps_key_rows_and_splits_every_row() {
         ("k2", keys_value(vec![3], s.clone())),
         ("x", floats(prim, vec![3, 4], row.repeat(3))),
     ]);
-    let out = eval_tensor_roots_with_frame(
-        &batched,
-        batched.roots(),
-        &mut RandomFrame::unhandled(),
-        |name| inputs.get(name).cloned(),
-    )
-    .unwrap();
+    let out = eval_tensor_roots_exact(&batched, batched.roots(), |name| inputs.get(name).cloned())
+        .unwrap();
     let drawn_rows = out[&batched.roots()[0]].to_f64_lossy_vec();
     let split_rows = &out[&batched.roots()[1]];
     assert_eq!(split_rows.shape, vec![3, 2]);
@@ -2298,7 +2172,7 @@ fn vmap_maps_key_rows_and_splits_every_row() {
 }
 
 #[test]
-fn vmap_refuses_to_broadcast_a_captured_key_or_a_draw_key() {
+fn vmap_refuses_to_broadcast_a_captured_key() {
     let mut dag = Dag::new();
     let key = load(&mut dag, "k", &[], Prim::Key);
     let drawn = draw(&mut dag, key, None);
@@ -2307,31 +2181,6 @@ fn vmap_refuses_to_broadcast_a_captured_key_or_a_draw_key() {
     let error = chelis_ir::vmap::vectorize_axis0_with_captures(&dag, DimInfo::Lit(3), &captured)
         .unwrap_err();
     assert!(error.contains("captured key"), "{error}");
-
-    let mut dag = Dag::new();
-    let x = load(&mut dag, "x", &[4], Prim::F32);
-    let rate = float_const(&mut dag, Prim::F32, 0.5);
-    let key = node(
-        &mut dag,
-        RiscOp::DrawKey {
-            handler: RandomHandler::Inherited,
-            draw: RandomDraw::Dropout,
-            dtype: Prim::F32,
-        },
-        vec![rate],
-        &[],
-        Prim::Key,
-    );
-    let drawn = node(
-        &mut dag,
-        RiscOp::Dropout,
-        vec![x, rate, key],
-        &[4],
-        Prim::F32,
-    );
-    dag.add_root(drawn);
-    let error = vectorize_axis0(&dag, DimInfo::Lit(3)).unwrap_err();
-    assert!(error.contains("draw key"), "{error}");
 }
 
 #[test]
@@ -2414,6 +2263,61 @@ fn a_batched_uniform_bound_adjoint_sums_shared_bounds_and_splits_per_row_bounds(
         } else {
             let all: Vec<f32> = (0..3).flat_map(row_units).collect();
             assert_eq!(actual, vec![f64::from(pair_sum(&all))]);
+        }
+    }
+}
+
+/// `dropout(key_from_seed(42i64), x, rate)` over `x = [1; count]` through
+/// lowering and the DAG evaluator.
+fn lowered_dropout(rate: f64, count: usize) -> Result<Vec<f64>, String> {
+    let source = format!(
+        "(app {{}} (var {{}} dropout) \
+         (app {{}} (var {{}} key_from_seed) (lit {{type: (t-prim {{}} i64)}} 42)) \
+         (var {{}} x) (lit {{type: (t-prim {{}} f32)}} {rate:?}))"
+    );
+    let expression = chelis_deep::parser::parse_str(&source)
+        .unwrap()
+        .pop()
+        .unwrap();
+    let inputs = UnordMap::from_iter([(
+        "x".to_string(),
+        TensorType {
+            dims: vec![DimInfo::Lit(count)],
+            precision: Prim::F32,
+        },
+    )]);
+    let dag = chelis_ir::lower::try_lower_subexpr_program(
+        &expression,
+        inputs,
+        UnordMap::new(),
+        UnordMap::new(),
+    )
+    .unwrap();
+    let values = eval_tensor_roots_exact(&dag, dag.roots(), |name| {
+        (name == "x").then(|| TensorValue::from_vec(vec![count], vec![1.0; count]))
+    })?;
+    Ok(values[&dag.roots()[0]].to_f64_lossy_vec())
+}
+
+/// [05-OP-37]: a zero rate keeps every element, at empty and nonempty
+/// shapes.
+#[test]
+fn zero_rate_dropout_is_an_identity_at_empty_and_nonempty_shapes() {
+    for count in [0, 1, 32] {
+        assert_eq!(lowered_dropout(0.0, count).unwrap(), vec![1.0; count]);
+    }
+}
+
+/// [05-OP-37]: a rate outside `[0, 1)` traps even when the tensor is empty.
+#[test]
+fn invalid_dropout_rates_trap_even_when_the_tensor_is_empty() {
+    for rate in [-0.5, 1.0, 2.0] {
+        for count in [0, 1, 32] {
+            let error = lowered_dropout(rate, count).unwrap_err();
+            assert_eq!(
+                error, "numeric trap: domain in dropout at f32",
+                "rate={rate:?}, count={count}"
+            );
         }
     }
 }

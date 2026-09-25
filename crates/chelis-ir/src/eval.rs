@@ -34,8 +34,8 @@ use chelis_types::dtype_semantics::{
     tensor_from_scalars,
 };
 use chelis_types::dtype_semantics::{
-    DropoutParameters, PreparedDropout, UniformLikeParameters, fold_in_storage,
-    key_from_seed_storage, split_key_storage, split_keys_storage, uniform_like_bound_adjoint_rows,
+    PreparedDropout, fold_in_storage, key_from_seed_storage, split_key_storage, split_keys_storage,
+    uniform_like_bound_adjoint_rows,
 };
 use chelis_types::types::Prim;
 use chelis_types::{PreparedUniformLike, RandomKey, uniform_like_bound_adjoint};
@@ -443,63 +443,6 @@ fn cast_trunc_value(input: &TensorValue, dst: Prim) -> Result<TensorValue, Strin
     Ok(TensorValue::from_storage(input.shape.clone(), storage))
 }
 
-/// The Random handler state one graph evaluation reads through its
-/// [`RiscOp::DrawKey`] nodes (`spec/design/randomness_counter_stream.md` §2):
-/// the stream the caller holds, if any, and the next ordinal of each scoped
-/// handler region lowered inside the graph.
-///
-/// A caller builds one frame per invocation. A graph run in several segments
-/// passes the same frame to each, so its scoped counters survive the cuts; the
-/// caller reads the inherited stream's next ordinal back afterwards.
-#[derive(Debug, Clone, Default)]
-pub struct RandomFrame {
-    inherited: Option<(u64, u64)>,
-    scoped: std::collections::BTreeMap<u32, u64>,
-}
-
-impl RandomFrame {
-    /// A frame with no inherited handler: only scoped draws can take keys.
-    pub fn unhandled() -> Self {
-        Self::default()
-    }
-
-    /// A frame inheriting the handler with `seed` bits at next ordinal
-    /// `counter`.
-    pub fn inherited(seed: u64, counter: u64) -> Self {
-        Self {
-            inherited: Some((seed, counter)),
-            scoped: std::collections::BTreeMap::new(),
-        }
-    }
-
-    /// The inherited handler's next ordinal, after the draws a graph took.
-    pub fn inherited_counter(&self) -> Option<u64> {
-        self.inherited.map(|(_, counter)| counter)
-    }
-
-    fn draw(
-        &mut self,
-        handler: crate::dag::RandomHandler,
-        scoped_seed: Option<u64>,
-    ) -> Result<RandomKey, String> {
-        let (seed, counter) = match (handler, scoped_seed) {
-            (crate::dag::RandomHandler::Inherited, None) => {
-                let (seed, counter) = self.inherited.as_mut().ok_or(
-                    "draw key: an inherited Random draw has no active handler in this evaluation",
-                )?;
-                (*seed, counter)
-            }
-            (crate::dag::RandomHandler::Scoped { instance }, Some(seed)) => {
-                (seed, self.scoped.entry(instance).or_insert(0))
-            }
-            _ => return Err("draw key: handler and seed operand disagree".into()),
-        };
-        let key = RandomKey::from_counter(seed, *counter);
-        *counter = counter.wrapping_add(1);
-        Ok(key)
-    }
-}
-
 /// Read a rank-0 value's one scalar.
 fn rank0_scalar(value: &TensorValue, what: &str) -> Result<chelis_types::ScalarValue, String> {
     if !value.shape.is_empty() || value.len() != 1 {
@@ -513,53 +456,6 @@ fn rank0_bool(value: &TensorValue, what: &str) -> Result<bool, String> {
         Some(bits) if value.prim() == Prim::Bool => Ok(bits != 0),
         _ => Err(format!("{what} is not a rank-0 Bool")),
     }
-}
-
-/// Evaluate one [`RiscOp::DrawKey`]: when active, validate the draw's controls
-/// and only then take the handler's next key; when inactive, neither.
-fn eval_draw_key(
-    node: &DagNode,
-    values: &UnordMap<NodeId, TensorValue>,
-    frame: &mut RandomFrame,
-) -> Result<Option<RandomKey>, String> {
-    let RiscOp::DrawKey {
-        handler,
-        draw,
-        dtype,
-    } = &node.op
-    else {
-        unreachable!("eval_draw_key evaluates only draw keys");
-    };
-    let value = |slot: usize| {
-        node.inputs
-            .get(slot)
-            .and_then(|input| values.get(input))
-            .ok_or_else(|| format!("draw key at node {}: missing input {slot}", node.id.0))
-    };
-    let seed_slots = usize::from(matches!(handler, crate::dag::RandomHandler::Scoped { .. }));
-    let active_slot = seed_slots + draw.control_count();
-    if node.inputs.len() > active_slot && !rank0_bool(value(active_slot)?, "draw key activation")? {
-        return Ok(None);
-    }
-    let control = |slot: usize| rank0_scalar(value(seed_slots + slot)?, "random control");
-    match draw {
-        crate::dag::RandomDraw::Dropout => {
-            DropoutParameters::new(*dtype, control(0)?).map_err(|error| error.to_string())?;
-        }
-        crate::dag::RandomDraw::UniformLike => {
-            UniformLikeParameters::new(*dtype, control(0)?, control(1)?)
-                .map_err(|error| error.to_string())?;
-        }
-    }
-    let scoped_seed = if seed_slots == 1 {
-        let seed = rank0_scalar(value(0)?, "scoped Random seed")?
-            .as_i64_exact()
-            .ok_or("draw key: a scoped Random seed is not an exact i64")?;
-        Some(seed as u64)
-    } else {
-        None
-    };
-    frame.draw(*handler, scoped_seed).map(Some)
 }
 
 /// The keys a key-operand random primitive draws with
@@ -605,9 +501,8 @@ fn leading_row(row: usize, rows: usize, len: usize) -> usize {
     row / (rows / len)
 }
 
-/// A key-operand random primitive's keys. A key an inactive `DrawKey`
-/// withheld has no value, so reading one under an active primitive is a
-/// malformed graph.
+/// A key-operand random primitive's keys. A key that has no value under an
+/// active primitive is a malformed graph.
 fn draw_keys<'a>(
     node: &DagNode,
     key_slot: usize,
@@ -2880,44 +2775,10 @@ where
     Ok(inputs)
 }
 
-/// The nodes `roots` need over a graph that holds several independently
-/// executed regions: a draw key runs when its value is reachable or another
-/// draw of its `with seed` region runs (`Dag::unlive_scoped_draw_peers`).
+/// The nodes `roots` need, with every effect node and every random node that
+/// can trap by itself.
 fn live_mask_for_roots(dag: &Dag, roots: &[NodeId]) -> Vec<bool> {
-    live_mask_entering(dag, roots, &std::collections::BTreeSet::new())
-}
-
-/// The nodes `roots` need over a graph of several activations, plus every
-/// draw key of the `with seed` regions their activations enter
-/// ([`crate::lower::RandomRegionOwners::entered_by`]), read or not.
-fn live_mask_entering(
-    dag: &Dag,
-    roots: &[NodeId],
-    entered: &std::collections::BTreeSet<u32>,
-) -> Vec<bool> {
-    let mut stack = roots.to_vec();
-    stack.extend(dag.nodes().iter().filter_map(|node| match node.op {
-        RiscOp::DrawKey {
-            handler: crate::dag::RandomHandler::Scoped { instance },
-            ..
-        } if entered.contains(&instance) => Some(node.id),
-        _ => None,
-    }));
-    live_mask_from(dag, stack)
-}
-
-/// The nodes one activation of `dag` runs for `roots`: every draw key
-/// executes whether or not its value is read, because an unused draw still
-/// takes its handler's ordinal.
-fn activation_live_mask(dag: &Dag, roots: &[NodeId]) -> Vec<bool> {
-    let mut stack = roots.to_vec();
-    stack.extend(
-        dag.nodes()
-            .iter()
-            .filter(|node| matches!(node.op, RiscOp::DrawKey { .. }))
-            .map(|node| node.id),
-    );
-    live_mask_from(dag, stack)
+    live_mask_from(dag, roots.to_vec())
 }
 
 fn live_mask_from(dag: &Dag, mut stack: Vec<NodeId>) -> Vec<bool> {
@@ -2931,26 +2792,21 @@ fn live_mask_from(dag: &Dag, mut stack: Vec<NodeId>) -> Vec<bool> {
             .filter(|node| node.op.is_unconditional_effect() || dag.random_node_may_trap(node))
             .map(|node| node.id),
     );
-    loop {
-        while let Some(id) = stack.pop() {
-            if live[id.0] {
-                continue;
-            }
-            live[id.0] = true;
-            if let Some(node) = dag.get(id) {
-                stack.extend(node.inputs.iter().copied());
-                // chelis#616: a runtime-dim declarer kept via `shape_deps`
-                // must actually EVALUATE so the mid-evaluation binding sees
-                // its extent (the consumer reads the dim, not the value).
-                stack.extend(node.shape_deps.iter().copied());
-                stack.extend(node.result_claim_deps.iter().copied());
-            }
+    while let Some(id) = stack.pop() {
+        if live[id.0] {
+            continue;
         }
-        stack = dag.unlive_scoped_draw_peers(&live);
-        if stack.is_empty() {
-            return live;
+        live[id.0] = true;
+        if let Some(node) = dag.get(id) {
+            stack.extend(node.inputs.iter().copied());
+            // chelis#616: a runtime-dim declarer kept via `shape_deps`
+            // must actually EVALUATE so the mid-evaluation binding sees
+            // its extent (the consumer reads the dim, not the value).
+            stack.extend(node.shape_deps.iter().copied());
+            stack.extend(node.result_claim_deps.iter().copied());
         }
     }
+    live
 }
 
 /// The node selection an evaluation runs under, and which of its values the
@@ -3243,21 +3099,13 @@ fn eval_tensor_internal<F>(
 where
     F: FnMut(&str) -> Option<TensorValue>,
 {
-    eval_tensor_internal_with_result_claims(
-        dag,
-        scope,
-        strict_loads,
-        &mut RandomFrame::unhandled(),
-        &[],
-        load_input,
-    )
+    eval_tensor_internal_with_result_claims(dag, scope, strict_loads, &[], load_input)
 }
 
 fn eval_tensor_internal_with_result_claims<F>(
     dag: &Dag,
     scope: EvaluationScope<'_>,
     strict_loads: bool,
-    random_frame: &mut RandomFrame,
     result_claims: &[crate::TensorType],
     mut load_input: F,
 ) -> Result<EvaluatedValues, String>
@@ -3501,26 +3349,6 @@ where
         if let Some(failure) = movement_failures.remove(&node.id) {
             return Err(failure);
         }
-        if matches!(node.op, RiscOp::DrawKey { .. }) {
-            // A key is an ordinary rank-0 key value. An inactive draw key
-            // takes no ordinal and has no value, so an active primitive that
-            // reads it is caught by `draw_keys`.
-            if let Some(key) = eval_draw_key(node, &values, random_frame)? {
-                let value =
-                    TensorValue::from_storage(Vec::new(), TensorStorage::from_keys(vec![key]));
-                live_elements += value.len();
-                values.insert(node.id, value);
-            }
-            if let Some(schedule) = &free_schedule {
-                for dead in &schedule[index] {
-                    if let Some(freed) = values.remove(dead) {
-                        live_elements -= freed.len();
-                    }
-                }
-            }
-            continue;
-        }
-
         // `spec/05-risc-primitives.md` section 2.4.1 makes every stride step
         // one operation-level precondition. Resolve the COMPLETE vector once
         // before any per-axis `StrideSpan` claim can run: otherwise an early
@@ -3958,9 +3786,6 @@ where
                     out_prim,
                     draw_keys(node, 2, &values)?,
                 )?
-            }
-            RiscOp::DrawKey { .. } => {
-                unreachable!("draw keys are evaluated before the value match")
             }
             RiscOp::KeyFromSeed => {
                 let seeds = &values[&node.inputs[0]];
@@ -4711,7 +4536,7 @@ where
     F: FnMut(&str, TensorInputDemand) -> Result<Option<TensorValue>, String>,
 {
     reject_drop_roots(dag, roots)?;
-    let live = (!roots.is_empty()).then(|| activation_live_mask(dag, roots));
+    let live = (!roots.is_empty()).then(|| live_mask_for_roots(dag, roots));
     prepare_tensor_inputs(dag, live.as_deref(), true, load_input).map(|prepared| prepared.inputs)
 }
 
@@ -4935,58 +4760,27 @@ where
     .map(|evaluated| evaluated.values)
 }
 
-/// [`eval_tensor_roots_with_strict`] over a lowered program, whose graph
-/// holds every top-level definition's activation. The draws of the `entered`
-/// regions run whether or not a root reads them, so their controls validate
-/// and trap (spec/06 §5.2); the draws of activations the roots do not run
-/// are not evaluated.
-pub fn eval_program_roots_with_strict<F>(
-    dag: &Dag,
-    roots: &[NodeId],
-    entered: &std::collections::BTreeSet<u32>,
-    load_input: F,
-) -> Result<UnordMap<NodeId, TensorValue>, String>
-where
-    F: FnMut(&str) -> Option<TensorValue>,
-{
-    if roots.is_empty() {
-        return eval_tensor_roots_with_strict(dag, roots, load_input);
-    }
-    reject_drop_roots(dag, roots)?;
-    let live = live_mask_entering(dag, roots, entered);
-    eval_tensor_internal(
-        dag,
-        EvaluationScope::Roots { live: &live, roots },
-        true,
-        load_input,
-    )
-    .map(|evaluated| evaluated.values)
-}
-
-/// Evaluate `roots` with strict loads, taking every draw key from `frame`.
+/// Evaluate exactly `roots` with strict loads.
 ///
-/// The result holds exactly the named roots; draw keys execute whether or not
-/// a root reads them. The frame's inherited counter reflects every key taken
-/// before an error.
-pub fn eval_tensor_roots_with_frame<F>(
+/// The result holds exactly the named roots. Unlike
+/// [`eval_tensor_roots_with_strict`], empty roots select no value node: only
+/// effect nodes and random nodes that can trap by themselves execute.
+pub fn eval_tensor_roots_exact<F>(
     dag: &Dag,
     roots: &[NodeId],
-    frame: &mut RandomFrame,
     load_input: F,
 ) -> Result<UnordMap<NodeId, TensorValue>, String>
 where
     F: FnMut(&str) -> Option<TensorValue>,
 {
-    eval_tensor_roots_with_frame_and_result_claims(dag, roots, frame, &[], load_input)
+    eval_tensor_roots_exact_with_result_claims(dag, roots, &[], load_input)
 }
 
-/// [`eval_tensor_roots_with_frame`] with invocation-local literal result
-/// claims checked against the realized roots. Unlike
-/// [`eval_tensor_roots_with_strict`], empty roots select no value node.
-pub fn eval_tensor_roots_with_frame_and_result_claims<F>(
+/// [`eval_tensor_roots_exact`] with invocation-local literal result claims
+/// checked against the realized roots.
+pub fn eval_tensor_roots_exact_with_result_claims<F>(
     dag: &Dag,
     roots: &[NodeId],
-    frame: &mut RandomFrame,
     result_claims: &[crate::TensorType],
     load_input: F,
 ) -> Result<UnordMap<NodeId, TensorValue>, String>
@@ -4994,12 +4788,11 @@ where
     F: FnMut(&str) -> Option<TensorValue>,
 {
     reject_drop_roots(dag, roots)?;
-    let live = activation_live_mask(dag, roots);
+    let live = live_mask_for_roots(dag, roots);
     eval_tensor_internal_with_result_claims(
         dag,
         EvaluationScope::Roots { live: &live, roots },
         true,
-        frame,
         result_claims,
         load_input,
     )
@@ -6241,43 +6034,6 @@ mod tests {
         );
     }
 
-    /// chelis#2405: a `dropout` lowered without a fixed-control plan is
-    /// refused, never evaluated with the pre-[05-RNG-1] formula. The plan
-    /// path's determinism and seed sensitivity are pinned in
-    /// `tests/dropout_fixed_stream_ir.rs`.
-    #[test]
-    fn lowered_dropout_draws_its_scoped_key() {
-        // A dropout lowered inside `with seed(42)` draws that handler's
-        // ordinal 0 through its draw key, with no execution plan.
-        let src = r#"
-            (def {} x (lit {type: (t-tensor {} (d-lit {} 32) (t-prim {} f32))} 1.0))
-            (def {} y
-              (handle-effect {effect: random}
-                (lit {type: (t-prim {} i64)} 42)
-                (app {} (var {} dropout) (var {} x) (lit {type: (t-prim {} f32)} 0.5))))
-        "#;
-        let dag = lower(src);
-        let values = eval_tensor(&dag, &UnordMap::new()).expect("a scoped dropout evaluates");
-        let dropout = dag
-            .nodes()
-            .iter()
-            .find(|node| matches!(node.op, RiscOp::Dropout))
-            .expect("a key-operand dropout")
-            .id;
-        // [05-OP-37] at f32: drop when the f32-rounded unit is below 0.5,
-        // else 1 / (1 - 0.5) = 2 exactly.
-        let expected = (0..32)
-            .map(|index| {
-                if (spec_uniform_unit(42, 0, index) as f32) < 0.5 {
-                    0.0
-                } else {
-                    2.0
-                }
-            })
-            .collect::<Vec<_>>();
-        assert_eq!(values[&dropout].to_f64_lossy_vec(), expected);
-    }
-
     // [05-RNG-1] transcribed from the spec text, never the kernel.
     fn spec_uniform_splitmix64(x: u64) -> u64 {
         let mut z = x.wrapping_add(0x9E37_79B9_7F4A_7C15);
@@ -7168,14 +6924,8 @@ mod value_reclamation {
     fn empty_roots_select_nothing_for_the_result_claims_entry_point() {
         let (dag, root) = neg_chain(4);
 
-        let empty = eval_tensor_roots_with_frame_and_result_claims(
-            &dag,
-            &[],
-            &mut RandomFrame::unhandled(),
-            &[],
-            load_x(),
-        )
-        .expect("empty roots are not an error");
+        let empty = eval_tensor_roots_exact_with_result_claims(&dag, &[], &[], load_x())
+            .expect("empty roots are not an error");
         assert!(
             empty.is_empty(),
             "every node is masked off, so nothing executes"
@@ -7187,14 +6937,8 @@ mod value_reclamation {
         assert_eq!(whole.len(), dag.len());
 
         // And with a root named, it returns that root alone.
-        let scoped = eval_tensor_roots_with_frame_and_result_claims(
-            &dag,
-            &[root],
-            &mut RandomFrame::unhandled(),
-            &[],
-            load_x(),
-        )
-        .expect("named root");
+        let scoped = eval_tensor_roots_exact_with_result_claims(&dag, &[root], &[], load_x())
+            .expect("named root");
         assert_eq!(scoped.len(), 1);
         assert_eq!(elements(&scoped, root), vec![1.0, 2.0, 3.0]);
     }

@@ -865,7 +865,10 @@ const CACHE_MAGIC: &[u8] = b"CHELIS_CTX_V23\n";
 /// and never shipped.
 /// V30 (chelis#2413): the explicit key operations join `RiscOp` and `key`
 /// becomes a storage dtype, so bincode variant indices shift again.
-const CACHE_FORMAT_VERSION: u32 = 30;
+/// V31 (chelis#2413): `RiscOp::DrawKey`, the `Random` effect and the `random`
+/// handler kind are deleted with the counter stream, so bincode variant
+/// indices shift again.
+const CACHE_FORMAT_VERSION: u32 = 31;
 
 /// On-disk envelope for the Phase I cache. The full file layout is:
 ///
@@ -1576,7 +1579,7 @@ mod tests {
     #[test]
     fn cache_format_version_tracks_the_key_operand_random_nodes() {
         assert_eq!(CACHE_MAGIC, b"CHELIS_CTX_V23\n");
-        assert_eq!(CACHE_FORMAT_VERSION, 30);
+        assert_eq!(CACHE_FORMAT_VERSION, 31);
     }
 
     /// chelis#1156: the cache identity must distinguish two BUILDS, not

@@ -471,7 +471,6 @@ pub struct VerifiedUnitId {
 pub struct VerifiedHostSourceSite<'a> {
     site: VerifiedHostSiteView<'a>,
     expression: &'a ConcreteHostExpr,
-    seed_parent: Option<HostSiteId>,
 }
 
 #[cfg(feature = "lowering-trace")]
@@ -482,18 +481,12 @@ impl<'a> VerifiedHostSourceSite<'a> {
     pub fn expression(self) -> &'a ConcreteHostExpr {
         self.expression
     }
-    pub fn seed_parent(self) -> Option<HostSiteId> {
-        self.seed_parent
-    }
     /// Observation-only words in distinct unit and host-site namespaces.
     pub fn unit_word(self) -> usize {
         self.site.record.unit
     }
     pub fn site_word(self) -> usize {
         self.site.id().index()
-    }
-    pub fn seed_parent_word(self) -> Option<usize> {
-        self.seed_parent.map(HostSiteId::index)
     }
     pub fn direct_callee_word(self) -> Option<usize> {
         self.direct_callee().map(|callee| callee.key as usize)

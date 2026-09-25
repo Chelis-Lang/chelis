@@ -9,9 +9,6 @@ repository.workspace = true
 [features]
 # Native immutable views at the actual code-generation boundary; default off.
 emission-observer = []
-# Default-off private C observation and its read-only emission metadata.
-# Existing Rust constructors and generated headers remain unchanged.
-native-random-observer = ["emission-observer", "chelis-backend-c/native-random-observer"]
 # Same-compilation helper captures and a final-success-bound projection; default off.
 compilation-trace = ["emission-observer", "chelis-ir/lowering-trace", "chelis-pipeline-core/lowering-trace"]
 
@@ -51,11 +48,6 @@ proc-macro2 = { version = "1", features = ["span-locations"] }
 name = "emission_observer"
 path = "tests/emission_observer.rs"
 required-features = ["emission-observer"]
-
-[[test]]
-name = "native_random_observer"
-path = "tests/native_random_observer.rs"
-required-features = ["native-random-observer"]
 
 [[test]]
 name = "compilation_trace"

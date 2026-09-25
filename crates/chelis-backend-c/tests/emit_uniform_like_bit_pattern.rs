@@ -38,8 +38,7 @@ fn build_uniform_like_dag(low: f64, high: f64, seed: u64) -> Dag {
     build_uniform_like_dag_for(Prim::F32, low, high, seed)
 }
 
-/// `uniform_like(template, low, high)` as the first draw of a `with
-/// seed(seed)` region lowered in the graph: the key is `(seed, 0)`.
+/// `uniform_like(key_from_seed(seed), template, low, high)`.
 fn build_uniform_like_dag_for(precision: Prim, low: f64, high: f64, seed: u64) -> Dag {
     let mut dag = Dag::new();
     let template = dag.add_node(
@@ -70,16 +69,7 @@ fn build_uniform_like_dag_for(precision: Prim, low: f64, high: f64, seed: u64) -
         rank0(Prim::Int64),
         None,
     );
-    let key = dag.add_node(
-        RiscOp::DrawKey {
-            handler: chelis_ir::dag::RandomHandler::Scoped { instance: 0 },
-            draw: chelis_ir::dag::RandomDraw::UniformLike,
-            dtype: precision,
-        },
-        vec![seed, low, high],
-        rank0(Prim::Key),
-        None,
-    );
+    let key = dag.add_node(RiscOp::KeyFromSeed, vec![seed], rank0(Prim::Key), None);
     let draw = dag.add_node(
         RiscOp::UniformLike,
         vec![template, low, high, key],
@@ -445,10 +435,14 @@ int main(void) {
         panic!("emitted f64 C did not compile/run");
     };
     let bound = |value| chelis_types::scalar_from_f64("test", Prim::F32, value).unwrap();
-    // The region's first draw takes key (42, 0).
+    // The draw's key is `key_from_seed(42)`.
+    let key = chelis_types::RandomKey::from_seed(
+        chelis_types::scalar_from_i64("test", Prim::Int64, 42).unwrap(),
+    )
+    .unwrap();
     let sampled = chelis_types::PreparedUniformLike::new(Prim::F64, 4, bound(2.0), bound(5.0))
         .unwrap()
-        .apply(chelis_types::RandomKey::from_counter(42, 0))
+        .apply(key)
         .unwrap();
     let expected = (0..4)
         .map(|index| format!("{:016x}", sampled.scalar_at(index).as_f64_lossy().to_bits()))

@@ -488,19 +488,6 @@ pub enum UniformBound {
     High,
 }
 
-/// The handler whose stream a [`RiscOp::DrawKey`] reads.
-///
-/// `Inherited` is the stream the graph's caller holds when it runs the graph.
-/// `Scoped` is a `with seed` handler lowered inside the graph: its literal
-/// seed is the node's first input and its ordinal counts from zero. `instance`
-/// is an opaque identity for one lowered handler region, so two regions with
-/// equal seeds keep separate counters even after their seed constants merge.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub enum RandomHandler {
-    Inherited,
-    Scoped { instance: u32 },
-}
-
 /// Which half of `[05-OP-70]`'s pair a [`RiscOp::Split`] produces: `Left` is
 /// `derive(k, 0)` and `Right` is `derive(k, 1)` of `[05-RNG-2]`. `split_key`
 /// is two nodes because an IR node has one output (LaCaDiLE's
@@ -517,26 +504,6 @@ impl KeyBranch {
         match self {
             Self::Left => chelis_types::dtype_semantics::KeyHalf::Left,
             Self::Right => chelis_types::dtype_semantics::KeyHalf::Right,
-        }
-    }
-}
-
-/// The random primitive whose controls a [`RiscOp::DrawKey`] validates before
-/// it advances its handler.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub enum RandomDraw {
-    /// `[05-OP-37]`: one rate control.
-    Dropout,
-    /// `[05-OP-8]`: low and high bound controls.
-    UniformLike,
-}
-
-impl RandomDraw {
-    /// The number of control inputs the primitive and its key both carry.
-    pub const fn control_count(self) -> usize {
-        match self {
-            Self::Dropout => 1,
-            Self::UniformLike => 2,
         }
     }
 }
@@ -777,20 +744,6 @@ pub enum RiscOp {
     /// consuming it.
     UniformBoundAdjoint {
         bound: UniformBound,
-    },
-    /// The counter-stream bridge (`spec/design/randomness_counter_stream.md`
-    /// §2): the key of `handler`'s next `[05-RNG-1]` ordinal,
-    /// `RandomKey::from_counter(seed, ordinal)`. Inputs are the literal seed
-    /// (a rank-0 i64 `Const`) when the handler is scoped, then `draw`'s
-    /// controls, then optionally one rank-0 Bool activation. When active it
-    /// validates the controls for a draw of dtype `dtype` and only then
-    /// advances its handler; when inactive it neither validates nor advances.
-    /// It is effectful: a dead-code root that is never merged, folded or
-    /// recomputed, executed in node order.
-    DrawKey {
-        handler: RandomHandler,
-        draw: RandomDraw,
-        dtype: Prim,
     },
     /// `[05-OP-69]` `key_from_seed`: input `[seed: tensor[D, i64]]`, output
     /// the `tensor[D, key]` of each seed's two's-complement bits. Pure and
@@ -1466,9 +1419,6 @@ impl RiscOp {
             Self::Dropout => Semantic(Id::Dropout),
             Self::DropoutReplay => Semantic(Id::DropoutReplay),
             Self::UniformBoundAdjoint { .. } => Semantic(Id::UniformBoundAdjoint),
-            // The counter-stream bridge supplies a key; it is not a Table-A
-            // operation and the explicit-key switch deletes it.
-            Self::DrawKey { .. } => Structural,
             Self::KeyFromSeed => Semantic(Id::KeyFromSeed),
             // Both halves are one identity: [05-OP-70] returns the pair.
             Self::Split { .. } => Semantic(Id::SplitKey),
@@ -1834,8 +1784,7 @@ impl RiscOp {
             RiscOp::UniformLike
             | RiscOp::Dropout
             | RiscOp::DropoutReplay
-            | RiscOp::UniformBoundAdjoint { .. }
-            | RiscOp::DrawKey { .. } => false,
+            | RiscOp::UniformBoundAdjoint { .. } => false,
 
             // Key derivations produce opaque keys, not a numeric envelope.
             RiscOp::KeyFromSeed | RiscOp::Split { .. } | RiscOp::FoldIn | RiscOp::SplitN { .. } => {
@@ -2287,57 +2236,19 @@ impl Dag {
         &self.roots
     }
 
-    /// Draw keys of a `with seed` region lowered in this graph that are not
-    /// yet live although another draw key of the same region is
-    /// (`spec/design/randomness_counter_stream.md` §2). A region's draws take
-    /// consecutive ordinals of its own counter, so once the region executes
-    /// none of them may be skipped, unused results included. A liveness pass
-    /// over a graph holding several independently executed regions marks
-    /// these, propagates their inputs, and repeats until none remain.
-    pub fn unlive_scoped_draw_peers(&self, live: &[bool]) -> Vec<NodeId> {
-        let scoped = |node: &DagNode| match node.op {
-            RiscOp::DrawKey {
-                handler: RandomHandler::Scoped { instance },
-                ..
-            } => Some(instance),
-            _ => None,
-        };
-        let live_regions = self
-            .nodes
-            .iter()
-            .filter(|node| live[node.id.0])
-            .filter_map(scoped)
-            .collect::<std::collections::BTreeSet<_>>();
-        self.nodes
-            .iter()
-            .filter(|node| !live[node.id.0])
-            .filter(|node| scoped(node).is_some_and(|instance| live_regions.contains(&instance)))
-            .map(|node| node.id)
-            .collect()
-    }
-
     /// chelis#2413: whether a random node can trap by itself, and so is an
     /// observable root for dead-code elimination (`spec/06-transformations.md`
     /// §5.2, "purity alone does not make a possible trap dead").
     ///
-    /// A draw validates its own rate or bounds ([05-OP-37]/[05-OP-8]) unless
-    /// its key is a `DrawKey`'s output: that `DrawKey` validates the same
-    /// controls first, and whether it runs is the counter stream's own
-    /// liveness rule, so the draw adds no trap of its own. A `SplitN` traps
-    /// on a negative runtime count ([05-OP-71]); a literal count cannot be
-    /// negative. The other key operations are total.
+    /// A draw validates its own rate or bounds ([05-OP-37]/[05-OP-8]). A
+    /// `SplitN` traps on a negative runtime count ([05-OP-71]); a literal
+    /// count cannot be negative. The other key operations are total.
     pub fn random_node_may_trap(&self, node: &DagNode) -> bool {
-        let key_slot = match &node.op {
-            RiscOp::Dropout => 2,
-            RiscOp::UniformLike => 3,
-            RiscOp::SplitN { count } => return count.as_lit().is_none(),
-            _ => return false,
-        };
-        !node
-            .inputs
-            .get(key_slot)
-            .and_then(|key| self.get(*key))
-            .is_some_and(|key| matches!(key.op, RiscOp::DrawKey { .. }))
+        match &node.op {
+            RiscOp::Dropout | RiscOp::UniformLike => true,
+            RiscOp::SplitN { count } => count.as_lit().is_none(),
+            _ => false,
+        }
     }
 
     pub fn set_roots(&mut self, roots: Vec<NodeId>) {
@@ -3664,11 +3575,6 @@ mod tests {
             RiscOp::UniformBoundAdjoint {
                 bound: UniformBound::High,
             },
-            RiscOp::DrawKey {
-                handler: RandomHandler::Inherited,
-                draw: RandomDraw::Dropout,
-                dtype: Prim::F32,
-            },
             RiscOp::KeyFromSeed,
             RiscOp::Split {
                 branch: KeyBranch::Left,
@@ -3760,8 +3666,8 @@ mod tests {
         // identities so they cannot inherit a verifier disposition.
         assert_eq!(
             all.len(),
-            66,
-            "one_of_every_risc_op must list all 66 classified samples"
+            65,
+            "one_of_every_risc_op must list all 65 classified samples"
         );
 
         // The classifier returns a definite bool for every variant (no
@@ -3773,7 +3679,7 @@ mod tests {
         // (5 binary/cmp + 13 unary, including `round`), 5 reductions, 6
         // movement, 4 memory/blas value nodes (Const, ConstTensor, Load,
         // BlasMatmul), and Cast are targetable (34); stochastic (the two
-        // key-operand draws, their two AD replays and the draw key: 5),
+        // key-operand draws and their two AD replays: 4),
         // arg-reductions (2), integer floor/trunc division and remainder (3),
         // `cast_trunc` (1, chelis#759), one_hot (1), the `Shape` metadata read
         // (1), sparse gather/scatter (4, including element-wise
@@ -3785,14 +3691,14 @@ mod tests {
         // output envelope, and relaxing it to its fallback's envelope would
         // drop the trap. The chelis#2413 key-operand IR replaces the two
         // baked draws with the two key-operand draws and adds their two
-        // AD replays and the draw key (+3 = 28). The four explicit key
-        // derivations produce opaque keys, not numeric envelopes (+4 = 32).
+        // AD replays (+2 = 27). The four explicit key derivations produce
+        // opaque keys, not numeric envelopes (+4 = 31).
         assert_eq!(
             targetable, 34,
             "targetable op count drifted from the pinned WI-2 subset"
         );
         assert_eq!(
-            excluded, 32,
+            excluded, 31,
             "excluded op count drifted from the pinned WI-2 subset"
         );
 
@@ -3901,7 +3807,6 @@ mod tests {
                     | RiscOp::Drop
                     | RiscOp::Realize
                     | RiscOp::FusedElem { .. }
-                    | RiscOp::DrawKey { .. }
             );
             assert_eq!(
                 matches!(op.atom_disposition(), RiscAtomDisposition::Structural),

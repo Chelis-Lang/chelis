@@ -254,15 +254,6 @@
       "kind": "wire-schema-numeric-field"
     },
     {
-      "authority": "TaggedTransport",
-      "contract": "random-handler-instance",
-      "flags": [
-        "numeric-field"
-      ],
-      "id": "chelis_compiler_api::schema::WireRandomHandler::Scoped.instance: u32",
-      "kind": "wire-schema-numeric-field"
-    },
-    {
       "authority": "NumericOperation",
       "contract": "[05-OP-15]",
       "flags": [

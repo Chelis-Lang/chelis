@@ -1,7 +1,6 @@
 //! Basic DAG optimization passes.
 
 use chelis_unord::UnordMap;
-use std::collections::BTreeSet;
 
 use crate::dag::{ComparisonKind, Dag, LogicalKind, NodeId, RiscOp};
 
@@ -273,64 +272,13 @@ pub(crate) fn dead_code_eliminate_with_retained(
     dag: &Dag,
     retained: &[NodeId],
 ) -> (Dag, UnordMap<NodeId, NodeId>) {
-    dead_code_eliminate_impl(dag, retained, true, DrawLiveness::Activation)
-}
-
-/// Which draw keys a dead-code pass keeps (`spec/design/randomness_counter_stream.md` §2).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum DrawLiveness<'a> {
-    /// The graph is one activation, a kernel or helper body run once per
-    /// call: every draw key executes, because an unused draw still takes its
-    /// handler's ordinal.
-    Activation,
-    /// The graph holds several independently executed activations, such as
-    /// a program's top-level definitions. Every draw key of an `entered`
-    /// `with seed` region executes, and so does every draw of a region whose
-    /// draw is reachable from the kept roots; an inherited draw that nothing
-    /// reaches belongs to an activation that does not execute.
-    Program { entered: &'a BTreeSet<u32> },
-}
-
-impl DrawLiveness<'_> {
-    fn observes(self, op: &RiscOp) -> bool {
-        match (self, op) {
-            (Self::Activation, RiscOp::DrawKey { .. }) => true,
-            (
-                Self::Program { entered },
-                RiscOp::DrawKey {
-                    handler: crate::dag::RandomHandler::Scoped { instance },
-                    ..
-                },
-            ) => entered.contains(instance),
-            _ => false,
-        }
-    }
-}
-
-/// [`dead_code_eliminate`] over a graph that holds several independently
-/// executed activations, such as a lowered program or its projection onto
-/// selected entry roots. `entered` names the `with seed` regions the kept
-/// roots' activations enter ([`crate::lower::RandomRegionOwners::entered_by`]);
-/// their draws survive whether or not a root reads them. A region's draws
-/// survive together when the region executes; draws of activations no kept
-/// root runs are removed.
-pub fn project_program_roots(dag: &Dag, entered: &BTreeSet<u32>) -> Dag {
-    project_program_roots_with_remap(dag, entered).0
-}
-
-/// [`project_program_roots`] with the `old_id -> new_id` remapping.
-pub fn project_program_roots_with_remap(
-    dag: &Dag,
-    entered: &BTreeSet<u32>,
-) -> (Dag, UnordMap<NodeId, NodeId>) {
-    dead_code_eliminate_impl(dag, &[], true, DrawLiveness::Program { entered })
+    dead_code_eliminate_impl(dag, retained, true)
 }
 
 fn dead_code_eliminate_impl(
     dag: &Dag,
     retained: &[NodeId],
     implicit_observations: bool,
-    draws: DrawLiveness<'_>,
 ) -> (Dag, UnordMap<NodeId, NodeId>) {
     let n = dag.len();
     if n == 0 {
@@ -350,10 +298,7 @@ fn dead_code_eliminate_impl(
         }
     }
     for node in dag.nodes() {
-        // A draw key is effectful: it advances its handler even when its key
-        // is never read, so in an activation that runs it is an observation
-        // like a Store.
-        let observed = matches!(node.op, RiscOp::Store { .. }) || draws.observes(&node.op);
+        let observed = matches!(node.op, RiscOp::Store { .. });
         // chelis#2368: an unconditional effect is live regardless of
         // `implicit_observations`. A projected slice may legitimately drop an
         // unrelated `Store`, but never an abort: [05-OP-68] says it may not
@@ -376,36 +321,26 @@ fn dead_code_eliminate_impl(
         }
     }
 
-    // Propagate liveness backward, then, over a program's regions, close it
-    // over the draws of every live `with seed` region.
-    loop {
-        for i in (0..n).rev() {
-            if live[i] {
-                for &input in &dag.nodes()[i].inputs {
-                    live[input.0] = true;
-                }
-                if let Some(reusable_input) = dag.nodes()[i].reusable_input {
-                    live[reusable_input.0] = true;
-                }
-                // chelis#384/#397: a shape-only dependency (the `x` whose
-                // runtime shape supplies an `expand` extent) is consumed for
-                // its shape, not its data, so it is not in `inputs`. Keep it
-                // live so its `Load` survives and the symbolic dim it declares
-                // retains its source. See `DagNode::shape_deps`.
-                for &dep in &dag.nodes()[i].shape_deps {
-                    live[dep.0] = true;
-                }
-                for &dep in &dag.nodes()[i].result_claim_deps {
-                    live[dep.0] = true;
-                }
+    // Propagate liveness backward.
+    for i in (0..n).rev() {
+        if live[i] {
+            for &input in &dag.nodes()[i].inputs {
+                live[input.0] = true;
             }
-        }
-        let peers = dag.unlive_scoped_draw_peers(&live);
-        if peers.is_empty() {
-            break;
-        }
-        for peer in peers {
-            live[peer.0] = true;
+            if let Some(reusable_input) = dag.nodes()[i].reusable_input {
+                live[reusable_input.0] = true;
+            }
+            // chelis#384/#397: a shape-only dependency (the `x` whose
+            // runtime shape supplies an `expand` extent) is consumed for
+            // its shape, not its data, so it is not in `inputs`. Keep it
+            // live so its `Load` survives and the symbolic dim it declares
+            // retains its source. See `DagNode::shape_deps`.
+            for &dep in &dag.nodes()[i].shape_deps {
+                live[dep.0] = true;
+            }
+            for &dep in &dag.nodes()[i].result_claim_deps {
+                live[dep.0] = true;
+            }
         }
     }
 
@@ -581,7 +516,6 @@ pub fn common_subexpr_eliminate(dag: &Dag) -> Dag {
                     | RiscOp::CheckedReshapeExtent { .. }
                     | RiscOp::CheckedUnitAxis { .. }
             )
-            && !matches!(node.op, RiscOp::DrawKey { .. })
             // Two key operations with equal inputs produce equal bits, but
             // merging them would hand one key to both consumers, which the
             // key rules reject: a key is consumed once in the graph, not
@@ -1406,7 +1340,12 @@ mod tests {
     }
 
     #[test]
-    fn cse_preserves_executed_random_draws() {
+    fn cse_keeps_each_key_operation_and_its_draw() {
+        // Two `key_from_seed` nodes over one seed produce equal bits, but
+        // merging them would hand one key to two draws, which the key rules
+        // reject (spec/10 section 3.2, V2): CSE keeps both key operations and
+        // both draws, and the two draws, as pure functions of equal keys,
+        // produce equal values.
         use chelis_types::types::Prim;
         let mut dag = Dag::new();
         let template = dag.add_node(
@@ -1415,12 +1354,12 @@ mod tests {
             scalar_f32(),
             None,
         );
-        let active = dag.add_node(
-            RiscOp::synth_const(Prim::Bool, 1.0),
+        let seed = dag.add_node(
+            RiscOp::synth_const(Prim::Int64, 42.0),
             vec![],
             TensorType {
                 dims: vec![],
-                precision: Prim::Bool,
+                precision: Prim::Int64,
             },
             None,
         );
@@ -1438,12 +1377,8 @@ mod tests {
         );
         for _ in 0..2 {
             let key = dag.add_node(
-                RiscOp::DrawKey {
-                    handler: crate::dag::RandomHandler::Inherited,
-                    draw: crate::dag::RandomDraw::UniformLike,
-                    dtype: Prim::F32,
-                },
-                vec![low, high, active],
+                RiscOp::KeyFromSeed,
+                vec![seed],
                 TensorType {
                     dims: vec![],
                     precision: Prim::Key,
@@ -1452,28 +1387,28 @@ mod tests {
             );
             let draw = dag.add_node(
                 RiscOp::UniformLike,
-                vec![template, low, high, key, active],
+                vec![template, low, high, key],
                 scalar_f32(),
                 None,
             );
             dag.add_root(draw);
         }
         let optimized = common_subexpr_eliminate(&dag);
-        let mut frame = crate::eval::RandomFrame::inherited(42, 0);
-        let values = crate::eval::eval_tensor_roots_with_frame(
-            &optimized,
-            optimized.roots(),
-            &mut frame,
-            |_| None,
-        )
-        .unwrap();
+        assert_eq!(crate::verify::verify(&optimized), Vec::<String>::new());
         assert_eq!(
-            frame.inherited_counter(),
-            Some(2),
-            "equal source syntax must still consume two draws"
+            optimized
+                .nodes()
+                .iter()
+                .filter(|node| matches!(node.op, RiscOp::KeyFromSeed))
+                .count(),
+            2,
+            "equal key operations must not merge"
         );
         assert_eq!(optimized.roots().len(), 2);
-        assert_ne!(values[&optimized.roots()[0]], values[&optimized.roots()[1]]);
+        assert_ne!(optimized.roots()[0], optimized.roots()[1]);
+        let values =
+            crate::eval::eval_tensor_roots_exact(&optimized, optimized.roots(), |_| None).unwrap();
+        assert_eq!(values[&optimized.roots()[0]], values[&optimized.roots()[1]]);
     }
 
     #[test]

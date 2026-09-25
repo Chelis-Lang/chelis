@@ -69,7 +69,7 @@ fn assert_contract_rejects(dag: &WireDag, expected: &str) {
 
 #[test]
 fn v7_input_axis_round_trips_as_typed_structure() {
-    assert_eq!(WIRE_DAG_SCHEMA_VERSION, 18);
+    assert_eq!(WIRE_DAG_SCHEMA_VERSION, 19);
     let dag = expand_dag(
         WireRtDim::InputAxis {
             tensor: 1,

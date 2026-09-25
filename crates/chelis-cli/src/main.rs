@@ -1714,7 +1714,6 @@ fn execution_host_requires_host_backend(
 
 type CliLoweredBuildProgram = (
     chelis_ir::Dag,
-    chelis_ir::lower::RandomRegionOwners,
     Option<chelis_ir::host::ConcreteHostProgram>,
     Option<chelis_ir::host::HostExecutionPlan>,
 );
@@ -1771,8 +1770,7 @@ fn lower_build_program_for_cli(
                 })
             })
             .transpose()?;
-        let random_regions = lowered.random_regions().clone();
-        Ok((lowered.into_dag(), random_regions, ordinary_host, plan))
+        Ok((lowered.into_dag(), ordinary_host, plan))
     } else {
         let mut compiled =
             chelis_ir::host::try_lower_compiled_program_with_manifest(checked.program(), manifest)
@@ -1782,8 +1780,7 @@ fn lower_build_program_for_cli(
         if let Some(host) = compiled.host.as_mut() {
             apply_manifest_display_roots(host, manifest, target)?;
         }
-        let random_regions = lowered.random_regions().clone();
-        Ok((lowered.into_dag(), random_regions, compiled.host, None))
+        Ok((lowered.into_dag(), compiled.host, None))
     }
 }
 
@@ -3712,7 +3709,6 @@ fn wire_inferred_precision(prec: &TensorPrec) -> WireInferredPrecision {
 /// Convert a single checker [`Effect`] into a [`WireInferredEffect`].
 fn wire_inferred_effect(effect: &Effect) -> WireInferredEffect {
     match effect {
-        Effect::Random => WireInferredEffect::Random,
         Effect::Accum => WireInferredEffect::Accum,
         Effect::Io => WireInferredEffect::Io,
         Effect::Test => WireInferredEffect::Test,
@@ -4015,7 +4011,7 @@ fn cmd_build(
             checked, target,
         ),
     )?;
-    let (mut dag, random_regions, mut compiled_host, mut execution_host) =
+    let (mut dag, mut compiled_host, mut execution_host) =
         lower_build_program_for_cli(&checked_compilation, &root_manifest, target)?;
     let tensor_root_names = checked_compilation.root_metadata().tensor_names().clone();
     let entry_root_names = lowered_root_names_from_decls(
@@ -4034,13 +4030,10 @@ fn cmd_build(
             }
         })
         .collect::<Vec<_>>();
-    let entered = if entry_root_names.is_empty() {
-        random_regions.entered_by(tensor_root_names.iter().map(|name| name.as_str()))
-    } else {
+    if !entry_root_names.is_empty() {
         dag.set_roots(selected);
-        random_regions.entered_by(entry_root_names.iter().map(String::as_str))
-    };
-    dag = chelis_ir::optimize::project_program_roots(&dag, &entered);
+    }
+    dag = chelis_ir::optimize::dead_code_eliminate(&dag);
     let func_name = file
         .file_stem()
         .and_then(|s| s.to_str())
@@ -4377,7 +4370,7 @@ fn cmd_build_deep(
             checked, target,
         ),
     )?;
-    let (mut dag, random_regions, mut compiled_host, mut execution_host) =
+    let (mut dag, mut compiled_host, mut execution_host) =
         lower_build_program_for_cli(&checked_compilation, &root_manifest, target)?;
     let tensor_root_names = checked_compilation.root_metadata().tensor_names().clone();
     let entry_root_names = lowered_root_names_from_exprs(&deep_exprs, checked.type_env());
@@ -4392,13 +4385,10 @@ fn cmd_build_deep(
             }
         })
         .collect::<Vec<_>>();
-    let entered = if entry_root_names.is_empty() {
-        random_regions.entered_by(tensor_root_names.iter().map(|name| name.as_str()))
-    } else {
+    if !entry_root_names.is_empty() {
         dag.set_roots(selected);
-        random_regions.entered_by(entry_root_names.iter().map(String::as_str))
-    };
-    dag = chelis_ir::optimize::project_program_roots(&dag, &entered);
+    }
+    dag = chelis_ir::optimize::dead_code_eliminate(&dag);
     let func_name = file
         .file_stem()
         .and_then(|s| s.to_str())

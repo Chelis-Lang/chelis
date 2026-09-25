@@ -1186,15 +1186,23 @@ int main(void) {{
         .collect()
 }
 
-/// `uniform_like(template, 2.0f32, 5.0f32)` under a `with seed(seed)` region
-/// lowered in the same graph, whose key the HIP lane computes at emission.
-fn scoped_uniform_like(dag: &mut Dag, template: NodeId, ty: TensorType, seed: i64) -> NodeId {
+/// The key `key_from_seed(PINNED_KEY_SEED)` has the bits
+/// `0x5072f63b9b5fc46b`, the key `key_ref.py of_draw_key(42, 0)` computes,
+/// so the `rng_ref.py uniform 42 0` bits pinned below stay valid for an
+/// explicit key.
+const PINNED_KEY_SEED: i64 = 0x5072_f63b_9b5f_c46b;
+
+/// `uniform_like(key_from_seed(seed), template, 2.0f32, 5.0f32)`, whose key
+/// the HIP lane computes at emission.
+fn seeded_uniform_like(dag: &mut Dag, template: NodeId, ty: TensorType, seed: i64) -> NodeId {
     let rank0 = |precision| TensorType {
         dims: vec![],
         precision,
     };
     let seed = dag.add_node(
-        RiscOp::synth_const(Prim::Int64, seed as f64),
+        RiscOp::Const {
+            value: chelis_types::scalar_from_i64("test", Prim::Int64, seed).unwrap(),
+        },
         vec![],
         rank0(Prim::Int64),
         None,
@@ -1211,16 +1219,7 @@ fn scoped_uniform_like(dag: &mut Dag, template: NodeId, ty: TensorType, seed: i6
         rank0(Prim::F32),
         None,
     );
-    let key = dag.add_node(
-        RiscOp::DrawKey {
-            handler: chelis_ir::dag::RandomHandler::Scoped { instance: 0 },
-            draw: chelis_ir::dag::RandomDraw::UniformLike,
-            dtype: ty.precision,
-        },
-        vec![seed, low, high],
-        rank0(Prim::Key),
-        None,
-    );
+    let key = dag.add_node(RiscOp::KeyFromSeed, vec![seed], rank0(Prim::Key), None);
     dag.add_node(
         RiscOp::UniformLike,
         vec![template, low, high, key],
@@ -1239,12 +1238,11 @@ fn uniform_like_fma_gpu_bit_exact_matches_eval_and_c() {
         vec_f32(8),
         None,
     );
-    // A `with seed(42)` region's first draw key: seed 42, ordinal 0.
-    let out = scoped_uniform_like(&mut dag, template, vec_f32(8), 42);
+    let out = seeded_uniform_like(&mut dag, template, vec_f32(8), PINNED_KEY_SEED);
     dag.add_root(out);
 
     let actual = compile_and_run_output_f32_bits(&dag, "uniform_like_fma");
-    // Seed 42, ordinal 0, [2,5), shape [8]: exact-rational evaluations of
+    // The key PINNED_KEY_SEED, [2,5), shape [8]: exact-rational evaluations of
     // [05-RNG-1] and [05-OP-8] (`rng_ref.py uniform 42 0 8 2 5 f32`,
     // chelis#2408). elem[6] is where an f64 affine lands 1 ULP away and
     // elem[2] is the FMA-vs-two-rounding tell.
@@ -1268,8 +1266,11 @@ fn issue_937_uniform_like_f64_gpu_bit_exact_matches_shared_sampler() {
         vec_f64(8),
         None,
     );
-    let key = chelis_types::RandomKey::from_counter(42, 0);
-    let out = scoped_uniform_like(&mut dag, template, vec_f64(8), 42);
+    let key = chelis_types::RandomKey::from_seed(
+        chelis_types::scalar_from_i64("test", Prim::Int64, PINNED_KEY_SEED).unwrap(),
+    )
+    .unwrap();
+    let out = seeded_uniform_like(&mut dag, template, vec_f64(8), PINNED_KEY_SEED);
     dag.add_root(out);
 
     let actual = compile_and_run_output_f64_bits(&dag, "uniform_like_f64");

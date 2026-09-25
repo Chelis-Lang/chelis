@@ -551,7 +551,7 @@ mod tests {
 
     #[test]
     fn cache_format_version_tracks_the_key_operand_random_nodes() {
-        assert_eq!(STDLIB_CACHE_FORMAT_VERSION, 28);
+        assert_eq!(STDLIB_CACHE_FORMAT_VERSION, 29);
     }
 
     #[test]

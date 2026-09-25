@@ -2221,10 +2221,6 @@
       "sample": "for (int64_t __i = 0;"
     },
     {
-      "identity": "kind=backend-element-spelling|path=crates/chelis-backend-c/src/host_abi_tests.rs|owner=fixed_control_host_helper_uses_the_active_invocation_rng",
-      "sample": "static inline uint64_t chelis_random_mix"
-    },
-    {
       "identity": "kind=backend-element-spelling|path=crates/chelis-backend-c/src/host_abi_tests.rs|owner=supported_concrete_types_map_to_exact_c_host_abis",
       "sample": "int8_t"
     },
@@ -2243,10 +2239,6 @@
     {
       "identity": "kind=backend-element-spelling|path=crates/chelis-backend-c/src/host_emit.rs|owner=HostEmitter < 'a >::assign_checked_tensor_cast",
       "sample": "{}for (int64_t {flat_index} = 0; {flat_index} < {view}.count; {flat_index}++) {{"
-    },
-    {
-      "identity": "kind=backend-element-spelling|path=crates/chelis-backend-c/src/host_emit.rs|owner=HostEmitter < 'a >::assign_expr_at_site",
-      "sample": "{}__chelis_random_host_frame {frame} = __chelis_random_push_host(__chelis_observer, {pointer}, (u..."
     },
     {
       "identity": "kind=backend-element-spelling|path=crates/chelis-backend-c/src/host_emit.rs|owner=HostEmitter < 'a >::assign_filter",
@@ -2983,14 +2975,6 @@
     {
       "identity": "kind=width-arithmetic|path=crates/chelis-vocab/src/lib.rs|owner=_",
       "sample": "core :: mem :: size_of :: < RuntimeDType > ()"
-    },
-    {
-      "identity": "kind=backend-element-spelling|path=crates/chelis-backend-c/src/host_emit.rs|owner=emit_function",
-      "sample": "__chelis_random_observer_sink __chelis_sink, void *__chelis_sink_context, uint64_t __chelis_invoc..."
-    },
-    {
-      "identity": "kind=load-store-template|path=crates/chelis-backend-c/src/random_observer.rs|owner=SUPPORT",
-      "sample": "/* CHELIS_NATIVE_RANDOM_OBSERVER_BEGIN */ typedef struct { uint64_t value; } __chelis_random_obse..."
     },
     {
       "identity": "kind=load-store-template|path=crates/chelis-backend-c/src/host_emit.rs|owner=HostResultClaim::frame_lines",

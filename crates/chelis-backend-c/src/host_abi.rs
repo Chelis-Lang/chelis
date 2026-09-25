@@ -99,11 +99,6 @@ pub(crate) struct ProjectedHostSite<'a> {
 }
 
 impl<'a> ProjectedHostProgram<'a> {
-    #[cfg(feature = "native-random-observer")]
-    pub(crate) fn source_emission(&self) -> VerifiedHostEmission<'a> {
-        self.emission
-    }
-
     pub(crate) fn program(&self) -> &HostAbiProgram {
         &self.program
     }
@@ -750,11 +745,6 @@ fn project_expr(
         ConcreteHostExprKind::FlatMap { callback, list, ty } => HostAbiExprKind::FlatMap {
             callback: project_callback(callback, allowed_callbacks)?,
             list: Box::new(project_expr(*list, allowed_callbacks)?),
-            ty: HostAbiType::try_from_concrete(&ty)?,
-        },
-        ConcreteHostExprKind::WithSeed { seed, body, ty } => HostAbiExprKind::WithSeed {
-            seed: Box::new(project_expr(*seed, allowed_callbacks)?),
-            body: Box::new(project_expr(*body, allowed_callbacks)?),
             ty: HostAbiType::try_from_concrete(&ty)?,
         },
         ConcreteHostExprKind::TensorCall { helper, args, ty } => HostAbiExprKind::TensorCall {

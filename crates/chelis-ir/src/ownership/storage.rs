@@ -618,7 +618,7 @@ fn hip_emission_literals(dag: VerifiedDagView<'_>) -> Vec<NodeId> {
     for node in dag.nodes() {
         for (slot, input) in node.inputs.iter().enumerate() {
             let literal = match node.op {
-                RiscOp::DrawKey { .. } | RiscOp::KeyFromSeed => true,
+                RiscOp::KeyFromSeed => true,
                 RiscOp::FoldIn => slot == 1,
                 RiscOp::UniformLike => matches!(slot, 1 | 2),
                 _ => false,
@@ -683,12 +683,9 @@ fn classify_nodes(
                         },
                     }
                 }
-                // A key is one word that the emitter keeps in a local, never
-                // tensor storage with a slot and a lifetime.
-                RiscOp::DrawKey { .. } => StoragePlacement::Skipped,
                 // A derived key is an ordinary key tensor on the C lane. The
-                // HIP lane computes rank-0 derivations while it emits, as it
-                // does a scoped draw key, so they take no device storage.
+                // HIP lane computes rank-0 derivations while it emits, so
+                // they take no device storage.
                 RiscOp::KeyFromSeed
                 | RiscOp::Split { .. }
                 | RiscOp::FoldIn

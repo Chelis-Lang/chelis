@@ -7,8 +7,6 @@ mod generated_header;
 mod host_abi;
 mod host_emit;
 pub mod memory;
-#[cfg(feature = "native-random-observer")]
-mod random_observer;
 #[cfg(test)]
 #[path = "../../../tests/support/runtime_archive.rs"]
 mod test_runtime_archive;
@@ -883,7 +881,7 @@ mod tests {
         // The context-carrying helper is private to this translation unit.
         let my_fn = authored_c_symbol("my_fn");
         assert!(
-            src.contains(&format!("static void {my_fn}__tensor_0__with_rng(")),
+            src.contains(&format!("static void {my_fn}__tensor_0__private(")),
             "tensor helper must carry static linkage to avoid PLT export;\ngenerated source:\n{}",
             src
         );
@@ -3927,7 +3925,7 @@ int main(void) {{
 
         // Tensor helper must be `static void` (never static inline — it uses the DAG kernel sig)
         assert!(
-            src.contains(&format!("static void {my_func}__tensor_0__with_rng(")),
+            src.contains(&format!("static void {my_func}__tensor_0__private(")),
             "tensor helper must be `static void` even in globals mode;\ngenerated source:\n{src}"
         );
         // The published header declares this authored function external, so

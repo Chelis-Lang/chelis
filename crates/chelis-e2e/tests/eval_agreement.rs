@@ -346,7 +346,6 @@ fn agreement_op_for_risc(op: &RiscOp) -> AgreementOp {
         | RiscOp::Dropout
         | RiscOp::DropoutReplay
         | RiscOp::UniformBoundAdjoint { .. }
-        | RiscOp::DrawKey { .. }
         | RiscOp::KeyFromSeed
         | RiscOp::Split { .. }
         | RiscOp::FoldIn

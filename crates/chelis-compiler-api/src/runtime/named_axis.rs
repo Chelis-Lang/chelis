@@ -337,9 +337,7 @@ impl<'a> EvalContext<'a> {
         let load = |name: &str| prepared.get(name).cloned();
         // Preparation may enter a fallible initializer that draws, so the
         // frame is taken from the host state after it.
-        let mut frame = self.random_frame();
-        let result = chelis_ir::eval::eval_tensor_roots_with_frame(&dag, &roots, &mut frame, load);
-        self.commit_random_frame(&frame);
+        let result = chelis_ir::eval::eval_tensor_roots_exact(&dag, &roots, load);
         let values = result.map_err(|err| {
             // [04-NUM-9]: a numeric trap renders byte-identically on every
             // surface, so it takes no prefix.

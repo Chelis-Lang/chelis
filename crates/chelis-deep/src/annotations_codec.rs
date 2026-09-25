@@ -314,7 +314,7 @@ fn decode_value(key: MetadataKey, raw: RawExpr) -> Result<MetadataValue, Metadat
             let kind = chelis_vocab::EffectKind::decode(chelis_vocab::EffectKindInput::Symbol(
                 symbol.value(),
             ))
-            .map_err(|_| invalid(spelling, span, "random or resource"))?;
+            .map_err(|_| invalid(spelling, span, "resource"))?;
             V::Effect(Spanned::new(kind, span))
         }
         K::LiteralSource => choice!(LiteralSource, LiteralOrigin, name),

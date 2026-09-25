@@ -7,8 +7,8 @@ use chelis_ir::axis_sources::{
 };
 use chelis_ir::dag::{
     ComparisonKind, Dag, DimExpr, DimInfo, ExtremaKind, ExtremaOperand, FusedInput, FusedStep,
-    FusedStepOp, KeyBranch, LogicalKind, NodeId, RandomDraw, RandomHandler, ReduceWindowKind,
-    RiscOp, RtAxis, RtDim, TensorType, UniformBound,
+    FusedStepOp, KeyBranch, LogicalKind, NodeId, ReduceWindowKind, RiscOp, RtAxis, RtDim,
+    TensorType, UniformBound,
 };
 use chelis_types::types::Prim;
 use chelis_types::unsupported::Stage;
@@ -619,7 +619,7 @@ fn unsupported_but_well_typed_mapping_yields_the_registered_receipt_not_an_ice()
 
 /// The number of `RiscOp` variants the table below must construct. Bumping
 /// it without adding a row makes the coverage assertion fail.
-const RISC_OP_VARIANTS: usize = 72;
+const RISC_OP_VARIANTS: usize = 71;
 
 /// Adding a `RiscOp` variant breaks this match, which is what forces the
 /// table in `every_risc_op_yields_exactly_one_source_per_output_axis` to
@@ -695,12 +695,11 @@ fn variant_index(op: &RiscOp) -> usize {
         RiscOp::Dropout => 64,
         RiscOp::DropoutReplay => 65,
         RiscOp::UniformBoundAdjoint { .. } => 66,
-        RiscOp::DrawKey { .. } => 67,
-        RiscOp::KeyFromSeed => 68,
-        RiscOp::Split { .. } => 69,
-        RiscOp::FoldIn => 70,
-        RiscOp::SplitN { .. } => 71,
-        RiscOp::GuardedFail { .. } => 72,
+        RiscOp::KeyFromSeed => 67,
+        RiscOp::Split { .. } => 68,
+        RiscOp::FoldIn => 69,
+        RiscOp::SplitN { .. } => 70,
+        RiscOp::GuardedFail { .. } => 71,
     }
 }
 
@@ -1124,17 +1123,7 @@ fn every_risc_op_yields_exactly_one_source_per_output_axis() {
         vec![],
         scalar(Prim::Int64),
     );
-    let dropout_key = add(
-        &mut dag,
-        RiscOp::DrawKey {
-            handler: RandomHandler::Scoped { instance: 0 },
-            draw: RandomDraw::Dropout,
-            dtype: Prim::F32,
-        },
-        vec![seed, rate],
-        scalar(Prim::Key),
-    );
-    nodes.push(dropout_key);
+    let dropout_key = add(&mut dag, RiscOp::KeyFromSeed, vec![seed], scalar(Prim::Key));
     nodes.push(add(
         &mut dag,
         RiscOp::Dropout,
@@ -1147,16 +1136,7 @@ fn every_risc_op_yields_exactly_one_source_per_output_axis() {
         vec![g, rate, dropout_key],
         f32_23(),
     ));
-    let uniform_key = add(
-        &mut dag,
-        RiscOp::DrawKey {
-            handler: RandomHandler::Scoped { instance: 1 },
-            draw: RandomDraw::UniformLike,
-            dtype: Prim::F32,
-        },
-        vec![seed, rate, rate],
-        scalar(Prim::Key),
-    );
+    let uniform_key = add(&mut dag, RiscOp::KeyFromSeed, vec![seed], scalar(Prim::Key));
     nodes.push(add(
         &mut dag,
         RiscOp::UniformLike,
@@ -1521,16 +1501,7 @@ fn a_shape_preserving_axis_over_a_literal_operand_resolves_to_the_literal() {
         scalar(Prim::Int64),
         None,
     );
-    let key = dag.add_node(
-        RiscOp::DrawKey {
-            handler: RandomHandler::Scoped { instance: 0 },
-            draw: RandomDraw::UniformLike,
-            dtype: Prim::F32,
-        },
-        vec![key_seed, low, high],
-        scalar(Prim::Key),
-        None,
-    );
+    let key = dag.add_node(RiscOp::KeyFromSeed, vec![key_seed], scalar(Prim::Key), None);
     let noised = dag.add_node(
         RiscOp::UniformLike,
         vec![filled, low, high, key],

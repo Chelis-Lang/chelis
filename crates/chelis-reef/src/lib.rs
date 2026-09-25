@@ -1093,9 +1093,7 @@ fn collect_expr_type_references(expr: &Expr, out: &mut BTreeSet<String>) {
         | Expr::Quote(inner, _)
         | Expr::Unquote(inner, _)
         | Expr::Splice(inner, _) => collect_expr_type_references(inner, out),
-        Expr::Binary(_, left, right, _)
-        | Expr::WithSeed(left, right, _)
-        | Expr::WithDevice(left, right, _) => {
+        Expr::Binary(_, left, right, _) | Expr::WithDevice(left, right, _) => {
             collect_expr_type_references(left, out);
             collect_expr_type_references(right, out);
         }
@@ -1236,9 +1234,7 @@ fn collect_expr_constructor_references(expr: &Expr, out: &mut BTreeSet<String>) 
         | Expr::Quote(inner, _)
         | Expr::Unquote(inner, _)
         | Expr::Splice(inner, _) => collect_expr_constructor_references(inner, out),
-        Expr::Binary(_, left, right, _)
-        | Expr::WithSeed(left, right, _)
-        | Expr::WithDevice(left, right, _) => {
+        Expr::Binary(_, left, right, _) | Expr::WithDevice(left, right, _) => {
             collect_expr_constructor_references(left, out);
             collect_expr_constructor_references(right, out);
         }
@@ -1447,9 +1443,7 @@ fn collect_expr_references(expr: &Expr, out: &mut BTreeSet<String>) {
         | Expr::Quote(inner, _)
         | Expr::Unquote(inner, _)
         | Expr::Splice(inner, _) => collect_expr_references(inner, out),
-        Expr::Binary(_, left, right, _)
-        | Expr::WithSeed(left, right, _)
-        | Expr::WithDevice(left, right, _) => {
+        Expr::Binary(_, left, right, _) | Expr::WithDevice(left, right, _) => {
             collect_expr_references(left, out);
             collect_expr_references(right, out);
         }
@@ -8696,7 +8690,6 @@ fn symbol_effects(module: &ModuleSource, name: &str) -> Vec<String> {
 fn effect_name(effect: &EffectExpr) -> String {
     match effect {
         EffectExpr::Diff(_) => "Diff".to_string(),
-        EffectExpr::Random(_) => "Random".to_string(),
         EffectExpr::Accum(_) => "Accum".to_string(),
         EffectExpr::Io(_) => "IO".to_string(),
         EffectExpr::Test(_) => "Test".to_string(),
@@ -9679,11 +9672,6 @@ fn rewrite_expr(expr: &Expr, resolver: &NameResolver, locals: &mut UnordSet<Stri
         Expr::Borrow(inner, span) => {
             Expr::Borrow(Box::new(rewrite_expr(inner, resolver, locals)), *span)
         }
-        Expr::WithSeed(seed, body, span) => Expr::WithSeed(
-            Box::new(rewrite_expr(seed, resolver, locals)),
-            Box::new(rewrite_expr(body, resolver, locals)),
-            *span,
-        ),
         Expr::WithDevice(device, body, span) => Expr::WithDevice(
             Box::new(rewrite_expr(device, resolver, locals)),
             Box::new(rewrite_expr(body, resolver, locals)),

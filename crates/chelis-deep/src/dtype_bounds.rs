@@ -20,7 +20,7 @@ pub const DTYPE_BOUNDS_KEY: &str = "dtype_bounds";
 /// One of the three dtype families of `spec/04-type-system.md` §5.9.
 ///
 /// The Deep spelling is lowercase, matching the effect-name convention
-/// (`(effects {} diff random)` for Surf's `Diff`/`Random`); the Surf
+/// (`(effects {} diff accum)` for Surf's `Diff`/`Accum`); the Surf
 /// spelling is PascalCase.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

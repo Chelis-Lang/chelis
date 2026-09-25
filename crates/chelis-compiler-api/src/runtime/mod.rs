@@ -635,8 +635,6 @@ pub(crate) fn evaluate_host_program_with_library_and_types(
         transcript: Vec::new(),
         transcript_capture: crate::transcript_capture::current_transcript_capture(),
         resolving_top_levels: Vec::new(),
-        random_seed: None,
-        random_counter: 0,
         cancel: chelis_types::current_cancel_token(),
     };
 
@@ -1097,14 +1095,11 @@ struct EvalContext<'a> {
     /// runtime obligation.
     active_declaration_names: Vec<String>,
     /// Per-def kernel decision: `None` is the host lane, `Some` a kernel
-    /// reused across applications; its draws take their keys from each
-    /// application's frame (see `EvalContext::def_kernel`).
+    /// reused across applications (see `EvalContext::def_kernel`).
     def_kernels: UnordMap<String, Option<std::sync::Arc<chelis_ir::host::HostDefKernel>>>,
     transcript: Vec<String>,
     transcript_capture: Option<crate::TranscriptCapture>,
     resolving_top_levels: Vec<String>,
-    random_seed: Option<u64>,
-    random_counter: u64,
     /// Cooperative cancellation flag (chelis#914), captured ONCE from the
     /// thread-local install point at construction so the per-node-visit
     /// check in [`Self::eval_expr`] is a relaxed atomic load rather than a
@@ -1164,31 +1159,6 @@ fn symbol_name(expr: &Expr) -> Option<&str> {
 fn int_value(expr: &Expr) -> Option<i64> {
     match expr {
         Expr::Atom(Atom::Int(value), _) => Some(*value),
-        _ => None,
-    }
-}
-
-/// Read a *literal* seed at full i64 width, peeling `(lit {meta} …)`
-/// wrappers down to the raw `Atom::Int`. Mirrors the compiled C host lane,
-/// which reads the raw atom and ignores the i32 default meta (`host.rs`
-/// `lower_host_expr`: the `lit` peel forwards to the `Atom::Int(i64)` arm).
-///
-/// chelis#771: routing a literal seed through `eval_lit` narrows it to the
-/// spec/04-type-system.md §5.3 i32 default (i32-truncate then
-/// sign-extend), so any seed `>= 2^31` becomes an unrelated `u64` in the
-/// evaluator while the compiled lane keeps the full value — the two lanes
-/// then sample completely different streams from the "same" seed. The seed
-/// is designed i64 (spec/design/checker_totality.md §C1.5 item 5, the
-/// i64-suffixed literal contract; #731 Phase 1's FORM gate is unshipped).
-///
-/// Returns `None` for non-literal (computed) seed expressions; those keep
-/// the existing dtype-narrowing `eval_expr` path unchanged.
-fn literal_seed_i64(expr: &Expr) -> Option<i64> {
-    match expr {
-        Expr::Atom(Atom::Int(value), _) => Some(*value),
-        Expr::Node(node, _) if node.tag() == DeepTag::Lit => {
-            node.children_slice().first().and_then(literal_seed_i64)
-        }
         _ => None,
     }
 }

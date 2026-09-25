@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use chelis_ir::Dag;
-use chelis_ir::lower::{LowerDiagnostic, LoweredLibrary as IrLoweredLibrary, RandomRegionOwners};
+use chelis_ir::lower::{LowerDiagnostic, LoweredLibrary as IrLoweredLibrary};
 
 use crate::artifacts::RootBindingMode;
 use crate::roots::root_metadata;
@@ -55,15 +55,13 @@ pub fn lower_checked(
     mode: LoweringMode,
 ) -> Result<LoweredCompilation, CoreLowerError> {
     let lower_result =
-        chelis_ir::lower::try_lower_program_to_library_with_random_regions(checked.program())
-            .map(LoweredProgram::from);
+        chelis_ir::lower::try_lower_program_to_library(checked.program()).map(LoweredProgram::from);
     finish_isolated_lowering(checked, mode, lower_result)
 }
 
-/// Select the C host program for a program whose tensor helpers draw
-/// `dropout`, before value-only lowering. A selected host payload has no
-/// independently emitted top-level DAG, hence no positional root binding. Ordinary programs retain the existing lowering
-/// and root-count guards; a failed collecting lowerer is never a recovery hint.
+/// Lower a checked compilation for the C execution lane: the ordinary
+/// lowering, with its root-count guards, plus the collected host program. A
+/// failed collecting lowerer is never a recovery hint.
 /// `AllowHostBackend` asks for the CLI's host selection policy: it permits a
 /// nonfatal raw-lowering decline only when the collected host requires that
 /// backend. Otherwise the CLI remains strict. `AllowHostOnly` is unchanged.
@@ -120,55 +118,41 @@ fn finish_c_execution_lowering(
     ),
     CoreLowerError,
 > {
-    if host.as_ref().is_some_and(|plan| plan.has_dropout_helpers()) {
-        let lowered = finish_lowering(
-            checked,
-            LoweredProgram::default(),
-            RootCountContext::Program,
-            RootBindingMode::SelectedHostBackend,
-        )?;
-        Ok((lowered, None, host))
+    let mode = if mode == LoweringMode::AllowHostBackend
+        && !host
+            .as_ref()
+            .is_some_and(|plan| chelis_ir::host::host_program_requires_host_backend(plan.program()))
+    {
+        LoweringMode::Strict
     } else {
-        let mode = if mode == LoweringMode::AllowHostBackend
-            && !host.as_ref().is_some_and(|plan| {
-                chelis_ir::host::host_program_requires_host_backend(plan.program())
-            }) {
-            LoweringMode::Strict
-        } else {
-            mode
-        };
-        let lowered = lower_checked(checked, mode)?;
-        let ordinary = host
-            .map(|plan| {
-                // This lane remains ordinary compilation; helper snapshots
-                // cannot justify changing its selection or optimization.
-                #[cfg(feature = "lowering-trace")]
-                let plan = plan.discard_helper_traces();
-                plan.into_ordinary()
-            })
-            .transpose()
-            .map_err(|message| {
-                CoreLowerError::Lower(LowerDiagnostic::new(message, None, None).fatal())
-            })?;
-        Ok((lowered, ordinary, None))
-    }
+        mode
+    };
+    let lowered = lower_checked(checked, mode)?;
+    let ordinary = host
+        .map(|plan| {
+            // This lane remains ordinary compilation; helper snapshots
+            // cannot justify changing its selection or optimization.
+            #[cfg(feature = "lowering-trace")]
+            let plan = plan.discard_helper_traces();
+            plan.into_ordinary()
+        })
+        .transpose()
+        .map_err(|message| {
+            CoreLowerError::Lower(LowerDiagnostic::new(message, None, None).fatal())
+        })?;
+    Ok((lowered, ordinary, None))
 }
 
 #[derive(Default)]
 struct LoweredProgram {
     dag: Dag,
     rootless_defs: BTreeSet<String>,
-    random_regions: RandomRegionOwners,
 }
 
-impl From<(IrLoweredLibrary, RandomRegionOwners)> for LoweredProgram {
-    fn from((library, random_regions): (IrLoweredLibrary, RandomRegionOwners)) -> Self {
+impl From<IrLoweredLibrary> for LoweredProgram {
+    fn from(library: IrLoweredLibrary) -> Self {
         let (dag, rootless_defs) = library.into_dag_and_rootless_defs();
-        Self {
-            dag,
-            rootless_defs,
-            random_regions,
-        }
+        Self { dag, rootless_defs }
     }
 }
 
@@ -177,7 +161,6 @@ impl From<chelis_ir::lower::ComposedLowering> for LoweredProgram {
         Self {
             dag: composed.dag,
             rootless_defs: composed.rootless_defs,
-            random_regions: composed.random_regions,
         }
     }
 }
@@ -310,11 +293,7 @@ fn finish_lowering(
     root_context: RootCountContext,
     root_binding_mode: RootBindingMode,
 ) -> Result<LoweredCompilation, CoreLowerError> {
-    let LoweredProgram {
-        dag,
-        rootless_defs,
-        random_regions,
-    } = lowered;
+    let LoweredProgram { dag, rootless_defs } = lowered;
     let named_roots = match root_binding_mode {
         RootBindingMode::Exact => NamedRoots::aligned(
             &checked.root_metadata.tensor_names.without(&rootless_defs),
@@ -332,7 +311,6 @@ fn finish_lowering(
         dag,
         named_roots,
         forward_node_index,
-        random_regions,
     })
 }
 
@@ -386,7 +364,10 @@ mod tests {
             let (actual, ordinary_host, plan) =
                 lower_checked_for_c_execution(checked.clone(), &manifest, mode).unwrap();
             assert_eq!(ordinary_host.is_some(), expected_host.is_some());
-            assert!(!plan.as_ref().is_some_and(|plan| plan.has_dropout_helpers()));
+            assert!(
+                plan.is_none(),
+                "the C execution lane selects no execution plan"
+            );
             assert_eq!(actual.named_roots(), ordinary.named_roots());
             assert_eq!(actual.forward_node_index(), ordinary.forward_node_index());
             assert_eq!(actual.dag().nodes().len(), ordinary.dag().nodes().len());

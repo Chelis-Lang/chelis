@@ -408,20 +408,21 @@ impl Partition<'_> {
             .nodes()
             .iter()
             .filter(|node| {
-                !matches!(
-                    node.op,
-                    RiscOp::ExtentWitness {
-                        site: crate::dag::ExtentWitnessSite::ResultClaim { .. }
-                            | crate::dag::ExtentWitnessSite::LiteralResultClaim,
-                        ..
-                    } | RiscOp::ExtentWitness {
-                        site: crate::dag::ExtentWitnessSite::LocalAscriptionClaim { .. },
-                        ..
-                    }
-                    // A key is never a dependency: its consumer, retained
-                    // here, reads it, and the draw executes with its segment.
-                    | RiscOp::DrawKey { .. }
-                )
+                // A key is never a dependency (spec/10 section 3.2, V4): its
+                // consumer, retained here, reads it, and the draw executes
+                // with its segment.
+                node.output_type.precision != chelis_types::types::Prim::Key
+                    && !matches!(
+                        node.op,
+                        RiscOp::ExtentWitness {
+                            site: crate::dag::ExtentWitnessSite::ResultClaim { .. }
+                                | crate::dag::ExtentWitnessSite::LiteralResultClaim,
+                            ..
+                        } | RiscOp::ExtentWitness {
+                            site: crate::dag::ExtentWitnessSite::LocalAscriptionClaim { .. },
+                            ..
+                        }
+                    )
             })
             .map(|node| node.id)
             .collect();
@@ -589,10 +590,6 @@ pub(super) fn resolve_callable_aliases(
             callback(cb, aliases);
             resolve_callable_aliases(init, aliases);
             resolve_callable_aliases(list, aliases);
-        }
-        HostExprKind::WithSeed { seed, body, .. } => {
-            resolve_callable_aliases(seed, aliases);
-            resolve_callable_aliases(body, aliases);
         }
         HostExprKind::Int(_)
         | HostExprKind::Float(_)

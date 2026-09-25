@@ -240,16 +240,14 @@ pub enum EffectKindInput<'a> {
 /// A closed effect vocabulary for all semantic consumers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum EffectKind {
-    Random,
     Resource,
 }
 
 impl EffectKind {
-    pub const ALL: [Self; 2] = [Self::Random, Self::Resource];
+    pub const ALL: [Self; 1] = [Self::Resource];
 
     pub const fn symbol(self) -> &'static str {
         match self {
-            Self::Random => "random",
             Self::Resource => "resource",
         }
     }
@@ -258,7 +256,6 @@ impl EffectKind {
         match input {
             EffectKindInput::Missing => Err(EffectKindDecodeError::Missing),
             EffectKindInput::Malformed => Err(EffectKindDecodeError::Malformed),
-            EffectKindInput::Symbol("random") => Ok(Self::Random),
             EffectKindInput::Symbol("resource") => Ok(Self::Resource),
             EffectKindInput::Symbol(symbol) => Err(EffectKindDecodeError::Unknown { symbol }),
         }
