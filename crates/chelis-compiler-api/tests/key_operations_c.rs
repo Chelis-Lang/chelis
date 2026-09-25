@@ -2277,3 +2277,226 @@ fn the_hip_build_admits_only_a_with_seed_draws_key() {
         }
     }
 }
+
+// ---- chelis#2491: [05-OP-33]'s admission of an impossible result ----
+
+/// `split_keys(key_from_seed(s), n)` over a key batch shaped `batch`; a
+/// rank-0 `batch` splits `key(7)`.
+fn split_of_n(batch: Vec<DimInfo>) -> Dag {
+    let mut dag = Dag::new();
+    let keys = if batch.is_empty() {
+        let seed = i64_const(&mut dag, 7);
+        node(&mut dag, RiscOp::KeyFromSeed, vec![seed], &[], Prim::Key)
+    } else {
+        let key_ty = |prim| TensorType {
+            dims: batch.clone(),
+            precision: prim,
+        };
+        let seeds = dag.add_node(
+            RiscOp::Load { name: "s".into() },
+            vec![],
+            key_ty(Prim::Int64),
+            None,
+        );
+        dag.add_node(RiscOp::KeyFromSeed, vec![seeds], key_ty(Prim::Key), None)
+    };
+    let n = load(&mut dag, "n", &[], Prim::Int64);
+    let mut dims = batch;
+    dims.push(DimInfo::Named("keys".into(), None));
+    let rows = dag.add_node(
+        RiscOp::SplitN {
+            count: RtDim::Node(1),
+        },
+        vec![keys, n],
+        TensorType {
+            dims,
+            precision: Prim::Key,
+        },
+        None,
+    );
+    dag.add_root(rows);
+    dag
+}
+
+/// Both lanes refuse an impossible split before deriving a key, with the same
+/// `Overflow` and the same metadata reason. Eval half: regression test (the
+/// base panicked with `capacity overflow`, or returned the empty batch). C
+/// half: disposition lock on C's current rendering, which reports through
+/// bare `chelis_alloc` with no [04-NUM-9] trap line naming `split_keys`; the
+/// evaluator renders the trap [04-NUM-9] specifies instead.
+#[test]
+fn an_impossible_split_traps_overflow_in_c_and_eval() {
+    let q = || DimInfo::Named("q".into(), None);
+    let cases = [
+        (vec![], vec![], 1i64 << 61, "byte size exceeds i64"),
+        (vec![], vec![], i64::MAX, "byte size exceeds i64"),
+        (
+            vec![DimInfo::Lit(4)],
+            vec![4],
+            1 << 62,
+            "extent product exceeds i64",
+        ),
+        (
+            vec![DimInfo::Lit(0), q()],
+            vec![0, 1 << 40],
+            1 << 40,
+            "stride product exceeds i64",
+        ),
+    ];
+    for (batch, seeds, n, reason) in cases {
+        let mut inputs = vec![("n", Input::Ints(vec![], vec![n]))];
+        if !seeds.is_empty() {
+            let len = seeds.iter().product::<usize>();
+            inputs.push(("s", Input::Ints(seeds, vec![1; len])));
+        }
+        assert_eq!(
+            run_eval(&split_of_n(batch.clone()), &inputs).unwrap_err(),
+            format!("Overflow: {reason}\nnumeric trap: overflow in split_keys at i64"),
+            "n = {n}"
+        );
+        assert_eq!(
+            run_c_failure(split_of_n(batch), &inputs),
+            format!("Overflow: chelis_alloc {reason}\n"),
+            "n = {n}"
+        );
+    }
+}
+
+/// `x` of `x_dims` expanded along axis 0 to the run-time `n`, as `out_dims`.
+fn expand_to_n(x_dims: &[usize], out_dims: Vec<DimInfo>, prim: Prim) -> Dag {
+    let mut dag = Dag::new();
+    let x = load(&mut dag, "x", x_dims, prim);
+    let n = load(&mut dag, "n", &[], Prim::Int64);
+    let expanded = dag.add_node(
+        RiscOp::Expand {
+            axis: 0,
+            size: RtDim::Node(1),
+        },
+        vec![x, n],
+        TensorType {
+            dims: out_dims,
+            precision: prim,
+        },
+        None,
+    );
+    dag.add_root(expanded);
+    dag
+}
+
+fn padded_by_n() -> Dag {
+    let mut dag = Dag::new();
+    let x = load(&mut dag, "x", &[1], Prim::F32);
+    let n = load(&mut dag, "n", &[], Prim::Int64);
+    let padded = dag.add_node(
+        RiscOp::zero_pad(Prim::F32, vec![(RtDim::Lit(0), RtDim::Node(1))]),
+        vec![x, n],
+        TensorType {
+            dims: vec![DimInfo::Named("m".into(), None)],
+            precision: Prim::F32,
+        },
+        None,
+    );
+    dag.add_root(padded);
+    dag
+}
+
+/// `sum(x, 1)` over `x: tensor[n, 0]`.
+fn sum_of_empty_rows() -> Dag {
+    let mut dag = Dag::new();
+    let n = || DimInfo::Named("n".into(), None);
+    let x = dag.add_node(
+        RiscOp::Load { name: "x".into() },
+        vec![],
+        TensorType {
+            dims: vec![n(), DimInfo::Lit(0)],
+            precision: Prim::F32,
+        },
+        None,
+    );
+    let total = dag.add_node(
+        RiscOp::Sum {
+            axis: 1,
+            accumulator: Prim::F32,
+        },
+        vec![x],
+        TensorType {
+            dims: vec![n()],
+            precision: Prim::F32,
+        },
+        None,
+    );
+    dag.add_root(total);
+    dag
+}
+
+/// Where the compiled lane admits a result through an operation plan, the two
+/// lanes print the same bytes: the metadata report and [04-NUM-9]'s trap line.
+/// Regression test: the evaluator panicked with `capacity overflow` on the
+/// base for every graph here.
+#[test]
+fn an_impossible_expansion_or_reduction_traps_identically_in_c_and_eval() {
+    let m = || DimInfo::Named("m".into(), None);
+    let one = || Input::Floats(Prim::F32, vec![1], vec![1.0]);
+    let huge = || Input::Ints(vec![], vec![1 << 62]);
+    // A graph, its inputs, and the trap both lanes report.
+    type Case = (Dag, Vec<(&'static str, Input)>, &'static str);
+    let cases: Vec<Case> = vec![
+        (
+            expand_to_n(&[1], vec![m()], Prim::F32),
+            vec![("x", one()), ("n", huge())],
+            "Overflow: byte size exceeds i64\nnumeric trap: overflow in expand at i64",
+        ),
+        (
+            expand_to_n(&[2], vec![m(), DimInfo::Lit(2)], Prim::F32),
+            vec![
+                ("x", Input::Floats(Prim::F32, vec![2], vec![1.0, 2.0])),
+                ("n", huge()),
+            ],
+            "Overflow: extent product exceeds i64\nnumeric trap: overflow in insert at i64",
+        ),
+        (
+            padded_by_n(),
+            vec![("x", one()), ("n", huge())],
+            "Overflow: byte size exceeds i64\nnumeric trap: overflow in pad at i64",
+        ),
+        (
+            sum_of_empty_rows(),
+            vec![("x", Input::Floats(Prim::F32, vec![1 << 62, 0], vec![]))],
+            "Overflow: byte size exceeds i64\nnumeric trap: overflow in sum at i64",
+        ),
+    ];
+    for (dag, inputs, trap) in cases {
+        assert_eq!(run_eval(&dag, &inputs).unwrap_err(), trap);
+        assert_eq!(run_c_failure(dag, &inputs), format!("{trap}\n"));
+    }
+}
+
+/// 2^60 f32 elements (2^62 bytes) and 2^61 bools fit the byte domain, so both
+/// lanes admit them, and neither can allocate them: C's request exceeds the
+/// address space and the evaluator's index scratch exceeds Rust's allocation
+/// domain. Both report C's allocation failure. Regression test: the evaluator
+/// panicked with `capacity overflow` on the base.
+#[test]
+fn an_expansion_neither_lane_can_allocate_fails_identically_in_c_and_eval() {
+    let failure = "Domain: chelis_alloc tensor allocation failed";
+    let m = || vec![DimInfo::Named("m".into(), None)];
+    let cases = [
+        (
+            Prim::F32,
+            Input::Floats(Prim::F32, vec![1], vec![1.0]),
+            1i64 << 60,
+        ),
+        (Prim::Bool, Input::Bools(vec![1], vec![1]), 1 << 61),
+    ];
+    for (prim, x, n) in cases {
+        let inputs = [("x", x), ("n", Input::Ints(vec![], vec![n]))];
+        assert_eq!(
+            run_eval(&expand_to_n(&[1], m(), prim), &inputs).unwrap_err(),
+            failure
+        );
+        assert_eq!(
+            run_c_failure(expand_to_n(&[1], m(), prim), &inputs),
+            format!("{failure}\n")
+        );
+    }
+}

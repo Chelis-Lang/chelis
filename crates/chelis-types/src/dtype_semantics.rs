@@ -3447,7 +3447,9 @@ pub fn fold_in_storage(
 }
 
 /// `[05-OP-71]` over a `tensor[D, key]`: the result is `tensor[D ++ [count],
-/// key]` in row-major order, so element `(i, j)` is row `j` of key `i`.
+/// key]` in row-major order, so element `(i, j)` is row `j` of key `i`. The
+/// caller admits that result's extents under `[05-OP-33]` first, as the DAG
+/// evaluator does: this kernel allocates every one of its keys.
 pub fn split_keys_storage(
     keys: &TensorStorage,
     count: usize,

@@ -406,6 +406,12 @@ name = "issue_1922_helper_summary_diagnostic_cli"
 package = "chelis-ir"
 name = "issue_1906_concat_admission"
 
+# chelis#2491: the DAG evaluator admits every extent-sized result before
+# allocating it, trapping where the compiled lane traps instead of panicking.
+[[standing_target]]
+package = "chelis-ir"
+name = "issue_2491_eval_extent_admission"
+
 [[standing_target]]
 package = "chelis-compiler-api"
 name = "issue_1906_annotated_softmax"
@@ -2718,6 +2724,15 @@ workflow = "ci.yml"
 job = "lint-rust"
 cadence = "pull_request and push"
 reason = "Clippy policy is executed directly by the standing Rust policy job"
+tracking_issue = "chelis#1824"
+
+[[path_rule]]
+prefix = "scripts/pipeline_core_dependency_guard.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "lint-rust"
+cadence = "pull_request and push"
+reason = "the Rust policy job's lint-and-unit gate stage runs the pipeline-core dependency guard against the workspace's resolved cargo graph"
 tracking_issue = "chelis#1824"
 
 [[path_rule]]

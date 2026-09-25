@@ -15,6 +15,7 @@
 //! index groups into the same closed typed-kernel boundary; this module
 //! does not own numeric accumulation or comparison.
 
+use chelis_abi::metadata::{MetadataError, ShapeMetadata};
 use chelis_unord::{UnordMap, UnordSet};
 use std::borrow::Cow;
 
@@ -202,6 +203,72 @@ fn numel(shape: &[usize]) -> usize {
     }
 }
 
+/// The C runtime's report when a tensor's storage cannot be allocated
+/// (`allocate_tensor` in `crates/chelis-runtime/src/lib.rs`), verbatim.
+const TENSOR_ALLOCATION_FAILED: &str = "Domain: chelis_alloc tensor allocation failed";
+
+/// [05-OP-33]'s checked admission of a result before allocation: the one
+/// gate every evaluator path that sizes a new tensor from its extents passes
+/// through, before it allocates anything proportional to them (chelis#2491).
+///
+/// The metadata is the C runtime's own authority, `chelis_abi`'s
+/// [`ShapeMetadata`], so the checks and their order are the compiled lane's:
+/// the element count, the byte size at the result's representation, and the
+/// stride products each fit i64, and the byte size fits the allocation
+/// domain. A failure is `op`'s [04-NUM-9] trap under the metadata report,
+/// the two lines the C runtime's operation plans (`expand`, `pad`, the
+/// reductions) print for it. Where the compiled lane instead allocates
+/// through bare `chelis_alloc` (`split_keys`, `const`), it prints the same
+/// report under that runtime symbol and no trap line; [04-NUM-9] requires the
+/// trap to name the operation, so this lane does not copy that rendering.
+///
+/// An admitted result can still be one this lane cannot hold: the evaluator
+/// keeps per-element scratch wider than the representation, at most one
+/// index group (`Vec<usize>`) per result element in a reduction. A result
+/// whose scratch would not fit Rust's allocation domain is refused with the
+/// C runtime's allocation failure, which is what C reports at that size: its
+/// request is then at least 2^58 bytes, more than any current 64-bit virtual
+/// address space holds.
+///
+/// Returns the admitted element count.
+fn admit_result(op: &'static str, shape: &[usize], prim: Prim) -> Result<usize, String> {
+    let dtype = prim.runtime_dtype().map_err(|error| error.to_string())?;
+    let metadata = i64_extents(shape)
+        .and_then(|extents| ShapeMetadata::contiguous(&extents, dtype))
+        .and_then(|metadata| metadata.bytes().allocation().map(|_| metadata))
+        .map_err(|error| admission_trap(op, &error))?;
+    metadata
+        .elements()
+        .scratch_len::<Vec<usize>>()
+        .map_err(|_| TENSOR_ALLOCATION_FAILED.to_string())
+}
+
+/// Host extents as the metadata's i64 extents.
+fn i64_extents(extents: &[usize]) -> Result<Vec<i64>, MetadataError> {
+    extents
+        .iter()
+        .map(|&extent| {
+            i64::try_from(extent).map_err(|_| MetadataError::Overflow("extent exceeds i64"))
+        })
+        .collect()
+}
+
+/// A metadata failure in `op`, as the C runtime's `affine_result` prints it:
+/// the metadata report, then [04-NUM-9]'s trap line at i64.
+fn admission_trap(op: &'static str, error: &MetadataError) -> String {
+    let trap = match error {
+        MetadataError::Domain(_) => NumericTrap::Domain {
+            op,
+            prim: Prim::Int64,
+        },
+        MetadataError::Overflow(_) => NumericTrap::Overflow {
+            op,
+            prim: Prim::Int64,
+        },
+    };
+    format!("{error}\n{trap}")
+}
+
 fn concrete_shape(ty: &TensorType) -> Result<Vec<usize>, String> {
     ty.dims
         .iter()
@@ -236,18 +303,18 @@ fn concrete_shape_with(
 }
 
 /// Zero-filled tensor at the type's declared dtype (missing non-strict
-/// Load inputs). Zero is a member of every active dtype, so this cannot
-/// trap.
-fn default_value(ty: &TensorType) -> TensorValue {
+/// Load inputs). Zero is a member of every active dtype, so no value traps;
+/// only the declared extents can fail admission.
+fn default_value(ty: &TensorType) -> Result<TensorValue, String> {
     let shape = concrete_shape(ty).unwrap_or_default();
-    let n = numel(&shape);
+    let n = admit_result("load", &shape, ty.precision)?;
     let storage = if ty.precision.is_float() {
         finalize_tensor("load", ty.precision, RawTensor::Float(vec![0.0; n]))
     } else {
         finalize_tensor("load", ty.precision, RawTensor::Int(vec![0; n]))
     }
     .expect("zero is a member of every active dtype");
-    TensorValue::from_storage(shape, storage)
+    Ok(TensorValue::from_storage(shape, storage))
 }
 
 /// Freeze a raw-f64 host input once at the Load's declared dtype, or accept
@@ -703,7 +770,9 @@ fn batched_row_len(data: &TensorValue, shape: &[usize], node: &DagNode) -> Resul
             node.id.0
         ));
     }
-    Ok(data.shape[shape.len()..].iter().product())
+    // An empty row's trailing extents need not have a representable
+    // product; `numel` answers zero without folding them.
+    Ok(numel(&data.shape[shape.len()..]))
 }
 
 fn row_of(storage: &TensorStorage, row: usize, row_len: usize) -> TensorStorage {
@@ -827,7 +896,9 @@ fn eval_uniform_bound_adjoint(
         crate::dag::UniformBound::High => chelis_types::UniformBound::High,
     };
     match keys {
-        DrawKeys::Inactive => zero_tensor(&concrete_shape(&node.output_type)?, prim),
+        DrawKeys::Inactive => {
+            zero_tensor("uniform_like", &concrete_shape(&node.output_type)?, prim)
+        }
         DrawKeys::Scalar(key) => {
             let value = uniform_like_bound_adjoint(g.storage(), key, bound)
                 .map_err(|error| error.to_string())?;
@@ -864,9 +935,10 @@ fn eval_uniform_bound_adjoint(
             })?;
             // Row `b` joins the group of the result element it would read as
             // a control of the result's shape; each group is contiguous.
-            let mut groups = vec![Vec::new(); numel(out_shape)];
+            let groups_len = admit_result("uniform_like", out_shape, prim)?;
+            let mut groups = vec![Vec::new(); groups_len];
             for row in 0..rows.len() {
-                groups[leading_row(row, rows.len(), numel(out_shape))].push(row);
+                groups[leading_row(row, rows.len(), groups_len)].push(row);
             }
             let values = groups
                 .iter()
@@ -896,8 +968,9 @@ fn key_value(
     Ok(TensorValue::from_storage(value.shape.clone(), storage))
 }
 
-fn zero_tensor(shape: &[usize], prim: Prim) -> Result<TensorValue, String> {
-    let storage = finalize_tensor("random", prim, RawTensor::Float(vec![0.0; numel(shape)]))
+fn zero_tensor(op: &'static str, shape: &[usize], prim: Prim) -> Result<TensorValue, String> {
+    let len = admit_result(op, shape, prim)?;
+    let storage = finalize_tensor("random", prim, RawTensor::Float(vec![0.0; len]))
         .map_err(|trap| trap.to_string())?;
     Ok(TensorValue::from_storage(shape.to_vec(), storage))
 }
@@ -1311,9 +1384,10 @@ fn matmul(lhs: &TensorValue, rhs: &TensorValue, prim: Prim) -> Result<TensorValu
     let k = lhs.shape[1];
     assert_eq!(rhs.shape[0], k);
     let n = rhs.shape[1];
+    let len = admit_result("matmul", &[m, n], prim)?;
     let a = lhs.to_f64_lossy_vec();
     let b = rhs.to_f64_lossy_vec();
-    let mut data = vec![0.0; m * n];
+    let mut data = vec![0.0; len];
     for i in 0..m {
         for j in 0..n {
             let mut acc = 0.0;
@@ -1337,12 +1411,15 @@ fn batched_matmul(lhs: &TensorValue, rhs: &TensorValue, prim: Prim) -> Result<Te
     let k = lhs.shape[rank - 1];
     assert_eq!(rhs.shape[rank - 2], k);
     let n = rhs.shape[rank - 1];
-    let batch_count = batch.iter().product::<usize>();
     let mut out_shape = batch.to_vec();
     out_shape.extend([m, n]);
+    let len = admit_result("matmul", &out_shape, prim)?;
+    // An empty result has no element to compute, and its batch extents'
+    // product need not be representable: `[2^62, 2^62, 0, 0]` is admitted.
+    let batch_count = if len == 0 { 0 } else { len / (m * n) };
     let a = lhs.to_f64_lossy_vec();
     let b = rhs.to_f64_lossy_vec();
-    let mut data = vec![0.0; batch_count * m * n];
+    let mut data = vec![0.0; len];
     for batch_idx in 0..batch_count {
         let lhs_base = batch_idx * m * k;
         let rhs_base = batch_idx * k * n;
@@ -1371,15 +1448,16 @@ fn index_at(indices: &TensorValue, linear: usize) -> isize {
     }
 }
 
-fn gather(values: &TensorValue, indices: &TensorValue, axis: usize) -> TensorValue {
+fn gather(values: &TensorValue, indices: &TensorValue, axis: usize) -> Result<TensorValue, String> {
     assert!(axis < values.shape.len());
     let index_rank = indices.shape.len();
     let mut out_shape = Vec::with_capacity(values.shape.len() - 1 + index_rank);
     out_shape.extend_from_slice(&values.shape[..axis]);
     out_shape.extend_from_slice(&indices.shape);
     out_shape.extend_from_slice(&values.shape[axis + 1..]);
-    let mut picks = Vec::with_capacity(numel(&out_shape));
-    for out_linear in 0..numel(&out_shape) {
+    let out_len = admit_result("gather", &out_shape, values.prim())?;
+    let mut picks = Vec::with_capacity(out_len);
+    for out_linear in 0..out_len {
         let out_index = linear_to_index(out_linear, &out_shape);
         let mut idx_index = Vec::with_capacity(index_rank);
         for pos in 0..index_rank {
@@ -1397,7 +1475,10 @@ fn gather(values: &TensorValue, indices: &TensorValue, axis: usize) -> TensorVal
         picks.push(index_to_linear(&value_index, &values.shape));
     }
     // reuse_* contract: gather is element-preserving (section C3).
-    TensorValue::from_storage(out_shape.clone(), values.storage().reuse_gather(&picks))
+    Ok(TensorValue::from_storage(
+        out_shape.clone(),
+        values.storage().reuse_gather(&picks),
+    ))
 }
 
 fn scatter_add(
@@ -1731,12 +1812,19 @@ fn for_each_window_pos(window_shape: &[usize], n: usize, mut f: impl FnMut(&[usi
 }
 
 /// Build the exact, ordered source-index group for every output element of
-/// an axis reduction. Shape planning remains local; arithmetic does not.
-fn axis_reduction_groups(input_shape: &[usize], axis: usize) -> (Vec<usize>, Vec<Vec<usize>>) {
+/// an axis reduction. Shape planning remains local; arithmetic does not. The
+/// result is admitted as `op`'s at `prim` first: removing an axis of an empty
+/// operand can leave extents whose product is not representable.
+fn axis_reduction_groups(
+    op: &'static str,
+    prim: Prim,
+    input_shape: &[usize],
+    axis: usize,
+) -> Result<(Vec<usize>, Vec<Vec<usize>>), String> {
     assert!(axis < input_shape.len());
     let mut out_shape = input_shape.to_vec();
     let axis_len = out_shape.remove(axis);
-    let out_len = numel(&out_shape);
+    let out_len = admit_result(op, &out_shape, prim)?;
     let mut groups = Vec::with_capacity(out_len);
     for out_flat in 0..out_len {
         let out_index = linear_to_index(out_flat, &out_shape);
@@ -1756,12 +1844,19 @@ fn axis_reduction_groups(input_shape: &[usize], axis: usize) -> (Vec<usize>, Vec
         }
         groups.push(group);
     }
-    (out_shape, groups)
+    Ok((out_shape, groups))
 }
 
 /// Axis reduction through the closed Phase 2 typed kernel.
-fn reduce(input: &TensorValue, axis: usize, op: TensorReduceOp) -> Result<TensorValue, String> {
-    let (out_shape, groups) = axis_reduction_groups(&input.shape, axis);
+/// `name` is the primitive's [04-NUM-9] name and `result` its result dtype.
+fn reduce(
+    name: &'static str,
+    input: &TensorValue,
+    axis: usize,
+    op: TensorReduceOp,
+    result: Prim,
+) -> Result<TensorValue, String> {
+    let (out_shape, groups) = axis_reduction_groups(name, result, &input.shape, axis)?;
     let storage =
         reduce_tensor_groups(op, input.storage(), &groups).map_err(|err| err.to_string())?;
     Ok(TensorValue::from_storage(out_shape, storage))
@@ -1775,7 +1870,11 @@ fn reduce(input: &TensorValue, axis: usize, op: TensorReduceOp) -> Result<Tensor
 /// (the `RiscOp::Argmax` spec invariant; per-dtype storage ended the
 /// f64-image detour of chelis#233).
 fn reduce_argcmp(input: &TensorValue, axis: usize, op: ArgReduceOp) -> Result<TensorValue, String> {
-    let (out_shape, groups) = axis_reduction_groups(&input.shape, axis);
+    let name = match op {
+        ArgReduceOp::Argmax => "argmax_reduce",
+        ArgReduceOp::Argmin => "argmin_reduce",
+    };
+    let (out_shape, groups) = axis_reduction_groups(name, Prim::Int64, &input.shape, axis)?;
     let storage =
         arg_reduce_tensor_groups(op, input.storage(), &groups).map_err(|err| err.to_string())?;
     Ok(TensorValue::from_storage(out_shape, storage))
@@ -1841,7 +1940,7 @@ pub fn count_tensor(input: &TensorValue, axes: &[usize]) -> Result<TensorValue, 
         .enumerate()
         .filter_map(|(axis, &extent)| (!selected.contains(&axis)).then_some(extent))
         .collect();
-    let mut groups = vec![Vec::<usize>::new(); numel(&out_shape)];
+    let mut groups = vec![Vec::<usize>::new(); admit_result("count", &out_shape, Prim::Int64)?];
     for flat in 0..input.len() {
         let input_coord = linear_to_index(flat, &input.shape);
         let output_coord: Vec<usize> = input_coord
@@ -1864,10 +1963,13 @@ fn reshape(input: &TensorValue, shape: Vec<usize>) -> TensorValue {
     TensorValue::from_storage(shape, input.storage().clone())
 }
 
-fn permute(input: &TensorValue, axes: &[usize]) -> TensorValue {
+/// A permutation keeps the element count but not the stride products: an
+/// empty `[2^62, 2^62, 0]` admits and its `[0, 2^62, 2^62]` does not, so the
+/// result is admitted as the C runtime's permutation plan admits it.
+fn permute(input: &TensorValue, axes: &[usize]) -> Result<TensorValue, String> {
     assert_eq!(axes.len(), input.shape.len());
     let out_shape: Vec<usize> = axes.iter().map(|&axis| input.shape[axis]).collect();
-    let out_len = numel(&out_shape);
+    let out_len = admit_result("permute", &out_shape, input.prim())?;
     let mut picks = Vec::with_capacity(out_len);
     for flat_idx in 0..out_len {
         let out_index = linear_to_index(flat_idx, &out_shape);
@@ -1878,12 +1980,22 @@ fn permute(input: &TensorValue, axes: &[usize]) -> TensorValue {
         picks.push(index_to_linear(&in_index, &input.shape));
     }
     // reuse_* contract: permute is element-preserving (section C3).
-    TensorValue::from_storage(out_shape, input.storage().reuse_gather(&picks))
+    Ok(TensorValue::from_storage(
+        out_shape,
+        input.storage().reuse_gather(&picks),
+    ))
 }
 
-fn expand(input: &TensorValue, axis: usize, _size: usize, out_shape: Vec<usize>) -> TensorValue {
+/// `op` is the expansion's primitive, `expand` or `insert`, whose result is
+/// admitted before its index map is built.
+fn expand(
+    op: &'static str,
+    input: &TensorValue,
+    axis: usize,
+    out_shape: Vec<usize>,
+) -> Result<TensorValue, String> {
     assert!(axis <= input.shape.len());
-    let out_len = numel(&out_shape);
+    let out_len = admit_result(op, &out_shape, input.prim())?;
     let mut picks = Vec::with_capacity(out_len);
     for flat_idx in 0..out_len {
         let out_index = linear_to_index(flat_idx, &out_shape);
@@ -1899,13 +2011,16 @@ fn expand(input: &TensorValue, axis: usize, _size: usize, out_shape: Vec<usize>)
         picks.push(index_to_linear(&in_index, &input.shape));
     }
     // reuse_* contract: expand is element-preserving (section C3).
-    TensorValue::from_storage(out_shape, input.storage().reuse_gather(&picks))
+    Ok(TensorValue::from_storage(
+        out_shape,
+        input.storage().reuse_gather(&picks),
+    ))
 }
 
 fn one_hot(indices: &TensorValue, vocab: usize, prim: Prim) -> Result<TensorValue, String> {
     let mut out_shape = indices.shape.clone();
     out_shape.push(vocab);
-    let mut out = vec![0i64; numel(&out_shape)];
+    let mut out = vec![0i64; admit_result("one_hot", &out_shape, prim)?];
     for index_linear in 0..indices.len() {
         let class = index_at(indices, index_linear);
         assert!(
@@ -2099,13 +2214,23 @@ fn pad(
     fill: chelis_types::ScalarValue,
 ) -> Result<TensorValue, String> {
     assert_eq!(padding.len(), input.shape.len());
-    let out_shape: Vec<usize> = input
-        .shape
+    // The padded extents are the C runtime's `ShapeMetadata::padded`, so an
+    // extent past i64 is its `Overflow`, before anything is allocated.
+    let (before, after): (Vec<usize>, Vec<usize>) = padding.iter().copied().unzip();
+    let dtype = input
+        .prim()
+        .runtime_dtype()
+        .map_err(|error| error.to_string())?;
+    let padded = i64_extents(&input.shape)
+        .and_then(|extents| ShapeMetadata::contiguous(&extents, dtype))
+        .and_then(|metadata| metadata.padded(&i64_extents(&before)?, &i64_extents(&after)?))
+        .map_err(|error| admission_trap("pad", &error))?;
+    let out_shape: Vec<usize> = padded
+        .shape()
         .iter()
-        .zip(padding.iter())
-        .map(|(dim, (before, after))| dim + before + after)
-        .collect();
-    let mut map: Vec<Option<usize>> = vec![None; numel(&out_shape)];
+        .map(|&extent| usize::try_from(extent).map_err(|_| "padded extent exceeds usize"))
+        .collect::<Result<_, _>>()?;
+    let mut map: Vec<Option<usize>> = vec![None; admit_result("pad", &out_shape, input.prim())?];
     for flat_idx in 0..input.len() {
         let in_index = linear_to_index(flat_idx, &input.shape);
         let out_index: Vec<usize> = in_index
@@ -3529,7 +3654,7 @@ where
                             .find_map(|dep| values.get(dep).map(|v| v.shape.clone()))
                     })
                     .unwrap_or_default();
-                let n = numel(&shape);
+                let n = admit_result("const", &shape, out_prim)?;
                 // The SEALED payload materializes exactly (chelis#856):
                 // integer/bool payloads splat through the exact i64
                 // lane (no f64 laundering above 2^53), float payloads
@@ -3543,6 +3668,7 @@ where
             RiscOp::ConstTensor { data } => {
                 let shape =
                     concrete_shape_with(&node.output_type, &runtime_dims).unwrap_or_default();
+                admit_result("const", &shape, out_prim)?;
                 // Sealed per-dtype storage: exact integer lane for
                 // integer/bool payloads, exact f64 images otherwise
                 // (chelis#856).
@@ -3712,7 +3838,7 @@ where
             RiscOp::Load { name } => match resolved_inputs.get(name.as_str()) {
                 Some(value) => ingress_to_declared(name.as_str(), out_prim, value)?,
                 None if strict_loads => return Err(format!("missing required input `{name}`")),
-                None => default_value(&node.output_type),
+                None => default_value(&node.output_type)?,
             },
             RiscOp::Store { .. } | RiscOp::Copy | RiscOp::Drop | RiscOp::Realize => {
                 values[&node.inputs[0]].clone()
@@ -3886,6 +4012,9 @@ where
                 // extent its type declares is a claim about them, checked
                 // before any key exists, as the C lane checks it.
                 check_declared_extents("split_keys", &node.output_type, &shape, &runtime_dims)?;
+                // [05-OP-33]: the result's count and bytes fit their domains
+                // before any key is derived into it (chelis#2491).
+                admit_result("split_keys", &shape, Prim::Key)?;
                 let storage =
                     split_keys_storage(keys.storage(), count).map_err(|error| error.to_string())?;
                 TensorValue::from_storage(shape, storage)
@@ -3976,23 +4105,37 @@ where
                 values[&node.inputs[1]].clone()
             }
             RiscOp::Sum { axis, accumulator } => reduce(
+                "sum",
                 &values[&node.inputs[0]],
                 *axis,
                 TensorReduceOp::Sum {
                     accumulator: *accumulator,
                     result: out_prim,
                 },
+                out_prim,
             )?,
             RiscOp::Count { axes } => count_tensor(&values[&node.inputs[0]], axes)?,
-            RiscOp::MaxReduce { axis } => {
-                reduce(&values[&node.inputs[0]], *axis, TensorReduceOp::MaxReduce)?
-            }
-            RiscOp::MinReduce { axis } => {
-                reduce(&values[&node.inputs[0]], *axis, TensorReduceOp::MinReduce)?
-            }
-            RiscOp::ProdReduce { axis } => {
-                reduce(&values[&node.inputs[0]], *axis, TensorReduceOp::ProdReduce)?
-            }
+            RiscOp::MaxReduce { axis } => reduce(
+                "max_reduce",
+                &values[&node.inputs[0]],
+                *axis,
+                TensorReduceOp::MaxReduce,
+                out_prim,
+            )?,
+            RiscOp::MinReduce { axis } => reduce(
+                "min_reduce",
+                &values[&node.inputs[0]],
+                *axis,
+                TensorReduceOp::MinReduce,
+                out_prim,
+            )?,
+            RiscOp::ProdReduce { axis } => reduce(
+                "prod_reduce",
+                &values[&node.inputs[0]],
+                *axis,
+                TensorReduceOp::ProdReduce,
+                out_prim,
+            )?,
             RiscOp::ReduceWindow {
                 reducer,
                 window_shape,
@@ -4043,9 +4186,11 @@ where
                     .collect::<Result<_, _>>()?;
                 // chelis#616: with runtime target extents the numel invariant
                 // is only checkable here — report a clean error (mirrored by
-                // the C backend's runtime numel abort), never a panic.
+                // the C backend's runtime numel abort), never a panic. The
+                // target's count is the admitted one, so an unrepresentable
+                // product traps rather than overflowing (chelis#2491).
                 let input = &values[&node.inputs[0]];
-                let expected: usize = shape.iter().product();
+                let expected = admit_result("reshape", &shape, input.prim())?;
                 // The phrase is the interpreter's and the C runtime's
                 // (`host_emit.rs`), so every lane reports the mismatch alike.
                 if expected != input.len() {
@@ -4057,12 +4202,12 @@ where
                 }
                 reshape(input, shape)
             }
-            RiscOp::Permute { axes } => permute(&values[&node.inputs[0]], axes),
+            RiscOp::Permute { axes } => permute(&values[&node.inputs[0]], axes)?,
             RiscOp::Expand { axis, size } => {
                 let input = &values[&node.inputs[0]];
                 let size_value = resolve_eval_bound(size, node, &values, 0)?;
                 let mut out_shape = input.shape.clone();
-                if node.output_type.dims.len() == input.shape.len() + 1 {
+                let kind = if node.output_type.dims.len() == input.shape.len() + 1 {
                     if *axis > out_shape.len() {
                         return Err(format!(
                             "expand at node {}: axis {} out of bounds for rank {} tensor",
@@ -4072,6 +4217,7 @@ where
                         ));
                     }
                     out_shape.insert(*axis, size_value);
+                    crate::axis_sources::ExpansionKind::Insert
                 } else if node.output_type.dims.len() == input.shape.len() {
                     let target = out_shape.get_mut(*axis).ok_or_else(|| {
                         format!(
@@ -4082,6 +4228,7 @@ where
                         )
                     })?;
                     *target = size_value;
+                    crate::axis_sources::ExpansionKind::Expand
                 } else {
                     return Err(format!(
                         "expand at node {}: output rank {} must equal input rank {} or {}",
@@ -4090,8 +4237,8 @@ where
                         input.shape.len(),
                         input.shape.len() + 1
                     ));
-                }
-                expand(input, *axis, size_value, out_shape)
+                };
+                expand(kind.primitive_name(), input, *axis, out_shape)?
             }
             RiscOp::OneHot { vocab } => one_hot(&values[&node.inputs[0]], *vocab, out_prim)?,
             RiscOp::Pad { padding, fill } => {
@@ -4292,7 +4439,7 @@ where
                 }
             }
             RiscOp::Gather { axis } => {
-                gather(&values[&node.inputs[0]], &values[&node.inputs[1]], *axis)
+                gather(&values[&node.inputs[0]], &values[&node.inputs[1]], *axis)?
             }
             RiscOp::ScatterAdd { axis } => scatter_add(
                 &values[&node.inputs[0]],
@@ -6692,12 +6839,14 @@ mod tests {
             RawTensor::Int(vec![i64::from(i32::MAX), 1, -1]),
         );
         let err = reduce(
+            "sum",
             &input,
             0,
             TensorReduceOp::Sum {
                 accumulator: Prim::Int32,
                 result: Prim::Int32,
             },
+            Prim::Int32,
         )
         .expect_err("lane0 + lane1 overflows the i32 accumulator");
         assert_eq!(err, "numeric trap: overflow in sum at i32");
@@ -6707,12 +6856,14 @@ mod tests {
             RawTensor::Int(vec![i64::from(i32::MAX) - 1, 1, -1]),
         );
         let output = reduce(
+            "sum",
             &control,
             0,
             TensorReduceOp::Sum {
                 accumulator: Prim::Int32,
                 result: Prim::Int32,
             },
+            Prim::Int32,
         )
         .expect("below-overflow control");
         assert_eq!(

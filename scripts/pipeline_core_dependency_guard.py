@@ -19,8 +19,17 @@ CORE_MANIFEST = REPO_ROOT / "crates" / CORE_PACKAGE / "Cargo.toml"
 APPROVED_DIRECT_DEPENDENCIES = frozenset(
     {"chelis-deep", "chelis-types", "chelis-effects", "chelis-ir", "chelis-unord"}
 )
+# chelis-abi is the leaf checked-metadata authority (it depends only on
+# chelis-vocab). chelis-ir's DAG evaluator admits each result's extents through
+# it before allocating, the check the C runtime makes (chelis#2491).
 APPROVED_WORKSPACE_CLOSURE = frozenset(
-    {CORE_PACKAGE, *APPROVED_DIRECT_DEPENDENCIES, "chelis-pred", "chelis-vocab"}
+    {
+        CORE_PACKAGE,
+        *APPROVED_DIRECT_DEPENDENCIES,
+        "chelis-abi",
+        "chelis-pred",
+        "chelis-vocab",
+    }
 )
 DENIED_PACKAGES = frozenset(
     {

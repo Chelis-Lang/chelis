@@ -677,6 +677,7 @@ name = "chelis-ir"
 version = "0.18.11"
 dependencies = [
  "bincode",
+ "chelis-abi",
  "chelis-deep",
  "chelis-effects",
  "chelis-macros",
