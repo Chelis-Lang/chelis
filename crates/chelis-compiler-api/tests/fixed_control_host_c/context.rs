@@ -1,4 +1,5 @@
-//! #1876: selected fixed-control source execution survives linked context transport.
+//! #1876: selected keyed source execution survives linked context transport.
+use super::key_reference::{self, half_dropout};
 use super::ownership_support;
 
 use chelis_compiler_api::compiler::{CompiledExecutionArtifact, compile_for_execution_in_context};
@@ -11,11 +12,11 @@ fn context() -> CompiledContext {
         r#"
 module Probe.Draw
 export (keep, loss, matrix, empty, single)
-def keep(x: tensor[4, f32], rate: f32) -> tensor[4, f32] = dropout(x, rate)
-def loss(x: tensor[4, f32]) -> tensor[f32] = sum(keep(x, 0.5f32), 0i32)
-def matrix(x: tensor[2, 2, f32]) -> tensor[2, 2, f32] = dropout(x, 0.5f32)
-def empty(x: tensor[0, f32]) -> tensor[0, f32] = dropout(x, 0.5f32)
-def single(x: tensor[1, f32]) -> tensor[1, f32] = dropout(x, 0.5f32)
+def keep(k: key, x: tensor[4, f32], rate: f32) -> tensor[4, f32] = dropout(k, x, rate)
+def loss(k: key, x: tensor[4, f32]) -> tensor[f32] = sum(keep(k, x, 0.5f32), 0i32)
+def matrix(k: key, x: tensor[2, 2, f32]) -> tensor[2, 2, f32] = dropout(k, x, 0.5f32)
+def empty(k: key, x: tensor[0, f32]) -> tensor[0, f32] = dropout(k, x, 0.5f32)
+def single(k: key, x: tensor[1, f32]) -> tensor[1, f32] = dropout(k, x, 0.5f32)
 "#,
     )
 }
@@ -28,14 +29,32 @@ fn context_with_library(library: &str) -> CompiledContext {
     compile_reef_context(directory.path(), directory.path()).unwrap()
 }
 
+/// A client whose `main` runs `body`: a block when it binds names, the bare
+/// expression otherwise (a one-expression block is a parse error).
 fn source(body: &str, shape: &str) -> String {
+    let body = if body.contains('\n') {
+        format!("{{\n {body}\n}}")
+    } else {
+        body.to_string()
+    };
     format!(
         "module Probe.Client\nimport Probe.Draw (keep, loss, matrix, empty, single)\n\
-         def main(x: tensor[{shape}, f32]) -> tensor[{shape}, f32] = with seed(42i64) {{ {body} }}\n"
+         def main(x: tensor[{shape}, f32]) -> tensor[{shape}, f32] = {body}\n"
     )
 }
 
-fn native(artifact: &CompiledExecutionArtifact, dims: &[usize], expected: &[f32]) {
+/// The driver's input of `count` elements: `2i - 3` for each flat index.
+fn driver_input(count: usize) -> Vec<f64> {
+    (0..count).map(|i| 2.0 * i as f64 - 3.0).collect()
+}
+
+/// `key_from_seed(9i64)`: its first element is kept, and its first four are
+/// mixed.
+fn key9() -> u64 {
+    key_reference::key_from_seed(9)
+}
+
+fn native(artifact: &CompiledExecutionArtifact, dims: &[usize], expected: &[f64]) {
     assert_eq!(artifact.host_entry_name, "chelis_main");
     assert!(artifact.entry_lane_decline.is_none());
     assert_eq!(artifact.inputs.len(), 1);
@@ -73,7 +92,7 @@ fn native(artifact: &CompiledExecutionArtifact, dims: &[usize], expected: &[f32]
         .join(",");
     let bits = expected
         .iter()
-        .map(|value| format!("{}u", value.to_bits()))
+        .map(|value| format!("{}u", (*value as f32).to_bits()))
         .chain(std::iter::once("0u".to_string()))
         .collect::<Vec<_>>()
         .join(",");
@@ -126,47 +145,68 @@ int main(void) {{
 fn context_native_source_order_saved_mask_and_shapes_survive_decode() {
     let original = context();
     let decoded = CompiledContext::decode(&original.encode().unwrap()).unwrap();
-    // [05-RNG-1]'s seed42 masks at ordinals 0/1/2 are [0,2,0,0],
-    // [2,0,0,0], [2,2,0,0]. These exact dyadic expectations are shared
-    // with the committed independent oracle in dropout_fixed_stream_api.
-    let cases: &[(&str, &str, &[usize], &[f32])] = &[
-        ("keep(x, 0.5f32)", "4", &[4], &[0.0, -2.0, 0.0, 0.0]),
+    let x = driver_input(4);
+    let ones = [1.0; 4];
+    let (k1, k2) = key_reference::two_keys();
+    let add = |left: Vec<f64>, right: Vec<f64>| -> Vec<f64> {
+        left.iter().zip(right).map(|(a, b)| a + b).collect()
+    };
+    let cases: &[(&str, &str, &[usize], Vec<f64>)] = &[
         (
-            "Probe.Draw.keep(x, 0.5f32)",
+            "keep(key_from_seed(9i64), x, 0.5f32)",
             "4",
             &[4],
-            &[0.0, -2.0, 0.0, 0.0],
+            half_dropout(key9(), &x, false),
         ),
         (
-            "unused = keep(x, 0.0f32)\n _ = drop(unused)\n keep(x, 0.5f32)",
+            "Probe.Draw.keep(key_from_seed(9i64), x, 0.5f32)",
             "4",
             &[4],
-            &[-6.0, 0.0, 0.0, 0.0],
+            half_dropout(key9(), &x, false),
         ),
         (
-            "unused = keep(x, 0.5f32)\n _ = drop(unused)\n x",
+            "(k1, k2) = split_key(key_from_seed(42i64))\n unused = keep(k1, x, 0.0f32)\n _ = drop(unused)\n keep(k2, x, 0.5f32)",
             "4",
             &[4],
-            &[-3.0, -1.0, 1.0, 3.0],
+            half_dropout(k2, &x, false),
         ),
         (
-            "g = grad(loss)(x)\n add(g, keep(x, 0.5f32))",
+            "unused = keep(key_from_seed(9i64), x, 0.5f32)\n _ = drop(unused)\n x",
             "4",
             &[4],
-            &[-6.0, 2.0, 0.0, 0.0],
+            x.clone(),
         ),
         (
-            "nested = with seed(99i64) { keep(x, 0.5f32) }\n add(nested, keep(x, 0.5f32))",
+            "(k1, k2) = split_key(key_from_seed(42i64))\n g = grad(loss, wrt=x)(k1, x)\n add(g, keep(k2, x, 0.5f32))",
             "4",
             &[4],
-            &[-6.0, -4.0, 2.0, 6.0],
+            add(half_dropout(k1, &ones, false), half_dropout(k2, &x, false)),
         ),
-        ("matrix(x)", "2, 2", &[2, 2], &[0.0, -2.0, 0.0, 0.0]),
-        ("empty(x)", "0", &[0], &[]),
-        ("single(x)", "1", &[1], &[0.0]),
+        (
+            "other = keep(key_from_seed(99i64), x, 0.5f32)\n add(other, keep(key_from_seed(9i64), x, 0.5f32))",
+            "4",
+            &[4],
+            add(
+                half_dropout(key_reference::key_from_seed(99), &x, false),
+                half_dropout(key9(), &x, false),
+            ),
+        ),
+        (
+            "matrix(key_from_seed(9i64), x)",
+            "2, 2",
+            &[2, 2],
+            half_dropout(key9(), &x, false),
+        ),
+        ("empty(key_from_seed(9i64), x)", "0", &[0], vec![]),
+        (
+            "single(key_from_seed(9i64), x)",
+            "1",
+            &[1],
+            half_dropout(key9(), &driver_input(1), false),
+        ),
     ];
     for context in [&original, &decoded] {
-        for &(body, shape, dims, expected) in cases {
+        for (body, shape, dims, expected) in cases {
             let source = source(body, shape);
             let artifact =
                 compile_for_execution_in_context(context, &source, CompileTarget::C, None)
@@ -180,14 +220,28 @@ fn context_native_source_order_saved_mask_and_shapes_survive_decode() {
 fn context_source_selection_preserves_siblings_and_ordinary_fallback() {
     let original = context();
     let decoded = CompiledContext::decode(&original.encode().unwrap()).unwrap();
+    let main_c = |artifact: &CompiledExecutionArtifact| {
+        artifact
+            .compile_result
+            .files
+            .iter()
+            .find(|file| file.path == "chelis_main.c")
+            .unwrap()
+            .contents
+            .clone()
+    };
     for context in [&original, &decoded] {
         let source = format!(
             "{}\ndef sibling(y: tensor[2, f32], z: tensor[2, f32]) -> tensor[2, f32] = add(y, z)\n",
-            source("keep(x, 0.5f32)", "4")
+            source("keep(key_from_seed(9i64), x, 0.5f32)", "4")
         );
         let artifact =
             compile_for_execution_in_context(context, &source, CompileTarget::C, None).unwrap();
-        native(&artifact, &[4], &[0.0, -2.0, 0.0, 0.0]);
+        native(
+            &artifact,
+            &[4],
+            &half_dropout(key9(), &driver_input(4), false),
+        );
         let ordinary =
             compile_for_execution_in_context(context, &source, CompileTarget::C, Some("sibling"))
                 .unwrap();
@@ -199,13 +253,11 @@ fn context_source_selection_preserves_siblings_and_ordinary_fallback() {
                 .collect::<Vec<_>>(),
             ["y", "z"]
         );
-        assert!(
-            !ordinary
-                .compile_result
-                .files
-                .iter()
-                .any(|file| file.contents.contains("chelis_dropout_unit"))
-        );
+        // The selected drawing entry emits its dropout kernel; the ordinary
+        // sibling must not carry it. (The shared random-unit helpers are
+        // part of every translation unit's preamble, so they are no witness.)
+        assert!(main_c(&artifact).contains("dropout"));
+        assert!(!main_c(&ordinary).contains("dropout"));
         for entry in ["keep", "Probe.Draw.keep", "ain"] {
             let error =
                 compile_for_execution_in_context(context, &source, CompileTarget::C, Some(entry))
@@ -218,23 +270,27 @@ fn context_source_selection_preserves_siblings_and_ordinary_fallback() {
     }
 }
 
+/// The third row is the key-form analogue of the retired unhandled-`Random`
+/// rejection: a call that omits the key is an arity error.
 #[test]
-fn context_rejects_unbound_names_and_rootless_entries() {
+fn context_rejects_unbound_names_and_keyless_calls() {
     let original = context();
     let decoded = CompiledContext::decode(&original.encode().unwrap()).unwrap();
     let cases = [
-        (source("keep(x, missing)", "4"), "unbound variable"),
         (
-            source("keep(x, 0.5f32)", "4").replace(
+            source("keep(key_from_seed(9i64), x, missing)", "4"),
+            "unbound variable",
+        ),
+        (
+            source("keep(key_from_seed(9i64), x, 0.5f32)", "4").replace(
                 "import Probe.Draw (keep, loss, matrix, empty, single)\n",
                 "",
             ),
             "unbound variable",
         ),
         (
-            source("keep(x, 0.5f32)", "4")
-                .replace("with seed(42i64) { keep(x, 0.5f32) }", "keep(x, 0.5f32)"),
-            "Random",
+            source("keep(x, 0.5f32)", "4"),
+            "arity mismatch: expected 3 args, got 2",
         ),
     ];
     for context in [&original, &decoded] {
@@ -255,7 +311,7 @@ fn context_rejects_unbound_names_and_rootless_entries() {
 #[test]
 fn context_imports_enforce_module_exports_before_checking_or_emission() {
     let original = context_with_library(
-        "module Probe.Draw\nexport (keep)\ndef keep(x: tensor[4, f32], rate: f32) -> tensor[4, f32] = dropout(x, rate)\ndef private_keep(x: tensor[4, f32]) -> tensor[4, f32] = dropout(x, 0.5f32)\n",
+        "module Probe.Draw\nexport (keep)\ndef keep(k: key, x: tensor[4, f32], rate: f32) -> tensor[4, f32] = dropout(k, x, rate)\ndef private_keep(k: key, x: tensor[4, f32]) -> tensor[4, f32] = dropout(k, x, 0.5f32)\n",
     );
     let decoded = CompiledContext::decode(&original.encode().unwrap()).unwrap();
     for context in [&original, &decoded] {
@@ -265,11 +321,11 @@ fn context_imports_enforce_module_exports_before_checking_or_emission() {
             "import Probe.Draw (..)",
         ] {
             for (call, allowed) in [
-                ("Probe.Draw.keep(x, 0.5f32)", true),
-                ("Probe.Draw.private_keep(x)", false),
+                ("Probe.Draw.keep(key_from_seed(9i64), x, 0.5f32)", true),
+                ("Probe.Draw.private_keep(key_from_seed(9i64), x)", false),
             ] {
                 let source = format!(
-                    "module Probe.Client\n{import}\ndef main(x: tensor[4, f32]) -> tensor[4, f32] = with seed(42i64) {{ {call} }}\n"
+                    "module Probe.Client\n{import}\ndef main(x: tensor[4, f32]) -> tensor[4, f32] = {call}\n"
                 );
                 let checked = chelis_compiler_api::compiler::check_in_context(context, &source);
                 let emitted = compile_for_execution_in_context(
@@ -293,7 +349,7 @@ fn context_imports_enforce_module_exports_before_checking_or_emission() {
                 }
             }
         }
-        let source = "module Probe.Client\nimport Probe.Draw (private_keep)\ndef main(x: tensor[4, f32]) -> tensor[4, f32] = with seed(42i64) { private_keep(x) }\n";
+        let source = "module Probe.Client\nimport Probe.Draw (private_keep)\ndef main(x: tensor[4, f32]) -> tensor[4, f32] = private_keep(key_from_seed(9i64), x)\n";
         let error = chelis_compiler_api::compiler::check_in_context(context, source).unwrap_err();
         assert!(format!("{error:?}").contains("does not export `private_keep`"));
     }
