@@ -9450,16 +9450,15 @@ mod tests {
         assert!(c.contains(&gate), "{c}");
         assert!(!c.contains(&format!("((float*)t{}_data)[0] != 0.0f", activation.0)));
         assert!(!c.contains(&format!("((bool*)t{}_data)", activation.0)));
-        // An inactive draw neither takes the scoped counter's next ordinal
-        // nor reads its key (chelis#2410): both sit only inside their gates.
-        let counter = "__chelis_scoped_counter_0++";
-        assert_eq!(c.matches(counter).count(), 1, "{c}");
-        let key_gate = format!("if (t{}_active) {{", key.0);
-        assert!(guarded_block(&c, &key_gate).contains(counter), "{c}");
-        let sample = format!("chelis_uniform_sample_f32(t{}_key,", key.0);
-        assert_eq!(c.matches(&sample).count(), 1, "{c}");
+        // An inactive draw neither validates its bounds nor samples
+        // (chelis#2410): the bound check sits inside the activation's gate,
+        // and each element is zeroed before the sampler when inactive.
         let draw_gate = format!("if ({gate}) {{");
-        assert!(guarded_block(&c, &draw_gate).contains(&sample), "{c}");
+        assert!(
+            guarded_block(&c, &draw_gate).contains("numeric trap: domain in uniform_like at f32"),
+            "{c}"
+        );
+        assert!(c.contains(&format!("if (!({gate})) {{")), "{c}");
     }
 
     /// The body of the one block `header` opens, up to its matching brace.

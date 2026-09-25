@@ -112,12 +112,12 @@ fn current_wire_dag_rejects_missing_older_and_future_versions_before_op_decode()
             Some(5),
         ),
         (
-            r#"{"schema_version":17,"nodes":[{"id":0,"op":{"kind":"not_an_op"},"inputs":[],"output_type":{"dims":[],"precision":"bool"}}],"roots":[0]}"#,
-            Some(17),
+            r#"{"schema_version":18,"nodes":[{"id":0,"op":{"kind":"not_an_op"},"inputs":[],"output_type":{"dims":[],"precision":"bool"}}],"roots":[0]}"#,
+            Some(18),
         ),
         (
-            r#"{"schema_version":19,"nodes":[{"id":0,"op":{"kind":"not_an_op"},"inputs":[],"output_type":{"dims":[],"precision":"bool"}}],"roots":[0]}"#,
-            Some(19),
+            r#"{"schema_version":20,"nodes":[{"id":0,"op":{"kind":"not_an_op"},"inputs":[],"output_type":{"dims":[],"precision":"bool"}}],"roots":[0]}"#,
+            Some(20),
         ),
     ];
 
