@@ -164,7 +164,7 @@ numerical method selection, or control flow design:
   criteria, initial guess strategy. The coding model generates the
   `Nautilus.Optim` call structure.
 - A Monte Carlo expectation `\mathbb{E}[f(S_T)]` needs: number of paths, variance
-  reduction choice (antithetic, control variate), `Random` effect handling. The
+  reduction choice (antithetic, control variate), random key threading. The
   coding model generates the `Shoals.Pricing` Monte Carlo engine call.
 
 The boundary between deterministic and LLM-assisted is: if the LaTeX uniquely
@@ -182,7 +182,7 @@ inspection / review view.
 
 - Named tensor dimensions → subscripts: `tensor[instrument, scenario, f32]`
   renders as `T_{instrument \times scenario}`
-- Effects → color-coded markers: `! { Random }` renders as a blue die marker,
+- Effects → color-coded markers: a `key` parameter renders as a blue die marker,
   `! { IO }` renders as a yellow lightning marker. Pure expressions have no
   marker.
 - `grad(f, wrt=x)` → `\frac{\partial f}{\partial x}` or `\nabla_x f`
@@ -289,7 +289,7 @@ Notebook lands in sub-phase `3o` (Part B) because it needs the full parse / lowe
 3. Octant compiles each formula to Deep, type-checks it, renders it back with
    dimension annotations.
 4. The quant sees: "This formula operates on `tensor[instrument, f32]` and
-   produces `tensor[instrument, f32]` with `Random` effect" — confirming the
+   produces `tensor[instrument, f32]` drawing from a `key`" — confirming the
    dimensions and stochastic structure match their intent.
 5. Runs a backtest on compiled code directly from the notebook. No Python
    translation step.

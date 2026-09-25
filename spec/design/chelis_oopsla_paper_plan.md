@@ -1,6 +1,6 @@
 # Chelis Language Systems Paper - Plan
 
-**Working title:** TBD. Something like "Chelis: A Typed Tensor Language with Automatic Differentiation Through Dataframes, Effect-Tracked Stochasticity, and Compiled Fusion"
+**Working title:** TBD. Something like "Chelis: A Typed Tensor Language with Automatic Differentiation Through Dataframes, Explicit-Key Stochasticity, and Compiled Fusion"
 **Venue (highly tentative):** OOPSLA 2027 (SPLASH)
 **Deadlines:** R1 ~Oct 2026, R2 ~Mar 2027 (estimated from historical pattern - 2027 CFP not yet posted)
 **Format:** PACMPL, acmsmall, 23 pages max, double-blind
@@ -39,7 +39,7 @@ None of these belong in the POPL paper (which is pure metatheory) or the ICLR pa
 
 2. **AD through dataframe operations:** Coral's `filter -> gather` and `aggregate -> reduction` pipeline is differentiable. `grad(portfolio_risk)` where portfolio_risk filters rows and aggregates a column produces correct gradients. No existing dataframe library (pandas, Polars, RAPIDS, Spark) supports this. This is a capability that emerges from the design decision to make dataframe columns be tensors on the same lazy DAG as all other tensor operations.
 
-3. **Effect-tracked stochastic computation:** A Monte Carlo simulation carries `Random` in its type. Handling it with `with seed(42) { ... }` guarantees reproducibility - not by convention, by the type system. This is a regulatory requirement in finance (identical results on re-run) that no other language enforces statically.
+3. **Explicit-key stochastic computation:** A Monte Carlo simulation takes an affine `key` parameter, so its randomness is in its type. Passing `key_from_seed(42)` guarantees reproducibility - not by convention, by the type system. This is a regulatory requirement in finance (identical results on re-run) that no other language enforces statically.
 
 4. **Compiled fusion vs the pydata stack:** Measured performance. Compound expressions (`normal_cdf(x) * exp(-x^2)`) achieve 3.0-3.6x over numpy at 100k elements because the compiler fuses them into single loops. Per-kernel wins of 2.3-6.8x on special functions and distribution CDFs. 881 scipy-parity assertions validate correctness.
 
@@ -64,13 +64,13 @@ Contributions: (1) language design, (2) AD through dataframes, (3) effect-tracke
 The key design decisions and their interactions. Not the formal calculus (that's LaCaDiLE at POPL) - the practical design choices:
 
 - Named tensor dimensions and how they prevent shape bugs without dependent types
-- The effect system (`Random`, `IO`, `Resource`, `Fail`) and how it tracks data provenance and reproducibility
+- The effect system (`IO`, `Resource`, `Fail`) and affine random keys, and how they track data provenance and reproducibility
 - Linear types and how they prevent use-after-transfer for GPU tensors
 - `grad` requiring linearity + effect purity - the practical consequence of the LaCaDiLE formalization
 - `vmap` adding a batch dimension via `addDim`
 - Dual syntax (Surf/Deep) as an AI-native design choice - humans read Surf, agents generate Deep, compiler fitness scores on Deep
 
-Show the interactions: `grad` requires linear use (linearity) and effect purity (effects). `vmap(grad(f))` gives per-example gradients (AD + vectorization). `with seed(42) { vmap(sample) }` gives reproducible batched sampling (effects + vectorization). These interactions are the paper's intellectual substance.
+Show the interactions: `grad` requires linear use (linearity) and effect purity (effects). `vmap(grad(f))` gives per-example gradients (AD + vectorization). `vmap(sample)` over `split_keys(key_from_seed(42), n)` gives reproducible batched sampling (keys + vectorization). These interactions are the paper's intellectual substance.
 
 ### Section 3: Ecosystem and Novel Capabilities (~4 pages)
 
@@ -89,17 +89,17 @@ sensitivity = grad(portfolio_risk, wrt=threshold)(prices, 0.3)
 
 Explain why this works (columns are tensors, filter is gather, gather is differentiable). Explain why pandas/Polars can't do this (columns are not on a differentiable computation graph). Show the financial use case: sensitivity of a risk measure to a portfolio parameter.
 
-#### Effect-Tracked Monte Carlo (Shoals)
+#### Explicit-Key Monte Carlo (Shoals)
 
 ```chelis
-def mc_price(spot: f32, vol: f32, paths: i64) -> f32 ! { Random } = {
+def mc_price(k: key, spot: f32, vol: f32, paths: i64) -> f32 = {
   -- pricing logic using normal_sample
 }
 -- Reproducible: same seed -> same price, guaranteed by the type system
-price = with seed(42) { mc_price(100.0, 0.2, 100000) }
+price = mc_price(key_from_seed(42), 100.0, 0.2, 100000)
 ```
 
-Explain how `Random` as an effect prevents accidental non-reproducibility. The type system won't let you call `mc_price` without handling `Random`. This is a regulatory-grade guarantee.
+Explain how an explicit affine key prevents accidental non-reproducibility. The type system won't let you call `mc_price` without supplying a key, or reuse one. This is a regulatory-grade guarantee.
 
 #### Greeks for Free (Shoals)
 

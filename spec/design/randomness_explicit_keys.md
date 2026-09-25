@@ -1,8 +1,8 @@
 # Explicit single-use random keys (option C)
 
-Tracker: chelis#2413. Status: **decided 2026-09-23 (Robert); names, key tensors, closures and branch arms decided 2026-09-24.** Chelis moves from the counter stream of [05-RNG-1] to explicit keys, after the phases shared by both designs (`randomness_counter_stream.md` phases 1 to 3).
+Tracker: chelis#2413. Status: **decided 2026-09-23 (Robert); names, key tensors, closures and branch arms decided 2026-09-24.** Chelis moves from the counter stream of [05-RNG-1] to explicit keys, after the phases shared by both designs (`archive/randomness_counter_stream.md` phases 1 to 3).
 
-Until the language change lands, the numbered spec still specifies the counter stream, and every lane must keep meeting it, apart from the gaps tracked under #2413. The numbered chapters are amended together with the implementation steps in §5, each step with the text it implements. This document plans that change; it does not decide semantics ahead of those amendments.
+The numbered chapters now specify keys, amended with the switch (#2413).
 
 ## 1. Why
 
@@ -71,7 +71,7 @@ It is never a bare integer (`dtype_semantics.md` §C6). Adding the runtime dtype
 
 ## 4. The shared IR this builds on
 
-Phase 3 of `randomness_counter_stream.md` gives random nodes a key operand. That IR is already C's final shape; only the key source changes when C lands:
+Phase 3 of `archive/randomness_counter_stream.md` gives random nodes a key operand. That IR is already C's final shape; only the key source changes when C lands:
 - in the interim, the bridge op `DrawKey` computes `ofDrawKey` from today's counter frame;
 - under C, keys come from `KeyFromSeed`, `Split{branch}`, `SplitN{count}` and `FoldIn` nodes, or enter as key-typed `Load`s. `split_key` is two nodes, `Split{Left}` and `Split{Right}` (LaCaDiLE's `KeyPath.left/right`), because an IR node has one output. Key derivations are never constant-folded, so exported graphs keep them symbolic.
 

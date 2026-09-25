@@ -1860,7 +1860,7 @@ rate cotangents, higher-order AD, random vmap, resource scopes, dynamic/recursiv
 general UniformLike numerics keep their compatibility boundary. Legacy Dag-only
 Rust entrypoints and serialized lowered libraries do not carry this plan; their
 baked-seed projection remains an adoption dependency. chelis#2413 retires this
-compatibility boundary; `randomness_counter_stream.md` owns that plan. No new mask tensor owner,
+compatibility boundary; `archive/randomness_counter_stream.md` owns that plan. No new mask tensor owner,
 public wire field, compiled-dropout support, or native effect certificate is
 implied by the evaluator's private key table.
 

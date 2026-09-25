@@ -2,15 +2,15 @@
 
 ## Purpose
 
-`chelis manifest` produces a machine-readable reproducibility certificate for a Chelis program. The certificate documents every random operation, its seed source, and the static guarantee that the program is reproducible given the same inputs and seeds.
+`chelis manifest` produces a machine-readable reproducibility certificate for a Chelis program. The certificate documents every random operation, the seed its key derives from, and the static guarantee that the program is reproducible given the same inputs and seeds.
 
-The compile-time guarantee already exists: the type system tracks the `Random` effect, and the compiler refuses to compile programs where `Random` is unhandled. `chelis manifest` is the user-facing artifact that documents this guarantee in a form auditable by humans, model validation teams, and regulators.
+The compile-time guarantee already exists: every random primitive takes an explicit, affine `key`, and a key is produced only by `key_from_seed`, a key derivation, or an entry argument (`randomness_explicit_keys.md`), so no draw depends on hidden state. `chelis manifest` is the user-facing artifact that documents this guarantee in a form auditable by humans, model validation teams, and regulators.
 
 ## What's Already Real
 
-- The `Random` effect in the type system: shipped, working today.
-- Compiler rejection of unhandled `Random`: shipped, working today.
-- `with seed(n) { ... }` handler syntax: shipped.
+- The `key` dtype and key-first random primitives: a function that draws takes a `key` parameter.
+- Compiler rejection of a second use of a key: keys are affine.
+- `key_from_seed(seed)`: the one way a seed becomes a key.
 
 What's missing: the CLI tool that emits the manifest artifact.
 
@@ -19,7 +19,7 @@ What's missing: the CLI tool that emits the manifest artifact.
 ```
 chelis manifest src/pricer.ch              # produce manifest for a file
 chelis manifest                            # manifest for current package
-chelis manifest --check                    # verify all Random ops are seeded; exit 1 if not
+chelis manifest --check                    # verify every random op's key traces to a seed or entry argument; exit 1 if not
 chelis manifest --format json              # default
 chelis manifest --format human             # human-readable text format
 chelis manifest --output dist/manifest.json
@@ -42,7 +42,7 @@ chelis manifest --output dist/manifest.json
       "function": "Shoals.MonteCarlo.simulate_paths",
       "source_location": "src/monte_carlo.ch:42",
       "seed_source": "explicit (parameter `seed: i64`)",
-      "seed_handled_at": "src/monte_carlo.ch:38 (with seed(seed))",
+      "key_root_at": "src/monte_carlo.ch:38 (key_from_seed(seed))",
       "operation_type": "normal_sample",
       "shape": "tensor[n_paths, n_steps, f32]"
     },
@@ -50,7 +50,7 @@ chelis manifest --output dist/manifest.json
       "function": "Shoals.MonteCarlo.bootstrap_sample",
       "source_location": "src/risk.ch:127",
       "seed_source": "explicit (parameter `bootstrap_seed: i64`)",
-      "seed_handled_at": "src/risk.ch:124 (with seed(bootstrap_seed))",
+      "key_root_at": "src/risk.ch:124 (key_from_seed(bootstrap_seed))",
       "operation_type": "uniform_sample",
       "shape": "tensor[n_samples, f32]"
     }
@@ -87,16 +87,16 @@ Random Operations: 2
      Location: src/monte_carlo.ch:42
      Operation: normal_sample over tensor[n_paths, n_steps, f32]
      Seed: explicit parameter `seed: i64`
-     Handled at: src/monte_carlo.ch:38 (with seed(seed))
+     Key root: src/monte_carlo.ch:38 (key_from_seed(seed))
 
   2. Shoals.MonteCarlo.bootstrap_sample
      Location: src/risk.ch:127
      Operation: uniform_sample over tensor[n_samples, f32]
      Seed: explicit parameter `bootstrap_seed: i64`
-     Handled at: src/risk.ch:124 (with seed(bootstrap_seed))
+     Key root: src/risk.ch:124 (key_from_seed(bootstrap_seed))
 
 Guarantees (compiler-verified):
-  ✓ All random operations have explicit, handled seeds
+  ✓ Every random operation's key traces to an explicit seed
   ✓ No implicit randomness reaches any production code path
   ✓ No I/O effects in functions declared pure
   ✓ Linearity verified (no use-after-consume on any tensor)
@@ -129,20 +129,20 @@ jobs:
           path: dist/manifest.json
 ```
 
-The `--check` flag fails the build if any Random operation lacks a handled seed (this duplicates what `chelis build` already does, but provides a clear single-purpose gate for compliance teams).
+The `--check` flag fails the build if any random operation's key does not trace to a seed or an entry argument (this duplicates what `chelis build` already guarantees, but provides a clear single-purpose gate for compliance teams).
 
 ## Implementation Components
 
 - **CLI subcommand**: `chelis manifest` with the flags specified above
-- **Compiler integration**: extract Random operation locations from the effect-checked program, walk the call graph to identify seed sources
+- **Compiler integration**: extract random operation locations from the checked program, follow each key through its derivations and the call graph to its `key_from_seed` root or entry argument
 - **Schema validation**: ensure the JSON output conforms to schema version 1.0
 - **Human-readable formatter**: structured text output as specified
 
 ## Acceptance Criteria
 
 1. `chelis manifest src/file.ch` produces a valid JSON manifest matching the schema.
-2. `chelis manifest --check` exits 0 if all Random ops are seeded, 1 otherwise.
+2. `chelis manifest --check` exits 0 if every random op's key traces to a seed or an entry argument, 1 otherwise.
 3. `chelis manifest --format human` produces the human-readable format specified above.
-4. The manifest correctly identifies every `Random` effect occurrence in the program.
-5. The manifest correctly identifies the seed source (explicit parameter, literal seed, environment variable, etc.) for each Random op.
+4. The manifest correctly identifies every random primitive call in the program.
+5. The manifest correctly identifies the seed source (explicit parameter, literal seed, environment variable, etc.) of each random op's key.
 6. End-to-end demo: a Shoals Monte Carlo example where the manifest is generated, a customer can read it, and re-running with the same seeds produces identical numerical output.

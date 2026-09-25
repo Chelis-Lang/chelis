@@ -541,7 +541,7 @@ since moved to `School.Nn.Generate` / `School.Optim` / `School.Schedule` in chel
   sampled generation (temperature, top-k, top-p) via record-config APIs. `KVCache` is
   precision-polymorphic so mixed-precision inference does not force an `f32` cache
   boundary. The shipped pure greedy entrypoint is `generate`; sampled `generate_with`
-  currently runs under `with seed(...)`. This is the core inference pattern for
+  takes an explicit random `key`. This is the core inference pattern for
   generative models — eliminates the need for manual fold-based generation loops.
 - **`Std.Optim` (expansion):** AdamW (decoupled weight decay, the standard transformer
   optimizer), LAMB (large-batch training).
@@ -595,7 +595,7 @@ Modules ship in three priority tiers.
 | Module | Contents |
 |---|---|
 | `Nautilus.Special` | `erf`, `erfinv`, `log_gamma`, `digamma`, `beta` — required by Distributions |
-| `Nautilus.Distributions` | Normal, LogNormal, Uniform, Student-t, Chi-squared, Exponential, Gamma — PDF, CDF, inverse CDF, sampling (`Random` effect). `normal_like` is Box-Muller here. |
+| `Nautilus.Distributions` | Normal, LogNormal, Uniform, Student-t, Chi-squared, Exponential, Gamma — PDF, CDF, inverse CDF, sampling (explicit `key`). `normal_like` is Box-Muller here. |
 | `Nautilus.LinAlg` | SVD, PCA, eigendecomposition, Cholesky, QR, LU, solve, inverse, determinant — nalgebra-backed with hand-written AD adjoints |
 
 **P1:**
@@ -611,7 +611,7 @@ Modules ship in three priority tiers.
 
 | Module | Contents |
 |---|---|
-| `Nautilus.SDE` | SDE solvers (Euler-Maruyama, Milstein). Uses `Random` effect. |
+| `Nautilus.SDE` | SDE solvers (Euler-Maruyama, Milstein). Draws take explicit keys. |
 | `Nautilus.Integrate` | Numerical integration (trapezoidal, Simpson's, Gaussian quadrature) |
 | `Nautilus.Interpolation` | Linear, cubic, spline interpolation |
 | `Nautilus.Testing` | Hypothesis testing, confidence intervals, p-values |
@@ -656,7 +656,7 @@ rationale and the pure-Chelis-vs-Rust-runtime decision point are covered in
 
 A reef package. Depends on `chelis-std` (`Std.Time`, `Std.Decimal`) + `nautilus` +
 `coral`. Contains only finance-specific logic — nothing a non-finance programmer would
-need. Greeks via `grad` for free. Reproducible Monte Carlo via `Random` effect. Typed
+need. Greeks via `grad` for free. Reproducible Monte Carlo via explicit keys. Typed
 market data via named tensor dimensions.
 
 Shoals ships with Chelis-native tests from day one (`tests/*.ch`, run via `chelis test`). Python parity only if comparing against QuantLib or other external pricing references.
@@ -679,16 +679,16 @@ type system's extension points).
 | `Shoals.Stochastic` | SDE discretization, path generation (uses `cumsum`), variance reduction |
 | `Shoals.Orderbook` | Limit order book representation, matching logic (host-side collections) |
 
-**Reproducibility manifests.** A compiler pass (`chelis manifest`) extracts all
-`Random`-effect-annotated operations from the typed AST into a structured JSON report:
-which operations introduce randomness, which seed handlers cover them, and whether the
+**Reproducibility manifests.** A compiler pass (`chelis manifest`) extracts every
+random draw from the typed AST into a structured JSON report: which operations draw,
+which `key_from_seed` root or entry argument each key derives from, and whether the
 computation is fully reproducible. `chelis manifest --check` exits 0/1 for CI gating.
 This is a product feature for model-validation teams ("machine-generated certificate
 that your simulation is reproducible"). Now demo-blocking for regulated-finance
-prospects: the compile-time guarantee on the Random effect is shipped, the CLI tool
+prospects: the compile-time guarantee on explicit random keys is shipped, the CLI tool
 that produces the audit artifact is the missing piece. Full design:
 `chelis_manifest_spec.md` (current concrete spec); historical context in
-`chelis_reproducibility_manifests.md`. Ships alongside or shortly after Shoals.
+`archive/chelis_reproducibility_manifests.md`. Ships alongside or shortly after Shoals.
 
 **Trust stack integration.** Shoals ships with example `@property` annotations for
 standard pricing models (put-call parity, delta bounds, price positivity,
@@ -752,7 +752,7 @@ extends to cover the new node kinds using the `3n` contract.
 
 | Module | Contents |
 |---|---|
-| `Octant.Lower` (LLM-assisted path) | SDE notation → `Shoals.Stochastic` (discretization + time grid + noise), Monte Carlo expectation → `Shoals.Pricing` (variance reduction + `Random` effect), calibration → `Nautilus.Optim`, yield curve → `Shoals.Curves`. |
+| `Octant.Lower` (LLM-assisted path) | SDE notation → `Shoals.Stochastic` (discretization + time grid + noise), Monte Carlo expectation → `Shoals.Pricing` (variance reduction + explicit keys), calibration → `Nautilus.Optim`, yield curve → `Shoals.Curves`. |
 | `Octant.Render` (finance additions) | Greek pattern matches — `grad(price, wrt=spot) → Δ`, `grad(price, wrt=vol) → 𝒱`, `grad(price, wrt=rate) → ρ`, `grad(price, wrt=T) → Θ`. Configurable variable-name conventions. |
 | `Octant.Notebook` | Cell-based environment — formula, parameter, execution, Greek cells. NOT a Jupyter kernel; cells produce Deep, execution runs compiled C, rendering is mathematical notation. |
 | `Octant.Provenance` (extension) | Same contract as 3n, applied to the new SDE / MC / calibration / curve node kinds. |
@@ -944,7 +944,7 @@ between releases; alpha functions are excluded or down-weighted because their
 signatures may change. Convention: add a `Stability` column to the API surface tables
 in each shell's SKILL.md. Nautilus v0.1.0 candidates for `stable`: all of Special, all
 of Distributions (pdf/cdf/inv_cdf). Candidates for `alpha`: CurveFit, SDE (API may
-change when autonomous Random sampling lands). Apply the same convention to Coral and
+change when keyed sampling lands). Apply the same convention to Coral and
 Shoals when they ship.
 
 **`chelis prove` — executable properties as spec.** The earlier pre-Phase 4 framing of
@@ -979,7 +979,7 @@ documentation for users.
 - `corpus/NNN_name.json` — Fitness score, type info, effect info
 
 **Coverage requirements:** Basic tensor ops, MLP forward/backward, pattern matching on
-ADTs, dimension polymorphism, pipe-heavy data flow, effects (Random, Resource),
+ADTs, dimension polymorphism, pipe-heavy data flow, effects (Resource), random keys,
 linearity (copy, borrow), macros, vmap, tuple returns, grad with multiple wrt targets,
 PyTorch-equivalent translation pairs.
 
@@ -1157,8 +1157,8 @@ type-directed input generation, deterministic first-counterexample reporting, De
 bridge metadata discovery, and the CLI subcommand. Move ahead of secondary-priority
 Phase 4 prep work.
 
-**`chelis manifest` priority elevation.** The compile-time guarantee on the Random
-effect is shipped. The CLI tool that produces the audit artifact is now demo-blocking
+**`chelis manifest` priority elevation.** The compile-time guarantee on explicit
+random keys is shipped. The CLI tool that produces the audit artifact is now demo-blocking
 for regulated-finance prospects. Specification is concrete (see
 `chelis_manifest_spec.md`). Build the subcommand and JSON output format. CI
 integration via `chelis manifest --check` as a gate.
@@ -1260,7 +1260,7 @@ before it's an implementation.
 - **Size-dependent types:** Futhark-style syntactic dimension equality with dynamic
   coercion fallback.
 - **Distribution types:** For probabilistic models.
-  `Distribution(Normal, {mean: tensor, std: tensor})`. Sampling is `Random` effect.
+  `Distribution(Normal, {mean: tensor, std: tensor})`. Sampling takes an explicit key.
 - **Equivariance constraints:** Track symmetry groups through composition. Most
   novel/publishable.
 - **Optimization properties:** `@convex`, `@lipschitz(1.0)`. Trusted annotations
