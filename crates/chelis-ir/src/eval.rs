@@ -2810,7 +2810,9 @@ fn live_mask_entering(
 /// needs. With nothing selected, or with every root selected, the set is
 /// empty and this is a no-op.
 ///
-/// This scopes the abort seed only, and the two draw-key seeds are left
+/// This scopes [`live_mask_from`]'s observable-root seed — the `[05-OP-68]`
+/// abort and a draw that validates its own controls alike, one class under
+/// `spec/06-transformations.md` §5.2 — and leaves the two draw-key seeds
 /// alone for DIFFERENT reasons. [`live_mask_entering`]'s scoped seed is
 /// already selected by `entered`, which its caller derives from the roots
 /// being run, and a draw of a region a selected root enters must execute for
@@ -2894,10 +2896,11 @@ fn live_mask_from(dag: &Dag, mut stack: Vec<NodeId>, unselected: &[bool]) -> Vec
     // trapping draw the selected roots' own activation contains, including
     // the discarded ones, which is what [05-OP-68] is about.
     //
-    // The two disjuncts are one class -- `random_node_may_trap` documents
-    // itself as an observable root under the same `spec/06` 5.2 rule -- so
+    // The two disjuncts are one class — `random_node_may_trap` documents
+    // itself as an observable root under the same spec/06 §5.2 rule — so
     // they take the same scoping. Leaving the newer one unscoped would put
-    // two seeds of one class on different rules.
+    // two seeds of one class on different rules, and re-arm chelis#2476
+    // along the second one.
     stack.extend(
         dag.nodes()
             .iter()
@@ -5891,6 +5894,70 @@ mod tests {
             );
             let _ = (unselected, z);
         }
+    }
+
+    /// chelis#2413 put a trapping draw beside the `[05-OP-68]` abort in the
+    /// same seed, and chelis#2476's rebase scoped both together: they are one
+    /// class under `spec/06` §5.2, so leaving the newer one unscoped would
+    /// re-arm #2476 along the second seed — a draw inside an uncalled `def`
+    /// would demand that def's parameters, and then trap on behalf of code
+    /// the caller excluded.
+    ///
+    /// Nothing lowers a non-`DrawKey`-keyed draw today, so this is built
+    /// directly. The precondition assert is load-bearing: a `DrawKey`-keyed
+    /// draw is not a trapping draw, and this test would pass vacuously.
+    #[test]
+    fn a_trapping_draw_owned_by_an_unselected_root_is_not_this_evaluation_s_concern() {
+        let mut dag = Dag::new();
+        let ty = vec3_f32();
+        let key_ty = TensorType {
+            dims: vec![],
+            precision: Prim::Key,
+        };
+        // `g(z, rate, k)`: an uncalled declaration holding a trapping draw.
+        let z = dag.add_node(RiscOp::Load { name: "z".into() }, vec![], ty.clone(), None);
+        let rate = dag.add_node(
+            RiscOp::Load {
+                name: "rate".into(),
+            },
+            vec![],
+            TensorType {
+                dims: vec![],
+                precision: Prim::F32,
+            },
+            None,
+        );
+        // A plain `Load` key, NOT a `DrawKey` output: the draw validates its
+        // own rate, so it can trap by itself.
+        let k = dag.add_node(RiscOp::Load { name: "k".into() }, vec![], key_ty, None);
+        let draw = dag.add_node(RiscOp::Dropout, vec![z, rate, k], ty.clone(), None);
+        let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], ty.clone(), None);
+        let main = dag.add_node(RiscOp::Add, vec![x, x], ty, None);
+        dag.add_root(draw);
+        dag.add_root(main);
+
+        assert!(
+            dag.random_node_may_trap(dag.get(draw).expect("draw node")),
+            "precondition: this draw must be one that can trap by itself, or \
+             the assertions below pass for the wrong reason"
+        );
+
+        let selected = live_mask_for_roots(&dag, &[main]);
+        assert!(
+            !selected[draw.0],
+            "a trapping draw owned by the unselected root `g` must not be seeded"
+        );
+        for (name, id) in [("z", z), ("rate", rate), ("k", k)] {
+            assert!(
+                !selected[id.0],
+                "and `{name}` must stay dead, so it never becomes a required input"
+            );
+        }
+
+        assert!(
+            live_mask_for_roots(&dag, &[main, draw])[draw.0],
+            "selecting its owner runs it, so the [05-OP-37] trap still fires"
+        );
     }
 
     /// chelis#2476. A lowered program makes every top-level `def` a DAG

@@ -10,10 +10,12 @@ parameters — the `missing required input` shape of
 [#991](https://github.com/Chelis-Lang/chelis/issues/991), re-armed. A node
 owned only by a root the caller did not select is now excluded from seeding;
 one the selection also reaches is never dropped, and selecting every root or
-none is a no-op. This scopes the `[05-OP-68]` abort seed only: a scoped draw
-is already selected by the entered-region set its caller derives from those
-same roots, and a draw of a region a selected root enters must still execute
-for its handler's ordinal. The scoping covers the root-reachable half: a
+none is a no-op. This scopes the observable-root seed — the `[05-OP-68]`
+abort and a draw that validates its own rate or bounds
+(`[05-OP-37]`/`[05-OP-8]`/`[05-OP-71]`) alike, one class under §5.2. The two
+draw-key seeds are unchanged: a scoped draw is already selected by the
+entered-region set its caller derives from those same roots, and a draw of a
+region a selected root enters must still execute for its handler's ordinal. The scoping covers the root-reachable half: a
 node an unselected declaration *discards* is an ancestor of no root, so it
 is owned by no unselected root either and still seeds — separating that from
 a discarded node in the selected root would need per-declaration attribution
