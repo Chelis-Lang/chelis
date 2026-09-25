@@ -458,7 +458,8 @@ pub fn output_axis_sources(dag: &Dag, node: NodeId) -> Vec<AxisSource> {
         | RiscOp::Store { .. }
         | RiscOp::KeyFromSeed
         | RiscOp::Split { .. }
-        | RiscOp::FoldIn => shape_preserving(dag, node),
+        | RiscOp::FoldIn
+        | RiscOp::KeySelect => shape_preserving(dag, node),
 
         // [05-OP-71]: the key's axes pass through and the new last axis is
         // the count's own typed carrier.

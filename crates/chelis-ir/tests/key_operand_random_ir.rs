@@ -457,7 +457,7 @@ fn the_verifier_rejects_a_key_fed_to_another_operation() {
     dag.add_root(added);
     assert_rejected(
         &dag,
-        "only a key operation or a random primitive consumes a key",
+        "only a key operation, a join or a random primitive consumes a key",
     );
     // chelis#2413 step 1, rule V2: a root is a use of its key, so a
     // consumed key is no root.
@@ -482,7 +482,7 @@ fn the_verifier_rejects_a_replay_that_changes_the_mask_contract() {
     );
     dag.add_root(out);
     dag.add_root(replay);
-    assert_rejected(&dag, "changes its forward node");
+    assert_rejected(&dag, "changes the mask contract of");
 }
 
 #[test]
@@ -500,7 +500,7 @@ fn the_verifier_rejects_a_replay_of_an_unconsumed_key() {
         None,
     );
     dag.add_root(replay);
-    assert_rejected(&dag, "that no forward random primitive consumes");
+    assert_rejected(&dag, "which no forward random primitive consumes");
 }
 
 #[test]
@@ -533,7 +533,7 @@ fn the_verifier_rejects_a_constant_key() {
         None,
     );
     dag.add_root(out);
-    assert_rejected(&dag, "only a key operation or a Load produces one");
+    assert_rejected(&dag, "only a key operation, a join or a Load produces one");
 }
 
 #[test]
@@ -570,5 +570,5 @@ fn bound_adjoint_nodes_verify_against_their_forward_template() {
         None,
     );
     dag.add_root(mismatched);
-    assert_rejected(&dag, "changes its forward node");
+    assert_rejected(&dag, "changes the mask contract of");
 }

@@ -116,6 +116,8 @@ fn wire_dag_operation_vocabulary_is_pinned_to_its_schema_version() {
         "split",
         "fold_in",
         "split_n",
+        // Version 19 (chelis#2413): the key join of a where-lowered branch.
+        "key_select",
     ];
     actual.sort();
     expected.sort();
@@ -123,7 +125,7 @@ fn wire_dag_operation_vocabulary_is_pinned_to_its_schema_version() {
         WIRE_DAG_SCHEMA_VERSION, 19,
         "review vocabulary and migration history with every version change"
     );
-    assert_eq!(actual.len(), 72);
+    assert_eq!(actual.len(), 73);
     assert_eq!(
         actual, expected,
         "operation changes require a schema-version and migration-history review"

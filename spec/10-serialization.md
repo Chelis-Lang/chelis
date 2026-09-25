@@ -298,24 +298,38 @@ reference under §3.4, not another template.
 
 `key` is a structural precision with no literal or storage carrier in a
 graph, at any rank: no `Const`, `ConstTensor` or `Pad.fill` holds a key. Every
-key is produced by `KeyFromSeed`, `Split`, `FoldIn` or `SplitN`, or enters as
-a key-precision `Load`. Every node carries its declaration, and a parameter is
+key is produced by `KeyFromSeed`, `Split`, `FoldIn`, `SplitN` or `KeySelect`,
+or enters as a key-precision `Load`. Every node carries its declaration, and a parameter is
 its declaration and its name: every `Load` of one parameter of one declaration
 is one key, and `Load`s of one name in two declarations read two parameters. A
 key
 has at most one use: one `UniformLike`, `Dropout`, `FoldIn` or `SplitN`, one
-place among the roots, or at most one `Split` of each branch. It is otherwise
-read only by its draw's replays. Two consumers of one key, draws and key
-operations alike, other than one `Split` of each branch, may both consume it
-only when each carries an activation and one activation's `And` conjuncts
-include a node `X` and the other's include `Not(X)`, or either's include the
-`bool` constant `false`, whose consumer never runs. Two key operations sharing
-a key this way may derive equal keys, as two `Split`s of one branch do, so a
-key that a key operation derives from a key it shares this way, and every key
-derived from that key in turn, is used only under that operation's
-activation: each of its consumers carries an activation whose `And` conjuncts
-include that activation or the constant `false`, and it is never a root. A key
-reaching any other operation or a shape dependency is a decode error.
+key input of one `KeySelect`, one place among the roots, or at most one
+`Split` of each branch. It is otherwise read only by its draw's replays. Two
+uses of one key, by draws, key operations and `KeySelect` inputs alike, other
+than one `Split` of each branch, may both consume it only when each consumes
+it under an activation and one activation's `And` conjuncts include a node `X`
+and the other's include `Not(X)`, or either's include the `bool` constant
+`false`, whose consumer never runs. `KeySelect` is a branch's join. Its inputs
+are two `key` tensors of its output's exact shape, then two Bool activations,
+each shaped like the key's leading `c` axes for some `c`; it consumes input 0
+under input 2 and input 1 under input 3, and each element of its output is
+input 0's key where input 2 holds for that element's row, and input 1's
+elsewhere. Its two activations are the two arms of one branch: through their
+`And` conjuncts, one is an enclosing activation `S` and a node `X`, and the
+other is `S` and `Not(X)`, or `X` and `Not(X)` are the `bool` constants `true`
+and `false`, so that wherever `S` holds exactly one arm does. Two key
+operations sharing a key under exclusive activations may derive equal keys,
+as two `Split`s of one branch do, so a key that a key operation derives from a
+key it shares this way, and every key derived from that key in turn, is
+consumed only under that operation's activation or by the join of its branch:
+each of its uses consumes it under an activation whose `And` conjuncts include
+that activation or the constant `false`, and it is never a root. A join's
+output is a key under `S`: each of its uses consumes it under an activation
+whose `And` conjuncts include `S`'s, and each such requirement of its inputs
+that both arms include, or the constant `false`, and while it has any such
+requirement it is never a root. A key reaching any other operation or input,
+or a shape dependency, is a decode error.
 
 `KeyFromSeed.inputs` is one `int64` tensor, and its output is the `key` tensor
 of that shape holding [05-OP-69]'s key of each element. `Split` carries its

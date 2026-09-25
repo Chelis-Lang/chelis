@@ -253,11 +253,13 @@ fn grad_dag_checked_impl(
                     }
                 }
                 // A key and its i64 seed or index are discrete: nothing a
-                // key operation reads is on the gradient path.
+                // key operation reads is on the gradient path, and a join's
+                // activations are control edges, as a draw's are.
                 RiscOp::KeyFromSeed
                 | RiscOp::Split { .. }
                 | RiscOp::FoldIn
-                | RiscOp::SplitN { .. } => {}
+                | RiscOp::SplitN { .. }
+                | RiscOp::KeySelect => {}
                 // chelis#1464 / [05-OP-68]: input 0 is the guard's firing
                 // predicate, a control edge, and input 1 is the value the
                 // result carries. Only the fallback is on the gradient path.
@@ -526,6 +528,7 @@ pub fn risc_op_name(op: &RiscOp) -> &'static str {
         RiscOp::Split { .. } => "split_key",
         RiscOp::FoldIn => "fold_in",
         RiscOp::SplitN { .. } => "split_keys",
+        RiscOp::KeySelect => "key_select",
         RiscOp::Sum { .. } => "sum",
         RiscOp::Count { .. } => "count",
         RiscOp::MaxReduce { .. } => "max_reduce",
@@ -1436,10 +1439,13 @@ fn compute_adjoints(
         // No higher-order adjoint is defined for the bound adjoint yet.
         RiscOp::UniformBoundAdjoint { .. } => None,
         // A key receives no cotangent, so no contribution ever reaches it,
-        // and a key operation's i64 seed or index receives none either.
-        RiscOp::KeyFromSeed | RiscOp::Split { .. } | RiscOp::FoldIn | RiscOp::SplitN { .. } => {
-            Some(Vec::new())
-        }
+        // and a key operation's i64 seed or index, or a join's activations,
+        // receive none either.
+        RiscOp::KeyFromSeed
+        | RiscOp::Split { .. }
+        | RiscOp::FoldIn
+        | RiscOp::SplitN { .. }
+        | RiscOp::KeySelect => Some(Vec::new()),
         // --- Reduction ---
         RiscOp::Sum { axis, .. } => {
             // d/dx sum(x, axis) = expand(g, axis, original_size)

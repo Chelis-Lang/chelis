@@ -424,7 +424,7 @@ fn a_split_and_a_draw_of_one_key_without_exclusive_activations_are_rejected() {
     let a = draw(&mut dag, decl, first, Some(c));
     let b = draw(&mut dag, decl, second, None);
     dag.set_roots(vec![a, b]);
-    assert_rejected(&dag, "is split twice for the Left branch");
+    assert_rejected(&dag, "is split twice for one branch");
     // A fold and a split-n under unrelated conditions.
     let mut dag = Dag::new();
     let decl = dag.declare("test");
@@ -492,7 +492,7 @@ enum Escape {
 /// so no graph here reaches the confinement rule there.
 #[test]
 fn a_key_derived_under_exclusive_sharing_is_used_only_under_that_activation() {
-    let outside = "uses it outside that activation";
+    let outside = "consumes it outside that activation";
     for (escape, needle) in [
         (Escape::Unconditional, outside),
         (Escape::OtherArm, outside),
@@ -859,5 +859,311 @@ fn grad_carries_a_key_operations_activation() {
         })
         .unwrap();
         assert_eq!(stored_bits(&out[&gradient]), expected, "c = {selected}");
+    }
+}
+
+// ---- Rule S's join (`KeySelect`), from `join_ir_ref.py` ----
+
+/// `fold_in(key(7), 3)`: `key_ref.py`'s worked value.
+const FOLD_7_3: u64 = 0x53c6_f7e8_3810_b049;
+/// `split(split_n(key(1), 2)[0]).0` and `fold_in(split_n(key(1), 2)[1], 3)`.
+const LEFT_OF_ROW0: u64 = 0x8417_b565_630c_4ecd;
+const FOLD_OF_ROW1: u64 = 0x6047_718a_f0e7_fea6;
+/// f32 `dropout(key, [1, 1], 0.5)`: the pathwise gradient of its sum.
+const DROP_FOLD_7_3: [u64; 2] = [0x4000_0000, 0x0000_0000];
+const DROP_LEFT_7: [u64; 2] = [0x4000_0000, 0x4000_0000];
+
+/// A branch's join of two rank-0 keys.
+fn join(
+    dag: &mut Dag,
+    decl: chelis_ir::dag::DeclId,
+    keys: [NodeId; 2],
+    actives: [NodeId; 2],
+) -> NodeId {
+    node(
+        dag,
+        decl,
+        RiscOp::KeySelect,
+        vec![keys[0], keys[1], actives[0], actives[1]],
+        &[],
+        Prim::Key,
+    )
+}
+
+/// `if c then fold_in(k, 3) else split_key(k).0` as a graph: each arm
+/// derives from the shared key under its activation, and the join consumes
+/// each arm's key under that arm. Returns the join.
+fn joined_arms(dag: &mut Dag, decl: chelis_ir::dag::DeclId, key: NodeId, c: NodeId) -> NodeId {
+    let not_c = not(dag, decl, c);
+    let folded = key_op(dag, decl, RiscOp::FoldIn, key, Some(c));
+    let half = key_op(dag, decl, left(), key, Some(not_c));
+    join(dag, decl, [folded, half], [c, not_c])
+}
+
+/// Rule S (spec/10 §3.2): a key derived in a branch arm leaves it through
+/// the branch's join, which is the taken arm's key, and may then be used
+/// anywhere the branch is, a root included.
+///
+/// Evidentiary status: DISPOSITION LOCK. The join is new; at `727e74b41` no
+/// graph can express it (`key_surface_lanes` holds the regression test).
+#[test]
+fn a_branch_join_is_the_taken_arms_key() {
+    let mut dag = Dag::new();
+    let decl = dag.declare("test");
+    let key = key7(&mut dag, decl);
+    let c = load(&mut dag, decl, "c", &[], Prim::Bool);
+    let joined = joined_arms(&mut dag, decl, key, c);
+    dag.set_roots(vec![joined]);
+    assert_accepted(&dag);
+    for (taken, expected) in [(true, FOLD_7_3), (false, LEFT_7)] {
+        let out = eval(&dag, &[("c", bool_value(vec![], &[taken]))]).unwrap();
+        assert_eq!(key_bits(&out[&joined]), [expected], "c = {taken}");
+    }
+    // `if c then fold_in(k, 3) else k`: the else arm consumes the key itself.
+    let mut dag = Dag::new();
+    let decl = dag.declare("test");
+    let key = key7(&mut dag, decl);
+    let c = load(&mut dag, decl, "c", &[], Prim::Bool);
+    let not_c = not(&mut dag, decl, c);
+    let folded = key_op(&mut dag, decl, RiscOp::FoldIn, key, Some(c));
+    let joined = join(&mut dag, decl, [folded, key], [c, not_c]);
+    let drawn = draw(&mut dag, decl, joined, None);
+    dag.set_roots(vec![drawn]);
+    assert_accepted(&dag);
+    // A join nested in an arm is under that arm, and so are its uses.
+    let mut dag = Dag::new();
+    let decl = dag.declare("test");
+    let key = key7(&mut dag, decl);
+    let q = load(&mut dag, decl, "q", &[], Prim::Bool);
+    let x = load(&mut dag, decl, "x", &[], Prim::Bool);
+    let not_x = not(&mut dag, decl, x);
+    let then_arm = and(&mut dag, decl, q, x);
+    let else_arm = and(&mut dag, decl, q, not_x);
+    let folded = key_op(&mut dag, decl, RiscOp::FoldIn, key, Some(then_arm));
+    let half = key_op(&mut dag, decl, left(), key, Some(else_arm));
+    let joined = join(&mut dag, decl, [folded, half], [then_arm, else_arm]);
+    let drawn = draw(&mut dag, decl, joined, Some(q));
+    dag.set_roots(vec![drawn]);
+    assert_accepted(&dag);
+}
+
+/// Rule S's negatives: a join's result is one key, a join's activations are
+/// the two arms of one branch, a key confined to one branch leaves it only
+/// through that branch's join, and a join under an enclosing arm stays
+/// under it.
+///
+/// Evidentiary status: DISPOSITION LOCK (the join is new).
+#[test]
+fn a_join_consumes_each_key_under_its_arm_and_stays_under_its_branch() {
+    // `if c then fold_in(k, 3) else k` returned twice.
+    let mut dag = Dag::new();
+    let decl = dag.declare("test");
+    let key = key7(&mut dag, decl);
+    let c = load(&mut dag, decl, "c", &[], Prim::Bool);
+    let not_c = not(&mut dag, decl, c);
+    let folded = key_op(&mut dag, decl, RiscOp::FoldIn, key, Some(c));
+    let joined = join(&mut dag, decl, [folded, key], [c, not_c]);
+    dag.set_roots(vec![joined, joined]);
+    assert_rejected(
+        &dag,
+        &format!(
+            "the `if` join key at node {} of `test` is a graph root twice",
+            joined.0
+        ),
+    );
+    // Activations that are not exclusive, and exclusive ones that do not
+    // cover their enclosing activation: with `c` true and `y` false neither
+    // arm holds.
+    for exclusive in [false, true] {
+        let mut dag = Dag::new();
+        let decl = dag.declare("test");
+        let first = load(&mut dag, decl, "first", &[], Prim::Key);
+        let second = load(&mut dag, decl, "second", &[], Prim::Key);
+        let c = load(&mut dag, decl, "c", &[], Prim::Bool);
+        let y = load(&mut dag, decl, "y", &[], Prim::Bool);
+        let (then_arm, else_arm) = if exclusive {
+            (and(&mut dag, decl, c, y), not(&mut dag, decl, c))
+        } else {
+            (c, y)
+        };
+        let joined = join(&mut dag, decl, [first, second], [then_arm, else_arm]);
+        dag.set_roots(vec![joined]);
+        assert_rejected(
+            &dag,
+            "joins keys under activations that are not the two arms of one branch",
+        );
+    }
+    // A key confined to `y`'s branch, joined by `c`'s.
+    let mut dag = Dag::new();
+    let decl = dag.declare("test");
+    let key = key7(&mut dag, decl);
+    let other = load(&mut dag, decl, "other", &[], Prim::Key);
+    let c = load(&mut dag, decl, "c", &[], Prim::Bool);
+    let y = load(&mut dag, decl, "y", &[], Prim::Bool);
+    let not_c = not(&mut dag, decl, c);
+    let not_y = not(&mut dag, decl, y);
+    let confined = key_op(&mut dag, decl, RiscOp::FoldIn, key, Some(y));
+    let twin = key_op(&mut dag, decl, RiscOp::FoldIn, key, Some(not_y));
+    let kept = draw(&mut dag, decl, twin, Some(not_y));
+    let joined = join(&mut dag, decl, [confined, other], [c, not_c]);
+    let drawn = draw(&mut dag, decl, joined, None);
+    dag.set_roots(vec![drawn, kept]);
+    assert_rejected(
+        &dag,
+        &format!(
+            "the `fold_in` key at node {} of `test` is confined to the activation at node {}, but the `if` join at node {} of `test` consumes it outside that activation",
+            confined.0, y.0, joined.0
+        ),
+    );
+    // A join under `q` used outside `q`. Its else arm folds the key that
+    // `q`'s other arm folds to the same bits, so on a path where `q` is
+    // false both draws below would draw them.
+    let hazard = |escape: bool| {
+        let mut dag = Dag::new();
+        let decl = dag.declare("test");
+        let key = key7(&mut dag, decl);
+        let fresh = load(&mut dag, decl, "fresh", &[], Prim::Key);
+        let q = load(&mut dag, decl, "q", &[], Prim::Bool);
+        let x = load(&mut dag, decl, "x", &[], Prim::Bool);
+        let not_q = not(&mut dag, decl, q);
+        let not_x = not(&mut dag, decl, x);
+        let then_arm = and(&mut dag, decl, q, x);
+        let else_arm = and(&mut dag, decl, q, not_x);
+        let folded = key_op(&mut dag, decl, RiscOp::FoldIn, key, Some(else_arm));
+        let twin = key_op(&mut dag, decl, RiscOp::FoldIn, key, Some(not_q));
+        let kept = draw(&mut dag, decl, twin, Some(not_q));
+        let joined = join(&mut dag, decl, [fresh, folded], [then_arm, else_arm]);
+        let escaped = draw(&mut dag, decl, joined, (!escape).then_some(q));
+        dag.set_roots(vec![escaped, kept]);
+        (dag, [escaped, kept])
+    };
+    assert_accepted(&hazard(false).0);
+    let (dag, [escaped, kept]) = hazard(true);
+    assert_rejected(&dag, "consumes it outside that activation");
+    // Why: evaluated anyway with `q` false, the escaped join is the folded
+    // key, and both draws draw its bits.
+    let out = eval(
+        &dag,
+        &[
+            ("q", bool_value(vec![], &[false])),
+            ("x", bool_value(vec![], &[false])),
+            ("fresh", {
+                let mut seeded = Dag::new();
+                let decl = seeded.declare("test");
+                let key = key7(&mut seeded, decl);
+                seeded.set_roots(vec![key]);
+                eval_tensor_roots_exact(&seeded, seeded.roots(), |_| None).unwrap()[&key].clone()
+            }),
+        ],
+    )
+    .unwrap();
+    assert_eq!(stored_bits(&out[&escaped]), stored_bits(&out[&kept]));
+}
+
+/// `vmap` batches a join elementwise: each row's activations select that
+/// row's key.
+///
+/// Evidentiary status: DISPOSITION LOCK (the join is new).
+#[test]
+fn vmap_batches_a_joins_activations() {
+    let mut dag = Dag::new();
+    let decl = dag.declare("test");
+    let key = load(&mut dag, decl, "k", &[], Prim::Key);
+    let c = load(&mut dag, decl, "c", &[], Prim::Bool);
+    let joined = joined_arms(&mut dag, decl, key, c);
+    dag.set_roots(vec![joined]);
+    assert_accepted(&dag);
+    let batched = vectorize_axis0(&dag, DimInfo::Lit(2)).unwrap();
+    assert_accepted(&batched);
+    let join = batched
+        .nodes()
+        .iter()
+        .find(|node| matches!(node.op, RiscOp::KeySelect))
+        .unwrap();
+    for active in &join.inputs[2..] {
+        assert_eq!(
+            batched.get(*active).unwrap().output_type,
+            ty(&[2], Prim::Bool)
+        );
+    }
+    let keys = TensorValue::from_storage(
+        vec![2],
+        TensorStorage::from_keys(
+            SPLIT_1_2
+                .iter()
+                .map(|bits| {
+                    let seed = i64::from_ne_bytes(bits.to_ne_bytes());
+                    RandomKey::from_seed(scalar_from_i64("test", Prim::Int64, seed).unwrap())
+                        .unwrap()
+                })
+                .collect(),
+        ),
+    );
+    let out = eval_tensor_roots_exact(&batched, batched.roots(), |name| match name {
+        "k" => Some(keys.clone()),
+        "c" => Some(bool_value(vec![2], &[false, true])),
+        _ => None,
+    })
+    .unwrap();
+    // Row 0 takes the else arm, row 1 the then arm.
+    assert_eq!(
+        key_bits(&out[&batched.roots()[0]]),
+        [LEFT_OF_ROW0, FOLD_OF_ROW1]
+    );
+}
+
+/// `grad` gives a join no cotangent and keeps its activations, so the
+/// backward graph verifies and replays the taken arm's mask.
+///
+/// Evidentiary status: DISPOSITION LOCK (the join is new).
+#[test]
+fn grad_keeps_a_joins_activations_and_gives_it_no_cotangent() {
+    let mut dag = Dag::new();
+    let decl = dag.declare("test");
+    let key = key7(&mut dag, decl);
+    let x = load(&mut dag, decl, "x", &[2], Prim::F32);
+    let c = load(&mut dag, decl, "c", &[], Prim::Bool);
+    let joined = joined_arms(&mut dag, decl, key, c);
+    let rate = f32_const(&mut dag, decl, 0.5);
+    let dropped = node(
+        &mut dag,
+        decl,
+        RiscOp::Dropout,
+        vec![x, rate, joined],
+        &[2],
+        Prim::F32,
+    );
+    let loss = node(
+        &mut dag,
+        decl,
+        RiscOp::Sum {
+            axis: 0,
+            accumulator: Prim::F32,
+        },
+        vec![dropped],
+        &[],
+        Prim::F32,
+    );
+    dag.add_root(loss);
+    assert_accepted(&dag);
+    let grad = grad_dag_checked(&dag, loss, &[x]).unwrap();
+    assert_accepted(&grad.dag);
+    assert!(
+        grad.dag
+            .nodes()
+            .iter()
+            .filter(|node| matches!(node.op, RiscOp::KeySelect))
+            .all(|join| join.inputs.len() == 4),
+        "every join keeps its activations"
+    );
+    let gradient = grad.grad_nodes[&x];
+    for (taken, expected) in [(true, DROP_FOLD_7_3), (false, DROP_LEFT_7)] {
+        let out = eval_tensor_roots_exact(&grad.dag, &[gradient], |name| match name {
+            "x" => Some(f32_value(vec![2], vec![1.0, 1.0])),
+            "c" => Some(bool_value(vec![], &[taken])),
+            _ => None,
+        })
+        .unwrap();
+        assert_eq!(stored_bits(&out[&gradient]), expected, "c = {taken}");
     }
 }

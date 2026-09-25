@@ -3864,6 +3864,32 @@ where
                 check_operand_extents("fold_in", key_dims, keys, 1, ns, keys.shape.len())?;
                 key_value(keys, fold_in_storage(keys.storage(), ns.storage()))?
             }
+            RiscOp::KeySelect => {
+                // The else keys' extents against the then keys', before
+                // either is read, with the C lane's report.
+                let then_keys = &values[&node.inputs[0]];
+                let key_dims = &bound_dag
+                    .get(node.inputs[0])
+                    .ok_or("join key is not in its graph")?
+                    .output_type
+                    .dims;
+                let else_keys = &values[&node.inputs[1]];
+                if then_keys.shape.len() != else_keys.shape.len() {
+                    return Err(format!(
+                        "join at node {}: then keys {:?} and else keys {:?} must share one shape",
+                        node.id.0, then_keys.shape, else_keys.shape
+                    ));
+                }
+                check_operand_extents(
+                    "if",
+                    key_dims,
+                    then_keys,
+                    1,
+                    else_keys,
+                    then_keys.shape.len(),
+                )?;
+                eval_key_select(node, &values)?
+            }
             RiscOp::SplitN { count } => {
                 let keys = &values[&node.inputs[0]];
                 let count = if key_operation_is_live(node, &values)? {
@@ -4510,6 +4536,55 @@ fn local_guard_verdict(
 /// operation declared. A name nothing has bound yet is declared by this
 /// result (`op_declared_axes`), and an anonymous one claims nothing. The
 /// report is [`local_guard_verdict`]'s, which the C lane mirrors.
+/// A branch's join ([`RiscOp::KeySelect`]): element `i` is the then key's
+/// where the then activation holds for its row, and the else key's
+/// elsewhere. An activation is rank 0, or shaped like a leading part of the
+/// keys' shape, and row `r` of `n` keys reads its element `r / (n / len)`, as
+/// a draw's activation does. The C lane selects the same way.
+fn eval_key_select(
+    node: &DagNode,
+    values: &UnordMap<NodeId, TensorValue>,
+) -> Result<TensorValue, String> {
+    let value = |slot: usize| {
+        node.inputs
+            .get(slot)
+            .and_then(|input| values.get(input))
+            .ok_or_else(|| format!("join at node {} has no input {slot}", node.id.0))
+    };
+    let (then_value, else_value, active) = (value(0)?, value(1)?, value(2)?);
+    let keys = |value: &TensorValue| {
+        value
+            .storage()
+            .keys()
+            .map(<[chelis_types::RandomKey]>::to_vec)
+            .ok_or_else(|| format!("join at node {} reads a non-key key", node.id.0))
+    };
+    if then_value.shape != else_value.shape {
+        return Err(format!(
+            "join at node {}: then keys {:?} and else keys {:?} must share one shape",
+            node.id.0, then_value.shape, else_value.shape
+        ));
+    }
+    if active.prim() != Prim::Bool || !then_value.shape.starts_with(&active.shape) {
+        return Err(format!(
+            "join at node {}: its activation must be a Bool shaped like a leading part of its keys' shape {:?}",
+            node.id.0, then_value.shape
+        ));
+    }
+    let (then_keys, mut selected) = (keys(then_value)?, keys(else_value)?);
+    let (rows, len) = (selected.len(), active.len());
+    for (row, key) in selected.iter_mut().enumerate() {
+        let taken = active.storage().scalar_at(leading_row(row, rows, len));
+        if taken.as_bool_exact() == Some(true) {
+            *key = then_keys[row];
+        }
+    }
+    Ok(TensorValue::from_storage(
+        then_value.shape.clone(),
+        TensorStorage::from_keys(selected),
+    ))
+}
+
 /// Whether a key operation's optional activation (spec/10 §3.2) holds in some
 /// row: absent, or a Bool with at least one true element. A key operation
 /// whose activation holds in no row reads no count.

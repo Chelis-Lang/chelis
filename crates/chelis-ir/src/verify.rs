@@ -686,8 +686,47 @@ pub fn verify_random_operands(graph: &impl KeyGraph, errors: &mut Vec<String>) {
             | KeyRole::DropoutReplay
             | KeyRole::UniformLike
             | KeyRole::UniformBoundAdjoint) => random_node_operands(graph, node, role, errors),
+            KeyRole::KeySelect => key_select_operands(graph, node, errors),
             _ => {}
         }
+    }
+}
+
+/// A join's operands: two keys of its own exact type, then two Bool
+/// activations, each shaped like a leading part of that type's dims.
+fn key_select_operands(graph: &impl KeyGraph, node: usize, errors: &mut Vec<String>) {
+    let described = graph.describe_node(node);
+    let inputs = (0..)
+        .map_while(|slot| graph.input(node, slot))
+        .collect::<Vec<_>>();
+    if inputs.len() != 4 {
+        errors.push(format!(
+            "{described} must read two keys and then two activations"
+        ));
+        return;
+    }
+    let Some(dims) = graph.dims(node) else {
+        errors.push(format!("{described} has no dims"));
+        return;
+    };
+    let key_ok = |input: usize| {
+        graph.dtype(input) == Some(Prim::Key) && graph.dims(input).is_some_and(|key| key == dims)
+    };
+    if graph.dtype(node) != Some(Prim::Key) || !key_ok(inputs[0]) || !key_ok(inputs[1]) {
+        errors.push(format!(
+            "{described} must read two keys of its own exact shape and produce a key"
+        ));
+    }
+    let active_ok = |input: usize| {
+        graph.dtype(input) == Some(Prim::Bool)
+            && graph
+                .dims(input)
+                .is_some_and(|active| dims.starts_with(&active))
+    };
+    if !active_ok(inputs[2]) || !active_ok(inputs[3]) {
+        errors.push(format!(
+            "{described}'s two activations must be Bools shaped like a leading part of its key's shape"
+        ));
     }
 }
 
@@ -697,6 +736,7 @@ fn key_operation_operands(
     role: KeyRole,
     errors: &mut Vec<String>,
 ) {
+    let at = graph.describe_node(node);
     let (operand, arity) = match role {
         KeyRole::KeyFromSeed => (Prim::Int64, 1),
         KeyRole::FoldIn => (Prim::Key, 2),
@@ -712,19 +752,17 @@ fn key_operation_operands(
     let activated = role.consumes() && inputs.len() == arity + 1;
     if inputs.len() != arity && !activated {
         errors.push(format!(
-            "node {node}: key operation has the wrong number of inputs"
+            "{at}: key operation has the wrong number of inputs"
         ));
         return;
     }
     if graph.dtype(inputs[0]) != Some(operand) || graph.dtype(node) != Some(Prim::Key) {
         errors.push(format!(
-            "node {node}: key operation reads the wrong operand dtype or does not produce keys"
+            "{at}: key operation reads the wrong operand dtype or does not produce keys"
         ));
     }
     let (Some(key), Some(dims)) = (graph.dims(inputs[0]), graph.dims(node)) else {
-        errors.push(format!(
-            "node {node}: key operation has an operand without dims"
-        ));
+        errors.push(format!("{at}: key operation has an operand without dims"));
         return;
     };
     if activated
@@ -734,7 +772,7 @@ fn key_operation_operands(
                 .is_some_and(|active| key.starts_with(&active)))
     {
         errors.push(format!(
-            "node {node}: key operation may end with exactly one Bool activation, shaped like a leading part of its key's shape"
+            "{at}: key operation may end with exactly one Bool activation, shaped like a leading part of its key's shape"
         ));
     }
     let valid = match role {
@@ -761,7 +799,7 @@ fn key_operation_operands(
     };
     if !valid {
         errors.push(format!(
-            "node {node}: key operation must be element-wise over one exact shape, with a split's count axis appended last"
+            "{at}: key operation must be element-wise over one exact shape, with a split's count axis appended last"
         ));
     }
 }
@@ -772,6 +810,7 @@ fn random_node_operands(
     role: KeyRole,
     errors: &mut Vec<String>,
 ) {
+    let at = graph.describe_node(node);
     let fixed = match role {
         KeyRole::UniformLike => 4,
         _ => 3,
@@ -780,7 +819,7 @@ fn random_node_operands(
         .take_while(|slot| graph.input(node, *slot).is_some())
         .count();
     if arity < fixed {
-        errors.push(format!("node {node}: random operation is missing an input"));
+        errors.push(format!("{at}: random operation is missing an input"));
         return;
     }
     let input = |slot: usize| graph.input(node, slot);
@@ -807,7 +846,7 @@ fn random_node_operands(
     };
     if !active_ok {
         errors.push(format!(
-            "node {node}: random operation may end with exactly one Bool activation, shaped like a leading part of its key's shape"
+            "{at}: random operation may end with exactly one Bool activation, shaped like a leading part of its key's shape"
         ));
     }
     if let Some(slot) = key_slot {
@@ -816,7 +855,7 @@ fn random_node_operands(
             || !dims(data).is_some_and(|data| data.starts_with(&batch))
         {
             errors.push(format!(
-                "node {node}: random operation requires a key batch matching its data's leading axes"
+                "{at}: random operation requires a key batch matching its data's leading axes"
             ));
         }
     }
@@ -830,10 +869,10 @@ fn random_node_operands(
     };
     let control_error = || {
         format!(
-            "node {node}: random control must be a value of the draw's dtype (f32 bounds admitted), shaped like a leading part of its key's shape"
+            "{at}: random control must be a value of the draw's dtype (f32 bounds admitted), shaped like a leading part of its key's shape"
         )
     };
-    let bounds_error = || format!("node {node}: uniform_like bounds must share one dtype");
+    let bounds_error = || format!("{at}: uniform_like bounds must share one dtype");
     let same_as = |slot: usize| {
         dtype(slot) == output && dims(slot).is_some_and(|dims| graph.dims(node) == Some(dims))
     };
@@ -841,7 +880,7 @@ fn random_node_operands(
         KeyRole::UniformLike => {
             if !float(output) || !same_as(0) {
                 errors.push(format!(
-                    "node {node}: uniform_like must preserve its float template's exact shape and dtype"
+                    "{at}: uniform_like must preserve its float template's exact shape and dtype"
                 ));
             }
             if !control(1, output, true) || !control(2, output, true) {
@@ -854,7 +893,7 @@ fn random_node_operands(
         KeyRole::Dropout | KeyRole::DropoutReplay => {
             if !float(output) || !same_as(0) {
                 errors.push(format!(
-                    "node {node}: dropout must preserve its float data input's exact shape and dtype"
+                    "{at}: dropout must preserve its float data input's exact shape and dtype"
                 ));
             }
             if !control(1, output, false) {
@@ -865,7 +904,7 @@ fn random_node_operands(
             let cotangent_ok = dtype(1) == dtype(0) && dims(1).is_some_and(|g| dims(0) == Some(g));
             if !float(output) || !per_row(graph.dims(node)) || dtype(0) != output || !cotangent_ok {
                 errors.push(format!(
-                    "node {node}: a uniform bound adjoint is a value of its template's dtype, shaped like a leading part of its key's shape, over a cotangent of its template's exact type"
+                    "{at}: a uniform bound adjoint is a value of its template's dtype, shaped like a leading part of its key's shape, over a cotangent of its template's exact type"
                 ));
             }
         }
@@ -884,6 +923,10 @@ pub enum KeyRole {
     FoldIn,
     /// `SplitN`, which consumes the key at input 0 and appends `count`.
     SplitN { count: SplitCount },
+    /// `KeySelect`, a branch's join, which consumes the key at input 0 under
+    /// the activation at input 2 and the key at input 1 under the one at
+    /// input 3.
+    KeySelect,
     /// A `Load`, which may enter a key into the graph.
     Load,
     /// `Dropout`, which consumes the key at input 2.
@@ -902,22 +945,43 @@ pub enum KeyRole {
     /// The rank-0 Bool constant `false`, read by the activation exclusivity
     /// rule.
     ConstFalse,
+    /// The rank-0 Bool constant `true`, read by the join's arm rule, where
+    /// folding has left it of one arm.
+    ConstTrue,
     /// An operation that takes no key.
     Other,
 }
 
 impl KeyRole {
+    /// The one input slot at which a key operation or a random primitive
+    /// reads its key; `None` for a join, which reads two
+    /// ([`Self::key_slots`]), and for any node that reads none.
     fn key_slot(self) -> Option<usize> {
         match self {
             Self::Split { .. } | Self::FoldIn | Self::SplitN { .. } => Some(0),
             Self::Dropout | Self::DropoutReplay | Self::UniformBoundAdjoint => Some(2),
             Self::UniformLike => Some(3),
             Self::KeyFromSeed
+            | Self::KeySelect
             | Self::Load
             | Self::And
             | Self::Not
             | Self::ConstFalse
+            | Self::ConstTrue
             | Self::Other => None,
+        }
+    }
+
+    /// Every input slot at which this node reads a key (rule V4).
+    fn key_slots(self) -> &'static [usize] {
+        match self {
+            Self::KeySelect => &[0, 1],
+            _ => match self.key_slot() {
+                Some(0) => &[0],
+                Some(2) => &[2],
+                Some(3) => &[3],
+                _ => &[],
+            },
         }
     }
 
@@ -925,8 +989,47 @@ impl KeyRole {
     fn produces_key(self) -> bool {
         matches!(
             self,
-            Self::KeyFromSeed | Self::Split { .. } | Self::FoldIn | Self::SplitN { .. }
+            Self::KeyFromSeed
+                | Self::Split { .. }
+                | Self::FoldIn
+                | Self::SplitN { .. }
+                | Self::KeySelect
         )
+    }
+
+    /// Whether this node derives its key from the key at input 0, so that
+    /// the derived key inherits the parent's confinement ([`verify_confinement`]).
+    fn derives(self) -> bool {
+        matches!(
+            self,
+            Self::Split { .. } | Self::FoldIn | Self::SplitN { .. }
+        )
+    }
+
+    /// How a diagnostic names this node's operation.
+    fn operation(self) -> Option<&'static str> {
+        Some(match self {
+            Self::KeyFromSeed => "`key_from_seed`",
+            Self::Split {
+                branch: crate::dag::KeyBranch::Left,
+            } => "left `split_key`",
+            Self::Split {
+                branch: crate::dag::KeyBranch::Right,
+            } => "right `split_key`",
+            Self::FoldIn => "`fold_in`",
+            Self::SplitN { .. } => "`split_keys`",
+            Self::KeySelect => "`if` join",
+            Self::Dropout => "`dropout`",
+            Self::UniformLike => "`uniform_like`",
+            Self::DropoutReplay => "`dropout` replay",
+            Self::UniformBoundAdjoint => "`uniform_like` bound adjoint",
+            Self::Load
+            | Self::And
+            | Self::Not
+            | Self::ConstFalse
+            | Self::ConstTrue
+            | Self::Other => return None,
+        })
     }
 
     fn is_draw(self) -> bool {
@@ -936,11 +1039,7 @@ impl KeyRole {
     /// Whether reading the key at [`Self::key_slot`] consumes it. A replay
     /// reads its forward draw's key without consuming it.
     fn consumes(self) -> bool {
-        self.is_draw()
-            || matches!(
-                self,
-                Self::Split { .. } | Self::FoldIn | Self::SplitN { .. }
-            )
+        self.is_draw() || self.derives() || self == Self::KeySelect
     }
 
     /// The input slot of a key consumer's optional activation: after a
@@ -1002,6 +1101,37 @@ pub trait KeyGraph {
     /// The dims `node` produces, or `None` when no node or when its dims
     /// have no IR reading.
     fn dims(&self, node: usize) -> Option<std::borrow::Cow<'_, [DimInfo]>>;
+
+    /// How a key-rule diagnostic names the key `node` produces (spec/10
+    /// §3.2): a parameter by its name and declaration, "key `k` of `f`",
+    /// and any other key by the operation that produces it, its node and its
+    /// declaration, "the `fold_in` key at node 7 of `f`". Both sides of the
+    /// codec word it here, so their diagnostics agree.
+    fn describe_key(&self, node: usize) -> String {
+        let of = match self.declaration(node) {
+            "" => String::new(),
+            declaration => format!(" of `{declaration}`"),
+        };
+        match (self.load_name(node), self.role(node).operation()) {
+            (Some(name), _) => format!("key `{name}`{of}"),
+            (None, Some(operation)) => format!("the {operation} key at node {node}{of}"),
+            (None, None) => format!("the key at node {node}{of}"),
+        }
+    }
+
+    /// How a key-rule diagnostic names the node that reads or produces a
+    /// key: its operation, its node and its declaration, "the `dropout` at
+    /// node 9 of `f`".
+    fn describe_node(&self, node: usize) -> String {
+        let of = match self.declaration(node) {
+            "" => String::new(),
+            declaration => format!(" of `{declaration}`"),
+        };
+        match self.role(node).operation() {
+            Some(operation) => format!("the {operation} at node {node}{of}"),
+            None => format!("node {node}{of}"),
+        }
+    }
 }
 
 impl KeyGraph for Dag {
@@ -1014,6 +1144,7 @@ impl KeyGraph for Dag {
             Some(RiscOp::KeyFromSeed) => KeyRole::KeyFromSeed,
             Some(RiscOp::Split { branch }) => KeyRole::Split { branch: *branch },
             Some(RiscOp::FoldIn) => KeyRole::FoldIn,
+            Some(RiscOp::KeySelect) => KeyRole::KeySelect,
             Some(RiscOp::SplitN { count }) => KeyRole::SplitN {
                 count: match count {
                     RtDim::Lit(value) => SplitCount::Lit(*value),
@@ -1029,6 +1160,7 @@ impl KeyGraph for Dag {
             Some(RiscOp::Logical(crate::dag::LogicalKind::And)) => KeyRole::And,
             Some(RiscOp::Logical(crate::dag::LogicalKind::Not)) => KeyRole::Not,
             Some(RiscOp::Const { value }) if is_const_false(value) => KeyRole::ConstFalse,
+            Some(RiscOp::Const { value }) if is_const_true(value) => KeyRole::ConstTrue,
             _ => KeyRole::Other,
         }
     }
@@ -1104,6 +1236,12 @@ pub fn is_const_false(value: &chelis_types::ScalarValue) -> bool {
     value.prim() == Prim::Bool && value.as_bool_exact() == Some(false)
 }
 
+/// Whether a scalar is the Bool constant `true`, what folding leaves of a
+/// join's arm whose condition became a constant.
+pub fn is_const_true(value: &chelis_types::ScalarValue) -> bool {
+    value.prim() == Prim::Bool && value.as_bool_exact() == Some(true)
+}
+
 /// Rule V3: two activations are structurally exclusive when one implies a
 /// node `X` and the other implies `Not(X)`, or when either implies the
 /// constant `false`, whose draw never runs. That covers `lower_if`'s arms,
@@ -1128,20 +1266,26 @@ fn activations_exclusive(graph: &impl KeyGraph, left: usize, right: usize) -> bo
 /// The key rules of spec/10 §3.2 (`spec/design/randomness_explicit_keys.md`
 /// §4, rules V1 to V4; V5, the batched-draw shapes, is an operand rule).
 ///
-/// - V1: a key is produced by a key operation or a key-typed `Load`, and a
-///   key may be a graph root.
-/// - V2: a key's uses are exactly one draw, one `FoldIn`, one `SplitN`, or
-///   one root, or at most one `Split` of each branch. Every `Load` of one
-///   parameter is one key.
-/// - V3: two consumers of one key, draws and key operations alike, other
-///   than one `Split` of each branch, may share it only when each carries an
-///   activation and their activations are structurally exclusive: one
-///   implies `X` and the other `Not(X)`, or either implies `false`. A key a
-///   key operation derives under such sharing, and every key derived from
-///   it, is used only under that operation's activation
+/// - V1: a key is produced by a key operation, a join or a key-typed `Load`,
+///   and a key may be a graph root.
+/// - V2: a key's uses are exactly one draw, one `FoldIn`, one `SplitN`, one
+///   slot of one join, or one root, or at most one `Split` of each branch.
+///   Every `Load` of one parameter of one declaration is one key.
+/// - V3: two uses of one key, by draws, key operations and join slots alike,
+///   other than one `Split` of each branch, may share it only when each
+///   consumes it under an activation and the two activations are
+///   structurally exclusive: one implies `X` and the other `Not(X)`, or
+///   either implies `false`. A join consumes input 0 under input 2 and input
+///   1 under input 3, and those are the two arms of one branch
+///   ([`join_arms`]). Rule S: a key derived under such sharing is consumed
+///   only under that activation, or by the join of its branch
 ///   ([`verify_confinement`]).
-/// - V4: a key reaching any other operation or a dependency list is
-///   rejected; replays read their forward draw's key without consuming it.
+/// - V4: a key reaching any other operation or slot, or a dependency list,
+///   is rejected; replays read their forward draw's key without consuming
+///   it.
+///
+/// Each message names a key by [`KeyGraph::describe_key`] and a node by
+/// [`KeyGraph::describe_node`].
 pub fn verify_key_rules(graph: &impl KeyGraph, errors: &mut Vec<String>) {
     let is_key = |node: usize| graph.dtype(node) == Some(Prim::Key);
     // The key a node's value is: every key `Load` of one parameter is the
@@ -1157,43 +1301,56 @@ pub fn verify_key_rules(graph: &impl KeyGraph, errors: &mut Vec<String>) {
             .unwrap_or(node),
         _ => node,
     };
-    let mut consumers = vec![Vec::<usize>::new(); graph.node_count()];
+    let key = |node: usize| graph.describe_key(identity(node));
+    let mut consumers = vec![Vec::<KeyUse>::new(); graph.node_count()];
     for node in 0..graph.node_count() {
         let role = graph.role(node);
         if role.produces_key() && !is_key(node) {
             errors.push(format!(
-                "node {node} is a key operation that does not produce a key"
+                "{} is a key operation that does not produce a key",
+                graph.describe_node(node)
             ));
         }
         if is_key(node) && !role.produces_key() && role != KeyRole::Load {
             errors.push(format!(
-                "node {node} produces a key, but only a key operation or a Load produces one"
+                "{} produces a key, but only a key operation, a join or a Load produces one",
+                graph.describe_node(node)
             ));
         }
         for dependency in graph.dependencies(node) {
             if is_key(dependency) {
                 errors.push(format!(
-                    "node {node} takes key {dependency} as a dependency"
+                    "{} takes {} as a dependency",
+                    graph.describe_node(node),
+                    key(dependency)
                 ));
             }
         }
         let inputs = (0..).map_while(|slot| graph.input(node, slot));
         for (slot, input) in inputs.enumerate().filter(|(_, input)| is_key(*input)) {
-            if role.key_slot() != Some(slot) {
+            if !role.key_slots().contains(&slot) {
                 errors.push(format!(
-                    "key {input} reaches node {node} input {slot}; only a key operation or a random primitive consumes a key"
+                    "{} reaches input {slot} of {}; only a key operation, a join or a random primitive consumes a key",
+                    key(input),
+                    graph.describe_node(node)
                 ));
                 continue;
             }
             if role.consumes() {
-                consumers[identity(input)].push(node);
+                consumers[identity(input)].push(KeyUse { node, slot });
             }
+        }
+        if role == KeyRole::KeySelect && join_arms(graph, node).is_none() {
+            errors.push(format!(
+                "{} joins keys under activations that are not the two arms of one branch",
+                graph.describe_node(node)
+            ));
         }
     }
     let mut exclusive = vec![false; graph.node_count()];
-    for (key, consuming) in consumers.iter().enumerate() {
-        if consuming.len() > 1 {
-            verify_shared_key(graph, key, consuming, &mut exclusive, errors);
+    for (shared, uses) in consumers.iter().enumerate() {
+        if uses.len() > 1 {
+            verify_shared_key(graph, &key(shared), uses, &mut exclusive, errors);
         }
     }
     // A root is a use: returning a key hands it to the caller.
@@ -1204,13 +1361,15 @@ pub fn verify_key_rules(graph: &impl KeyGraph, errors: &mut Vec<String>) {
         };
         *uses += 1;
         if *uses == 2 {
-            errors.push(format!("key {} is a graph root twice", identity(root)));
+            errors.push(format!("{} is a graph root twice", key(root)));
         }
     }
-    for (key, uses) in rooted.iter().enumerate() {
-        if let (true, Some(consumer)) = (*uses > 0, consumers[key].first()) {
+    for (shared, uses) in rooted.iter().enumerate() {
+        if let (true, Some(consumer)) = (*uses > 0, consumers[shared].first()) {
             errors.push(format!(
-                "key {key} is a graph root and is also consumed by node {consumer}"
+                "{} is a graph root and is also consumed by {}",
+                key(shared),
+                graph.describe_node(consumer.node)
             ));
         }
     }
@@ -1223,19 +1382,21 @@ pub fn verify_key_rules(graph: &impl KeyGraph, errors: &mut Vec<String>) {
             KeyRole::UniformBoundAdjoint => KeyRole::UniformLike,
             _ => continue,
         };
-        let Some(key) = graph.input(node, 2) else {
+        let Some(read) = graph.input(node, 2) else {
             continue;
         };
         let forwards = consumers
-            .get(identity(key))
+            .get(identity(read))
             .into_iter()
             .flatten()
-            .copied()
+            .map(|forward| forward.node)
             .filter(|forward| graph.role(*forward).is_draw())
             .collect::<Vec<_>>();
         if forwards.is_empty() {
             errors.push(format!(
-                "replay node {node} reads key {key} that no forward random primitive consumes"
+                "{} reads {}, which no forward random primitive consumes",
+                graph.describe_node(node),
+                key(read)
             ));
             continue;
         }
@@ -1257,49 +1418,63 @@ pub fn verify_key_rules(graph: &impl KeyGraph, errors: &mut Vec<String>) {
         };
         if !forwards.iter().any(|forward| matches(*forward)) {
             errors.push(format!(
-                "replay node {node} changes its forward node {}'s mask contract",
-                forwards[0]
+                "{} changes the mask contract of {}",
+                graph.describe_node(node),
+                graph.describe_node(forwards[0])
             ));
         }
     }
 }
 
-/// Rules V2 and V3 for a key with several consumers, pair by pair: a `Left`
-/// and a `Right` split are the two halves of one `split_key`, and any other
-/// pair, whatever the consumers' kinds, must carry structurally exclusive
-/// activations. Each consumer that shares the key only through exclusive
-/// activations is marked in `exclusive`, for [`verify_confinement`].
+/// One consuming read of a key: input `slot` of `node`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct KeyUse {
+    node: usize,
+    slot: usize,
+}
+
+/// Rules V2 and V3 for a key `key` names that several uses consume, pair by
+/// pair: a `Left` and a `Right` split are the two halves of one
+/// `split_key`, and any other pair, whatever the consumers' kinds and
+/// whichever of a join's slots, must consume it under structurally exclusive
+/// activations. Each key operation that shares the key only through
+/// exclusive activations is marked in `exclusive`, for
+/// [`verify_confinement`].
 fn verify_shared_key(
     graph: &impl KeyGraph,
-    key: usize,
-    consuming: &[usize],
+    key: &str,
+    uses: &[KeyUse],
     exclusive: &mut [bool],
     errors: &mut Vec<String>,
 ) {
-    for (index, &left) in consuming.iter().enumerate() {
-        for &right in &consuming[index + 1..] {
-            let (left_role, right_role) = (graph.role(left), graph.role(right));
+    for (index, &left) in uses.iter().enumerate() {
+        for &right in &uses[index + 1..] {
+            let (left_role, right_role) = (graph.role(left.node), graph.role(right.node));
             if let (KeyRole::Split { branch: first }, KeyRole::Split { branch: second }) =
                 (left_role, right_role)
                 && first != second
             {
                 continue;
             }
-            match (activation(graph, left), activation(graph, right)) {
+            let (first, second) = (
+                graph.describe_node(left.node),
+                graph.describe_node(right.node),
+            );
+            match (consuming_activation(graph, left), consuming_activation(graph, right)) {
                 (Some(left_active), Some(right_active))
                     if activations_exclusive(graph, left_active, right_active) =>
                 {
-                    exclusive[left] = true;
-                    exclusive[right] = true;
+                    exclusive[left.node] = true;
+                    exclusive[right.node] = true;
                 }
                 (Some(_), Some(_)) => errors.push(format!(
-                    "key {key} is consumed twice, by nodes {left} and {right}, whose activations are not exclusive"
+                    "{key} is consumed twice, by {first} and {second}, whose activations are not exclusive"
                 )),
                 _ => errors.push(match left_role {
-                    KeyRole::Split { branch } if left_role == right_role => format!(
-                        "key {key} is split twice for the {branch:?} branch, by nodes {left} and {right}"
-                    ),
-                    _ => format!("key {key} is consumed twice, by nodes {left} and {right}"),
+                    KeyRole::Split { .. } if left_role == right_role => {
+                        format!("{key} is split twice for one branch, by {first} and {second}")
+                    }
+                    _ => format!("{key} is consumed twice, by {first} and {second}"),
                 }),
             }
         }
@@ -1314,19 +1489,98 @@ fn activation(graph: &impl KeyGraph, node: usize) -> Option<usize> {
         .and_then(|slot| graph.input(node, slot))
 }
 
-/// Rule V3's confinement. A key operation that shares its key with an
-/// exclusive consumer may derive what that consumer derives: two exclusive
-/// `Split{Left}`s derive one key, and so do a `FoldIn` of `n` and row `n` of
-/// a `SplitN`. Such keys stay apart only while each is used under the
-/// activation it was derived under. So a key derived by an operation that
-/// `exclusive` marks, and every key derived from it in turn, is used only by
-/// consumers whose activations imply that activation (their `And` conjuncts
-/// contain it) or contain the constant `false`, and is never a root.
-/// `identity` names the key a node's value is, as in [`verify_key_rules`].
+/// The activation a use consumes its key under: a join's slot 0 under its
+/// input 2 and slot 1 under its input 3, and any other consumer under its
+/// own activation, if it carries one.
+fn consuming_activation(graph: &impl KeyGraph, key_use: KeyUse) -> Option<usize> {
+    match graph.role(key_use.node) {
+        KeyRole::KeySelect => graph.input(key_use.node, key_use.slot + 2),
+        _ => activation(graph, key_use.node),
+    }
+}
+
+/// The nodes a conjunction implies at its top level: through every `And`,
+/// both conjuncts, transitively, stopping at `atom` and at every node that
+/// is not an `And`.
+fn conjunction_atoms(graph: &impl KeyGraph, activation: usize, atom: usize) -> Vec<usize> {
+    let mut atoms = Vec::new();
+    let mut seen = Vec::new();
+    let mut stack = vec![activation];
+    while let Some(node) = stack.pop() {
+        if seen.contains(&node) {
+            continue;
+        }
+        seen.push(node);
+        if node != atom && graph.role(node) == KeyRole::And {
+            stack.extend((0..2).filter_map(|slot| graph.input(node, slot)));
+        } else {
+            atoms.push(node);
+        }
+    }
+    atoms
+}
+
+/// A join's two activations as the two arms of one branch, or `None` when
+/// they are not: the then activation is a conjunction `S And X` and the else
+/// activation `S And Not(X)` (either way round, `S` possibly empty), for one
+/// node `X` and one set `S` of conjuncts, or `X` and `Not(X)` are the
+/// constants `true` and `false` that folding leaves of them. Then where the
+/// enclosing activation `S` holds exactly one arm does, which makes the
+/// join's result a key under `S`. Returns `S`, the atoms of the enclosing
+/// activation.
+fn join_arms(graph: &impl KeyGraph, node: usize) -> Option<Vec<usize>> {
+    let (then_active, else_active) = (graph.input(node, 2)?, graph.input(node, 3)?);
+    let then_conjuncts = activation_conjuncts(graph, then_active);
+    let else_conjuncts = activation_conjuncts(graph, else_active);
+    let negates = |node: usize, other: usize| {
+        graph.role(node) == KeyRole::Not && graph.input(node, 0) == Some(other)
+    };
+    let constants = |node: usize, other: usize| {
+        graph.role(node) == KeyRole::ConstFalse && graph.role(other) == KeyRole::ConstTrue
+    };
+    let complementary =
+        |a: usize, b: usize| negates(a, b) || negates(b, a) || constants(a, b) || constants(b, a);
+    for &then_atom in &then_conjuncts {
+        for &else_atom in &else_conjuncts {
+            if !complementary(then_atom, else_atom) {
+                continue;
+            }
+            let mut enclosing = conjunction_atoms(graph, then_active, then_atom);
+            enclosing.retain(|atom| *atom != then_atom);
+            enclosing.sort_unstable();
+            let mut other = conjunction_atoms(graph, else_active, else_atom);
+            other.retain(|atom| *atom != else_atom);
+            other.sort_unstable();
+            if enclosing == other {
+                return Some(enclosing);
+            }
+        }
+    }
+    None
+}
+
+/// Rule S. A key operation that shares its key with an exclusive consumer
+/// may derive what that consumer derives: two exclusive `Split{Left}`s
+/// derive one key, and so do a `FoldIn` of `n` and row `n` of a `SplitN`.
+/// Such keys stay apart only while each is used under the activation it was
+/// derived under. So a key derived by an operation that `exclusive` marks,
+/// and every key derived from it in turn, is consumed only under that
+/// activation: by consumers whose activations imply it (their `And`
+/// conjuncts contain it) or contain the constant `false`, a join's slot
+/// among them, and it is never a root.
+///
+/// A join of a branch ([`join_arms`]) consumes each slot under its arm, so
+/// its result carries only the requirements its arms share, which are the
+/// enclosing activation's: those its slots' keys carry that both arms imply,
+/// and every atom of the enclosing activation itself. On a path where that
+/// holds exactly one arm does, and the result is that arm's key, used where
+/// every requirement of it holds; the enclosing requirement keeps the result
+/// out of every path where no arm holds. `identity` names the key a node's
+/// value is, as in [`verify_key_rules`].
 fn verify_confinement(
     graph: &impl KeyGraph,
     identity: impl Fn(usize) -> usize,
-    consumers: &[Vec<usize>],
+    consumers: &[Vec<KeyUse>],
     exclusive: &[bool],
     rooted: &[usize],
     errors: &mut Vec<String>,
@@ -1334,41 +1588,66 @@ fn verify_confinement(
     // The activations each key must be used under. Nodes precede their
     // consumers, so a parent's entry is complete before its children read it.
     let mut required = vec![Vec::<usize>::new(); graph.node_count()];
+    let inherited = |required: &[Vec<usize>], slot: usize, node: usize| {
+        graph
+            .input(node, slot)
+            .map(&identity)
+            .and_then(|parent| required.get(parent))
+            .map_or_else(Vec::new, Clone::clone)
+    };
     for node in 0..graph.node_count() {
         let role = graph.role(node);
-        if !(role.produces_key() && role.consumes()) {
-            continue;
-        }
-        // A key operation without a parent key in this graph is the operand
-        // rules' error, and derives nothing these rules can follow.
-        let Some(parent) = graph.input(node, 0).map(&identity) else {
-            continue;
-        };
-        let Some(inherited) = required.get(parent) else {
-            continue;
-        };
-        let mut under = inherited.clone();
-        if exclusive[node]
-            && let Some(active) = activation(graph, node)
-            && !under.contains(&active)
+        if role.derives() {
+            // A key operation without a parent key in this graph is the
+            // operand rules' error, and derives nothing these rules follow.
+            let mut under = inherited(&required, 0, node);
+            if exclusive[node]
+                && let Some(active) = activation(graph, node)
+                && !under.contains(&active)
+            {
+                under.push(active);
+            }
+            required[node] = under;
+        } else if role == KeyRole::KeySelect
+            && let Some(enclosing) = join_arms(graph, node)
         {
-            under.push(active);
+            let (Some(then_active), Some(else_active)) =
+                (graph.input(node, 2), graph.input(node, 3))
+            else {
+                continue;
+            };
+            let then_conjuncts = activation_conjuncts(graph, then_active);
+            let else_conjuncts = activation_conjuncts(graph, else_active);
+            let mut under = enclosing;
+            for active in inherited(&required, 0, node)
+                .into_iter()
+                .chain(inherited(&required, 1, node))
+            {
+                if then_conjuncts.contains(&active)
+                    && else_conjuncts.contains(&active)
+                    && !under.contains(&active)
+                {
+                    under.push(active);
+                }
+            }
+            required[node] = under;
         }
-        required[node] = under;
     }
     for (key, under) in required.iter().enumerate() {
         let Some(&first) = under.first() else {
             continue;
         };
+        let described = graph.describe_key(key);
         if rooted[key] > 0 {
             errors.push(format!(
-                "key {key} is derived under node {first}'s activation from a key shared by exclusive consumers, and is a graph root"
+                "{described} is confined to the activation at node {first}, and is a graph root; a key derived in a branch arm leaves it only through that branch's join"
             ));
         }
-        for &consumer in &consumers[key] {
-            let Some(active) = activation(graph, consumer) else {
+        for &key_use in &consumers[key] {
+            let consumer = graph.describe_node(key_use.node);
+            let Some(active) = consuming_activation(graph, key_use) else {
                 errors.push(format!(
-                    "key {key} is derived under node {first}'s activation from a key shared by exclusive consumers, but node {consumer} uses it outside that activation"
+                    "{described} is confined to the activation at node {first}, but {consumer} consumes it outside that activation; a key derived in a branch arm leaves it only through that branch's join"
                 ));
                 continue;
             };
@@ -1381,7 +1660,7 @@ fn verify_confinement(
             }
             if let Some(missing) = under.iter().find(|active| !conjuncts.contains(active)) {
                 errors.push(format!(
-                    "key {key} is derived under node {missing}'s activation from a key shared by exclusive consumers, but node {consumer} uses it outside that activation"
+                    "{described} is confined to the activation at node {missing}, but {consumer} consumes it outside that activation; a key derived in a branch arm leaves it only through that branch's join"
                 ));
             }
         }
@@ -2153,7 +2432,8 @@ fn verify_with_dangling_policy(dag: &Dag, reject_dangling: bool) -> Vec<String> 
             | RiscOp::UniformBoundAdjoint { .. }
             | RiscOp::KeyFromSeed
             | RiscOp::Split { .. }
-            | RiscOp::FoldIn => {}
+            | RiscOp::FoldIn
+            | RiscOp::KeySelect => {}
             // chelis#616: movement ops (and `Reshape`, whose runtime target
             // extents work the same way) carry a tensor at `inputs[0]` plus zero
             // or more rank-0 integer bound scalars at `inputs[1..]` (node-valued

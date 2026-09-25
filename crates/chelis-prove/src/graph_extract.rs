@@ -242,6 +242,7 @@ fn check_finite_floats(wire_dag: &WireDag) -> Result<(), GraphExtractError> {
             | WireRiscOp::KeyFromSeed {}
             | WireRiscOp::Split { .. }
             | WireRiscOp::FoldIn {}
+            | WireRiscOp::KeySelect {}
             | WireRiscOp::SplitN { .. }
             | WireRiscOp::Sum { .. }
             | WireRiscOp::Count { .. }

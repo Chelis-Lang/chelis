@@ -541,7 +541,11 @@ pub fn common_subexpr_eliminate(dag: &Dag) -> Dag {
             // merely once per value.
             && !matches!(
                 node.op,
-                RiscOp::KeyFromSeed | RiscOp::Split { .. } | RiscOp::FoldIn | RiscOp::SplitN { .. }
+                RiscOp::KeyFromSeed
+                    | RiscOp::Split { .. }
+                    | RiscOp::FoldIn
+                    | RiscOp::SplitN { .. }
+                    | RiscOp::KeySelect
             )
             && let Some(&existing) = seen.get(&cse_key)
         {
