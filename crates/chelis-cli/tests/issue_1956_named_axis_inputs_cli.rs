@@ -85,7 +85,7 @@ fn assert_values(formal: bool, body: &str, captured_bits: &str, transcript: &[&s
     );
     assert!(output.stderr.is_empty());
     let result: Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(result["schema_version"], 3);
+    assert_eq!(result["schema_version"], 4);
     let mut expected = Vec::new();
     // Existing manifest observes main and out independently; both calls matter.
     for entry in ["main", "out"] {
