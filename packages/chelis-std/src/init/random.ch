@@ -1,12 +1,21 @@
 module Std.Init.Random
 export (normal_like)
 sig normal_like[r, p: Float]: key -> &tensor[..r, p] -> p -> p -> tensor[..r, p]
--- [05-OP-35]: validate, split the key, draw u1 and u2 from the halves, then the Box-Muller graph.
+-- [05-OP-35]: validate, draw the two unit uniforms from the key, then the pure Box-Muller graph.
 def normal_like(k, template, mean, std) = {
   _ = validate_normal_params(mean, std)
+  normal_like_given(normal_like_sample(k, template), template, mean, std)
+}
+-- The sampling layer: split the key, then draw u1 from the left half and u2 from the right.
+sig normal_like_sample[r, p: Float]: key -> &tensor[..r, p] -> (tensor[..r, p], tensor[..r, p])
+def normal_like_sample(k, template) = {
   (k1, k2) = split_key(k)
-  u1 = uniform_like(k1, template, 1e-7, 1.0)
-  u2 = uniform_like(k2, template, 0.0, 1.0)
+  (uniform_like(k1, template, 1e-7, 1.0), uniform_like(k2, template, 0.0, 1.0))
+}
+-- The pure layer: the Box-Muller normal values of two unit uniform draws, shaped like the template.
+sig normal_like_given[r, p: Float]: (tensor[..r, p], tensor[..r, p]) -> &tensor[..r, p] -> p -> p -> tensor[..r, p]
+def normal_like_given(units, template, mean, std) = {
+  (u1, u2) = units
   u1_flat = reshape(copy(u1), [numel(u1)])
   u2_flat = reshape(copy(u2), [numel(u2)])
   radii = map(fn (x) -> sqrt(mul(-2.0, log(x))), to_list(u1_flat))

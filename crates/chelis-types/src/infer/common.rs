@@ -1979,8 +1979,11 @@ fn is_exact_op35_wrapper(name: &str) -> bool {
             | "pkg__chelis__std__Std__Init__Kaiming__kaiming_uniform_given"
             | "pkg__chelis__std__Std__Init__Kaiming__tensor_shape"
             | "pkg__chelis__std__Std__Init__Random__normal_like"
+            | "pkg__chelis__std__Std__Init__Random__normal_like_given"
+            | "pkg__chelis__std__Std__Init__Random__normal_like_sample"
             | "pkg__chelis__std__Std__Init__Random__tensor_shape"
             | "pkg__chelis__std__Std__Init__XavierExt__trunc_normal"
+            | "pkg__chelis__std__Std__Init__XavierExt__trunc_normal_given"
             | "pkg__chelis__std__Std__Init__XavierExt__tensor_shape"
             | "pkg__chelis__std__Std__Init__XavierExt__xavier_normal"
             | "pkg__chelis__std__Std__Init__XavierExt__xavier_uniform"
@@ -2023,7 +2026,7 @@ fn install_exact_op35_dependency_contracts(
     if matches!(
         name,
         "pkg__chelis__std__Std__Init__Kaiming__kaiming_uniform"
-            | "pkg__chelis__std__Std__Init__Random__normal_like"
+            | "pkg__chelis__std__Std__Init__Random__normal_like_sample"
             | "pkg__chelis__std__Std__Init__XavierExt__xavier_uniform"
     ) {
         let template = vg.fresh_tvar();

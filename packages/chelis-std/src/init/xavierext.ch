@@ -24,10 +24,14 @@ def xavier_normal(k, template, fan_in, fan_out) = {
   normal_like(k, template, 0.0, std)
 }
 sig trunc_normal[r, p: Float]: key -> &tensor[..r, p] -> p -> p -> p -> p -> tensor[..r, p]
--- [05-OP-35]: validate, draw the normal values from the key with normal_like, then clip them to [a, b].
+-- [05-OP-35]: validate, draw the normal values from the key with normal_like, then the pure clipping graph.
 def trunc_normal(k, template, mean, std, a, b) = {
   _ = validate_trunc_params(mean, std, a, b)
-  raw = normal_like(k, template, mean, std)
+  trunc_normal_given(normal_like(k, template, mean, std), template, a, b)
+}
+-- The pure layer: a normal draw clipped to [a, b], shaped like the template.
+sig trunc_normal_given[r, p: Float]: tensor[..r, p] -> &tensor[..r, p] -> p -> p -> tensor[..r, p]
+def trunc_normal_given(raw, template, a, b) = {
   flat = reshape(copy(raw), [numel(raw)])
   values = map(fn (x) -> if lt(x, a) then a else if gt(x, b) then b else x, to_list(flat))
   _ = drop(raw)
