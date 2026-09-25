@@ -3212,15 +3212,15 @@ pub(super) fn uniform_like_value(
 #[cfg(test)]
 mod uniform_like_affine_tests {
     //! chelis#770/#937: `uniform_like_value` routes through the shared
-    //! per-dtype sampler used by the IR evaluator. These pin the draw for seed
-    //! 42 and ordinal 0 over shape [8], at elements where the single-rounding
-    //! f32 FMA differs from the old f64 affine and from a two-rounding f32
-    //! affine, plus a negative range. The pinned bits are exact-rational
-    //! evaluations of [05-RNG-1] and [05-OP-8] from the spec text
-    //! (`rng_ref.py uniform 42 0 8 2 5 f32`, chelis#2408).
+    //! per-dtype sampler used by the IR evaluator. These pin the draw keyed by
+    //! `key_from_seed(42)` over shape [12], at elements where the
+    //! single-rounding f32 FMA differs from the old f64 affine and from a
+    //! two-rounding f32 affine, plus a negative range. The pinned bits are
+    //! exact-rational evaluations of [05-RNG-2]'s word (`key_ref.py`) and
+    //! [05-OP-8] (`keys-b-h9-probes/port_ref.py`).
     use super::*;
 
-    // [05-RNG-1] transcribed from the spec text, never the kernel.
+    // [05-RNG-1]'s splitmix64 transcribed from the spec text, never the kernel.
     fn splitmix64(x: u64) -> u64 {
         let mut z = x.wrapping_add(0x9E37_79B9_7F4A_7C15);
         z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
@@ -3228,18 +3228,19 @@ mod uniform_like_affine_tests {
         z ^ (z >> 31)
     }
 
-    fn key(seed: u64, ordinal: u64) -> u64 {
-        seed ^ splitmix64(ordinal).rotate_left(17)
-    }
+    /// `[05-OP-69]`: `key_from_seed(42)`, whose bits are the seed's bits.
+    const KEY_BITS: u64 = 42;
 
     fn draw(template: &RuntimeTensorValue, low: f64, high: f64) -> RuntimeTensorValue {
         let bound = |value| scalar_from_f64("test", Prim::F32, value).unwrap();
         let prepared = prepare_uniform_like(template, bound(low), bound(high)).unwrap();
-        uniform_like_value(template, &prepared, RandomKey::from_counter(42, 0)).unwrap()
+        let key = RandomKey::from_seed(scalar_from_i64("test", Prim::Int64, 42).unwrap()).unwrap();
+        uniform_like_value(template, &prepared, key).unwrap()
     }
 
-    fn unit(seed: u64, ordinal: u64, index: u64) -> f64 {
-        let word = splitmix64(key(seed, ordinal) ^ splitmix64(index).rotate_left(41));
+    /// [05-RNG-2]'s `word(k, i)` and [05-RNG-1]'s unit at `KEY_BITS`.
+    fn unit(index: u64) -> f64 {
+        let word = splitmix64(KEY_BITS ^ splitmix64(index).rotate_left(41));
         (word >> 11) as f64 / (1_u64 << 53) as f64
     }
 
@@ -3259,33 +3260,33 @@ mod uniform_like_affine_tests {
 
     #[test]
     fn affine_mirrors_c_f32_sampler_positive_range() {
-        let out = draw(&template_f32(8), 2.0, 5.0);
-        // elem[6]: the single-rounding FMA gives 0x40683468 where the old f64
+        let out = draw(&template_f32(12), 2.0, 5.0);
+        // elem[11]: the single-rounding FMA gives 0x406d6dc6 where the old f64
         // affine rounded to the adjacent f32.
-        assert_eq!(f32_bits(&out, 6), 0x4068_3468);
-        let old_f64_affine = 2.0 + (5.0 - 2.0) * unit(42, 0, 6);
-        assert_eq!((old_f64_affine as f32).to_bits(), 0x4068_3467);
-        // elem[2]: a plain two-rounding `low + span * unit` differs by 1 ULP,
+        assert_eq!(f32_bits(&out, 11), 0x406d_6dc6);
+        let old_f64_affine = 2.0 + (5.0 - 2.0) * unit(11);
+        assert_eq!((old_f64_affine as f32).to_bits(), 0x406d_6dc5);
+        // elem[10]: a plain two-rounding `low + span * unit` differs by 1 ULP,
         // the bit the compiled C lane would flip between `-ffp-contract=fast`
         // and `=off` without its explicit `fmaf`.
-        assert_eq!(f32_bits(&out, 2), 0x401c_b39d);
-        let two_rounding_2 = 2.0f32 + (5.0f32 - 2.0f32) * (unit(42, 0, 2) as f32);
-        assert_eq!(two_rounding_2.to_bits(), 0x401c_b39c);
-        assert_eq!(f32_bits(&out, 7), 0x401b_f5fc);
+        assert_eq!(f32_bits(&out, 10), 0x4034_fb45);
+        let two_rounding_10 = 2.0f32 + (5.0f32 - 2.0f32) * (unit(10) as f32);
+        assert_eq!(two_rounding_10.to_bits(), 0x4034_fb44);
+        assert_eq!(f32_bits(&out, 7), 0x408f_92d9);
     }
 
     #[test]
     fn affine_is_f32_for_negative_range() {
         let out = draw(&template_f32(8), -3.0, -1.0);
-        assert_eq!(f32_bits(&out, 3), 0xc03b_a886);
+        assert_eq!(f32_bits(&out, 3), 0xc027_e1a4);
     }
 
     #[test]
     fn affine_uses_f64_storage_and_f64_arithmetic_for_f64_template() {
         let out = draw(&template_f64(8), 2.0, 5.0);
         assert_eq!(out.precision, Prim::F64);
-        let expected = (5.0f64 - 2.0).mul_add(unit(42, 0, 4), 2.0);
-        assert_eq!(expected.to_bits(), 0x4000_bff3_3038_5719);
+        let expected = (5.0f64 - 2.0).mul_add(unit(4), 2.0);
+        assert_eq!(expected.to_bits(), 0x4005_8b85_e511_043a);
         assert_eq!(out.value.element_f64_lossy(4).to_bits(), expected.to_bits());
         assert_ne!(
             out.value.element_f64_lossy(4).to_bits(),

@@ -3288,28 +3288,16 @@ impl DropoutParameters {
 /// that a random kernel receives in place of any ambient stream.
 ///
 /// A key has no arithmetic, comparison, or cast. It is formed only by
-/// [`RandomKey::from_counter`], the counter stream's key for a handler's seed
-/// and a draw's call ordinal, by [`RandomKey::from_seed`] ([05-OP-69]), and by
-/// the [05-RNG-2] derivations [`RandomKey::split`], [`RandomKey::fold_in`]
-/// and [`RandomKey::split_n`]. [`RandomKey::bits`] exists so that native
-/// backends can port the kernels bit for bit.
+/// [`RandomKey::from_seed`] ([05-OP-69]) and by the [05-RNG-2] derivations
+/// [`RandomKey::split`], [`RandomKey::fold_in`] and [`RandomKey::split_n`].
+/// [`RandomKey::bits`] exists so that native backends can port the kernels
+/// bit for bit.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct RandomKey {
     bits: u64,
 }
 
 impl RandomKey {
-    /// The counter stream's key for one entered random primitive:
-    /// `seed_bits XOR rotl64(splitmix64(ordinal), 17)`, where `seed_bits` is
-    /// the handled i64 seed's two's-complement bits and `ordinal` is the
-    /// zero-based call ordinal of `[05-RNG-1]`. This is LaCaDiLE's
-    /// `Key.ofDrawKey(seed, c)`.
-    pub fn from_counter(seed_bits: u64, ordinal: u64) -> Self {
-        Self {
-            bits: random_draw_key(seed_bits, ordinal),
-        }
-    }
-
     /// `[05-OP-69]` `key_from_seed`: the key whose bits are the i64 seed's
     /// two's-complement bits, with no mixing.
     pub fn from_seed(seed: ScalarValue) -> Result<Self, NumericKernelError> {
@@ -3492,8 +3480,8 @@ fn require_row_split(op: &'static str, len: usize, rows: usize) -> Result<(), Nu
 ///
 /// ```
 /// use chelis_types::dtype_semantics::{PreparedDropout, RandomKey};
-/// fn draw(prepared: &PreparedDropout<'_>) {
-///     let _ = prepared.apply(RandomKey::from_counter(42, 0));
+/// fn draw(prepared: &PreparedDropout<'_>, key: RandomKey) {
+///     let _ = prepared.apply(key);
 /// }
 /// ```
 ///
@@ -3656,8 +3644,8 @@ impl UniformLikeParameters {
 ///
 /// ```
 /// use chelis_types::dtype_semantics::{PreparedUniformLike, RandomKey};
-/// fn draw(prepared: &PreparedUniformLike) {
-///     let _ = prepared.apply(RandomKey::from_counter(42, 0));
+/// fn draw(prepared: &PreparedUniformLike, key: RandomKey) {
+///     let _ = prepared.apply(key);
 /// }
 /// ```
 ///
@@ -3806,20 +3794,14 @@ fn random_derive(key: u64, j: u64) -> u64 {
     random_splitmix64(key ^ random_splitmix64(j).rotate_left(29))
 }
 
-/// The bits of [`RandomKey::from_counter`].
+/// `[05-RNG-2]`'s source word for flat element `index` of the draw keyed by
+/// `key`: `word(key, index) = splitmix64(key XOR rotl64(splitmix64(index), 41))`,
+/// which [05-RNG-1] reads for element `index`.
 ///
-/// This and [`random_word`] are the one kernel boundary of the Random effect
-/// (chelis#2408): every Rust lane derives a draw's element words from its key
-/// here, and the emitted C and HIP samplers are ports of the same two
-/// functions. A key is all a sampler knows about the stream it draws from.
-fn random_draw_key(seed_bits: u64, ordinal: u64) -> u64 {
-    seed_bits ^ random_splitmix64(ordinal).rotate_left(17)
-}
-
-/// `[05-RNG-1]`'s source word for flat element `index` of the draw keyed by
-/// `key`: `splitmix64(key XOR rotl64(splitmix64(index), 41))`. XOR is
-/// associative, so with `key` from [`random_draw_key`] this is the atom's
-/// `splitmix64(seed_bits ^ rotl64(splitmix64(c),17) ^ rotl64(splitmix64(i),41))`.
+/// This is the one kernel boundary of randomness (chelis#2408): every Rust
+/// lane derives a draw's element words from its key here, and the emitted C
+/// and HIP samplers are ports of this function. A key is all a sampler knows
+/// about the stream it draws from.
 fn random_word(key: u64, index: u64) -> u64 {
     random_splitmix64(key ^ random_splitmix64(index).rotate_left(41))
 }
@@ -4411,14 +4393,19 @@ mod tests {
         }
     }
 
+    /// `[05-OP-69]`'s key of an i64 seed.
+    fn seed_key(seed: i64) -> RandomKey {
+        RandomKey::from_seed(scalar_from_i64("test", Prim::Int64, seed).unwrap()).unwrap()
+    }
+
     #[test]
     fn prepared_dropout_rounds_the_unit_before_comparing_and_finalizes_division() {
-        let rate = f32::from_bits(0x3e1c_aae7);
-        assert_eq!(
-            random_word(random_draw_key(42, 0), 0),
-            0x272a_b9a7_3115_2a2c
-        );
-        let unit = random_unit(random_draw_key(42, 0), 0);
+        // key_ref.py: word(key(45), 0) = 3cf6dc70d6515d83, whose unit rounds
+        // up to the f32 0x3e73db72.
+        let key = seed_key(45);
+        let rate = f32::from_bits(0x3e73_db72);
+        assert_eq!(random_word(key.bits(), 0), 0x3cf6_dc70_d651_5d83);
+        let unit = random_unit(key.bits(), 0);
         assert_eq!((unit as f32).to_bits(), rate.to_bits());
         assert!(
             unit < f64::from(rate),
@@ -4431,11 +4418,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            prepared
-                .apply(RandomKey::from_counter(42, 0))
-                .unwrap()
-                .scalar_at(0)
-                .as_f64_lossy(),
+            prepared.apply(key).unwrap().scalar_at(0).as_f64_lossy(),
             f64::from(1.0f32 / (1.0f32 - rate))
         );
         let input = finalize_tensor(
@@ -4446,11 +4429,7 @@ mod tests {
         .unwrap();
         let prepared =
             PreparedDropout::new(&input, scalar_from_f64("test", Prim::F32, 0.1).unwrap()).unwrap();
-        let result = prepared
-            .apply(RandomKey::from_counter(42, 0))
-            .unwrap()
-            .scalar_at(0)
-            .as_f64_lossy() as f32;
+        let result = prepared.apply(key).unwrap().scalar_at(0).as_f64_lossy() as f32;
         assert_eq!(result.to_bits(), 0x3f8e_38e9);
         assert_ne!(result.to_bits(), 0x3f8e_38ea, "reciprocal-multiply mutant");
     }
@@ -4461,11 +4440,10 @@ mod tests {
             let rate = scalar_from_f64("test", prim, 0.5).unwrap();
             let input = finalize_tensor("test", prim, RawTensor::Float(vec![-0.0; 2])).unwrap();
             let prepared = PreparedDropout::new(&input, rate).unwrap();
-            let first = prepared.apply(RandomKey::from_counter(42, 0)).unwrap();
-            assert_eq!(
-                first,
-                prepared.apply(RandomKey::from_counter(42, 0)).unwrap()
-            );
+            // key_ref.py: unit(key(44), 0) = 0.4215 < 0.5 <= unit(key(44), 1) = 0.7762,
+            // so element 0 is dropped and element 1 is kept.
+            let first = prepared.apply(seed_key(44)).unwrap();
+            assert_eq!(first, prepared.apply(seed_key(44)).unwrap());
             assert_eq!(first.scalar_at(0).as_f64_lossy().to_bits(), 0);
             assert_eq!(
                 first.scalar_at(1).as_f64_lossy().to_bits(),
@@ -4479,37 +4457,44 @@ mod tests {
             assert!(
                 PreparedDropout::new(&empty, rate)
                     .unwrap()
-                    .apply(RandomKey::from_counter(u64::MAX, u64::MAX))
+                    .apply(seed_key(-1))
                     .unwrap()
                     .is_empty()
             );
         }
     }
 
-    // [05-RNG-1] transcribed from the spec text for the kernel tests below.
-    fn spec_unit(seed_bits: u64, ordinal: u64, index: u64) -> f64 {
+    // [05-RNG-2]'s `word` and [05-RNG-1]'s unit, transcribed from the spec
+    // text for the kernel tests below.
+    fn spec_unit(key_bits: u64, index: u64) -> f64 {
         fn splitmix64(x: u64) -> u64 {
             let mut z = x.wrapping_add(0x9E37_79B9_7F4A_7C15);
             z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
             z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
             z ^ (z >> 31)
         }
-        let word = splitmix64(
-            seed_bits ^ splitmix64(ordinal).rotate_left(17) ^ splitmix64(index).rotate_left(41),
-        );
+        let word = splitmix64(key_bits ^ splitmix64(index).rotate_left(41));
         (word >> 11) as f64 / (1_u64 << 53) as f64
     }
 
     #[test]
-    fn the_draw_key_and_word_are_the_05_rng_1_word() {
-        for seed_bits in [0, 42, (-1_i64) as u64, i64::MIN as u64] {
-            for ordinal in [0, 1, 2, 17, u64::MAX] {
-                let key = RandomKey::from_counter(seed_bits, ordinal);
+    fn the_draw_word_is_the_05_rng_2_word() {
+        // key_ref.py's worked values: word(key(7), 0) and its unit.
+        assert_eq!(random_word(seed_key(7).bits(), 0), 0x2065_4588_fcd2_5740);
+        assert_eq!(
+            random_unit(seed_key(7).bits(), 0).to_bits(),
+            0.126_545_282_310_709_38_f64.to_bits()
+        );
+        for seed in [0, 42, -1, i64::MIN, i64::MAX] {
+            let root = seed_key(seed);
+            let (left, right) = root.split();
+            for key in [root, left, right] {
                 for index in [0, 1, 5, 1 << 40, u64::MAX] {
                     assert_eq!(
                         random_unit(key.bits(), index).to_bits(),
-                        spec_unit(seed_bits, ordinal, index).to_bits(),
-                        "seed {seed_bits:#x} ordinal {ordinal} index {index}"
+                        spec_unit(key.bits(), index).to_bits(),
+                        "key {:#x} index {index}",
+                        key.bits()
                     );
                 }
             }
@@ -4518,21 +4503,21 @@ mod tests {
 
     // chelis#2408: the retired mixing computed `seed ^ c*G ^ i*G`, so element i
     // of draw c equalled element c of draw i, and every diagonal element was
-    // the same seed-only value.
+    // the same seed-only value. Draw c here is the draw keyed by row c of
+    // `split_keys` ([05-OP-71]).
     #[test]
     fn draw_c_element_i_is_not_draw_i_element_c() {
-        const N: u64 = 32;
-        for seed_bits in [42, (-1_i64) as u64] {
-            let unit = |c: u64, i: u64| {
-                random_unit(RandomKey::from_counter(seed_bits, c).bits(), i).to_bits()
-            };
+        const N: usize = 32;
+        for seed in [42, -1] {
+            let rows = seed_key(seed).split_n(N);
+            let unit = |c: usize, i: usize| random_unit(rows[c].bits(), i as u64).to_bits();
             for c in 0..N {
                 for i in (c + 1)..N {
-                    assert_ne!(unit(c, i), unit(i, c), "seed {seed_bits:#x} ({c}, {i})");
+                    assert_ne!(unit(c, i), unit(i, c), "seed {seed} ({c}, {i})");
                 }
             }
             let diagonal = (0..N).map(|c| unit(c, c)).collect::<BTreeSet<_>>();
-            assert_eq!(diagonal.len(), N as usize, "seed {seed_bits:#x}");
+            assert_eq!(diagonal.len(), N, "seed {seed}");
         }
     }
 
@@ -4551,11 +4536,10 @@ mod tests {
 
     #[test]
     fn uniform_sampler_is_the_05_op_8_affine_of_the_spec_unit() {
-        for (seed_bits, ordinal) in [(42, 0), ((-1_i64) as u64, 3)] {
-            let key = RandomKey::from_counter(seed_bits, ordinal);
+        for key in [seed_key(42), seed_key(-1).split().1] {
             for (low, high) in [(2.0f32, 5.0f32), (-1.0, 3.0), (0.0, 1.0)] {
                 for index in 0..16 {
-                    let unit = spec_unit(seed_bits, ordinal, index);
+                    let unit = spec_unit(key.bits(), index);
                     let narrow = (high - low).mul_add(unit as f32, low);
                     let wide = (f64::from(high) - f64::from(low)).mul_add(unit, f64::from(low));
                     for (prim, expected) in [
@@ -4568,7 +4552,8 @@ mod tests {
                         assert_eq!(
                             value.to_bits(),
                             expected.to_bits(),
-                            "{prim:?} [{low}, {high}) seed {seed_bits:#x} ordinal {ordinal} index {index}"
+                            "{prim:?} [{low}, {high}) key {:#x} index {index}",
+                            key.bits()
                         );
                     }
                 }
@@ -4580,7 +4565,7 @@ mod tests {
     fn uniform_sampler_dispatches_at_the_output_dtype_width() {
         let low = 2.0f32;
         let high = 7.0f32;
-        let key = RandomKey::from_counter(42, 0);
+        let key = seed_key(42);
         let index = 4;
         let f32_value = uniform_element(Prim::F32, low, high, key, index);
         let f64_value = uniform_element(Prim::F64, low, high, key, index);
@@ -4603,16 +4588,18 @@ mod tests {
         ));
     }
 
-    // Phase 3 of chelis#2413: the kernels take a key and nothing else about
-    // the stream. The dropout and uniform values of `from_counter(s, c)` are
-    // the atoms' values at seed `s` and ordinal `c`, recomputed here from the
-    // spec text (`spec_unit` above) rather than from any kernel helper.
+    // chelis#2413: the kernels take a key and nothing else about the stream.
+    // The dropout and uniform values under a key are the atoms' values at
+    // that key, recomputed here from the spec text (`spec_unit` above) rather
+    // than from any kernel helper.
     #[test]
-    fn kernels_under_a_counter_key_reproduce_the_spec_stream() {
-        let seeds = [0_u64, 42, (-1_i64) as u64, i64::MIN as u64, 7];
-        for seed_bits in seeds {
-            for ordinal in [0_u64, 1, 2, 9, u64::MAX] {
-                let key = RandomKey::from_counter(seed_bits, ordinal);
+    fn kernels_under_a_key_reproduce_the_spec_stream() {
+        for seed in [0, 42, -1, i64::MIN, 7] {
+            let root = seed_key(seed);
+            let (left, right) = root.split();
+            let mut keys = vec![root, left, right];
+            keys.extend(root.split_n(2));
+            for key in keys {
                 for prim in [Prim::F16, Prim::Bf16, Prim::F32, Prim::F64] {
                     let values = (0..24)
                         .map(|i| 1.0 + f64::from(i) / 8.0)
@@ -4630,7 +4617,7 @@ mod tests {
                     )
                     .unwrap();
                     for index in 0..input.len() {
-                        let unit = spec_unit(seed_bits, ordinal, index as u64);
+                        let unit = spec_unit(key.bits(), index as u64);
                         let unit = if prim == Prim::F64 {
                             unit
                         } else {
@@ -4646,7 +4633,8 @@ mod tests {
                         assert_eq!(
                             output.scalar_at(index).as_f64_lossy().to_bits(),
                             expected.to_bits(),
-                            "dropout {prim:?} seed {seed_bits:#x} ordinal {ordinal} index {index}"
+                            "dropout {prim:?} key {:#x} index {index}",
+                            key.bits()
                         );
                     }
                     let (low, high) = (-1.5f32, 2.25f32);
@@ -4656,7 +4644,7 @@ mod tests {
                             .apply(key)
                             .unwrap();
                     for index in 0..24 {
-                        let unit = spec_unit(seed_bits, ordinal, index);
+                        let unit = spec_unit(key.bits(), index);
                         let expected = if prim == Prim::F64 {
                             (f64::from(high) - f64::from(low)).mul_add(unit, f64::from(low))
                         } else {
@@ -4671,7 +4659,8 @@ mod tests {
                         assert_eq!(
                             sampled.scalar_at(index as usize).as_f64_lossy().to_bits(),
                             expected.to_bits(),
-                            "uniform {prim:?} seed {seed_bits:#x} ordinal {ordinal} index {index}"
+                            "uniform {prim:?} key {:#x} index {index}",
+                            key.bits()
                         );
                     }
                 }
@@ -4683,13 +4672,7 @@ mod tests {
     // row-major order at the arithmetic width, combined level by level in
     // adjacent pairs with an odd trailing element carried up unchanged, then
     // narrowed once to `p`.
-    fn spec_bound_adjoint(
-        prim: Prim,
-        cotangent: &[f64],
-        seed_bits: u64,
-        ordinal: u64,
-        high: bool,
-    ) -> f64 {
+    fn spec_bound_adjoint(prim: Prim, cotangent: &[f64], key_bits: u64, high: bool) -> f64 {
         fn tree<T: Copy + std::ops::Add<Output = T>>(mut level: Vec<T>, zero: T) -> T {
             if level.is_empty() {
                 return zero;
@@ -4709,7 +4692,7 @@ mod tests {
                 .iter()
                 .enumerate()
                 .map(|(i, g)| {
-                    let u = spec_unit(seed_bits, ordinal, i as u64);
+                    let u = spec_unit(key_bits, i as u64);
                     g * if high { u } else { 1.0 - u }
                 })
                 .collect();
@@ -4719,7 +4702,7 @@ mod tests {
                 .iter()
                 .enumerate()
                 .map(|(i, g)| {
-                    let u = spec_unit(seed_bits, ordinal, i as u64) as f32;
+                    let u = spec_unit(key_bits, i as u64) as f32;
                     (*g as f32) * if high { u } else { 1.0 - u }
                 })
                 .collect();
@@ -4740,16 +4723,16 @@ mod tests {
                 let stored = (0..len)
                     .map(|i| cotangent.scalar_at(i).as_f64_lossy())
                     .collect::<Vec<_>>();
-                for (seed_bits, ordinal) in [(42_u64, 0_u64), ((-1_i64) as u64, 5)] {
-                    let key = RandomKey::from_counter(seed_bits, ordinal);
+                for key in [seed_key(42), seed_key(-1).split().0] {
                     for (bound, high) in [(UniformBound::Low, false), (UniformBound::High, true)] {
                         let actual = uniform_like_bound_adjoint(&cotangent, key, bound).unwrap();
                         assert_eq!(actual.prim(), prim);
-                        let expected = spec_bound_adjoint(prim, &stored, seed_bits, ordinal, high);
+                        let expected = spec_bound_adjoint(prim, &stored, key.bits(), high);
                         assert_eq!(
                             actual.as_f64_lossy().to_bits(),
                             expected.to_bits(),
-                            "{prim:?} len {len} {bound:?} seed {seed_bits:#x} ordinal {ordinal}"
+                            "{prim:?} len {len} {bound:?} key {:#x}",
+                            key.bits()
                         );
                     }
                 }
@@ -4757,7 +4740,7 @@ mod tests {
         }
         let integer = finalize_tensor("test", Prim::Int32, RawTensor::Int(vec![1])).unwrap();
         assert!(matches!(
-            uniform_like_bound_adjoint(&integer, RandomKey::from_counter(0, 0), UniformBound::Low),
+            uniform_like_bound_adjoint(&integer, seed_key(0), UniformBound::Low),
             Err(NumericKernelError::WrongFamily { .. })
         ));
     }
@@ -4788,7 +4771,7 @@ mod tests {
             }
             let equal = PreparedUniformLike::new(prim, 3, f32_scalar(0.5), f32_scalar(0.5))
                 .unwrap()
-                .apply(RandomKey::from_counter(42, 0))
+                .apply(seed_key(42))
                 .unwrap();
             for index in 0..3 {
                 assert_eq!(equal.scalar_at(index).as_f64_lossy(), 0.5);
