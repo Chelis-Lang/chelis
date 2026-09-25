@@ -102,7 +102,11 @@ jobs:
       matrix:
         os: [ubuntu-latest]
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 240
+    # The 12000 s per-test backstop of the real-producer scenario in the
+    # runtime-identity-producers nextest profile, the alternate-compiler
+    # scenario (about 1000 s) and setup must all fit, so a stuck scenario is
+    # killed and reported before the job limit.
+    timeout-minutes: 300
     env:
       CARGO_PROFILE_DEV_DEBUG: 0
       CARGO_PROFILE_TEST_DEBUG: 0

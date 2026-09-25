@@ -200,8 +200,9 @@ path = "junit.xml"
 # In Linux Extended Validation run 36090959279 the Dtype oracle's wire census
 # passed in 2634 s and the binding census was killed at this profile's 3000 s
 # backstop, after the other 872 selected tests had passed. The two census
-# owners keep a backstop, sized like the producer scenarios' below, so a stuck
-# census still reports inside the Dtype job's 360-minute limit.
+# owners keep a 150-period backstop, over three times the wire census's
+# measured cold time, so a stuck census still reports inside the Dtype job's
+# 360-minute limit.
 [[profile.ci-full.overrides]]
 filter = '''(binary_id(/^chelis-compiler-api::capacity_census_wire$/) & test(/^wire_schema_numeric_fields_match_the_reviewed_baseline$/)) + (binary_id(/^chelis-python::capacity_census_bindings$/) & test(/^registered_pyfunctions_match_the_reviewed_rustdoc_signatures$/))'''
 slow-timeout = { period = "60s", terminate-after = 150 }
@@ -256,7 +257,12 @@ path = "junit.xml"
 inherits = "default"
 fail-fast = false
 test-threads = 1
-slow-timeout = { period = "60s", terminate-after = 150 }
+# The real-producer scenario builds every producer variant cold. On hosted
+# Linux it passed in 8514 s at e9a036b4e and was killed at a 150-period
+# backstop at 2e502d857, after main added the key dtype to the runtime and
+# Python producers. 200 periods keeps a hung scenario reportable inside the
+# job's 300-minute limit.
+slow-timeout = { period = "60s", terminate-after = 200 }
 
 [profile.runtime-identity-producers.junit]
 path = "junit.xml"
