@@ -55,16 +55,18 @@ def assert_extended(test, pr, nightly):
         test.assertNotIn("if", job)
         test.assertFalse(job.get("continue-on-error", False))
         execution_budget = (
-            120
-            if name == "runtime-representation-phase0-oracle"
-            else 90
-            if name == "dtype-phase3-oracle"
-            else 60
+            60
             if name.startswith("generalize")
             else 45
         )
-        # Keep the complete oracle budget as well as cold Devenv setup headroom.
-        test.assertEqual(job["timeout-minutes"], execution_budget + 25)
+        if name in ("runtime-representation-phase0-oracle", "dtype-phase3-oracle"):
+            # chelis#2394: a hosted candidate dispatch builds the census cold
+            # under observation, so both census-running oracles may use the
+            # six-hour GitHub-hosted maximum.
+            test.assertEqual(job["timeout-minutes"], 360)
+        else:
+            # Keep the complete oracle budget as well as cold Devenv setup headroom.
+            test.assertEqual(job["timeout-minutes"], execution_budget + 25)
         if name == "runtime-representation-phase0-oracle":
             test.assertEqual(job["name"], "Runtime Representation Phase 2 Oracle")
             step_names = [step.get("name") for step in job["steps"]]

@@ -17,8 +17,9 @@ foreign carrier fail before data access.
 
 The Phase 1 composite runs in the dedicated
 `runtime-representation-phase0-oracle` job in `heavy-e2e.yml`, daily at 03:17
-UTC and on manual dispatch, with a 145-minute timeout: the 120-minute oracle
-budget plus 25 minutes for cold environment setup. The stable job identity
+UTC and on manual dispatch. `docs/ci_validation.md` records its job timeout,
+which covers a hosted candidate dispatch building the binding census cold under
+observed Cargo (chelis#2394). The stable job identity
 predates Phase 1; its display name and command identify the current inherited
 phase. Ordinary PR and main-push CI do not run this full oracle, so a completion
 claim requires a candidate-head dispatch or equivalent clean execution receipt.

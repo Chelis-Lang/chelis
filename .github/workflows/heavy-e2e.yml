@@ -202,6 +202,10 @@ jobs:
         run: uv pip install --python "$PYO3_PYTHON" PyYAML==6.0.3
 
       # Later explicit restores must preserve the same provider partition as rust-cache.
+      # Observed builds also bind their receipts to absolute artifact paths. A
+      # target restored under another checkout path makes the next runtime
+      # producer build fail closed with CHELIS_IDENTITY_MISSING_OBSERVATION, so
+      # the checkout path partitions these entries as well (chelis#2394).
       - name: Restore script compiler builds
         uses: actions/cache/restore@v4
         with:
@@ -211,8 +215,8 @@ jobs:
             target/agents/native-execution-integration
             target/agents/native-owner-integration
             target/graph-fixture-target
-          key: ${{ runner.os }}-${{ runner.arch }}-script-execution-v1-devenv-${{ hashFiles('devenv.lock', 'devenv.yaml', 'devenv.nix', 'devenv/*.nix', '.kache.toml') }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-${{ github.sha }}
-          restore-keys: ${{ runner.os }}-${{ runner.arch }}-script-execution-v1-devenv-${{ hashFiles('devenv.lock', 'devenv.yaml', 'devenv.nix', 'devenv/*.nix', '.kache.toml') }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-
+          key: ${{ runner.os }}-${{ runner.arch }}-script-execution-v2-${{ github.workspace }}-devenv-${{ hashFiles('devenv.lock', 'devenv.yaml', 'devenv.nix', 'devenv/*.nix', '.kache.toml') }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-${{ github.sha }}
+          restore-keys: ${{ runner.os }}-${{ runner.arch }}-script-execution-v2-${{ github.workspace }}-devenv-${{ hashFiles('devenv.lock', 'devenv.yaml', 'devenv.nix', 'devenv/*.nix', '.kache.toml') }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-
 
       - name: Run script integration tests
         run: python scripts/ci_script_tests.py nightly
@@ -227,7 +231,7 @@ jobs:
             target/agents/native-execution-integration
             target/agents/native-owner-integration
             target/graph-fixture-target
-          key: ${{ runner.os }}-${{ runner.arch }}-script-execution-v1-devenv-${{ hashFiles('devenv.lock', 'devenv.yaml', 'devenv.nix', 'devenv/*.nix', '.kache.toml') }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-${{ github.sha }}
+          key: ${{ runner.os }}-${{ runner.arch }}-script-execution-v2-${{ github.workspace }}-devenv-${{ hashFiles('devenv.lock', 'devenv.yaml', 'devenv.nix', 'devenv/*.nix', '.kache.toml') }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-${{ github.sha }}
 
       - name: Upload script selection and timings
         if: always()
@@ -246,8 +250,12 @@ jobs:
         shell: chelis-ci-shell run {0}
     # chelis#1730: the exact-main oracle remained healthy but was cancelled
     # while its exhaustive compiled witness was still executing at 60 minutes.
-    # Preserve the 90-minute budget plus 25 minutes for cold Devenv setup.
-    timeout-minutes: 115
+    # chelis#2394: observed builds cannot reuse census targets restored under
+    # another checkout path, so hosted candidate dispatches build the census
+    # cold. The first such run was cancelled at 115 minutes with the binding
+    # census still running. Allow the six-hour GitHub-hosted maximum until a
+    # completed cold run is measured.
+    timeout-minutes: 360
     permissions:
       contents: read
       issues: read
@@ -275,12 +283,15 @@ jobs:
           shared-key: linux-workspace
           save-if: false
 
+      # Observed builds bind receipts to absolute artifact paths. A census
+      # target restored under another checkout path fails closed at the next
+      # runtime producer build, so the checkout path partitions these caches.
       - name: Restore capacity rustdoc build
         uses: actions/cache/restore@v4
         with:
           path: target/agents/729-capacity-rustdoc
-          key: ${{ runner.os }}-${{ runner.arch }}-capacity-rustdoc-v1-devenv-${{ hashFiles('devenv.lock', 'devenv.yaml', 'devenv.nix', 'devenv/*.nix', '.kache.toml') }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml', 'scripts/capacity_census_typed.py', 'crates/chelis-compiler-api/**', 'crates/chelis-python/**') }}
-          restore-keys: ${{ runner.os }}-${{ runner.arch }}-capacity-rustdoc-v1-devenv-${{ hashFiles('devenv.lock', 'devenv.yaml', 'devenv.nix', 'devenv/*.nix', '.kache.toml') }}-
+          key: ${{ runner.os }}-${{ runner.arch }}-capacity-rustdoc-v2-${{ github.workspace }}-devenv-${{ hashFiles('devenv.lock', 'devenv.yaml', 'devenv.nix', 'devenv/*.nix', '.kache.toml') }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml', 'scripts/capacity_census_typed.py', 'crates/chelis-compiler-api/**', 'crates/chelis-python/**') }}
+          restore-keys: ${{ runner.os }}-${{ runner.arch }}-capacity-rustdoc-v2-${{ github.workspace }}-devenv-${{ hashFiles('devenv.lock', 'devenv.yaml', 'devenv.nix', 'devenv/*.nix', '.kache.toml') }}-
 
       - name: Restore census control builds
         uses: actions/cache/restore@v4
@@ -289,8 +300,8 @@ jobs:
             target/agents/wire-codec-rustdoc
             target/agents/native-bindings-driver
             target/graph-fixture-target
-          key: ${{ runner.os }}-${{ runner.arch }}-census-controls-v1-devenv-${{ hashFiles('devenv.lock', 'devenv.yaml', 'devenv.nix', 'devenv/*.nix', '.kache.toml') }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-${{ github.sha }}
-          restore-keys: ${{ runner.os }}-${{ runner.arch }}-census-controls-v1-devenv-${{ hashFiles('devenv.lock', 'devenv.yaml', 'devenv.nix', 'devenv/*.nix', '.kache.toml') }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-
+          key: ${{ runner.os }}-${{ runner.arch }}-census-controls-v2-${{ github.workspace }}-devenv-${{ hashFiles('devenv.lock', 'devenv.yaml', 'devenv.nix', 'devenv/*.nix', '.kache.toml') }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-${{ github.sha }}
+          restore-keys: ${{ runner.os }}-${{ runner.arch }}-census-controls-v2-${{ github.workspace }}-devenv-${{ hashFiles('devenv.lock', 'devenv.yaml', 'devenv.nix', 'devenv/*.nix', '.kache.toml') }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-
 
       - name: Dtype Phase 0-3 oracle
         env:
@@ -318,7 +329,7 @@ jobs:
         uses: actions/cache/save@v4
         with:
           path: target/agents/729-capacity-rustdoc
-          key: ${{ runner.os }}-${{ runner.arch }}-capacity-rustdoc-v1-devenv-${{ hashFiles('devenv.lock', 'devenv.yaml', 'devenv.nix', 'devenv/*.nix', '.kache.toml') }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml', 'scripts/capacity_census_typed.py', 'crates/chelis-compiler-api/**', 'crates/chelis-python/**') }}
+          key: ${{ runner.os }}-${{ runner.arch }}-capacity-rustdoc-v2-${{ github.workspace }}-devenv-${{ hashFiles('devenv.lock', 'devenv.yaml', 'devenv.nix', 'devenv/*.nix', '.kache.toml') }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml', 'scripts/capacity_census_typed.py', 'crates/chelis-compiler-api/**', 'crates/chelis-python/**') }}
 
       - name: Save census control builds
         if: ${{ success() && github.ref == 'refs/heads/main' }}
@@ -328,7 +339,7 @@ jobs:
             target/agents/wire-codec-rustdoc
             target/agents/native-bindings-driver
             target/graph-fixture-target
-          key: ${{ runner.os }}-${{ runner.arch }}-census-controls-v1-devenv-${{ hashFiles('devenv.lock', 'devenv.yaml', 'devenv.nix', 'devenv/*.nix', '.kache.toml') }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-${{ github.sha }}
+          key: ${{ runner.os }}-${{ runner.arch }}-census-controls-v2-${{ github.workspace }}-devenv-${{ hashFiles('devenv.lock', 'devenv.yaml', 'devenv.nix', 'devenv/*.nix', '.kache.toml') }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-${{ github.sha }}
 
       - name: Upload census subprocess timings
         if: always()
@@ -416,9 +427,13 @@ jobs:
         shell: chelis-ci-shell run {0}
     # chelis#2299: exact-main Phase 1 passed and Phase 2 reached its final
     # Python/DLPack cohort before the still-running binding census was cancelled
-    # at 90 minutes. Preserve measured completion headroom without weakening it.
-    # Preserve the 120-minute budget plus 25 minutes for cold Devenv setup.
-    timeout-minutes: 145
+    # at 90 minutes. chelis#2394: this job restores no census target and
+    # observed builds rebuild every unit rust-cache restores without its
+    # observation state, so the census builds cold under observation. The first
+    # such run was cancelled at 145 minutes with the binding census still
+    # running. Allow the six-hour GitHub-hosted maximum until a completed cold
+    # run is measured.
+    timeout-minutes: 360
     permissions:
       contents: read
     env:
