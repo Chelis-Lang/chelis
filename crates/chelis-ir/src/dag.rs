@@ -2310,17 +2310,89 @@ impl Dag {
 
     /// chelis#2413: whether a random node can trap by itself, and so is an
     /// observable root for dead-code elimination (`spec/06-transformations.md`
-    /// §5.2, "purity alone does not make a possible trap dead").
+    /// §5.2, "purity alone does not make a possible trap dead"). This one
+    /// predicate is read by the evaluator's seeds, dead-code elimination and
+    /// every other liveness reader.
     ///
-    /// A draw validates its own rate or bounds ([05-OP-37]/[05-OP-8]). A
-    /// `SplitN` traps on a negative runtime count ([05-OP-71]); a literal
-    /// count cannot be negative. The other key operations are total.
+    /// A draw validates its own controls and key batch ([05-OP-37]/[05-OP-8])
+    /// and cannot trap only when every guard is statically satisfied:
+    /// [`Self::draw_controls_are_literal_and_in_range`] and
+    /// [`Self::draw_key_batch_is_literal`]. A `SplitN` traps on a negative
+    /// runtime count ([05-OP-71]); a literal count cannot be negative. The
+    /// other key operations are total.
     pub fn random_node_may_trap(&self, node: &DagNode) -> bool {
         match &node.op {
-            RiscOp::Dropout | RiscOp::UniformLike => true,
+            RiscOp::Dropout | RiscOp::UniformLike => {
+                !(self.draw_controls_are_literal_and_in_range(node)
+                    && self.draw_key_batch_is_literal(node))
+            }
             RiscOp::SplitN { count } => count.as_lit().is_none(),
             _ => false,
         }
+    }
+
+    /// Whether every control of the draw `node` (a dropout rate, a
+    /// `uniform_like` bound pair) is a `Const` its own atom accepts at the
+    /// draw's dtype: the same validation the draw performs before drawing,
+    /// applied to the literal. A runtime control, or a literal out of range,
+    /// may trap.
+    fn draw_controls_are_literal_and_in_range(&self, node: &DagNode) -> bool {
+        let literal = |slot: usize| {
+            node.inputs
+                .get(slot)
+                .and_then(|input| self.get(*input))
+                .and_then(|input| match &input.op {
+                    RiscOp::Const { value } => Some(*value),
+                    _ => None,
+                })
+        };
+        let prim = node.output_type.precision;
+        match &node.op {
+            RiscOp::Dropout => literal(1).is_some_and(|rate| {
+                chelis_types::dtype_semantics::DropoutParameters::new(prim, rate).is_ok()
+            }),
+            RiscOp::UniformLike => literal(1).zip(literal(2)).is_some_and(|(low, high)| {
+                chelis_types::dtype_semantics::UniformLikeParameters::new(prim, low, high).is_ok()
+            }),
+            _ => false,
+        }
+    }
+
+    /// Whether the draw `node`'s key batch statically indexes its operands:
+    /// a rank-0 key, or a key whose dims are all literal and equal to the
+    /// literal leading dims of its data and of every per-row operand (its
+    /// controls and activation), the static form of the evaluator's extent
+    /// check. A symbolic extent on either side may disagree at run time.
+    fn draw_key_batch_is_literal(&self, node: &DagNode) -> bool {
+        let Some(layout) = node.op.draw_batch_layout() else {
+            return false;
+        };
+        let dims_of = |slot: usize| {
+            node.inputs
+                .get(slot)
+                .and_then(|input| self.get(*input))
+                .map(|input| input.output_type.dims.as_slice())
+        };
+        let Some(key) = dims_of(layout.key) else {
+            return false;
+        };
+        if key.is_empty() {
+            return true;
+        }
+        let literal_prefix = |dims: &[DimInfo], axes: usize| {
+            dims.len() >= axes
+                && dims[..axes].iter().zip(key).all(
+                    |(dim, key)| matches!((dim, key), (DimInfo::Lit(a), DimInfo::Lit(b)) if a == b),
+                )
+        };
+        let Some(data) = dims_of(layout.data_input) else {
+            return false;
+        };
+        literal_prefix(data, key.len())
+            && layout.per_row.iter().all(|slot| match dims_of(*slot) {
+                Some(dims) => dims.len() <= key.len() && literal_prefix(dims, dims.len()),
+                None => true,
+            })
     }
 
     pub fn set_roots(&mut self, roots: Vec<NodeId>) {
@@ -3217,6 +3289,185 @@ mod tests {
 
     fn scalar_f32() -> TensorType {
         TensorType::scalar_f32()
+    }
+
+    /// chelis#2413: a draw cannot trap only when every guard is statically
+    /// satisfied ([`Dag::random_node_may_trap`]): its controls are literals
+    /// in range at its dtype, and its key is rank 0 or its literal dims equal
+    /// its data's literal leading dims. One negative per guard.
+    mod draw_trap_guards {
+        use super::*;
+        use chelis_types::types::Prim;
+
+        fn ty(dims: &[DimInfo], precision: Prim) -> TensorType {
+            TensorType {
+                dims: dims.to_vec(),
+                precision,
+            }
+        }
+
+        fn lit(dims: &[usize]) -> Vec<DimInfo> {
+            dims.iter().copied().map(DimInfo::Lit).collect()
+        }
+
+        /// A key of `key_dims` (`None` for `key_from_seed(7)`), data of
+        /// `data_dims`, and the draw `op` over them with `controls`, each a
+        /// literal or, for `None`, a runtime `Load`.
+        fn draw(
+            op: RiscOp,
+            controls: &[Option<f64>],
+            key_dims: Option<Vec<DimInfo>>,
+            data_dims: Vec<DimInfo>,
+        ) -> (Dag, NodeId) {
+            let mut dag = Dag::new();
+            let decl = dag.declare("test");
+            let data = dag.add_node(
+                decl,
+                RiscOp::Load { name: "x".into() },
+                vec![],
+                ty(&data_dims, Prim::F32),
+                None,
+            );
+            let mut inputs = vec![data];
+            for (slot, control) in controls.iter().enumerate() {
+                let op = match control {
+                    Some(value) => RiscOp::synth_const(Prim::F32, *value),
+                    None => RiscOp::Load {
+                        name: format!("control{slot}").as_str().into(),
+                    },
+                };
+                inputs.push(dag.add_node(decl, op, vec![], scalar_f32(), None));
+            }
+            let key = match key_dims {
+                None => {
+                    let seed = dag.add_node(
+                        decl,
+                        RiscOp::Const {
+                            value: chelis_types::scalar_from_i64("test", Prim::Int64, 7).unwrap(),
+                        },
+                        vec![],
+                        ty(&[], Prim::Int64),
+                        None,
+                    );
+                    dag.add_node(
+                        decl,
+                        RiscOp::KeyFromSeed,
+                        vec![seed],
+                        ty(&[], Prim::Key),
+                        None,
+                    )
+                }
+                Some(dims) => dag.add_node(
+                    decl,
+                    RiscOp::Load { name: "k".into() },
+                    vec![],
+                    ty(&dims, Prim::Key),
+                    None,
+                ),
+            };
+            inputs.push(key);
+            let drawn = dag.add_node(decl, op, inputs, ty(&data_dims, Prim::F32), None);
+            (dag, drawn)
+        }
+
+        fn may_trap((dag, drawn): &(Dag, NodeId)) -> bool {
+            dag.random_node_may_trap(dag.get(*drawn).unwrap())
+        }
+
+        /// Evidentiary status: REGRESSION TEST. At 727e74b41 every draw was
+        /// a seed, so a discarded draw with an in-range literal rate kept its
+        /// data live (`dead_draw_input_is_not_required_when_not_data_live_at_the_selected_root`).
+        #[test]
+        fn a_draw_whose_guards_all_hold_statically_cannot_trap() {
+            for graph in [
+                draw(RiscOp::Dropout, &[Some(0.0)], None, lit(&[4])),
+                draw(RiscOp::Dropout, &[Some(0.5)], Some(lit(&[2])), lit(&[2, 4])),
+                draw(
+                    RiscOp::UniformLike,
+                    &[Some(-1.0), Some(1.0)],
+                    None,
+                    lit(&[4]),
+                ),
+            ] {
+                assert!(!may_trap(&graph));
+                // Dead, it is eliminated with its data.
+                let (mut dag, _) = graph;
+                let root = dag.add_node(
+                    DeclId(0),
+                    RiscOp::synth_const(Prim::F32, 1.0),
+                    vec![],
+                    scalar_f32(),
+                    None,
+                );
+                dag.add_root(root);
+                let pruned = crate::optimize::dead_code_eliminate(&dag);
+                assert_eq!(pruned.len(), 1, "{:?}", pruned.nodes());
+            }
+        }
+
+        /// Evidentiary status: disposition lock (every draw was a seed at
+        /// 727e74b41).
+        #[test]
+        fn an_out_of_range_literal_control_may_trap() {
+            assert!(may_trap(&draw(
+                RiscOp::Dropout,
+                &[Some(1.0)],
+                None,
+                lit(&[4])
+            )));
+            assert!(may_trap(&draw(
+                RiscOp::Dropout,
+                &[Some(-0.5)],
+                None,
+                lit(&[4])
+            )));
+            assert!(may_trap(&draw(
+                RiscOp::UniformLike,
+                &[Some(1.0), Some(-1.0)],
+                None,
+                lit(&[4])
+            )));
+        }
+
+        /// Evidentiary status: disposition lock (every draw was a seed at
+        /// 727e74b41).
+        #[test]
+        fn a_symbolic_key_extent_against_a_literal_one_may_trap() {
+            let symbolic = vec![DimInfo::Named("n".into(), None)];
+            assert!(may_trap(&draw(
+                RiscOp::Dropout,
+                &[Some(0.5)],
+                Some(symbolic.clone()),
+                lit(&[2, 4])
+            )));
+            let mut data = symbolic;
+            data.push(DimInfo::Lit(4));
+            assert!(may_trap(&draw(
+                RiscOp::Dropout,
+                &[Some(0.5)],
+                Some(lit(&[2])),
+                data
+            )));
+            assert!(may_trap(&draw(
+                RiscOp::Dropout,
+                &[Some(0.5)],
+                Some(lit(&[3])),
+                lit(&[2, 4])
+            )));
+        }
+
+        /// Evidentiary status: disposition lock (every draw was a seed at
+        /// 727e74b41).
+        #[test]
+        fn a_runtime_control_may_trap() {
+            assert!(may_trap(&draw(RiscOp::Dropout, &[None], None, lit(&[4]))));
+            assert!(may_trap(&draw(
+                RiscOp::UniformLike,
+                &[Some(0.0), None],
+                None,
+                lit(&[4])
+            )));
+        }
     }
 
     #[test]
