@@ -3607,10 +3607,7 @@ fn a_key_element_is_the_key_variant_and_describes_without_panicking() {
         .expect("every i64 seeds a key")
         .split();
     let value = RuntimeValue::from_scalar_value(chelis_types::ScalarValue::from_key(key));
-    assert!(
-        matches!(value, RuntimeValue::Key(inner) if inner == key),
-        "{value:?}"
-    );
+    assert!(matches!(value, RuntimeValue::Key(inner) if inner == key));
     assert_eq!(describe_value(&value), "key(aa3896172f9a3213)");
     assert_eq!(describe_argument(Some(&value)), "key(aa3896172f9a3213)");
 }
