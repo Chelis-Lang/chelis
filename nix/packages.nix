@@ -75,7 +75,10 @@ let
     rootFeatures = [ ];
   };
   compilerCrate = cargoGraph.workspaceMembers."chelis-cli".build.override {
-    features = [ "smt" ];
+    features = [
+      "smt"
+      "sealed-runtime"
+    ];
   };
   runtimeCrate = cargoGraph.workspaceMembers."chelis-runtime".build.override {
     features = [ ];
@@ -225,13 +228,23 @@ let
     pkgs.runCommand "chelis-${version}"
       {
         inherit version;
+        nativeBuildInputs = [ pkgs.jq ];
         meta.mainProgram = "chelis";
       }
       ''
         mkdir -p $out/bin $out/lib $out/include
         cp ${compiler}/bin/chelis $out/bin/chelis
-        cp ${runtime}/lib/libchelis_runtime.a $out/lib/libchelis_runtime.a
-        cp ${runtime}/include/*.h $out/include/
+        # Ship the runtime the compiler carries (spec/08-backends.md §2.1).
+        export_dir="$TMPDIR/runtime-export"
+        ${compiler}/bin/chelis runtime export "$export_dir"
+        receipt="$export_dir/chelis_runtime.receipt.json"
+        test "$(jq -r .mode "$receipt")" = sealed
+        cp "$export_dir/libchelis_runtime.a" $out/lib/libchelis_runtime.a
+        archive_sha256="$(sha256sum $out/lib/libchelis_runtime.a | cut -d ' ' -f 1)"
+        test "$archive_sha256" = "$(jq -r .archive_sha256 "$receipt")"
+        ${lib.concatMapStringsSep "\n" (header: ''
+          cp "$export_dir/${header}" $out/include/${header}
+        '') (import ./contracts.nix).publicRuntimeHeaders}
       '';
 in
 {

@@ -1747,17 +1747,27 @@ identity and executable digests.
 Native execution uses a separately pinned archive from the current
 `cargo build --locked -p chelis-runtime --lib --features ownership-ledger
 --message-format=json` result. The runner verifies its source/manifest/target
-identity, copies it into an exclusive directory, sets `CHELIS_RUNTIME_DIR`, and
-checks its digest after all executions. Each selected direct-link harness honors
-that explicit archive. Eight empty-archive controls must fail at the actual
-linker despite complete older archives in the warm target. Five missing-compiler
+identity, copies it into an exclusive directory, names the copy as the exact
+file `CHELIS_RUNTIME_LIB`, and checks its digest after all executions. Each
+selected harness that links the runtime itself honors that explicit archive.
+`chelis build` instead stages the runtime carried by its own Cargo build
+([spec/08 §2.1](../08-backends.md)), so the pin never sets
+`CHELIS_RUNTIME_DIR` and refuses to pin a runtime when it is inherited.
+CLI-driven legs therefore link the product runtime; without
+`CHELIS_OWNERSHIP_LEDGER_PATH` the ledger records nothing, and the one leg that
+sets it, the JSON ownership-ledger mutation test, builds its instrumented Cargo
+artifact and links that exact archive in place of the staged one. Seven
+empty-archive controls must fail at the actual linker despite complete older
+archives in the warm target. The CLI-staged consumer's control instead names
+the empty archive's directory as `CHELIS_RUNTIME_DIR` and must fail with the
+CLI's rejection before linking: honoring the directory would fail at the
+linker, and ignoring it would pass. Five missing-compiler
 controls prevent native compile checks from returning early. Selected library
 native cases have no availability exits: parallelism follows the configured
 platform toolchain, and the canonical matmul case executes with the BLAS hint
 without claiming a vendor call. Reduced-float BLAS cases use the platform
 toolchain and must execute. Python fixtures isolate their target configuration
-and prove that an inherited target's execution evidence survives. The JSON ownership-ledger
-mutation test independently builds/selects its instrumented Cargo artifact.
+and prove that an inherited target's execution evidence survives.
 This acceptance pin does not resolve the broader production archive discovery
 work in #1354; other consumers retain that issue's obligations.
 
@@ -1842,7 +1852,11 @@ metadata-plan C API tests, 79 HIP descriptor/owner tests, 109 platform-invariant
 Python binding tests, and sixteen backend-header census/enrollment tests. Counts
 and digests are derived summaries, not membership authority. The Python leg names its
 integration binaries and relevant internal ownership tests explicitly rather
-than freezing platform-only package tests. The command first obtains a complete
+than freezing platform-only package tests. The Python extension still selects its
+runtime through `CHELIS_RUNTIME_DIR` and otherwise searches by modification time,
+so only that leg receives the pin's exclusive directory under that name; it
+spawns no chelis CLI, and every other leg runs without the variable. That export
+ends when the extension carries its runtime (#1354). The command first obtains a complete
 fresh Phase 1 receipt, then lists and executes each complete current Phase 2
 cohort with zero retries. Every required identity must remain selected,
 nonignored, executed and passing; additions are executed and reported, while a

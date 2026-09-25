@@ -71,6 +71,11 @@ class ContractTests(unittest.TestCase):
         self.assertNotIn("compiled_host_outputs_have_no_runtime_metadata_leaks", args[-1])
         self.assertNotIn("manual_", args[-1])
 
+    def test_pinned_runtime_directory_never_reaches_a_leg_that_can_run_the_cli(self):
+        archive = Path("/pinned/runtime/libchelis_runtime.a")
+        with self.assertRaises(oracle.OracleFailure):
+            oracle.leg_environment(("-p", "chelis-python", "-p", "chelis-cli"), archive)
+
     def test_phase_two_execute_leg_reports_and_executes_an_added_test(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -85,8 +90,12 @@ class ContractTests(unittest.TestCase):
                 '</testsuite></testsuites>'
             )
 
-            def command(argv, command_root, command_evidence, label):
+            scoped = {"CHELIS_RUNTIME_DIR": str(root / "runtime")}
+            environments = {}
+
+            def command(argv, command_root, command_evidence, label, *, scoped_environment=None):
                 self.assertEqual(command_root, root)
+                environments[label] = scoped_environment
                 command_evidence.mkdir(parents=True, exist_ok=True)
                 if label == "run":
                     junit.write_text(xml)
@@ -105,7 +114,12 @@ class ContractTests(unittest.TestCase):
                     (),
                     required,
                     evidence,
+                    environment=scoped,
                 )
+
+            # The leg's scoped variable reaches both of its processes and only them.
+            self.assertEqual(environments, {"list": scoped, "run": scoped})
+            self.assertNotIn("CHELIS_RUNTIME_DIR", oracle.phase1.os.environ)
 
             self.assertEqual(receipt["required"], required)
             self.assertEqual(receipt["selected"], selected)
@@ -128,7 +142,7 @@ class ContractTests(unittest.TestCase):
                 '</testsuite></testsuites>'
             )
 
-            def command(argv, command_root, command_evidence, label):
+            def command(argv, command_root, command_evidence, label, *, scoped_environment=None):
                 command_evidence.mkdir(parents=True, exist_ok=True)
                 if label == "run":
                     junit.write_text(xml)
@@ -173,14 +187,16 @@ class ReceiptTests(unittest.TestCase):
                 "pinned_artifact": {str(root / "runtime/libchelis_runtime.a"): "sha256"}
             }
             events: list[str] = []
+            environments: dict[str, dict] = {}
 
             def phase_one():
                 events.append("phase1")
                 return root / "phase1.json"
 
-            def execute(name, args, selected, evidence):
+            def execute(name, args, selected, evidence, *, environment):
                 self.assertEqual(selected, [name])
                 events.append(name)
+                environments[name] = environment
                 return {
                     "name": name,
                     "required": [name],
@@ -221,6 +237,16 @@ class ReceiptTests(unittest.TestCase):
 
             runtime_pin.assert_called_once_with(root / "target/runtime-representation-phase2/run-id/runtime-build")
             self.assertEqual(events, ["phase1", *[name for name, _ in legs]])
+            # Only the Python extension, which still selects its runtime through
+            # CHELIS_RUNTIME_DIR, receives runtime_pin's exclusive directory.
+            python = "Python host device and DLPack boundaries"
+            self.assertEqual(
+                environments,
+                {
+                    name: {"CHELIS_RUNTIME_DIR": str(root / "runtime")} if name == python else {}
+                    for name, _ in legs
+                },
+            )
             payload = json.loads(receipt.read_text())
             self.assertEqual(payload["phase1_receipt"], str(root / "phase1.json"))
             self.assertEqual(payload["runtime"], runtime_receipt)

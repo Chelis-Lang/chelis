@@ -1605,6 +1605,145 @@ if __name__ == "__main__":
         self.assertIs(detection.detector, oracle.Detector.OUTPUT_MISMATCH)
 
 
+class RuntimeLinkContractTests(unittest.TestCase):
+    def context(self, **environment: str) -> oracle.PhaseContext:
+        with mock.patch.dict(os.environ, environment):
+            context = oracle.PhaseContext()
+        self.addCleanup(context.close)
+        return context
+
+    def test_build_rejections_are_observed_without_a_runtime_directory(self) -> None:
+        fixture = next(
+            row
+            for row in oracle.fixture_manifest()
+            if row.action is oracle.Action.BUILD_REJECT
+        )
+        context = self.context(
+            CHELIS_RUNTIME_DIR="/foreign/runtime",
+            CHELIS_OWNERSHIP_LEDGER_PATH="/foreign/ledger.jsonl",
+        )
+        context._prepared = True
+        environments: list[dict[str, str]] = []
+
+        def chelis(argv, *, environment, **_):
+            environments.append(environment)
+            if "CHELIS_RUNTIME_DIR" in environment:
+                stderr = (
+                    "error: CHELIS_RUNTIME_DIR is set (/foreign/runtime), but chelis "
+                    "stages the runtime built into it and never takes one from a "
+                    "directory. Unset CHELIS_RUNTIME_DIR\n"
+                )
+            else:
+                stderr = "\n".join(fixture.diagnostic_fragments)
+            return oracle.subprocess.CompletedProcess(argv, 1, "", stderr)
+
+        with mock.patch.object(oracle, "_run", side_effect=chelis):
+            detection = oracle.execute_fixture(context, fixture)
+
+        self.assertTrue(detection.passed, detection.detail)
+        self.assertEqual(len(environments), 1)
+        self.assertNotIn("CHELIS_OWNERSHIP_LEDGER_PATH", environments[0])
+
+    def test_prepare_takes_the_runtime_the_cli_build_compiled_with_the_ledger(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory)
+            (target / "debug" / "deps").mkdir(parents=True)
+            executable = target / "debug" / "chelis"
+            executable.write_bytes(b"feature-built chelis")
+            archive = target / "debug" / "deps" / "libchelis_runtime-0123abcd.a"
+            archive.write_bytes(b"instrumented runtime")
+
+            def messages(features: list[str]) -> str:
+                rows = (
+                    {"reason": "build-script-executed"},
+                    {
+                        "reason": "compiler-artifact",
+                        "target": {"name": "chelis_runtime", "kind": ["staticlib", "rlib"]},
+                        "features": features,
+                        "filenames": [str(archive), str(archive.with_suffix(".rlib"))],
+                        "executable": None,
+                    },
+                    {
+                        "reason": "compiler-artifact",
+                        "target": {"name": "chelis", "kind": ["bin"]},
+                        "features": [],
+                        "filenames": [str(executable)],
+                        "executable": str(executable),
+                    },
+                    {"reason": "build-finished", "success": True},
+                )
+                return "".join(json.dumps(row) + "\n" for row in rows)
+
+            context = self.context(CARGO_TARGET_DIR=str(target))
+            built = oracle.subprocess.CompletedProcess((), 0, messages(["ownership-ledger"]), "")
+            with mock.patch.object(oracle, "_run", return_value=built):
+                context.prepare()
+            self.assertEqual(context.chelis.read_bytes(), b"feature-built chelis")
+            self.assertEqual(
+                context.runtime_sha256,
+                oracle.hashlib.sha256(b"instrumented runtime").hexdigest(),
+            )
+
+            uninstrumented = self.context(CARGO_TARGET_DIR=str(target))
+            built = oracle.subprocess.CompletedProcess((), 0, messages([]), "")
+            with mock.patch.object(oracle, "_run", return_value=built):
+                with self.assertRaisesRegex(oracle.OracleFailure, "without ownership-ledger"):
+                    uninstrumented.prepare()
+
+            foreign = self.context(CARGO_TARGET_DIR=str(target / "debug" / "deps"))
+            built = oracle.subprocess.CompletedProcess((), 0, messages(["ownership-ledger"]), "")
+            with mock.patch.object(oracle, "_run", return_value=built):
+                with self.assertRaisesRegex(oracle.OracleFailure, "outside"):
+                    foreign.prepare()
+
+    def test_compile_links_only_the_instrumented_runtime_archive(self) -> None:
+        fixture = next(
+            row
+            for row in oracle.fixture_manifest()
+            if row.action is oracle.Action.LEDGER_BUILD_RUN
+        )
+        instrumented = oracle.hashlib.sha256(b"instrumented runtime").hexdigest()
+        uninstrumented = oracle.hashlib.sha256(b"release runtime").hexdigest()
+        context = self.context()
+        context.runtime_sha256 = instrumented
+        output = context.root / "out"
+        output.mkdir()
+        staged = output / "libchelis_runtime.a"
+        exact = f"cc -O2 {output}/main.c {staged} -lm -o {output}/main"
+        searched = f"cc -O2 {output}/main.c -L{output} -lchelis_runtime -lm -o {output}/main"
+
+        def artifact(receipt: str, compile_line: str) -> oracle.BuildArtifact:
+            stdout = f"Staged runtime {staged} (sha256 {receipt})\nCompile: {compile_line}\n"
+            return oracle.BuildArtifact(
+                output,
+                oracle.subprocess.CompletedProcess((), 0, stdout, ""),
+                tuple(oracle.shlex.split(compile_line)),
+            )
+
+        cases = (
+            ("uninstrumented bytes", b"release runtime", instrumented, exact, "not the instrumented"),
+            ("uninstrumented receipt", b"release runtime", uninstrumented, exact, "did not stage"),
+            ("library search", b"instrumented runtime", instrumented, searched, "must link exactly"),
+        )
+        for name, contents, receipt, compile_line, message in cases:
+            with self.subTest(case=name):
+                staged.write_bytes(contents)
+                with mock.patch.object(oracle, "_run") as run:
+                    with self.assertRaisesRegex(oracle.OracleFailure, message):
+                        context.compile_and_run(
+                            fixture, artifact(receipt, compile_line), ledger=True
+                        )
+                run.assert_not_called()
+
+        staged.write_bytes(b"instrumented runtime")
+        linked = artifact(instrumented, exact)
+        succeeded = oracle.subprocess.CompletedProcess((), 0, "", "")
+        with mock.patch.object(oracle, "_run", return_value=succeeded) as run:
+            context.compile_and_run(fixture, linked, ledger=True)
+        self.assertEqual(run.call_args_list[0].args[0], linked.compile_command)
+        self.assertIn(str(staged), linked.compile_command)
+
+
 def _flatten_tests(suite: unittest.TestSuite) -> tuple[unittest.TestCase, ...]:
     tests: list[unittest.TestCase] = []
     for candidate in suite:

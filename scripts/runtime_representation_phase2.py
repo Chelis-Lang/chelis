@@ -197,13 +197,32 @@ def python_suite():
     )
 
 
-def execute_leg(name, args, required, directory):
+def leg_environment(args, archive: Path):
+    """Name the pinned runtime directory only for the Python extension's leg.
+
+    The extension still selects its runtime through `CHELIS_RUNTIME_DIR` and
+    otherwise falls back to a modification-time search (#1354). Its leg never
+    spawns the chelis CLI, which rejects the variable, and no other leg receives
+    it. The export goes away when the extension carries its runtime.
+    """
+    packages = [value for flag, value in zip(args, args[1:]) if flag == "-p"]
+    if "chelis-python" not in packages:
+        return {}
+    if packages != ["chelis-python"]:
+        raise OracleFailure(
+            "the pinned runtime directory is exported only to a chelis-python-only leg"
+        )
+    return {"CHELIS_RUNTIME_DIR": str(archive.parent)}
+
+
+def execute_leg(name, args, required, directory, *, environment=None):
     print(f"+ {name}: list and execute {len(required)} required tests", flush=True)
     listed = phase1.command(
         [*phase1.nextest_command("list", args), "--message-format", "json"],
         ROOT,
         directory,
         "list",
+        scoped_environment=environment,
     )
     include_ignored = args[-2:] == ("--run-ignored", "only")
     selected, artifacts = phase1.selection(
@@ -228,6 +247,7 @@ def execute_leg(name, args, required, directory):
         ROOT,
         directory,
         "run",
+        scoped_environment=environment,
     )
     if not junit.is_file():
         raise OracleFailure("nextest produced no fresh Phase 2 execution receipt")
@@ -257,6 +277,7 @@ def run() -> Path:
     phase1_receipt = phase1.run()
     executions = []
     with phase1.runtime_pin(directory / "runtime-build") as runtime_receipt:
+        (archive,) = map(Path, runtime_receipt["pinned_artifact"])
         for index, (row, (name, args)) in enumerate(
             zip(packet["legs"], phase2_legs(), strict=True)
         ):
@@ -266,6 +287,7 @@ def run() -> Path:
                     args,
                     row["required"],
                     directory / str(index),
+                    environment=leg_environment(args, archive),
                 )
             )
     if source_identity(ROOT) != identity:

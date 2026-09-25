@@ -103,9 +103,15 @@ class NixFlakeContractTests(unittest.TestCase):
         release = (REPO_ROOT / ".github" / "workflows" / "release.yml").read_text(
             encoding="utf-8"
         )
+        # The release ships the runtime its chelis carries: `lib/` and
+        # `include/` come from `chelis runtime export`, never from a
+        # separately built target directory (spec/08-backends.md §2.1).
+        self.assertIn(
+            './target/release/chelis runtime export "$runtime_export"', release
+        )
         staged_headers = set(
             re.findall(
-                r"cp crates/chelis-runtime/include/(chelis_[^\s/]+\.h) "
+                r'cp "\$runtime_export/(chelis_[^\s/"]+\.h)" '
                 r'"\$staging/include/"',
                 release,
             )
@@ -113,8 +119,9 @@ class NixFlakeContractTests(unittest.TestCase):
         self.assertEqual(staged_headers, set(EXPECTED_HEADERS))
         self.assertIn('cp target/release/chelis "$staging/bin/"', release)
         self.assertIn(
-            'cp target/release/libchelis_runtime.a "$staging/lib/"', release
+            'cp "$runtime_export/libchelis_runtime.a" "$staging/lib/"', release
         )
+        self.assertNotIn("target/release/libchelis_runtime.a", release)
         self.assertEqual(
             contracts["runtimeConsumers"],
             {"aarch64-darwin": "Accelerate", "x86_64-linux": "OpenBLAS"},
@@ -601,7 +608,6 @@ class NixSourceContractTests(unittest.TestCase):
         self.assertIn('workspaceMembers."chelis-cli".build', packages)
         self.assertIn('workspaceMembers."chelis-runtime".build', packages)
         self.assertIn('workspaceMembers."chelisup".build', packages)
-        self.assertIn('features = [ "smt" ];', packages)
         self.assertNotIn("buildRustPackage", packages)
 
     def test_disabled_ifd_fails_the_automatic_graph_contract(self) -> None:

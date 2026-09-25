@@ -1364,6 +1364,11 @@ disposition = "packages"
 packages = ["chelis-cli", "chelis-compiler-api", "chelis-ir"]
 
 [[path_rule]]
+prefix = "tests/support/runtime_archive.rs"
+disposition = "packages"
+packages = ["chelis-backend-c", "chelis-cli"]
+
+[[path_rule]]
 prefix = "examples/declared_operation_bounds.ch"
 disposition = "owner"
 workflow = "ci.yml"
@@ -1832,6 +1837,15 @@ reason = "the native Nix job executes the complete flake check set, including th
 tracking_issue = "chelis#2241"
 
 [[path_rule]]
+prefix = "nix/packages.nix"
+disposition = "owner"
+workflow = "nix-packages.yml"
+job = "nix-linux-x86-64"
+cadence = "workflow_dispatch and published release"
+reason = "the native Nix job builds every locked package defined here, including the chelis package's runtime export and digest check"
+tracking_issue = "chelis#2241"
+
+[[path_rule]]
 prefix = "devenv/ci.nix"
 disposition = "owner"
 workflow = "ci.yml"
@@ -2046,6 +2060,24 @@ job = "nix-linux-x86-64"
 cadence = "workflow_dispatch and published release"
 reason = "native Nix jobs explicitly run the complete module, including evaluation and package build contracts"
 tracking_issue = "chelis#2287"
+
+[[path_rule]]
+prefix = "scripts/test_release_workflow_pyo3_isolation.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "the release workflow's build-target and pyo3-isolation contracts run in the PR script-unit discovery"
+tracking_issue = "chelis#1354"
+
+[[path_rule]]
+prefix = "scripts/installed_artifact_canary.py"
+disposition = "owner"
+workflow = "release.yml"
+job = "installed-artifact-canary"
+cadence = "tag push and workflow_dispatch"
+reason = "the release canary installs the shipped toolchain and requires the staged runtime to match the shipped lib archive byte for byte"
+tracking_issue = "chelis#1354"
 
 [[path_rule]]
 prefix = "scripts/test_devenv_composition.py"

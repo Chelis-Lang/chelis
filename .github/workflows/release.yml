@@ -93,10 +93,7 @@ jobs:
       # failure still fails on the first attempt, so this job remains the
       # cold-build proof docs/smt_build_setup.md says it is.
       - name: Build chelis-cli (release, smt)
-        run: python3 scripts/ci_cvc5_build.py -- cargo build --release -p chelis-cli --features smt
-
-      - name: Build chelis-runtime staticlib (release)
-        run: cargo build --release -p chelis-runtime
+        run: python3 scripts/ci_cvc5_build.py -- cargo build --release -p chelis-cli --features smt,sealed-runtime
 
       - name: Verify cvc5 discharge path (smt feature live)
         run: python3 .github/scripts/verify_release_smt.py ./target/release/chelis
@@ -127,13 +124,16 @@ jobs:
           staging="chelis-${{ steps.version.outputs.version }}-linux-x86_64"
           mkdir -p "$staging/bin" "$staging/lib" "$staging/include"
           cp target/release/chelis "$staging/bin/"
-          cp target/release/libchelis_runtime.a "$staging/lib/"
-          cp crates/chelis-runtime/include/chelis_runtime.h "$staging/include/"
-          cp crates/chelis-runtime/include/chelis_runtime_views.h "$staging/include/"
-          cp crates/chelis-runtime/include/chelis_runtime_dtype.h "$staging/include/"
-          cp crates/chelis-runtime/include/chelis_blas.h "$staging/include/"
-          cp crates/chelis-runtime/include/chelis_simd.h "$staging/include/"
-          cp crates/chelis-runtime/include/chelis_math.h "$staging/include/"
+          # Ship the runtime the released chelis carries (spec/08-backends.md §2.1).
+          runtime_export="$(mktemp -d)"
+          ./target/release/chelis runtime export "$runtime_export"
+          cp "$runtime_export/libchelis_runtime.a" "$staging/lib/"
+          cp "$runtime_export/chelis_runtime.h" "$staging/include/"
+          cp "$runtime_export/chelis_runtime_views.h" "$staging/include/"
+          cp "$runtime_export/chelis_runtime_dtype.h" "$staging/include/"
+          cp "$runtime_export/chelis_blas.h" "$staging/include/"
+          cp "$runtime_export/chelis_simd.h" "$staging/include/"
+          cp "$runtime_export/chelis_math.h" "$staging/include/"
           cp README.md "$staging/"
           cp LICENSE "$staging/"
           tar czf "${staging}.tar.gz" "$staging"
@@ -216,10 +216,7 @@ jobs:
       # See the linux-x86_64 job for the WI-11 GMP-not-CLN rationale and the
       # chelis#1004 fetch-retry rationale.
       - name: Build chelis-cli (release, smt)
-        run: python3 scripts/ci_cvc5_build.py -- cargo build --release -p chelis-cli --features smt
-
-      - name: Build chelis-runtime staticlib (release)
-        run: cargo build --release -p chelis-runtime
+        run: python3 scripts/ci_cvc5_build.py -- cargo build --release -p chelis-cli --features smt,sealed-runtime
 
       # WS-B (chelis#164): the bootstrap installer
       # (crates/chelisup/bootstrap/chelisup.sh) downloads a BARE executable
@@ -273,13 +270,16 @@ jobs:
           staging="chelis-${{ steps.version.outputs.version }}-linux-x86_64-glibc2.31"
           mkdir -p "$staging/bin" "$staging/lib" "$staging/include"
           cp target/release/chelis "$staging/bin/"
-          cp target/release/libchelis_runtime.a "$staging/lib/"
-          cp crates/chelis-runtime/include/chelis_runtime.h "$staging/include/"
-          cp crates/chelis-runtime/include/chelis_runtime_views.h "$staging/include/"
-          cp crates/chelis-runtime/include/chelis_runtime_dtype.h "$staging/include/"
-          cp crates/chelis-runtime/include/chelis_blas.h "$staging/include/"
-          cp crates/chelis-runtime/include/chelis_simd.h "$staging/include/"
-          cp crates/chelis-runtime/include/chelis_math.h "$staging/include/"
+          # Ship the runtime the released chelis carries (spec/08-backends.md §2.1).
+          runtime_export="$(mktemp -d)"
+          ./target/release/chelis runtime export "$runtime_export"
+          cp "$runtime_export/libchelis_runtime.a" "$staging/lib/"
+          cp "$runtime_export/chelis_runtime.h" "$staging/include/"
+          cp "$runtime_export/chelis_runtime_views.h" "$staging/include/"
+          cp "$runtime_export/chelis_runtime_dtype.h" "$staging/include/"
+          cp "$runtime_export/chelis_blas.h" "$staging/include/"
+          cp "$runtime_export/chelis_simd.h" "$staging/include/"
+          cp "$runtime_export/chelis_math.h" "$staging/include/"
           cp README.md "$staging/"
           cp LICENSE "$staging/"
           tar czf "${staging}.tar.gz" "$staging"
@@ -356,10 +356,7 @@ jobs:
       # See the linux-x86_64 job for the WI-11 GMP-not-CLN rationale and the
       # chelis#1004 fetch-retry rationale.
       - name: Build chelis-cli (release, smt)
-        run: python3 scripts/ci_cvc5_build.py -- cargo build --release -p chelis-cli --features smt
-
-      - name: Build chelis-runtime staticlib (release)
-        run: cargo build --release -p chelis-runtime
+        run: python3 scripts/ci_cvc5_build.py -- cargo build --release -p chelis-cli --features smt,sealed-runtime
 
       # WS-B (chelis#164): darwin half of the bare `chelisup-<slug>`
       # bootstrap asset — see the glibc-2.31 job for the convention.
@@ -408,13 +405,16 @@ jobs:
           staging="chelis-${{ steps.version.outputs.version }}-darwin-arm64"
           mkdir -p "$staging/bin" "$staging/lib" "$staging/include"
           cp target/release/chelis "$staging/bin/"
-          cp target/release/libchelis_runtime.a "$staging/lib/"
-          cp crates/chelis-runtime/include/chelis_runtime.h "$staging/include/"
-          cp crates/chelis-runtime/include/chelis_runtime_views.h "$staging/include/"
-          cp crates/chelis-runtime/include/chelis_runtime_dtype.h "$staging/include/"
-          cp crates/chelis-runtime/include/chelis_blas.h "$staging/include/"
-          cp crates/chelis-runtime/include/chelis_simd.h "$staging/include/"
-          cp crates/chelis-runtime/include/chelis_math.h "$staging/include/"
+          # Ship the runtime the released chelis carries (spec/08-backends.md §2.1).
+          runtime_export="$(mktemp -d)"
+          ./target/release/chelis runtime export "$runtime_export"
+          cp "$runtime_export/libchelis_runtime.a" "$staging/lib/"
+          cp "$runtime_export/chelis_runtime.h" "$staging/include/"
+          cp "$runtime_export/chelis_runtime_views.h" "$staging/include/"
+          cp "$runtime_export/chelis_runtime_dtype.h" "$staging/include/"
+          cp "$runtime_export/chelis_blas.h" "$staging/include/"
+          cp "$runtime_export/chelis_simd.h" "$staging/include/"
+          cp "$runtime_export/chelis_math.h" "$staging/include/"
           cp README.md "$staging/"
           cp LICENSE "$staging/"
           tar czf "${staging}.tar.gz" "$staging"

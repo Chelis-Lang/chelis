@@ -150,30 +150,27 @@ When a generated object-mode header would otherwise export a source-level
 `main`, the emitted C symbol is renamed to `<program>__main` so downstream
 drivers can link their own `main(void)` without collision.
 
-### Runtime Discovery
+### Runtime Staging
 
-Runtime library discovery order is fixed and explicit:
+`spec/08-backends.md` §2.1 owns the rule; this section records the
+implementation. The CLI carries its runtime: the `chelis-runtime-bundle` crate
+embeds, through `chelis-runtime-bundle-macro`, the static archive produced by the
+`chelis-runtime` compilation the same build links, and re-exports that
+compilation's public headers. `chelis build` stages exactly those bytes, verifies
+the written archive against the carried SHA-256, writes
+`chelis_runtime.receipt.json`, and reports
+`Staged runtime <dir>/libchelis_runtime.a (sha256 <digest>)`. Nothing searches for
+a runtime archive, so archives that other configurations or commits leave in a
+target directory are never read.
 
-1. `CHELIS_RUNTIME_DIR`
-2. path relative to `std::env::current_exe()`
-3. hard error with a clear message
-
-Do not search arbitrary directories.
-
-Development expectation:
-
-- `cargo run -p chelis-cli` users set `CHELIS_RUNTIME_DIR` to the Cargo build output
-  directory containing `libchelis_runtime.a`
-
-Installed-binary expectation:
-
-- the runtime library is found relative to the installed `chelis` executable
-
-Required failure text shape:
-
-- it must clearly mention `libchelis_runtime.a`
-- it must mention `CHELIS_RUNTIME_DIR`
-- it must tell the user to install Chelis correctly or set the environment variable
+- A set `CHELIS_RUNTIME_DIR` fails `chelis build` before any output is written;
+  the message tells the user to unset it.
+- `chelis runtime export <dir>` writes the carried runtime for packaging; release
+  tarballs ship its output and build with `sealed-runtime`.
+- A test or oracle that needs an instrumented runtime builds its consumer with
+  that runtime feature, or links an exact instrumented Cargo artifact itself.
+- The Python extension still selects its runtime separately until its cutover
+  (chelis#1354).
 
 ## Execution Plan
 
@@ -199,7 +196,7 @@ That oracle must prove all of the following in one named suite:
 - a mixed tensor + scalar/string/list/dict program builds through `chelis build --target c`
 - the emitted output contains `chelis_runtime.h` and `libchelis_runtime.a`
 - the emitted output does not contain `chelis_runtime.c`
-- the printed compile line links `-lchelis_runtime`
+- the printed compile line links the staged `libchelis_runtime.a` by path
 - the generated host C no longer reads host-value fields directly
 - the compiled binary matches `chelis eval`
 
@@ -225,7 +222,7 @@ cargo test -p chelis-runtime
 This gate is not part of the default workspace run and must stay documented as manual:
 
 ```sh
-CHELIS_RUNTIME_DIR=<runtime-dir> cargo test -p chelis-cli phase3m_rust_runtime_hip_manual_gate -- --ignored --nocapture
+cargo test -p chelis-cli phase3m_rust_runtime_hip_manual_gate -- --ignored --nocapture
 ```
 
 Expected success condition:
@@ -249,11 +246,11 @@ Expected success condition:
 
 ### CLI / build
 
-- runtime discovery prefers `CHELIS_RUNTIME_DIR`
-- fallback to executable-relative runtime works
-- missing runtime produces the documented hard error
+- `chelis build` stages the runtime the CLI carries, whatever other archives
+  exist near the executable
+- a set `CHELIS_RUNTIME_DIR` fails the build before any output is written
 - `chelis build` copies `libchelis_runtime.a`, not `chelis_runtime.c`
-- printed compile lines mention `-lchelis_runtime`
+- printed compile lines name the staged `libchelis_runtime.a` by path
 
 ### Codegen
 

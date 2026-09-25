@@ -13,6 +13,7 @@ import argparse
 from collections import Counter
 from dataclasses import dataclass, replace
 from enum import Enum
+import hashlib
 import importlib
 import json
 import os
@@ -31,6 +32,11 @@ import unittest
 REPO_ROOT = Path(__file__).resolve().parents[1]
 FIXTURE_ROOT = Path("crates/chelis-cli/tests/fixtures/compiled_value_ownership")
 LEDGER_SCHEMA = "compiled-value-ownership-ledger-v1"
+LEDGER_FEATURE = "ownership-ledger"
+LEDGER_PATH_VARIABLE = "CHELIS_OWNERSHIP_LEDGER_PATH"
+RUNTIME_DIR_VARIABLE = "CHELIS_RUNTIME_DIR"
+RUNTIME_ARCHIVE_NAME = "libchelis_runtime.a"
+STAGED_RUNTIME_LINE = re.compile(r"Staged runtime (?P<path>.+) \(sha256 (?P<sha256>[0-9a-f]{64})\)")
 PYTHON_TEST_RECEIPT_SCHEMA = "compiled-value-ownership-python-test-receipt-v1"
 OWNERSHIP_CHILD_ISSUES = frozenset(
     {543, 544, 1206, 1214, 1222, 1344, 1346, 1352, 1356}
@@ -138,6 +144,9 @@ FROZEN_SELF_TEST_CENSUS = tuple(
     ReceiptContractTests.test_promoted_reuse_test_failure_is_detected
     ReceiptContractTests.test_python_execution_receipt_schema_and_counts_fail_closed
     ReceiptContractTests.test_unexpected_success_fails_closed
+    RuntimeLinkContractTests.test_build_rejections_are_observed_without_a_runtime_directory
+    RuntimeLinkContractTests.test_compile_links_only_the_instrumented_runtime_archive
+    RuntimeLinkContractTests.test_prepare_takes_the_runtime_the_cli_build_compiled_with_the_ledger
     """.split()
 )
 FROZEN_RUNTIME_LEDGER_TEST_CENSUS = tuple(
@@ -2120,6 +2129,96 @@ def _run(
         raise OracleFailure(f"command could not complete: {_command_text(argv)}: {error}") from error
 
 
+def _sha256(path: Path) -> str:
+    try:
+        return hashlib.sha256(path.read_bytes()).hexdigest()
+    except OSError as error:
+        raise OracleFailure(f"hash {path}: {error}") from error
+
+
+def instrumented_build_artifacts(cargo_stdout: str, target: Path) -> tuple[Path, Path]:
+    """Select the CLI and the ledger runtime archive from one Cargo build's messages.
+
+    The `chelis` executable carries the `chelis-runtime` archive compiled by the
+    same invocation. That archive is named only by Cargo's own compiler-artifact
+    message, never by a directory search, and must carry the ledger feature.
+    """
+    executables: list[Path] = []
+    archives: list[Path] = []
+    for line in cargo_stdout.splitlines():
+        if not line.strip():
+            continue
+        try:
+            message = json.loads(line)
+        except json.JSONDecodeError as error:
+            raise OracleFailure(f"Cargo emitted a non-JSON message: {line!r}") from error
+        if not isinstance(message, dict) or message.get("reason") != "compiler-artifact":
+            continue
+        artifact_target = message.get("target")
+        if not isinstance(artifact_target, dict):
+            raise OracleFailure(f"Cargo compiler-artifact has no target: {line!r}")
+        kinds = artifact_target.get("kind") or ()
+        if artifact_target.get("name") == "chelis" and "bin" in kinds:
+            executable = message.get("executable")
+            if not isinstance(executable, str):
+                raise OracleFailure("Cargo reported the chelis binary without an executable")
+            executables.append(Path(executable))
+        elif artifact_target.get("name") == "chelis_runtime":
+            if "staticlib" not in kinds or LEDGER_FEATURE not in (message.get("features") or ()):
+                raise OracleFailure(
+                    f"the chelis build compiled chelis-runtime without its static archive "
+                    f"or without {LEDGER_FEATURE}: kinds={kinds}, features={message.get('features')}"
+                )
+            archives.extend(
+                Path(name) for name in message.get("filenames") or () if name.endswith(".a")
+            )
+    if len(executables) != 1 or len(archives) != 1:
+        raise OracleFailure(
+            "the chelis build must report exactly one chelis executable and one "
+            f"instrumented runtime archive; got executables={executables}, archives={archives}"
+        )
+    root = target.resolve()
+    for path in (executables[0], archives[0]):
+        if not path.resolve().is_relative_to(root) or not path.is_file():
+            raise OracleFailure(f"Cargo artifact {path} is missing or outside {root}")
+    return executables[0], archives[0]
+
+
+def require_instrumented_runtime(
+    fixture_id: str, artifact: BuildArtifact, runtime_sha256: str
+) -> Path:
+    """Require the Compile command to link exactly the instrumented runtime archive."""
+    staged = artifact.output_dir / RUNTIME_ARCHIVE_NAME
+    receipts = [
+        match
+        for line in artifact.build.stdout.splitlines()
+        if (match := STAGED_RUNTIME_LINE.fullmatch(line)) is not None
+    ]
+    if (
+        len(receipts) != 1
+        or Path(receipts[0]["path"]) != staged
+        or receipts[0]["sha256"] != runtime_sha256
+    ):
+        raise OracleFailure(
+            f"{fixture_id}: chelis build did not stage the instrumented runtime "
+            f"{runtime_sha256} at {staged}: {[match.group(0) for match in receipts]}"
+        )
+    command = artifact.compile_command or ()
+    if command.count(str(staged)) != 1 or any(
+        argument.startswith("-lchelis_runtime") for argument in command
+    ):
+        raise OracleFailure(
+            f"{fixture_id}: Compile command must link exactly {staged}: {_command_text(command)}"
+        )
+    observed = _sha256(staged)
+    if observed != runtime_sha256:
+        raise OracleFailure(
+            f"{fixture_id}: linked runtime {staged} has SHA-256 {observed}, "
+            f"not the instrumented {LEDGER_FEATURE} archive {runtime_sha256}"
+        )
+    return staged
+
+
 class PhaseContext:
     def __init__(self) -> None:
         self.temporary = tempfile.TemporaryDirectory(prefix="chelis-ownership-phase0-")
@@ -2136,9 +2235,15 @@ class PhaseContext:
         target_setting = self.environment.get("CARGO_TARGET_DIR", "target")
         target = Path(target_setting)
         self.target = target if target.is_absolute() else REPO_ROOT / target
-        self.chelis = self.target / "debug" / "chelis"
-        self.runtime_dir = self.root / "instrumented-runtime"
-        self.runtime_dir.mkdir()
+        # chelis stages the runtime it carries and rejects a runtime directory;
+        # the instrumented CLI must not write its own ledger either.
+        self.chelis_environment = {
+            name: value
+            for name, value in self.environment.items()
+            if name not in {RUNTIME_DIR_VARIABLE, LEDGER_PATH_VARIABLE}
+        }
+        self.chelis = self.root / "instrumented-cli" / "chelis"
+        self.runtime_sha256: str | None = None
         self._prepared = False
 
     def close(self) -> None:
@@ -2147,19 +2252,27 @@ class PhaseContext:
     def prepare(self) -> None:
         if self._prepared:
             return
-        for argv in (
-            ("cargo", "build", "-p", "chelis-cli", "--bin", "chelis"),
-            ("cargo", "build", "-p", "chelis-runtime", "--features", "ownership-ledger"),
-        ):
-            result = _run(argv, environment=self.environment, timeout=900)
-            if result.returncode != 0:
-                raise OracleFailure(
-                    f"Phase 0 preparation failed: {_command_text(argv)}\n{result.stdout}\n{result.stderr}"
-                )
-        archive = self.target / "debug" / "libchelis_runtime.a"
-        if not self.chelis.is_file() or not archive.is_file():
-            raise OracleFailure("Phase 0 preparation did not produce chelis and the runtime archive")
-        shutil.copy2(archive, self.runtime_dir / archive.name)
+        argv = (
+            "cargo",
+            "build",
+            "-p",
+            "chelis-cli",
+            "--bin",
+            "chelis",
+            "--features",
+            f"chelis-runtime/{LEDGER_FEATURE}",
+            "--message-format=json-render-diagnostics",
+        )
+        result = _run(argv, environment=self.environment, timeout=900)
+        if result.returncode != 0:
+            raise OracleFailure(
+                f"Phase 0 preparation failed: {_command_text(argv)}\n{result.stdout}\n{result.stderr}"
+            )
+        executable, archive = instrumented_build_artifacts(result.stdout, self.target)
+        # A later Cargo invocation may replace the uplifted CLI; run a private copy.
+        self.chelis.parent.mkdir()
+        shutil.copy2(executable, self.chelis)
+        self.runtime_sha256 = _sha256(archive)
         self._prepared = True
 
     def source_copy(self, fixture: Fixture) -> Path:
@@ -2180,8 +2293,6 @@ class PhaseContext:
         self.prepare()
         source = self.source_copy(fixture)
         output = source.parent / "out"
-        environment = self.environment.copy()
-        environment["CHELIS_RUNTIME_DIR"] = str(self.runtime_dir)
         result = _run(
             (
                 str(self.chelis),
@@ -2192,7 +2303,7 @@ class PhaseContext:
                 "--output",
                 str(output),
             ),
-            environment=environment,
+            environment=self.chelis_environment,
         )
         compile_command: tuple[str, ...] | None = None
         for line in result.stdout.splitlines():
@@ -2205,6 +2316,9 @@ class PhaseContext:
     ) -> tuple[subprocess.CompletedProcess[str], Path | None]:
         if artifact.compile_command is None:
             raise OracleFailure(f"{fixture.id}: successful build emitted no exact Compile command")
+        if self.runtime_sha256 is None:
+            raise OracleFailure(f"{fixture.id}: the instrumented runtime was never prepared")
+        require_instrumented_runtime(fixture.id, artifact, self.runtime_sha256)
         compile_result = _run(
             artifact.compile_command,
             environment=self.environment,
@@ -2223,7 +2337,7 @@ class PhaseContext:
         if ledger:
             ledger_path = artifact.output_dir.parent / "ownership-ledger.jsonl"
             ledger_path.unlink(missing_ok=True)
-            environment["CHELIS_OWNERSHIP_LEDGER_PATH"] = str(ledger_path)
+            environment[LEDGER_PATH_VARIABLE] = str(ledger_path)
         result = _run(
             (str(executable),),
             environment=environment,
@@ -2738,7 +2852,7 @@ def execute_fixture(context: PhaseContext, fixture: Fixture) -> Detection:
         source = context.source_copy(fixture)
         result = _run(
             (str(context.chelis), "check", str(source)),
-            environment=context.environment,
+            environment=context.chelis_environment,
         )
         diagnostic = f"{result.stdout}\n{result.stderr}".lower()
         if result.returncode != 0 and "unbound variable" in diagnostic:

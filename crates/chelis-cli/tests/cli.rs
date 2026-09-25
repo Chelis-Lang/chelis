@@ -652,59 +652,6 @@ fn check_show_inferred_pure_tensor_fn_has_empty_effect_row_and_structured_tensor
     assert_eq!(arg1["precision"]["name"], "f32");
 }
 
-/// Resolve the workspace `target/` directory from the running test binary
-/// rather than a `CARGO_MANIFEST_DIR`-relative path, so an external
-/// `CARGO_TARGET_DIR` (e.g. a concurrent agent building into
-/// `target/agents/<name>`) is honored. The binary lives at
-/// `<target>/<profile>/deps/<test-bin>`; strip a trailing `deps` component if
-/// present, then drop the profile component to reach `<target>`. See
-/// chelis#747.
-fn target_dir_from_current_exe() -> PathBuf {
-    let exe = std::env::current_exe().expect("could not determine current test executable");
-    let mut profile_dir = exe
-        .parent()
-        .expect("test executable should have a parent directory");
-    if profile_dir.file_name().and_then(|name| name.to_str()) == Some("deps") {
-        profile_dir = profile_dir
-            .parent()
-            .expect("`deps` directory should have a parent");
-    }
-    profile_dir
-        .parent()
-        .map(PathBuf::from)
-        .expect("profile directory should have a parent target directory")
-}
-
-fn runtime_library_path() -> PathBuf {
-    let target_dir = target_dir_from_current_exe();
-    for dir in [
-        target_dir.join("debug/deps"),
-        target_dir.join("release/deps"),
-    ] {
-        if let Ok(entries) = fs::read_dir(&dir) {
-            for entry in entries.flatten() {
-                let path = entry.path();
-                if path
-                    .file_name()
-                    .and_then(|name| name.to_str())
-                    .map(|name| name.starts_with("libchelis_runtime") && name.ends_with(".a"))
-                    .unwrap_or(false)
-                {
-                    return path;
-                }
-            }
-        }
-    }
-    panic!("could not locate libchelis_runtime.a for cli tests");
-}
-
-fn runtime_library_dir() -> PathBuf {
-    runtime_library_path()
-        .parent()
-        .expect("runtime library should have a parent directory")
-        .to_path_buf()
-}
-
 #[test]
 fn check_accepts_executable_examples() {
     for path in executable_examples() {
@@ -3888,13 +3835,30 @@ fn phase3m_rust_runtime_acceptance_oracle() {
         ])
         .assert()
         .success()
-        .stdout(predicate::str::contains("-lchelis_runtime"))
+        .stdout(predicate::str::contains("-lchelis_runtime").not())
         .stdout(predicate::str::contains("libchelis_runtime.a"))
         .get_output()
         .stdout
         .clone();
 
     let build_stdout = String::from_utf8(build).expect("build stdout utf8");
+    let staged_archive = out_dir.join("libchelis_runtime.a");
+    let compile_line = build_stdout
+        .lines()
+        .find(|line| line.starts_with("Compile: "))
+        .expect("build reports a compile command");
+    assert!(
+        compile_line.contains(&format!(" {} ", staged_archive.display())),
+        "the compile command must link the staged archive by path: {compile_line}"
+    );
+    assert!(
+        build_stdout.contains(&format!(
+            "Staged runtime {} (sha256 {})",
+            staged_archive.display(),
+            chelis_runtime_bundle::carried_sha256().expect("carried runtime digest")
+        )),
+        "{build_stdout}"
+    );
     assert!(out_dir.join("scalar_string_foundation.c").exists());
     assert!(out_dir.join("scalar_string_foundation.h").exists());
     assert!(out_dir.join("chelis_runtime.h").exists());
@@ -4084,29 +4048,39 @@ fn build_hip_runs_scalar_string_foundation_and_matches_eval_output() {
     assert_eq!(run_output.stdout, eval_stdout);
 }
 
+/// chelis#1354: chelis stages the runtime built into it; a runtime location
+/// variable is rejected before any output is written, whatever the target.
 #[test]
-fn build_fails_cleanly_when_chelis_runtime_dir_is_wrong() {
+fn build_rejects_chelis_runtime_dir_before_writing_outputs() {
     let dir = tempdir().expect("tempdir");
-    let bad_runtime_dir = dir.path().join("missing-runtime");
-    fs::create_dir_all(&bad_runtime_dir).expect("create bad runtime dir");
-    let out_dir = dir.path().join("bad-build");
+    let runtime_dir = dir.path().join("runtime");
+    fs::create_dir_all(&runtime_dir).expect("create runtime dir");
+    fs::write(
+        runtime_dir.join("libchelis_runtime.a"),
+        b"!<arch>\nforeign runtime",
+    )
+    .expect("write foreign archive");
 
-    Command::cargo_bin("chelis")
-        .expect("binary")
-        .env("CHELIS_STYLE_GATE_DISABLE", "1")
-        .env("CHELIS_RUNTIME_DIR", &bad_runtime_dir)
-        .args([
-            "build",
-            mnist_example().to_str().unwrap(),
-            "--target",
-            "c",
-            "--output",
-            out_dir.to_str().unwrap(),
-        ])
-        .assert()
-        .failure()
-        .stderr(predicate::str::contains("CHELIS_RUNTIME_DIR"))
-        .stderr(predicate::str::contains("libchelis_runtime.a"));
+    for target in ["c", "hip", "metal"] {
+        let out_dir = dir.path().join(format!("build-{target}"));
+        Command::cargo_bin("chelis")
+            .expect("binary")
+            .env("CHELIS_STYLE_GATE_DISABLE", "1")
+            .env("CHELIS_RUNTIME_DIR", &runtime_dir)
+            .args([
+                "build",
+                mnist_example().to_str().unwrap(),
+                "--target",
+                target,
+                "--output",
+                out_dir.to_str().unwrap(),
+            ])
+            .assert()
+            .failure()
+            .stderr(predicate::str::contains("CHELIS_RUNTIME_DIR is set"))
+            .stderr(predicate::str::contains("Unset CHELIS_RUNTIME_DIR"));
+        assert!(!out_dir.exists(), "a rejected {target} build wrote output");
+    }
 }
 
 /// Regression for issue #261: `chelis build --target c` must reject
@@ -4250,15 +4224,30 @@ fn build_hip_host_rejects_unimplemented_window_dtype_cleanly() {
         .stderr(predicate::str::contains("panicked").not());
 }
 
+/// chelis#1354: runtime archives left beside the chelis executable, newer
+/// than the build, never replace the runtime chelis carries. The former
+/// resolver took the newest archive found near the executable.
 #[test]
-fn build_honors_chelis_runtime_dir_override() {
+fn build_stages_the_carried_runtime_not_newer_archives_nearby() {
     let dir = tempdir().expect("tempdir");
-    let out_dir = dir.path().join("env-runtime-build");
+    let bin_dir = dir.path().join("bin");
+    fs::create_dir_all(bin_dir.join("deps")).expect("create bin/deps");
+    fs::create_dir_all(dir.path().join("lib")).expect("create lib");
+    let chelis = bin_dir.join("chelis");
+    fs::copy(env!("CARGO_BIN_EXE_chelis"), &chelis).expect("copy chelis");
+    let foreign: &[u8] = b"!<arch>\nforeign runtime";
+    for archive in [
+        bin_dir.join("deps/libchelis_runtime-ffffffffffffffff.a"),
+        bin_dir.join("libchelis_runtime.a"),
+        dir.path().join("lib/libchelis_runtime.a"),
+    ] {
+        fs::write(&archive, foreign).expect("write foreign archive");
+    }
+    let out_dir = dir.path().join("out");
 
-    Command::cargo_bin("chelis")
-        .expect("binary")
+    let output = StdCommand::new(&chelis)
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
-        .env("CHELIS_RUNTIME_DIR", runtime_library_dir())
+        .env_remove("CHELIS_RUNTIME_DIR")
         .args([
             "build",
             mnist_example().to_str().unwrap(),
@@ -4267,12 +4256,90 @@ fn build_honors_chelis_runtime_dir_override() {
             "--output",
             out_dir.to_str().unwrap(),
         ])
+        .output()
+        .expect("run chelis");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        output.stderr.is_empty(),
+        "successful builds are silent on stderr"
+    );
+
+    let staged_archive = out_dir.join("libchelis_runtime.a");
+    let staged = fs::read(&staged_archive).expect("staged archive");
+    assert_ne!(staged, foreign, "a foreign archive was staged");
+    let carried = chelis_runtime_bundle::carried_sha256().expect("carried runtime digest");
+    let stdout = String::from_utf8(output.stdout).expect("stdout utf8");
+    assert!(
+        stdout.contains(&format!(
+            "Staged runtime {} (sha256 {carried})",
+            staged_archive.display()
+        )),
+        "{stdout}"
+    );
+    let receipt: Value = serde_json::from_slice(
+        &fs::read(out_dir.join("chelis_runtime.receipt.json")).expect("staging receipt"),
+    )
+    .expect("receipt JSON");
+    assert_eq!(receipt["archive_sha256"], carried.as_str());
+    assert_eq!(receipt["mode"], chelis_runtime_bundle::MODE);
+}
+
+/// chelis#1354: `chelis runtime export` writes exactly the runtime chelis
+/// carries, for packaging, and rejects a runtime location variable first.
+#[test]
+fn runtime_export_writes_the_carried_runtime() {
+    use sha2::{Digest, Sha256};
+
+    let dir = tempdir().expect("tempdir");
+    let export_dir = dir.path().join("runtime");
+    let stdout = Command::cargo_bin("chelis")
+        .expect("binary")
+        .env_remove("CHELIS_RUNTIME_DIR")
+        .args(["runtime", "export", export_dir.to_str().unwrap()])
         .assert()
         .success()
-        .stdout(predicate::str::contains("libchelis_runtime.a"));
+        .get_output()
+        .stdout
+        .clone();
+    let carried = chelis_runtime_bundle::carried_sha256().expect("carried runtime digest");
+    let archive = export_dir.join("libchelis_runtime.a");
+    let stdout = String::from_utf8(stdout).expect("stdout utf8");
+    assert!(
+        stdout.contains(&format!(
+            "Staged runtime {} (sha256 {carried})",
+            archive.display()
+        )),
+        "{stdout}"
+    );
+    let digest: String = Sha256::digest(fs::read(&archive).expect("exported archive"))
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+    assert_eq!(digest, carried);
+    for (name, contents) in chelis_runtime_bundle::PUBLIC_HEADERS {
+        assert_eq!(
+            fs::read_to_string(export_dir.join(name)).expect("exported header"),
+            *contents
+        );
+    }
+    assert!(export_dir.join("chelis_runtime.receipt.json").is_file());
 
-    assert!(out_dir.join("libchelis_runtime.a").exists());
-    assert!(!out_dir.join("chelis_runtime.c").exists());
+    let rejected = dir.path().join("rejected");
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .env("CHELIS_RUNTIME_DIR", dir.path())
+        .args(["runtime", "export", rejected.to_str().unwrap()])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("Unset CHELIS_RUNTIME_DIR"));
+    assert!(
+        !rejected.exists(),
+        "a rejected export created its directory"
+    );
 }
 
 #[test]
@@ -4295,8 +4362,8 @@ fn phase3m_rust_runtime_hip_manual_gate() {
         ])
         .assert()
         .success()
-        .stdout(predicate::str::contains("-lchelis_runtime"))
-        .stdout(predicate::str::contains("libchelis_runtime.a"));
+        .stdout(predicate::str::contains("-lchelis_runtime").not())
+        .stdout(predicate::str::contains("Staged runtime"));
 
     assert!(out_dir.join("scalar_string_foundation_hip.cpp").exists());
     assert!(out_dir.join("chelis_runtime.h").exists());
@@ -9704,7 +9771,6 @@ fn fixed_control_c_entry_is_independent_of_host_siblings() {
         let out = dir.path().join(stem);
         Command::cargo_bin("chelis")
             .unwrap()
-            .env("CHELIS_RUNTIME_DIR", runtime_library_dir())
             .arg("build")
             .arg(&source)
             .args(["--target", "c", "--output"])
@@ -9792,7 +9858,6 @@ fn concrete_static_rate_local_helper_executes_eval_and_native_c() {
     let out = dir.path().join("out");
     Command::cargo_bin("chelis")
         .unwrap()
-        .env("CHELIS_RUNTIME_DIR", runtime_library_dir())
         .arg("build")
         .arg(&source)
         .arg("--output")
@@ -10377,7 +10442,6 @@ fn build_c_higher_order_def_with_unused_fn_param_keeps_its_kernel() {
     Command::cargo_bin("chelis")
         .expect("binary")
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
-        .env("CHELIS_RUNTIME_DIR", runtime_library_dir())
         .args([
             "build",
             source.to_str().unwrap(),
@@ -10446,7 +10510,6 @@ fn build_c_mixed_module_keeps_working_roots_and_drops_only_the_rootless_grad() {
     Command::cargo_bin("chelis")
         .expect("binary")
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
-        .env("CHELIS_RUNTIME_DIR", runtime_library_dir())
         .args([
             "build",
             source.to_str().unwrap(),
@@ -10517,7 +10580,6 @@ fn build_c_grad_program_keeps_both_named_roots() {
     let assert = Command::cargo_bin("chelis")
         .expect("binary")
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
-        .env("CHELIS_RUNTIME_DIR", runtime_library_dir())
         .args([
             "build",
             source.to_str().unwrap(),
@@ -10632,7 +10694,6 @@ fn build_c_grad_program_has_zero_definitely_lost_under_valgrind() {
     Command::cargo_bin("chelis")
         .expect("binary")
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
-        .env("CHELIS_RUNTIME_DIR", runtime_library_dir())
         .args([
             "build",
             source.to_str().unwrap(),
@@ -10777,7 +10838,6 @@ fn build_c_list_combinator_program_has_zero_definitely_lost_under_valgrind() {
     Command::cargo_bin("chelis")
         .expect("binary")
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
-        .env("CHELIS_RUNTIME_DIR", runtime_library_dir())
         .args([
             "build",
             source.to_str().unwrap(),
@@ -10899,7 +10959,6 @@ fn build_c_program_using_std_io_serializers_emits_exact_documents() {
         .expect("binary")
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .env("CHELIS_REEF_HOME", dir.path().join("reef-home"))
-        .env("CHELIS_RUNTIME_DIR", runtime_library_dir())
         .current_dir(&proj)
         .args([
             "build",
@@ -11001,7 +11060,6 @@ fn assert_built_c_has_zero_definitely_lost(name: &str, source: &str, expected_st
     Command::cargo_bin("chelis")
         .expect("binary")
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
-        .env("CHELIS_RUNTIME_DIR", runtime_library_dir())
         .args([
             "build",
             src.to_str().unwrap(),

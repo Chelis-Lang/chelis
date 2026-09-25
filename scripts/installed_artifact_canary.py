@@ -264,7 +264,8 @@ def execute(args: argparse.Namespace, report: dict) -> None:
     source.write_text(fixture.ADD_PROGRAM)
     output = root / "generated"
     runner.run("build", [shim, "build", source, "--output", output])
-    # Check lookup selected the installed runtime, not a local Cargo fallback.
+    # The staged runtime is the one the installed chelis carries; the tarball
+    # must ship those same bytes (spec/08-backends.md §2.1).
     if digest(output / "libchelis_runtime.a") != inventory["lib/libchelis_runtime.a"]:
         raise ValueError("generated build used a different runtime archive")
     for header in HEADERS:
