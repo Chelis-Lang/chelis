@@ -41,13 +41,14 @@ mod common;
 
 use common::{gcc_available, link_generated, parse_tensor_data, write_file};
 
-/// An 8-element f32 template plus a `with seed(seed)` uniform draw over
-/// `[low, high)`, where `low`/`high` are arbitrary Surf bound expressions.
-fn program(low: &str, high: &str, seed: u64) -> String {
+/// An 8-element f32 template plus a uniform draw keyed by
+/// `key_from_seed(seed)` over `[low, high)`, where `low`/`high` are arbitrary
+/// Surf bound expressions.
+fn program(low: &str, high: &str, seed: i64) -> String {
     format!(
         "template = to_tensor([cast(0.0, f32), cast(0.0, f32), cast(0.0, f32), \
          cast(0.0, f32), cast(0.0, f32), cast(0.0, f32), cast(0.0, f32), cast(0.0, f32)])\n\
-         sampled = with seed({seed}i64) {{ uniform_like(copy(template), {low}, {high}) }}\n"
+         sampled = uniform_like(key_from_seed({seed}i64), copy(template), {low}, {high})\n"
     )
 }
 
@@ -215,8 +216,8 @@ fn mixed_neg_and_cast_bounds_cross_lane() {
 // -- runtime-computed bounds ---------------------------------------------------
 //
 // chelis#2411/#2413: a runtime-computed bound is an ordinary [05-OP-8] scalar
-// operand, validated by the draw at execution. It checks clean inside `with
-// seed` and in a `def` body, and both lanes sample the computed range.
+// operand, validated by the draw at execution. It checks clean at top level
+// and in a `def` body, and both lanes sample the computed range.
 
 #[test]
 fn runtime_computed_bound_samples_its_computed_range_in_both_lanes() {
@@ -234,8 +235,8 @@ fn runtime_computed_bound_samples_its_computed_range_in_both_lanes() {
 #[test]
 fn def_form_runtime_bound_checks_clean() {
     let score = check_score(
-        "def draw[n](lo: f32, hi: f32, t: &tensor[n, f32]) -> tensor[n, f32] ! { Random } = \
-         uniform_like(t, lo, hi)\n",
+        "def draw[n](k: key, lo: f32, hi: f32, t: &tensor[n, f32]) -> tensor[n, f32] = \
+         uniform_like(k, t, lo, hi)\n",
     );
     assert!(
         (score - 1.0).abs() < 1e-9,
@@ -330,13 +331,14 @@ fn pad_runtime_fill_build_fails_loudly() {
     );
 }
 
-// -- chelis#731 obligation: the checker gate fires inside `with seed` bodies ---
+// -- chelis#731 obligation: the checker sees a keyed draw's bounds -----------
 //
 // Before chelis#731 Phase 1 the uniform_like literal-bounds checker gate never
-// fired inside a `with seed { ... }` body (the body was unchecked, chelis#709),
-// so only the lowering enforced it. These two `chelis check`-level tests pin the
-// obligation directly: a statically-resolvable bound inside a handler body
-// checks clean, and a genuinely-runtime bound is caught by the checker there.
+// fired inside a seeded handler body (the body was unchecked, chelis#709), so
+// only the lowering enforced it. Explicit keys (chelis#2413) removed the
+// handler; a draw's bounds are checked wherever the keyed draw is written.
+// These two `chelis check`-level tests pin that a statically-resolvable bound
+// and a runtime-computed bound of a keyed draw both check clean.
 
 /// `chelis check` score for a `.ch` program.
 fn check_score(program: &str) -> f64 {
@@ -355,21 +357,21 @@ fn check_score(program: &str) -> f64 {
 }
 
 #[test]
-fn with_seed_body_runtime_bound_checks_clean() {
+fn keyed_draw_runtime_bound_checks_clean() {
     let score = check_score(&program("add(cast(2.0, f32), cast(1.0, f32))", "5.0", 42));
     assert!(
         (score - 1.0).abs() < 1e-9,
-        "a runtime bound inside a `with seed` body must check clean, got {score}"
+        "a runtime bound of a keyed draw must check clean, got {score}"
     );
 }
 
 #[test]
-fn gate_accepts_static_bound_in_with_seed_body() {
-    // Positive parity: a statically-resolvable bound (a negated literal) inside
-    // `with seed` passes the gate and checks clean.
+fn gate_accepts_static_bound_in_a_keyed_draw() {
+    // Positive parity: a statically-resolvable bound (a negated literal) of a
+    // keyed draw passes the gate and checks clean.
     let score = check_score(&program("-3.0", "-1.0", 42));
     assert!(
         (score - 1.0).abs() < 1e-9,
-        "a statically-resolvable bound inside `with seed` must check clean, got {score}"
+        "a statically-resolvable bound of a keyed draw must check clean, got {score}"
     );
 }

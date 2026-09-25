@@ -51,8 +51,8 @@
 //!   `runtime_derived_template_builds_and_matches_eval`,
 //!   `expand_inside_parameterised_def_matches_eval`,
 //!   `template_values_do_not_affect_the_draw`,
-//!   `two_draws_in_one_scope_consume_distinct_ordinals`,
-//!   `host_and_dag_draws_share_one_rng_scope_consistently`, and
+//!   `two_draws_from_split_keys_differ_and_match_eval` (then an ordinal test),
+//!   `host_and_dag_draws_from_split_keys_agree` (then a shared-scope test), and
 //!   `every_active_float_dtype_matches_eval_with_a_runtime_template`.
 //!   The last one is red twice over: on the base sha the build is refused,
 //!   and with only f32/f64 arms its f16 and bf16 rows built successfully and
@@ -60,12 +60,15 @@
 //! * `constant_foldable_template_still_matches_eval` is a DISPOSITION LOCK:
 //!   green before and after. It proves the fix did not perturb the path that
 //!   already worked.
-//! * `different_seeds_produce_different_draws_with_runtime_template` is an
+//! * `different_keys_produce_different_draws_with_runtime_template` is an
 //!   EVALUATOR-ONLY non-triviality control; it does not drive the C lane.
-//! * `runtime_computed_bounds_remain_rejected_in_both_lanes` is NEGATIVE
-//!   PARITY: the separate chelis#776 bounds gate is a CHECKER rejection and
-//!   must stay closed in both lanes. This fix widens the template contract
-//!   only; it must not open the bounds contract as a side effect.
+//! * `runtime_computed_bounds_sample_in_both_lanes` pins chelis#2411: computed
+//!   bounds are ordinary operands in both lanes.
+//!
+//! chelis#2413 moved every program here to explicit keys: a draw reads
+//! `key_from_seed(seed)` or a half of `split_key`, and the headline and
+//! literal-template rows also compare the f32 draw with `common::key_ref`'s
+//! [05-OP-8] reference, so both lanes being wrong in the same way fails.
 
 #![allow(clippy::uninlined_format_args)]
 
@@ -84,8 +87,8 @@ fn runtime_template_program(low: &str, high: &str, seed: u64) -> String {
     format!(
         "def bc(c: f32) -> tensor[8, f32] = \
          to_tensor([c, c, c, c, c, c, c, c])\n\
-         sampled = with seed({seed}i64) \
-         {{ uniform_like(bc(cast(0.5, f32)), {low}, {high}) }}\n"
+         sampled = uniform_like(key_from_seed({seed}i64), \
+         bc(cast(0.5, f32)), {low}, {high})\n"
     )
 }
 
@@ -96,8 +99,8 @@ fn literal_template_program(low: &str, high: &str, seed: u64) -> String {
         "template = to_tensor([cast(0.5, f32), cast(0.5, f32), cast(0.5, f32), \
          cast(0.5, f32), cast(0.5, f32), cast(0.5, f32), cast(0.5, f32), \
          cast(0.5, f32)])\n\
-         sampled = with seed({seed}i64) \
-         {{ uniform_like(copy(template), {low}, {high}) }}\n"
+         sampled = uniform_like(key_from_seed({seed}i64), copy(template), \
+         {low}, {high})\n"
     )
 }
 
@@ -109,8 +112,8 @@ fn runtime_template_varied_values_program(low: &str, high: &str, seed: u64) -> S
         "def bc(c: f32) -> tensor[8, f32] = \
          to_tensor([c, mul(c, 3.0f32), -7.5f32, 1000.0f32, \
          neg(c), 0.0f32, mul(c, -2.0f32), 12345.0f32])\n\
-         sampled = with seed({seed}i64) \
-         {{ uniform_like(bc(cast(0.5, f32)), {low}, {high}) }}\n"
+         sampled = uniform_like(key_from_seed({seed}i64), \
+         bc(cast(0.5, f32)), {low}, {high})\n"
     )
 }
 
@@ -126,8 +129,8 @@ fn expand_in_def_program(seed: u64) -> String {
     format!(
         "def bc(c: f32) -> tensor[16, f32] = \
          reshape(expand(to_tensor([c]), 0, 16i64), [16i64])\n\
-         sampled = with seed({seed}i64) \
-         {{ uniform_like(bc(cast(0.5, f32)), 2.0f32, 5.0f32) }}\n"
+         sampled = uniform_like(key_from_seed({seed}i64), \
+         bc(cast(0.5, f32)), 2.0f32, 5.0f32)\n"
     )
 }
 
@@ -207,6 +210,15 @@ fn assert_f32_bit_parity(eval: &[f64], c: &[f64], context: &str) {
     }
 }
 
+/// `uniform_like(key, template, low, high)` over `count` f32 elements, from
+/// `common::key_ref`'s [05-OP-8] transcription.
+fn reference_f32(key: u64, count: usize, low: f32, high: f32) -> Vec<f64> {
+    common::key_ref::uniform_f32(key, count, low, high)
+        .into_iter()
+        .map(f64::from)
+        .collect()
+}
+
 /// The headline chelis#2120 regression: a runtime-derived template must build
 /// and must agree with `eval` element-for-element.
 #[test]
@@ -219,6 +231,8 @@ fn runtime_derived_template_builds_and_matches_eval() {
     let eval = eval_sampled(&src);
     let c = c_sampled(&src, "u2120_runtime");
     assert_f32_bit_parity(&eval, &c, "runtime-derived template, [2,5)");
+    let reference = reference_f32(common::key_ref::key_from_seed(42), 8, 2.0, 5.0);
+    assert_f32_bit_parity(&reference, &c, "reference vs C, [2,5)");
 }
 
 /// The issue's original field program shape: `expand` + `reshape` behind a
@@ -276,43 +290,49 @@ fn constant_foldable_template_still_matches_eval() {
     let eval = eval_sampled(&src);
     let c = c_sampled(&src, "u2120_literal");
     assert_f32_bit_parity(&eval, &c, "constant-foldable template, [2,5)");
+    let reference = reference_f32(common::key_ref::key_from_seed(42), 8, 2.0, 5.0);
+    assert_f32_bit_parity(&reference, &c, "reference vs C, literal template");
 }
 
-/// Ordinal consumption, the highest-risk property of this fix. A host-lane
-/// `uniform_like` is the FIRST host-lane consumer of a Random call ordinal;
-/// every earlier host draw site was a carrier that handed `__chelis_rng` to a
-/// DAG kernel. Two draws in one `with seed` scope must therefore consume two
-/// distinct ordinals, exactly as the evaluator's `random_counter` does.
-///
-/// `sub` of the two draws makes the failure mode visible: if the second draw
-/// reused the first's ordinal, every element would be exactly 0.0.
+/// Two host-lane draws from the two halves of one `split_key`. A host-lane
+/// `uniform_like` must read the key it is given: were both draws to read the
+/// same key, every element of their difference would be exactly 0.0. Both
+/// lanes agree with eval and with the reference difference.
 #[test]
-fn two_draws_in_one_scope_consume_distinct_ordinals() {
+fn two_draws_from_split_keys_differ_and_match_eval() {
     if !gcc_available() {
         eprintln!("skipping: no host C compiler");
         return;
     }
     let src = "def bc(c: f32) -> tensor[4, f32] = to_tensor([c, c, c, c])\n\
-               sampled = with seed(42i64) \
-               { sub(uniform_like(bc(cast(0.5, f32)), 2.0f32, 5.0f32), \
-               uniform_like(bc(cast(0.5, f32)), 2.0f32, 5.0f32)) }\n";
+               sampled = {\n\
+               \x20 (a, b) = split_key(key_from_seed(42i64))\n\
+               \x20 sub(uniform_like(a, bc(cast(0.5, f32)), 2.0f32, 5.0f32), \
+               uniform_like(b, bc(cast(0.5, f32)), 2.0f32, 5.0f32))\n\
+               }\n";
     let eval = eval_sampled(src);
     let c = c_sampled(src, "u2120_two_draws");
-    assert_f32_bit_parity(&eval, &c, "two host-lane draws in one seed scope");
+    assert_f32_bit_parity(&eval, &c, "two host-lane draws from split keys");
     assert!(
         eval.iter().any(|v| *v != 0.0),
-        "two draws in one scope produced an all-zero difference, so the second \
-         draw reused the first draw's ordinal: {eval:?}",
+        "two draws from split keys produced an all-zero difference, so both \
+         read one key: {eval:?}",
     );
+    let (a, b) = common::key_ref::split(common::key_ref::key_from_seed(42));
+    let reference = common::key_ref::uniform_f32(a, 4, 2.0, 5.0)
+        .into_iter()
+        .zip(common::key_ref::uniform_f32(b, 4, 2.0, 5.0))
+        .map(|(left, right)| f64::from(left - right))
+        .collect::<Vec<_>>();
+    assert_f32_bit_parity(&reference, &c, "reference vs C, split-key difference");
 }
 
-/// The desync case the shared RNG state makes possible: one draw whose
-/// template is runtime-derived (host lane) beside one whose template folds
-/// (tensor-DAG lane), inside a single `with seed` scope. Both mutate the same
-/// `__chelis_rng`, so a host arm that advanced the counter at a different
-/// point than the evaluator would shift every later draw in the scope.
+/// One draw whose template is runtime-derived (host lane) beside one whose
+/// template folds (tensor-DAG lane), keyed by the two halves of one
+/// `split_key`. Each lane must read its own key, so the difference is
+/// non-zero and agrees with eval.
 #[test]
-fn host_and_dag_draws_share_one_rng_scope_consistently() {
+fn host_and_dag_draws_from_split_keys_agree() {
     if !gcc_available() {
         eprintln!("skipping: no host C compiler");
         return;
@@ -320,16 +340,18 @@ fn host_and_dag_draws_share_one_rng_scope_consistently() {
     let src = "template = to_tensor([cast(0.5, f32), cast(0.5, f32), \
                cast(0.5, f32), cast(0.5, f32)])\n\
                def bc(c: f32) -> tensor[4, f32] = to_tensor([c, c, c, c])\n\
-               sampled = with seed(42i64) \
-               { sub(uniform_like(bc(cast(0.5, f32)), 2.0f32, 5.0f32), \
-               uniform_like(copy(template), 2.0f32, 5.0f32)) }\n";
+               sampled = {\n\
+               \x20 (a, b) = split_key(key_from_seed(42i64))\n\
+               \x20 sub(uniform_like(a, bc(cast(0.5, f32)), 2.0f32, 5.0f32), \
+               uniform_like(b, copy(template), 2.0f32, 5.0f32))\n\
+               }\n";
     let eval = eval_sampled(src);
     let c = c_sampled(src, "u2120_mixed_lanes");
-    assert_f32_bit_parity(&eval, &c, "host-lane and DAG-lane draws in one scope");
+    assert_f32_bit_parity(&eval, &c, "host-lane and DAG-lane draws from split keys");
     assert!(
         eval.iter().any(|v| *v != 0.0),
         "mixed-lane draws produced an all-zero difference, so the two lanes \
-         drew the same ordinal: {eval:?}",
+         read one key: {eval:?}",
     );
 }
 
@@ -355,8 +377,8 @@ fn every_active_float_dtype_matches_eval_with_a_runtime_template() {
     ] {
         let src = format!(
             "def bc(c: {dtype}) -> tensor[4, {dtype}] = to_tensor([c, c, c, c])\n\
-             sampled = with seed(42i64) \
-             {{ uniform_like(bc(cast(0.5, {dtype})), 2.0f32, 5.0f32) }}\n"
+             sampled = uniform_like(key_from_seed(42i64), \
+             bc(cast(0.5, {dtype})), 2.0f32, 5.0f32)\n"
         );
         let eval = eval_sampled(&src);
         let c = c_sampled(&src, &format!("u2120_dtype_{label}"));
@@ -364,13 +386,13 @@ fn every_active_float_dtype_matches_eval_with_a_runtime_template() {
     }
 }
 
-/// Non-triviality control, on the EVALUATOR lane only: two seeds must give
+/// Non-triviality control, on the EVALUATOR lane only: two keys must give
 /// different draws, so a parity oracle cannot pass by every value being equal.
-/// The cross-lane non-vacuity proof is elsewhere — the two all-zero assertions
-/// in the ordinal tests, and the compiled-lane comparisons above.
-/// Mirrors chelis#770's `different_seeds_produce_different_draws`.
+/// The cross-lane non-vacuity proof is elsewhere: the two all-zero assertions
+/// in the split-key tests, and the reference comparisons above.
+/// Mirrors chelis#770's `different_keys_produce_different_draws`.
 #[test]
-fn different_seeds_produce_different_draws_with_runtime_template() {
+fn different_keys_produce_different_draws_with_runtime_template() {
     let a = eval_sampled(&runtime_template_program("2.0f32", "5.0f32", 42));
     let b = eval_sampled(&runtime_template_program("2.0f32", "5.0f32", 43));
     assert_eq!(a.len(), b.len(), "both draws should have 8 elements");
@@ -388,8 +410,8 @@ fn runtime_computed_bounds_sample_in_both_lanes() {
     let src = "def bc(c: f32) -> tensor[8, f32] = \
                to_tensor([c, c, c, c, c, c, c, c])\n\
                def lo(x: f32) -> f32 = mul(x, 2.0f32)\n\
-               sampled = with seed(42i64) \
-               { uniform_like(bc(cast(0.5, f32)), lo(cast(1.0, f32)), 5.0f32) }\n";
+               sampled = uniform_like(key_from_seed(42i64), bc(cast(0.5, f32)), \
+               lo(cast(1.0, f32)), 5.0f32)\n";
     let eval = eval_sampled(src);
     assert!(
         eval.iter().all(|sample| (2.0..5.0).contains(sample)),

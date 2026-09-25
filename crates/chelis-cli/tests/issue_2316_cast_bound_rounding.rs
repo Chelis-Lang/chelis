@@ -88,8 +88,8 @@ fn dag_lane_program(low: &str, high: &str) -> String {
     format!(
         "template = to_tensor([cast(0.5, f32), cast(0.5, f32), cast(0.5, f32), \
          cast(0.5, f32)])\n\
-         sampled = with seed(42i64) \
-         {{ uniform_like(copy(template), {low}, {high}) }}\n"
+         sampled = uniform_like(key_from_seed(42i64), \
+         copy(template), {low}, {high})\n"
     )
 }
 
@@ -99,8 +99,8 @@ fn dag_lane_program(low: &str, high: &str) -> String {
 fn host_lane_program(low: &str, high: &str) -> String {
     format!(
         "def bc(c: f32) -> tensor[4, f32] = to_tensor([c, c, c, c])\n\
-         sampled = with seed(42i64) \
-         {{ uniform_like(bc(cast(0.5, f32)), {low}, {high}) }}\n"
+         sampled = uniform_like(key_from_seed(42i64), \
+         bc(cast(0.5, f32)), {low}, {high})\n"
     )
 }
 
@@ -329,8 +329,8 @@ fn runtime_computed_bound_samples_in_both_lanes() {
     let program = "lo = cast(0.3, f32)\n\
                    template = to_tensor([cast(0.5, f32), cast(0.5, f32), \
                    cast(0.5, f32), cast(0.5, f32)])\n\
-                   sampled = with seed(42i64) \
-                   { uniform_like(copy(template), cast(lo, f32), 0.9f32) }\n";
+                   sampled = uniform_like(key_from_seed(42i64), \
+                   copy(template), cast(lo, f32), 0.9f32)\n";
     let eval = eval_sampled(program);
     let low = f64::from(0.3f32);
     assert!(
