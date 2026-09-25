@@ -258,16 +258,20 @@ fn ingress_to_declared(
 ) -> Result<TensorValue, String> {
     if value.raw_f64_ingress {
         let storage = finalize_tensor("load", declared, value.storage().to_raw())
-            .map_err(|trap| format!("input `{name}`: {trap}"))?;
+            .map_err(|trap| format!("input `{name}`\n{trap}"))?;
         return Ok(TensorValue::from_storage(value.shape.clone(), storage));
     }
     if value.prim() == declared {
         return Ok(value.clone());
     }
     Err(format!(
-        "input `{name}` carries dtype {} but the Load declares {}; provide a value with the declared dtype (casts are explicit in Chelis)",
+        "input `{name}` carries dtype {} but the Load declares {}; provide a value with the declared dtype (casts are explicit in Chelis)\n{}",
         value.prim().name(),
-        declared.name()
+        declared.name(),
+        NumericTrap::Domain {
+            op: "load",
+            prim: declared
+        }
     ))
 }
 
@@ -2343,11 +2347,12 @@ fn resolve_load_inputs<F>(
     symbolic_dim_load_inputs: &UnordSet<&str>,
     required_shape_inputs: &UnordSet<String>,
     mut load_input: F,
-) -> Result<UnordMap<String, TensorValue>, String>
+) -> Result<(UnordMap<String, TensorValue>, Vec<NodeId>), String>
 where
     F: FnMut(&str, TensorInputDemand) -> Result<Option<TensorValue>, String>,
 {
     let mut inputs = UnordMap::new();
+    let mut resolved_loads = Vec::new();
     for node in dag.nodes() {
         let RiscOp::Load { name } = &node.op else {
             continue;
@@ -2373,6 +2378,7 @@ where
         match load_input(name.as_str(), demand)? {
             Some(value) => {
                 inputs.insert(name.as_str().to_string(), value);
+                resolved_loads.push(node.id);
             }
             None if strict_loads && is_live => {
                 return Err(format!("missing required input `{name}`"));
@@ -2380,7 +2386,7 @@ where
             None => {}
         }
     }
-    Ok(inputs)
+    Ok((inputs, resolved_loads))
 }
 
 /// The nodes `roots` need over a graph that holds several independently
@@ -2646,6 +2652,7 @@ fn value_free_schedule(
 
 struct PreparedTensorInputs {
     inputs: UnordMap<String, TensorValue>,
+    resolved_loads: Vec<NodeId>,
     required_symbols: UnordSet<String>,
     needs_symbolic_binding: bool,
     symbolic_selection: SymbolicInputSelection,
@@ -2720,7 +2727,7 @@ where
         UnordSet::new()
     };
     let symbolic_selection = select_symbolic_inputs(dag, &required_symbols, live);
-    let resolved_inputs = resolve_load_inputs(
+    let (resolved_inputs, resolved_loads) = resolve_load_inputs(
         dag,
         live,
         strict_loads,
@@ -2730,6 +2737,7 @@ where
     )?;
     Ok(PreparedTensorInputs {
         inputs: resolved_inputs,
+        resolved_loads,
         required_symbols,
         needs_symbolic_binding,
         symbolic_selection,
@@ -2768,7 +2776,8 @@ where
 {
     let live = scope.live();
     let PreparedTensorInputs {
-        inputs: resolved_inputs,
+        inputs: mut resolved_inputs,
+        resolved_loads,
         required_symbols,
         needs_symbolic_binding,
         symbolic_selection,
@@ -2777,93 +2786,107 @@ where
     // actual caller inputs. Both host lanes consume the same individual
     // schedule before symbolic inference or dependent operations. Missing
     // inputs belonging only to an unrelated root remain optional (#991).
-    let entry_guards = crate::axis_sources::entry_extent_guards(dag);
     // chelis#1374: a named witness claim whose pair the entry schedule above
     // already compares is checked there, once (spec/04 §4.7). The claim stays
     // in the graph because it is also what retains a declared-but-unread
     // parameter's interface witness.
     let entry_covered = crate::axis_sources::entry_covered_witness_claims(dag);
-    // Rank and literal ABI checks remain the complement of the claim schedule.
-    for node in dag.nodes() {
-        let RiscOp::Load { name } = &node.op else {
-            continue;
-        };
-        let Some(value) = resolved_inputs.get(name.as_str()) else {
-            continue;
-        };
-        let dims = &node.output_type.dims;
-        let fully_ranked = !dims.is_empty()
-            && dims
-                .iter()
-                .all(|dim| matches!(dim, DimInfo::Lit(_) | DimInfo::Named(_, _)));
-        if fully_ranked && value.shape.len() != dims.len() {
-            return Err(format!(
-                "input `{name}` expected rank {}, got {}",
-                dims.len(),
-                value.shape.len()
-            ));
-        }
-        for (axis, dim) in dims.iter().enumerate() {
-            let DimInfo::Lit(declared) = dim else {
-                continue;
-            };
-            if entry_guards.iter().any(|guard| {
-                matches!(guard,
-                crate::axis_sources::EntryExtentGuard::Literal { required, observed }
-                    if *required == *declared && *observed == (node.id, axis))
-            }) {
-                continue;
+    // One IR plan supplies the same slot/axis order to Eval and direct C.
+    // Freeze tagged/raw values at entry, before symbolic binding or body
+    // execution; a Load later reads only its admitted value.
+    for step in crate::axis_sources::entry_validation_plan_for_resolved_loads(dag, &resolved_loads)
+    {
+        use crate::axis_sources::{EntryExtentGuard, EntryValidationStep};
+        match step {
+            EntryValidationStep::DType { load } => {
+                let node = dag.get(load).expect("entry input");
+                let RiscOp::Load { name } = &node.op else {
+                    unreachable!()
+                };
+                if let Some(value) = resolved_inputs.get(name.as_str()) {
+                    let admitted =
+                        ingress_to_declared(name.as_str(), node.output_type.precision, value)?;
+                    resolved_inputs.insert(name.as_str().to_string(), admitted);
+                }
             }
-            let Some(observed) = value.shape.get(axis).copied() else {
-                continue;
-            };
-            if observed != *declared {
-                return Err(format!(
-                    "extent `{declared}`: claimed = {declared}, {name} axis {axis} = {observed}\n\
-                     numeric trap: domain in load at i64"
-                ));
+            EntryValidationStep::Rank { load } => {
+                let node = dag.get(load).expect("entry input");
+                let RiscOp::Load { name } = &node.op else {
+                    unreachable!()
+                };
+                if let Some(value) = resolved_inputs.get(name.as_str())
+                    && value.shape.len() != node.output_type.dims.len()
+                {
+                    return Err(format!(
+                        "input `{name}` expected rank {}, got {}\nnumeric trap: domain in load at i64",
+                        node.output_type.dims.len(),
+                        value.shape.len()
+                    ));
+                }
             }
-        }
-    }
-
-    for guard in entry_guards {
-        use crate::axis_sources::EntryExtentGuard;
-        let read = |(load, axis): (NodeId, usize)| {
-            let RiscOp::Load { name } = &dag.get(load)?.op else {
-                return None;
-            };
-            let extent = *resolved_inputs.get(name.as_str())?.shape.get(axis)?;
-            Some((name.as_str(), axis, extent))
-        };
-        let context = match guard {
-            EntryExtentGuard::Named {
-                claim,
-                canonical,
-                observed,
+            EntryValidationStep::LiteralAxis {
+                load,
+                axis,
+                required,
             } => {
-                let (Some((left_label, left_axis, left)), Some((right_label, right_axis, right))) =
-                    (read(canonical), read(observed))
-                else {
-                    continue;
+                let node = dag.get(load).expect("entry input");
+                let RiscOp::Load { name } = &node.op else {
+                    unreachable!()
                 };
-                if left == right {
-                    continue;
+                if let Some(observed) = resolved_inputs
+                    .get(name.as_str())
+                    .and_then(|value| value.shape.get(axis))
+                    .copied()
+                    && observed != required
+                {
+                    return Err(format!(
+                        "extent `{required}`: claimed = {required}, {name} axis {axis} = {observed}\nnumeric trap: domain in load at i64"
+                    ));
                 }
-                format!(
-                    "extent `{claim}`: {left_label} axis {left_axis} = {left}, {right_label} axis {right_axis} = {right}"
-                )
             }
-            EntryExtentGuard::Literal { required, observed } => {
-                let Some((label, axis, actual)) = read(observed) else {
-                    continue;
+            EntryValidationStep::Extent(guard) => {
+                let read = |(load, axis): (NodeId, usize)| {
+                    let RiscOp::Load { name } = &dag.get(load)?.op else {
+                        return None;
+                    };
+                    let extent = *resolved_inputs.get(name.as_str())?.shape.get(axis)?;
+                    Some((name.as_str(), axis, extent))
                 };
-                if actual == required {
-                    continue;
-                }
-                format!("extent `{required}`: claimed = {required}, {label} axis {axis} = {actual}")
+                let context = match guard {
+                    EntryExtentGuard::Named {
+                        claim,
+                        canonical,
+                        observed,
+                    } => {
+                        let (
+                            Some((left_label, left_axis, left)),
+                            Some((right_label, right_axis, right)),
+                        ) = (read(canonical), read(observed))
+                        else {
+                            continue;
+                        };
+                        if left == right {
+                            continue;
+                        }
+                        format!(
+                            "extent `{claim}`: {left_label} axis {left_axis} = {left}, {right_label} axis {right_axis} = {right}"
+                        )
+                    }
+                    EntryExtentGuard::Literal { required, observed } => {
+                        let Some((label, axis, actual)) = read(observed) else {
+                            continue;
+                        };
+                        if actual == required {
+                            continue;
+                        }
+                        format!(
+                            "extent `{required}`: claimed = {required}, {label} axis {axis} = {actual}"
+                        )
+                    }
+                };
+                return Err(format!("{context}\nnumeric trap: domain in load at i64"));
             }
-        };
-        return Err(format!("{context}\nnumeric trap: domain in load at i64"));
+        }
     }
 
     let mut prebound_dims: UnordMap<String, usize> = UnordMap::new();
@@ -3333,7 +3356,13 @@ where
             }
             RiscOp::CheckedUnitAxis { .. } => values[&node.inputs[0]].clone(),
             RiscOp::Load { name } => match resolved_inputs.get(name.as_str()) {
-                Some(value) => ingress_to_declared(name.as_str(), out_prim, value)?,
+                // The entry plan freezes the selected declaration once. A
+                // raw, unverified DAG can still contain a second live Load
+                // with this name but a conflicting type; do not silently
+                // hand it the first Load's admitted storage.
+                Some(value) => {
+                    ingress_to_declared(name.as_str(), node.output_type.precision, value)?
+                }
                 None if strict_loads => return Err(format!("missing required input `{name}`")),
                 None => default_value(&node.output_type),
             },

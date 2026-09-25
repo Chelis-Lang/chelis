@@ -6348,6 +6348,140 @@ int main(void) {{
     );
 }
 
+/// #2530/#2531: the executable DAG entry checks rank zero, then validates
+/// every supplied input in its ABI slot order with one typed trap line.
+#[test]
+fn direct_interface_guards_use_slot_order_and_typed_traps() {
+    let mut scalar = Dag::new();
+    let x = scalar.add_node(
+        RiscOp::Load { name: "x".into() },
+        vec![],
+        TensorType {
+            dims: vec![],
+            precision: Prim::F32,
+        },
+        None,
+    );
+    scalar.add_root(x);
+
+    let mut pair = Dag::new();
+    for name in ["z", "a"] {
+        let value = pair.add_node(
+            RiscOp::Load { name: name.into() },
+            vec![],
+            TensorType {
+                dims: vec![DimInfo::Lit(2)],
+                precision: Prim::F32,
+            },
+            None,
+        );
+        pair.add_root(value);
+    }
+
+    let mut failures = Vec::new();
+    for (case, dag, first_rank, first_extent, first_dtype, second_extent, second_dtype, expected) in [
+        (
+            "scalar_rank_bad",
+            &scalar,
+            1,
+            4,
+            "F32",
+            0,
+            "F32",
+            Some(("input `x` expected rank 0, got 1", "i64")),
+        ),
+        ("scalar_rank_good", &scalar, 0, 0, "F32", 0, "F32", None),
+        (
+            "slot_dtype_bad",
+            &pair,
+            1,
+            2,
+            "F64",
+            2,
+            "I32",
+            Some(("input `z` expected dtype f32, got f64", "f32")),
+        ),
+        (
+            "slot_dtype_before_later_extent",
+            &pair,
+            1,
+            2,
+            "F64",
+            3,
+            "F32",
+            Some(("input `z` expected dtype f32, got f64", "f32")),
+        ),
+        (
+            "slot_extent_bad",
+            &pair,
+            1,
+            3,
+            "F32",
+            3,
+            "F32",
+            Some(("input `z` axis 0 expected 2, got 3", "i64")),
+        ),
+        ("slot_good", &pair, 1, 2, "F32", 2, "F32", None),
+    ] {
+        let function = format!("entry_{case}");
+        let src = codegen(dag, &function)
+            .expect("direct entry codegen")
+            .c_source;
+        let input_count = if std::ptr::eq(dag, &scalar) { 1 } else { 2 };
+        let harness = format!(
+            r#"{HARNESS_HEADER}
+extern void {function}(chelis_tensor **, int, chelis_tensor **, int);
+int main(void) {{
+    chelis_tensor *inputs[2] = {{
+        chelis_alloc({first_rank}, (int64_t[]){{{first_extent}}}, CHELIS_DTYPE_{first_dtype}),
+        chelis_alloc(1, (int64_t[]){{{second_extent}}}, CHELIS_DTYPE_{second_dtype})
+    }};
+    chelis_tensor *outputs[2] = {{ NULL, NULL }};
+    {function}(inputs, {input_count}, outputs, {input_count});
+    for (int i = 0; i < {input_count}; ++i) {{
+        if (outputs[i] == NULL || chelis_tensor_rank(outputs[i]) != {first_rank}
+            || chelis_tensor_numel(outputs[i]) != ({first_rank} == 0 ? 1 : 2)
+            || chelis_tensor_read_view(outputs[i]).dtype != CHELIS_DTYPE_F32
+            || ((float*)chelis_tensor_read_view(outputs[i]).data)[0] != 0.0f) {{
+            puts("wrong output"); return 2;
+        }}
+    }}
+    puts("completed");
+    return 0;
+}}
+"#
+        );
+        let run = compile_and_capture_run(&function, &src, &harness);
+        let stderr = String::from_utf8_lossy(&run.stderr);
+        if let Some((context, dtype)) = expected {
+            let trap = format!("numeric trap: domain in load at {dtype}");
+            let trap_lines = stderr
+                .lines()
+                .filter(|line| line.starts_with("numeric trap:"))
+                .collect::<Vec<_>>();
+            let exact = format!("{function}: {context}\n{trap}\n");
+            if run.status.success()
+                || stderr != exact
+                || trap_lines != [trap.as_str()]
+                || stderr.contains("input `a`")
+            {
+                failures.push(format!(
+                    "{case}: stderr={stderr:?}, trap lines={trap_lines:?}"
+                ));
+            }
+        } else {
+            if !run.status.success() || !String::from_utf8_lossy(&run.stdout).contains("completed")
+            {
+                failures.push(format!(
+                    "{case}: stdout={:?}, stderr={stderr:?}",
+                    String::from_utf8_lossy(&run.stdout)
+                ));
+            }
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
 /// chelis#2490, [04-NUM-11]: the four-argument public entry `x + x` over one
 /// input declared at `declared`, run on a zero-filled tensor of `supplied`.
 fn direct_entry_dtype_run(declared: Prim, supplied: &str) -> (String, std::process::Output) {

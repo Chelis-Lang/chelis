@@ -285,6 +285,11 @@ impl<'a> VerifiedDagView<'a> {
         crate::axis_sources::entry_extent_guards(self.dag)
     }
 
+    /// The same ordered input admission plan consumed by DAG evaluation.
+    pub fn entry_validation_plan(self) -> Vec<crate::axis_sources::EntryValidationStep> {
+        crate::axis_sources::entry_validation_plan(self.dag)
+    }
+
     /// The named witness claims the entry schedule above already compares, so
     /// an emitter checks each such pair once (`spec/04-type-system.md` §4.7).
     /// The view answers this for the same reason it answers placement: the
