@@ -770,3 +770,80 @@ fn a_library_generic_is_never_instantiated_at_a_key() {
         }
     }
 }
+
+/// Spec/04 section 1.1: a key has no cast in either direction, whatever the
+/// target: a concrete dtype or a declaration's bounded dtype binder. The
+/// numeric twins of every shape still check.
+#[test]
+fn a_key_has_no_cast_to_any_target() {
+    for op in ["cast", "cast_trunc"] {
+        for (name, source) in [
+            (
+                "a scalar key to a concrete target",
+                format!("def bad(k: key) -> i32 = {op}(k, i32)\n"),
+            ),
+            (
+                "a key tensor to a concrete target",
+                format!("def bad(k: key) -> tensor[2, i32] = {op}(split_keys(k, 2i64), i32)\n"),
+            ),
+            (
+                "a scalar key to a binder target",
+                format!("def bad[p: Int](k: key) -> p = {op}(k, p)\n"),
+            ),
+            (
+                "a key tensor to an Int binder target",
+                format!("def bad[n, p: Int](x: tensor[n, key]) -> tensor[n, p] = {op}(x, p)\n"),
+            ),
+            (
+                "a key tensor to a Float binder target",
+                format!("def bad[n, p: Float](x: tensor[n, key]) -> tensor[n, p] = {op}(x, p)\n"),
+            ),
+            (
+                "a derived key tensor to a binder target",
+                format!("def bad[p: Int](k: key) -> tensor[2, p] = {op}(split_keys(k, 2i64), p)\n"),
+            ),
+            (
+                "a scalar to key",
+                format!("def bad(x: f32) -> key = {op}(x, key)\n"),
+            ),
+            (
+                "a tensor to key",
+                format!("def bad(x: tensor[2, f32]) -> tensor[2, key] = {op}(x, key)\n"),
+            ),
+            (
+                "a binder scalar to key",
+                format!("def bad[p: Float](x: p) -> key = {op}(x, key)\n"),
+            ),
+            (
+                "a binder tensor to key",
+                format!("def bad[n, p: Float](x: tensor[n, p]) -> tensor[n, key] = {op}(x, key)\n"),
+            ),
+        ] {
+            rejects(
+                &format!("{op}: {name}"),
+                &source,
+                CheckErrorKind::UnsupportedTensorPrecision,
+            );
+        }
+        for (name, source) in [
+            (
+                "a scalar to a concrete target",
+                format!("def good(x: f32) -> i32 = {op}(x, i32)\n"),
+            ),
+            (
+                "a tensor to a concrete target",
+                format!("def good(x: tensor[2, f32]) -> tensor[2, i32] = {op}(x, i32)\n"),
+            ),
+            (
+                "a scalar to a binder target",
+                format!("def good[p: Int](x: f32) -> p = {op}(x, p)\n"),
+            ),
+            (
+                "a tensor to a binder target",
+                format!("def good[n, p: Int](x: tensor[n, f32]) -> tensor[n, p] = {op}(x, p)\n"),
+            ),
+        ] {
+            accepts(&format!("{op}: {name}"), &source);
+        }
+    }
+}
