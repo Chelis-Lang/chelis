@@ -978,6 +978,12 @@ prefix = "bindings/python/tests/"
 disposition = "packages"
 packages = ["chelis-python"]
 
+# The Python facade the chelis-python execution-wire tests import.
+[[path_rule]]
+prefix = "bindings/python/chelis/"
+disposition = "packages"
+packages = ["chelis-python"]
+
 [[path_rule]]
 prefix = "editors/vscode/syntaxes/chelis.tmLanguage.json"
 disposition = "owner"
