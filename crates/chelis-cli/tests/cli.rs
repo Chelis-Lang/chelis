@@ -1960,14 +1960,20 @@ fn build_c_fold_tuple_tensor_accumulator_specializes_callback_types() {
     let out_dir = dir.path().join("fold-tuple-build-out");
     write_file(
         &path,
+        // chelis#2523: `step` is bound inside the declaration that applies it.
+        // Its projections on `state` are obligations that only an application
+        // resolves, and a later top-level declaration is not a binding site for
+        // them ([04-INF-1]).
         "xs = to_list(to_tensor([1.0, 2.0]))\n\
          state0 = (to_tensor([0.0, 0.0]), cast(0.0, f32))\n\
-         step = fn (state, x: f32) -> {\n\
-           l_inner = state.0\n\
-           total = state.1\n\
-           (l_inner, add(total, x))\n\
-         }\n\
-         out = fold(step, state0, xs)\n",
+         out = {\n\
+           step = fn (state, x: f32) -> {\n\
+             l_inner = state.0\n\
+             total = state.1\n\
+             (l_inner, add(total, x))\n\
+           }\n\
+           fold(step, state0, xs)\n\
+         }\n",
     );
 
     Command::cargo_bin("chelis")

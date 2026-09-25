@@ -114,7 +114,7 @@ fn declaration_boundary_rejects_implicit_collection_contracts() {
         report["errors"].as_array().unwrap().iter().any(|error| {
             error["message"]
                 .as_str()
-                .is_some_and(|message| message.contains("in `size` at declaration boundary"))
+                .is_some_and(|message| message.contains("never determined within `size`"))
         }),
         "{report}"
     );

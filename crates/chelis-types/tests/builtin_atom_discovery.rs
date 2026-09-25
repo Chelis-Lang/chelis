@@ -277,7 +277,7 @@ fn symbolic_observation_preserves_legal_applications_and_rejects_wrong_bounds() 
         "sig render[p: Float]: p -> string\ndef render(x) = to_string(x)\nresult = render(1.0f32)",
         "sig render[p: Int]: p -> string\ndef render(x) = to_string(x)\nresult = render(1i64)",
         "sig render[p: Numeric]: p -> string\ndef render(x) = to_string(x)\nresult = render(1i64)",
-        "def equal(x,y) = eq(x,y)\na = equal(1,1)\nb = equal([1],[1])",
+        "a = eq(1,1)\nb = eq(true,false)",
     ] {
         let deep = desugar_program(&parse_str(source).unwrap()).expect("Surf fixture must desugar");
         assert!(chelis_types::check_typed_program(&deep).is_ok(), "{source}");
@@ -288,6 +288,10 @@ fn symbolic_observation_preserves_legal_applications_and_rejects_wrong_bounds() 
         "result = map(fn(x) -> len(x), [1.0])",
         "sig size[p: Int]: p -> i64\ndef size(x) = len(x)\nresult = size(1i64)",
         "def equal(x,y) = eq(x,y)\nresult = equal(1,[1])",
+        // chelis#2518, [04-INF-9]: `eq` admits only some types (not a
+        // function), and parameter holes publish no implicit contract, so a
+        // hole-typed wrapper is rejected at its declaration however it is used.
+        "def equal(x,y) = eq(x,y)\na = equal(1,1)\nb = equal([1],[1])",
     ] {
         let deep = desugar_program(&parse_str(source).unwrap()).expect("Surf fixture must desugar");
         let errors = chelis_types::check_typed_program(&deep).unwrap_err();

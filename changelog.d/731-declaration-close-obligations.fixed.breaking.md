@@ -10,6 +10,10 @@ these checked with score 1:
   types is rejected, naming the declaration, and an operation that admits every
   type is still accepted. The collection operations `len`, `index`, `append`
   and `concat` follow the same rule and diagnostic rather than a separate one.
+  So does `eq`, which admits no function: a wrapper such as
+  `def equal(x, y) = eq(x, y)` is rejected, as `def equal[a](x: a, y: a) -> bool`
+  already was. A `to_tensor([])` whose element type nothing determines is now a
+  check error rather than an evaluation or code-generation error.
 - `dict_get`, `dict_contains`, `dict_remove` and `dict_insert` over an operand
   typed by an authored binder, `to_tensor` and `dict_of` over a list whose
   element an unbounded binder types, and a tuple projection or field read on a
@@ -25,7 +29,11 @@ these checked with score 1:
 - A tuple projection or field read on the parameter of a `let`-bound lambda let
   the lambda generalize, so each use returned an unconstrained type and a false
   declared result checked. The lambda now stays monomorphic until its first
-  application, like one carrying any other obligation.
+  application, like one carrying any other obligation, and a top-level lambda
+  whose projections only a later declaration's call would resolve is rejected,
+  since a later declaration is not a binding site ([04-INF-1]). A field read on
+  an opaque type through such a lambda is now reported as the opaque-boundary
+  violation it is, rather than as an unverifiable access.
 - A dtype-family requirement that narrowed an authored binder only while the
   declaration boundary replayed a suspended call, such as a `cast_trunc` inside
   a returned closure whose parameter only the declared type fixes
