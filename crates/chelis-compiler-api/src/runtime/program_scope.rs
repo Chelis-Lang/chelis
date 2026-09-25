@@ -131,12 +131,13 @@ impl ProgramScope {
     ///
     /// Reached means on every path through the body: argument, binding and
     /// block order, into a called top-level function's body at its call (as
-    /// lowering inlines it), into an applied pipe stage and into an applied
-    /// `grad` or `vmap` target. A lambda that is not applied, an `if` or
-    /// `match` arm, and a name `masked` reports as lexically bound by the
-    /// caller reach nothing. A name resolves as a read of it resolves
-    /// ([`Self::resolve_def_key`]); an input declaration (`x: T = x`) has no
-    /// initializer, so it is never listed.
+    /// lowering inlines it), whether it is called by its own name or through
+    /// a local that aliases it (`g = f` then `g(x)`), into an applied pipe
+    /// stage and into an applied `grad` or `vmap` target. A lambda that is
+    /// not applied, an `if` or `match` arm, and a name `masked` reports as
+    /// lexically bound by the caller reach nothing. A name resolves as a
+    /// read of it resolves ([`Self::resolve_def_key`]); an input declaration
+    /// (`x: T = x`) has no initializer, so it is never listed.
     ///
     /// This form applies an inline `fn` whose free names `masked` may bind.
     pub(super) fn reached_by_applying(
@@ -207,7 +208,10 @@ impl ProgramScope {
 struct ReachWalk<'s> {
     scope: &'s ProgramScope,
     masked: &'s dyn Fn(&str) -> bool,
-    bound: Vec<UnordSet<String>>,
+    /// The lexical scopes, innermost last. Each bound name maps to the
+    /// top-level definition its binding aliases when the binding's value is
+    /// a bare name of one (`g = f`), so applying the local runs it.
+    bound: Vec<UnordMap<String, Option<String>>>,
     /// Top-level functions whose bodies this walk entered; a recursive call
     /// reaches nothing its first entry did not.
     entered_functions: UnordSet<String>,
@@ -241,8 +245,8 @@ impl<'s> ReachWalk<'s> {
                 params
                     .iter()
                     .filter_map(|param| super::transforms::runtime_param_parts(param))
-                    .map(|(name, _)| name.to_owned())
-                    .collect::<UnordSet<_>>()
+                    .map(|(name, _)| (name.to_owned(), None))
+                    .collect::<UnordMap<_, _>>()
             })
             .unwrap_or_default();
         self.bound.push(names);
@@ -252,7 +256,7 @@ impl<'s> ReachWalk<'s> {
 
     /// The top-level declaration a free `name` reads, if any.
     fn declaration(&self, name: &str) -> Option<(String, &'s Expr)> {
-        if self.bound.iter().any(|scope| scope.contains(name)) || (self.masked)(name) {
+        if self.bound.iter().any(|scope| scope.contains_key(name)) || (self.masked)(name) {
             return None;
         }
         let scope: &'s ProgramScope = self.scope;
@@ -260,20 +264,42 @@ impl<'s> ReachWalk<'s> {
         Some((key.to_owned(), scope.defs.get(key)?))
     }
 
-    /// Run the top-level function a free `name` names, following bare
-    /// aliases (`alias = entry`), as a call of it does.
+    /// The top-level definition `name` names here: the one a local binding
+    /// aliases when `name` is lexically bound (none when the binding is not
+    /// a bare name of one), nothing when `masked` binds it, and otherwise the
+    /// declaration it resolves to.
+    fn definition_named(&self, name: &str) -> Option<String> {
+        match self.bound.iter().rev().find_map(|scope| scope.get(name)) {
+            Some(alias) => alias.clone(),
+            None if (self.masked)(name) => None,
+            None => self.scope.resolve_def_key(name).map(str::to_owned),
+        }
+    }
+
+    /// Run the top-level function `name` names, by its own name or through
+    /// a local alias of it, as a call of it does.
     fn call(&mut self, name: &str) {
-        let mut name = name.to_owned();
-        for _ in 0..self.scope.defs.len() {
-            let Some((key, body)) = self.declaration(&name) else {
+        if let Some(key) = self.definition_named(name) {
+            self.enter(key);
+        }
+    }
+
+    /// Run the top-level definition `key`, following bare aliases
+    /// (`alias = entry`), whose names resolve in declaration scope.
+    fn enter(&mut self, mut key: String) {
+        let scope: &'s ProgramScope = self.scope;
+        for _ in 0..scope.defs.len() {
+            let Some(body) = scope.defs.get(&key) else {
                 return;
             };
             if let Some(alias) = var_name(body) {
-                if alias == key {
-                    return;
+                match scope.resolve_def_key(alias) {
+                    Some(next) if next != key => {
+                        key = next.to_owned();
+                        continue;
+                    }
+                    _ => return,
                 }
-                name = alias.to_owned();
-                continue;
             }
             if !self.entered_functions.insert(key) {
                 return;
@@ -339,13 +365,15 @@ impl<'s> ReachWalk<'s> {
                 let [binds, body, ..] = children else {
                     return;
                 };
-                let mut names = UnordSet::new();
+                let mut names = UnordMap::new();
                 if let Some((DeepTag::Bind, pairs)) = super::tagged_expr_children(binds) {
                     for pair in pairs.chunks(2) {
                         if let [name, value] = pair {
                             self.expr(value);
                             if let Some(name) = super::symbol_name(name) {
-                                names.insert(name.to_owned());
+                                let alias =
+                                    var_name(value).and_then(|value| self.definition_named(value));
+                                names.insert(name.to_owned(), alias);
                             }
                         }
                     }
