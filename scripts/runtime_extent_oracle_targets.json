@@ -1264,8 +1264,10 @@
       "expected": [
         "c_forwarded_insert_axis_keeps_result_ownership",
         "c_insert_result_guard_owns_attribution_and_effect_order",
+        "c_result_axes_follow_declaration_order",
         "eval_forwarded_insert_axis_keeps_result_ownership",
         "eval_insert_result_guard_owns_attribution_and_effect_order",
+        "eval_result_axes_follow_declaration_order",
         "input_axis_claim_still_precedes_body_on_both_lanes",
         "mixed_named_entry_and_literal_result_keep_distinct_owners"
       ],

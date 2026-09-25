@@ -1559,6 +1559,18 @@ Phase B records `guard.local.declaration_order.eval_c`. This closes the P2
 multi-axis reshape ordering witness recorded during #1662; it does not claim
 the remaining op-computed guard coverage or call/witness transport.
 
+For `insert`, C collects the new-axis carrier and forwarded input-axis
+observations at the same preallocation hook before consuming that ordered
+claim list. Dispatching forwarded axes separately would reorder simultaneous
+failures. The additional 32-lane matrix covers both insertion positions,
+folded `InputAxis` and computed `Node` sizes, each independent mismatch,
+simultaneous mismatches, and exact agreement:
+
+```sh
+cargo nextest run -p chelis-cli --test issue_2377_producer_guards \
+  -E 'test(result_axes_follow_declaration_order)'
+```
+
 The #1377 exit runs six direct-call cases and 34 nested/discarded/alias
 cases, with declared types and exact outputs or required traps:
 

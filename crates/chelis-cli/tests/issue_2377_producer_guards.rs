@@ -156,6 +156,75 @@ fn c_forwarded_insert_axis_keeps_result_ownership() {
     assert_forwarded_insert_axis(true);
 }
 
+// §4.7 orders claims ready at one producer by their declaration, including
+// when one extent is inserted and another is forwarded from its operand.
+fn assert_result_axis_declaration_order(native: bool) {
+    for insert_axis in [0, 1] {
+        for computed in [false, true] {
+            for (new_bad, carried_bad) in
+                [(false, false), (true, false), (false, true), (true, true)]
+            {
+                let new_extent = if new_bad { 5 } else { 4 };
+                let carried_extent = if carried_bad { 2 } else { 3 };
+                let x = vec!["0i64"; new_extent - usize::from(computed)].join(", ");
+                let y = vec!["0i64"; carried_extent].join(", ");
+                let size = if computed {
+                    "add(shape(x, 0i32), 1i64)"
+                } else {
+                    "shape(x, 0i32)"
+                };
+                let dims = if insert_axis == 0 { "4, 3" } else { "3, 4" };
+                let source = format!(
+                    "def f[n, m](x: tensor[n, i64], y: tensor[m, i64]) -> tensor[{dims}, f64] = insert(insert(scalar_to_tensor(7.0f64), 0i32, shape(y, 0i32)), {insert_axis}i32, {size})\nout = f(to_tensor([{x}]), to_tensor([{y}]))\n"
+                );
+                let (ok, output) = run(&source, native);
+                assert_eq!(ok, !new_bad && !carried_bad, "{source}\n{output}");
+                if ok {
+                    let values = ["7.0"; 12].join(", ");
+                    assert!(
+                        output.contains(&format!("out = tensor(shape=[{dims}], data=[{values}])")),
+                        "{output}"
+                    );
+                } else {
+                    let first_is_new = new_bad && (insert_axis == 0 || !carried_bad);
+                    let (claim, axis, actual) = if first_is_new {
+                        (4, insert_axis, new_extent)
+                    } else {
+                        (3, 1 - insert_axis, carried_extent)
+                    };
+                    assert!(
+                        output.contains(&format!(
+                            "extent `{claim}`: claimed = {claim}, insert axis {axis} = {actual}"
+                        )),
+                        "{source}\n{output}"
+                    );
+                    assert!(
+                        output
+                            .lines()
+                            .any(|line| line == "numeric trap: domain in insert at i64"),
+                        "{output}"
+                    );
+                }
+                assert_eq!(
+                    output.matches("numeric trap:").count(),
+                    usize::from(!ok),
+                    "{output}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn eval_result_axes_follow_declaration_order() {
+    assert_result_axis_declaration_order(false);
+}
+
+#[test]
+fn c_result_axes_follow_declaration_order() {
+    assert_result_axis_declaration_order(true);
+}
+
 // The old backend assertion placed the literal result at entry. Execute both
 // obligations independently before migrating that structural expectation.
 #[test]

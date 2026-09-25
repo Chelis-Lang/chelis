@@ -7359,7 +7359,14 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
                 .iter()
                 .any(|site| site.producer() == NodeId(id))
         {
-            self.emit_runtime_dim_sites(id, &[(axis, extent.clone())]);
+            // The inserted and forwarded axes belong to one result producer.
+            // Supply them together so the shared consumer follows declaration
+            // order, rather than checking forwarded axes in an earlier hook.
+            let mut extents = self.input_axis_result_extents(id, inputs);
+            if !extents.iter().any(|(existing, _)| *existing == axis) {
+                extents.push((axis, extent.clone()));
+            }
+            self.emit_runtime_dim_sites(id, &extents);
         }
         let operation = match dag.expansion_kind(NodeId(id)) {
             chelis_ir::axis_sources::ExpansionKind::Expand => "CHELIS_MOVEMENT_EXPAND",
@@ -7601,12 +7608,11 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
         self.emit_inherited_result_guards(node.id.0, &extents, true);
     }
 
-    /// Shape-preserving producers know their result extent from input metadata.
-    /// Check it before allocating or evaluating a potentially trapping element.
-    fn emit_input_axis_result_guards(&mut self, node: &DagNode, _dag: VerifiedDagView<'_>) {
+    /// Input-axis observations, shared by ordinary and movement producers.
+    fn input_axis_result_extents(&self, id: usize, inputs: &[NodeId]) -> Vec<(usize, String)> {
         use chelis_ir::axis_sources::LocalGuardObservation;
         let mut carriers = Vec::new();
-        if let Some(sites) = self.local_dim_guard_sites.get(&node.id.0) {
+        if let Some(sites) = self.local_dim_guard_sites.get(&id) {
             for (axis, claim) in sites {
                 if let LocalGuardObservation::Carrier(carrier @ RtDim::InputAxis { .. }) =
                     &claim.observed
@@ -7616,7 +7622,7 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
             }
         }
         for site in &self.inherited_result_sites {
-            if site.producer() == node.id
+            if site.producer() == NodeId(id)
                 && let LocalGuardObservation::Carrier(carrier @ RtDim::InputAxis { .. }) =
                     site.observation()
             {
@@ -7629,29 +7635,28 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
                 }
             }
         }
-        // Movement owners already check their carriers at their dedicated
-        // preallocation hooks. They must not execute a second comparison here.
-        carriers.retain(|(axis, _)| {
-            !matches!(&node.op, RiscOp::Expand { axis: set, .. } if axis == set)
-                && !matches!(node.op, RiscOp::Reshape { .. })
-        });
         if carriers.is_empty() {
-            return;
+            return Vec::new();
         }
-        let operand = node
-            .inputs
+        let operand = inputs
             .first()
             .expect("input-axis observation has an operand")
             .0;
-        let extents = carriers
+        carriers
             .into_iter()
-            .map(|(axis, carrier)| {
-                (
-                    axis,
-                    Self::bound_c_expr(&carrier, &node.inputs, operand, axis),
-                )
-            })
-            .collect::<Vec<_>>();
+            .map(|(axis, carrier)| (axis, Self::bound_c_expr(&carrier, inputs, operand, axis)))
+            .collect()
+    }
+
+    /// Shape-preserving producers know their result extent from input metadata.
+    /// Check it before allocating or evaluating a potentially trapping element.
+    fn emit_input_axis_result_guards(&mut self, node: &DagNode, _dag: VerifiedDagView<'_>) {
+        // Movement owners consume all their result axes together at their
+        // dedicated preallocation hook, including forwarded input axes.
+        if matches!(node.op, RiscOp::Expand { .. } | RiscOp::Reshape { .. }) {
+            return;
+        }
+        let extents = self.input_axis_result_extents(node.id.0, &node.inputs);
         self.emit_runtime_dim_sites(node.id.0, &extents);
     }
 
