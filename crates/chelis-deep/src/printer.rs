@@ -7,183 +7,283 @@ use crate::annotations_codec::{
     WireExpr, WireMetaExpr as MetaExpr, WireMetadata as MetaMap, WireNode,
 };
 use crate::ast::{Atom, Expr};
-use crate::span::Span;
 use crate::tag::DeepTag;
 
 const MAX_LINE: usize = 80;
 const INDENT_STEP: usize = 2;
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum PrintMode {
-    Pretty,
-    Flat,
-}
 
 /// Print a slice of top-level expressions in canonical pretty form.
 ///
 /// Expressions are separated by blank lines and the output ends with a
 /// single newline.
 pub fn print_canonical(exprs: &[Expr]) -> String {
-    print_program(exprs, PrintMode::Pretty)
+    let printer = Printer::new();
+    print_program(exprs, |wire, out| out.push_str(&printer.fmt_expr(wire, 0)))
 }
 
 /// Print a slice of top-level expressions in flat canonical form.
 pub fn print_canonical_flat(exprs: &[Expr]) -> String {
-    print_program(exprs, PrintMode::Flat)
+    print_program(exprs, |wire, out| write_flat(Flat::Expr(wire), out))
 }
 
 /// Print a single expression in canonical pretty form (no trailing newline).
 pub fn print_expr(expr: &Expr) -> String {
-    Printer::pretty().fmt_expr(&WireExpr::from_ast(expr), 0)
+    with_wire(expr, |wire| Printer::new().fmt_expr(wire, 0))
 }
 
 /// Print a single expression in canonical flat form (no trailing newline).
 pub fn print_expr_flat(expr: &Expr) -> String {
-    Printer::flat().fmt_expr(&WireExpr::from_ast(expr), 0)
+    with_wire(expr, |wire| render_flat(Flat::Expr(wire)))
 }
 
 pub fn print_macro_source(source: &crate::annotations::MacroSource) -> String {
-    Printer::flat().fmt_expr(
-        &WireExpr::from_value(&crate::annotations::MetadataValue::Source(source.clone())),
-        0,
-    )
+    render_flat(Flat::Expr(&WireExpr::from_value(
+        &crate::annotations::MetadataValue::Source(source.clone()),
+    )))
 }
 
-fn print_program(exprs: &[Expr], mode: PrintMode) -> String {
+fn print_program(exprs: &[Expr], mut write: impl FnMut(&WireExpr, &mut String)) -> String {
     if exprs.is_empty() {
         return String::new();
     }
-    let printer = Printer::new(mode);
-    let parts: Vec<String> = exprs
-        .iter()
-        .map(|expr| printer.fmt_expr(&WireExpr::from_ast(expr), 0))
-        .collect();
-    let mut out = parts.join("\n\n");
+    let mut out = String::new();
+    for (index, expr) in exprs.iter().enumerate() {
+        if index > 0 {
+            out.push_str("\n\n");
+        }
+        with_wire(expr, |wire| write(wire, &mut out));
+    }
     out.push('\n');
     out
 }
 
+/// Run `f` on the wire shadow of `expr`, then release the shadow without the
+/// per-level recursion of its derived drop glue (chelis#2424).
+fn with_wire<R>(expr: &Expr, f: impl FnOnce(&WireExpr) -> R) -> R {
+    let wire = WireExpr::from_ast(expr);
+    let result = f(&wire);
+    wire.dispose();
+    result
+}
+
+/// One pending piece of flat canonical output.
+enum Flat<'a> {
+    Text(&'a str),
+    Expr(&'a WireExpr),
+    Node(&'a WireNode),
+    Map(&'a MetaMap),
+    MetaExpr(&'a MetaExpr),
+    MetaEntries(&'a [(String, WireExpr)]),
+}
+
+/// The flat canonical form of `item`.
+fn render_flat(item: Flat<'_>) -> String {
+    let mut out = String::new();
+    write_flat(item, &mut out);
+    out
+}
+
+/// Append the flat canonical form of `item` to `out`.
+///
+/// Flat output is one token stream, so a heap stack of pending pieces
+/// replaces the per-level recursion: the depth of the tree no longer bounds
+/// the native stack, and each byte is written once instead of being copied
+/// into every enclosing level's string (chelis#2424).
+fn write_flat(item: Flat<'_>, out: &mut String) {
+    let mut stack = vec![item];
+    while let Some(item) = stack.pop() {
+        match item {
+            Flat::Text(text) => out.push_str(text),
+            Flat::Expr(expr) => match expr {
+                WireExpr::ExtensionData(data) => out.push_str(data.syntax()),
+                WireExpr::Atom(atom, _) => write_atom(out, atom),
+                WireExpr::Map(map, _) => stack.push(Flat::Map(map)),
+                WireExpr::MetaExpr(meta, _) => stack.push(Flat::MetaExpr(meta)),
+                WireExpr::Node(node, _) => stack.push(Flat::Node(node)),
+                WireExpr::BareList(items, _) => {
+                    out.push('(');
+                    stack.push(Flat::Text(")"));
+                    for (index, item) in items.iter().enumerate().rev() {
+                        stack.push(Flat::Expr(item));
+                        if index > 0 {
+                            stack.push(Flat::Text(" "));
+                        }
+                    }
+                }
+                WireExpr::UnknownForm(form) => {
+                    open_form(&form.head, &form.meta, &form.children, out, &mut stack);
+                }
+            },
+            Flat::Node(node) => {
+                open_form(
+                    node.tag.as_str(),
+                    &node.meta,
+                    &node.children,
+                    out,
+                    &mut stack,
+                );
+            }
+            Flat::Map(map) => {
+                out.push('{');
+                stack.push(Flat::Text("}"));
+                let entries = sorted_entries(&map.entries);
+                for (index, (key, value)) in entries.into_iter().enumerate().rev() {
+                    stack.push(Flat::Expr(value));
+                    stack.push(Flat::Text(": "));
+                    stack.push(Flat::Text(key));
+                    if index > 0 {
+                        stack.push(Flat::Text(", "));
+                    }
+                }
+            }
+            Flat::MetaExpr(meta) => {
+                stack.push(Flat::Expr(&meta.expr));
+                stack.push(Flat::Text(" "));
+                stack.push(Flat::MetaEntries(&meta.entries));
+            }
+            Flat::MetaEntries(entries) => {
+                out.push_str("^{");
+                stack.push(Flat::Text("}"));
+                for (index, (key, value)) in sorted_entries(entries).into_iter().enumerate().rev() {
+                    stack.push(Flat::Expr(value));
+                    stack.push(Flat::Text(" "));
+                    stack.push(Flat::Text(key));
+                    stack.push(Flat::Text(":"));
+                    if index > 0 {
+                        stack.push(Flat::Text(" "));
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Write a form's `(head ` and queue the `{meta} child...)` that follows it.
+fn open_form<'a>(
+    head: &str,
+    meta: &'a MetaMap,
+    children: &'a [WireExpr],
+    out: &mut String,
+    stack: &mut Vec<Flat<'a>>,
+) {
+    out.push('(');
+    out.push_str(head);
+    out.push(' ');
+    stack.push(Flat::Text(")"));
+    for child in children.iter().rev() {
+        stack.push(Flat::Expr(child));
+        stack.push(Flat::Text(" "));
+    }
+    stack.push(Flat::Map(meta));
+}
+
+/// Entries in canonical key order. The sort is stable, so entries with equal
+/// keys keep their order.
+fn sorted_entries(entries: &[(String, WireExpr)]) -> Vec<(&str, &WireExpr)> {
+    let mut sorted: Vec<_> = entries
+        .iter()
+        .map(|(key, value)| (key.as_str(), value))
+        .collect();
+    sorted.sort_by_key(|(key, _)| *key);
+    sorted
+}
+
+fn write_atom(out: &mut String, atom: &Atom) {
+    match atom {
+        Atom::Name(s) => out.push_str(s),
+        Atom::Int(n) => out.push_str(&n.to_string()),
+        Atom::Float(f) => {
+            let s = f.to_string();
+            out.push_str(&s);
+            if !s.contains('.') {
+                out.push_str(".0");
+            }
+        }
+        Atom::Str(s) => {
+            out.reserve(s.len() + 2);
+            out.push('"');
+            for ch in s.chars() {
+                match ch {
+                    '\\' => out.push_str("\\\\"),
+                    '"' => out.push_str("\\\""),
+                    '\n' => out.push_str("\\n"),
+                    '\t' => out.push_str("\\t"),
+                    '\r' => out.push_str("\\r"),
+                    '\0' => out.push_str("\\0"),
+                    c => out.push(c),
+                }
+            }
+            out.push('"');
+        }
+        Atom::Bool(b) => out.push_str(if *b { "true" } else { "false" }),
+    }
+}
+
+/// The pretty layout. Every width it measures is a flat rendering from
+/// [`write_flat`]; only breaking a line recurses.
 struct Printer {
-    mode: PrintMode,
     max_width: usize,
     indent_step: usize,
 }
 
 impl Printer {
-    fn new(mode: PrintMode) -> Self {
+    fn new() -> Self {
         Self {
-            mode,
             max_width: MAX_LINE,
             indent_step: INDENT_STEP,
         }
     }
 
-    fn pretty() -> Self {
-        Self::new(PrintMode::Pretty)
-    }
-
-    fn flat() -> Self {
-        Self::new(PrintMode::Flat)
-    }
-
     fn fmt_expr(&self, expr: &WireExpr, indent: usize) -> String {
         match expr {
-            WireExpr::ExtensionData(data) => data.syntax().into(),
-            WireExpr::Atom(atom, _) => Self::fmt_atom(atom),
+            WireExpr::ExtensionData(_) | WireExpr::Atom(..) => render_flat(Flat::Expr(expr)),
             WireExpr::Map(map, _) => self.fmt_map(map, indent),
             WireExpr::MetaExpr(meta, _) => self.fmt_meta_expr(meta, indent),
             WireExpr::Node(node, _) => self.fmt_node(node, indent),
-            WireExpr::BareList(elems, _) => self.fmt_list(elems, indent),
-            WireExpr::UnknownForm(data) => {
-                let elements = unknown_form_elements(&data.head, &data.meta, &data.children);
-                self.fmt_list(&elements, indent)
-            }
-        }
-    }
-
-    fn fmt_expr_flat(&self, expr: &WireExpr) -> String {
-        match expr {
-            WireExpr::ExtensionData(data) => data.syntax().into(),
-            WireExpr::Atom(atom, _) => Self::fmt_atom(atom),
-            WireExpr::Map(map, _) => Self::fmt_map_flat(map),
-            WireExpr::MetaExpr(meta, _) => self.fmt_meta_expr_flat(meta),
-            WireExpr::Node(node, _) => self.fmt_node_flat(node),
-            WireExpr::BareList(elems, _) => self.fmt_list_flat(elems),
-            WireExpr::UnknownForm(data) => {
-                let elements = unknown_form_elements(&data.head, &data.meta, &data.children);
-                self.fmt_list_flat(&elements)
-            }
-        }
-    }
-
-    fn fmt_atom(atom: &Atom) -> String {
-        match atom {
-            Atom::Name(s) => s.clone(),
-            Atom::Int(n) => n.to_string(),
-            Atom::Float(f) => {
-                let s = f.to_string();
-                if s.contains('.') { s } else { format!("{s}.0") }
-            }
-            Atom::Str(s) => {
-                let mut out = String::with_capacity(s.len() + 2);
-                out.push('"');
-                for ch in s.chars() {
-                    match ch {
-                        '\\' => out.push_str("\\\\"),
-                        '"' => out.push_str("\\\""),
-                        '\n' => out.push_str("\\n"),
-                        '\t' => out.push_str("\\t"),
-                        '\r' => out.push_str("\\r"),
-                        '\0' => out.push_str("\\0"),
-                        c => out.push(c),
-                    }
+            WireExpr::BareList(items, _) => {
+                let flat = render_flat(Flat::Expr(expr));
+                if indent + flat.len() <= self.max_width {
+                    return flat;
                 }
-                out.push('"');
-                out
+                let Some((first, rest)) = items.split_first() else {
+                    return flat;
+                };
+                let child_indent = indent + self.indent_step;
+                self.fmt_broken_list(
+                    &self.fmt_expr(first, child_indent),
+                    rest.iter().map(|child| self.fmt_expr(child, child_indent)),
+                    indent,
+                )
             }
-            Atom::Bool(b) => if *b { "true" } else { "false" }.to_string(),
+            // An unknown form prints as the list of its head symbol, its
+            // metadata map and its children, laid out from the borrowed form.
+            WireExpr::UnknownForm(form) => {
+                let flat = render_flat(Flat::Expr(expr));
+                if indent + flat.len() <= self.max_width {
+                    return flat;
+                }
+                let child_indent = indent + self.indent_step;
+                let meta = self.fmt_map(&form.meta, child_indent);
+                let children = form
+                    .children
+                    .iter()
+                    .map(|child| self.fmt_expr(child, child_indent));
+                self.fmt_broken_list(&form.head, std::iter::once(meta).chain(children), indent)
+            }
         }
     }
 
     /// A stamped node prints as its canonical `(tag {meta} children...)`
     /// form, with the tag regenerated from the decoded [`DeepTag`].
     fn fmt_node(&self, node: &WireNode, indent: usize) -> String {
-        let flat = self.fmt_node_flat(node);
-        if self.mode == PrintMode::Flat || force_flat_tag(node.tag) {
+        let flat = render_flat(Flat::Node(node));
+        if force_flat_tag(node.tag) {
             return flat;
         }
         if !force_break_tag(node.tag) && indent + flat.len() <= self.max_width {
             return flat;
         }
         self.fmt_canonical_node(node, indent)
-    }
-
-    fn fmt_node_flat(&self, node: &WireNode) -> String {
-        let parts: Vec<String> = [
-            node.tag.as_str().to_string(),
-            Self::fmt_map_flat(&node.meta),
-        ]
-        .into_iter()
-        .chain(node.children.iter().map(|expr| self.fmt_expr_flat(expr)))
-        .collect();
-        format!("({})", parts.join(" "))
-    }
-
-    /// A structural list, or an unknown form's head-map-children sequence.
-    fn fmt_list(&self, elements: &[WireExpr], indent: usize) -> String {
-        let flat = self.fmt_list_flat(elements);
-        if self.mode == PrintMode::Flat || indent + flat.len() <= self.max_width {
-            return flat;
-        }
-        self.fmt_generic_list_broken(elements, indent)
-    }
-
-    fn fmt_list_flat(&self, elements: &[WireExpr]) -> String {
-        let parts: Vec<String> = elements
-            .iter()
-            .map(|expr| self.fmt_expr_flat(expr))
-            .collect();
-        format!("({})", parts.join(" "))
     }
 
     fn fmt_canonical_node(&self, node: &WireNode, indent: usize) -> String {
@@ -217,16 +317,18 @@ impl Printer {
         lines.join("\n")
     }
 
-    fn fmt_generic_list_broken(&self, elements: &[WireExpr], indent: usize) -> String {
-        let Some((first, rest)) = elements.split_first() else {
-            return "()".to_string();
-        };
-
-        let child_indent = indent + self.indent_step;
-        let prefix = " ".repeat(child_indent);
-        let mut lines = vec![format!("({}", self.fmt_expr(first, child_indent))];
-        for child in rest {
-            let rendered = self.fmt_expr(child, child_indent);
+    /// A structural list, or an unknown form's head-map-children sequence,
+    /// too wide for one line: the first element follows the opening
+    /// parenthesis and every later element starts its own line.
+    fn fmt_broken_list(
+        &self,
+        first: &str,
+        rest: impl Iterator<Item = String>,
+        indent: usize,
+    ) -> String {
+        let prefix = " ".repeat(indent + self.indent_step);
+        let mut lines = vec![format!("({first}")];
+        for rendered in rest {
             let mut child_lines = rendered.lines();
             if let Some(first) = child_lines.next() {
                 lines.push(format!("{prefix}{first}"));
@@ -243,14 +345,12 @@ impl Printer {
     }
 
     fn fmt_map(&self, map: &MetaMap, indent: usize) -> String {
-        let flat = Self::fmt_map_flat_with(self, map);
-        if self.mode == PrintMode::Flat || indent + flat.len() <= self.max_width {
+        let flat = render_flat(Flat::Map(map));
+        if indent + flat.len() <= self.max_width {
             return flat;
         }
 
-        let mut sorted: Vec<_> = map.entries.iter().collect();
-        sorted.sort_by_key(|(key, _)| key.as_str());
-
+        let sorted = sorted_entries(&map.entries);
         let mut lines = Vec::new();
         for (index, (key, value)) in sorted.iter().enumerate() {
             let entry_indent = indent + self.indent_step;
@@ -277,30 +377,13 @@ impl Printer {
         lines.join("\n")
     }
 
-    fn fmt_map_flat(map: &MetaMap) -> String {
-        Self::fmt_map_flat_with(&Self::flat(), map)
-    }
-
-    fn fmt_map_flat_with(&self, map: &MetaMap) -> String {
-        if map.entries.is_empty() {
-            return "{}".to_string();
-        }
-        let mut sorted: Vec<_> = map.entries.iter().collect();
-        sorted.sort_by_key(|(key, _)| key.as_str());
-        let parts: Vec<String> = sorted
-            .iter()
-            .map(|(key, value)| format!("{key}: {}", self.fmt_expr_flat(value)))
-            .collect();
-        format!("{{{}}}", parts.join(", "))
-    }
-
     fn fmt_meta_expr(&self, meta: &MetaExpr, indent: usize) -> String {
-        let flat = self.fmt_meta_expr_flat(meta);
-        if self.mode == PrintMode::Flat || indent + flat.len() <= self.max_width {
+        let flat = render_flat(Flat::MetaExpr(meta));
+        if indent + flat.len() <= self.max_width {
             return flat;
         }
 
-        let meta_part = self.fmt_meta_entries(&meta.entries);
+        let meta_part = render_flat(Flat::MetaEntries(&meta.entries));
         let expr_indent = indent + meta_part.len() + 1;
         let expr_text = self.fmt_expr(&meta.expr, expr_indent);
         let mut lines = expr_text.lines();
@@ -311,21 +394,6 @@ impl Printer {
             output.push_str(line);
         }
         output
-    }
-
-    fn fmt_meta_expr_flat(&self, meta: &MetaExpr) -> String {
-        let meta_part = self.fmt_meta_entries(&meta.entries);
-        format!("{meta_part} {}", self.fmt_expr_flat(&meta.expr))
-    }
-
-    fn fmt_meta_entries(&self, entries: &[(String, WireExpr)]) -> String {
-        let mut sorted: Vec<_> = entries.iter().collect();
-        sorted.sort_by_key(|(key, _)| key.as_str());
-        let parts: Vec<String> = sorted
-            .iter()
-            .map(|(key, value)| format!(":{key} {}", self.fmt_expr_flat(value)))
-            .collect();
-        format!("^{{{}}}", parts.join(" "))
     }
 }
 
@@ -346,17 +414,6 @@ fn force_flat_tag(tag: DeepTag) -> bool {
 /// Binding forms that always break their children onto separate lines.
 fn force_break_tag(tag: DeepTag) -> bool {
     matches!(tag, DeepTag::Fn | DeepTag::Let | DeepTag::Bind)
-}
-
-/// The printed element sequence of an `UnknownForm`: its head symbol, its
-/// metadata map, then its children.
-fn unknown_form_elements(head: &str, meta: &MetaMap, children: &[WireExpr]) -> Vec<WireExpr> {
-    let span = Span::new(0, 0);
-    let mut elements = Vec::with_capacity(children.len() + 2);
-    elements.push(WireExpr::Atom(Atom::Name(head.to_string()), span));
-    elements.push(WireExpr::Map(meta.clone(), span));
-    elements.extend(children.iter().cloned());
-    elements
 }
 
 #[cfg(test)]
@@ -624,5 +681,72 @@ mod tests {
     fn multiple_top_level_exprs_have_blank_line_between() {
         let exprs = vec![sym("one"), sym("two")];
         assert_eq!(print_canonical(&exprs), "one\n\ntwo\n");
+    }
+
+    /// chelis#2424: flat printing, with the Deep-to-wire conversion and the
+    /// release of the converted tree, does not recurse once per nesting
+    /// level. A 100,000-deep chain cycling through every carrier that nests
+    /// (`Node`, `BareList`, `MetaExpr`, `UnknownForm`) prints byte for byte on
+    /// a 256 KiB thread. Building, comparing and dropping the input recurse,
+    /// so they run on a large-stack thread; only the printer runs on the
+    /// small one.
+    #[test]
+    fn a_deep_mixed_chain_prints_flat_on_a_small_stack() {
+        std::thread::Builder::new()
+            .stack_size(512 * 1024 * 1024)
+            .spawn(print_a_deep_mixed_chain_on_a_small_stack)
+            .expect("spawn the large-stack harness")
+            .join()
+            .expect("the large-stack harness must not abort");
+    }
+
+    fn print_a_deep_mixed_chain_on_a_small_stack() {
+        const DEPTH: usize = 100_000;
+        let var = |name: &str| node("var", vec![], vec![sym(name)]);
+        let mut input = var("x");
+        let mut prefixes = Vec::with_capacity(DEPTH);
+        let mut suffixes = String::with_capacity(DEPTH);
+        for level in 1..=DEPTH {
+            let (wrapped, prefix, suffix) = match level % 4 {
+                0 => (
+                    node("app", vec![], vec![var("g"), input]),
+                    "(app {} (var {} g) ",
+                    ")",
+                ),
+                1 => (generic_list(vec![sym("g"), input]), "(g ", ")"),
+                2 => (meta_expr(vec![], input), "^{} ", ""),
+                _ => (
+                    Expr::UnknownForm(Box::new(crate::ast::UnknownFormData {
+                        head: "u".into(),
+                        meta: Metadata::default(),
+                        children: vec![input],
+                        span: sp(),
+                    })),
+                    "(u {} ",
+                    ")",
+                ),
+            };
+            input = wrapped;
+            prefixes.push(prefix);
+            suffixes.push_str(suffix);
+        }
+        let expected: String =
+            prefixes.iter().rev().copied().collect::<String>() + "(var {} x)" + &suffixes;
+
+        let (program, expr) = std::thread::scope(|scope| {
+            std::thread::Builder::new()
+                .stack_size(256 * 1024)
+                .spawn_scoped(scope, || {
+                    (
+                        print_canonical_flat(std::slice::from_ref(&input)),
+                        print_expr_flat(&input),
+                    )
+                })
+                .expect("spawn the small-stack printer")
+                .join()
+                .expect("flat printing must not exhaust a small native stack")
+        });
+        assert!(program == format!("{expected}\n"), "program output differs");
+        assert!(expr == expected, "expression output differs");
     }
 }
