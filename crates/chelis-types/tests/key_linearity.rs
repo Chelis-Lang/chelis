@@ -453,6 +453,89 @@ fn top_level_roots_observe_a_key_once() {
     );
 }
 
+/// The `KeyReuse` diagnostics that reject a declaration's capture of the
+/// top-level key `k0`.
+fn top_level_key_captures(name: &str, source: &str) -> Vec<CheckError> {
+    rejects(name, source, CheckErrorKind::KeyReuse)
+        .into_iter()
+        .filter(|error| {
+            same_kind(&error.kind, &CheckErrorKind::KeyReuse)
+                && error
+                    .message
+                    .contains("captures key-carrying variable `k0`")
+                && error.message.contains("[04-LIN-9]")
+        })
+        .collect()
+}
+
+const TOP_LEVEL_KEY: &str =
+    "k0 = key_from_seed(1i64)\nx0 = to_tensor([1.0f32, 2.0f32, 3.0f32, 4.0f32])\n";
+
+/// [04-LIN-9]: a named function declaration that refers to a top-level key
+/// captures it, and every call would draw with it again, so the declaration
+/// is refused whether or not anything calls it. A declaration that takes the
+/// key as a parameter is the accepted twin.
+///
+/// Evidentiary status: DISPOSITION LOCK for chelis#2549, which checks a
+/// declaration's body against the top-level scope rather than as a closure
+/// created there. Each refusal must survive that change.
+#[test]
+fn a_function_declaration_never_captures_a_top_level_key() {
+    let declaration = "def f(x: tensor[4, f32]) -> tensor[4, f32] = dropout(k0, x, 0.5f32)\n";
+    for (call, suffix) in [("uncalled", ""), ("called", "out = f(x0)\n")] {
+        let name = format!("a declaration reading `k0`, {call}");
+        let captures =
+            top_level_key_captures(&name, &format!("{TOP_LEVEL_KEY}{declaration}{suffix}"));
+        assert_eq!(captures.len(), 1, "{name}: {captures:?}");
+    }
+    accepts(
+        "the key passed to the declaration as a parameter",
+        &format!(
+            "{TOP_LEVEL_KEY}def f(k: key, x: tensor[4, f32]) -> tensor[4, f32] = dropout(k, x, \
+             0.5f32)\nout = f(k0, x0)\n"
+        ),
+    );
+}
+
+/// Two declarations reading the same top-level key are each refused: the
+/// first refusal does not consume `k0` on the second's behalf. One
+/// declaration yields exactly one refusal (the test above), so two refusals
+/// are one per declaration.
+///
+/// Evidentiary status: DISPOSITION LOCK for chelis#2549 (see above).
+#[test]
+fn every_function_declaration_reading_a_top_level_key_is_refused() {
+    let name = "two declarations reading `k0`";
+    let captures = top_level_key_captures(
+        name,
+        &format!(
+            "{TOP_LEVEL_KEY}def f(x: tensor[4, f32]) -> tensor[4, f32] = dropout(k0, x, \
+             0.5f32)\ndef g(x: tensor[4, f32]) -> tensor[4, f32] = uniform_like(k0, x, 0.0f32, \
+             1.0f32)\n"
+        ),
+    );
+    assert_eq!(captures.len(), 2, "{name}: {captures:?}");
+}
+
+/// [04-LIN-9] across top-level initializers: two draws from `k0` reuse it,
+/// and one draw is its single use.
+///
+/// Evidentiary status: DISPOSITION LOCK for chelis#2549, which reorders how
+/// top-level initializers and declarations are walked.
+#[test]
+fn top_level_initializers_draw_from_a_key_once() {
+    rejects_reuse(
+        "two top-level draws from `k0`",
+        &format!(
+            "{TOP_LEVEL_KEY}first = dropout(k0, x0, 0.5f32)\nsecond = dropout(k0, x0, 0.5f32)\n"
+        ),
+    );
+    accepts(
+        "one top-level draw from `k0`",
+        &format!("{TOP_LEVEL_KEY}first = dropout(k0, x0, 0.5f32)\n"),
+    );
+}
+
 #[test]
 fn key_is_not_a_numeric_or_castable_dtype() {
     rejects(

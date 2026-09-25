@@ -17637,12 +17637,17 @@ fn binder_float_literal_keeps_f32_source(operand: &Expr, target: &HostTypeTerm) 
         )
 }
 
+/// The operand-derived type may replace the checker's only to name the
+/// dimensions the checker left synthetic. The checker owns the element
+/// dtype, so an inferred tensor of another dtype never displaces it.
 fn should_prefer_inferred_app_type(explicit: &HostTypeTerm, inferred: &HostTypeTerm) -> bool {
     explicit.is_unresolved()
         || matches!(
             (explicit, inferred),
-            (HostTypeTerm::Tensor(_), HostTypeTerm::Tensor(_)) if host_type_has_synthetic_tensor_dims(explicit)
-                && !host_type_has_synthetic_tensor_dims(inferred)
+            (HostTypeTerm::Tensor(checked), HostTypeTerm::Tensor(operand))
+                if checked.precision == operand.precision
+                    && host_type_has_synthetic_tensor_dims(explicit)
+                    && !host_type_has_synthetic_tensor_dims(inferred)
         )
 }
 
@@ -18862,9 +18867,17 @@ fn infer_builtin_host_type_from_arg_tys_unchecked(
         _ => None,
     });
     match name {
+        // [05-OP-8] and [05-OP-37]: a draw's result has the type of its
+        // data operand, which follows the key. Position decides it: the key
+        // is itself a rank-zero key tensor wherever it was projected from a
+        // `split_key` result, so a search for the first tensor operand
+        // would type the draw as its key.
+        "uniform_like" | "dropout" => {
+            Some(arg_tys.get(1).cloned().unwrap_or_else(fresh_host_inference))
+        }
         "add" | "sub" | "mul" | "div" | "floor_div" | "trunc_div" | "neg" | "exp" | "log"
         | "sin" | "sqrt" | "relu" | "sigmoid" | "tanh" | "silu" | "gelu" | "max_elem"
-        | "min_elem" | "copy" | "uniform_like" | "dropout" | "softmax" => {
+        | "min_elem" | "copy" | "softmax" => {
             if let Some(tensor_ty) = tensor_arg {
                 Some(HostTypeTerm::Tensor(tensor_ty))
             } else if arg_tys
@@ -22714,6 +22727,90 @@ def from_column[n, a](column: Column[n, a]) -> Frame[n, a] =
                 dims: vec![],
                 precision: Prim::Int64,
             }))),
+        );
+    }
+
+    fn rank_zero_key() -> HostTypeTerm {
+        HostTypeTerm::Tensor(TensorType {
+            dims: vec![],
+            precision: Prim::Key,
+        })
+    }
+
+    fn named_f32_vector(name: &str) -> HostTypeTerm {
+        HostTypeTerm::Tensor(TensorType {
+            dims: vec![DimInfo::Named(name.to_owned(), None)],
+            precision: Prim::F32,
+        })
+    }
+
+    /// [05-OP-8] and [05-OP-37]: a draw's result is its data operand's type.
+    /// A key projected from `split_key` is a rank-zero key tensor, which
+    /// precedes the data operand, so it must never be taken as the result.
+    #[test]
+    fn draw_result_types_follow_the_data_operand_not_the_key() {
+        let scalar_key = HostTypeTerm::Scalar(HostPrecisionTerm::Concrete(Prim::Key));
+        for key in [rank_zero_key(), scalar_key] {
+            assert_eq!(
+                infer_builtin_host_type_from_arg_tys(
+                    "uniform_like",
+                    &[
+                        key.clone(),
+                        named_f32_vector("n"),
+                        HostTypeTerm::Float32,
+                        HostTypeTerm::Float32,
+                    ],
+                ),
+                Ok(Some(named_f32_vector("n"))),
+                "uniform_like keyed by {key:?}",
+            );
+            assert_eq!(
+                infer_builtin_host_type_from_arg_tys(
+                    "dropout",
+                    &[key.clone(), named_f32_vector("n"), HostTypeTerm::Float32],
+                ),
+                Ok(Some(named_f32_vector("n"))),
+                "dropout keyed by {key:?}",
+            );
+            // A scalar template draws a scalar of the template's type.
+            assert_eq!(
+                infer_builtin_host_type_from_arg_tys(
+                    "uniform_like",
+                    &[
+                        key.clone(),
+                        HostTypeTerm::Float32,
+                        HostTypeTerm::Float32,
+                        HostTypeTerm::Float32,
+                    ],
+                ),
+                Ok(Some(HostTypeTerm::Float32)),
+                "scalar uniform_like keyed by {key:?}",
+            );
+        }
+    }
+
+    /// The operand-derived application type may name dimensions the checker
+    /// left synthetic, never change the checker's element dtype.
+    #[test]
+    fn operand_inference_names_synthetic_dims_without_changing_the_dtype() {
+        let checked = named_f32_vector("d47");
+        assert!(
+            should_prefer_inferred_app_type(&checked, &named_f32_vector("n")),
+            "a same-dtype operand type names the synthetic dimension",
+        );
+        assert!(
+            !should_prefer_inferred_app_type(&checked, &rank_zero_key()),
+            "a key operand's type must not displace a checked f32 draw",
+        );
+        assert!(
+            !should_prefer_inferred_app_type(
+                &checked,
+                &HostTypeTerm::Tensor(TensorType {
+                    dims: vec![DimInfo::Named("n".to_owned(), None)],
+                    precision: Prim::F64,
+                }),
+            ),
+            "an operand of another float dtype must not displace the checked dtype",
         );
     }
 
