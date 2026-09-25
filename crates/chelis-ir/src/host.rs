@@ -20546,19 +20546,30 @@ mod tests {
 
     #[test]
     fn literal_result_claim_transfer_requires_a_pure_called_helper() {
+        // A keyed draw is a pure function of its key (spec/05 §2.7), so its
+        // helper transfers like any other pure helper; an `IO` helper is the
+        // effecting case that keeps the direct lowering contract.
         let checked = surf_check(
             "def pure[n](x: tensor[n, f32]) -> tensor[2, f32] = \
                  shrink(x, [[1i64, shape(x, 0i32)]])\n\
-             def random[n](x: tensor[n, f32]) -> tensor[2, f32] = \
-                 dropout(shrink(x, [[1i64, shape(x, 0i32)]]), 0.5f32)\n\
-             def caller[n](x: tensor[n, f32]) = (pure(copy(x)), random(x))\n",
+             def keyed[n](k: key, x: tensor[n, f32]) -> tensor[2, f32] = \
+                 dropout(k, shrink(x, [[1i64, shape(x, 0i32)]]), 0.5f32)\n\
+             def loud[n](x: tensor[n, f32]) -> tensor[2, f32] ! { IO } = {\n\
+               _ = print(\"loud\")\n\
+               shrink(x, [[1i64, shape(x, 0i32)]])\n\
+             }\n\
+             def caller[n](k: key, x: tensor[n, f32]) = \
+                 (pure(copy(x)), keyed(k, copy(x)), loud(x))\n",
         );
         let session = HostLoweringSession::new(&checked);
         assert!(top_level_fn_transfers_literal_result_claims(
             &session, "pure"
         ));
+        assert!(top_level_fn_transfers_literal_result_claims(
+            &session, "keyed"
+        ));
         assert!(!top_level_fn_transfers_literal_result_claims(
-            &session, "random"
+            &session, "loud"
         ));
     }
 
