@@ -1728,14 +1728,98 @@ impl<'a, 'sites> UnitLowerer<'a, 'sites> {
         })?;
         self.record_edge(HostSiteKind::BranchEdge, then_block);
         self.record_edge(HostSiteKind::BranchEdge, else_block);
+
+        // `moved` is a single set for the whole unit, but a branch has two
+        // paths. Consuming an enclosing owner on one arm marks it moved
+        // everywhere, so the enclosing scope exit emits no release for the arm
+        // that did NOT consume it, and that owner reaches the join live on one
+        // path only. Lower each arm from the same snapshot and reconcile, so
+        // every owner that survives one arm and not the other carries its
+        // release on the arm that dropped it (chelis#2477).
+        let moved_before = self.moved.clone();
+        let outer_owners: BTreeSet<OwnerId> = self.owners.keys().copied().collect();
+
         self.current = then_block;
         self.push_scope();
         self.lower_join_arm(then_expr, join)?;
+        let moved_after_then = self.moved.clone();
+        // An arm with nested control flow ends in a different block than the
+        // one it started in, and the release belongs on the block that jumps
+        // to the join. Emitting into the arm's entry block would place it
+        // before that block's own terminator, so a later borrow inside the arm
+        // would read a released owner.
+        let then_end = self.current;
+
+        self.moved = moved_before;
         self.current = else_block;
         self.push_scope();
         self.lower_join_arm(else_expr, join)?;
+        let moved_after_else = self.moved.clone();
+        let else_end = self.current;
+
+        self.moved = moved_after_then
+            .union(&moved_after_else)
+            .copied()
+            .collect::<BTreeSet<_>>();
+        self.release_on_arm(
+            then_end,
+            &moved_after_else,
+            &moved_after_then,
+            &outer_owners,
+        )?;
+        self.release_on_arm(
+            else_end,
+            &moved_after_then,
+            &moved_after_else,
+            &outer_owners,
+        )?;
+
         self.current = join;
         Ok(Value::Fresh(join_owner))
+    }
+
+    /// Release, in `arm`'s block, every pre-existing owner that the sibling
+    /// arm consumed and this one did not. Restricted to owners that existed
+    /// before the branch: anything minted inside an arm does not exist on the
+    /// other path and its own scope exit already covers it.
+    ///
+    /// These are emitted with `ProvisionalScopeExit`, exactly like a scope
+    /// exit, so `last_use::schedule` re-places them with every other
+    /// provisional release rather than treating them as fixed.
+    fn release_on_arm(
+        &mut self,
+        arm: BlockId,
+        moved_by_sibling: &BTreeSet<OwnerId>,
+        moved_by_arm: &BTreeSet<OwnerId>,
+        outer_owners: &BTreeSet<OwnerId>,
+    ) -> Result<(), OwnershipError> {
+        let owed: Vec<OwnerId> = moved_by_sibling
+            .difference(moved_by_arm)
+            .copied()
+            .filter(|owner| outer_owners.contains(owner))
+            .filter(|owner| {
+                self.owners
+                    .get(owner)
+                    .is_some_and(|info| info.origin == OwnerOrigin::Owned)
+            })
+            .collect();
+        let restore = self.current;
+        self.current = arm;
+        for owner in owed {
+            let heap = self
+                .owners
+                .get(&owner)
+                .is_some_and(|info| info.class.is_heap());
+            if heap {
+                self.emit_scope_exit(Op::Drop {
+                    owner: Operand::move_(owner),
+                });
+            } else {
+                self.emit_scope_exit(Op::Discard { owner });
+            }
+        }
+        self.current = restore;
+        Ok(())
     }
 
     fn lower_match_option(

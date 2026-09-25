@@ -2784,18 +2784,106 @@ where
 /// The nodes `roots` need, with every effect node and every random node that
 /// can trap by itself.
 fn live_mask_for_roots(dag: &Dag, roots: &[NodeId]) -> Vec<bool> {
-    live_mask_from(dag, roots.to_vec())
+    let unselected = unselected_root_region(dag, roots);
+    live_mask_from(dag, roots.to_vec(), &unselected)
 }
 
-fn live_mask_from(dag: &Dag, mut stack: Vec<NodeId>) -> Vec<bool> {
+/// The nodes that belong to a DAG root this evaluation did not select.
+///
+/// A lowered program makes **every** top-level `def` a DAG root, whether or
+/// not anything calls it, and a def's parameters are `Load` nodes built by
+/// the same code that builds a genuine entry input — `z` in an uncalled
+/// `def g(z)` is indistinguishable from `x` in the `main(x)` being run
+/// (chelis#2476).
+///
+/// Selecting roots is therefore a scoping decision, not merely a request for
+/// certain outputs: `g`'s subgraph is in this DAG because `g` was declared,
+/// not because the selected roots reach it. Value reachability honours that
+/// by construction. A **seed** does not — it marks nodes the roots cannot
+/// reach, which is the whole point of a seed — so without this every seed
+/// would pull another declaration's subgraph into the run, and
+/// `resolve_load_inputs` would then demand that declaration's parameters as
+/// required inputs for a program that never calls it.
+///
+/// A node shared with a selected root is not in this set: reachability from
+/// the selection wins, so scoping can only ever drop work no selected root
+/// needs. With nothing selected, or with every root selected, the set is
+/// empty and this is a no-op.
+///
+/// This scopes [`live_mask_from`]'s seeds: the `[05-OP-68]` abort and a
+/// draw that validates its own controls alike, one class under
+/// `spec/06-transformations.md` §5.2.
+fn unselected_root_region(dag: &Dag, roots: &[NodeId]) -> Vec<bool> {
+    if roots.is_empty() || dag.roots().is_empty() {
+        return vec![false; dag.len()];
+    }
+    // Membership by mask, not `Vec::contains`: a program with R declared
+    // roots asks this R times, and the scan made that quadratic in R — paid
+    // even when every root is selected and the answer is "nothing".
+    let mut selected = vec![false; dag.len()];
+    for root in roots {
+        selected[root.0] = true;
+    }
+    let unselected = dag
+        .roots()
+        .iter()
+        .copied()
+        .filter(|root| !selected[root.0])
+        .collect::<Vec<_>>();
+    if unselected.is_empty() {
+        return vec![false; dag.len()];
+    }
+    let mut owned = reachable_from(dag, unselected);
+    for (id, selected) in reachable_from(dag, roots.to_vec()).into_iter().enumerate() {
+        if selected {
+            owned[id] = false;
+        }
+    }
+    owned
+}
+
+/// Plain backward reachability over `inputs` and both dependency edges.
+fn reachable_from(dag: &Dag, mut stack: Vec<NodeId>) -> Vec<bool> {
+    let mut seen = vec![false; dag.len()];
+    while let Some(id) = stack.pop() {
+        if seen[id.0] {
+            continue;
+        }
+        seen[id.0] = true;
+        if let Some(node) = dag.get(id) {
+            stack.extend(node.inputs.iter().copied());
+            stack.extend(node.shape_deps.iter().copied());
+            stack.extend(node.result_claim_deps.iter().copied());
+        }
+    }
+    seen
+}
+
+fn live_mask_from(dag: &Dag, mut stack: Vec<NodeId>, unselected: &[bool]) -> Vec<bool> {
     let mut live = vec![false; dag.len()];
     // chelis#2368: effect nodes are live because they are effects, not
     // because a value reaches them. chelis#2413: so is a random node that can
     // trap by itself.
+    //
+    // chelis#2476 scopes BOTH to the selection. An abort, or a trapping
+    // draw, inside a root this evaluation did not select belongs to a
+    // declaration it is not running, so firing it would abort on behalf of
+    // code the caller excluded. The seed still reaches every abort and
+    // trapping draw the selected roots' own activation contains, including
+    // the discarded ones, which is what [05-OP-68] is about.
+    //
+    // The two disjuncts are one class — `random_node_may_trap` documents
+    // itself as an observable root under the same spec/06 §5.2 rule — so
+    // they take the same scoping. Leaving the newer one unscoped would put
+    // two seeds of one class on different rules, and re-arm chelis#2476
+    // along the second one.
     stack.extend(
         dag.nodes()
             .iter()
-            .filter(|node| node.op.is_unconditional_effect() || dag.random_node_may_trap(node))
+            .filter(|node| {
+                (node.op.is_unconditional_effect() || dag.random_node_may_trap(node))
+                    && !unselected[node.id.0]
+            })
             .map(|node| node.id),
     );
     while let Some(id) = stack.pop() {
@@ -5653,6 +5741,325 @@ mod tests {
         assert_eq!(
             vals[&live],
             TensorValue::from_vec(vec![3], vec![2.0, 4.0, 6.0])
+        );
+    }
+
+    /// The scoping may only ever drop work no selected root needs, so a
+    /// node both roots reach is not owned by the unselected one. Asserted
+    /// on the helper directly: no seed can observe it today, and an
+    /// untested branch is how the rule quietly stops holding.
+    #[test]
+    fn a_node_the_selection_also_reaches_is_not_owned_by_an_unselected_root() {
+        let mut dag = Dag::new();
+        let ty = vec3_f32();
+        let shared = dag.add_node(
+            RiscOp::Load {
+                name: "shared".into(),
+            },
+            vec![],
+            ty.clone(),
+            None,
+        );
+        let only_g = dag.add_node(RiscOp::Load { name: "z".into() }, vec![], ty.clone(), None);
+        let g = dag.add_node(RiscOp::Add, vec![shared, only_g], ty.clone(), None);
+        let main = dag.add_node(RiscOp::Neg, vec![shared], ty, None);
+        dag.add_root(g);
+        dag.add_root(main);
+
+        let owned = unselected_root_region(&dag, &[main]);
+        assert!(
+            owned[g.0],
+            "`g`'s own body is owned by the root nobody selected"
+        );
+        assert!(owned[only_g.0], "and so is the input only `g` reads");
+        assert!(
+            !owned[shared.0],
+            "but a node the selected root also reaches is never dropped"
+        );
+        assert!(!owned[main.0]);
+
+        assert!(
+            unselected_root_region(&dag, &[main, g])
+                .iter()
+                .all(|owned| !owned),
+            "selecting every root leaves nothing unselected"
+        );
+        assert!(
+            unselected_root_region(&dag, &[]).iter().all(|owned| !owned),
+            "and selecting nothing is a no-op, not an exclusion of everything"
+        );
+    }
+
+    /// `reachable_from` must follow every BACKWARD edge `live_mask_from`
+    /// propagates over — `inputs`, `shape_deps` and `result_claim_deps`.
+    /// Walking fewer misfiles a node the SELECTED root reaches only through
+    /// a dependency edge as owned by an unselected root.
+    ///
+    /// That is a coherence defect in the helper rather than a reachable
+    /// behaviour defect: `live_mask_from` starts its walk from `roots` and
+    /// follows those same edges, so anything the selection reaches is live
+    /// whether or not its seed was suppressed. The one asymmetry left is
+    /// deliberate — `live_mask_from` also expands through
+    /// `unlive_scoped_draw_peers`, which `reachable_from` does not, and by
+    /// the same argument that cannot be made observable. Keeping the helper
+    /// honest is cheap; growing it to chase an unobservable case is not.
+    #[test]
+    fn ownership_follows_every_edge_liveness_propagates_over() {
+        for edge in ["shape_dep", "result_claim_dep"] {
+            let mut dag = Dag::new();
+            let ty = vec3_f32();
+            let bool_ty = TensorType {
+                dims: vec![DimInfo::Lit(3)],
+                precision: Prim::Bool,
+            };
+            let z = dag.add_node(RiscOp::Load { name: "z".into() }, vec![], ty.clone(), None);
+            let cond = dag.add_node(
+                RiscOp::Compare(crate::dag::ComparisonKind::Gt),
+                vec![z, z],
+                bool_ty,
+                None,
+            );
+            let fallback = dag.add_node(
+                RiscOp::synth_const(ty.precision, 0.0),
+                vec![],
+                ty.clone(),
+                None,
+            );
+            let abort = dag.add_node(
+                RiscOp::GuardedFail {
+                    message: "reached only by a dependency edge".to_string(),
+                    trap_on_true: true,
+                },
+                vec![cond, fallback],
+                ty.clone(),
+                None,
+            );
+            // The unselected root consumes the abort through an ORDINARY
+            // input edge, so it is an ancestor of the abort either way. Only
+            // the dependency edge below can save the seed.
+            let only_unselected = dag.add_node(
+                RiscOp::Load {
+                    name: "only_g".into(),
+                },
+                vec![],
+                ty.clone(),
+                None,
+            );
+            let unselected =
+                dag.add_node(RiscOp::Mul, vec![abort, only_unselected], ty.clone(), None);
+            let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], ty.clone(), None);
+            let main = dag.add_node(RiscOp::Add, vec![x, x], ty, None);
+            // The selected root reaches the abort ONLY through this edge.
+            match edge {
+                "shape_dep" => dag.add_shape_dep(main, abort),
+                _ => dag.add_result_claim_dep(main, abort),
+            }
+            dag.add_root(unselected);
+            dag.add_root(main);
+
+            let owned = unselected_root_region(&dag, &[main]);
+            assert!(
+                !owned[abort.0],
+                "{edge}: the selected root reaches this abort, so it is not owned \
+                 by the unselected root"
+            );
+            assert!(
+                live_mask_for_roots(&dag, &[main])[abort.0],
+                "{edge}: and it must still execute"
+            );
+            assert!(
+                owned[only_unselected.0],
+                "{edge}: while the input only the unselected root reads is scoped out"
+            );
+            let _ = (unselected, z);
+        }
+    }
+
+    /// chelis#2413 put a trapping draw beside the `[05-OP-68]` abort in the
+    /// same seed, and chelis#2476's rebase scoped both together: they are one
+    /// class under `spec/06` §5.2, so leaving the newer one unscoped would
+    /// re-arm #2476 along the second seed — a draw inside an uncalled `def`
+    /// would demand that def's parameters, and then trap on behalf of code
+    /// the caller excluded.
+    ///
+    /// Nothing lowers a non-`DrawKey`-keyed draw today, so this is built
+    /// directly. The precondition assert is load-bearing: a `DrawKey`-keyed
+    /// draw is not a trapping draw, and this test would pass vacuously.
+    #[test]
+    fn a_trapping_draw_owned_by_an_unselected_root_is_not_this_evaluation_s_concern() {
+        let mut dag = Dag::new();
+        let ty = vec3_f32();
+        let key_ty = TensorType {
+            dims: vec![],
+            precision: Prim::Key,
+        };
+        // `g(z, rate, k)`: an uncalled declaration holding a trapping draw.
+        let z = dag.add_node(RiscOp::Load { name: "z".into() }, vec![], ty.clone(), None);
+        let rate = dag.add_node(
+            RiscOp::Load {
+                name: "rate".into(),
+            },
+            vec![],
+            TensorType {
+                dims: vec![],
+                precision: Prim::F32,
+            },
+            None,
+        );
+        // A plain `Load` key, NOT a `DrawKey` output: the draw validates its
+        // own rate, so it can trap by itself.
+        let k = dag.add_node(RiscOp::Load { name: "k".into() }, vec![], key_ty, None);
+        let draw = dag.add_node(RiscOp::Dropout, vec![z, rate, k], ty.clone(), None);
+        let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], ty.clone(), None);
+        let main = dag.add_node(RiscOp::Add, vec![x, x], ty, None);
+        dag.add_root(draw);
+        dag.add_root(main);
+
+        assert!(
+            dag.random_node_may_trap(dag.get(draw).expect("draw node")),
+            "precondition: this draw must be one that can trap by itself, or \
+             the assertions below pass for the wrong reason"
+        );
+
+        let selected = live_mask_for_roots(&dag, &[main]);
+        assert!(
+            !selected[draw.0],
+            "a trapping draw owned by the unselected root `g` must not be seeded"
+        );
+        for (name, id) in [("z", z), ("rate", rate), ("k", k)] {
+            assert!(
+                !selected[id.0],
+                "and `{name}` must stay dead, so it never becomes a required input"
+            );
+        }
+
+        assert!(
+            live_mask_for_roots(&dag, &[main, draw])[draw.0],
+            "selecting its owner runs it, so the [05-OP-37] trap still fires"
+        );
+    }
+
+    /// chelis#2476. A lowered program makes every top-level `def` a DAG
+    /// root, so an uncalled `def g(z)` puts `z` in the DAG as a `Load`
+    /// indistinguishable from the selected root's own input. Value
+    /// reachability ignores it; a seed must too, or `g`'s parameter becomes
+    /// a required input for a program that never calls `g`.
+    ///
+    /// The abort is the seed available to test this today. Both directions
+    /// are asserted: excluded when `g` is not selected, live when it is.
+    #[test]
+    fn an_abort_owned_by_an_unselected_root_is_not_this_evaluation_s_concern() {
+        fn program() -> (Dag, NodeId, NodeId) {
+            let mut dag = Dag::new();
+            let ty = vec3_f32();
+            // `g(z)`: an uncalled declaration whose body aborts.
+            let z = dag.add_node(RiscOp::Load { name: "z".into() }, vec![], ty.clone(), None);
+            let cond = dag.add_node(
+                RiscOp::Compare(crate::dag::ComparisonKind::Gt),
+                vec![z, z],
+                TensorType {
+                    dims: vec![DimInfo::Lit(3)],
+                    precision: Prim::Bool,
+                },
+                None,
+            );
+            let fallback = dag.add_node(
+                RiscOp::synth_const(ty.precision, 0.0),
+                vec![],
+                ty.clone(),
+                None,
+            );
+            let g = dag.add_node(
+                RiscOp::GuardedFail {
+                    message: "uncalled".to_string(),
+                    trap_on_true: true,
+                },
+                vec![cond, fallback],
+                ty.clone(),
+                None,
+            );
+            // `main(x)`: the root actually being evaluated.
+            let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], ty.clone(), None);
+            let main = dag.add_node(RiscOp::Add, vec![x, x], ty, None);
+            dag.add_root(g);
+            dag.add_root(main);
+            (dag, g, main)
+        }
+
+        let (dag, g, main) = program();
+        let selected = live_mask_for_roots(&dag, &[main]);
+        assert!(
+            !selected[g.0],
+            "an abort owned by the unselected root `g` must not be seeded"
+        );
+        assert!(
+            selected.iter().enumerate().all(|(id, live)| !live
+                || !matches!(&dag.nodes()[id].op, RiscOp::Load { name } if name.as_str() == "z")),
+            "and `z` must stay dead, so it is never a required input"
+        );
+
+        let both = live_mask_for_roots(&dag, &[main, g]);
+        assert!(
+            both[g.0],
+            "selecting `g` runs it, so its abort is seeded as [05-OP-68] requires"
+        );
+    }
+
+    /// The scoping may only ever drop work no selected root needs. A
+    /// DISCARDED abort is the case that matters for chelis#2368, and the
+    /// criterion classifies it by what it is an ancestor of: belonging to no
+    /// root, it is owned by no unselected root either, so every selection
+    /// seeds it.
+    ///
+    /// That cuts both ways and the limit is deliberate: a discarded node
+    /// inside a declaration nobody calls is likewise owned by no root, so
+    /// this scoping does not reach it (chelis#2476 residual). Separating
+    /// those two would need per-declaration attribution on `DagNode`, which
+    /// the DAG does not carry.
+    #[test]
+    fn an_abort_owned_by_no_root_is_seeded_for_every_selection() {
+        let mut dag = Dag::new();
+        let ty = vec3_f32();
+        let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], ty.clone(), None);
+        let cond = dag.add_node(
+            RiscOp::Compare(crate::dag::ComparisonKind::Gt),
+            vec![x, x],
+            TensorType {
+                dims: vec![DimInfo::Lit(3)],
+                precision: Prim::Bool,
+            },
+            None,
+        );
+        let fallback = dag.add_node(
+            RiscOp::synth_const(ty.precision, 0.0),
+            vec![],
+            ty.clone(),
+            None,
+        );
+        // Discarded: nothing consumes it and it is not a root.
+        let abort = dag.add_node(
+            RiscOp::GuardedFail {
+                message: "discarded".to_string(),
+                trap_on_true: true,
+            },
+            vec![cond, fallback],
+            ty.clone(),
+            None,
+        );
+        let other = dag.add_node(RiscOp::Load { name: "z".into() }, vec![], ty.clone(), None);
+        let unselected = dag.add_node(RiscOp::Mul, vec![other, other], ty.clone(), None);
+        let main = dag.add_node(RiscOp::Add, vec![x, x], ty, None);
+        dag.add_root(unselected);
+        dag.add_root(main);
+
+        let live = live_mask_for_roots(&dag, &[main]);
+        assert!(
+            live[abort.0],
+            "a discarded abort belongs to no root, so it is part of every activation"
+        );
+        assert!(
+            !live[unselected.0],
+            "while the unselected root's own body is still excluded"
         );
     }
 
