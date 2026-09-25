@@ -1469,7 +1469,61 @@ unsafe fn finish_finalization(
     }
 }
 
+/// A container whose last strong owner was released inside a finalizer, with
+/// the release site the ledger records for it.
+type PendingFinalization = (ownership_ledger::Kind, *mut libc::c_void, &'static str);
+
+/// Finalize an allocation whose last strong owner was just released, and
+/// every container that release frees in turn.
+///
+/// [05-OP-44] runs each kind's finalizer exactly once, when its final owner is
+/// released. A finalizer releases its children, and a container child whose
+/// count reaches zero is queued here rather than finalized by recursion, so a
+/// deep chain (a recursive data type, a list of lists) is freed in bounded
+/// native stack (chelis#2522). Leaf kinds finalize directly: a string, a
+/// mapped file, or a tensor and its storage owns no further value.
 unsafe fn finalize_heap(kind: ownership_ledger::Kind, pointer: *mut libc::c_void, site: &str) {
+    let mut pending = Vec::new();
+    finalize_one(kind, pointer, site, &mut pending);
+    while let Some((kind, pointer, site)) = pending.pop() {
+        finalize_one(kind, pointer, site, &mut pending);
+    }
+}
+
+/// Release one child owner from inside a finalizer, queueing a container
+/// whose count reaches zero on `pending` instead of finalizing it here.
+unsafe fn release_child(value: chelis_value, pending: &mut Vec<PendingFinalization>) {
+    match value.tag {
+        CHELIS_VALUE_LIST => {
+            validate_value(value, "chelis_value_release");
+            release_list_ptr_into(value.payload.list, pending);
+        }
+        CHELIS_VALUE_TUPLE => {
+            validate_value(value, "chelis_value_release");
+            release_tuple_ptr_into(value.payload.tuple, pending);
+        }
+        CHELIS_VALUE_DICT => {
+            validate_value(value, "chelis_value_release");
+            release_dict_ptr_into(value.payload.dict, pending);
+        }
+        CHELIS_VALUE_ADT => {
+            validate_value(value, "chelis_value_release");
+            release_adt_ptr_into(value.payload.adt, pending);
+        }
+        CHELIS_VALUE_OPTION => {
+            validate_value(value, "chelis_value_release");
+            release_option_ptr_into(value.payload.option, pending);
+        }
+        _ => chelis_value_release(value),
+    }
+}
+
+unsafe fn finalize_one(
+    kind: ownership_ledger::Kind,
+    pointer: *mut libc::c_void,
+    site: &str,
+    pending: &mut Vec<PendingFinalization>,
+) {
     match kind {
         ownership_ledger::Kind::String => {
             finish_finalization(pointer, kind, site);
@@ -1493,7 +1547,7 @@ unsafe fn finalize_heap(kind: ownership_ledger::Kind, pointer: *mut libc::c_void
         ownership_ledger::Kind::List => {
             let list = Box::from_raw(pointer.cast::<chelis_list>());
             for value in list.live() {
-                chelis_value_release(*value);
+                release_child(*value, pending);
             }
             finish_finalization(pointer, kind, site);
             drop(list);
@@ -1501,7 +1555,7 @@ unsafe fn finalize_heap(kind: ownership_ledger::Kind, pointer: *mut libc::c_void
         ownership_ledger::Kind::Tuple => {
             let tuple = Box::from_raw(pointer.cast::<chelis_tuple>());
             for value in &tuple.items {
-                chelis_value_release(*value);
+                release_child(*value, pending);
             }
             finish_finalization(pointer, kind, site);
             drop(tuple);
@@ -1509,8 +1563,8 @@ unsafe fn finalize_heap(kind: ownership_ledger::Kind, pointer: *mut libc::c_void
         ownership_ledger::Kind::Dict => {
             let dict = Box::from_raw(pointer.cast::<chelis_dict>());
             for entry in &dict.entries {
-                chelis_value_release(entry.key);
-                chelis_value_release(entry.value);
+                release_child(entry.key, pending);
+                release_child(entry.value, pending);
             }
             finish_finalization(pointer, kind, site);
             drop(dict);
@@ -1519,7 +1573,7 @@ unsafe fn finalize_heap(kind: ownership_ledger::Kind, pointer: *mut libc::c_void
             let adt = Box::from_raw(pointer.cast::<chelis_adt>());
             chelis_string_release(adt.ctor);
             for field in &adt.fields {
-                chelis_value_release(*field);
+                release_child(*field, pending);
             }
             finish_finalization(pointer, kind, site);
             drop(adt);
@@ -1527,7 +1581,7 @@ unsafe fn finalize_heap(kind: ownership_ledger::Kind, pointer: *mut libc::c_void
         ownership_ledger::Kind::Option => {
             let option = Box::from_raw(pointer.cast::<chelis_option>());
             if let Some(value) = option.value {
-                chelis_value_release(value);
+                release_child(value, pending);
             }
             finish_finalization(pointer, kind, site);
             drop(option);
@@ -1552,6 +1606,36 @@ unsafe fn release_tensor_storage(storage: *mut TensorStorage, site: &str) {
 
 macro_rules! heap_ref_ops {
     ($retain:ident, $release:ident, $ty:ty, $kind:ident, $ledger_failure:literal) => {
+        heap_ref_ops!(@ $retain, $release, $ty, $kind, $ledger_failure);
+    };
+    (
+        $retain:ident,
+        $release:ident,
+        $release_into:ident,
+        $ty:ty,
+        $kind:ident,
+        $ledger_failure:literal
+    ) => {
+        heap_ref_ops!(@ $retain, $release, $ty, $kind, $ledger_failure);
+
+        /// Release one owner from inside a finalizer: a final release is
+        /// queued on `pending` rather than finalized by recursion.
+        unsafe fn $release_into(pointer: *mut $ty, pending: &mut Vec<PendingFinalization>) {
+            if release_header(
+                pointer.cast(),
+                ownership_ledger::Kind::$kind,
+                stringify!($release),
+                $ledger_failure,
+            ) {
+                pending.push((
+                    ownership_ledger::Kind::$kind,
+                    pointer.cast(),
+                    stringify!($release),
+                ));
+            }
+        }
+    };
+    (@ $retain:ident, $release:ident, $ty:ty, $kind:ident, $ledger_failure:literal) => {
         unsafe fn $retain(pointer: *mut $ty) {
             retain_header(
                 pointer.cast(),
@@ -1587,6 +1671,7 @@ heap_ref_ops!(
 heap_ref_ops!(
     retain_list_ptr,
     release_list_ptr,
+    release_list_ptr_into,
     chelis_list,
     List,
     "compiled ownership ledger detected invalid list release"
@@ -1594,6 +1679,7 @@ heap_ref_ops!(
 heap_ref_ops!(
     retain_tuple_ptr,
     release_tuple_ptr,
+    release_tuple_ptr_into,
     chelis_tuple,
     Tuple,
     "compiled ownership ledger detected invalid tuple release"
@@ -1601,6 +1687,7 @@ heap_ref_ops!(
 heap_ref_ops!(
     retain_dict_ptr,
     release_dict_ptr,
+    release_dict_ptr_into,
     chelis_dict,
     Dict,
     "compiled ownership ledger detected invalid dict release"
@@ -1608,6 +1695,7 @@ heap_ref_ops!(
 heap_ref_ops!(
     retain_adt_ptr,
     release_adt_ptr,
+    release_adt_ptr_into,
     chelis_adt,
     Adt,
     "compiled ownership ledger detected invalid adt release"
@@ -1615,6 +1703,7 @@ heap_ref_ops!(
 heap_ref_ops!(
     retain_option_ptr,
     release_option_ptr,
+    release_option_ptr_into,
     chelis_option,
     Option,
     "compiled ownership ledger detected invalid option release"
