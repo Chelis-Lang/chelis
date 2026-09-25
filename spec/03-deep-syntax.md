@@ -754,6 +754,11 @@ the authored operand order for every operator (`spec/02-surf-syntax.md`
 list, record, and record-update children evaluate left to right (§6.2's
 `kv` ordering restates this for records).
 
+A binding's initializer, whether a `let` bind pair or a top-level value
+declaration that the evaluated program names, is evaluated whether or not the
+binding is read, so its traps are preserved. (This requirement is not fully
+implemented; see chelis#2440.)
+
 Within a single primitive, elementwise and reduction evaluation order is
 owned by `spec/04-type-system.md` [04-NUM-12] and [04-NUM-15]; this section
 orders the argument expressions that produce a primitive's operands.

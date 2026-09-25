@@ -15,10 +15,13 @@ mod wire_values;
 
 mod key_reference;
 
-use chelis_compiler_api::compiler::{eval_selected, prepare_eval};
+use chelis_compiler_api::compiler::{CompilerError, eval_in_context, eval_selected, prepare_eval};
+use chelis_compiler_api::context::CompiledContext;
 use chelis_compiler_api::schema::{
     EvalRequest, EvalResult, ExecutionValue, SourceKind, TensorValue,
 };
+use chelis_compiler_api::{COMPILER_VERSION, compile_reef_context};
+use chelis_types::types::Lane;
 use key_reference::{FOUR_KEYS, THREE_KEYS, TWO_KEYS, four_keys, three_keys, two_keys};
 use std::collections::BTreeMap;
 
@@ -1657,6 +1660,191 @@ fn an_unselected_declarations_invalid_draw_does_not_run() {
     );
     let result = eval_selected(request(&source), &["selected".into()]).unwrap();
     assert_eq!(tensor(&result, "selected"), mask(two_keys().1));
+}
+
+const DOMAIN_TRAP: &str = "numeric trap: domain in dropout at f32";
+
+/// A value declaration whose draw has the rate `rate`.
+fn sampled_value(rate: &str) -> String {
+    format!("sampled = dropout(key_from_seed(9i64), to_tensor([1.0f32, 1.0f32]), {rate})\n")
+}
+
+fn lane_of(result: &EvalResult, name: &str) -> Lane {
+    result
+        .manifest
+        .entries
+        .iter()
+        .find(|entry| entry.name == name)
+        .unwrap_or_else(|| panic!("no manifest entry `{name}`: {:?}", result.manifest))
+        .lane
+}
+
+/// A root's value, a scalar read as one element.
+fn root_values(result: &EvalResult, name: &str) -> Vec<f64> {
+    let root = result
+        .roots
+        .iter()
+        .find(|root| root.name.as_deref() == Some(name))
+        .unwrap_or_else(|| panic!("no root `{name}`: {:?}", result.roots));
+    match &root.value {
+        ExecutionValue::Scalar { value } => vec![value.get().as_f64_lossy()],
+        ExecutionValue::Tensor { .. } => tensor(result, name),
+        other => panic!("{other:?}"),
+    }
+}
+
+fn assert_domain_trap(outcome: Result<EvalResult, CompilerError>, row: &str) {
+    let error = outcome
+        .map(|result| format!("{:?}", result.roots))
+        .expect_err(row);
+    assert!(
+        error
+            .errors
+            .iter()
+            .any(|error| error.message == DOMAIN_TRAP),
+        "{row}: {error:?}"
+    );
+}
+
+/// spec/03 §4.4 with spec/06 §5.2 and [05-OP-37]: a binding's initializer is
+/// evaluated whether or not the binding is read, so a value declaration that
+/// a selected Host-lane declaration names is initialized, and its invalid
+/// rate traps, though nothing reads it. The rows are #2463's API witnesses
+/// in `eval_selected`: the value named from a function reached only through
+/// `grad` (#2463's witness 3, which C and `chelis eval --file` trap on in
+/// `issue_2463_key_dead_draw_traps`), from a plain call of that function,
+/// from a body the host runs as one kernel, and from a function the root
+/// names without applying it. Each row's valid-rate twin returns the root's
+/// value from the Host lane, so the trap is the only difference.
+///
+/// Evidentiary status: REGRESSION TEST for the `grad`, kernel-body and
+/// unapplied-function rows, each of which returned the root's value at
+/// 727e74b41. The plain-call row is a disposition lock: the host interpreter
+/// already walked its dead binding there.
+#[test]
+fn a_dead_reference_to_a_value_declaration_initializes_it_in_the_host_lane() {
+    let rows = [
+        (
+            "reached only through grad",
+            "def f(v: tensor[4, f32]) -> f32 = {\n  dead = sampled\n  tensor_to_scalar(sum(v, 0i32))\n}\ndef main() -> tensor[4, f32] = grad(f)(to_tensor([1.0f32, 2.0f32, 3.0f32, 4.0f32]))\n",
+            vec![1.0; 4],
+        ),
+        (
+            "plain call",
+            "def f(v: tensor[4, f32]) -> f32 = {\n  dead = sampled\n  tensor_to_scalar(sum(v, 0i32))\n}\ndef main() -> f32 = f(to_tensor([1.0f32, 2.0f32, 3.0f32, 4.0f32]))\n",
+            vec![10.0],
+        ),
+        (
+            "kernel body",
+            "def main() -> tensor[2, f32] = {\n  dead = sampled\n  to_tensor([1.0f32, 1.0f32])\n}\n",
+            vec![1.0; 2],
+        ),
+        (
+            "function named, not applied",
+            "def f(v: tensor[2, f32]) -> tensor[2, f32] = {\n  dead = sampled\n  v\n}\ndef main() -> tensor[2, f32] = {\n  g = f\n  to_tensor([1.0f32, 1.0f32])\n}\n",
+            vec![1.0; 2],
+        ),
+    ];
+    for (row, body, expected) in rows {
+        for inputs in [BTreeMap::new(), bindings()] {
+            let evaluate = |rate: &str| {
+                eval_selected(
+                    EvalRequest {
+                        source_kind: SourceKind::Surf,
+                        source: format!("{}{body}", sampled_value(rate)),
+                        bindings: inputs.clone(),
+                    },
+                    &["main".into()],
+                )
+            };
+            let control = evaluate("0.5f32").unwrap_or_else(|error| panic!("{row}: {error:?}"));
+            assert_eq!(lane_of(&control, "main"), Lane::Host, "{row}");
+            assert_eq!(root_values(&control, "main"), expected, "{row}");
+            assert_domain_trap(evaluate("1.0f32"), row);
+        }
+    }
+}
+
+/// A compiled context whose library module `Drawlib.Draw` exports `sampled`
+/// (an invalid rate) and `kept` (a valid one), with its decoded copy.
+fn draw_library_contexts() -> [CompiledContext; 2] {
+    let directory = tempfile::tempdir().unwrap();
+    std::fs::create_dir(directory.path().join("src")).unwrap();
+    std::fs::write(
+        directory.path().join("reef.toml"),
+        format!("[package]\nname = \"drawlib\"\nversion = \"0.1.0\"\ncompiler = \"={COMPILER_VERSION}\"\nmodule_prefix = \"Drawlib\"\n"),
+    )
+    .unwrap();
+    std::fs::write(
+        directory.path().join("src/draw.ch"),
+        format!(
+            "module Drawlib.Draw\nexport (sampled, kept)\n{}kept = dropout(key_from_seed(1i64), to_tensor([1.0f32, 1.0f32]), 0.0f32)\n",
+            sampled_value("1.0f32")
+        ),
+    )
+    .unwrap();
+    let context = compile_reef_context(directory.path(), directory.path()).unwrap();
+    let decoded = CompiledContext::decode(&context.encode().unwrap()).unwrap();
+    [context, decoded]
+}
+
+/// #2463's witness 2 in the in-context lane: a client whose only reference
+/// to the library value `sampled` is dead initializes it, so its invalid
+/// rate traps, as it does in C (`issue_2463_key_dead_draw_traps`). The
+/// valid-rate twin `kept`, named the same way, returns the client's value.
+///
+/// Evidentiary status: REGRESSION TEST. At 727e74b41 the `sampled` client
+/// returned `[1, 1]` from `eval_in_context`, in both contexts.
+#[test]
+fn a_dead_reference_to_a_library_value_declaration_initializes_it_in_context() {
+    let client = |name: &str| {
+        format!(
+            "module Drawlib.Client\nimport Drawlib.Draw ({name})\ndef main() -> tensor[2, f32] = {{\n  dead = {name}\n  to_tensor([1.0f32, 1.0f32])\n}}\n"
+        )
+    };
+    for context in &draw_library_contexts() {
+        let result = eval_in_context(context, &client("kept")).unwrap();
+        assert_eq!(lane_of(&result, "main"), Lane::Host);
+        assert_eq!(tensor(&result, "main"), vec![1.0; 2]);
+        assert_domain_trap(
+            eval_in_context(context, &client("sampled")),
+            "library value",
+        );
+    }
+}
+
+/// The complement of the two tests above: a value declaration that no
+/// declaration the evaluation runs names is never initialized, whether it
+/// sits beside the selected root, is named only by an unselected
+/// declaration, or is a library value the client imports without naming. An
+/// input declaration a kernel body names has no initializer to run.
+///
+/// Evidentiary status: DISPOSITION LOCK (every row returned its value at
+/// 727e74b41 too); the `other` selection is its regression half.
+#[test]
+fn a_value_declaration_no_run_declaration_names_is_not_initialized() {
+    let source = format!(
+        "{}def other() -> tensor[2, f32] = {{\n  dead = sampled\n  to_tensor([1.0f32, 1.0f32])\n}}\ndef main() -> tensor[2, f32] = to_tensor([1.0f32, 1.0f32])\n",
+        sampled_value("1.0f32")
+    );
+    let result = eval_selected(request(&source), &["main".into()]).unwrap();
+    assert_eq!(lane_of(&result, "main"), Lane::Host);
+    assert_eq!(tensor(&result, "main"), vec![1.0; 2]);
+    assert_domain_trap(
+        eval_selected(request(&source), &["other".into()]),
+        "the naming declaration, selected",
+    );
+
+    let source = "x: tensor[32, f32] = x\ndef main() -> tensor[2, f32] = {\n  dead = x\n  to_tensor([1.0f32, 1.0f32])\n}\n";
+    let result = eval_selected(request(source), &["main".into()]).unwrap();
+    assert_eq!(lane_of(&result, "main"), Lane::Host);
+    assert_eq!(tensor(&result, "main"), vec![1.0; 2]);
+
+    let client = "module Drawlib.Client\nimport Drawlib.Draw (sampled)\ndef main() -> tensor[2, f32] = to_tensor([1.0f32, 1.0f32])\n";
+    for context in &draw_library_contexts() {
+        let result = eval_in_context(context, client).unwrap();
+        assert_eq!(tensor(&result, "main"), vec![1.0; 2]);
+    }
 }
 
 /// A discarded draw consumes only its own key, so keeping a selected
