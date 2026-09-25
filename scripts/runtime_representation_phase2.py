@@ -198,21 +198,23 @@ def python_suite():
 
 
 def leg_environment(args, archive: Path):
-    """Name the pinned runtime directory only for the Python extension's leg.
+    """Name the pinned runtime directory for every leg that runs no chelis-cli tests.
 
-    The extension still selects its runtime through `CHELIS_RUNTIME_DIR` and
-    otherwise falls back to a modification-time search (#1354). Its leg never
-    spawns the chelis CLI, which rejects the variable, and no other leg receives
-    it. The export goes away when the extension carries its runtime.
+    The Python extension and the HIP harnesses still select their runtime
+    through `CHELIS_RUNTIME_DIR` and otherwise search for one (#1354). chelis-cli
+    tests may run `chelis build`, which rejects the variable, so their legs never
+    receive it, and a leg cannot mix them with a package that needs the pin. The
+    export goes away when those consumers carry or name their runtime.
     """
     packages = [value for flag, value in zip(args, args[1:]) if flag == "-p"]
-    if "chelis-python" not in packages:
-        return {}
-    if packages != ["chelis-python"]:
+    if "chelis-cli" not in packages:
+        return {"CHELIS_RUNTIME_DIR": str(archive.parent)}
+    if set(packages) != {"chelis-cli"}:
         raise OracleFailure(
-            "the pinned runtime directory is exported only to a chelis-python-only leg"
+            "a leg that runs chelis-cli tests cannot also run a package that needs "
+            "the pinned runtime directory"
         )
-    return {"CHELIS_RUNTIME_DIR": str(archive.parent)}
+    return {}
 
 
 def execute_leg(name, args, required, directory, *, environment=None):

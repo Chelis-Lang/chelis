@@ -179,7 +179,7 @@ target directory are never read.
 3. create `chelis-runtime` and move the runtime header into it
 4. implement the Rust runtime modules
 5. update host codegen to use accessors and retain/release
-6. update CLI build output and runtime discovery
+6. update CLI build output and runtime staging
 7. migrate compile/run tests away from `chelis_runtime.c`
 8. remove `crates/chelis-backend-c/runtime/chelis_runtime.c`
 
@@ -266,5 +266,6 @@ Before calling `3m` healthy enough to unblock `3g`, red-team these concrete surf
 - no active docs still claim `chelis build` emits `chelis_runtime.c`
 - no generated host code still peeks into non-tensor runtime struct fields
 - no active tests compile `chelis_runtime.c`
-- runtime discovery failures are explicit and actionable
+- `chelis build` stages only the runtime the CLI carries and rejects a set
+  `CHELIS_RUNTIME_DIR` before writing output
 - mixed-program compiled execution agrees with `chelis eval` on both C and HIP paths

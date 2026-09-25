@@ -2071,6 +2071,15 @@ reason = "the release workflow's build-target and pyo3-isolation contracts run i
 tracking_issue = "chelis#1354"
 
 [[path_rule]]
+prefix = "scripts/test_release_runtime_header_manifest.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "script-unit requires every release staging block to ship the exported runtime-header closure and preprocesses it as an installed consumer"
+tracking_issue = "chelis#1354"
+
+[[path_rule]]
 prefix = "scripts/installed_artifact_canary.py"
 disposition = "owner"
 workflow = "release.yml"

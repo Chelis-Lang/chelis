@@ -128,6 +128,8 @@ jobs:
           runtime_export="$(mktemp -d)"
           ./target/release/chelis runtime export "$runtime_export"
           cp "$runtime_export/libchelis_runtime.a" "$staging/lib/"
+          # The shipped archive is the sealed export's, byte for byte.
+          python3 -c 'import hashlib, json, sys; receipt = json.load(open(sys.argv[1])); digest = hashlib.sha256(open(sys.argv[2], "rb").read()).hexdigest(); sys.exit(0 if (receipt["mode"], receipt["archive_sha256"]) == ("sealed", digest) else f"shipped runtime {digest} is not the sealed export {receipt}")' "$runtime_export/chelis_runtime.receipt.json" "$staging/lib/libchelis_runtime.a"
           cp "$runtime_export/chelis_runtime.h" "$staging/include/"
           cp "$runtime_export/chelis_runtime_views.h" "$staging/include/"
           cp "$runtime_export/chelis_runtime_dtype.h" "$staging/include/"
@@ -274,6 +276,8 @@ jobs:
           runtime_export="$(mktemp -d)"
           ./target/release/chelis runtime export "$runtime_export"
           cp "$runtime_export/libchelis_runtime.a" "$staging/lib/"
+          # The shipped archive is the sealed export's, byte for byte.
+          python3 -c 'import hashlib, json, sys; receipt = json.load(open(sys.argv[1])); digest = hashlib.sha256(open(sys.argv[2], "rb").read()).hexdigest(); sys.exit(0 if (receipt["mode"], receipt["archive_sha256"]) == ("sealed", digest) else f"shipped runtime {digest} is not the sealed export {receipt}")' "$runtime_export/chelis_runtime.receipt.json" "$staging/lib/libchelis_runtime.a"
           cp "$runtime_export/chelis_runtime.h" "$staging/include/"
           cp "$runtime_export/chelis_runtime_views.h" "$staging/include/"
           cp "$runtime_export/chelis_runtime_dtype.h" "$staging/include/"
@@ -409,6 +413,8 @@ jobs:
           runtime_export="$(mktemp -d)"
           ./target/release/chelis runtime export "$runtime_export"
           cp "$runtime_export/libchelis_runtime.a" "$staging/lib/"
+          # The shipped archive is the sealed export's, byte for byte.
+          python3 -c 'import hashlib, json, sys; receipt = json.load(open(sys.argv[1])); digest = hashlib.sha256(open(sys.argv[2], "rb").read()).hexdigest(); sys.exit(0 if (receipt["mode"], receipt["archive_sha256"]) == ("sealed", digest) else f"shipped runtime {digest} is not the sealed export {receipt}")' "$runtime_export/chelis_runtime.receipt.json" "$staging/lib/libchelis_runtime.a"
           cp "$runtime_export/chelis_runtime.h" "$staging/include/"
           cp "$runtime_export/chelis_runtime_views.h" "$staging/include/"
           cp "$runtime_export/chelis_runtime_dtype.h" "$staging/include/"

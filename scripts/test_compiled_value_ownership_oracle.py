@@ -1608,33 +1608,29 @@ if __name__ == "__main__":
 class RuntimeLinkContractTests(unittest.TestCase):
     def context(self, **environment: str) -> oracle.PhaseContext:
         with mock.patch.dict(os.environ, environment):
+            if "CHELIS_RUNTIME_DIR" not in environment:
+                os.environ.pop("CHELIS_RUNTIME_DIR", None)
             context = oracle.PhaseContext()
         self.addCleanup(context.close)
         return context
 
     def test_build_rejections_are_observed_without_a_runtime_directory(self) -> None:
+        # An inherited runtime directory is refused before anything runs, so it
+        # reaches neither the CLI nor the cargo-test fixtures.
+        with self.assertRaisesRegex(oracle.OracleFailure, "Unset CHELIS_RUNTIME_DIR"):
+            self.context(CHELIS_RUNTIME_DIR="/foreign/runtime")
         fixture = next(
             row
             for row in oracle.fixture_manifest()
             if row.action is oracle.Action.BUILD_REJECT
         )
-        context = self.context(
-            CHELIS_RUNTIME_DIR="/foreign/runtime",
-            CHELIS_OWNERSHIP_LEDGER_PATH="/foreign/ledger.jsonl",
-        )
+        context = self.context(CHELIS_OWNERSHIP_LEDGER_PATH="/foreign/ledger.jsonl")
         context._prepared = True
         environments: list[dict[str, str]] = []
 
         def chelis(argv, *, environment, **_):
             environments.append(environment)
-            if "CHELIS_RUNTIME_DIR" in environment:
-                stderr = (
-                    "error: CHELIS_RUNTIME_DIR is set (/foreign/runtime), but chelis "
-                    "stages the runtime built into it and never takes one from a "
-                    "directory. Unset CHELIS_RUNTIME_DIR\n"
-                )
-            else:
-                stderr = "\n".join(fixture.diagnostic_fragments)
+            stderr = "\n".join(fixture.diagnostic_fragments)
             return oracle.subprocess.CompletedProcess(argv, 1, "", stderr)
 
         with mock.patch.object(oracle, "_run", side_effect=chelis):
@@ -1643,6 +1639,7 @@ class RuntimeLinkContractTests(unittest.TestCase):
         self.assertTrue(detection.passed, detection.detail)
         self.assertEqual(len(environments), 1)
         self.assertNotIn("CHELIS_OWNERSHIP_LEDGER_PATH", environments[0])
+        self.assertNotIn("CHELIS_RUNTIME_DIR", environments[0])
 
     def test_prepare_takes_the_runtime_the_cli_build_compiled_with_the_ledger(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

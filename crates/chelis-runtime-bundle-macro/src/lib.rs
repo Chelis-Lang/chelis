@@ -60,10 +60,12 @@ fn expand(input: TokenStream, found: impl FnOnce(&Path) -> Result<String, String
         let args = std::env::args_os()
             .map(|arg| arg.to_string_lossy().into_owned())
             .collect::<Vec<_>>();
-        locate::locate(&args, extern_name, Path::is_file).and_then(|located| match located {
-            Located::Archive(archive) => found(&archive),
-            Located::NoLinkableOutput => Ok("::core::option::Option::None".to_owned()),
-        })
+        locate::expand_argfiles(args, |path| std::fs::read_to_string(path))
+            .and_then(|args| locate::locate(&args, extern_name, Path::is_file))
+            .and_then(|located| match located {
+                Located::Archive(archive) => found(&archive),
+                Located::NoLinkableOutput => Ok("::core::option::Option::None".to_owned()),
+            })
     };
     let source = match expansion {
         Ok(source) => source,

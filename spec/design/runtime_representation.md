@@ -1596,6 +1596,13 @@ incomplete-arithmetic and element-binding mutations remain the negative
 witnesses: a dtype or storage marker without its complete registration still
 fails.
 
+The carried runtime (chelis#1354) registers `chelis-runtime/src/public_headers.rs`
+in the Phase 0 source universe: 87 sources (76 Rust and eleven
+C/C++/Objective-C). It holds the public runtime header texts as `include_str!`
+constants that the CLI stages beside the carried archive. The structural scan
+finds no new representation seam, with no foundation, classifier or mutation
+change.
+
 ## B2. Invariants at every phase boundary
 
 1. The public C ABI remains [05-OP-31]/[05-OP-44]-exact and
@@ -1852,11 +1859,12 @@ metadata-plan C API tests, 79 HIP descriptor/owner tests, 109 platform-invariant
 Python binding tests, and sixteen backend-header census/enrollment tests. Counts
 and digests are derived summaries, not membership authority. The Python leg names its
 integration binaries and relevant internal ownership tests explicitly rather
-than freezing platform-only package tests. The Python extension still selects its
-runtime through `CHELIS_RUNTIME_DIR` and otherwise searches by modification time,
-so only that leg receives the pin's exclusive directory under that name; it
-spawns no chelis CLI, and every other leg runs without the variable. That export
-ends when the extension carries its runtime (#1354). The command first obtains a complete
+than freezing platform-only package tests. The Python extension and the HIP
+harnesses still select their runtime through `CHELIS_RUNTIME_DIR` and otherwise
+search for one, so every leg that runs no chelis-cli tests receives the pin's
+exclusive directory under that name; chelis-cli legs, which may run `chelis
+build`, never do. That export ends when those consumers carry or name their
+runtime (#1354). The command first obtains a complete
 fresh Phase 1 receipt, then lists and executes each complete current Phase 2
 cohort with zero retries. Every required identity must remain selected,
 nonignored, executed and passing; additions are executed and reported, while a

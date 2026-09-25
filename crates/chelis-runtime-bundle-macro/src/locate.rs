@@ -75,6 +75,35 @@ pub(crate) fn locate(
     Ok(Located::Archive(archive))
 }
 
+/// This process's arguments as rustc reads them: an `@path` argument after the
+/// program is replaced by the lines of `path`. Cargo passes rustc its arguments
+/// through such a file when the command line is too long; classifying the
+/// unexpanded `@path` would mistake a linkable compilation for one without
+/// linkable output. `read` returns a file's contents.
+pub(crate) fn expand_argfiles(
+    args: Vec<String>,
+    read: impl Fn(&Path) -> std::io::Result<String>,
+) -> Result<Vec<String>, String> {
+    let mut expanded = Vec::with_capacity(args.len());
+    for (index, arg) in args.into_iter().enumerate() {
+        match arg.strip_prefix('@').filter(|_| index > 0) {
+            Some(file) if file.starts_with("shell:") => {
+                return Err(format!(
+                    "cannot locate the runtime archive: rustc read shell-quoted arguments from `{file}`"
+                ));
+            }
+            Some(file) => {
+                let text = read(Path::new(file)).map_err(|error| {
+                    format!("cannot read the rustc argument file {file}: {error}")
+                })?;
+                expanded.extend(text.lines().map(str::to_owned));
+            }
+            None => expanded.push(arg),
+        }
+    }
+    Ok(expanded)
+}
+
 fn has_flag(args: &[String], flag: &str) -> bool {
     args.iter().any(|arg| {
         arg == flag
@@ -238,5 +267,31 @@ mod tests {
         let list = link_compile(&["--emit=link", "--extern", &first, "--extern", second]);
         let error = classify(&list).unwrap_err();
         assert!(error.contains("conflicting"), "{error}");
+    }
+
+    #[test]
+    fn argfile_arguments_are_classified_as_rustc_reads_them() {
+        let contents = format!(
+            "--crate-name\nchelis_runtime_bundle\n--emit=link\n--extern\nchelis_runtime={RLIB}\n"
+        );
+        let expanded = expand_argfiles(args(&["rustc", "@/t/args"]), |path| {
+            assert_eq!(path, Path::new("/t/args"));
+            Ok(contents.clone())
+        })
+        .expect("argument file");
+        assert_eq!(
+            classify(&expanded),
+            Ok(Located::Archive(PathBuf::from(ARCHIVE)))
+        );
+    }
+
+    #[test]
+    fn unreadable_or_shell_quoted_argfiles_fail() {
+        let missing = expand_argfiles(args(&["rustc", "@/t/missing"]), |_| {
+            Err(std::io::Error::from(std::io::ErrorKind::NotFound))
+        });
+        assert!(missing.unwrap_err().contains("/t/missing"));
+        let shell = expand_argfiles(args(&["rustc", "@shell:/t/args"]), |_| Ok(String::new()));
+        assert!(shell.unwrap_err().contains("shell-quoted"));
     }
 }

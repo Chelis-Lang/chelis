@@ -73,6 +73,11 @@ class ContractTests(unittest.TestCase):
 
     def test_pinned_runtime_directory_never_reaches_a_leg_that_can_run_the_cli(self):
         archive = Path("/pinned/runtime/libchelis_runtime.a")
+        self.assertEqual(oracle.leg_environment(("-p", "chelis-cli"), archive), {})
+        self.assertEqual(
+            oracle.leg_environment(("-p", "chelis-backend-hip"), archive),
+            {"CHELIS_RUNTIME_DIR": "/pinned/runtime"},
+        )
         with self.assertRaises(oracle.OracleFailure):
             oracle.leg_environment(("-p", "chelis-python", "-p", "chelis-cli"), archive)
 
@@ -237,14 +242,14 @@ class ReceiptTests(unittest.TestCase):
 
             runtime_pin.assert_called_once_with(root / "target/runtime-representation-phase2/run-id/runtime-build")
             self.assertEqual(events, ["phase1", *[name for name, _ in legs]])
-            # Only the Python extension, which still selects its runtime through
-            # CHELIS_RUNTIME_DIR, receives runtime_pin's exclusive directory.
-            python = "Python host device and DLPack boundaries"
+            # Every leg that runs no chelis-cli tests receives runtime_pin's
+            # exclusive directory: its Python and HIP consumers still select
+            # their runtime through CHELIS_RUNTIME_DIR. chelis-cli legs never do.
             self.assertEqual(
                 environments,
                 {
-                    name: {"CHELIS_RUNTIME_DIR": str(root / "runtime")} if name == python else {}
-                    for name, _ in legs
+                    name: {} if "chelis-cli" in args else {"CHELIS_RUNTIME_DIR": str(root / "runtime")}
+                    for name, args in legs
                 },
             )
             payload = json.loads(receipt.read_text())

@@ -134,16 +134,17 @@ compilation that emits no linkable output MAY carry an inert placeholder, and
 staging and export SHALL refuse it. A sealed distribution build SHALL carry no
 build path.
 
-Staging SHALL write the carried archive and public headers atomically, verify the
-written archive against the carried SHA-256 digest, and write
-`chelis_runtime.receipt.json` recording that digest, the header digests and the
-build mode. The receipt records staging only; it makes no claim about linking or
+Staging SHALL replace each staged file atomically, verify the written archive
+against the carried SHA-256 digest before publishing it, and write
+`chelis_runtime.receipt.json` last, recording that digest, the header digests and
+the build mode; a staging without a receipt is incomplete. The receipt records
+staging only; it makes no claim about linking or
 execution. `chelis build` SHALL name the staged archive and its digest on stdout.
 Link commands that Chelis prints or runs SHALL name the staged archive by path,
 never through a library search.
 
 A development build SHALL refuse to stage when the runtime's declared source
-inputs changed after it was built. The runtime compilation records a digest for
+inputs changed after it was built. The runtime compilation SHALL record a digest for
 each file of the runtime crate, of its workspace dependencies, and of the
 workspace lockfile; a changed or missing recorded file, or an unrecorded file in
 those roots, fails staging with its path. A sealed distribution build is

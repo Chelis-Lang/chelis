@@ -2221,6 +2221,13 @@ def require_instrumented_runtime(
 
 class PhaseContext:
     def __init__(self) -> None:
+        # chelis build rejects a runtime directory, and the cargo-test fixtures
+        # must not link one either, so an inherited one is refused up front.
+        if RUNTIME_DIR_VARIABLE in os.environ:
+            raise OracleFailure(
+                f"{RUNTIME_DIR_VARIABLE} is set, but chelis build rejects it and this "
+                f"oracle links only the runtime its CLI carries. Unset {RUNTIME_DIR_VARIABLE}"
+            )
         self.temporary = tempfile.TemporaryDirectory(prefix="chelis-ownership-phase0-")
         self.root = Path(self.temporary.name)
         self.environment = os.environ.copy()
@@ -2235,12 +2242,11 @@ class PhaseContext:
         target_setting = self.environment.get("CARGO_TARGET_DIR", "target")
         target = Path(target_setting)
         self.target = target if target.is_absolute() else REPO_ROOT / target
-        # chelis stages the runtime it carries and rejects a runtime directory;
-        # the instrumented CLI must not write its own ledger either.
+        # The instrumented CLI must not write its own ledger.
         self.chelis_environment = {
             name: value
             for name, value in self.environment.items()
-            if name not in {RUNTIME_DIR_VARIABLE, LEDGER_PATH_VARIABLE}
+            if name != LEDGER_PATH_VARIABLE
         }
         self.chelis = self.root / "instrumented-cli" / "chelis"
         self.runtime_sha256: str | None = None
