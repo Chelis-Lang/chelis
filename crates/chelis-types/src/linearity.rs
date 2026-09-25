@@ -1395,13 +1395,21 @@ impl Checker {
         }
 
         let mut pushed: Vec<(String, BindingId)> = Vec::new();
+        // chelis#2544: a parameter's type is the checked function type's, not
+        // its annotation. An unannotated parameter the checker resolved to a
+        // key (`map(fn (y) -> (y, y), keys)`) is a key holder like an
+        // annotated one; reading the annotation alone declared it untyped, so
+        // [04-LIN-9] never saw its second use. The annotation is the fallback
+        // only where the node carries no resolved type.
+        let checked_fn_type = type_metadata(expr);
         if let Some(params) = tagged_children(&children[0], DeepTag::Params) {
-            for param in params {
+            for (index, param) in params.iter().enumerate() {
                 if let Some((name, ty)) = param_name_and_type(param) {
                     if let Some(ty) = ty {
                         self.reject_borrowed_key_parameter(expr, name, ty);
                     }
-                    let id = inner_scope.declare(name, ty.cloned());
+                    let checked = checked_fn_type.and_then(|fn_ty| type_expr_fn_arg(fn_ty, index));
+                    let id = inner_scope.declare(name, checked.or(ty).cloned());
                     pushed.push((name.to_string(), id));
                 }
             }

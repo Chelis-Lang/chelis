@@ -261,6 +261,37 @@ fn a_closure_never_captures_a_key() {
     );
 }
 
+/// chelis#2544: a closure parameter the checker resolves to a key is a key
+/// holder whether or not the program annotates it; linearity reads the
+/// checked parameter type, so a second use is refused either way.
+///
+/// Evidentiary status: REGRESSION TEST. At `6f42b4e92` both unannotated
+/// negatives were accepted: linearity declared an unannotated parameter
+/// untyped.
+#[test]
+fn an_inferred_key_closure_parameter_is_used_once() {
+    rejects_reuse(
+        "map with an inferred key parameter used twice",
+        "def bad(ks: List[key]) -> List[(key, key)] = map(fn (y) -> (y, y), ks)\n",
+    );
+    rejects_reuse(
+        "an applied lambda with an inferred key parameter used twice",
+        "def bad(k: key) -> (key, key) = (fn (y) -> (y, y))(k)\n",
+    );
+    rejects_reuse(
+        "the annotated twin used twice",
+        "def bad(k: key) -> (key, key) = (fn (y: key) -> (y, y))(k)\n",
+    );
+    accepts(
+        "map with an inferred key parameter used once",
+        "def good(ks: List[key]) -> List[(key, key)] = map(fn (y) -> split_key(y), ks)\n",
+    );
+    accepts(
+        "an applied lambda with an inferred key parameter used once",
+        "def good(k: key) -> (key, key) = (fn (y) -> split_key(y))(k)\n",
+    );
+}
+
 #[test]
 fn a_signature_never_borrows_a_key() {
     rejects_reuse("&key", "def bad(k: &key) -> i64 = 0i64\n");
