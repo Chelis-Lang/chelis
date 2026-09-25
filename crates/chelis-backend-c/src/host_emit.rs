@@ -516,20 +516,8 @@ pub(crate) fn emit_host_abi_program(
         )?;
     }
 
-    // Keep runtime aggregate accessors out of translation units whose emitted
-    // code never reconstructs aggregate interface provenance. Besides avoiding
-    // dead support, this preserves the existing source-level contract that a
-    // compile-time record projection has no runtime ADT accessor at all. The
-    // helper group is mutually recursive through erased `chelis_value` children,
-    // so one actual aggregate-ingress call enables the complete group.
-    let needs_aggregate_interface_origin_support = body
-        .iter()
-        .any(|line| line.contains("__chelis_host_result_origin_interface_"));
     let mut result_claim_support = Vec::new();
     append_host_result_claim_support(&mut result_claim_support);
-    if needs_aggregate_interface_origin_support {
-        append_host_result_interface_origin_support(&mut result_claim_support);
-    }
     append_host_result_claim_checks(&mut result_claim_support);
     result_claim_support.push(String::new());
     result_claim_support.extend(body);
@@ -2132,6 +2120,9 @@ typedef struct __chelis_host_result_origin {
     const char *op;
     const char *trap;
     int64_t child_count;
+    /* A leaf that stands for every value nested in the one it labels: the
+       interface `load` origin. Projecting a child of it yields itself. */
+    int uniform;
     const struct __chelis_host_result_origin *const *child_view;
     const struct __chelis_host_result_origin *children[];
 } __chelis_host_result_origin;
@@ -2168,6 +2159,7 @@ static __chelis_host_result_origin *__chelis_host_result_origin_alloc(__chelis_h
     node->op = NULL;
     node->trap = NULL;
     node->child_count = child_count;
+    node->uniform = 0;
     node->child_view = NULL;
     arena->head = node;
     return node;
@@ -2186,6 +2178,15 @@ static const __chelis_host_result_origin *__chelis_host_result_origin_leaf(__che
     return node;
 }
 
+/* The origin of a value that entered this invocation from its caller.
+   Every tensor nested in an interface value is a `load`, so one uniform leaf
+   describes the whole value without walking it (chelis#2522). */
+static const __chelis_host_result_origin *__chelis_host_result_origin_load(__chelis_host_result_origin_arena *arena) {
+    const __chelis_host_result_origin *leaf = __chelis_host_result_origin_leaf(arena, "load", "numeric trap: domain in load at i64");
+    ((__chelis_host_result_origin *)leaf)->uniform = 1;
+    return leaf;
+}
+
 static const __chelis_host_result_origin *__chelis_host_result_origin_aggregate(__chelis_host_result_origin_arena *arena, int64_t child_count, const __chelis_host_result_origin *const *children) {
     bool any = false;
     for (int64_t i = 0; i < child_count; ++i) {
@@ -2200,6 +2201,7 @@ static const __chelis_host_result_origin *__chelis_host_result_origin_aggregate(
 
 static const __chelis_host_result_origin *__chelis_host_result_origin_child(const __chelis_host_result_origin *origin, int64_t index) {
     if (origin == NULL) return NULL;
+    if (origin->uniform) return origin;
     if (origin->child_count < 0 || index < 0 || index >= origin->child_count || origin->child_view == NULL) {
         fprintf(stderr, "host runtime: aggregate result producer provenance does not match the projected value\n");
         abort();
@@ -2208,7 +2210,7 @@ static const __chelis_host_result_origin *__chelis_host_result_origin_child(cons
 }
 
 static const __chelis_host_result_origin *__chelis_host_result_origin_list_suffix(__chelis_host_result_origin_arena *arena, const __chelis_host_result_origin *origin, int64_t count) {
-    if (origin == NULL || count == 0) return origin;
+    if (origin == NULL || count == 0 || origin->uniform) return origin;
     // The runtime owns skip's negative-count diagnostic. Preserve that
     // ordering instead of replacing it with an internal metadata failure.
     if (count < 0) return origin;
@@ -2237,76 +2239,6 @@ static const __chelis_host_result_origin **__chelis_host_result_origin_children(
         abort();
     }
     return children;
-}
-"#.to_string());
-}
-
-fn append_host_result_interface_origin_support(out: &mut Vec<String>) {
-    out.push(r#"
-static const __chelis_host_result_origin *__chelis_host_result_origin_interface_value(__chelis_host_result_origin_arena *arena, chelis_value value);
-
-static const __chelis_host_result_origin *__chelis_host_result_origin_interface_list(__chelis_host_result_origin_arena *arena, const chelis_list *value) {
-    int64_t count = chelis_list_len(value);
-    const __chelis_host_result_origin **children = __chelis_host_result_origin_children(count);
-    for (int64_t i = 0; i < count; ++i) {
-        chelis_value child = chelis_list_index(value, i);
-        children[i] = __chelis_host_result_origin_interface_value(arena, child);
-        chelis_value_release(child);
-    }
-    const __chelis_host_result_origin *origin = __chelis_host_result_origin_aggregate(arena, count, children);
-    free(children);
-    return origin;
-}
-
-static const __chelis_host_result_origin *__chelis_host_result_origin_interface_tuple(__chelis_host_result_origin_arena *arena, const chelis_tuple *value) {
-    int64_t count = chelis_tuple_len(value);
-    const __chelis_host_result_origin **children = __chelis_host_result_origin_children(count);
-    for (int64_t i = 0; i < count; ++i) {
-        chelis_value child = chelis_tuple_get(value, i);
-        children[i] = __chelis_host_result_origin_interface_value(arena, child);
-        chelis_value_release(child);
-    }
-    const __chelis_host_result_origin *origin = __chelis_host_result_origin_aggregate(arena, count, children);
-    free(children);
-    return origin;
-}
-
-static const __chelis_host_result_origin *__chelis_host_result_origin_interface_adt(__chelis_host_result_origin_arena *arena, const chelis_adt *value) {
-    int64_t count = chelis_adt_field_count(value);
-    const __chelis_host_result_origin **children = __chelis_host_result_origin_children(count);
-    for (int64_t i = 0; i < count; ++i) {
-        chelis_value child = chelis_adt_get_field(value, i);
-        children[i] = __chelis_host_result_origin_interface_value(arena, child);
-        chelis_value_release(child);
-    }
-    const __chelis_host_result_origin *origin = __chelis_host_result_origin_aggregate(arena, count, children);
-    free(children);
-    return origin;
-}
-
-static const __chelis_host_result_origin *__chelis_host_result_origin_interface_option(__chelis_host_result_origin_arena *arena, const chelis_option *value) {
-    if (!chelis_option_is_some(value)) return NULL;
-    chelis_value child = chelis_option_unwrap(value);
-    const __chelis_host_result_origin *child_origin = __chelis_host_result_origin_interface_value(arena, child);
-    chelis_value_release(child);
-    return __chelis_host_result_origin_aggregate(arena, 1, &child_origin);
-}
-
-static const __chelis_host_result_origin *__chelis_host_result_origin_interface_value(__chelis_host_result_origin_arena *arena, chelis_value value) {
-    switch (value.tag) {
-        case CHELIS_VALUE_TENSOR:
-            return __chelis_host_result_origin_leaf(arena, "load", "numeric trap: domain in load at i64");
-        case CHELIS_VALUE_LIST:
-            return __chelis_host_result_origin_interface_list(arena, (const chelis_list *)value.payload.handle);
-        case CHELIS_VALUE_TUPLE:
-            return __chelis_host_result_origin_interface_tuple(arena, (const chelis_tuple *)value.payload.handle);
-        case CHELIS_VALUE_ADT:
-            return __chelis_host_result_origin_interface_adt(arena, (const chelis_adt *)value.payload.handle);
-        case CHELIS_VALUE_OPTION:
-            return __chelis_host_result_origin_interface_option(arena, (const chelis_option *)value.payload.handle);
-        default:
-            return NULL;
-    }
 }
 "#.to_string());
 }
@@ -3767,7 +3699,7 @@ impl<'a> HostEmitter<'a> {
     fn declare_result_origin(&mut self, value: &str, ty: &HostType, producer: Option<&str>) {
         let origin = result_origin_name(value);
         let initializer = match producer {
-            Some("load") => self.interface_result_origin_expr(value, ty),
+            Some("load") => Self::interface_result_origin_expr(ty),
             Some(op) if matches!(ty, HostType::Tensor(_)) => {
                 let op = chelis_ir::span_sanitize::sanitize_for_format_string(op);
                 format!(
@@ -3782,31 +3714,21 @@ impl<'a> HostEmitter<'a> {
         ));
     }
 
-    fn interface_result_origin_expr(&self, value: &str, ty: &HostType) -> String {
-        if !host_type_may_carry_result_origin(ty) {
-            return "NULL".to_string();
-        }
-        match ty {
-            HostType::Tensor(_) => "__chelis_host_result_origin_leaf(__chelis_origin_arena, \"load\", \"numeric trap: domain in load at i64\")".to_string(),
-            HostType::List(_) => format!(
-                "__chelis_host_result_origin_interface_list(__chelis_origin_arena, {value})"
-            ),
-            HostType::Tuple(_) => format!(
-                "__chelis_host_result_origin_interface_tuple(__chelis_origin_arena, {value})"
-            ),
-            HostType::Adt(_, _) => format!(
-                "__chelis_host_result_origin_interface_adt(__chelis_origin_arena, {value})"
-            ),
-            HostType::Option(_) => format!(
-                "__chelis_host_result_origin_interface_option(__chelis_origin_arena, {value})"
-            ),
-            _ => "NULL".to_string(),
+    /// The origin of a value that entered from outside the expression: a
+    /// parameter, a loop item, or a callee without private provenance. It is
+    /// one uniform `load` leaf, so no ingress walks the value, and a
+    /// recursive call over a large carried value stays linear (chelis#2522).
+    fn interface_result_origin_expr(ty: &HostType) -> String {
+        if host_type_may_carry_result_origin(ty) {
+            "__chelis_host_result_origin_load(__chelis_origin_arena)".to_string()
+        } else {
+            "NULL".to_string()
         }
     }
 
     fn assign_interface_result_origin(&mut self, target: &str, ty: &HostType) {
         let origin = result_origin_name(target);
-        let initializer = self.interface_result_origin_expr(target, ty);
+        let initializer = Self::interface_result_origin_expr(ty);
         self.lines
             .push(format!("{}{origin} = {initializer};", self.indent));
     }
@@ -4804,7 +4726,7 @@ impl<'a> HostEmitter<'a> {
                         .push(format!("{}{target} = {};", self.indent, c_ident(name)));
                     let target_origin = result_origin_name(target);
                     if self.interface_reload_names.contains(name) {
-                        let load = self.interface_result_origin_expr(target, ty);
+                        let load = Self::interface_result_origin_expr(ty);
                         self.lines
                             .push(format!("{}{target_origin} = {load};", self.indent));
                     } else {
@@ -9977,10 +9899,10 @@ fn host_type(expr: &HostExpr) -> HostType {
 }
 
 /// Whether the evaluator's `ResultProducer` model can attach provenance to
-/// a value of this resolved ABI type.  This keeps a true interface ingress
-/// O(1) for scalar-only lists/tuples instead of walking values that can only
-/// produce an all-null tree.  ADT arguments are type parameters rather than a
-/// field-layout description, so ADTs remain conservatively recursive.
+/// a value of this resolved ABI type. A value that cannot carries a null
+/// origin rather than the uniform `load` leaf. ADT arguments are type
+/// parameters rather than a field-layout description, so every ADT is
+/// conservatively treated as able to.
 fn host_type_may_carry_result_origin(ty: &HostType) -> bool {
     match ty {
         HostType::Tensor(_) | HostType::Adt(_, _) => true,
