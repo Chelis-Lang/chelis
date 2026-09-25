@@ -808,6 +808,27 @@ class FrozenMutationContractTests(unittest.TestCase):
 
 
 class MutationContractTests(unittest.TestCase):
+    def test_every_mutation_applies_to_its_current_source(self) -> None:
+        # Mutations execute only in the oracle proper, so without this an
+        # anchor the tree has drifted from surfaces only in that heavy run.
+        for probe in oracle.phase0_mutation_probes():
+            path = REPO_ROOT / probe.path
+            source = path.read_text(encoding="utf-8") if path.exists() else ""
+            with self.subTest(witness=probe.witness_id):
+                self.assertNotEqual(probe.mutate(source), source)
+
+    def test_incomplete_dtype_mutation_survives_an_appended_dtype(self) -> None:
+        declaration = "pub enum RuntimeDType {\n"
+        source = (REPO_ROOT / "crates/chelis-vocab/src/lib.rs").read_text(encoding="utf-8")
+        tail = source.index("\n}", source.index(declaration))
+        appended = source[:tail] + "\n    Phase0Successor = 126," + source[tail:]
+        for name, current in (("current", source), ("appended", appended)):
+            with self.subTest(source=name):
+                mutated = oracle.mutate_incomplete_dtype(current)
+                start = mutated.index(declaration)
+                body = mutated[start : mutated.index("\n}", start)]
+                self.assertTrue(body.endswith("\n    Phase0Probe = 127,"), body[-80:])
+
     def test_header_mutations_remain_inside_their_include_guards(self) -> None:
         for probe in oracle.phase0_mutation_probes():
             if probe.path.suffix != ".h":
@@ -1434,7 +1455,7 @@ class RedTeamRegressionTests(unittest.TestCase):
         native = len(oracle.INVENTORY_SOURCES) - rust
         source = Path(oracle.__file__).read_text(encoding="utf-8")
         self.assertIn(
-            "Seventy-six are Rust and eleven are C, C++, or Objective-C sources",
+            "Seventy-seven are Rust and eleven are C, C++, or Objective-C sources",
             source,
         )
-        self.assertEqual((rust, native), (76, 11))
+        self.assertEqual((rust, native), (77, 11))

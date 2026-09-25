@@ -1573,6 +1573,30 @@ emitter owner moves active debt from 252 to 253. Both remain implementation
 internals with no public ABI or carrier change, and the existing mutations
 continue to reject an unregistered successor.
 
+The random-key element dtype (chelis#2413) adds runtime dtype `Key = 9`, whose
+representation `Repr::Word64` is one opaque 64-bit word with no arithmetic
+representation, and its sealed storage marker `KeyWord`. The append-only
+foundation extends from 368 to 372 rows, and active debt from 237 to 241, with
+four `dtype-contract` owners: `RuntimeDType::Key` and `Repr::Word64` in
+`chelis-vocab/src/lib.rs`, and `ElementStorage for KeyWord` and
+`private :: Sealed for KeyWord` in `chelis-runtime/src/element.rs`. The
+numbered semantics move with them: spec/04 §1.1 adds `key`, and [05-OP-31]
+adds `CHELIS_DTYPE_KEY = 9` as a tensor-only tag that no `chelis_scalar`
+carries. The two element owners enter as transition debt, not as final forms
+beside `Bool8`'s, because the final-form list is oracle configuration this
+change does not edit; promoting them is a classification for the #893 owner.
+No classifier, final-form list, source-universe rule or deletion phase changes.
+One frozen mutation is reimplemented: `phase0.mutate_incomplete_dtype` anchored
+on the text of the last variant, `I16 = 8`, which appending `Key` removed, so
+the witness could no longer run. It now anchors on the `RuntimeDType`
+declaration and inserts its unregistered variant before the closing brace, so
+it still follows the last variant and no longer drifts when a dtype is
+appended. Its path, seam kind, owners, failure and command are unchanged; its
+implementation digest and the freeze digest move. The incomplete-dtype,
+incomplete-arithmetic and element-binding mutations remain the negative
+witnesses: a dtype or storage marker without its complete registration still
+fails.
+
 ## B2. Invariants at every phase boundary
 
 1. The public C ABI remains [05-OP-31]/[05-OP-44]-exact and

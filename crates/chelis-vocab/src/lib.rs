@@ -301,10 +301,13 @@ pub enum Repr {
     TwosComplement64,
     /// A canonical boolean in one byte: `0` is false and `1` is true.
     Bool8,
+    /// An opaque 64-bit word with no numeric meaning: a random key
+    /// ([05-RNG-2]). Every bit pattern is a key.
+    Word64,
 }
 
 impl Repr {
-    pub const ALL: [Self; 9] = [
+    pub const ALL: [Self; 10] = [
         Self::Ieee754Binary16,
         Self::Ieee754Binary32,
         Self::Ieee754Binary64,
@@ -314,6 +317,7 @@ impl Repr {
         Self::TwosComplement32,
         Self::TwosComplement64,
         Self::Bool8,
+        Self::Word64,
     ];
 
     pub const fn byte_width(self) -> usize {
@@ -321,7 +325,7 @@ impl Repr {
             Self::TwosComplement8 | Self::Bool8 => 1,
             Self::Ieee754Binary16 | Self::Bfloat16 | Self::TwosComplement16 => 2,
             Self::Ieee754Binary32 | Self::TwosComplement32 => 4,
-            Self::Ieee754Binary64 | Self::TwosComplement64 => 8,
+            Self::Ieee754Binary64 | Self::TwosComplement64 | Self::Word64 => 8,
         }
     }
 
@@ -337,7 +341,8 @@ impl Repr {
             | Self::TwosComplement16
             | Self::TwosComplement32
             | Self::TwosComplement64
-            | Self::Bool8 => false,
+            | Self::Bool8
+            | Self::Word64 => false,
         }
     }
 }
@@ -357,6 +362,9 @@ pub enum RuntimeDType {
     F16 = 6,
     I8 = 7,
     I16 = 8,
+    /// A random key ([05-RNG-2]): structurally non-numeric, with no
+    /// arithmetic representation.
+    Key = 9,
 }
 
 /// The representation used while computing, before storage finalization
@@ -422,7 +430,7 @@ impl DTypeContract {
 }
 
 impl RuntimeDType {
-    pub const ALL: [Self; 9] = [
+    pub const ALL: [Self; 10] = [
         Self::F32,
         Self::F64,
         Self::I32,
@@ -432,6 +440,7 @@ impl RuntimeDType {
         Self::F16,
         Self::I8,
         Self::I16,
+        Self::Key,
     ];
 
     pub const fn id(self) -> i32 {
@@ -449,6 +458,7 @@ impl RuntimeDType {
             Self::F16 => "f16",
             Self::I8 => "int8",
             Self::I16 => "int16",
+            Self::Key => "key",
         }
     }
 
@@ -463,11 +473,13 @@ impl RuntimeDType {
             Self::F16 => "CHELIS_DTYPE_F16",
             Self::I8 => "CHELIS_DTYPE_I8",
             Self::I16 => "CHELIS_DTYPE_I16",
+            Self::Key => "CHELIS_DTYPE_KEY",
         }
     }
 
     /// Selects stored and arithmetic representation together, exactly as
-    /// [04-NUM-8] declares. Bool has no arithmetic representation ([04-NUM-4]).
+    /// [04-NUM-8] declares. Bool has no arithmetic representation ([04-NUM-4]),
+    /// and neither has a key (spec/04 §1.1).
     pub const fn contract(self) -> DTypeContract {
         use ArithmeticRepr as A;
         let (repr, arithmetic) = match self {
@@ -480,6 +492,7 @@ impl RuntimeDType {
             Self::F16 => (Repr::Ieee754Binary16, Some(A::Ieee754Binary32)),
             Self::I8 => (Repr::TwosComplement8, Some(A::ExactTwosComplement8)),
             Self::I16 => (Repr::TwosComplement16, Some(A::ExactTwosComplement16)),
+            Self::Key => (Repr::Word64, None),
         };
         DTypeContract {
             dtype: self,
@@ -509,6 +522,7 @@ impl RuntimeDType {
             6 => Ok(Self::F16),
             7 => Ok(Self::I8),
             8 => Ok(Self::I16),
+            9 => Ok(Self::Key),
             id => Err(RuntimeDTypeDecodeError::InvalidId { id }),
         }
     }

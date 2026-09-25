@@ -322,6 +322,13 @@ OBSERVATION_DECODE_TABLE: tuple[tuple[str, str, str], ...] = (
         "raw 2-byte bit read: `half::f16` has no `TensorElement` impl, "
         "so the bits are decoded explicitly via `from_bits`",
     ),
+    (
+        "Key",
+        'runtime_fail!("Domain: tensor formatting: a key has no text form")',
+        "no pointer view: a random key has no text form (spec/04 section 1.1; "
+        "[05-OP-25] admits only the data element dtypes), so the arm reads no "
+        "element and traps Domain",
+    ),
 )
 
 # Obligation 7: the only permitted c-format-narrowing allowlist row. The

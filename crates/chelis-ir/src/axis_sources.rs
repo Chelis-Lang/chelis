@@ -330,7 +330,17 @@ pub fn same_shape_result_agreement(
     }
     let result_rank = owner.output_type.dims.len();
     let mut members = Vec::new();
-    for input in &owner.inputs {
+    // A random primitive's data operand is its only same-shape operand. Its
+    // key, controls and activation are shaped like leading parts of the data
+    // (spec/10 §3.2), whose agreement with the data's leading axes the draw
+    // checks itself.
+    let operands = match owner.op {
+        RiscOp::UniformLike | RiscOp::Dropout | RiscOp::DropoutReplay => {
+            &owner.inputs[..owner.inputs.len().min(1)]
+        }
+        _ => &owner.inputs[..],
+    };
+    for input in operands {
         let operand = dag.get(*input).ok_or_else(|| {
             format!(
                 "same-shape result at node {} references missing operand {}",
@@ -445,7 +455,20 @@ pub fn output_axis_sources(dag: &Dag, node: NodeId) -> Vec<AxisSource> {
         | RiscOp::Cast { .. }
         | RiscOp::CastTrunc { .. }
         | RiscOp::FusedElem { .. }
-        | RiscOp::Store { .. } => shape_preserving(dag, node),
+        | RiscOp::Store { .. }
+        | RiscOp::KeyFromSeed
+        | RiscOp::Split { .. }
+        | RiscOp::FoldIn => shape_preserving(dag, node),
+
+        // [05-OP-71]: the key's axes pass through and the new last axis is
+        // the count's own typed carrier.
+        RiscOp::SplitN { count } => match input_rank(dag, node, 0) {
+            Some(key_rank) if key_rank + 1 == rank => (0..key_rank)
+                .map(|axis| pass_through(id, 0, axis))
+                .chain(std::iter::once(rt_dim_source(id, key_rank, count)))
+                .collect(),
+            _ => op_computed(id, rank),
+        },
 
         // Rank-0 results: a bound adjoint is a scalar sum and a draw key is
         // a key word; neither has an axis.

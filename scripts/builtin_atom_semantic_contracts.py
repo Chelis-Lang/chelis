@@ -69,6 +69,13 @@ CLAUSES = {
         "may not be removed or reordered with respect to another observable effect",
         "The fallback receives the result's cotangent unchanged",
     ),
+    69: ("the seed's two's-complement bits, with no mixing", "element by element",
+         "the seed receives no cotangent"),
+    70: ("consumes the key `k`", "`(derive(k, 0), derive(k, 1))`", "neither carries a cotangent"),
+    71: ("consumes the key `k`", "`derive(derive(k, 2), j)`", "`n` SHALL be non-negative",
+         "the new axis last"),
+    72: ("consumes the key `k`", "`derive(derive(k, 2), n)`", "negative ones included, is valid",
+         "with no broadcasting"),
 }
 
 # Cross-chapter domain contradictions caught during semantic review. Requiring

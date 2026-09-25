@@ -1998,6 +1998,17 @@ fn decode_runtime_dtype(dtype: i32) -> PyResult<RuntimeDType> {
     })
 }
 
+/// chelis#2413: a random-key tensor crosses no numeric interchange. A key
+/// has no arithmetic, comparison, or cast (spec/04 §1.1), so NumPy and DLPack,
+/// whose dtypes all carry numeric meaning, cannot describe one.
+fn key_tensor_has_no_numeric_interchange(dtype: i32) -> PyErr {
+    PyValueError::new_err(format!(
+        "compiled output tensor carries runtime dtype {} (tag {dtype}): a random-key \
+         tensor has no NumPy or DLPack representation, because a key is not a number",
+        RuntimeDType::Key.c_macro()
+    ))
+}
+
 /// chelis#920: NumPy dtype name for a `CHELIS_*` runtime dtype tag.
 ///
 /// No default arm, for the same reason as `spec_dtype_mapping`: an
@@ -2007,6 +2018,7 @@ fn numpy_dtype_name(dtype: i32) -> PyResult<&'static str> {
     match decode_runtime_dtype(dtype)? {
         RuntimeDType::F32 => Ok("float32"),
         RuntimeDType::F64 => Ok("float64"),
+        RuntimeDType::Key => Err(key_tensor_has_no_numeric_interchange(dtype)),
         other => Err(PyValueError::new_err(format!(
             "compiled output tensor carries runtime dtype {} (tag {dtype}), which \
              chelis-python cannot describe to NumPy (known tags: \
@@ -2023,6 +2035,7 @@ fn dlpack_bits(dtype: i32) -> PyResult<u8> {
     match decode_runtime_dtype(dtype)? {
         RuntimeDType::F32 => Ok(32),
         RuntimeDType::F64 => Ok(64),
+        RuntimeDType::Key => Err(key_tensor_has_no_numeric_interchange(dtype)),
         other => Err(PyValueError::new_err(format!(
             "compiled output tensor carries runtime dtype {} (tag {dtype}), which has \
              no DLPack width in chelis-python (known tags: {CHELIS_DTYPE_F32} = 32-bit \
@@ -3070,6 +3083,25 @@ loss = (mean(x, 0) : tensor[f32])
                 err.to_string().contains("not a Chelis runtime dtype id"),
                 "expected the decoder's rejection, got: {err}"
             );
+        });
+    }
+
+    // chelis#2413: a key tensor is refused by name, not as an unknown width.
+    #[test]
+    fn a_key_tensor_has_no_numpy_or_dlpack_representation() {
+        Python::with_gil(|_py| {
+            let key = RuntimeDType::Key.id();
+            for err in [
+                numpy_dtype_name(key).expect_err("a key tensor must not map to NumPy"),
+                dlpack_bits(key).expect_err("a key tensor must have no DLPack width"),
+            ] {
+                let message = err.to_string();
+                assert!(
+                    message.contains("CHELIS_DTYPE_KEY")
+                        && message.contains("a key is not a number"),
+                    "expected the typed key refusal, got: {message}"
+                );
+            }
         });
     }
 

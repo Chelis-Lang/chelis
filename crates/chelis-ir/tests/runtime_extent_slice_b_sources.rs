@@ -7,8 +7,8 @@ use chelis_ir::axis_sources::{
 };
 use chelis_ir::dag::{
     ComparisonKind, Dag, DimExpr, DimInfo, ExtremaKind, ExtremaOperand, FusedInput, FusedStep,
-    FusedStepOp, LogicalKind, NodeId, RandomDraw, RandomHandler, ReduceWindowKind, RiscOp, RtAxis,
-    RtDim, TensorType, UniformBound,
+    FusedStepOp, KeyBranch, LogicalKind, NodeId, RandomDraw, RandomHandler, ReduceWindowKind,
+    RiscOp, RtAxis, RtDim, TensorType, UniformBound,
 };
 use chelis_types::types::Prim;
 use chelis_types::unsupported::Stage;
@@ -619,7 +619,7 @@ fn unsupported_but_well_typed_mapping_yields_the_registered_receipt_not_an_ice()
 
 /// The number of `RiscOp` variants the table below must construct. Bumping
 /// it without adding a row makes the coverage assertion fail.
-const RISC_OP_VARIANTS: usize = 68;
+const RISC_OP_VARIANTS: usize = 72;
 
 /// Adding a `RiscOp` variant breaks this match, which is what forces the
 /// table in `every_risc_op_yields_exactly_one_source_per_output_axis` to
@@ -696,7 +696,11 @@ fn variant_index(op: &RiscOp) -> usize {
         RiscOp::DropoutReplay => 65,
         RiscOp::UniformBoundAdjoint { .. } => 66,
         RiscOp::DrawKey { .. } => 67,
-        RiscOp::GuardedFail { .. } => 68,
+        RiscOp::KeyFromSeed => 68,
+        RiscOp::Split { .. } => 69,
+        RiscOp::FoldIn => 70,
+        RiscOp::SplitN { .. } => 71,
+        RiscOp::GuardedFail { .. } => 72,
     }
 }
 
@@ -1166,6 +1170,50 @@ fn every_risc_op_yields_exactly_one_source_per_output_axis() {
         },
         vec![f, g, uniform_key],
         scalar(Prim::F32),
+    ));
+    // chelis#2413: the key operations are element-wise over their key's
+    // shape, except that a key split appends its count axis last.
+    let seeds = dag.add_node(
+        RiscOp::Load {
+            name: "seeds".into(),
+        },
+        vec![],
+        ty(vec![DimInfo::Lit(2), DimInfo::Lit(3)], Prim::Int64),
+        None,
+    );
+    let keys = add(
+        &mut dag,
+        RiscOp::KeyFromSeed,
+        vec![seeds],
+        ty(vec![DimInfo::Lit(2), DimInfo::Lit(3)], Prim::Key),
+    );
+    nodes.push(keys);
+    let left = add(
+        &mut dag,
+        RiscOp::Split {
+            branch: KeyBranch::Left,
+        },
+        vec![keys],
+        ty(vec![DimInfo::Lit(2), DimInfo::Lit(3)], Prim::Key),
+    );
+    nodes.push(left);
+    let folded = add(
+        &mut dag,
+        RiscOp::FoldIn,
+        vec![left, seeds],
+        ty(vec![DimInfo::Lit(2), DimInfo::Lit(3)], Prim::Key),
+    );
+    nodes.push(folded);
+    nodes.push(add(
+        &mut dag,
+        RiscOp::SplitN {
+            count: RtDim::Lit(4),
+        },
+        vec![folded],
+        ty(
+            vec![DimInfo::Lit(2), DimInfo::Lit(3), DimInfo::Lit(4)],
+            Prim::Key,
+        ),
     ));
 
     let mut covered = vec![0usize; RISC_OP_VARIANTS];

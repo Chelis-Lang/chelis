@@ -110,22 +110,72 @@ def _binary(index: int, dtype: dict, elements: list, storage: bool) -> bytes:
     return result
 
 
+def _carried(vocabulary: list[dict]) -> tuple[str, ...]:
+    """The runtime dtypes the codec carries: every one but the random key,
+    which spec/10 section 3.2 gives no literal or storage carrier."""
+    return tuple(d["name"] for d in vocabulary if d["kind"] != "key")
+
+
 def codec_cases(
     vocabulary: list[dict], order: tuple[str, ...] | None = None
 ) -> list[CodecCase]:
     """Independent JSON/bincode cases; binary ordinals come from actual rustdoc."""
     names = tuple(d["name"] for d in vocabulary)
-    order = names if order is None else order
+    carried = _carried(vocabulary)
+    order = carried if order is None else order
     if (
-        not names
+        not carried
         or len(set(names)) != len(names)
-        or set(order) != set(names)
-        or len(order) != len(names)
+        or set(order) != set(carried)
+        or len(order) != len(carried)
     ):
         raise GraphError("codec vocabulary/order is empty, duplicated or incomplete")
     cases = []
     for dtype in vocabulary:
         name, width, kind = dtype["name"], dtype["width"], dtype["kind"]
+        if kind == "key":
+            # A key is stored (runtime dtype `key`, one 64-bit word) but has no
+            # codec spelling at all: every attempted literal is rejected, in
+            # JSON by its tag and in bincode at the ordinal an appended key
+            # variant would take.
+            if name != "key" or width != 8:
+                raise GraphError("unsupported random key runtime dtype")
+            word = (7).to_bytes(8, "little")
+            for carrier in ("scalar", "storage"):
+                storage = carrier == "storage"
+                field = "values" if storage else "value"
+                for label, payload in (
+                    ("no-literal-bits", "0" * 16),
+                    ("no-literal-value", 7),
+                ):
+                    member = "bits" if label == "no-literal-bits" else field
+                    bad = {"dtype": name, member: [payload] if storage else payload}
+                    cases.append(
+                        CodecCase(
+                            f"{carrier}/json/{name}/{label}",
+                            name,
+                            carrier,
+                            "json",
+                            canonical(bad),
+                            None,
+                            "unknown variant",
+                        )
+                    )
+                binary = len(order).to_bytes(4, "little")
+                if storage:
+                    binary += (1).to_bytes(8, "little")
+                cases.append(
+                    CodecCase(
+                        f"{carrier}/binary/{name}/no-literal-ordinal",
+                        name,
+                        carrier,
+                        "binary",
+                        (binary + word).hex(),
+                        None,
+                        "variant index",
+                    )
+                )
+            continue
         if kind not in {"float", "integer", "bool"} or width not in {1, 2, 4, 8}:
             raise GraphError("unsupported runtime dtype representation")
         if kind == "float":
@@ -495,9 +545,16 @@ class _CodecShapeGraph(RustdocGraph):
                 primitive = ty["primitive"]
             else:
                 nominal, args = self._nominal(crate, ty)
+                # The opaque `RandomKey` is admitted only as the key dtype's
+                # payload; the vocabulary comparison below enforces that.
                 _require(
                     args is None
-                    and nominal in {"half::binary16::f16", "half::bfloat::bf16"},
+                    and nominal
+                    in {
+                        "half::binary16::f16",
+                        "half::bfloat::bf16",
+                        _TYPES + "RandomKey",
+                    },
                     "unsupported native numeric adapter",
                 )
                 primitive = nominal.rsplit("::", 1)[-1]
@@ -515,6 +572,9 @@ class _CodecShapeGraph(RustdocGraph):
                 if dtype["kind"] == "integer"
                 else "u8"
                 if storage and name == "bool"
+                # The structurally non-numeric key carries the opaque key.
+                else "RandomKey"
+                if dtype["kind"] == "key"
                 else name
             )
             expected[variant] = primitive
@@ -651,6 +711,9 @@ class _CodecShapeGraph(RustdocGraph):
             )
             dtype = self.vocabulary[name]
             _require(
+                dtype["kind"] != "key", "a random key has no wire literal carrier"
+            )
+            _require(
                 attrs == (() if binary else (("rename", name),)),
                 "wire variant dtype name changed",
             )
@@ -691,8 +754,9 @@ class _CodecShapeGraph(RustdocGraph):
                 else edge
             )
             order.append(name)
+        carried = _carried(list(self.vocabulary.values()))
         _require(
-            len(order) == len(self.vocabulary) and set(order) == set(self.vocabulary),
+            len(order) == len(carried) and set(order) == set(carried),
             "wire mirror dtype vocabulary is incomplete",
         )
         self.orders[identity] = tuple(order)

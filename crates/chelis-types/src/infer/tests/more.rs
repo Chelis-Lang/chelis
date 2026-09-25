@@ -2155,3 +2155,33 @@ def caller[n](spots: tensor[n, f32]) -> tensor[n, 1, f64] = const_col(spots, cas
          got {rendered}"
     );
 }
+
+/// chelis#2413 (spec/04 §1.1): `key` is an active tensor element dtype, so
+/// `tensor[D, key]` is a valid tensor type, but it has no cast. The tensor
+/// cast scheme reads the data element dtypes, never the wider tensor element
+/// predicate, so no cast mode reaches a key target.
+#[test]
+fn a_tensor_cast_to_a_key_is_rejected() {
+    assert!(Prim::Key.is_valid_tensor_precision());
+    let source = Type::Tensor(vec![Dim::Lit(3)], TensorPrec::Concrete(Prim::F32));
+    for mode in [chelis_deep::CastMode::Checked, chelis_deep::CastMode::Trunc] {
+        let error = crate::infer::expr_record::cast_result_from_settled_source(
+            source.clone(),
+            Prim::Key,
+            mode,
+        )
+        .expect_err("a key is never a cast target");
+        assert!(matches!(
+            error.kind,
+            CheckErrorKind::UnsupportedTensorPrecision
+        ));
+    }
+    assert!(
+        crate::infer::expr_record::cast_result_from_settled_source(
+            source,
+            Prim::Int64,
+            chelis_deep::CastMode::Checked,
+        )
+        .is_ok()
+    );
+}

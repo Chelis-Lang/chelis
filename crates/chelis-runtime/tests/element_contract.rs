@@ -1,7 +1,8 @@
 //! C1 storage registration: [04-NUM-4]/[04-NUM-8], not the Phase 3 access seal.
 
 use chelis_runtime::{
-    chelis_alloc, chelis_tensor_release, Bf16Bits, Bool8, F16Bits, RuntimeDType, TensorElement,
+    chelis_alloc, chelis_tensor_release, Bf16Bits, Bool8, F16Bits, KeyWord, RuntimeDType,
+    TensorElement,
 };
 use chelis_vocab::{ArithmeticRepr, Repr};
 use std::any::TypeId;
@@ -28,7 +29,6 @@ fn all_nine_storage_and_arithmetic_types_match_the_spec() {
     row::<i16, i16>(RuntimeDType::I16, Repr::TwosComplement16);
     row::<i8, i8>(RuntimeDType::I8, Repr::TwosComplement8);
     row::<Bool8, ()>(RuntimeDType::Bool, Repr::Bool8);
-    assert_eq!(RuntimeDType::ALL.len(), 9);
     assert_eq!(RuntimeDType::Bool.contract().arithmetic(), None);
     for dtype in [RuntimeDType::F16, RuntimeDType::Bf16] {
         assert_eq!(
@@ -36,6 +36,14 @@ fn all_nine_storage_and_arithmetic_types_match_the_spec() {
             Some(ArithmeticRepr::Ieee754Binary32)
         );
     }
+}
+
+// chelis#2413: the tenth storage type, a random key, has no arithmetic.
+#[test]
+fn the_key_storage_type_matches_the_spec_and_completes_the_vocabulary() {
+    row::<KeyWord, ()>(RuntimeDType::Key, Repr::Word64);
+    assert_eq!(RuntimeDType::Key.contract().arithmetic(), None);
+    assert_eq!(RuntimeDType::ALL.len(), 10);
 }
 
 #[test]
@@ -68,6 +76,16 @@ fn bool_storage_admits_only_canonical_construction() {
     assert_ne!(TypeId::of::<Bool8>(), TypeId::of::<i8>());
 }
 
+#[test]
+fn key_storage_preserves_every_word_without_sharing_an_integer_type() {
+    for bits in [0, 1, 0x8000_0000_0000_0000, u64::MAX, 0x0123_4567_89ab_cdef] {
+        assert_eq!(KeyWord::from_bits(bits).bits(), bits);
+    }
+    assert_eq!(align_of::<KeyWord>(), align_of::<u64>());
+    assert_ne!(TypeId::of::<KeyWord>(), TypeId::of::<u64>());
+    assert_ne!(TypeId::of::<KeyWord>(), TypeId::of::<i64>());
+}
+
 fn checked_access<T: TensorElement + std::fmt::Debug + PartialEq, Wrong: TensorElement>(value: T) {
     assert_eq!(size_of::<T>(), size_of::<Wrong>());
     assert_ne!(T::REPR, Wrong::REPR);
@@ -96,6 +114,9 @@ fn checked_access_rejects_equal_width_representation_swaps() {
     checked_access::<i16, F16Bits>(i16::MAX);
     checked_access::<i8, Bool8>(i8::MAX);
     checked_access::<Bool8, i8>(Bool8::TRUE);
+    checked_access::<KeyWord, i64>(KeyWord::from_bits(u64::MAX));
+    checked_access::<i64, KeyWord>(i64::MIN);
+    checked_access::<KeyWord, f64>(KeyWord::from_bits(0x7ff8_0000_0000_0001));
 }
 
 // The isolated Cargo fixture compiles the real registration and verbatim trait
@@ -189,7 +210,7 @@ fn executed_compile_controls_seal_the_owner_and_check_each_registration() {
     let library = format!(
         "#![allow(dead_code, non_camel_case_types)]\n\
          use chelis_vocab::RuntimeDType;\n\
-         use chelis_runtime::{{Bool8, DtypeMismatch}};\n\
+         use chelis_runtime::{{Bool8, DtypeMismatch, KeyWord}};\n\
          mod element;\npub struct chelis_tensor;\n\
          impl chelis_tensor {{ fn count(&self) -> usize {{ unimplemented!() }} }}\n\
          unsafe fn tensor_dtype(_: *const chelis_tensor, _: &str) -> RuntimeDType {{ unimplemented!() }}\n\
@@ -204,16 +225,16 @@ fn executed_compile_controls_seal_the_owner_and_check_each_registration() {
     );
     let probe = CompileProbe::new();
     compiled(probe.check(
-        "use chelis_runtime::{TensorElement, F16Bits, Bf16Bits, Bool8};\n\
+        "use chelis_runtime::{TensorElement, F16Bits, Bf16Bits, Bool8, KeyWord};\n\
          fn element<T: TensorElement>() {}\n\
          fn main() { element::<f64>(); element::<f32>(); element::<F16Bits>();\n\
          element::<Bf16Bits>(); element::<i64>(); element::<i32>(); element::<i16>();\n\
-         element::<i8>(); element::<Bool8>(); }",
+         element::<i8>(); element::<Bool8>(); element::<KeyWord>(); }",
         &library,
         &owner,
     ));
 
-    for ty in ["bool", "u8", "u16", "u32", "()"] {
+    for ty in ["bool", "u8", "u16", "u32", "u64", "()"] {
         rejected(probe.check(&format!(
             "fn element<T: chelis_runtime::TensorElement>() {{}}\nfn main() {{ element::<{ty}>(); }}"
         ), &library, &owner), "E0277", "ElementStorage");

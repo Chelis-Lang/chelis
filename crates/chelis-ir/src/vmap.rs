@@ -73,6 +73,22 @@ pub fn vectorize_axis0_with_node_map_and_captures(
             &node.op,
             RiscOp::Load { name } if captured_loads.contains(name.as_str())
         );
+        // spec/design/randomness_explicit_keys.md §3: each row of a vmapped
+        // draw consumes its own row of a mapped `tensor[n, key]`. Broadcasting
+        // one captured key to every row would consume it once per row, and a
+        // counter-stream draw key has no per-row key at all (chelis#2409).
+        if captured_load && node.output_type.precision == chelis_types::types::Prim::Key {
+            return Err(format!(
+                "vmap cannot broadcast captured key {:?} to every row; a vmapped key must be a mapped tensor of keys",
+                node.op
+            ));
+        }
+        if matches!(node.op, RiscOp::DrawKey { .. }) {
+            return Err(
+                "vmap of a counter-stream draw key is refused: a draw key has no per-row key (chelis#2409)"
+                    .to_string(),
+            );
+        }
         let output_type = if shared {
             node.output_type.clone()
         } else {
@@ -482,6 +498,8 @@ fn bound_input_slots(op: &RiscOp) -> UnordSet<usize> {
     };
     match op {
         RiscOp::Expand { size, .. } => add(size),
+        // A key split's count is one shared extent for every row.
+        RiscOp::SplitN { count } => add(count),
         RiscOp::Reshape { new_shape } => new_shape.iter().for_each(add),
         RiscOp::Pad { padding, .. } | RiscOp::Shrink { bounds: padding } => {
             for (start, end) in padding {

@@ -568,13 +568,18 @@ behavior and is exactly what the atom forbids.
 Every dropout evaluator uses the sealed `dtype_semantics::PreparedDropout`
 boundary. `new(&TensorStorage, ScalarValue)` checks the input family, same-dtype
 rate and [05-OP-37] domain without allocating or consuming Random. After the
-draw's key is taken, `apply(key: RandomKey)` computes [05-RNG-1]'s unit,
-arithmetic-width comparison, positive dropped zero, and finalized sub/div into
-`TensorStorage`. `PreparedUniformLike` is the same split for [05-OP-8]: `new`
-validates the bounds at the arithmetic width, and `apply(key)` fills the
-template's element count. `RandomKey` is an opaque, structurally non-numeric
-carrier; under the counter stream its only constructor is
-`RandomKey::from_counter(seed, ordinal)`. The numerical owners have no ambient
+draw's key is taken, `apply(key: RandomKey)` computes [05-RNG-2]'s unit of
+`word(key, e)` for each element `e` (for a counter-stream key, [05-RNG-1]'s
+unit), arithmetic-width comparison, positive dropped zero, and finalized
+sub/div into `TensorStorage`. `PreparedUniformLike` is the same split for
+[05-OP-8]: `new` validates the bounds at the arithmetic width, and
+`apply(key)` fills the template's element count. A draw over a key batch
+stacks its rows: each row is one `new` and `apply` over that row's elements,
+with the row's key and controls. `RandomKey` is an opaque, structurally
+non-numeric carrier. `RandomKey::from_counter(seed, ordinal)` forms the
+counter stream's key and `from_seed` forms [05-OP-69]'s; `derive`
+([05-RNG-2]), `split` ([05-OP-70]), `fold_in` ([05-OP-72]) and `split_n`
+([05-OP-71]) form keys from a key. The numerical owners have no ambient
 stream or replay authority. Their private fields prevent bypassing preparation;
 the lane supplying the key owns source order and failure-prefix accounting. The
 four exact compiler-kernel callables are registered to [05-OP-37] and [05-OP-8]
@@ -1636,7 +1641,7 @@ contract; it does not complete binding or runtime obligations.
 
 #### Final wire and binding contract handoff
 
-**Current integration state.** Execution version 3 and WireDag version 17 are
+**Current integration state.** Execution version 3 and WireDag version 18 are
 the source contract for spec/10 §§3.2–3.5. Measured at WireDag version 16, the
 executed wire baseline contains 97 distinct numeric leaves: 80 verified
 transports and 17 numeric operations, with zero exception rows. It includes the shape-dependency and opaque

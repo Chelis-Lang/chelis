@@ -163,11 +163,14 @@ pub enum Prim {
     Int64,
     Bool,
     String,
-    /// The key of one random draw (`spec/design/randomness_counter_stream.md`
-    /// §2): a structurally non-numeric IR element dtype with no arithmetic,
-    /// comparison, cast, storage, or literal carrier. Every key value is
-    /// produced by a graph node. It has no source spelling; its interchange
-    /// spelling is `key`.
+    /// A random key (spec/04 §1.1, [05-RNG-2]): an active tensor element
+    /// dtype that is structurally non-numeric, with no arithmetic,
+    /// comparison, cast, or literal carrier. A `tensor[D, key]` is stored
+    /// with runtime dtype `key`. It is not one of the nine active data element
+    /// dtypes ([`Prim::is_data_element_dtype`]), so an operation scheme admits
+    /// it only where its own atom names `key`. Every key value is produced by
+    /// a graph node or enters as an input. It has no source spelling yet; its
+    /// interchange spelling is `key`.
     Key,
 }
 
@@ -271,7 +274,26 @@ impl Prim {
             Prim::Int32 => Ok(RuntimeDType::I32),
             Prim::Int64 => Ok(RuntimeDType::I64),
             Prim::Bool => Ok(RuntimeDType::Bool),
-            Prim::F8e4m3 | Prim::String | Prim::Key => Err(RuntimeDTypeMappingError { prim: self }),
+            Prim::Key => Ok(RuntimeDType::Key),
+            Prim::F8e4m3 | Prim::String => Err(RuntimeDTypeMappingError { prim: self }),
+        }
+    }
+
+    /// The language dtype a runtime ABI dtype stores, the inverse of
+    /// [`Self::runtime_dtype`]. Every runtime dtype has one, so a runtime
+    /// dtype added without its language dtype fails to compile here.
+    pub fn from_runtime_dtype(dtype: RuntimeDType) -> Prim {
+        match dtype {
+            RuntimeDType::F32 => Prim::F32,
+            RuntimeDType::F64 => Prim::F64,
+            RuntimeDType::F16 => Prim::F16,
+            RuntimeDType::Bf16 => Prim::Bf16,
+            RuntimeDType::I8 => Prim::Int8,
+            RuntimeDType::I16 => Prim::Int16,
+            RuntimeDType::I32 => Prim::Int32,
+            RuntimeDType::I64 => Prim::Int64,
+            RuntimeDType::Bool => Prim::Bool,
+            RuntimeDType::Key => Prim::Key,
         }
     }
 
@@ -328,10 +350,12 @@ impl Prim {
         !matches!(self, Prim::F8e4m3)
     }
 
-    /// Whether this precision is valid as the element type of a tensor.
-    /// Per spec §1.1 the active tensor element set is f32, f64, bf16, f16,
-    /// i8, i16, i32, i64, and bool. The deferred `f8e4m3` (§1.1.1)
-    /// is rejected.
+    /// Whether this precision is one of spec §1.1's ten active tensor element
+    /// dtypes: f32, f64, bf16, f16, i8, i16, i32, i64, bool, and key. The
+    /// deferred `f8e4m3` (§1.1.1) is rejected. This says only that a
+    /// `tensor[D, p]` exists; an operation scheme that admits every element
+    /// dtype admits [`Prim::is_data_element_dtype`]'s nine, and `key` only
+    /// where its own atom names it.
     ///
     /// Note: backend support for the reduced floats (`f16`, `bf16`) is
     /// staged separately in WS-A1/A2/A3; the type checker admits them here
@@ -339,6 +363,14 @@ impl Prim {
     /// yet emit them are expected to produce their own targeted diagnostic
     /// rather than let them slip through silently.
     pub fn is_valid_tensor_precision(&self) -> bool {
+        self.is_data_element_dtype() || matches!(self, Prim::Key)
+    }
+
+    /// Whether this precision is one of spec §1.1's nine active data element
+    /// dtypes: the active tensor element dtypes other than `key`, that is the
+    /// eight numeric dtypes and bool. A domain written as every active tensor
+    /// element dtype is exactly this set.
+    pub fn is_data_element_dtype(&self) -> bool {
         matches!(
             self,
             Prim::F32
@@ -354,9 +386,9 @@ impl Prim {
     }
 
     /// Whether this precision is a legitimate target for `cast(scalar, p)`.
-    /// Mirrors `is_valid_tensor_precision` in this cycle: the host scalar
-    /// lane carries the same active dtype set per spec §1.1, and the
-    /// deferred `f8e4m3` (§1.1.1) is rejected here too.
+    /// Mirrors `is_data_element_dtype` in this cycle: the host scalar lane
+    /// carries the same active data dtype set per spec §1.1, and the deferred
+    /// `f8e4m3` (§1.1.1) is rejected here too. A key has no cast.
     pub fn is_valid_scalar_cast_target(&self) -> bool {
         matches!(
             self,
@@ -1012,10 +1044,11 @@ mod prim_classification_tests {
     #[test]
     fn is_valid_tensor_precision_matches_active_set() {
         // Active dtype set per §1.1, including f16/bf16 (active per WS-0
-        // spec lock cc47e6d). Excludes the deferred f8e4m3 (§1.1.1) and
-        // String (no tensor element representation).
+        // spec lock cc47e6d) and key. Excludes the deferred f8e4m3 (§1.1.1)
+        // and String (no tensor element representation). The data element
+        // set is the same minus key.
         for prim in ALL_PRIMS {
-            let expected = matches!(
+            let data = matches!(
                 prim,
                 Prim::F32
                     | Prim::F64
@@ -1028,8 +1061,14 @@ mod prim_classification_tests {
                     | Prim::Int64
             );
             assert_eq!(
+                prim.is_data_element_dtype(),
+                data,
+                "is_data_element_dtype({prim:?}) disagrees with §1.1 \
+                 active data element set"
+            );
+            assert_eq!(
                 prim.is_valid_tensor_precision(),
-                expected,
+                data || *prim == Prim::Key,
                 "is_valid_tensor_precision({prim:?}) disagrees with §1.1 \
                  active tensor element set"
             );
@@ -1088,8 +1127,10 @@ mod prim_classification_tests {
         }
     }
 
-    // chelis#2413: a random key is an IR and interchange dtype only. No
-    // source or Deep spelling reaches it, and it is not numeric.
+    // chelis#2413: a random key is an active tensor element dtype with
+    // runtime storage. No source or Deep spelling reaches it yet, it is not
+    // numeric, it is not one of the nine active data element dtypes, and it
+    // has no cast.
     #[test]
     fn a_random_key_has_an_interchange_spelling_and_no_source_spelling() {
         assert_eq!(Prim::parse_name("key"), None);
@@ -1097,9 +1138,23 @@ mod prim_classification_tests {
         assert_eq!(Prim::Key.interchange_name(), "key");
         assert!(!Prim::Key.is_numeric());
         assert!(!Prim::Key.is_float());
-        assert!(!Prim::Key.is_valid_tensor_precision());
+        assert!(Prim::Key.is_valid_tensor_precision());
+        assert!(!Prim::Key.is_data_element_dtype());
         assert!(!Prim::Key.is_valid_scalar_cast_target());
-        assert!(Prim::Key.runtime_dtype().is_err());
+        assert_eq!(Prim::Key.runtime_dtype(), Ok(RuntimeDType::Key));
+        assert!(Prim::String.runtime_dtype().is_err());
+    }
+
+    #[test]
+    fn from_runtime_dtype_inverts_runtime_dtype() {
+        for dtype in RuntimeDType::ALL {
+            assert_eq!(Prim::from_runtime_dtype(dtype).runtime_dtype(), Ok(dtype));
+        }
+        for prim in ALL_PRIMS {
+            if let Ok(dtype) = prim.runtime_dtype() {
+                assert_eq!(Prim::from_runtime_dtype(dtype), *prim);
+            }
+        }
     }
 
     #[test]

@@ -735,12 +735,9 @@ fn the_vmap_node_map_names_every_input_nodes_batched_id() {
 /// parent DAG, so the entry-point dead-code elimination would otherwise remove
 /// the forward activation and the carrier holding its extent obligations.
 ///
-/// This row exists because round 1 of this pull request deleted that block and
-/// every other test still passed. It asserts the EDGE rather than a program's
-/// output, because a `vmap(grad(...))` program whose callee carries an entry
-/// witness does not lower at all on this head (it fails with "`vmap(...)`
-/// lowering produced no roots", a separate defect), so no end-to-end receipt
-/// can reach the mechanism.
+/// This structural row asserts the edge rather than a program's output.
+/// #2112's entry-witness matrix supplies the separate end-to-end Eval/C
+/// receipt, including a named witness through `vmap(grad(...))`.
 ///
 /// The program has two roots: the exported `h` kernel's own unbatched
 /// reduction, and the mapped cotangent. Only the second carries a shape
@@ -748,14 +745,9 @@ fn the_vmap_node_map_names_every_input_nodes_batched_id() {
 /// vmap shifted past the batch axis. Asserting that signature rather than a
 /// root index is what makes the row independent of root order.
 ///
-/// EVIDENTIARY STATUS: regression test for the block's PRESENCE, proven by
-/// deleting the dependency block from the `vmap(grad(...))` lowering and
-/// rerunning, which leaves no root with any shape dependency. It does not
-/// discriminate the map: round 2 measured that it still passes when the block
-/// is rewritten to the unmapped id, because every `vmap(grad(...))` program
-/// that lowers today has an identity map. The map's own contract is proven
-/// separately, and on a fixture where it is NOT the identity, by
-/// `the_vmap_node_map_names_every_input_nodes_batched_id` above.
+/// EVIDENTIARY STATUS: regression test for the dependency's presence. The
+/// nonidentity mapped-axis receipt added by #2144 and #2112's end-to-end
+/// matrix establish properties this structural row alone cannot prove.
 #[test]
 fn vmap_grad_records_the_batched_forward_activation_as_a_shape_dep() {
     let source = "def h(x: tensor[2, f32]) -> tensor[f32] = sum(mul(x, x), 0i32)\n\

@@ -439,7 +439,9 @@ fn classify_binder(p: &Param, invariants: &[crate::opaque::OpaqueInvariant]) -> 
             }
         }
         TypeExpr::Tensor(dims, precision, _)
-            if Prim::parse_name(precision).is_some_and(|prim| prim.is_valid_tensor_precision()) =>
+            // A sampled key tensor would be a key literal (spec/04 §1.1), so
+            // only the data element dtypes are sampled.
+            if Prim::parse_name(precision).is_some_and(|prim| prim.is_data_element_dtype()) =>
         {
             let lit: Option<Vec<usize>> = dims
                 .iter()

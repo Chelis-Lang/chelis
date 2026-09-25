@@ -7,6 +7,9 @@
 use super::{Bits, Buf, ScalarValue, TensorStorage};
 use serde::{Deserialize, Serialize};
 
+const KEY_HAS_NO_LITERAL_CARRIER: &str =
+    "a random key has no literal carrier: every key in a graph is a node's output";
+
 #[derive(Clone, Serialize)]
 #[serde(transparent)]
 struct HexBits<const DIGITS: usize>(String);
@@ -175,6 +178,9 @@ impl Serialize for ScalarValue {
             Bits::I16(value) => ScalarWire::I16 { value },
             Bits::I8(value) => ScalarWire::I8 { value },
             Bits::Bool(value) => ScalarWire::Bool { value },
+            // spec/10 §3.2: a key has no literal carrier; every key in a
+            // graph is a node's output.
+            Bits::Key(_) => return Err(serde::ser::Error::custom(KEY_HAS_NO_LITERAL_CARRIER)),
         }
         .encode(serializer)
     }
@@ -228,6 +234,7 @@ impl Serialize for TensorStorage {
             Buf::Bool(v) => StorageWire::Bool {
                 values: v.iter().map(|v| *v != 0).collect(),
             },
+            Buf::Key(_) => return Err(serde::ser::Error::custom(KEY_HAS_NO_LITERAL_CARRIER)),
         }
         .encode(serializer)
     }

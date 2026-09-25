@@ -586,8 +586,8 @@ at a boundary that cannot encode the role rather than silently erase it.
 
 The #2110 matrix covers direct, aliased and inlined bindings with agreeing,
 runtime-disagreeing and statically refuted extents, including the incidental
-function-result failure and the wildcard-result form that currently succeeds
-silently. Check disposition, Eval and compiled C must agree with the
+function-result failure and the wildcard-result form that #2143 repaired.
+Check disposition, Eval and compiled C must agree with the
 numbered-spec verdict; no row may exit zero with an undeclared extent or
 terminate through an internal assertion.
 
@@ -1119,11 +1119,11 @@ the type: a live node reading the name BY VALUE, a `Reshape` target's
 supplied values rather than of the graph, so the set is the caller's to name
 and the tolerance covers exactly it; a multi-scope name whose scopes AGREE has
 one extent and an omitted binding for it is refused like any other. The
-declarations are not yet scoped the way these guards are: two scopes of one
-binder lowered into ONE emitted function still share one declaration, which
-#1788 records as residual and the per-scope rename in the claim transport
-fixes. Deleting a declaration mechanism that holds a
-loud-unsupported census site shrinks that site's baseline in the same change,
+per-scope declaration rename shipped in #1946 and the complete entry-plan work
+closed #1788. A regression that merges two independent scopes under one
+emitted declaration violates that delivered boundary. Deleting a declaration
+mechanism that holds a loud-unsupported census site shrinks its baseline in
+the same change,
 under `spec/design/loud_unsupported.md` B1, which owns that rule.
 
 Record projection also needs an executable lowering route, and the route
@@ -1627,6 +1627,109 @@ receipt is interim capability evidence, not execution of a legal case. Repair
 stale measured dispositions with fresh evidence and an explicit baseline
 correction; do not call relabeling a behavioral improvement.
 
+### C6 Closure of transformed and host witnesses after the recorded corpus
+
+The phase-A/B corpus proves its registered cells, not every accepted program
+that carries a runtime extent. The following leaves from the #1362 launch
+stream remain individual acceptance obligations under #1277. They share C2's
+axis value, independent claim, declaring witness and guard model. The repair
+must migrate the producer and transform boundaries to that model; adding a
+single special-case renderer or copying a printable dimension onto a result
+cannot close the class.
+
+#### C6.1 One axis contract through helpers and transforms
+
+At each checked activation, retain an axis's physical source, authored claim,
+scoped binder identity, and producer site as different fields. The existing
+`ExtentOrigin`, `ExtentWitness`, `ResultClaim`, and `LocalAscriptionClaim`
+roles are the vocabulary; an implementation may consolidate their storage,
+but must not reconstruct one from a string, an equal numeric extent, a
+synthetic `dN` alias, or a neighboring tensor operand. A checker-side label
+that makes a named-axis query legal is transported as a label, not promoted
+into an extent equality claim. This distinction is shared with
+[`named_dimension_context.md`](named_dimension_context.md) for #1889.
+
+Instantiate the complete ordered axis contract once per call. Helper results,
+inlined roots, copied values, callable aliases and cached contexts retain the
+same origin relationships while independent calls get independent scopes.
+Every graph rewrite that can change geometry, including a gradient's backward
+DAG, obtains its output axes from the operation's structural axis mapping and
+remaps the original witness references. A verifier checks that every live
+claim, label used as a selector, result site and rendered dimension has its
+declaring source after each publication boundary. A missing producer is a
+typed lowering failure before Eval starts or C artifacts are called
+successful; no `expect`, empty default or guessed alias is an exit.
+
+The differentiated actual's shape and the forward activation's observable
+obligations remain separate through `grad`. The structural mapping and full
+exits for #1767, #1978 and #2370 belong to nested class #2515 and are in
+[`transformed_extent_witnesses.md`](transformed_extent_witnesses.md); C2.4's
+existing #1821 receipts do not prove them.
+
+#### C6.2 Producer sites, order and diagnostic information
+
+Select a result or local-ascription guard's owner from the operation that
+introduces the observed output axis, with the authored claim and declaring
+witness retained for context. Producer-site lookup is a checked result rather
+than `result_extent_sites(...).find(...).expect(...)`. A missing producer-site
+relation must fail before execution with a typed diagnostic; a correct
+ascription around a host tensor builder must retain and
+execute its site. The same source relationships decide whether an obligation
+uses spec/04 §4.7's interface-entry or producer-position schedule. A result
+claim on an `insert` output is producer-owned even when its size comes from
+an input's shape: the earlier `neg` overflow in #2377 wins, and a nontrapping
+prefix reaches a Domain trap attributed to `insert`. This is distinct from a
+claim on the input tensor axis itself, whose guard runs at entry. Both lanes
+must consume that same classification, not whichever failure they currently
+report first.
+
+Both lanes represent a movement failure by its operation, trap kind, dtype,
+axis, bound/observed values and source labels before rendering. Eval must not
+replace spec/05 §2.4.1's `shrink` Domain failure with a private node-id or
+post-bind diagnostic; C must not replace an authored binder with only its
+resolved numeral. The failure of a declared result names its producing
+primitive and the authored disagreeing sources under spec/04 §4.7. The
+structured information, operation-precondition checks and guard schedule are
+separate: fixing wording cannot alter which trap executes first.
+
+#### C6.3 Executable issue exits
+
+Each row below needs its original reproducer, an agreeing control, and a
+negative that would detect loss or conflation of its witness. The required
+lane is Eval plus compiled, linked and executed C unless the issue explicitly
+records a narrower existing boundary. Add the exact cells to the appropriate
+phase-B or issue-owned target manifest before calling an issue closed. Merely
+running `runtime_extent_oracle.py --phase final` against its current 206 rows
+does not enroll a new case.
+
+| Leaf | Structural exit and discriminating control |
+|---|---|
+| #1767 | Cotangent geometry comes from the differentiated actual, including a disconnected top-level tensor; execute the full transformed-witness matrix. |
+| #1900 | The existing named host-result mismatch still traps on both lanes, with the authored binder and declaring parameter source in context; a literal claim, an agreeing named claim and a distinct same-sized witness do not masquerade as that binder. |
+| #1908 | Negative runtime start, end past a symbolic operand and eager-actual overshoot all emit the owning `shrink` Domain trap on Eval and C; valid and statically rejected spans retain their separate verdicts. |
+| #1917 | Both `separate_scopes` inlined-root cells recover `left` only in the correct caller scope; their export, binding and C twins keep exact success/trap results, and independent same-spelled scopes never merge. |
+| #1977 | Chained rank-four shape-sourced `insert` helpers keep distinct physical sources instead of conflicting synthetic aliases; the original inline/let and Eval/C matrix plus a false equality control executes. |
+| #1978 | The symbolic ReLU shim's backward DAG uses the authored/actual axis mapping; execute the full transformed-witness matrix. |
+| #2083 | The incidental #2144 success becomes a permanent agreeing `insert`→`permute` gradient and mismatching-width forward-failure pair in the transformed-witness matrix before closure. |
+| #2374 | The exact `pad_sequences_to` local ascription executes without an internal assertion on Eval/C; a runtime-disagreeing ascription traps at its initializer and a statically wrong one rejects before execution. |
+| #2377 | The earlier-overflow/later-`insert`-claim program reports `neg` overflow first on both lanes; a nontrapping prefix reports `insert` Domain attribution, and agreeing extent controls retain values and effects. An independent wrong input-axis claim still runs at entry. |
+| #1889 | The named helper-result query works through direct, alias, live and decoded-context paths without treating a caller-side label as a callee claim; direct native C and its remaining alias/worker/disk paths receive independent receipts. |
+| #1935 | A complete obligation summary proves a forward has no guard, checked extent or other observable trap before removing its cotangent shape dependency; every phase-B gradient guard row and an obligation-free emitted-code control pass. This performance change follows, rather than gates, correctness closure. |
+| #2370 | The composed generic Jacobian retains its authored binder-to-actual mapping; execute the composed and isolated transformed-witness controls. |
+
+#2162 is a separate documentation exit: stale current-state sentences here and
+the mapped-gradient test rationale must be corrected against the merged
+#1946/#1788, #2143 and #2112/#2144 receipts. It is not an unimplemented
+runtime mechanism. #2407 is closed under the randomness tracker and is not a
+#1277 acceptance row.
+
+The generic Bool/rank and `where` failures #1760/#1761 have a separate
+[`generic_tensor_actualization.md`](generic_tensor_actualization.md) design
+under #729. Computed-input concat routing #2373 under #2514 has a separate
+[`computed_tensor_host_admission.md`](computed_tensor_host_admission.md)
+design. Those plans compose with this one at a checked tensor boundary; they
+do not make an extent claim or guard optional.
+
 ## Part II: remaining delivery sequence
 
 Each row below is an owner of concrete work, not a claim that a PR exists.
@@ -1643,6 +1746,7 @@ All are Slice B work under #1277 unless expressly separated.
 | #1948 same-shape result claims | C2.3's independent claim contract and spec/04 §4.7's returned-value producer rule | attach each declared-result obligation to the returned same-shape operation; represent every positive-rank agreement member without a selected operand origin; run operand agreement before the result guard; prove the dedicated check/Eval/compiled-C matrix and update the earlier #1798 attribution receipts |
 | #2110 local tensor ascriptions | C2.3's independent claim contract and C2.5's introducing-site rule | retain authored local tensor annotations as explicit checked obligations; attach them at the initializer producer; preserve them through aliases, inlining, rebuilds and artifact boundaries; prove the independent static/runtime/agreeing matrix on check, Eval and compiled C |
 | #1932 mapped-gradient artifact closure | C2.4's authored witnesses, batched node map and fail-loud artifact boundary | remap and retain the complete entry-witness/dimension-origin set through `vmap(grad(...))`, cotangent packing and splice; reject unresolved roots or rendered identifiers before success; execute the exact witness and controls on Eval and compiled C, including compile/link/run and mutation negatives |
+| C6 post-corpus witness closure | C2's scoped axis contracts and the recorded phase exit | implement the per-leaf C6.3 matrix for #1767, #1900, #1908, #1917, #1977, #1978, #2083, #2374, #2377, #1889, #1935 and #2370; the transformed subset belongs to nested class #2515 and uses `transformed_extent_witnesses.md`, and #1935 follows correctness closure |
 | #1512 audit | no dependency on the B2b carrier or withdrawn C | enumerate reachable non-expand unresolved producers and consumer decisions; resolved/unresolved positive and negative pairs; distinguish error cascade suppression; assign each surviving defect a repair under #1512 |
 
 B2b-0b and B2b-1 can be developed as separate changes, but their shared local
