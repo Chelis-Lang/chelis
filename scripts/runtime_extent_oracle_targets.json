@@ -498,6 +498,7 @@
         "issue_1374_cross_tensor_read_under_a_named_claim_is_guarded_on_c",
         "issue_1376_same_tensor_read_under_a_foreign_claim_is_guarded_on_c",
         "issue_1556_uniform_over_an_inlined_parameter_builds_and_runs",
+        "issue_1767_disconnected_gradient_preserves_false_declared_result_trap",
         "issue_1782_a_root_literal_restating_a_binder_defers_to_the_named_guard_on_c",
         "issue_1782_a_root_literal_restating_a_binder_defers_to_the_named_guard_on_eval",
         "issue_1782_a_root_literal_restating_a_foreign_binder_defers_to_the_named_guard_on_c",
@@ -509,6 +510,7 @@
         "issue_1931_positive_stride_controls_execute_exactly_on_both_lanes",
         "issue_1931_positive_stride_extents_guard_declared_results_on_both_lanes",
         "issue_1932_mapped_grad_entry_witness_matrix_executes_exactly_on_both_lanes",
+        "issue_2083_rank_raising_gradient_keeps_geometry_and_forward_trap",
         "issue_597_positional_same_rank_replacement_executes_on_c",
         "issue_665_expand_over_stride_builds_and_runs",
         "literal_parameter_obligations_keep_the_existing_helper_order",
@@ -766,6 +768,10 @@
         "an_all_interface_class_traps_at_entry_when_its_witnesses_disagree",
         "an_untaken_runtime_branch_does_not_emit_its_local_ascription_guard_on_c",
         "entry_guards_run_in_assigned_slot_order_not_claim_name_order",
+        "issue_1767_disconnected_actual_geometry_executes_on_eval_and_c",
+        "issue_1767_live_and_decoded_helper_contexts_execute_on_eval_and_c",
+        "issue_1767_parameter_and_ordered_multiple_actuals_execute_on_eval_and_c",
+        "issue_1767_symbolic_actual_axes_are_read_for_each_execution",
         "issue_1788_a_scope_rename_does_not_collide_with_a_name_the_graph_declares",
         "issue_1788_two_scopes_in_one_function_share_one_declaration",
         "local_reshape_guards_follow_declaration_order",
@@ -1289,6 +1295,33 @@
         "missing_result_axis_is_a_checked_error"
       ],
       "note": "Token-only, physical-only and coalesced producer sites, forwarded-axis observations, independent requirements and malformed-axis rejection."
+    },
+    {
+      "phase": "b",
+      "id": "ir_disconnected_geometry",
+      "package": "chelis-ir",
+      "kind": "test",
+      "file": "crates/chelis-ir/tests/issue_1102_zero_gradient.rs",
+      "selector": {
+        "mode": "exact"
+      },
+      "expected": [
+        "disconnected_actual_still_checks_its_declared_input_extent",
+        "disconnected_top_level_actual_keeps_every_axis"
+      ]
+    },
+    {
+      "phase": "b",
+      "id": "gradient_mapping_verifier",
+      "package": "chelis-ir",
+      "kind": "lib",
+      "file": "crates/chelis-ir/src/lower.rs",
+      "selector": {
+        "mode": "exact"
+      },
+      "expected": [
+        "lower::tests::gradient_axis_mapping_rejects_missing_sources_before_publication"
+      ]
     }
   ]
 }

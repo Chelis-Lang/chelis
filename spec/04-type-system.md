@@ -26,7 +26,7 @@ Types are represented as Deep AST nodes using the `t-*` tag family.
 
 ### 1.1 Primitive Types
 
-The active primitive set is exactly ten names:
+The active primitive set is exactly eleven names:
 
 ```scheme
 (t-prim {} f32)       ;; 32-bit float
@@ -39,16 +39,27 @@ The active primitive set is exactly ten names:
 (t-prim {} i64)       ;; 64-bit signed integer
 (t-prim {} bool)      ;; boolean
 (t-prim {} string)    ;; UTF-8 string
+(t-prim {} key)       ;; random key
 ```
 
 These closed subsets are used throughout the specs:
 
 - the **eight active numeric dtypes** are the four floats (`f16`, `bf16`,
   `f32`, `f64`) and four signed integers (`i8`, `i16`, `i32`, `i64`);
-- the **nine active tensor element dtypes** are those eight numeric dtypes plus
-  `bool`; and
+- the **ten active tensor element dtypes** are those eight numeric dtypes,
+  `bool`, and `key`;
+- the **nine active data element dtypes** are the active tensor element dtypes
+  other than `key`: the eight numeric dtypes plus `bool`; and
 - `string` is an active host primitive, but is neither a numeric dtype nor a
   tensor element dtype.
+
+A `key` is a 64-bit random key ([05-RNG-2]). It is not numeric, and it has
+no arithmetic, comparison, cast, literal, or default value. [05-OP-69] creates
+keys, [05-OP-70] through [05-OP-72] derive them, and a draw keyed by a key
+reads it under [05-RNG-2]. An operation admits `key` elements only where its
+own atom names `key`: a domain written as every active tensor element dtype
+admits exactly the nine active data element dtypes. (Source and Deep ingress
+do not yet accept the `key` spelling; chelis#2413.)
 
 Code, tests, examples, and stdlib signatures referenced from any active spec
 section must use these set names with exactly those meanings. The reserved
@@ -155,7 +166,7 @@ matching numpy and Arrow. All of these spellings are rejected under
 #### 1.1.3 Per-Backend Dtype Support Matrix
 
 The active primitive set in §1.1 is the **language-level** dtype contract: a
-program that mentions one of the ten active primitives is well-typed in
+program that mentions one of the eleven active primitives is well-typed in
 every Chelis pass that does not select a backend (parser, type checker, IR
 evaluator). Backend code generation is a separate surface; not every backend
 admits every active dtype. This sub-section is the authoritative per-backend
@@ -173,6 +184,7 @@ the spec or in user-facing docs must resolve to a cell in this table.
 | i32  | admitted                                                                                                          | admitted                                                                                                                                                                                                 | admitted                                     | admitted  |
 | i64  | admitted                                                                                                          | admitted                                                                                                                                                                                                 | admitted                                     | admitted  |
 | bool   | admitted                                                                                                          | admitted                                                                                                                                                                                                 | admitted                                     | admitted  |
+| key    | admitted                                                                                                          | **operation-limited**: only the key ([05-RNG-2]) that a `with seed` region lowered into the same graph gives one of its [05-OP-8] draws with literal bounds and no activation; [05-OP-69] through [05-OP-72], key parameters, and key results are rejected | **operation-limited**: no operation          | admitted  |
 
 **Arithmetic width is not a cell of this table.** It is a target-independent
 property of the dtype, declared once by [04-NUM-8] and owned by the semantic
@@ -3271,6 +3283,7 @@ Scope:
 > | `i16` | signed two's-complement 16-bit integer | 16 | exact i16 |
 > | `i8` | signed two's-complement 8-bit integer | 8 | exact i8 |
 > | `bool` | canonical Bool8 (`0x00` false, `0x01` true) | 8 | not an arithmetic dtype ([04-NUM-4]) |
+> | `key` | opaque 64-bit word, every bit pattern a key ([05-RNG-2]) | 64 | not an arithmetic dtype (§1.1) |
 >
 > Stored representation, storage width, and arithmetic width are separate
 > facts. Equal storage widths do not make two representations interchangeable:
@@ -3415,8 +3428,7 @@ named operations if introduced. Behaviors are named operations, never modes.
 > before it reads that tensor's elements. A mismatch is a `Domain` trap in
 > `load` at the declared dtype under [04-NUM-9], accompanied by the input's
 > name and both dtypes; the supplied storage is never read at the declared
-> dtype. (Not fully implemented for a tensor nested in a supplied value,
-> chelis#2506, or for the HIP and Metal entries, chelis#2510.)
+> dtype. (Not fully implemented for the HIP and Metal entries, chelis#2510.)
 
 > **[04-NUM-12]** A numeric trap's OCCURRENCE is deterministic within a
 > lane and is defined by that lane's documented evaluation order. For a

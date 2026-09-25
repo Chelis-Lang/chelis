@@ -137,11 +137,13 @@ impl UnaryEmission {
     }
 }
 
-/// The C carrier of a [05-RNG-1] draw key, of the seed and counter words a
-/// key is taken from, and of the element index a key is read at. A key is
-/// never a tensor element, so no element type spells it. `unsigned long long`
-/// holds at least 64 bits, so every such word converts exactly to and from
-/// the `uint64_t` parameters and results of the runtime's key helpers.
+/// The C carrier of a random key ([05-RNG-1]'s draw keys and [05-RNG-2]'s
+/// derived keys), of the seed and counter words a key is taken from, and of
+/// the element index a key is read at. It is also the element type of a
+/// `CHELIS_DTYPE_KEY` tensor, whose one 64-bit word per element
+/// `unsigned long long` holds exactly on every supported target; every such
+/// word converts exactly to and from the `uint64_t` parameters and results of
+/// the runtime's key helpers.
 const RANDOM_WORD_C_TYPE: &str = "unsigned long long";
 
 /// A draw key the emitter cannot take.
@@ -505,6 +507,20 @@ impl CEmitter {
         );
         e.line("    return fma(high - low, chelis_random_unit(key, index), low);");
         e.line("}");
+        // [05-RNG-2]'s derive, only in a kernel that derives keys, so every
+        // other kernel's source is unchanged. `host_emit` carries the same
+        // lines after the samplers.
+        if dag.nodes().iter().any(|node| {
+            matches!(
+                node.op,
+                RiscOp::Split { .. } | RiscOp::FoldIn | RiscOp::SplitN { .. }
+            )
+        }) {
+            e.line("static inline uint64_t chelis_key_derive(uint64_t key, uint64_t index) {");
+            e.line("    uint64_t mixed = chelis_random_mix(index);");
+            e.line("    return chelis_random_mix(key ^ ((mixed << 29) | (mixed >> 35)));");
+            e.line("}");
+        }
         e.line("/* CHELIS_UNIFORM_HELPERS_END */");
         // [05-OP-31]/[05-OP-44] make every published host tensor descriptor
         // canonical row-major storage.  The old runtime ABI exposed mutable
@@ -1503,6 +1519,10 @@ impl CEmitter {
                 draw,
                 dtype,
             } => self.emit_draw_key(node, *handler, *draw, *dtype, dag)?,
+            RiscOp::KeyFromSeed => self.emit_key_from_seed(node, dag),
+            RiscOp::Split { branch } => self.emit_split_key(node, *branch, dag),
+            RiscOp::FoldIn => self.emit_fold_in(node, dag),
+            RiscOp::SplitN { count } => self.emit_split_keys(node, count),
             RiscOp::Dropout => self.emit_keyed_dropout(node, dag),
             RiscOp::DropoutReplay => {
                 #[cfg(feature = "native-random-observer")]
@@ -1513,7 +1533,7 @@ impl CEmitter {
             RiscOp::UniformBoundAdjoint { bound } => {
                 #[cfg(feature = "native-random-observer")]
                 self.record_observed_replay(node);
-                self.emit_uniform_bound_adjoint(node, *bound)
+                self.emit_uniform_bound_adjoint(node, *bound, dag)
             }
             RiscOp::Copy => self.emit_realize(id, &node.inputs, &node.output_type),
             RiscOp::Drop => {
@@ -1832,16 +1852,13 @@ impl CEmitter {
     }
 
     pub(crate) fn input_labels(dag: VerifiedDagView<'_>) -> Vec<String> {
-        let mut labels = Vec::new();
-        let mut seen = chelis_unord::UnordSet::new();
-        for node in dag.nodes() {
-            if let RiscOp::Load { name } = &node.op
-                && seen.insert(name.as_str().to_string())
-            {
-                labels.push(name.as_str().to_string());
-            }
-        }
-        labels
+        chelis_ir::axis_sources::ordered_interface_loads(dag.nodes())
+            .into_iter()
+            .map(|node| match &node.op {
+                RiscOp::Load { name } => name.as_str().to_string(),
+                _ => unreachable!("ordered interface input is a Load"),
+            })
+            .collect()
     }
 
     fn input_slots(labels: &[String]) -> chelis_unord::UnordMap<String, usize> {
@@ -1894,8 +1911,9 @@ impl CEmitter {
                 | Prim::Int16
                 | Prim::Int32
                 | Prim::Int64 => {}
-                // A key is a C local of its draw node, never a tensor.
-                Prim::Key if matches!(node.op, RiscOp::DrawKey { .. }) => {}
+                // A draw key is a C local of its draw node; every other key
+                // is a `CHELIS_DTYPE_KEY` tensor.
+                Prim::Key => {}
                 other => panic!(
                     "C backend does not yet support {} tensors, found at node {}",
                     other.name(),
@@ -2138,120 +2156,122 @@ impl CEmitter {
         }
     }
 
-    fn input_types(dag: VerifiedDagView<'_>) -> chelis_unord::UnordMap<String, TensorType> {
-        let mut seen = chelis_unord::UnordMap::<String, TensorType>::new();
-        for node in dag.nodes() {
-            if let RiscOp::Load { name } = &node.op {
-                seen.entry(name.as_str().to_string())
-                    .or_insert_with(|| node.output_type.clone());
-            }
-        }
-        seen
-    }
-
     fn emit_input_shape_preamble(
         &mut self,
         dag: VerifiedDagView<'_>,
         input_slots: &chelis_unord::UnordMap<String, usize>,
         func_name: &str,
     ) {
-        // Iteration order over `input_types` (a UnordMap) must be
-        // deterministic so the emitted C is byte-identical across runs
-        // for the same input. Sort by label; the lookup is by name and
-        // the emitted lines are independent per label.
-        // See spec/upstream-bugs/host-emit-hashmap-iteration-nondeterminism.md.
-        let input_types = Self::input_types(dag);
-        let sorted_labels = input_types.to_sorted();
         // Producer-supplied strings flowing into the fprintf format string
         // baked into a `"..."` C string literal. Sanitize once per emission
         // boundary per spec/upstream-bugs/producer-string-sanitization.md.
         let func_name_fmt = chelis_ir::span_sanitize::sanitize_for_format_string(func_name);
 
-        // chelis#1277 b2.4: the (slot, axis) pairs a `Literal` claim's entry
-        // guard already compares against that same literal. The static-dim
-        // check below and that guard are then the identical comparison
-        // written twice, and the ABI one runs first, so the kernel would
-        // `abort()` where `spec/04-type-system.md` section 4.7 requires the
-        // [04-NUM-9] trap.
-        //
-        // The narrowing is exactly that overlap and no wider. A `Name` claim
-        // is excluded because its guard compares against another input's
-        // RUNTIME extent, which does not imply the statically declared size;
-        // dropping the static check there would lose a comparison rather
-        // than rename one. The ABI check's own obligation - an external C
-        // caller passing a wrong-shaped tensor to an exported kernel -
-        // survives for every axis no class guards, including in programs
-        // that contain no runtime extent at all.
-        let entry_guards = dag.entry_extent_guards();
-        let mut literal_claim_pairs = chelis_unord::UnordMap::<(usize, i32), usize>::new();
-        for guard in &entry_guards {
-            if let chelis_ir::axis_sources::EntryExtentGuard::Literal {
-                required,
-                observed: (load, axis),
-            } = guard
-                && let RiscOp::Load { name } = &dag.get(*load).expect("entry input").op
-            {
-                literal_claim_pairs.insert((input_slots[name.as_str()], *axis as i32), *required);
-            }
-        }
-
-        for (label, _) in sorted_labels {
-            let ty = &input_types[label];
-            let slot = input_slots[label];
-            // `label` originates as `LoadStoreName::as_str()` (validated)
-            // but we route through the format-string sanitizer to lock the
-            // architectural pattern: every producer-supplied string into a
-            // format-string context goes through `sanitize_for_format_string`.
-            let label_fmt = chelis_ir::span_sanitize::sanitize_for_format_string(label);
-            self.line(&format!("if (inputs[{slot}] == NULL) {{"));
-            self.indent += 1;
-            self.line(&format!(
-                "fprintf(stderr, \"{func_name_fmt}: input `{label_fmt}` at slot {slot} is NULL\\n\");"
-            ));
-            self.line("abort();");
-            self.indent -= 1;
-            self.line("}");
-            for line in Self::entry_dtype_guard(
-                &format!("inputs[{slot}]"),
-                &format!("{func_name_fmt}: input `{label_fmt}`"),
-                ty,
-            ) {
-                self.line(&line);
-            }
-            self.line(&format!(
-                "if (chelis_tensor_rank(inputs[{slot}]) != {}) {{",
-                Self::ndim(ty)
-            ));
-            self.indent += 1;
-            self.line(&format!(
-                "fprintf(stderr, \"{func_name_fmt}: input `{label_fmt}` expected rank {}, got %d\\n\", chelis_tensor_rank(inputs[{slot}]));",
-                Self::ndim(ty)
-            ));
-            self.line("abort();");
-            self.indent -= 1;
-            self.line("}");
-            for (axis, dim) in ty.dims.iter().enumerate() {
-                if let Some(expected) = Self::known_dim_size(dim) {
+        // The shared IR plan follows ABI slots, interleaves each input's
+        // metadata checks with its due extent witnesses, and excludes exact
+        // duplicate literal comparisons. A second label/guard traversal
+        // would give Eval and C different first failures (#2531).
+        for step in dag.entry_validation_plan() {
+            use chelis_ir::axis_sources::{EntryExtentGuard, EntryValidationStep};
+            let input = |load: NodeId| {
+                let node = dag.get(load).expect("entry input");
+                let RiscOp::Load { name } = &node.op else {
+                    unreachable!()
+                };
+                let slot = input_slots[name.as_str()];
+                let label = chelis_ir::span_sanitize::sanitize_for_format_string(name.as_str());
+                (node, slot, label)
+            };
+            match step {
+                EntryValidationStep::DType { load } => {
+                    let (node, slot, label) = input(load);
+                    self.line(&format!("if (inputs[{slot}] == NULL) {{"));
+                    self.indent += 1;
+                    self.line(&format!("fprintf(stderr, \"{func_name_fmt}: input `{label}` at slot {slot} is NULL\\n\");"));
+                    self.line("abort();");
+                    self.indent -= 1;
+                    self.line("}");
+                    for line in Self::entry_dtype_guard(
+                        &format!("inputs[{slot}]"),
+                        &format!("{func_name_fmt}: input `{label}`"),
+                        "",
+                        &node.output_type,
+                    ) {
+                        self.line(&line);
+                    }
+                }
+                EntryValidationStep::Rank { load } => {
+                    let (node, slot, label) = input(load);
+                    let rank = node.output_type.dims.len();
+                    self.line(&format!(
+                        "if (chelis_tensor_rank(inputs[{slot}]) != {rank}) {{"
+                    ));
+                    self.indent += 1;
+                    self.line(&format!("fprintf(stderr, \"{func_name_fmt}: input `{label}` expected rank {rank}, got %d\\n\", chelis_tensor_rank(inputs[{slot}]));"));
+                    self.line("chelis_numeric_trap(\"numeric trap: domain in load at i64\");");
+                    self.indent -= 1;
+                    self.line("}");
+                }
+                EntryValidationStep::LiteralAxis {
+                    load,
+                    axis,
+                    required,
+                } => {
                     if self.host_entry_coverage.iter().any(|guard| {
-                        matches!(guard, chelis_ir::axis_sources::EntryExtentGuard::Literal {
-                            required, observed: (load, observed_axis)
-                        } if *required == expected && *observed_axis == axis
-                            && matches!(&dag.get(*load).expect("covered input").op,
-                                RiscOp::Load { name } if name.as_str() == label))
+                        matches!(guard, EntryExtentGuard::Literal { required: covered, observed }
+                            if *covered == required && *observed == (load, axis))
                     }) {
                         continue;
                     }
-                    if literal_claim_pairs.get(&(slot, axis as i32)) == Some(&expected) {
-                        continue;
-                    }
+                    let (_, slot, label) = input(load);
                     self.line(&format!(
-                        "if (chelis_tensor_shape(inputs[{slot}], {axis}) != {expected}) {{"
+                        "if (chelis_tensor_shape(inputs[{slot}], {axis}) != {required}) {{"
                     ));
                     self.indent += 1;
-                    self.line(&format!(
-                        "fprintf(stderr, \"{func_name_fmt}: input `{label_fmt}` axis {axis} expected {expected}, got %lld\\n\", (long long)chelis_tensor_shape(inputs[{slot}], {axis}));"
-                    ));
-                    self.line("abort();");
+                    self.line(&format!("fprintf(stderr, \"{func_name_fmt}: input `{label}` axis {axis} expected {required}, got %lld\\n\", (long long)chelis_tensor_shape(inputs[{slot}], {axis}));"));
+                    self.line("chelis_numeric_trap(\"numeric trap: domain in load at i64\");");
+                    self.indent -= 1;
+                    self.line("}");
+                }
+                EntryValidationStep::Extent(guard) => {
+                    if self.host_entry_coverage.contains(&guard) {
+                        continue;
+                    }
+                    let input_read = |(load, axis): (NodeId, usize)| {
+                        let (_, slot, label) = input(load);
+                        (
+                            format!("chelis_tensor_shape(inputs[{slot}], {axis})"),
+                            label,
+                            axis,
+                        )
+                    };
+                    let (left, right, diagnostic) = match guard {
+                        EntryExtentGuard::Named {
+                            claim,
+                            canonical,
+                            observed,
+                        } => {
+                            let (left, canonical_label, canonical_axis) = input_read(canonical);
+                            let (right, label, axis) = input_read(observed);
+                            let claim =
+                                chelis_ir::span_sanitize::sanitize_for_format_string(&claim);
+                            let diagnostic = format!(
+                                "fprintf(stderr, \"extent `{claim}`: {canonical_label} axis {canonical_axis} = %lld, {label} axis {axis} = %lld\\n\", (long long)({left}), (long long)({right}));"
+                            );
+                            (left, right, diagnostic)
+                        }
+                        EntryExtentGuard::Literal { required, observed } => {
+                            let (right, label, axis) = input_read(observed);
+                            let diagnostic = format!(
+                                "fprintf(stderr, \"extent `{required}`: claimed = {required}, {label} axis {axis} = %lld\\n\", (long long)({right}));"
+                            );
+                            (required.to_string(), right, diagnostic)
+                        }
+                    };
+                    self.line(&format!("if ({right} != {left}) {{"));
+                    self.indent += 1;
+                    self.line(&diagnostic);
+                    self.line("chelis_numeric_trap(\"numeric trap: domain in load at i64\");");
                     self.indent -= 1;
                     self.line("}");
                 }
@@ -2293,55 +2313,6 @@ impl CEmitter {
                 name
             ));
             self.declared_dim_names.insert(name);
-        }
-
-        // Shared IR owns ordering and witness identity. Rendering never
-        // re-groups checks by class, name or guard kind.
-        for guard in entry_guards {
-            if self.host_entry_coverage.contains(&guard) {
-                continue;
-            }
-            use chelis_ir::axis_sources::EntryExtentGuard;
-            let input_read = |(load, axis): (NodeId, usize)| {
-                let RiscOp::Load { name } = &dag.get(load).expect("entry input").op else {
-                    unreachable!("entry witness must be an input");
-                };
-                let slot = input_slots[name.as_str()];
-                let label = chelis_ir::span_sanitize::sanitize_for_format_string(name.as_str());
-                (
-                    format!("chelis_tensor_shape(inputs[{slot}], {axis})"),
-                    label.to_string(),
-                    axis,
-                )
-            };
-            let (left, right, diagnostic) = match guard {
-                EntryExtentGuard::Named {
-                    claim,
-                    canonical,
-                    observed,
-                } => {
-                    let (left, canonical_label, canonical_axis) = input_read(canonical);
-                    let (right, label, axis) = input_read(observed);
-                    let claim = chelis_ir::span_sanitize::sanitize_for_format_string(&claim);
-                    let diagnostic = format!(
-                        "fprintf(stderr, \"extent `{claim}`: {canonical_label} axis {canonical_axis} = %lld, {label} axis {axis} = %lld\\n\", (long long)({left}), (long long)({right}));"
-                    );
-                    (left, right, diagnostic)
-                }
-                EntryExtentGuard::Literal { required, observed } => {
-                    let (right, label, axis) = input_read(observed);
-                    let diagnostic = format!(
-                        "fprintf(stderr, \"extent `{required}`: claimed = {required}, {label} axis {axis} = %lld\\n\", (long long)({right}));"
-                    );
-                    (required.to_string(), right, diagnostic)
-                }
-            };
-            self.line(&format!("if ({right} != {left}) {{"));
-            self.indent += 1;
-            self.line(&diagnostic);
-            self.line("chelis_numeric_trap(\"numeric trap: domain in load at i64\");");
-            self.indent -= 1;
-            self.line("}");
         }
     }
 
@@ -2433,10 +2404,17 @@ impl CEmitter {
     /// declared dtype before any element is read, and a mismatch traps
     /// `Domain` in `load` at the declared dtype ([04-NUM-9]) after one context
     /// line naming the input and both dtypes. The storage is never read at the
-    /// declared dtype. `input` is the sanitized context prefix that names the
-    /// input. The DAG entry and the host signature entry both render their
-    /// guard through this one function.
-    pub(crate) fn entry_dtype_guard(tensor: &str, input: &str, ty: &TensorType) -> [String; 5] {
+    /// declared dtype. `input` is the sanitized format fragment that names the
+    /// input and `input_args` the arguments it consumes, each preceded by a
+    /// comma, or empty. The DAG entry, the host signature entry and the host
+    /// entry's nested-value walk all render their guard through this one
+    /// function.
+    pub(crate) fn entry_dtype_guard(
+        tensor: &str,
+        input: &str,
+        input_args: &str,
+        ty: &TensorType,
+    ) -> [String; 5] {
         let declared = ty.precision;
         // The supplied tag has passed the runtime's own validation, so it is
         // one of the runtime ABI's dtypes; each is spelled as its language
@@ -2444,16 +2422,10 @@ impl CEmitter {
         let supplied = chelis_vocab::RuntimeDType::ALL
             .iter()
             .map(|dtype| {
-                let prim = Prim::ACTIVE_FLOATS
-                    .into_iter()
-                    .chain(Prim::ACTIVE_INTEGERS)
-                    .chain([Prim::Bool])
-                    .find(|prim| prim.runtime_dtype().is_ok_and(|mapped| mapped == *dtype))
-                    .expect("every runtime ABI dtype is a language dtype");
                 format!(
                     "__chelis_supplied_dtype == {} ? \"{}\" : ",
                     dtype.c_macro(),
-                    prim.name()
+                    Prim::from_runtime_dtype(*dtype).name()
                 )
             })
             .collect::<String>();
@@ -2471,7 +2443,7 @@ impl CEmitter {
                 "    const chelis_dtype __chelis_supplied_dtype = chelis_tensor_read_view({tensor}).dtype;"
             ),
             format!(
-                "    fprintf(stderr, \"{input} expected dtype {}, got %s\\n\", {supplied}\"an unregistered dtype\");",
+                "    fprintf(stderr, \"{input} expected dtype {}, got %s\\n\"{input_args}, {supplied}\"an unregistered dtype\");",
                 declared.name()
             ),
             format!("    chelis_numeric_trap({trap:?});"),
@@ -2513,6 +2485,8 @@ impl CEmitter {
             // Returning the storage type here keeps memcpy, slot
             // allocation, and pointer-cast code correct.
             Prim::Bf16 | Prim::F16 => "uint16_t",
+            // A key tensor's element is one opaque random word.
+            Prim::Key => RANDOM_WORD_C_TYPE,
             other => panic!(
                 "C backend does not yet support `{}` tensors; the silent \
                  default-arm downgrade was removed by WS-A0 to surface \
@@ -2533,7 +2507,7 @@ impl CEmitter {
 
     /// The C type of a rank-0 value of `prim`, from the element-type
     /// authority `elem_type`.
-    fn prim_elem_type(prim: Prim) -> &'static str {
+    pub(crate) fn prim_elem_type(prim: Prim) -> &'static str {
         Self::elem_type(&TensorType {
             dims: vec![],
             precision: prim,
@@ -4648,6 +4622,10 @@ impl CEmitter {
     /// over a cotangent: drop where the arithmetic-width unit is below the
     /// rate, else the finalized `div(x, sub(1p, rate))`.
     fn emit_keyed_dropout(&mut self, node: &DagNode, dag: VerifiedDagView<'_>) {
+        self.emit_draw_extent_guards(node, dag);
+        if !Self::is_draw_key(dag, node.inputs[2]) {
+            return self.emit_explicitly_keyed_dropout(node, dag);
+        }
         let id = node.id.0;
         let ty = &node.output_type;
         let prim = ty.precision;
@@ -4717,6 +4695,10 @@ impl CEmitter {
     /// [05-OP-8] over operand bounds and a key, with the same samplers the
     /// baked node uses.
     fn emit_keyed_uniform_like(&mut self, node: &DagNode, dag: VerifiedDagView<'_>) {
+        self.emit_draw_extent_guards(node, dag);
+        if !Self::is_draw_key(dag, node.inputs[3]) {
+            return self.emit_explicitly_keyed_uniform_like(node, dag);
+        }
         let id = node.id.0;
         let ty = &node.output_type;
         let key = node.inputs[3].0;
@@ -4768,7 +4750,16 @@ impl CEmitter {
     /// [05-OP-8]'s bound adjoint: contributions `g_i * (1 - u_i)` or
     /// `g_i * u_i` in row-major order at the arithmetic width, combined by
     /// the canonical adjacent-pair tree and narrowed once to `p`.
-    fn emit_uniform_bound_adjoint(&mut self, node: &DagNode, bound: chelis_ir::dag::UniformBound) {
+    fn emit_uniform_bound_adjoint(
+        &mut self,
+        node: &DagNode,
+        bound: chelis_ir::dag::UniformBound,
+        dag: VerifiedDagView<'_>,
+    ) {
+        self.emit_draw_extent_guards(node, dag);
+        if !Self::is_draw_key(dag, node.inputs[2]) {
+            return self.emit_explicitly_keyed_bound_adjoint(node, bound, dag);
+        }
         let id = node.id.0;
         let ty = &node.output_type;
         let prim = ty.precision;
@@ -4858,6 +4849,660 @@ impl CEmitter {
                 Self::f32_to_reduced_fn(prim)
             )),
         }
+    }
+
+    // ---- Explicit keys ([05-RNG-2], [05-OP-69..72]) ----
+
+    /// Whether a random primitive's key is a counter-stream draw key, whose
+    /// word lives in the `t{id}_key` local and whose `DrawKey` already
+    /// validated the draw's controls.
+    fn is_draw_key(dag: VerifiedDagView<'_>, key: NodeId) -> bool {
+        dag.get(key)
+            .is_some_and(|node| matches!(node.op, RiscOp::DrawKey { .. }))
+    }
+
+    /// Element `row` of a key tensor, or of a rank-0 key at row 0.
+    fn key_word_expr(key: NodeId, row: &str) -> String {
+        format!(
+            "((const {}*)t{}_data)[{row}]",
+            Self::prim_elem_type(Prim::Key),
+            key.0
+        )
+    }
+
+    /// The element row `b` of draw `id` reads from an operand shaped like
+    /// its key's leading axes: `b / (rows / size)`, which is `b` itself for
+    /// an operand of the key's own shape. A row exists only for a nonempty
+    /// key batch, whose leading part is nonempty too.
+    fn leading_row_expr(id: usize, input: NodeId) -> String {
+        format!("b / (t{id}_rows / t{}_size)", input.0)
+    }
+
+    /// Draw `id`'s control at row `b`: its one element when rank 0, or the
+    /// row's element of a control shaped like the key's leading axes, at its
+    /// exact arithmetic reading.
+    fn row_float_expr(dag: VerifiedDagView<'_>, input: NodeId, id: usize) -> String {
+        let ty = &dag.get(input).expect("verified random control").output_type;
+        if ty.dims.is_empty() {
+            return Self::rank0_float_expr(dag, input);
+        }
+        let row = Self::leading_row_expr(id, input);
+        let stored = format!("((const {}*)t{}_data)[{row}]", Self::elem_type(ty), input.0);
+        match ty.precision {
+            Prim::F64 | Prim::F32 => stored,
+            prim @ (Prim::F16 | Prim::Bf16) => {
+                format!("{}({stored})", Self::reduced_to_f32_fn(prim))
+            }
+            other => panic!(
+                "random control of dtype `{}` is not f16, bf16, f32 or f64",
+                other.name()
+            ),
+        }
+    }
+
+    /// Draw `id`'s activation at row `b`: absent is active, a rank-0 Bool is
+    /// its byte, and a Bool shaped like the key's leading axes is the row's
+    /// byte.
+    fn row_bool_expr(dag: VerifiedDagView<'_>, input: Option<&NodeId>, id: usize) -> String {
+        match input {
+            Some(input)
+                if !dag
+                    .get(*input)
+                    .expect("verified activation")
+                    .output_type
+                    .dims
+                    .is_empty() =>
+            {
+                format!(
+                    "(((const {}*)t{}_data)[{}] != 0)",
+                    Self::prim_elem_type(Prim::Bool),
+                    input.0,
+                    Self::leading_row_expr(id, *input)
+                )
+            }
+            other => Self::rank0_bool_expr(other),
+        }
+    }
+
+    /// Check each extent `dims` declares against `observed(axis)`, a C
+    /// expression, before the result exists: a mismatch reports the claim
+    /// in the DAG evaluator's `check_declared_extents` form and traps
+    /// `Domain` in `op` at i64.
+    fn emit_declared_extent_guards(
+        &mut self,
+        op: &'static str,
+        dims: &[DimInfo],
+        observed: impl Fn(usize) -> String,
+    ) {
+        let trap = NumericTrap::Domain {
+            op,
+            prim: Prim::Int64,
+        }
+        .to_string();
+        for (axis, dim) in dims.iter().enumerate() {
+            let observed = observed(axis);
+            let claimed = Self::emit_dim_info(dim);
+            let claim = Self::extent_claim_label(dim);
+            self.line(&format!("if (({claimed}) != ({observed})) {{"));
+            self.indent += 1;
+            self.line(&format!(
+                "fprintf(stderr, \"extent `{claim}`: claimed = %lld, {op} axis {axis} = %lld\\n\", (long long)({claimed}), (long long)({observed}));"
+            ));
+            self.line(&format!("chelis_numeric_trap({trap:?});"));
+            self.indent -= 1;
+            self.line("}");
+        }
+    }
+
+    /// How an extent report names a declared axis: its literal, or its name
+    /// made safe for a format string.
+    fn extent_claim_label(dim: &DimInfo) -> String {
+        match dim {
+            DimInfo::Lit(value) => value.to_string(),
+            DimInfo::Named(name, _) => {
+                chelis_ir::span_sanitize::sanitize_for_format_string(name).into_owned()
+            }
+        }
+    }
+
+    /// Check input `slot`, `input`, against `reference`, whose declared axes
+    /// are `reference_dims`, on its first `axes` runtime extents: a mismatch
+    /// reports the reference's claim in the DAG evaluator's
+    /// `check_operand_extents` form and traps `Domain` in `op` at i64.
+    fn emit_operand_extent_guards(
+        &mut self,
+        op: &'static str,
+        reference: NodeId,
+        reference_dims: &[DimInfo],
+        slot: usize,
+        input: NodeId,
+        axes: usize,
+    ) {
+        let trap = NumericTrap::Domain {
+            op,
+            prim: Prim::Int64,
+        }
+        .to_string();
+        for (axis, dim) in reference_dims.iter().enumerate().take(axes) {
+            let claim = Self::extent_claim_label(dim);
+            let claimed = format!("chelis_tensor_shape(t{}, {axis})", reference.0);
+            let observed = format!("chelis_tensor_shape(t{}, {axis})", input.0);
+            self.line(&format!("if (({claimed}) != ({observed})) {{"));
+            self.indent += 1;
+            self.line(&format!(
+                "fprintf(stderr, \"extent `{claim}`: claimed = %lld, {op} input {slot} axis {axis} = %lld\\n\", (long long)({claimed}), (long long)({observed}));"
+            ));
+            self.line(&format!("chelis_numeric_trap({trap:?});"));
+            self.indent -= 1;
+            self.line("}");
+        }
+    }
+
+    /// A key-operand random primitive's extents, checked before it
+    /// allocates its result or reads an operand. First its key batch against
+    /// its operands, in [`RiscOp::draw_batch_layout`]'s order and with the
+    /// DAG evaluator's report (spec/10 §3.2, rule V5): a key batch's shape is
+    /// its data's leading axes, and each per-row control and activation is a
+    /// leading part of it. Then every extent the result's type declares,
+    /// from which this lane allocates the result, against the data's (a bound
+    /// adjoint's, against the key's leading axes), with the local extent
+    /// guard's report; the evaluator builds each result from its data and
+    /// reads no declared extent. So no row index, row length or loop bound
+    /// below rests on an extent that nothing has checked against the
+    /// operands.
+    fn emit_draw_extent_guards(&mut self, node: &DagNode, dag: VerifiedDagView<'_>) {
+        let layout = node
+            .op
+            .draw_batch_layout()
+            .expect("emit_draw_extent_guards emits only key-operand random primitives");
+        let op = layout.op;
+        let key = node.inputs[layout.key];
+        let data = node.inputs[layout.data_input];
+        let key_dims = &dag.get(key).expect("verified key").output_type.dims;
+        let rank = |input: NodeId| {
+            dag.get(input)
+                .expect("verified random operand")
+                .output_type
+                .dims
+                .len()
+        };
+        if !key_dims.is_empty() {
+            let operands = std::iter::once((layout.data_input, data, key_dims.len())).chain(
+                layout.per_row.iter().filter_map(|slot| {
+                    node.inputs
+                        .get(*slot)
+                        .map(|input| (*slot, *input, rank(*input)))
+                }),
+            );
+            for (slot, input, axes) in operands.collect::<Vec<_>>() {
+                self.emit_operand_extent_guards(op, key, key_dims, slot, input, axes);
+            }
+        }
+        let source = if matches!(node.op, RiscOp::UniformBoundAdjoint { .. }) {
+            key
+        } else {
+            data
+        };
+        self.emit_declared_extent_guards(op, &node.output_type.dims, |axis| {
+            format!("chelis_tensor_shape(t{}, {axis})", source.0)
+        });
+    }
+
+    /// The row count and per-row element count of draw `id`'s data `data`
+    /// under key `key`: one row of every element for a rank-0 key, and for a
+    /// batch one row per key, of the data's runtime element count over the
+    /// key's (spec/10 §3.2). [`Self::emit_draw_extent_guards`] has checked
+    /// that the data's leading axes are the key's shape, so each row is
+    /// whole. Row `b` holds flat elements `[b * row_len, (b + 1) * row_len)`
+    /// and numbers them from zero.
+    fn emit_draw_rows(&mut self, id: usize, key: NodeId, dag: VerifiedDagView<'_>, data: NodeId) {
+        let index = Self::prim_elem_type(Prim::Int64);
+        let batched = !dag
+            .get(key)
+            .expect("verified key")
+            .output_type
+            .dims
+            .is_empty();
+        let rows = if batched {
+            format!("t{}_size", key.0)
+        } else {
+            "1".to_string()
+        };
+        self.line(&format!("{index} t{id}_rows = {rows};"));
+        self.line(&format!(
+            "{index} t{id}_row_len = t{id}_rows > 0 ? t{}_size / t{id}_rows : 0;",
+            data.0
+        ));
+    }
+
+    /// The row `b` and in-row index `e` of flat element `i` of a draw.
+    fn emit_row_of_element(&mut self, id: usize) {
+        let index = Self::prim_elem_type(Prim::Int64);
+        self.line(&format!("{index} b = i / t{id}_row_len;"));
+        self.line(&format!(
+            "{RANDOM_WORD_C_TYPE} e = ({RANDOM_WORD_C_TYPE})(i - b * t{id}_row_len);"
+        ));
+    }
+
+    /// [05-OP-37] under an explicit key: the draw validates its own rate for
+    /// every active row, then drops where the arithmetic-width unit of
+    /// `word(key[b], e)` is below row `b`'s rate.
+    fn emit_explicitly_keyed_dropout(&mut self, node: &DagNode, dag: VerifiedDagView<'_>) {
+        let id = node.id.0;
+        let ty = &node.output_type;
+        let prim = ty.precision;
+        let data = node.inputs[0].0;
+        let key = node.inputs[2];
+        let index = Self::prim_elem_type(Prim::Int64);
+        let binary64 = Self::prim_elem_type(Prim::F64);
+        let binary32 = Self::prim_elem_type(Prim::F32);
+        let storage = Self::elem_type(ty);
+        let rate = Self::row_float_expr(dag, node.inputs[1], id);
+        let active = Self::row_bool_expr(dag, node.inputs.get(3), id);
+        let trap = NumericTrap::Domain {
+            op: "dropout",
+            prim,
+        }
+        .to_string();
+        self.emit_slot_wrapper(id, ty);
+        self.emit_draw_rows(id, key, dag, node.inputs[0]);
+        self.line(&format!("for ({index} b = 0; b < t{id}_rows; b++) {{"));
+        self.indent += 1;
+        self.line(&format!("if ({active}) {{"));
+        self.indent += 1;
+        self.line(&format!("{binary64} rate = ({binary64})({rate});"));
+        self.line(&format!(
+            "if (!(rate >= 0.0 && rate < 1.0)) chelis_numeric_trap({trap:?});"
+        ));
+        self.indent -= 1;
+        self.line("}");
+        self.indent -= 1;
+        self.line("}");
+        self.line("#pragma omp parallel for");
+        self.line(&format!("for ({index} i = 0; i < t{id}_size; i++) {{"));
+        self.indent += 1;
+        self.emit_row_of_element(id);
+        self.line(&format!(
+            "if (!({active})) {{ (({storage}*)t{id}_data)[i] = ({storage})0; continue; }}"
+        ));
+        let unit = format!("chelis_random_unit({}, e)", Self::key_word_expr(key, "b"));
+        match prim {
+            Prim::F64 => {
+                self.line(&format!("{binary64} rate = {rate};"));
+                self.line(&format!(
+                    "(({storage}*)t{id}_data)[i] = {unit} < rate ? 0.0 : ((const {storage}*)t{data}_data)[i] / (1.0 - rate);"
+                ));
+            }
+            Prim::F32 => {
+                self.line(&format!("{binary32} rate = {rate};"));
+                self.line(&format!(
+                    "(({storage}*)t{id}_data)[i] = ({binary32}){unit} < rate ? 0.0f : ((const {storage}*)t{data}_data)[i] / (1.0f - rate);"
+                ));
+            }
+            Prim::F16 | Prim::Bf16 => {
+                let widen = Self::reduced_to_f32_fn(prim);
+                let narrow = Self::f32_to_reduced_fn(prim);
+                self.line(&format!("{binary32} rate = {rate};"));
+                self.line(&format!(
+                    "{binary32} denom = {widen}({narrow}(1.0f - rate));"
+                ));
+                self.line(&format!(
+                    "(({storage}*)t{id}_data)[i] = ({binary32}){unit} < rate ? {narrow}(0.0f) : {narrow}({widen}(((const {storage}*)t{data}_data)[i]) / denom);"
+                ));
+            }
+            other => panic!(
+                "dropout of dtype `{}` is not f16, bf16, f32 or f64",
+                other.name()
+            ),
+        }
+        self.indent -= 1;
+        self.line("}");
+    }
+
+    /// [05-OP-8] under an explicit key: the draw validates its own bounds for
+    /// every active row, then samples `word(key[b], e)` with row `b`'s bounds.
+    fn emit_explicitly_keyed_uniform_like(&mut self, node: &DagNode, dag: VerifiedDagView<'_>) {
+        let id = node.id.0;
+        let ty = &node.output_type;
+        let prim = ty.precision;
+        let key = node.inputs[3];
+        let index = Self::prim_elem_type(Prim::Int64);
+        let binary64 = Self::prim_elem_type(Prim::F64);
+        let storage = Self::elem_type(ty);
+        let low = Self::row_float_expr(dag, node.inputs[1], id);
+        let high = Self::row_float_expr(dag, node.inputs[2], id);
+        let active = Self::row_bool_expr(dag, node.inputs.get(4), id);
+        let trap = NumericTrap::Domain {
+            op: "uniform_like",
+            prim,
+        }
+        .to_string();
+        self.emit_slot_wrapper(id, ty);
+        self.emit_draw_rows(id, key, dag, node.inputs[0]);
+        self.line(&format!("for ({index} b = 0; b < t{id}_rows; b++) {{"));
+        self.indent += 1;
+        self.line(&format!("if ({active}) {{"));
+        self.indent += 1;
+        self.line(&format!(
+            "{binary64} low = ({binary64})({low}), high = ({binary64})({high});"
+        ));
+        if prim == Prim::F64 {
+            self.line(&format!("{binary64} span = high - low;"));
+        } else {
+            let binary32 = Self::prim_elem_type(Prim::F32);
+            self.line(&format!(
+                "{binary32} span = ({binary32})high - ({binary32})low;"
+            ));
+        }
+        self.line(&format!(
+            "if (!(isfinite(low) && isfinite(high) && low <= high && isfinite(span))) chelis_numeric_trap({trap:?});"
+        ));
+        self.indent -= 1;
+        self.line("}");
+        self.indent -= 1;
+        self.line("}");
+        let (wide, sampler) = if prim == Prim::F64 {
+            (binary64, "chelis_uniform_sample_f64")
+        } else {
+            (Self::prim_elem_type(Prim::F32), "chelis_uniform_sample_f32")
+        };
+        self.line("#pragma omp parallel for");
+        self.line(&format!("for ({index} i = 0; i < t{id}_size; i++) {{"));
+        self.indent += 1;
+        self.emit_row_of_element(id);
+        self.line(&format!(
+            "if (!({active})) {{ (({storage}*)t{id}_data)[i] = ({storage})0; continue; }}"
+        ));
+        let sample = format!(
+            "{sampler}({}, e, ({wide})({low}), ({wide})({high}))",
+            Self::key_word_expr(key, "b")
+        );
+        match prim {
+            Prim::F64 | Prim::F32 => {
+                self.line(&format!("(({storage}*)t{id}_data)[i] = {sample};"));
+            }
+            Prim::F16 | Prim::Bf16 => self.line(&format!(
+                "(({storage}*)t{id}_data)[i] = {}({sample});",
+                Self::f32_to_reduced_fn(prim)
+            )),
+            other => panic!(
+                "uniform_like of dtype `{}` is not f16, bf16, f32 or f64",
+                other.name()
+            ),
+        }
+        self.indent -= 1;
+        self.line("}");
+    }
+
+    /// [05-OP-8]'s bound adjoint under an explicit key. Row `b`'s leaves are
+    /// `g_i * (1 - u_i)` or `g_i * u_i` with `u_i` from `word(key[b], e)`, and
+    /// positive zero for an inactive row. The result is shaped like the key's
+    /// leading axes, and each element folds the leaves of the rows that share
+    /// it in one canonical adjacent-pair tree: a rank-0 result folds every
+    /// leaf, and a result of the key's shape folds each row's.
+    fn emit_explicitly_keyed_bound_adjoint(
+        &mut self,
+        node: &DagNode,
+        bound: chelis_ir::dag::UniformBound,
+        dag: VerifiedDagView<'_>,
+    ) {
+        let id = node.id.0;
+        let ty = &node.output_type;
+        let prim = ty.precision;
+        let cotangent = node.inputs[1].0;
+        let key = node.inputs[2];
+        let active = Self::row_bool_expr(dag, node.inputs.get(3), id);
+        let arithmetic_ty = TensorType {
+            dims: vec![],
+            precision: if prim == Prim::F64 {
+                Prim::F64
+            } else {
+                Prim::F32
+            },
+        };
+        let arithmetic = Self::elem_type(&arithmetic_ty);
+        let arithmetic_dtype = Self::dtype_macro(&arithmetic_ty);
+        let index = Self::prim_elem_type(Prim::Int64);
+        let storage = Self::elem_type(ty);
+        let load_g = match prim {
+            Prim::F64 | Prim::F32 => format!("((const {storage}*)t{cotangent}_data)[i]"),
+            Prim::F16 | Prim::Bf16 => format!(
+                "{}(((const {storage}*)t{cotangent}_data)[i])",
+                Self::reduced_to_f32_fn(prim)
+            ),
+            other => panic!(
+                "uniform bound adjoint of dtype `{}` is not f16, bf16, f32 or f64",
+                other.name()
+            ),
+        };
+        let weight = match bound {
+            chelis_ir::dag::UniformBound::Low => format!("(({arithmetic})1 - u)"),
+            chelis_ir::dag::UniformBound::High => "u".to_string(),
+        };
+        let store = |value: &str| match prim {
+            Prim::F64 | Prim::F32 => value.to_string(),
+            _ => format!("{}({value})", Self::f32_to_reduced_fn(prim)),
+        };
+        let per_row = !ty.dims.is_empty();
+        self.emit_slot_wrapper(id, ty);
+        self.emit_draw_rows(id, key, dag, node.inputs[1]);
+        // One output per group of rows sharing a bound element, or one for
+        // the whole draw; each group's leaves are contiguous.
+        let outputs = if per_row {
+            format!("t{id}_size")
+        } else {
+            "1".to_string()
+        };
+        let segment = if per_row {
+            format!("(t{cotangent}_size / t{id}_size)")
+        } else {
+            format!("t{cotangent}_size")
+        };
+        self.line(&format!("{index} t{id}_n = t{cotangent}_size;"));
+        self.line(&format!(
+            "for ({index} out = 0; out < {outputs}; out++) (({storage}*)t{id}_data)[out] = {};",
+            store(&format!("({arithmetic})0"))
+        ));
+        self.line(&format!("if (t{id}_n > 0) {{"));
+        self.indent += 1;
+        self.line(&format!(
+            "chelis_tensor *t{id}_leaves_tensor = chelis_alloc(1, &t{id}_n, {arithmetic_dtype});"
+        ));
+        self.line(&format!(
+            "chelis_tensor_write *t{id}_leaves_guard = chelis_tensor_begin_write(t{id}_leaves_tensor);"
+        ));
+        self.line(&format!(
+            "{arithmetic} *t{id}_leaves = ({arithmetic}*)chelis_tensor_write_view(t{id}_leaves_guard).data;"
+        ));
+        self.line(&format!("for ({index} i = 0; i < t{id}_n; i++) {{"));
+        self.indent += 1;
+        self.emit_row_of_element(id);
+        self.line(&format!(
+            "{arithmetic} u = ({arithmetic})chelis_random_unit({}, e);",
+            Self::key_word_expr(key, "b")
+        ));
+        self.line(&format!(
+            "t{id}_leaves[i] = ({active}) ? ({arithmetic})({load_g}) * {weight} : ({arithmetic})0;"
+        ));
+        self.indent -= 1;
+        self.line("}");
+        self.line(&format!("for ({index} out = 0; out < {outputs}; out++) {{"));
+        self.indent += 1;
+        self.line(&format!(
+            "{arithmetic} *seg = t{id}_leaves + out * {segment};"
+        ));
+        self.line(&format!("{index} n = {segment};"));
+        self.line("while (n > 1) {");
+        self.indent += 1;
+        self.line(&format!("{index} next_n = n / 2 + n % 2;"));
+        self.line(&format!("for ({index} pair = 0; pair < next_n; pair++) {{"));
+        self.indent += 1;
+        self.line(&format!("{index} left = 2 * pair;"));
+        self.line(&format!("{index} right = left + 1;"));
+        self.line("seg[pair] = right < n ? seg[left] + seg[right] : seg[left];");
+        self.indent -= 1;
+        self.line("}");
+        self.line("n = next_n;");
+        self.indent -= 1;
+        self.line("}");
+        self.line(&format!(
+            "if (n > 0) (({storage}*)t{id}_data)[out] = {};",
+            store("seg[0]")
+        ));
+        self.indent -= 1;
+        self.line("}");
+        self.line(&format!("chelis_tensor_end_write(t{id}_leaves_guard);"));
+        self.line(&format!("chelis_tensor_release(t{id}_leaves_tensor);"));
+        self.indent -= 1;
+        self.line("}");
+    }
+
+    /// An elementwise key operation's extents ([05-OP-69], [05-OP-70],
+    /// [05-OP-72]), checked before it allocates its result or reads an
+    /// operand. The verifier gives the result and every operand one declared
+    /// shape; this lane allocates the result from it and reads each operand
+    /// at every flat index of the result. So first each later operand's
+    /// runtime extents against the first's, with the DAG evaluator's report,
+    /// then every extent the result declares against the first operand's,
+    /// with the local extent guard's report; the evaluator builds the result
+    /// from its operands and reads no declared extent. Every index below the
+    /// result's size is then in bounds for every operand.
+    fn emit_key_operation_extent_guards(
+        &mut self,
+        op: &'static str,
+        node: &DagNode,
+        dag: VerifiedDagView<'_>,
+    ) {
+        let first = node.inputs[0];
+        let dims = &dag
+            .get(first)
+            .expect("verified key operand")
+            .output_type
+            .dims;
+        for (slot, input) in node.inputs.iter().enumerate().skip(1) {
+            self.emit_operand_extent_guards(op, first, dims, slot, *input, dims.len());
+        }
+        self.emit_declared_extent_guards(op, &node.output_type.dims, |axis| {
+            format!("chelis_tensor_shape(t{}, {axis})", first.0)
+        });
+    }
+
+    /// [05-OP-69]: each key is its i64 seed's two's-complement bits.
+    fn emit_key_from_seed(&mut self, node: &DagNode, dag: VerifiedDagView<'_>) {
+        let id = node.id.0;
+        let seed = node.inputs[0].0;
+        let word = Self::prim_elem_type(Prim::Key);
+        let seed_ty = Self::prim_elem_type(Prim::Int64);
+        let index = Self::prim_elem_type(Prim::Int64);
+        self.emit_key_operation_extent_guards("key_from_seed", node, dag);
+        self.emit_slot_wrapper(id, &node.output_type);
+        self.line(&format!("for ({index} i = 0; i < t{id}_size; i++) {{"));
+        self.indent += 1;
+        self.line(&format!(
+            "(({word}*)t{id}_data)[i] = ({word})((const {seed_ty}*)t{seed}_data)[i];"
+        ));
+        self.indent -= 1;
+        self.line("}");
+    }
+
+    /// One half of [05-OP-70]: `derive(k, 0)` or `derive(k, 1)` per element.
+    fn emit_split_key(
+        &mut self,
+        node: &DagNode,
+        branch: chelis_ir::dag::KeyBranch,
+        dag: VerifiedDagView<'_>,
+    ) {
+        let id = node.id.0;
+        let key = node.inputs[0];
+        let word = Self::prim_elem_type(Prim::Key);
+        let index = Self::prim_elem_type(Prim::Int64);
+        let derive_index = match branch {
+            chelis_ir::dag::KeyBranch::Left => 0,
+            chelis_ir::dag::KeyBranch::Right => 1,
+        };
+        self.emit_key_operation_extent_guards("split_key", node, dag);
+        self.emit_slot_wrapper(id, &node.output_type);
+        self.line(&format!("for ({index} i = 0; i < t{id}_size; i++) {{"));
+        self.indent += 1;
+        self.line(&format!(
+            "(({word}*)t{id}_data)[i] = chelis_key_derive({}, {derive_index}ULL);",
+            Self::key_word_expr(key, "i")
+        ));
+        self.indent -= 1;
+        self.line("}");
+    }
+
+    /// [05-OP-72]: `derive(derive(k, 2), n)` per element, `n`'s i64 read as
+    /// its two's-complement bits.
+    fn emit_fold_in(&mut self, node: &DagNode, dag: VerifiedDagView<'_>) {
+        let id = node.id.0;
+        let key = node.inputs[0];
+        let n = node.inputs[1].0;
+        let word = Self::prim_elem_type(Prim::Key);
+        let index_ty = Self::prim_elem_type(Prim::Int64);
+        self.emit_key_operation_extent_guards("fold_in", node, dag);
+        self.emit_slot_wrapper(id, &node.output_type);
+        self.line(&format!("for ({index_ty} i = 0; i < t{id}_size; i++) {{"));
+        self.indent += 1;
+        self.line(&format!(
+            "(({word}*)t{id}_data)[i] = chelis_key_derive(chelis_key_derive({}, 2ULL), ({word})((const {index_ty}*)t{n}_data)[i]);",
+            Self::key_word_expr(key, "i")
+        ));
+        self.indent -= 1;
+        self.line("}");
+    }
+
+    /// [05-OP-71]: row `j` of key `i` is `derive(derive(k[i], 2), j)`, the
+    /// count axis last. A negative runtime count traps before allocation.
+    fn emit_split_keys(&mut self, node: &DagNode, count: &RtDim) {
+        let id = node.id.0;
+        let key = node.inputs[0];
+        let word = Self::prim_elem_type(Prim::Key);
+        let index = Self::prim_elem_type(Prim::Int64);
+        let last = node.output_type.dims.len() - 1;
+        let extent = Self::bound_c_expr(count, &node.inputs, key.0, last);
+        let trap = NumericTrap::Domain {
+            op: "split_keys",
+            prim: Prim::Int64,
+        }
+        .to_string();
+        self.line(&format!("{index} t{id}_count = ({index})({extent});"));
+        if matches!(count, RtDim::Node(_)) {
+            self.line(&format!(
+                "if (t{id}_count < 0) chelis_numeric_trap({trap:?});"
+            ));
+        }
+        if self.runtime_dim_sites.contains_key(&(id, last)) {
+            self.emit_runtime_dim_sites(id, &[(last, format!("t{id}_count"))]);
+        }
+        // The key's extents and the count are the result's extents. Every
+        // extent the result's type declares is a claim about them, checked
+        // before the allocation, as `chelis_movement_check_target` checks an
+        // expansion's target and as the DAG evaluator checks this node; the
+        // report is the local extent guard's.
+        self.emit_declared_extent_guards("split_keys", &node.output_type.dims, |axis| {
+            if axis == last {
+                format!("t{id}_count")
+            } else {
+                format!("chelis_tensor_shape(t{}, {axis})", key.0)
+            }
+        });
+        self.emit_slot_wrapper(id, &node.output_type);
+        self.line(&format!("for ({index} i = 0; i < t{}_size; i++) {{", key.0));
+        self.indent += 1;
+        self.line(&format!(
+            "{word} parent = chelis_key_derive({}, 2ULL);",
+            Self::key_word_expr(key, "i")
+        ));
+        self.line(&format!("for ({index} j = 0; j < t{id}_count; j++) {{"));
+        self.indent += 1;
+        self.line(&format!(
+            "(({word}*)t{id}_data)[i * t{id}_count + j] = chelis_key_derive(parent, ({word})j);"
+        ));
+        self.indent -= 1;
+        self.line("}");
+        self.indent -= 1;
+        self.line("}");
     }
 
     // ---- Fused elementwise helpers ----

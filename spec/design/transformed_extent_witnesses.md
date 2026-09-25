@@ -79,3 +79,25 @@ The matrix is an addition to #1277's bounded oracle or an issue-owned target
 with explicit inclusion in that oracle's manifest. The #2083 regression can
 close against #2144 once both controls execute on merged main; the other
 leaves close only on their full matrices. No result here closes all of #1277.
+
+### Disconnected cotangent receipt boundary
+
+`lower_grad_callable_with_values` pairs each selected formal load with its
+actual node and ordered tensor type before AD. It validates rank, dtype and
+physical axis sources; packing requires that same mapping. A disconnected
+cotangent reads every extent from the actual's corresponding axis, including
+literal-shaped inputs whose entry claims must still execute. Rank-zero
+cotangents retain the actual as an activation dependency. External top-level
+inputs obtain their declared type from their authored signature when the
+value environment omits their self-reference.
+
+The #1767 matrix runs in `chelis-backend-c::exec_compile` under the
+`issue_1767` filter: top-level, parameter, rank-zero, empty, symbolic,
+reordered/repeated selections, movement actuals, and live/decoded helper
+contexts compare strict Eval with linked C. `chelis-ir::issue_1102_zero_gradient`
+pins the original failure and input guard; the lowerer unit
+`gradient_axis_mapping_rejects_missing_sources_before_publication` removes
+or corrupts sources. `chelis-cli::runtime_extent_slice_b` owns the #1767
+false-result-claim pair and #2083's exact agreeing/refuted movement pair.
+These tests are included explicitly in `runtime_extent_oracle_targets.json`;
+their presence does not change the scope of the other transformed leaves.

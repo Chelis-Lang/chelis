@@ -293,6 +293,14 @@ pub(crate) fn project_program(
             .map(|function| project_function(function, &declared_callbacks))
             .collect::<Result<Vec<_>, _>>()?,
         summary_rejections: emission.summary_rejections().to_vec(),
+        adt_layouts: emission
+            .adt_layouts()
+            .iter()
+            .map(project_adt_layout)
+            .collect::<Result<Vec<_>, _>>()?
+            .into_iter()
+            .flatten()
+            .collect(),
     };
     let sites = emission.sites().map(project_site).collect();
     let root_sites = emission.root_sites().map(project_site).collect();
@@ -325,6 +333,59 @@ pub(crate) fn project_program(
         function_sites,
         function_owner_bindings,
     })
+}
+
+/// Project one parameter ADT layout for entry validation.
+///
+/// A layout whose ADT type has no C representation is dropped, since no
+/// parameter can carry it. A field that holds no tensor value, such as a
+/// function, is walked past, so it projects as `Unit` when its own type has
+/// no C representation; a field that holds a tensor must project exactly.
+fn project_adt_layout(
+    layout: &chelis_ir::host::HostAdtLayout<ConcreteHostType>,
+) -> Result<Option<chelis_ir::host::HostAdtLayout<HostAbiType>>, Unsupported> {
+    fn carries_tensor(ty: &ConcreteHostType) -> bool {
+        match ty {
+            ConcreteHostType::Tensor(_) => true,
+            ConcreteHostType::Adt(_, items) | ConcreteHostType::Tuple(items) => {
+                items.iter().any(carries_tensor)
+            }
+            ConcreteHostType::List(inner) | ConcreteHostType::Option(inner) => {
+                carries_tensor(inner)
+            }
+            ConcreteHostType::Dict(key, value) => carries_tensor(key) || carries_tensor(value),
+            _ => false,
+        }
+    }
+    let Ok(ty) = HostAbiType::try_from_concrete(&layout.ty) else {
+        return Ok(None);
+    };
+    let constructors = layout
+        .constructors
+        .iter()
+        .map(|constructor| {
+            let fields = constructor
+                .fields
+                .iter()
+                .map(|field| {
+                    let ty = match HostAbiType::try_from_concrete(&field.ty) {
+                        Ok(ty) => ty,
+                        Err(_) if !carries_tensor(&field.ty) => HostAbiType::Unit,
+                        Err(error) => return Err(error),
+                    };
+                    Ok(chelis_ir::host::HostAdtField {
+                        name: field.name.clone(),
+                        ty,
+                    })
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(chelis_ir::host::HostAdtConstructorLayout {
+                name: constructor.name.clone(),
+                fields,
+            })
+        })
+        .collect::<Result<Vec<_>, Unsupported>>()?;
+    Ok(Some(chelis_ir::host::HostAdtLayout { ty, constructors }))
 }
 
 fn project_site<'a>(site: chelis_ir::ownership::VerifiedHostSiteView<'a>) -> ProjectedHostSite<'a> {

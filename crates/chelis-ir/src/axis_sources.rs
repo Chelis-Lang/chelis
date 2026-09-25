@@ -330,7 +330,17 @@ pub fn same_shape_result_agreement(
     }
     let result_rank = owner.output_type.dims.len();
     let mut members = Vec::new();
-    for input in &owner.inputs {
+    // A random primitive's data operand is its only same-shape operand. Its
+    // key, controls and activation are shaped like leading parts of the data
+    // (spec/10 §3.2), whose agreement with the data's leading axes the draw
+    // checks itself.
+    let operands = match owner.op {
+        RiscOp::UniformLike | RiscOp::Dropout | RiscOp::DropoutReplay => {
+            &owner.inputs[..owner.inputs.len().min(1)]
+        }
+        _ => &owner.inputs[..],
+    };
+    for input in operands {
         let operand = dag.get(*input).ok_or_else(|| {
             format!(
                 "same-shape result at node {} references missing operand {}",
@@ -445,7 +455,20 @@ pub fn output_axis_sources(dag: &Dag, node: NodeId) -> Vec<AxisSource> {
         | RiscOp::Cast { .. }
         | RiscOp::CastTrunc { .. }
         | RiscOp::FusedElem { .. }
-        | RiscOp::Store { .. } => shape_preserving(dag, node),
+        | RiscOp::Store { .. }
+        | RiscOp::KeyFromSeed
+        | RiscOp::Split { .. }
+        | RiscOp::FoldIn => shape_preserving(dag, node),
+
+        // [05-OP-71]: the key's axes pass through and the new last axis is
+        // the count's own typed carrier.
+        RiscOp::SplitN { count } => match input_rank(dag, node, 0) {
+            Some(key_rank) if key_rank + 1 == rank => (0..key_rank)
+                .map(|axis| pass_through(id, 0, axis))
+                .chain(std::iter::once(rt_dim_source(id, key_rank, count)))
+                .collect(),
+            _ => op_computed(id, rank),
+        },
 
         // Rank-0 results: a bound adjoint is a scalar sum and a draw key is
         // a key word; neither has an axis.
@@ -1379,25 +1402,29 @@ fn member_is_interface(dag: &Dag, member: &ClassMember) -> bool {
 /// slots, so the ABI branch governs those entries. This is also what the C
 /// emitter's `input_labels` assigns, so a guard's order here and its slot there cannot
 /// disagree.
+pub fn ordered_interface_loads(nodes: &[DagNode]) -> Vec<&DagNode> {
+    let mut seen = Vec::new();
+    let mut loads = Vec::new();
+    for node in nodes {
+        if let RiscOp::Load { name } = &node.op
+            && !seen.contains(&name.as_str())
+        {
+            seen.push(name.as_str());
+            loads.push(node);
+        }
+    }
+    loads
+}
+
+/// Locate a witness in the single ordered interface-input set.
 fn abi_input_slot(dag: &Dag, load: NodeId) -> Option<usize> {
     let name = match &dag.get(load)?.op {
         RiscOp::Load { name } => name.as_str(),
         _ => return None,
     };
-    let mut slot = 0usize;
-    let mut seen: Vec<&str> = Vec::new();
-    for node in dag.nodes() {
-        if let RiscOp::Load { name: other } = &node.op {
-            if other.as_str() == name {
-                return Some(slot);
-            }
-            if !seen.contains(&other.as_str()) {
-                seen.push(other.as_str());
-                slot += 1;
-            }
-        }
-    }
-    None
+    ordered_interface_loads(dag.nodes())
+        .iter()
+        .position(|node| matches!(&node.op, RiscOp::Load { name: other } if other.as_str() == name))
 }
 
 /// The claim stamped on one output axis, or `None` when the axis carries no
@@ -2079,6 +2106,25 @@ pub enum EntryExtentGuard {
     },
 }
 
+/// One ordered entry check, shared by the DAG evaluator and direct C emitter.
+/// Input metadata checks precede every read of that input's elements. Extent
+/// comparisons retain the independent witness schedule from §4.7.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EntryValidationStep {
+    DType {
+        load: NodeId,
+    },
+    Rank {
+        load: NodeId,
+    },
+    LiteralAxis {
+        load: NodeId,
+        axis: usize,
+        required: usize,
+    },
+    Extent(EntryExtentGuard),
+}
+
 /// The named witness claims an entry guard already checks, as
 /// `(witness node, claim index)`.
 ///
@@ -2429,6 +2475,91 @@ pub fn entry_extent_guards(dag: &Dag) -> Vec<EntryExtentGuard> {
         }
     }
     unique
+}
+
+/// Validate interface inputs in their assigned ABI slot order (authored
+/// signature order when one exists), then by axis within each input. A named
+/// comparison is due at the later witness, exactly as `entry_extent_guards`
+/// orders it; this plan interleaves that schedule with dtype/rank and literal
+/// shape admission rather than regrouping checks by kind or label.
+pub fn entry_validation_plan(dag: &Dag) -> Vec<EntryValidationStep> {
+    entry_validation_plan_for_resolved_loads(dag, &[])
+}
+
+/// Eval can select a later occurrence of a name when an earlier Load belongs
+/// only to an unselected root. Keep the name's ABI slot, but validate the
+/// declaration that actually supplied the selected value.
+pub fn entry_validation_plan_for_resolved_loads(
+    dag: &Dag,
+    resolved_loads: &[NodeId],
+) -> Vec<EntryValidationStep> {
+    let due = |guard: &EntryExtentGuard| match guard {
+        EntryExtentGuard::Named {
+            canonical,
+            observed,
+            ..
+        } => {
+            let position = |(load, axis): (NodeId, usize)| {
+                (
+                    abi_input_slot(dag, load).expect("entry witness is an input"),
+                    axis,
+                )
+            };
+            position(*canonical).max(position(*observed))
+        }
+        EntryExtentGuard::Literal { observed, .. } => (
+            abi_input_slot(dag, observed.0).expect("entry witness is an input"),
+            observed.1,
+        ),
+    };
+    let guards = entry_extent_guards(dag);
+    let mut steps = Vec::new();
+    for (slot, first) in ordered_interface_loads(dag.nodes()).into_iter().enumerate() {
+        let RiscOp::Load { name } = &first.op else {
+            unreachable!()
+        };
+        let load = resolved_loads
+            .iter()
+            .filter_map(|id| dag.get(*id))
+            .find(|node| matches!(&node.op, RiscOp::Load { name: resolved } if resolved == name))
+            .unwrap_or(first);
+        steps.push(EntryValidationStep::DType { load: load.id });
+        steps.push(EntryValidationStep::Rank { load: load.id });
+        for (axis, dim) in load.output_type.dims.iter().enumerate() {
+            if let DimInfo::Lit(required) | DimInfo::Named(_, Some(required)) = dim
+                && !guards.iter().any(|guard| {
+                    matches!(guard, EntryExtentGuard::Literal { required: claim, observed }
+                        if claim == required && *observed == (load.id, axis))
+                })
+            {
+                steps.push(EntryValidationStep::LiteralAxis {
+                    load: load.id,
+                    axis,
+                    required: *required,
+                });
+            }
+            steps.extend(
+                guards
+                    .iter()
+                    .filter(|guard| due(guard) == (slot, axis))
+                    .cloned()
+                    .map(EntryValidationStep::Extent),
+            );
+        }
+        // A scalar interface witness has no tensor axis to enumerate. Its
+        // due comparison still runs after the input's dtype and rank check.
+        steps.extend(
+            guards
+                .iter()
+                .filter(|guard| {
+                    let (guard_slot, axis) = due(guard);
+                    guard_slot == slot && axis >= load.output_type.dims.len()
+                })
+                .cloned()
+                .map(EntryValidationStep::Extent),
+        );
+    }
+    steps
 }
 
 /// A local guard's position: the node that introduces the extent, and the

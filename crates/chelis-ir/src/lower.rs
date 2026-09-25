@@ -8907,11 +8907,39 @@ impl<'program> LowerCtx<'program> {
             .and_then(stamped_parts)
             .and_then(|(tag, _, kids)| (tag == DeepTag::TFn).then(|| kids.last()).flatten())
             .map(Self::type_from_type_expr);
+        // A checked value declaration has a bare tensor signature rather
+        // than a function result. Its direct free-variable RHS is an external
+        // input; lower_var/lower_atom otherwise mint default_type() for that
+        // Load, which is a placeholder, not a declared rank-zero tensor.
+        let declared_value = self
+            .program_signatures
+            .get(&name)
+            .filter(|signature| {
+                stamped_parts(signature).is_some_and(|(tag, _, _)| tag == DeepTag::TTensor)
+            })
+            .map(Self::type_from_type_expr);
+        let direct_free_name = match &kids[1] {
+            Expr::Atom(Atom::Name(name), _) => Some(name.as_str()),
+            Expr::Node(node, _) if node.tag() == DeepTag::Var => {
+                node.children_slice().first().and_then(symbol_name)
+            }
+            _ => None,
+        };
+        let before_body = self.dag.len();
         let body_id = self.lower_expr_with_claim(
             &kids[1],
             declared_result.as_ref(),
             declared_result.is_some(),
         );
+        if let (Some(declared), Some(id)) = (declared_value, body_id.as_single_node())
+            && id.0 >= before_body
+            && let Some(node) = self.dag.get(id)
+            && matches!(&node.op, RiscOp::Load { name } if direct_free_name == Some(name.as_str()))
+            && node.output_type == Self::default_type()
+        {
+            let op = node.op.clone();
+            self.dag.replace_node(id, op, Vec::new(), declared);
+        }
         if !name.is_empty() {
             if self.is_host_list_expr(&kids[1]) {
                 self.list_bindings.insert(name.clone(), kids[1].clone());
@@ -9600,7 +9628,19 @@ impl<'program> LowerCtx<'program> {
                 };
             }
             let ty = if explicit_ty == Self::default_type() {
-                self.program_types.get(name).cloned().unwrap_or(explicit_ty)
+                self.program_types
+                    .get(name)
+                    .cloned()
+                    // External top-level bindings (`x: tensor[...] = x`)
+                    // carry their checked input contract in the authored
+                    // signature, but are absent from the value type env.
+                    .or_else(|| {
+                        self.program_signatures.get(name).and_then(|signature| {
+                            let (tag, _, _) = stamped_parts(signature)?;
+                            (tag != DeepTag::TFn).then(|| Self::type_from_type_expr(signature))
+                        })
+                    })
+                    .unwrap_or(explicit_ty)
             } else {
                 explicit_ty
             };
@@ -10091,7 +10131,13 @@ impl<'program> LowerCtx<'program> {
             ctx.dag
                 .get(id)
                 .map(|node| node.output_type.clone())
-                .unwrap_or_else(Self::default_type)
+                .unwrap_or_else(|| {
+                    raise_fatal_lowering_error(
+                        format!("gradient actual {id:?} has no live tensor source"),
+                        Some(app_span),
+                        ctx.current_span_id.clone(),
+                    )
+                })
         };
         // Formal/actual pairs for the precision/rank substitution seeding
         // below. ADT-typed params are excluded: their formal annotation is
@@ -10266,10 +10312,14 @@ impl<'program> LowerCtx<'program> {
             subctx.random_path_condition = Some(load);
             (load_name, activation)
         });
-        let mut wrt = Vec::new();
-        // Actual argument node backing each `wrt` load, in `wrt` order
-        // (tensor param -> the argument node, ADT field -> the field node).
-        let mut wrt_actuals: Vec<NodeId> = Vec::new();
+        // One record owns each selected formal, actual and ordered
+        // geometry from selection through AD and result packing.
+        struct GradientTarget {
+            formal: NodeId,
+            actual: NodeId,
+            ty: TensorType,
+        }
+        let mut targets = Vec::new();
         // Formal/actual type pairs per load, for the dim-symbol remap of
         // the differentiated DAG below.
         let mut remap_formal_types: Vec<TensorType> = Vec::new();
@@ -10325,8 +10375,11 @@ impl<'program> LowerCtx<'program> {
                             subctx.current_span_id.clone(),
                         );
                         if selected && differentiable_leaves[leaf_index] {
-                            wrt.push(load);
-                            wrt_actuals.push(*element_node);
+                            targets.push(GradientTarget {
+                                formal: load,
+                                actual: *element_node,
+                                ty: element_ty.clone(),
+                            });
                         }
                         remap_formal_types.push(element_ty.clone());
                         remap_actual_types.push(element_ty);
@@ -10365,8 +10418,11 @@ impl<'program> LowerCtx<'program> {
                         subctx.current_span_id.clone(),
                     );
                     if self.is_selected_wrt(index, &param_ty, wrt_indices) {
-                        wrt.push(load);
-                        wrt_actuals.push(*actual);
+                        targets.push(GradientTarget {
+                            formal: load,
+                            actual: *actual,
+                            ty: node_type(self, *actual),
+                        });
                         result_param_indices.push(index);
                         result_plans.push(GradResultPlan::Tensor);
                     }
@@ -10376,28 +10432,32 @@ impl<'program> LowerCtx<'program> {
                         .bindings
                         .insert(name.clone(), LoweredValue::Node(load));
                 }
-                // Fewer arguments than parameters: keep the pre-#520
-                // behavior (a free Load with the formal type; the splice
-                // leaves it unresolved and downstream evaluation reports
-                // the missing input).
-                None => {
-                    let load = subctx.dag.add_node(
-                        RiscOp::Load {
-                            name: name.as_str().into(),
-                        },
-                        vec![],
-                        param_ty.clone(),
-                        subctx.current_span_id.clone(),
-                    );
-                    if self.is_selected_wrt(index, &param_ty, wrt_indices) {
-                        wrt.push(load);
-                    }
-                    subctx
-                        .bindings
-                        .insert(name.clone(), LoweredValue::Node(load));
-                }
+                None => raise_fatal_lowering_error(
+                    format!("gradient parameter {index} has no actual argument mapping"),
+                    Some(app_span),
+                    self.current_span_id.clone(),
+                ),
             }
         }
+        // Verify the public rank/dtype and the physical source for every
+        // selected actual before AD can prune a disconnected formal load.
+        for target in &targets {
+            let formal_ty = node_type(&subctx, target.formal);
+            if formal_ty.dims.len() != target.ty.dims.len()
+                || formal_ty.precision != target.ty.precision
+            {
+                raise_fatal_lowering_error(
+                    format!(
+                        "gradient actual-axis mapping failed: formal {:?} has {formal_ty:?}, actual {:?} has {:?}",
+                        target.formal, target.actual, target.ty
+                    ),
+                    Some(app_span),
+                    self.current_span_id.clone(),
+                );
+            }
+            self.verify_gradient_axis_source(target.actual);
+        }
+        let wrt: Vec<_> = targets.iter().map(|target| target.formal).collect();
         let lowered_output = subctx.lower_resolved_body(fn_expr, &param_names, body);
         let output = lowered_output.expect_node("grad requires a scalar floating output");
         self.next_random_instance = subctx.next_random_instance;
@@ -10536,24 +10596,35 @@ impl<'program> LowerCtx<'program> {
         // callable result returned above, so a `None` entry here is proven to
         // mean that the wrt input does not influence the known output
         // dataflow. Its cotangent is therefore an exact shape-preserving zero.
-        let grad_per_wrt: Vec<Option<NodeId>> = wrt
+        let grad_per_wrt: Vec<Option<NodeId>> = targets
             .iter()
-            .map(|wrt_node| {
-                grad_result
-                    .grad_nodes
-                    .get(wrt_node)
-                    .map(|grad_node| remap[grad_node])
+            .map(|target| {
+                grad_result.grad_nodes.get(&target.formal).map(|gradient| {
+                    remap.get(gradient).copied().unwrap_or_else(|| {
+                        raise_fatal_lowering_error(
+                            "gradient cotangent has no splice mapping",
+                            Some(app_span),
+                            self.current_span_id.clone(),
+                        )
+                    })
+                })
             })
             .collect();
-        for (grad_node, reusable_input) in grad_per_wrt.iter().zip(wrt_actuals.iter()) {
-            if let Some(grad_node) = grad_node {
-                self.dag.set_reusable_input(*grad_node, *reusable_input);
+        for (gradient, target) in grad_per_wrt.iter().zip(&targets) {
+            if let Some(gradient) = gradient {
+                self.verify_gradient_axis_source(*gradient);
+                let ty = node_type(self, *gradient);
+                if ty.dims.len() != target.ty.dims.len() || ty.precision != target.ty.precision {
+                    raise_fatal_lowering_error(
+                        "gradient cotangent disagrees with its differentiated actual geometry",
+                        Some(app_span),
+                        self.current_span_id.clone(),
+                    );
+                }
+                self.dag.set_reusable_input(*gradient, target.actual);
             }
         }
-        // Rebuild the per-parameter result structure: one Node per tensor
-        // param, an Adt of Nodes per ADT param (chelis#520 D2).
-        let mut grad_iter = grad_per_wrt.iter().copied();
-        let mut wrt_actual_iter = wrt_actuals.iter().copied();
+        let mut grad_iter = targets.iter().zip(grad_per_wrt.iter().copied());
         let mut packed: Vec<LoweredValue> = Vec::with_capacity(result_plans.len());
         // chelis#1821: every packed cotangent node, so the forward
         // activation can be recorded as their shared shape dependency below.
@@ -10561,8 +10632,13 @@ impl<'program> LowerCtx<'program> {
         for plan in &result_plans {
             match plan {
                 GradResultPlan::Tensor => {
-                    let grad_node = grad_iter.next().flatten();
-                    let actual = wrt_actual_iter.next();
+                    let (target, grad_node) = grad_iter.next().unwrap_or_else(|| {
+                        raise_fatal_lowering_error(
+                            "gradient result has no actual-axis mapping",
+                            Some(app_span),
+                            self.current_span_id.clone(),
+                        )
+                    });
                     match grad_node {
                         Some(node) => {
                             cotangents.push(node);
@@ -10575,10 +10651,7 @@ impl<'program> LowerCtx<'program> {
                         // while dropping a multi-target slot mislabels every
                         // later value (chelis#520 D2 / chelis#614).
                         None => {
-                            let field_ty = actual
-                                .map(|id| node_type(self, id))
-                                .unwrap_or_else(Self::default_type);
-                            let zero = self.zero_tensor_node(&field_ty, actual);
+                            let zero = self.zero_tensor_node(&target.ty, Some(target.actual));
                             cotangents.push(zero);
                             packed.push(LoweredValue::Node(zero));
                         }
@@ -10591,13 +10664,15 @@ impl<'program> LowerCtx<'program> {
                     let mut leaves = Vec::with_capacity(differentiable_leaves.len());
                     for differentiable in differentiable_leaves {
                         if *differentiable {
-                            let grad_node = grad_iter.next().flatten();
-                            let actual = wrt_actual_iter.next();
+                            let (target, grad_node) = grad_iter.next().unwrap_or_else(|| {
+                                raise_fatal_lowering_error(
+                                    "gradient leaf has no actual-axis mapping",
+                                    Some(app_span),
+                                    self.current_span_id.clone(),
+                                )
+                            });
                             let node = grad_node.unwrap_or_else(|| {
-                                let element_ty = actual
-                                    .map(|id| node_type(self, id))
-                                    .unwrap_or_else(Self::default_type);
-                                self.zero_tensor_node(&element_ty, actual)
+                                self.zero_tensor_node(&target.ty, Some(target.actual))
                             });
                             cotangents.push(node);
                             leaves.push(LoweredValue::Node(node));
@@ -10634,12 +10709,20 @@ impl<'program> LowerCtx<'program> {
         // both keep a shape-dep source live, the forward nodes precede the
         // backward nodes in id order so their traps fire first, and no value
         // the derivative returns changes.
-        if let Some(forward_output) = remap.get(&grad_result.output_node).copied() {
-            // A cotangent that IS the forward output needs no edge to itself,
-            // the same exclusion `record_runtime_dim_shape_deps` applies.
-            for cotangent in cotangents.iter().filter(|id| **id != forward_output) {
-                self.dag.add_shape_dep(*cotangent, forward_output);
-            }
+        let forward_output = remap
+            .get(&grad_result.output_node)
+            .copied()
+            .unwrap_or_else(|| {
+                raise_fatal_lowering_error(
+                    "gradient forward activation has no splice mapping",
+                    Some(app_span),
+                    self.current_span_id.clone(),
+                )
+            });
+        // A cotangent that IS the forward output needs no edge to itself,
+        // the same exclusion `record_runtime_dim_shape_deps` applies.
+        for cotangent in cotangents.iter().filter(|id| **id != forward_output) {
+            self.dag.add_shape_dep(*cotangent, forward_output);
         }
         let result = match packed.as_slice() {
             [LoweredValue::Node(single)] => {
@@ -10671,7 +10754,7 @@ impl<'program> LowerCtx<'program> {
                     actual_types: remap_actual_types,
                     specialized: specialized_grad_dag,
                     arguments: arg_map.into_sorted().into_iter().collect(),
-                    wrt_actuals,
+                    wrt_actuals: targets.iter().map(|target| target.actual).collect(),
                     remap: crate::lowering_trace::ordered(&remap),
                     before_splice: before_splice.expect("pre-splice observation"),
                     after_splice: after_splice.expect("post-splice observation"),
@@ -10685,9 +10768,10 @@ impl<'program> LowerCtx<'program> {
 
     /// A zero-valued tensor of the given type: `Const 0.0`, cast to the
     /// target precision, expanded axis-by-axis to the target dims
-    /// (mirrors the `lower_if_mask` expansion pattern). A symbolic expansion
-    /// retains a shape-only dependency on the differentiated primal so codegen
-    /// can bind the runtime extent without introducing a value dependency.
+    /// (mirrors the `lower_if_mask` expansion pattern). Each gradient axis
+    /// reads its differentiated actual, retaining its claims even when its
+    /// extent is literal. Callers without a primal may construct only a
+    /// statically shaped, unreachable placeholder for a pending List trap.
     /// Used by gradient packing for every proven-zero tensor slot
     /// (chelis#520 D2/#1102).
     fn zero_tensor_node(&mut self, ty: &TensorType, primal: Option<NodeId>) -> NodeId {
@@ -10713,23 +10797,34 @@ impl<'program> LowerCtx<'program> {
         let mut dims = Vec::new();
         for (axis, dim) in ty.dims.iter().enumerate() {
             dims.push(dim.clone());
-            let (size, inputs) = match dim {
-                DimInfo::Lit(value) | DimInfo::Named(_, Some(value)) => {
-                    (RtDim::Lit(*value), vec![node])
-                }
-                DimInfo::Named(_, None) => {
-                    let source = primal.unwrap_or_else(|| {
-                        panic!(
-                            "symbolic zero tensor axis {axis} requires its differentiated primal shape source"
-                        )
-                    });
-                    (
-                        RtDim::InputAxis {
-                            tensor: 1,
-                            axis: RtAxis::Lit(i32::try_from(axis).expect("tensor rank fits i32")),
-                        },
-                        vec![node, source],
+            let (size, inputs) = if let Some(source) = primal {
+                // Even a literal here is a claim on the actual. Read that
+                // actual's corresponding physical axis, retaining its input
+                // guard and avoiding a same-width neighbour or binder lookup.
+                let axis = i32::try_from(axis).unwrap_or_else(|_| {
+                    raise_fatal_lowering_error(
+                        "zero cotangent axis does not fit i32",
+                        None,
+                        self.current_span_id.clone(),
                     )
+                });
+                (
+                    RtDim::InputAxis {
+                        tensor: 1,
+                        axis: RtAxis::Lit(axis),
+                    },
+                    vec![node, source],
+                )
+            } else {
+                match dim {
+                    DimInfo::Lit(value) | DimInfo::Named(_, Some(value)) => {
+                        (RtDim::Lit(*value), vec![node])
+                    }
+                    DimInfo::Named(_, None) => raise_fatal_lowering_error(
+                        "zero cotangent has no differentiated actual axis source",
+                        None,
+                        self.current_span_id.clone(),
+                    ),
                 }
             };
             node = self.dag.add_node(
@@ -10742,7 +10837,39 @@ impl<'program> LowerCtx<'program> {
                 self.current_span_id.clone(),
             );
         }
+        if let Some(primal) = primal {
+            // Rank-zero has no axis reads, but still owes the actual's
+            // activation and input validation.
+            self.dag.add_shape_dep(node, primal);
+            self.verify_gradient_axis_source(node);
+        }
         node
+    }
+
+    /// Validate physical source identities at the gradient publication
+    /// boundary. Use the same structural mapping consumed by Eval and C.
+    fn verify_gradient_axis_source(&self, id: NodeId) {
+        let node = self.dag.get(id).unwrap_or_else(|| {
+            raise_fatal_lowering_error(
+                "gradient axis source is not live",
+                None,
+                self.current_span_id.clone(),
+            )
+        });
+        let sources = crate::axis_sources::output_axis_sources(&self.dag, id);
+        crate::axis_sources::check_node_axis_sources(
+            &self.dag,
+            node,
+            &sources,
+            chelis_types::unsupported::Stage::Lowering,
+        )
+        .unwrap_or_else(|error| {
+            raise_fatal_lowering_error(
+                format!("gradient actual-axis mapping failed: {error}"),
+                None,
+                self.current_span_id.clone(),
+            )
+        });
     }
 
     fn lower_plain_callable_app(
@@ -20019,6 +20146,70 @@ mod tests {
             chelis_deep::annotations::RuntimeExpression::try_new(expr)
                 .expect("valid runtime metadata expression"),
         ))
+    }
+
+    #[test]
+    fn gradient_axis_mapping_rejects_missing_sources_before_publication() {
+        let missing = catch_lowering(|| {
+            let mut ctx = empty_lower_ctx();
+            ctx.zero_tensor_node(
+                &TensorType {
+                    dims: vec![DimInfo::Named("n".into(), None)],
+                    precision: Prim::F32,
+                },
+                None,
+            )
+        })
+        .expect_err("symbolic geometry needs its actual");
+        assert!(
+            missing
+                .to_string()
+                .contains("no differentiated actual axis source")
+        );
+        let stale = catch_lowering(|| {
+            let ctx = empty_lower_ctx();
+            ctx.verify_gradient_axis_source(NodeId(7));
+        })
+        .expect_err("missing actual must fail before publication");
+        assert!(
+            stale
+                .to_string()
+                .contains("gradient axis source is not live")
+        );
+        let remapped = catch_lowering(|| {
+            let mut ctx = empty_lower_ctx();
+            let zero = ctx.dag.add_node(
+                RiscOp::synth_const(Prim::F32, 0.0),
+                vec![],
+                TensorType {
+                    dims: vec![],
+                    precision: Prim::F32,
+                },
+                None,
+            );
+            let bad = ctx.dag.add_node(
+                RiscOp::Expand {
+                    axis: 0,
+                    size: RtDim::InputAxis {
+                        tensor: 1,
+                        axis: RtAxis::Lit(0),
+                    },
+                },
+                vec![zero],
+                TensorType {
+                    dims: vec![DimInfo::Lit(3)],
+                    precision: Prim::F32,
+                },
+                None,
+            );
+            ctx.verify_gradient_axis_source(bad);
+        })
+        .expect_err("a dropped actual-axis input must not publish a zero");
+        assert!(
+            remapped
+                .to_string()
+                .contains("gradient actual-axis mapping failed")
+        );
     }
 
     fn empty_lower_ctx() -> LowerCtx<'static> {

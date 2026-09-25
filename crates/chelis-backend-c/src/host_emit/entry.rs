@@ -141,12 +141,7 @@ pub(super) fn delegated_function_guards(
         env.insert(param.name.clone(), index);
     }
     let plan = function_entry_plan(function);
-    let plan_args = function
-        .params
-        .iter()
-        .filter(|param| matches!(param.ty, HostAbiType::Tensor(_)))
-        .map(|param| HostExpr::new(HostExprKind::Var(param.name.clone(), param.ty.clone())))
-        .collect::<Vec<_>>();
+    let plan_args = super::entry_walk::entry_plan_args(function);
     let plan_guards = plan
         .guards()
         .iter()
@@ -227,12 +222,7 @@ pub(super) fn helper_coverage_with_verified(
     for param in &function.params {
         env.insert(param.name.clone(), walker.fresh());
     }
-    let args = function
-        .params
-        .iter()
-        .filter(|p| matches!(p.ty, HostAbiType::Tensor(_)))
-        .map(|p| HostExpr::new(HostExprKind::Var(p.name.clone(), p.ty.clone())))
-        .collect::<Vec<_>>();
+    let args = super::entry_walk::entry_plan_args(function);
     let plan = function_entry_plan(function);
     let delegated = delegated_function_guards(function, verified_helpers);
     let mut facts = plan
@@ -650,10 +640,11 @@ mod tests {
             None,
         )
         .unwrap();
-        assert!(
-            !discharged.contains("numeric trap: domain in load at i64"),
-            "{discharged}"
-        );
+        let seq_diagnostic = "extent `seq`: a axis 0 = %lld, b axis 0 = %lld";
+        let seq_comparison =
+            "if (chelis_tensor_shape(inputs[1], 0) != chelis_tensor_shape(inputs[0], 0)) {";
+        assert!(!discharged.contains(seq_diagnostic), "{discharged}");
+        assert!(!discharged.contains(seq_comparison), "{discharged}");
         let full = CEmitter::emit_verified_dag_with_options(
             dag.emission(),
             "unguarded",
@@ -663,21 +654,25 @@ mod tests {
             None,
         )
         .unwrap();
-        assert_eq!(
-            full.matches("numeric trap: domain in load at i64").count(),
-            1,
-            "{full}"
-        );
+        assert_eq!(full.matches(seq_diagnostic).count(), 1, "{full}");
+        assert_eq!(full.matches(seq_comparison).count(), 1, "{full}");
         let standalone = crate::codegen_with_options(dag, "standalone", options).unwrap();
-        assert_eq!(
-            standalone
-                .c_source
-                .matches("numeric trap: domain in load at i64")
-                .count(),
-            1,
-            "{}",
-            standalone.c_source
-        );
+        assert_eq!(standalone.c_source.matches(seq_diagnostic).count(), 1);
+        assert_eq!(standalone.c_source.matches(seq_comparison).count(), 1);
+        for source in [&discharged, &full, &standalone.c_source] {
+            for slot in 0..2 {
+                assert!(
+                    source.contains(&format!("if (chelis_tensor_rank(inputs[{slot}]) != 1) {{")),
+                    "{source}"
+                );
+                assert!(
+                    source.contains(&format!(
+                        "if (chelis_tensor_read_view(inputs[{slot}]).dtype != CHELIS_DTYPE_F32) {{"
+                    )),
+                    "{source}"
+                );
+            }
+        }
     }
 
     #[test]

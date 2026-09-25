@@ -583,7 +583,7 @@ fn verifier_rejects_invalid_domains_shapes_outputs_and_arities() {
                 ty(&[2], Prim::F8e4m3),
             ],
             ty(&[2], Prim::F8e4m3),
-            "active tensor",
+            "active data element",
         ),
         (
             RiscOp::Where,
@@ -593,7 +593,7 @@ fn verifier_rejects_invalid_domains_shapes_outputs_and_arities() {
                 ty(&[2], Prim::String),
             ],
             ty(&[2], Prim::String),
-            "active tensor",
+            "active data element",
         ),
     ];
     for (op, input_types, output_type, needle) in cases {

@@ -6,7 +6,11 @@ use std::{env, process::Command, ptr};
 fn alloc_like_preserves_shape_and_checks_each_result_representation() {
     unsafe {
         for source in RuntimeDType::ALL {
-            for target in RuntimeDType::ALL {
+            // The exemplar is a [05-OP-31] scalar carrier, which a key is not.
+            for target in RuntimeDType::ALL
+                .into_iter()
+                .filter(|target| *target != RuntimeDType::Key)
+            {
                 for shape in [
                     vec![],
                     vec![3],

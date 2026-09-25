@@ -717,6 +717,7 @@ impl HostExecutionPlan {
                 global_tensor_helpers: Vec::new(),
                 functions,
                 summary_rejections,
+                adt_layouts: program.adt_layouts,
             },
             global: Vec::new(),
             functions: selected_execution,
@@ -896,6 +897,12 @@ pub struct HostProgram<T = HostTypeTerm> {
     /// for the acceptance oracle that locks the structured shape of
     /// each rejection class.
     pub summary_rejections: Vec<SummaryRejection>,
+    /// The constructors, with field types instantiated at that exact type, of
+    /// every ADT a function parameter can carry, directly or nested in another
+    /// value. An ADT type names no field types, and a compiled entry walks a
+    /// supplied value by this table to validate each nested tensor before the
+    /// body reads it ([04-NUM-11]).
+    pub adt_layouts: Vec<HostAdtLayout<T>>,
 }
 
 impl<T> Default for HostProgram<T> {
@@ -905,8 +912,23 @@ impl<T> Default for HostProgram<T> {
             global_tensor_helpers: Vec::new(),
             functions: Vec::new(),
             summary_rejections: Vec::new(),
+            adt_layouts: Vec::new(),
         }
     }
+}
+
+/// One ADT type's constructors, each with its fields' types at that type.
+#[derive(Debug, Clone)]
+pub struct HostAdtLayout<T = HostTypeTerm> {
+    pub ty: T,
+    pub constructors: Vec<HostAdtConstructorLayout<T>>,
+}
+
+/// One constructor: its runtime tag and its fields in storage order.
+#[derive(Debug, Clone)]
+pub struct HostAdtConstructorLayout<T = HostTypeTerm> {
+    pub name: String,
+    pub fields: Vec<HostAdtField<T>>,
 }
 
 #[derive(Debug, Clone)]
@@ -1842,6 +1864,42 @@ fn resolve_host_program(
             .map(resolve_host_function)
             .collect::<Result<Vec<_>, _>>()?,
         summary_rejections: program.summary_rejections,
+        // A layout whose field types do not resolve is dropped rather than
+        // failing the whole program here: only a backend that validates a
+        // parameter of that ADT needs it, and that backend refuses the
+        // parameter by name.
+        adt_layouts: program
+            .adt_layouts
+            .into_iter()
+            .filter_map(|layout| resolve_host_adt_layout(layout).ok())
+            .collect(),
+    })
+}
+
+fn resolve_host_adt_layout(
+    layout: HostAdtLayout,
+) -> Result<HostAdtLayout<ConcreteHostType>, crate::HostTypeResolutionError> {
+    Ok(HostAdtLayout {
+        ty: layout.ty.into_concrete()?,
+        constructors: layout
+            .constructors
+            .into_iter()
+            .map(|constructor| {
+                Ok(HostAdtConstructorLayout {
+                    name: constructor.name,
+                    fields: constructor
+                        .fields
+                        .into_iter()
+                        .map(|field| {
+                            Ok(HostAdtField {
+                                name: field.name,
+                                ty: field.ty.into_concrete()?,
+                            })
+                        })
+                        .collect::<Result<Vec<_>, _>>()?,
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()?,
     })
 }
 
@@ -2265,9 +2323,10 @@ fn try_lower_compiled_program_with_lane_overrides(
         Err(diagnostic) if diagnostic.fatal => return Err(diagnostic),
         Err(_) => None,
     };
-    let (host_terms, execution) = crate::lower::catch_lowering_external(|| {
+    let (mut host_terms, execution) = crate::lower::catch_lowering_external(|| {
         lower_host_program_with_execution(program, &lowered_names, c_execution_lane, collect_trace)
     })??;
+    host_terms.adt_layouts = parameter_adt_layouts(program, &host_terms.functions);
     let host = resolve_host_program(host_terms).map_err(|error| {
         crate::lower::LowerDiagnostic::new(
             format!(
@@ -4176,8 +4235,8 @@ fn contains_computed_callable_application(expr: &Expr) -> bool {
     }
 }
 
-/// Lexical scopes retain constructor scrutinees (chelis#520 D1) and direct
-/// concat input facts. Neither class evaluates arbitrary tensor expressions.
+/// Lexical scopes retain constructor scrutinees (chelis#520 D1) and checked
+/// concat producer facts. Neither class evaluates arbitrary tensor expressions.
 struct UncarriableWalk<'a> {
     defs: &'a BTreeMap<String, Expr>,
     active: UnordSet<String>,
@@ -4200,20 +4259,23 @@ struct AdmissionBinding {
     concat: ConcatInputFact,
 }
 
-/// Only direct input forwarding, lexical aliases, and literal List spines.
-/// An unknown computed tensor is not evidence that its DAG cannot be built.
+/// Checked tensor geometry is retained only when its producer relationship
+/// proves the ordered axes. Literal List spines preserve each element's fact;
+/// a checked List with no visible spine cannot prove static concatenation.
 #[derive(Clone, Default, PartialEq, Eq)]
 enum ConcatInputFact {
     #[default]
     Unknown,
     Tensor(TensorType),
     List(Vec<ConcatInputFact>),
+    OpaqueTensorList,
 }
 
 impl ConcatInputFact {
     fn from_type(ty: &HostTypeTerm) -> Self {
         match ty {
             HostTypeTerm::Tensor(tensor) => Self::Tensor(tensor.clone()),
+            HostTypeTerm::List(_) => Self::OpaqueTensorList,
             _ => Self::Unknown,
         }
     }
@@ -4246,29 +4308,137 @@ impl UncarriableWalk<'_> {
                     .collect(),
             );
         }
-        ConcatInputFact::Unknown
+        let Some((tag, _, kids)) = stamped_parts(expr) else {
+            return ConcatInputFact::Unknown;
+        };
+        if tag == DeepTag::Copy {
+            let (Some(input), Some(checked)) = (kids.first(), expr_type(expr)) else {
+                return ConcatInputFact::Unknown;
+            };
+            let fact = self.concat_input_fact(input);
+            return match (&fact, checked) {
+                (ConcatInputFact::Tensor(input), HostTypeTerm::Tensor(output))
+                    if input.dims.len() == output.dims.len()
+                        && input.precision == output.precision =>
+                {
+                    fact
+                }
+                (
+                    ConcatInputFact::List(_) | ConcatInputFact::OpaqueTensorList,
+                    HostTypeTerm::List(_),
+                ) => fact,
+                _ => ConcatInputFact::Unknown,
+            };
+        }
+        if tag != DeepTag::App {
+            return ConcatInputFact::Unknown;
+        }
+        let Some(name) = kids
+            .first()
+            .and_then(stamped_parts)
+            .and_then(|(tag, _, callee)| {
+                (tag == DeepTag::Var)
+                    .then(|| callee.first().and_then(symbol_name))
+                    .flatten()
+            })
+        else {
+            return ConcatInputFact::Unknown;
+        };
+        if self.bound(name).is_some()
+            || self.defs.contains_key(name)
+            || !matches!(
+                chelis_types::builtin_decl(name).map(|decl| decl.shape_class),
+                Some(chelis_types::ShapeClass::Identity)
+            )
+            || chelis_types::shape_class(name) != chelis_types::ShapeClass::Identity
+        {
+            return ConcatInputFact::Unknown;
+        }
+        let Some(HostTypeTerm::Tensor(output)) = expr_type(expr) else {
+            return ConcatInputFact::Unknown;
+        };
+        // Shape-identity is an operation contract, but its source geometry
+        // is usable only when every tensor operand already has a proved fact.
+        // A checked result type by itself could hide an earlier failing
+        // reshape or insert (#1922). The checker may rename a symbolic axis
+        // on the result, so retain the operand's actual axis source.
+        let mut inputs = kids[1..].iter().map(|arg| self.concat_input_fact(arg));
+        let Some(ConcatInputFact::Tensor(first)) = inputs.next() else {
+            return ConcatInputFact::Unknown;
+        };
+        if first.dims.len() != output.dims.len()
+            || inputs.any(|fact| {
+                !matches!(fact, ConcatInputFact::Tensor(tensor) if tensor.dims == first.dims)
+            })
+        {
+            return ConcatInputFact::Unknown;
+        }
+        ConcatInputFact::Tensor(TensorType {
+            dims: first.dims,
+            precision: output.precision,
+        })
     }
 
     fn concat_requires_host(&self, list: &Expr, axis: &Expr) -> bool {
         let Some(axis) = crate::lower::extract_int_axis(axis) else {
-            return false;
+            // A checked runtime axis is legal, but the static Pad+Add DAG
+            // requires a fixed axis before lowering starts.
+            return true;
         };
-        let ConcatInputFact::List(elements) = self.concat_input_fact(list) else {
-            return false;
+        let elements = match self.concat_input_fact(list) {
+            ConcatInputFact::List(elements) => elements,
+            ConcatInputFact::OpaqueTensorList => {
+                // A checked List whose spine is unavailable cannot prove
+                // static concatenation.
+                return true;
+            }
+            ConcatInputFact::Unknown | ConcatInputFact::Tensor(_) => {
+                // No checked List fact exists. This is not permission to
+                // treat an untyped structural probe as a valid Host call.
+                return false;
+            }
         };
+        if elements
+            .iter()
+            .any(|element| !matches!(element, ConcatInputFact::Tensor(_)))
+        {
+            // No route proof is available for a List containing an unknown
+            // producer. In particular, do not hide its own fatal lowering
+            // diagnostic behind a later Host concat (#1922).
+            return false;
+        }
+        let mut first: Option<&TensorType> = None;
         elements.iter().any(|element| {
             let ConcatInputFact::Tensor(tensor) = element else {
-                return false;
+                unreachable!("checked above")
             };
             let normalized = if axis < 0 {
                 axis + tensor.dims.len() as i64
             } else {
                 axis
             };
-            usize::try_from(normalized)
+            let Some(selected) = usize::try_from(normalized)
                 .ok()
-                .and_then(|axis| tensor.dims.get(axis))
-                .is_some_and(|dim| crate::lower::concrete_dim_len(dim).is_none())
+                .filter(|selected| *selected < tensor.dims.len())
+            else {
+                return true;
+            };
+            if let Some(first) = first {
+                if first.dims.len() != tensor.dims.len()
+                    || first.precision != tensor.precision
+                    || first
+                        .dims
+                        .iter()
+                        .zip(&tensor.dims)
+                        .enumerate()
+                        .any(|(index, (left, right))| index != selected && left != right)
+                {
+                    return true;
+                }
+            } else {
+                first = Some(tensor);
+            }
+            crate::lower::concrete_dim_len(&tensor.dims[selected]).is_none()
         })
     }
 
@@ -4353,7 +4523,7 @@ impl UncarriableWalk<'_> {
                         && kids.len() == 3
                         && self.concat_requires_host(&kids[1], &kids[2])
                     {
-                        return Some("tensor concat over a directly forwarded runtime input extent (chelis#1906)".to_string());
+                        return Some("tensor concat whose checked producer geometry has no static representation (chelis#2373)".to_string());
                     }
                     if name.starts_with("reduce_window_")
                         && kids[1..]
@@ -19415,6 +19585,109 @@ fn adt_constructor_definitions(program: &HostLoweringSession<'_>) -> Vec<Generic
     definitions
 }
 
+/// The layout of every ADT a function parameter carries, directly or nested
+/// in a tuple, list, option, dictionary, or another ADT's field.
+///
+/// A checker-native nominal type the registry carries no constructor for
+/// (`Result`) gets a layout with none.
+/// An ADT whose name matches several registered ADTs, or whose constructors
+/// do not all instantiate at the carried type, gets no layout; the backend
+/// that would walk it refuses it by name rather than skipping its tensors.
+fn parameter_adt_layouts(
+    program: &HostLoweringSession<'_>,
+    functions: &[HostFunction],
+) -> Vec<HostAdtLayout> {
+    let definitions = adt_constructor_definitions(program);
+    let mut pending = functions
+        .iter()
+        .flat_map(|function| function.params.iter().map(|param| param.ty.clone()))
+        .collect::<Vec<_>>();
+    pending.reverse();
+    let mut seen: Vec<HostTypeTerm> = Vec::new();
+    let mut layouts = Vec::new();
+    while let Some(ty) = pending.pop() {
+        if seen.contains(&ty) {
+            continue;
+        }
+        seen.push(ty.clone());
+        match &ty {
+            HostTypeTerm::Tuple(items) => pending.extend(items.iter().rev().cloned()),
+            HostTypeTerm::List(inner) | HostTypeTerm::Option(inner) => {
+                pending.push((**inner).clone())
+            }
+            HostTypeTerm::Dict(key, value) => {
+                pending.push((**value).clone());
+                pending.push((**key).clone());
+            }
+            HostTypeTerm::Adt(name, _) => {
+                let exact = definitions
+                    .iter()
+                    .filter(|definition| definition.adt_name == *name)
+                    .collect::<Vec<_>>();
+                let candidates = if exact.is_empty() {
+                    definitions
+                        .iter()
+                        .filter(|definition| terminal_name_matches(name, &definition.adt_name))
+                        .collect::<Vec<_>>()
+                } else {
+                    exact
+                };
+                // Lowering builds, matches and reads a field of an ADT only
+                // through a constructor of this table. A checker-native
+                // nominal type the registry carries no constructor for, such
+                // as `Result`, therefore has no field a body can read, and its
+                // layout is exactly that: no constructors. Any other name with
+                // no definition is a failed lookup, which gets no layout, so
+                // the backend refuses it by name.
+                if candidates.is_empty() && chelis_types::is_checker_native_nominal(name) {
+                    layouts.push(HostAdtLayout {
+                        ty: ty.clone(),
+                        constructors: Vec::new(),
+                    });
+                    continue;
+                }
+                let one_adt = candidates
+                    .windows(2)
+                    .all(|pair| pair[0].adt_name == pair[1].adt_name);
+                if candidates.is_empty() || !one_adt {
+                    continue;
+                }
+                let canonical =
+                    canonicalize_representation_erased_adt_args(ty.clone(), &definitions);
+                let constructors = candidates
+                    .iter()
+                    .map(|definition| {
+                        definition.instantiate(&canonical).map(|instantiated| {
+                            HostAdtConstructorLayout {
+                                name: definition.ctor_name.clone(),
+                                fields: instantiated.fields,
+                            }
+                        })
+                    })
+                    .collect::<Result<Vec<_>, _>>();
+                let Ok(constructors) = constructors else {
+                    continue;
+                };
+                for constructor in constructors.iter().rev() {
+                    pending.extend(
+                        constructor
+                            .fields
+                            .iter()
+                            .rev()
+                            .map(|field| field.ty.clone()),
+                    );
+                }
+                layouts.push(HostAdtLayout {
+                    ty: ty.clone(),
+                    constructors,
+                });
+            }
+            _ => {}
+        }
+    }
+    layouts
+}
+
 fn rename_host_type_variables(
     term: HostTypeTerm,
     names: &UnordMap<String, String>,
@@ -20405,6 +20678,84 @@ mod tests {
                 .expect("the same known extent is representable by static concat");
             }
         }
+    }
+
+    #[test]
+    fn concat_admission_uses_checked_copy_and_add_producers() {
+        for (width, producer, host) in [
+            ("2", "copy(x)", false),
+            ("2", "add(x, x)", false),
+            ("2", "mul(x, x)", false),
+            ("s", "copy(x)", true),
+            ("s", "add(x, x)", true),
+            ("s", "mul(x, x)", true),
+        ] {
+            let source = format!(
+                "def join[s](x: tensor[s, {width}, f32]) = concat([{producer}, {producer}], 1i32)\n"
+            );
+            let checked = surf_check(&source);
+            let session = HostLoweringSession::new(&checked);
+            let defs = cached_program_defs(&session);
+            let (_, _, fn_kids) = stamped_parts(&defs["join"]).unwrap();
+            let (_, _, binders) = stamped_parts(&fn_kids[0]).unwrap();
+            let params = binders
+                .iter()
+                .map(|binder| HostParam {
+                    name: param_name(binder).unwrap(),
+                    ty: param_host_type(binder).unwrap(),
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(
+                body_form_the_dag_cannot_carry(&session, &fn_kids[1], &params, false).is_some(),
+                host,
+                "{source}"
+            );
+        }
+    }
+
+    #[test]
+    fn concat_admission_does_not_treat_shadowed_callee_as_builtin_identity() {
+        let checked = surf_check(
+            "def run[s](x: tensor[s, s, f32]) = {\n z = mul(x, x)\n concat([z, z], 1i32)\n}\n",
+        );
+        let session = HostLoweringSession::new(&checked);
+        let defs = cached_program_defs(&session);
+        let (_, _, run) = stamped_parts(&defs["run"]).unwrap();
+        let (_, _, body) = stamped_parts(&run[1]).unwrap();
+        let (_, _, bindings) = stamped_parts(&body[0]).unwrap();
+        let producer = &bindings[1];
+        let tensor = TensorType {
+            dims: vec![DimInfo::Named("s".to_string(), None); 2],
+            precision: Prim::F32,
+        };
+        let scope = UnordMap::from([(
+            "x".to_string(),
+            AdmissionBinding {
+                constructor: false,
+                concat: ConcatInputFact::Tensor(tensor),
+            },
+        )]);
+        let mut walk = UncarriableWalk {
+            defs: &defs,
+            active: UnordSet::new(),
+            completed: UnordMap::new(),
+            cycle_cutoff: false,
+            def_visits: 0,
+            admit_dropout: false,
+            scopes: vec![scope],
+        };
+        assert!(matches!(
+            walk.concat_input_fact(producer),
+            ConcatInputFact::Tensor(_)
+        ));
+        walk.scopes
+            .last_mut()
+            .unwrap()
+            .insert("mul".to_string(), AdmissionBinding::default());
+        assert!(matches!(
+            walk.concat_input_fact(producer),
+            ConcatInputFact::Unknown
+        ));
     }
 
     #[test]

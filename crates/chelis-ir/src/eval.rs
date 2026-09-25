@@ -32,7 +32,10 @@ use chelis_types::dtype_semantics::{
     integer_is_exactly_representable, reduce_tensor_groups, reduce_window_grad_tensor_groups,
     tensor_from_scalars,
 };
-use chelis_types::dtype_semantics::{DropoutParameters, PreparedDropout, UniformLikeParameters};
+use chelis_types::dtype_semantics::{
+    DropoutParameters, PreparedDropout, UniformLikeParameters, fold_in_storage,
+    key_from_seed_storage, split_key_storage, split_keys_storage, uniform_like_bound_adjoint_rows,
+};
 use chelis_types::types::Prim;
 use chelis_types::{PreparedUniformLike, RandomKey, uniform_like_bound_adjoint};
 
@@ -256,18 +259,27 @@ fn ingress_to_declared(
     declared: Prim,
     value: &TensorValue,
 ) -> Result<TensorValue, String> {
+    if value.raw_f64_ingress && declared == Prim::Key {
+        return Err(format!(
+            "input `{name}` declares key, which has no raw numeric ingress; provide key storage"
+        ));
+    }
     if value.raw_f64_ingress {
         let storage = finalize_tensor("load", declared, value.storage().to_raw())
-            .map_err(|trap| format!("input `{name}`: {trap}"))?;
+            .map_err(|trap| format!("input `{name}`\n{trap}"))?;
         return Ok(TensorValue::from_storage(value.shape.clone(), storage));
     }
     if value.prim() == declared {
         return Ok(value.clone());
     }
     Err(format!(
-        "input `{name}` carries dtype {} but the Load declares {}; provide a value with the declared dtype (casts are explicit in Chelis)",
+        "input `{name}` carries dtype {} but the Load declares {}; provide a value with the declared dtype (casts are explicit in Chelis)\n{}",
         value.prim().name(),
-        declared.name()
+        declared.name(),
+        NumericTrap::Domain {
+            op: "load",
+            prim: declared
+        }
     ))
 }
 
@@ -487,41 +499,405 @@ fn eval_draw_key(
     frame.draw(*handler, scoped_seed).map(Some)
 }
 
-/// A key-operand random primitive's key, or `None` when its draw is inactive.
-/// An inactive key under an active primitive is a malformed graph.
-fn random_operand_key(
+/// The keys a key-operand random primitive draws with
+/// (`spec/10-serialization.md` §3.2).
+enum DrawKeys<'a> {
+    /// A rank-0 activation is false: the primitive validates and draws
+    /// nothing and produces positive zeros.
+    Inactive,
+    /// A rank-0 key.
+    Scalar(RandomKey),
+    /// A key batch of `shape`, any positive rank: row `b` of the data, the
+    /// elements whose leading indices are the key index `b` in row-major
+    /// order, draws with `keys[b]`, and only when `active` is absent or its
+    /// element for row `b` is true.
+    Rows {
+        keys: &'a [RandomKey],
+        shape: &'a [usize],
+        active: Option<&'a TensorValue>,
+    },
+}
+
+impl DrawKeys<'_> {
+    fn row_active(&self, row: usize) -> bool {
+        match self {
+            Self::Rows {
+                keys,
+                active: Some(active),
+                ..
+            } => {
+                let element = leading_row(row, keys.len(), active.len());
+                active.storage().scalar_at(element).as_bool_exact() == Some(true)
+            }
+            _ => true,
+        }
+    }
+}
+
+/// The element that row `row` of `rows` reads from an operand of `len`
+/// elements shaped like the keys' leading axes: the row's index over those
+/// axes. A nonempty key batch has a nonempty leading part, so `len > 0`
+/// whenever a row exists.
+fn leading_row(row: usize, rows: usize, len: usize) -> usize {
+    row / (rows / len)
+}
+
+/// A key-operand random primitive's keys. A key an inactive `DrawKey`
+/// withheld has no value, so reading one under an active primitive is a
+/// malformed graph.
+fn draw_keys<'a>(
     node: &DagNode,
     key_slot: usize,
-    values: &UnordMap<NodeId, TensorValue>,
-    keys: &UnordMap<NodeId, Option<RandomKey>>,
-) -> Result<Option<RandomKey>, String> {
-    let active = match node.inputs.get(key_slot + 1) {
-        Some(activation) => rank0_bool(
+    values: &'a UnordMap<NodeId, TensorValue>,
+) -> Result<DrawKeys<'a>, String> {
+    let activation = match node.inputs.get(key_slot + 1) {
+        Some(activation) => Some(
             values
                 .get(activation)
                 .ok_or("random primitive activation is not available")?,
-            "random primitive activation",
-        )?,
-        None => true,
+        ),
+        None => None,
     };
-    let key = *node
+    if let Some(activation) = activation
+        && activation.shape.is_empty()
+        && !rank0_bool(activation, "random primitive activation")?
+    {
+        return Ok(DrawKeys::Inactive);
+    }
+    let key = node
         .inputs
         .get(key_slot)
-        .and_then(|key| keys.get(key))
+        .and_then(|key| values.get(key))
         .ok_or_else(|| {
             format!(
-                "random primitive at node {} has no evaluated key",
+                "random primitive at node {} is active but its key's draw was not",
                 node.id.0
             )
         })?;
-    match (active, key) {
-        (false, _) => Ok(None),
-        (true, Some(key)) => Ok(Some(key)),
-        (true, None) => Err(format!(
-            "random primitive at node {} is active but its key's draw was not",
-            node.id.0
-        )),
+    let keys = key
+        .storage()
+        .keys()
+        .ok_or_else(|| format!("random primitive at node {} has a non-key key", node.id.0))?;
+    if key.shape.is_empty() {
+        return Ok(DrawKeys::Scalar(keys[0]));
     }
+    let active = activation.filter(|activation| !activation.shape.is_empty());
+    if active.is_some_and(|active| !key.shape.starts_with(&active.shape)) {
+        return Err(format!(
+            "random primitive at node {}: a batched activation must be shaped like a leading part of its keys' shape {:?}",
+            node.id.0, key.shape
+        ));
+    }
+    Ok(DrawKeys::Rows {
+        keys,
+        shape: &key.shape,
+        active,
+    })
+}
+
+/// Row `row` of a batched draw's control: the one scalar of a rank-0
+/// control, or the element a control shaped like the keys' leading axes
+/// holds for the row.
+fn row_control(
+    value: &TensorValue,
+    row: usize,
+    shape: &[usize],
+    what: &str,
+) -> Result<chelis_types::ScalarValue, String> {
+    if value.shape.is_empty() {
+        return rank0_scalar(value, what);
+    }
+    if !shape.starts_with(&value.shape) {
+        return Err(format!(
+            "{what} must be rank 0 or shaped like a leading part of its keys' shape {shape:?}"
+        ));
+    }
+    Ok(value
+        .storage()
+        .scalar_at(leading_row(row, numel(shape), value.len())))
+}
+
+/// A key-operand random primitive's key batch against its operands, checked
+/// before it reads one, in [`RiscOp::draw_batch_layout`]'s order and with
+/// the C lane's report (spec/10 §3.2, rule V5): a key batch's shape is its
+/// data's leading axes, and each per-row control and activation is a
+/// leading part of that shape. The verifier relates the declared dims; this
+/// relates the values, so no row index rests on an extent nothing has
+/// checked. A key an inactive draw key withheld is rank 0, so it batches
+/// nothing. This lane builds each result from its data's shape, so it reads
+/// no declared result extent.
+fn check_draw_extents(
+    dag: &Dag,
+    node: &DagNode,
+    values: &UnordMap<NodeId, TensorValue>,
+) -> Result<(), String> {
+    let layout = node
+        .op
+        .draw_batch_layout()
+        .ok_or("check_draw_extents reads only a key-operand random primitive")?;
+    let op = layout.op;
+    let value = |slot: usize| node.inputs.get(slot).and_then(|input| values.get(input));
+    let Some(key) = value(layout.key).filter(|key| !key.shape.is_empty()) else {
+        return Ok(());
+    };
+    let key_dims = &dag
+        .get(node.inputs[layout.key])
+        .ok_or("random primitive key is not in its graph")?
+        .output_type
+        .dims;
+    let data = value(layout.data_input).ok_or("random primitive data is not available")?;
+    let operands = std::iter::once((layout.data_input, data, key.shape.len())).chain(
+        layout
+            .per_row
+            .iter()
+            .filter_map(|slot| value(*slot).map(|operand| (*slot, operand, operand.shape.len()))),
+    );
+    for (slot, operand, axes) in operands {
+        if axes > key.shape.len() || operand.shape.len() < axes {
+            return Err(format!(
+                "{op} input {slot} has rank {}, which its rank-{} key batch does not index",
+                operand.shape.len(),
+                key.shape.len()
+            ));
+        }
+        check_operand_extents(op, key_dims, key, slot, operand, axes)?;
+    }
+    Ok(())
+}
+
+/// Input `slot`, `operand`, against `reference`, whose declared axes are
+/// `reference_dims`, on its first `axes` extents: the first that disagrees
+/// reports the reference's claim and traps `Domain` in `op` at i64, the C
+/// lane's operand extent guard's report.
+fn check_operand_extents(
+    op: &'static str,
+    reference_dims: &[DimInfo],
+    reference: &TensorValue,
+    slot: usize,
+    operand: &TensorValue,
+    axes: usize,
+) -> Result<(), String> {
+    for axis in 0..axes {
+        let (claimed, observed) = (reference.shape[axis], operand.shape[axis]);
+        if claimed != observed {
+            let claim = match reference_dims.get(axis) {
+                Some(DimInfo::Lit(value)) => value.to_string(),
+                Some(DimInfo::Named(name, _)) => name.clone(),
+                None => claimed.to_string(),
+            };
+            return Err(format!(
+                "extent `{claim}`: claimed = {claimed}, {op} input {slot} axis {axis} = {observed}\n\
+                 {}",
+                NumericTrap::Domain {
+                    op,
+                    prim: Prim::Int64
+                }
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// The element count of each row of `data` that a batch of keys of `shape`
+/// splits it into: the data's leading axes are the keys' shape.
+fn batched_row_len(data: &TensorValue, shape: &[usize], node: &DagNode) -> Result<usize, String> {
+    if !data.shape.starts_with(shape) {
+        return Err(format!(
+            "random primitive at node {}: its keys of shape {shape:?} must match its data's leading axes",
+            node.id.0
+        ));
+    }
+    Ok(data.shape[shape.len()..].iter().product())
+}
+
+fn row_of(storage: &TensorStorage, row: usize, row_len: usize) -> TensorStorage {
+    let indices = (row * row_len..(row + 1) * row_len).collect::<Vec<_>>();
+    storage.reuse_gather(&indices)
+}
+
+/// Positive zeros at `prim`, the value of an inactive draw or row.
+fn zero_storage(prim: Prim, len: usize) -> Result<TensorStorage, String> {
+    finalize_tensor("random", prim, RawTensor::Float(vec![0.0; len]))
+        .map_err(|trap| trap.to_string())
+}
+
+/// Concatenate row results into one buffer in row order.
+fn concat_rows(prim: Prim, rows: &[TensorStorage]) -> TensorStorage {
+    let scalars = rows
+        .iter()
+        .flat_map(|row| (0..row.len()).map(|index| row.scalar_at(index)))
+        .collect::<Vec<_>>();
+    tensor_from_scalars(prim, &scalars)
+}
+
+/// A draw over `data`'s elements at `prim`, as the stack of its rows' draws
+/// (`spec/10-serialization.md` §3.2): a rank-0 key is one row of every
+/// element, and a key batch splits the data by its leading axes. `draw`
+/// receives each active row's index, key, key shape and element count, and
+/// is the only place a row's controls are read and validated. So a batch
+/// validates exactly its active rows, and one with no rows validates
+/// nothing, as `vmap` over no calls does. An inactive row, and every row
+/// under a false rank-0 activation, is positive zeros.
+fn stack_draw_rows(
+    node: &DagNode,
+    data: &TensorValue,
+    prim: Prim,
+    keys: DrawKeys<'_>,
+    mut draw: impl FnMut(usize, RandomKey, &[usize], usize) -> Result<TensorStorage, String>,
+) -> Result<TensorStorage, String> {
+    match keys {
+        DrawKeys::Inactive => zero_storage(prim, data.len()),
+        DrawKeys::Scalar(key) => draw(0, key, &[], data.len()),
+        DrawKeys::Rows {
+            keys: rows,
+            shape,
+            active,
+        } => {
+            let row_len = batched_row_len(data, shape, node)?;
+            let keys = DrawKeys::Rows {
+                keys: rows,
+                shape,
+                active,
+            };
+            let mut out = Vec::with_capacity(rows.len());
+            for (row, key) in rows.iter().enumerate() {
+                out.push(if keys.row_active(row) {
+                    draw(row, *key, shape, row_len)?
+                } else {
+                    zero_storage(prim, row_len)?
+                });
+            }
+            Ok(concat_rows(prim, &out))
+        }
+    }
+}
+
+/// `[05-OP-37]`'s dropout (or its replay, on the cotangent) under `keys`.
+fn eval_dropout(
+    node: &DagNode,
+    data: &TensorValue,
+    rate: &TensorValue,
+    keys: DrawKeys<'_>,
+) -> Result<TensorValue, String> {
+    let storage = stack_draw_rows(node, data, data.prim(), keys, |row, key, shape, row_len| {
+        let gathered;
+        let input = if row_len == data.len() {
+            data.storage()
+        } else {
+            gathered = row_of(data.storage(), row, row_len);
+            &gathered
+        };
+        let rate = row_control(rate, row, shape, "dropout rate")?;
+        PreparedDropout::new(input, rate)
+            .and_then(|prepared| prepared.apply(key))
+            .map_err(|error| error.to_string())
+    })?;
+    Ok(TensorValue::from_storage(data.shape.clone(), storage))
+}
+
+/// `[05-OP-8]`'s sampler for a template of `shape` under `keys`.
+fn eval_uniform_like(
+    node: &DagNode,
+    template: &TensorValue,
+    low: &TensorValue,
+    high: &TensorValue,
+    prim: Prim,
+    keys: DrawKeys<'_>,
+) -> Result<TensorValue, String> {
+    let storage = stack_draw_rows(node, template, prim, keys, |row, key, shape, row_len| {
+        let low = row_control(low, row, shape, "uniform_like low bound")?;
+        let high = row_control(high, row, shape, "uniform_like high bound")?;
+        PreparedUniformLike::new(prim, row_len, low, high)
+            .and_then(|prepared| prepared.apply(key))
+            .map_err(|error| error.to_string())
+    })?;
+    Ok(TensorValue::from_storage(template.shape.clone(), storage))
+}
+
+/// `[05-OP-8]`'s bound adjoint of the cotangent `g` under `keys`. A batched
+/// draw's adjoint has its bound's shape, the keys' leading `c` axes: each
+/// element is one balanced tree over the contributions, in row-major order,
+/// of the rows that share that bound element. Rank 0 folds every row, and
+/// the keys' own shape folds each row alone.
+fn eval_uniform_bound_adjoint(
+    node: &DagNode,
+    g: &TensorValue,
+    bound: crate::dag::UniformBound,
+    prim: Prim,
+    keys: DrawKeys<'_>,
+) -> Result<TensorValue, String> {
+    let bound = match bound {
+        crate::dag::UniformBound::Low => chelis_types::UniformBound::Low,
+        crate::dag::UniformBound::High => chelis_types::UniformBound::High,
+    };
+    match keys {
+        DrawKeys::Inactive => zero_tensor(&concrete_shape(&node.output_type)?, prim),
+        DrawKeys::Scalar(key) => {
+            let value = uniform_like_bound_adjoint(g.storage(), key, bound)
+                .map_err(|error| error.to_string())?;
+            Ok(TensorValue::from_storage(
+                Vec::new(),
+                tensor_from_scalars(prim, &[value]),
+            ))
+        }
+        DrawKeys::Rows {
+            keys: rows,
+            shape,
+            active,
+        } => {
+            let row_len = batched_row_len(g, shape, node)?;
+            let keys = DrawKeys::Rows {
+                keys: rows,
+                shape,
+                active,
+            };
+            let masked = (0..rows.len())
+                .map(|row| {
+                    if keys.row_active(row) {
+                        Ok(row_of(g.storage(), row, row_len))
+                    } else {
+                        zero_storage(prim, row_len)
+                    }
+                })
+                .collect::<Result<Vec<_>, String>>()?;
+            let out_shape = shape.get(..node.output_type.dims.len()).ok_or_else(|| {
+                format!(
+                    "uniform bound adjoint at node {}: its result is not a leading part of its keys' shape {shape:?}",
+                    node.id.0
+                )
+            })?;
+            // Row `b` joins the group of the result element it would read as
+            // a control of the result's shape; each group is contiguous.
+            let mut groups = vec![Vec::new(); numel(out_shape)];
+            for row in 0..rows.len() {
+                groups[leading_row(row, rows.len(), numel(out_shape))].push(row);
+            }
+            let values = groups
+                .iter()
+                .map(|group| {
+                    let cotangent = group
+                        .iter()
+                        .map(|row| masked[*row].clone())
+                        .collect::<Vec<_>>();
+                    let keys = group.iter().map(|row| rows[*row]).collect::<Vec<_>>();
+                    uniform_like_bound_adjoint_rows(&concat_rows(prim, &cotangent), &keys, bound)
+                        .map_err(|error| error.to_string())
+                })
+                .collect::<Result<Vec<_>, String>>()?;
+            Ok(TensorValue::from_storage(
+                out_shape.to_vec(),
+                tensor_from_scalars(prim, &values),
+            ))
+        }
+    }
+}
+
+fn key_value(
+    value: &TensorValue,
+    storage: Result<TensorStorage, chelis_types::NumericKernelError>,
+) -> Result<TensorValue, String> {
+    let storage = storage.map_err(|error| error.to_string())?;
+    Ok(TensorValue::from_storage(value.shape.clone(), storage))
 }
 
 fn zero_tensor(shape: &[usize], prim: Prim) -> Result<TensorValue, String> {
@@ -2343,11 +2719,12 @@ fn resolve_load_inputs<F>(
     symbolic_dim_load_inputs: &UnordSet<&str>,
     required_shape_inputs: &UnordSet<String>,
     mut load_input: F,
-) -> Result<UnordMap<String, TensorValue>, String>
+) -> Result<(UnordMap<String, TensorValue>, Vec<NodeId>), String>
 where
     F: FnMut(&str, TensorInputDemand) -> Result<Option<TensorValue>, String>,
 {
     let mut inputs = UnordMap::new();
+    let mut resolved_loads = Vec::new();
     for node in dag.nodes() {
         let RiscOp::Load { name } = &node.op else {
             continue;
@@ -2373,6 +2750,7 @@ where
         match load_input(name.as_str(), demand)? {
             Some(value) => {
                 inputs.insert(name.as_str().to_string(), value);
+                resolved_loads.push(node.id);
             }
             None if strict_loads && is_live => {
                 return Err(format!("missing required input `{name}`"));
@@ -2380,7 +2758,7 @@ where
             None => {}
         }
     }
-    Ok(inputs)
+    Ok((inputs, resolved_loads))
 }
 
 /// The nodes `roots` need over a graph that holds several independently
@@ -2426,11 +2804,12 @@ fn activation_live_mask(dag: &Dag, roots: &[NodeId]) -> Vec<bool> {
 fn live_mask_from(dag: &Dag, mut stack: Vec<NodeId>) -> Vec<bool> {
     let mut live = vec![false; dag.len()];
     // chelis#2368: effect nodes are live because they are effects, not
-    // because a value reaches them.
+    // because a value reaches them. chelis#2413: so is a random node that can
+    // trap by itself.
     stack.extend(
         dag.nodes()
             .iter()
-            .filter(|node| node.op.is_unconditional_effect())
+            .filter(|node| node.op.is_unconditional_effect() || dag.random_node_may_trap(node))
             .map(|node| node.id),
     );
     loop {
@@ -2646,6 +3025,7 @@ fn value_free_schedule(
 
 struct PreparedTensorInputs {
     inputs: UnordMap<String, TensorValue>,
+    resolved_loads: Vec<NodeId>,
     required_symbols: UnordSet<String>,
     needs_symbolic_binding: bool,
     symbolic_selection: SymbolicInputSelection,
@@ -2720,7 +3100,7 @@ where
         UnordSet::new()
     };
     let symbolic_selection = select_symbolic_inputs(dag, &required_symbols, live);
-    let resolved_inputs = resolve_load_inputs(
+    let (resolved_inputs, resolved_loads) = resolve_load_inputs(
         dag,
         live,
         strict_loads,
@@ -2730,6 +3110,7 @@ where
     )?;
     Ok(PreparedTensorInputs {
         inputs: resolved_inputs,
+        resolved_loads,
         required_symbols,
         needs_symbolic_binding,
         symbolic_selection,
@@ -2771,7 +3152,8 @@ where
     let declared_local_guard_sites = crate::axis_sources::local_dim_guard_sites(dag)?;
     let live = scope.live();
     let PreparedTensorInputs {
-        inputs: resolved_inputs,
+        inputs: mut resolved_inputs,
+        resolved_loads,
         required_symbols,
         needs_symbolic_binding,
         symbolic_selection,
@@ -2780,93 +3162,107 @@ where
     // actual caller inputs. Both host lanes consume the same individual
     // schedule before symbolic inference or dependent operations. Missing
     // inputs belonging only to an unrelated root remain optional (#991).
-    let entry_guards = crate::axis_sources::entry_extent_guards(dag);
     // chelis#1374: a named witness claim whose pair the entry schedule above
     // already compares is checked there, once (spec/04 §4.7). The claim stays
     // in the graph because it is also what retains a declared-but-unread
     // parameter's interface witness.
     let entry_covered = crate::axis_sources::entry_covered_witness_claims(dag);
-    // Rank and literal ABI checks remain the complement of the claim schedule.
-    for node in dag.nodes() {
-        let RiscOp::Load { name } = &node.op else {
-            continue;
-        };
-        let Some(value) = resolved_inputs.get(name.as_str()) else {
-            continue;
-        };
-        let dims = &node.output_type.dims;
-        let fully_ranked = !dims.is_empty()
-            && dims
-                .iter()
-                .all(|dim| matches!(dim, DimInfo::Lit(_) | DimInfo::Named(_, _)));
-        if fully_ranked && value.shape.len() != dims.len() {
-            return Err(format!(
-                "input `{name}` expected rank {}, got {}",
-                dims.len(),
-                value.shape.len()
-            ));
-        }
-        for (axis, dim) in dims.iter().enumerate() {
-            let DimInfo::Lit(declared) = dim else {
-                continue;
-            };
-            if entry_guards.iter().any(|guard| {
-                matches!(guard,
-                crate::axis_sources::EntryExtentGuard::Literal { required, observed }
-                    if *required == *declared && *observed == (node.id, axis))
-            }) {
-                continue;
+    // One IR plan supplies the same slot/axis order to Eval and direct C.
+    // Freeze tagged/raw values at entry, before symbolic binding or body
+    // execution; a Load later reads only its admitted value.
+    for step in crate::axis_sources::entry_validation_plan_for_resolved_loads(dag, &resolved_loads)
+    {
+        use crate::axis_sources::{EntryExtentGuard, EntryValidationStep};
+        match step {
+            EntryValidationStep::DType { load } => {
+                let node = dag.get(load).expect("entry input");
+                let RiscOp::Load { name } = &node.op else {
+                    unreachable!()
+                };
+                if let Some(value) = resolved_inputs.get(name.as_str()) {
+                    let admitted =
+                        ingress_to_declared(name.as_str(), node.output_type.precision, value)?;
+                    resolved_inputs.insert(name.as_str().to_string(), admitted);
+                }
             }
-            let Some(observed) = value.shape.get(axis).copied() else {
-                continue;
-            };
-            if observed != *declared {
-                return Err(format!(
-                    "extent `{declared}`: claimed = {declared}, {name} axis {axis} = {observed}\n\
-                     numeric trap: domain in load at i64"
-                ));
+            EntryValidationStep::Rank { load } => {
+                let node = dag.get(load).expect("entry input");
+                let RiscOp::Load { name } = &node.op else {
+                    unreachable!()
+                };
+                if let Some(value) = resolved_inputs.get(name.as_str())
+                    && value.shape.len() != node.output_type.dims.len()
+                {
+                    return Err(format!(
+                        "input `{name}` expected rank {}, got {}\nnumeric trap: domain in load at i64",
+                        node.output_type.dims.len(),
+                        value.shape.len()
+                    ));
+                }
             }
-        }
-    }
-
-    for guard in entry_guards {
-        use crate::axis_sources::EntryExtentGuard;
-        let read = |(load, axis): (NodeId, usize)| {
-            let RiscOp::Load { name } = &dag.get(load)?.op else {
-                return None;
-            };
-            let extent = *resolved_inputs.get(name.as_str())?.shape.get(axis)?;
-            Some((name.as_str(), axis, extent))
-        };
-        let context = match guard {
-            EntryExtentGuard::Named {
-                claim,
-                canonical,
-                observed,
+            EntryValidationStep::LiteralAxis {
+                load,
+                axis,
+                required,
             } => {
-                let (Some((left_label, left_axis, left)), Some((right_label, right_axis, right))) =
-                    (read(canonical), read(observed))
-                else {
-                    continue;
+                let node = dag.get(load).expect("entry input");
+                let RiscOp::Load { name } = &node.op else {
+                    unreachable!()
                 };
-                if left == right {
-                    continue;
+                if let Some(observed) = resolved_inputs
+                    .get(name.as_str())
+                    .and_then(|value| value.shape.get(axis))
+                    .copied()
+                    && observed != required
+                {
+                    return Err(format!(
+                        "extent `{required}`: claimed = {required}, {name} axis {axis} = {observed}\nnumeric trap: domain in load at i64"
+                    ));
                 }
-                format!(
-                    "extent `{claim}`: {left_label} axis {left_axis} = {left}, {right_label} axis {right_axis} = {right}"
-                )
             }
-            EntryExtentGuard::Literal { required, observed } => {
-                let Some((label, axis, actual)) = read(observed) else {
-                    continue;
+            EntryValidationStep::Extent(guard) => {
+                let read = |(load, axis): (NodeId, usize)| {
+                    let RiscOp::Load { name } = &dag.get(load)?.op else {
+                        return None;
+                    };
+                    let extent = *resolved_inputs.get(name.as_str())?.shape.get(axis)?;
+                    Some((name.as_str(), axis, extent))
                 };
-                if actual == required {
-                    continue;
-                }
-                format!("extent `{required}`: claimed = {required}, {label} axis {axis} = {actual}")
+                let context = match guard {
+                    EntryExtentGuard::Named {
+                        claim,
+                        canonical,
+                        observed,
+                    } => {
+                        let (
+                            Some((left_label, left_axis, left)),
+                            Some((right_label, right_axis, right)),
+                        ) = (read(canonical), read(observed))
+                        else {
+                            continue;
+                        };
+                        if left == right {
+                            continue;
+                        }
+                        format!(
+                            "extent `{claim}`: {left_label} axis {left_axis} = {left}, {right_label} axis {right_axis} = {right}"
+                        )
+                    }
+                    EntryExtentGuard::Literal { required, observed } => {
+                        let Some((label, axis, actual)) = read(observed) else {
+                            continue;
+                        };
+                        if actual == required {
+                            continue;
+                        }
+                        format!(
+                            "extent `{required}`: claimed = {required}, {label} axis {axis} = {actual}"
+                        )
+                    }
+                };
+                return Err(format!("{context}\nnumeric trap: domain in load at i64"));
             }
-        };
-        return Err(format!("{context}\nnumeric trap: domain in load at i64"));
+        }
     }
 
     let mut prebound_dims: UnordMap<String, usize> = UnordMap::new();
@@ -2908,9 +3304,6 @@ where
     };
 
     let mut values: UnordMap<NodeId, TensorValue> = UnordMap::new();
-    // A draw's key is a word, never a tensor value: it lives beside `values`
-    // and is read only by the key slot of a random primitive.
-    let mut keys: UnordMap<NodeId, Option<RandomKey>> = UnordMap::new();
     // chelis#828's receipt, sampled once per executed node. `live_elements`
     // is maintained incrementally so the sample costs two comparisons rather
     // than a walk of the map.
@@ -3010,8 +3403,15 @@ where
             return Err(failure);
         }
         if matches!(node.op, RiscOp::DrawKey { .. }) {
-            let key = eval_draw_key(node, &values, random_frame)?;
-            keys.insert(node.id, key);
+            // A key is an ordinary rank-0 key value. An inactive draw key
+            // takes no ordinal and has no value, so an active primitive that
+            // reads it is caught by `draw_keys`.
+            if let Some(key) = eval_draw_key(node, &values, random_frame)? {
+                let value =
+                    TensorValue::from_storage(Vec::new(), TensorStorage::from_keys(vec![key]));
+                live_elements += value.len();
+                values.insert(node.id, value);
+            }
             if let Some(schedule) = &free_schedule {
                 for dead in &schedule[index] {
                     if let Some(freed) = values.remove(dead) {
@@ -3336,7 +3736,13 @@ where
             }
             RiscOp::CheckedUnitAxis { .. } => values[&node.inputs[0]].clone(),
             RiscOp::Load { name } => match resolved_inputs.get(name.as_str()) {
-                Some(value) => ingress_to_declared(name.as_str(), out_prim, value)?,
+                // The entry plan freezes the selected declaration once. A
+                // raw, unverified DAG can still contain a second live Load
+                // with this name but a conflicting type; do not silently
+                // hand it the first Load's admitted storage.
+                Some(value) => {
+                    ingress_to_declared(name.as_str(), node.output_type.precision, value)?
+                }
                 None if strict_loads => return Err(format!("missing required input `{name}`")),
                 None => default_value(&node.output_type),
             },
@@ -3430,56 +3836,91 @@ where
             // `f64::round`, which rounds half away from zero.
             RiscOp::Round => unary_elementwise(ElementwiseUnOp::Round, &values[&node.inputs[0]])?,
             RiscOp::Dropout | RiscOp::DropoutReplay => {
-                let data = &values[&node.inputs[0]];
-                match random_operand_key(node, 2, &values, &keys)? {
-                    None => zero_tensor(&data.shape, data.prim())?,
-                    Some(key) => {
-                        let rate = rank0_scalar(&values[&node.inputs[1]], "dropout rate")?;
-                        let storage = PreparedDropout::new(data.storage(), rate)
-                            .and_then(|prepared| prepared.apply(key))
-                            .map_err(|error| error.to_string())?;
-                        TensorValue::from_storage(data.shape.clone(), storage)
-                    }
-                }
+                check_draw_extents(&bound_dag, node, &values)?;
+                eval_dropout(
+                    node,
+                    &values[&node.inputs[0]],
+                    &values[&node.inputs[1]],
+                    draw_keys(node, 2, &values)?,
+                )?
             }
             RiscOp::UniformLike => {
-                let shape = values[&node.inputs[0]].shape.clone();
-                match random_operand_key(node, 3, &values, &keys)? {
-                    None => zero_tensor(&shape, out_prim)?,
-                    Some(key) => {
-                        let low = rank0_scalar(&values[&node.inputs[1]], "uniform_like low bound")?;
-                        let high =
-                            rank0_scalar(&values[&node.inputs[2]], "uniform_like high bound")?;
-                        let storage = PreparedUniformLike::new(out_prim, numel(&shape), low, high)
-                            .and_then(|prepared| prepared.apply(key))
-                            .map_err(|error| error.to_string())?;
-                        TensorValue::from_storage(shape, storage)
-                    }
-                }
+                check_draw_extents(&bound_dag, node, &values)?;
+                eval_uniform_like(
+                    node,
+                    &values[&node.inputs[0]],
+                    &values[&node.inputs[1]],
+                    &values[&node.inputs[2]],
+                    out_prim,
+                    draw_keys(node, 3, &values)?,
+                )?
             }
             RiscOp::UniformBoundAdjoint { bound } => {
-                match random_operand_key(node, 2, &values, &keys)? {
-                    None => zero_tensor(&[], out_prim)?,
-                    Some(key) => {
-                        let bound = match bound {
-                            crate::dag::UniformBound::Low => chelis_types::UniformBound::Low,
-                            crate::dag::UniformBound::High => chelis_types::UniformBound::High,
-                        };
-                        let value = uniform_like_bound_adjoint(
-                            values[&node.inputs[1]].storage(),
-                            key,
-                            bound,
-                        )
-                        .map_err(|error| error.to_string())?;
-                        TensorValue::from_storage(
-                            Vec::new(),
-                            tensor_from_scalars(out_prim, &[value]),
-                        )
-                    }
-                }
+                check_draw_extents(&bound_dag, node, &values)?;
+                eval_uniform_bound_adjoint(
+                    node,
+                    &values[&node.inputs[1]],
+                    *bound,
+                    out_prim,
+                    draw_keys(node, 2, &values)?,
+                )?
             }
             RiscOp::DrawKey { .. } => {
                 unreachable!("draw keys are evaluated before the value match")
+            }
+            RiscOp::KeyFromSeed => {
+                let seeds = &values[&node.inputs[0]];
+                key_value(seeds, key_from_seed_storage(seeds.storage()))?
+            }
+            RiscOp::Split { branch } => {
+                let keys = &values[&node.inputs[0]];
+                key_value(keys, split_key_storage(keys.storage(), branch.half()))?
+            }
+            RiscOp::FoldIn => {
+                let keys = &values[&node.inputs[0]];
+                let ns = &values[&node.inputs[1]];
+                if keys.shape.len() != ns.shape.len() {
+                    return Err(format!(
+                        "fold_in at node {}: key shape {:?} and count shape {:?} must be equal",
+                        node.id.0, keys.shape, ns.shape
+                    ));
+                }
+                // Each count extent against the key's, before either is
+                // read, with the C lane's report.
+                let key_dims = &bound_dag
+                    .get(node.inputs[0])
+                    .ok_or("fold_in key is not in its graph")?
+                    .output_type
+                    .dims;
+                check_operand_extents("fold_in", key_dims, keys, 1, ns, keys.shape.len())?;
+                key_value(keys, fold_in_storage(keys.storage(), ns.storage()))?
+            }
+            RiscOp::SplitN { count } => {
+                let keys = &values[&node.inputs[0]];
+                // [05-OP-71]: a negative runtime count traps before
+                // allocation, with the C lane's `Domain` trap.
+                if let RtDim::Node(slot) = count
+                    && let Some(value) = node.inputs.get(*slot).and_then(|input| values.get(input))
+                    && rank0_scalar(value, "split_keys count")?
+                        .as_i64_exact()
+                        .is_some_and(|count| count < 0)
+                {
+                    return Err(NumericTrap::Domain {
+                        op: "split_keys",
+                        prim: Prim::Int64,
+                    }
+                    .to_string());
+                }
+                let count = resolve_eval_bound(count, node, &values, 0)?;
+                let mut shape = keys.shape.clone();
+                shape.push(count);
+                // The key's extents and the count are the result's; every
+                // extent its type declares is a claim about them, checked
+                // before any key exists, as the C lane checks it.
+                check_declared_extents("split_keys", &node.output_type, &shape, &runtime_dims)?;
+                let storage =
+                    split_keys_storage(keys.storage(), count).map_err(|error| error.to_string())?;
+                TensorValue::from_storage(shape, storage)
             }
             RiscOp::MaxElem => binary_elementwise(
                 ElementwiseBinOp::Max,
@@ -4065,6 +4506,43 @@ fn local_guard_verdict(
              numeric trap: domain in {} at i64",
             claim.claim, claim.op, claim.op,
         ));
+    }
+    Ok(())
+}
+
+/// The extents `shape` an operation computed against the extents its
+/// declared type claims: a literal, a bound name, or a name an earlier
+/// operation declared. A name nothing has bound yet is declared by this
+/// result (`op_declared_axes`), and an anonymous one claims nothing. The
+/// report is [`local_guard_verdict`]'s, which the C lane mirrors.
+fn check_declared_extents(
+    op: &str,
+    declared: &TensorType,
+    shape: &[usize],
+    runtime_dims: &UnordMap<String, usize>,
+) -> Result<(), String> {
+    if declared.dims.len() != shape.len() {
+        return Err(format!(
+            "{op} computed rank {}, but its type declares rank {}",
+            shape.len(),
+            declared.dims.len()
+        ));
+    }
+    for (axis, (dim, &observed)) in declared.dims.iter().zip(shape).enumerate() {
+        let (claim, claimed) = match dim {
+            DimInfo::Lit(value) => (value.to_string(), *value),
+            DimInfo::Named(name, Some(value)) => (name.clone(), *value),
+            DimInfo::Named(name, None) => match runtime_dims.get(name) {
+                Some(value) => (name.clone(), *value),
+                None => continue,
+            },
+        };
+        if observed != claimed {
+            return Err(format!(
+                "extent `{claim}`: claimed = {claimed}, {op} axis {axis} = {observed}\n\
+                 numeric trap: domain in {op} at i64"
+            ));
+        }
     }
     Ok(())
 }

@@ -49,6 +49,11 @@ use crate::types::Prim;
 
 /// Frozen prefix shared by every [04-NUM-9] numeric-trap diagnostic.
 pub const NUMERIC_TRAP_PREFIX: &str = "numeric trap: ";
+
+/// Why a key buffer or key scalar refuses every numeric read: a key has no
+/// arithmetic, comparison, or cast (spec/04 §1.1), and the IR verifier keeps
+/// keys out of every numeric operation, so reaching one is a compiler defect.
+const KEY_HAS_NO_NUMERIC_READING: &str = "a random key has no numeric reading; the IR verifier keeps keys out of every numeric operation";
 /// Frozen spelling of the [04-NUM-9] overflow kind.
 pub const NUMERIC_TRAP_OVERFLOW_KIND: &str = "overflow";
 /// Frozen spelling of the [04-NUM-9] domain kind.
@@ -334,6 +339,8 @@ enum Bits {
     F32(f32),
     F64(f64),
     Bool(bool),
+    /// A random key ([05-RNG-2]): an opaque word, never a number.
+    Key(RandomKey),
 }
 
 /// A finalized scalar at its dtype's own width. Construct via
@@ -356,6 +363,23 @@ impl ScalarValue {
             Bits::F32(_) => Prim::F32,
             Bits::F64(_) => Prim::F64,
             Bits::Bool(_) => Prim::Bool,
+            Bits::Key(_) => Prim::Key,
+        }
+    }
+
+    /// A key as a scalar value. A key has no literal, so this is the only
+    /// way a key scalar is formed: from a key some key operation produced.
+    pub fn from_key(key: RandomKey) -> Self {
+        Self {
+            bits: Bits::Key(key),
+        }
+    }
+
+    /// The key payload, or `None` for every numeric and bool dtype.
+    pub fn as_key(&self) -> Option<RandomKey> {
+        match self.bits {
+            Bits::Key(key) => Some(key),
+            _ => None,
         }
     }
 
@@ -379,6 +403,10 @@ impl ScalarValue {
                     0.0
                 }
             }
+            Bits::Key(_) => panic!(
+                "as_f64_lossy: a random key has no numeric reading; the IR verifier \
+                 keeps keys out of every numeric operation"
+            ),
         }
     }
 
@@ -391,7 +419,7 @@ impl ScalarValue {
             Bits::I32(v) => Some(v as i64),
             Bits::I64(v) => Some(v),
             Bits::Bool(v) => Some(if v { 1 } else { 0 }),
-            Bits::F16(_) | Bits::Bf16(_) | Bits::F32(_) | Bits::F64(_) => None,
+            Bits::F16(_) | Bits::Bf16(_) | Bits::F32(_) | Bits::F64(_) | Bits::Key(_) => None,
         }
     }
 
@@ -406,7 +434,8 @@ impl ScalarValue {
             | Bits::F16(_)
             | Bits::Bf16(_)
             | Bits::F32(_)
-            | Bits::F64(_) => None,
+            | Bits::F64(_)
+            | Bits::Key(_) => None,
         }
     }
 
@@ -423,6 +452,9 @@ impl ScalarValue {
             Bits::F32(v) => ElementRef::F32(v),
             Bits::F64(v) => ElementRef::F64(v),
             Bits::Bool(v) => ElementRef::Bool(v),
+            Bits::Key(_) => {
+                panic!("element_ref: a random key has no observation form (chelis#2413)")
+            }
         }
     }
 }
@@ -1239,6 +1271,8 @@ enum Buf {
     I8(Vec<i8>),
     /// 0/1, one byte per element; ends PR #79's bool-storage deferral.
     Bool(Vec<u8>),
+    /// Random keys ([05-RNG-2]); constructed only by the key kernels.
+    Key(Vec<RandomKey>),
 }
 
 /// Read-only borrowed view of a [`TensorStorage`] buffer at its own
@@ -1255,6 +1289,8 @@ pub enum StorageView<'a> {
     I8(&'a [i8]),
     /// 0/1 bytes.
     Bool(&'a [u8]),
+    /// Opaque random keys.
+    Key(&'a [RandomKey]),
 }
 
 /// A finalized element buffer at its dtype's own width. Construct via
@@ -1277,6 +1313,7 @@ impl TensorStorage {
             Buf::I16(_) => Prim::Int16,
             Buf::I8(_) => Prim::Int8,
             Buf::Bool(_) => Prim::Bool,
+            Buf::Key(_) => Prim::Key,
         }
     }
 
@@ -1291,6 +1328,7 @@ impl TensorStorage {
             Buf::I16(v) => v.len(),
             Buf::I8(v) => v.len(),
             Buf::Bool(v) => v.len(),
+            Buf::Key(v) => v.len(),
         }
     }
 
@@ -1312,6 +1350,7 @@ impl TensorStorage {
             Buf::I16(v) => StorageView::I16(v),
             Buf::I8(v) => StorageView::I8(v),
             Buf::Bool(v) => StorageView::Bool(v),
+            Buf::Key(v) => StorageView::Key(v),
         }
     }
 
@@ -1330,6 +1369,7 @@ impl TensorStorage {
             Buf::I16(v) => RawTensor::Int(v.iter().map(|&x| x as i64).collect()),
             Buf::I8(v) => RawTensor::Int(v.iter().map(|&x| x as i64).collect()),
             Buf::Bool(v) => RawTensor::Int(v.iter().map(|&x| x as i64).collect()),
+            Buf::Key(_) => panic!("to_raw: {KEY_HAS_NO_NUMERIC_READING}"),
         }
     }
 
@@ -1346,6 +1386,7 @@ impl TensorStorage {
             Buf::I16(v) => v.iter().map(|&x| x as f64).collect(),
             Buf::I8(v) => v.iter().map(|&x| x as f64).collect(),
             Buf::Bool(v) => v.iter().map(|&x| x as f64).collect(),
+            Buf::Key(_) => panic!("to_f64_lossy_vec: {KEY_HAS_NO_NUMERIC_READING}"),
         }
     }
 
@@ -1358,7 +1399,7 @@ impl TensorStorage {
             Buf::I16(v) => Some(v.iter().map(|&x| x as i64).collect()),
             Buf::I8(v) => Some(v.iter().map(|&x| x as i64).collect()),
             Buf::Bool(v) => Some(v.iter().map(|&x| x as i64).collect()),
-            Buf::F64(_) | Buf::F32(_) | Buf::F16(_) | Buf::Bf16(_) => None,
+            Buf::F64(_) | Buf::F32(_) | Buf::F16(_) | Buf::Bf16(_) | Buf::Key(_) => None,
         }
     }
 
@@ -1376,6 +1417,7 @@ impl TensorStorage {
             Buf::I16(v) => v[index] as f64,
             Buf::I8(v) => v[index] as f64,
             Buf::Bool(v) => v[index] as f64,
+            Buf::Key(_) => panic!("element_f64_lossy: {KEY_HAS_NO_NUMERIC_READING}"),
         }
     }
 
@@ -1392,6 +1434,7 @@ impl TensorStorage {
             Buf::I16(v) => Bits::I16(v[index]),
             Buf::I8(v) => Bits::I8(v[index]),
             Buf::Bool(v) => Bits::Bool(v[index] != 0),
+            Buf::Key(v) => Bits::Key(v[index]),
         };
         ScalarValue { bits }
     }
@@ -1420,6 +1463,7 @@ impl TensorStorage {
             Buf::I16(v) => Buf::I16(pick(v, indices)),
             Buf::I8(v) => Buf::I8(pick(v, indices)),
             Buf::Bool(v) => Buf::Bool(pick(v, indices)),
+            Buf::Key(v) => Buf::Key(pick(v, indices)),
         };
         TensorStorage { buf }
     }
@@ -1455,6 +1499,7 @@ impl TensorStorage {
             (Buf::I16(v), Bits::I16(f)) => Buf::I16(place(v, f, map)),
             (Buf::I8(v), Bits::I8(f)) => Buf::I8(place(v, f, map)),
             (Buf::Bool(v), Bits::Bool(f)) => Buf::Bool(place(v, u8::from(f), map)),
+            (Buf::Key(v), Bits::Key(f)) => Buf::Key(place(v, f, map)),
             (buf_other, bits_other) => unreachable!(
                 "reuse_fill_gather: prim equality was asserted above, yet buffer {:?} \
                  met fill {:?}",
@@ -1500,6 +1545,7 @@ impl TensorStorage {
             (Buf::I16(d), Buf::I16(s)) => write(d, s, writes),
             (Buf::I8(d), Buf::I8(s)) => write(d, s, writes),
             (Buf::Bool(d), Buf::Bool(s)) => write(d, s, writes),
+            (Buf::Key(d), Buf::Key(s)) => write(d, s, writes),
             (dst_other, src_other) => unreachable!(
                 "reuse_overwrite: prim equality was asserted above, yet target {:?} \
                  met source {:?}",
@@ -2933,6 +2979,7 @@ fn splat_storage(value: ScalarValue, len: usize) -> TensorStorage {
         Bits::F32(value) => Buf::F32(vec![value; len]),
         Bits::F64(value) => Buf::F64(vec![value; len]),
         Bits::Bool(value) => Buf::Bool(vec![u8::from(value); len]),
+        Bits::Key(value) => Buf::Key(vec![value; len]),
     };
     TensorStorage { buf }
 }
@@ -3240,12 +3287,12 @@ impl DropoutParameters {
 /// The key of one random draw: an opaque, structurally non-numeric carrier
 /// that a random kernel receives in place of any ambient stream.
 ///
-/// A key has no arithmetic, comparison, or cast. Under the counter stream of
-/// `[05-RNG-1]` the only constructor is [`RandomKey::from_counter`], which a
-/// lane calls with its handler's seed and the draw's call ordinal; the
-/// explicit-key design (`spec/design/randomness_explicit_keys.md`) adds its
-/// derivations beside it. [`RandomKey::bits`] exists so that native backends
-/// can port the kernels bit for bit.
+/// A key has no arithmetic, comparison, or cast. It is formed only by
+/// [`RandomKey::from_counter`], the counter stream's key for a handler's seed
+/// and a draw's call ordinal, by [`RandomKey::from_seed`] ([05-OP-69]), and by
+/// the [05-RNG-2] derivations [`RandomKey::split`], [`RandomKey::fold_in`]
+/// and [`RandomKey::split_n`]. [`RandomKey::bits`] exists so that native
+/// backends can port the kernels bit for bit.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct RandomKey {
     bits: u64,
@@ -3263,9 +3310,174 @@ impl RandomKey {
         }
     }
 
+    /// `[05-OP-69]` `key_from_seed`: the key whose bits are the i64 seed's
+    /// two's-complement bits, with no mixing.
+    pub fn from_seed(seed: ScalarValue) -> Result<Self, NumericKernelError> {
+        match seed.bits {
+            Bits::I64(seed) => Ok(Self { bits: seed as u64 }),
+            _ => Err(NumericKernelError::DtypeMismatch {
+                op: "key_from_seed",
+                lhs: Prim::Int64,
+                rhs: seed.prim(),
+            }),
+        }
+    }
+
+    /// `[05-RNG-2]`'s `derive(k, j) = splitmix64(k XOR rotl64(splitmix64(j), 29))`.
+    pub fn derive(self, j: u64) -> Self {
+        Self {
+            bits: random_derive(self.bits, j),
+        }
+    }
+
+    /// `[05-OP-70]` `split_key`: `(derive(k, 0), derive(k, 1))`.
+    pub fn split(self) -> (Self, Self) {
+        (self.derive(0), self.derive(1))
+    }
+
+    /// `[05-OP-72]` `fold_in`: `derive(derive(k, 2), n)` with the i64 `n`
+    /// read as its two's-complement bits.
+    pub fn fold_in(self, n: ScalarValue) -> Result<Self, NumericKernelError> {
+        match n.bits {
+            Bits::I64(n) => Ok(self.fold_in_word(n as u64)),
+            _ => Err(NumericKernelError::DtypeMismatch {
+                op: "fold_in",
+                lhs: Prim::Int64,
+                rhs: n.prim(),
+            }),
+        }
+    }
+
+    /// `[05-OP-71]` `split_keys`: row `j` is `derive(derive(k, 2), j)`.
+    pub fn split_n(self, count: usize) -> Vec<Self> {
+        (0..count as u64).map(|j| self.fold_in_word(j)).collect()
+    }
+
+    fn fold_in_word(self, n: u64) -> Self {
+        self.derive(2).derive(n)
+    }
+
     /// The key word, for native ports of the kernels below.
     pub fn bits(self) -> u64 {
         self.bits
+    }
+}
+
+/// Which half of `[05-OP-70]`'s pair a split produces.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum KeyHalf {
+    /// `derive(k, 0)`.
+    Left,
+    /// `derive(k, 1)`.
+    Right,
+}
+
+impl TensorStorage {
+    /// Key storage from keys a key kernel produced. A key has no literal, so
+    /// this is the only construction path for a key buffer.
+    pub fn from_keys(keys: Vec<RandomKey>) -> Self {
+        TensorStorage {
+            buf: Buf::Key(keys),
+        }
+    }
+
+    /// The keys of a key buffer, or `None` for every numeric and bool buffer.
+    pub fn keys(&self) -> Option<&[RandomKey]> {
+        match &self.buf {
+            Buf::Key(keys) => Some(keys),
+            _ => None,
+        }
+    }
+}
+
+fn key_operand<'a>(
+    op: &'static str,
+    storage: &'a TensorStorage,
+) -> Result<&'a [RandomKey], NumericKernelError> {
+    storage.keys().ok_or(NumericKernelError::DtypeMismatch {
+        op,
+        lhs: Prim::Key,
+        rhs: storage.prim(),
+    })
+}
+
+/// `[05-OP-69]` element by element over a `tensor[D, i64]` of seeds.
+pub fn key_from_seed_storage(seeds: &TensorStorage) -> Result<TensorStorage, NumericKernelError> {
+    let keys = (0..seeds.len())
+        .map(|index| RandomKey::from_seed(seeds.scalar_at(index)))
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(TensorStorage::from_keys(keys))
+}
+
+/// One half of `[05-OP-70]` element by element over a `tensor[D, key]`.
+pub fn split_key_storage(
+    keys: &TensorStorage,
+    half: KeyHalf,
+) -> Result<TensorStorage, NumericKernelError> {
+    let index = match half {
+        KeyHalf::Left => 0,
+        KeyHalf::Right => 1,
+    };
+    let keys = key_operand("split_key", keys)?;
+    Ok(TensorStorage::from_keys(
+        keys.iter().map(|key| key.derive(index)).collect(),
+    ))
+}
+
+/// `[05-OP-72]` element by element over a `tensor[D, key]` and a
+/// `tensor[D, i64]` of exactly equal length; there is no broadcasting.
+pub fn fold_in_storage(
+    keys: &TensorStorage,
+    ns: &TensorStorage,
+) -> Result<TensorStorage, NumericKernelError> {
+    let keys = key_operand("fold_in", keys)?;
+    if keys.len() != ns.len() {
+        return Err(NumericKernelError::LengthMismatch {
+            op: "fold_in",
+            lhs: keys.len(),
+            rhs: ns.len(),
+        });
+    }
+    let folded = keys
+        .iter()
+        .enumerate()
+        .map(|(index, key)| key.fold_in(ns.scalar_at(index)))
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(TensorStorage::from_keys(folded))
+}
+
+/// `[05-OP-71]` over a `tensor[D, key]`: the result is `tensor[D ++ [count],
+/// key]` in row-major order, so element `(i, j)` is row `j` of key `i`.
+pub fn split_keys_storage(
+    keys: &TensorStorage,
+    count: usize,
+) -> Result<TensorStorage, NumericKernelError> {
+    let keys = key_operand("split_keys", keys)?;
+    Ok(TensorStorage::from_keys(
+        keys.iter().flat_map(|key| key.split_n(count)).collect(),
+    ))
+}
+
+/// The row of flat element `index` when `len` elements split into
+/// `rows` equal rows, and the element's index within its row. A batched
+/// draw (`spec/10-serialization.md` §3.2) keys row `b` by `keys[b]` and
+/// numbers the row's elements from zero.
+fn batched_row(index: usize, len: usize, rows: usize) -> (usize, u64) {
+    let row_len = len / rows;
+    (index / row_len, (index % row_len) as u64)
+}
+
+fn require_row_split(op: &'static str, len: usize, rows: usize) -> Result<(), NumericKernelError> {
+    // Zero rows split only zero elements.
+    let divides = len.is_multiple_of(rows);
+    if divides {
+        Ok(())
+    } else {
+        Err(NumericKernelError::LengthMismatch {
+            op,
+            lhs: len,
+            rhs: rows,
+        })
     }
 }
 
@@ -3504,6 +3716,34 @@ pub fn uniform_like_bound_adjoint(
     key: RandomKey,
     bound: UniformBound,
 ) -> Result<ScalarValue, NumericKernelError> {
+    uniform_like_bound_adjoint_by(cotangent, bound, |index| {
+        random_unit(key.bits, index as u64)
+    })
+}
+
+/// [`uniform_like_bound_adjoint`] of a row-batched draw whose rows share one
+/// bound: the cotangent's elements split into `keys.len()` equal rows, the
+/// unit of flat element `i` comes from its row's key at its index within the
+/// row, and every contribution joins one canonical balanced tree in
+/// increasing row-major order.
+pub fn uniform_like_bound_adjoint_rows(
+    cotangent: &TensorStorage,
+    keys: &[RandomKey],
+    bound: UniformBound,
+) -> Result<ScalarValue, NumericKernelError> {
+    let len = cotangent.len();
+    require_row_split("uniform_like", len, keys.len())?;
+    uniform_like_bound_adjoint_by(cotangent, bound, |index| {
+        let (row, element) = batched_row(index, len, keys.len());
+        random_unit(keys[row].bits, element)
+    })
+}
+
+fn uniform_like_bound_adjoint_by(
+    cotangent: &TensorStorage,
+    bound: UniformBound,
+    unit_at: impl Fn(usize) -> f64,
+) -> Result<ScalarValue, NumericKernelError> {
     let prim = cotangent.prim();
     if !prim.is_float() {
         return Err(NumericKernelError::WrongFamily {
@@ -3515,7 +3755,7 @@ pub fn uniform_like_bound_adjoint(
     let value = if prim == Prim::F64 {
         let leaves = (0..cotangent.len())
             .map(|index| {
-                let unit = random_unit(key.bits, index as u64);
+                let unit = unit_at(index);
                 let weight = match bound {
                     UniformBound::Low => 1.0 - unit,
                     UniformBound::High => unit,
@@ -3530,7 +3770,7 @@ pub fn uniform_like_bound_adjoint(
     } else {
         let leaves = (0..cotangent.len())
             .map(|index| {
-                let unit = random_unit(key.bits, index as u64) as f32;
+                let unit = unit_at(index) as f32;
                 let weight = match bound {
                     UniformBound::Low => 1.0f32 - unit,
                     UniformBound::High => unit,
@@ -3555,6 +3795,13 @@ fn random_splitmix64(mut value: u64) -> u64 {
     value = (value ^ (value >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
     value = (value ^ (value >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
     value ^ (value >> 31)
+}
+
+/// `[05-RNG-2]`'s `derive(k, j) = splitmix64(k XOR rotl64(splitmix64(j), 29))`.
+/// A finalized mix, never a bare XOR of per-index terms, so a chained fold is
+/// not symmetric in its indices (the chelis#2408 class).
+fn random_derive(key: u64, j: u64) -> u64 {
+    random_splitmix64(key ^ random_splitmix64(j).rotate_left(29))
 }
 
 /// The bits of [`RandomKey::from_counter`].
@@ -3815,8 +4062,8 @@ pub fn finalize_tensor(
              finalize semantics (op {op})"
         ),
         Prim::Key => panic!(
-            "finalize_tensor: a random key is not a numeric dtype and has no \
-             finalize semantics (op {op})"
+            "finalize_tensor: a random key has no literal or raw ingress; only the \
+             key kernels construct key storage (op {op})"
         ),
     };
     Ok(TensorStorage { buf })
@@ -4018,9 +4265,20 @@ pub fn tensor_from_scalars(prim: Prim, values: &[ScalarValue]) -> TensorStorage 
             "tensor_from_scalars: string is not a numeric dtype and has no \
              tensor storage"
         ),
-        Prim::Key => panic!(
-            "tensor_from_scalars: a random key is not a numeric dtype and has no \
-             tensor storage"
+        Prim::Key => Buf::Key(
+            values
+                .iter()
+                .map(|v| {
+                    read(
+                        prim,
+                        v,
+                        match v.bits {
+                            Bits::Key(key) => Some(key),
+                            _ => None,
+                        },
+                    )
+                })
+                .collect(),
         ),
     };
     TensorStorage { buf }

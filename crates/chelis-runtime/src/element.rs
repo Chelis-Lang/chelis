@@ -1,5 +1,5 @@
 //! C1's closed storage owner. No pointer access lives in this module.
-use super::{Bool8, TensorElement};
+use super::{Bool8, KeyWord, TensorElement};
 use chelis_vocab::{ArithmeticRepr, Repr, RuntimeDType};
 
 pub use half::{bf16 as Bf16Bits, f16 as F16Bits};
@@ -85,6 +85,13 @@ impl ElementStorage for Bool8 {
     type ArithmeticStorage = ();
 }
 
+impl private::Sealed for KeyWord {}
+impl ElementStorage for KeyWord {
+    const STORAGE_DTYPE: RuntimeDType = RuntimeDType::Key;
+    const STORED_REPR: Repr = Repr::Word64;
+    type ArithmeticStorage = ();
+}
+
 trait ArithmeticIdentity {
     const REPR: Option<ArithmeticRepr>;
 }
@@ -157,6 +164,7 @@ const fn assert_registered_dtype(dtype: RuntimeDType) {
         RuntimeDType::I16 => assert_registration::<i16>(dtype),
         RuntimeDType::I8 => assert_registration::<i8>(dtype),
         RuntimeDType::Bool => assert_registration::<Bool8>(dtype),
+        RuntimeDType::Key => assert_registration::<KeyWord>(dtype),
     }
 }
 
