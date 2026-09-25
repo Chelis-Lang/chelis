@@ -11,7 +11,7 @@ use chelis_types::types::Lane;
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
 
-const LIBRARY: &str = "weights = with seed(17i64) { _ = print(\"initialize\")\n\
+const LIBRARY: &str = "weights = { _ = print(\"initialize\")\n\
     to_tensor([3.0f32, 5.0f32]) }\n\
     def total[pre, post](weights: &tensor[..pre, seq, ..post, f32]) -> tensor[..pre, ..post, f32] = sum(weights, seq)\n";
 
@@ -92,10 +92,18 @@ fn assert_host_with_inputs(
 }
 
 fn sampled_client(params: &str, total: &str) -> String {
-    let draws = "_ = uniform_like(copy(x), 0.0f32, 1.0f32)\n".repeat(5);
+    // Five discarded draws on their own keys; under explicit keys they do not
+    // move the returned draw, which is keyed by `key_from_seed(42)` alone.
+    let draws = (0..5)
+        .map(|n| {
+            format!(
+                "_ = uniform_like(fold_in(key_from_seed(7i64), {n}i64), copy(x), 0.0f32, 1.0f32)\n"
+            )
+        })
+        .collect::<String>();
     format!(
-        "def main({params}) = with seed(42i64) {{ _ = print(\"entry\")\n\
-         {draws} result = {total}\n (result, uniform_like(x, 0.0f32, 1.0f32)) }}\n"
+        "def main({params}) = {{ _ = print(\"entry\")\n\
+         {draws} result = {total}\n (result, uniform_like(key_from_seed(42i64), x, 0.0f32, 1.0f32)) }}\n"
     )
 }
 
@@ -104,9 +112,9 @@ fn assert_sample(result: &EvalResult, sum: &str) {
         result,
         &[
             ("main.0", tagged(&[], "f32", &[sum])),
-            // [05-RNG-1]/[05-OP-8] for seed 42, ordinal 5 (after five
-            // discarded draws), [0, 1), f32: `rng_ref.py uniform 42 5 2 0 1 f32`.
-            ("main.1", tagged(&[2], "f32", &["3f5b1b74", "3daedee7"])),
+            // [05-OP-8] keyed by `key_from_seed(42)`, [0, 1), f32: the f32
+            // rounding of key_ref.py's `unit(key_from_seed(42), i)`, i = 0, 1.
+            ("main.1", tagged(&[2], "f32", &["3efa06fe", "3e762d86"])),
         ],
         &["entry"],
     );
@@ -253,10 +261,11 @@ fn nonintegral_actual_reaches_the_declared_integer_ingress_trap() {
 
 #[test]
 fn fixed_control_host_keeps_its_existing_supplied_input_route() {
-    // A negated literal retains Host lowering while the checked dropout plan
-    // is FixedControl. This is not an admission extension for runtime rates.
+    // A negated literal rate keeps its supplied-input route: the keyed draw at
+    // rate -0 returns its input. This is not an admission extension for
+    // runtime rates.
     let prepared = prepare(
-        "def main(x: tensor[2, f32]) -> tensor[2, f32] = with seed(42i64) { dropout(x, -0.0f32) }\n",
+        "def main(x: tensor[2, f32]) -> tensor[2, f32] = dropout(key_from_seed(42i64), x, -0.0f32)\n",
     );
     for bits in [
         ["40e00000", "41300000"],

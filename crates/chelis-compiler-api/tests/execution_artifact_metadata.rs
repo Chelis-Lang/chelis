@@ -22,8 +22,8 @@ def solve(a: tensor[1, f32], b: tensor[1, f32]) -> tensor[1, f32] = add(helper(a
 ";
 
 const FIXED_CONTROL_ENTRIES: &str = "\
-def sample(x: tensor[4, f32]) -> tensor[4, f32] = with seed(42i64) { dropout(x, 0.5f32) }
-def other(y: tensor[8, f32]) -> tensor[8, f32] = with seed(7i64) { dropout(y, 0.5f32) }
+def sample(x: tensor[4, f32]) -> tensor[4, f32] = dropout(key_from_seed(42i64), x, 0.5f32)
+def other(y: tensor[8, f32]) -> tensor[8, f32] = dropout(key_from_seed(7i64), y, 0.5f32)
 ";
 
 #[test]
@@ -57,20 +57,29 @@ fn fixed_control_hostless_entry_keeps_exact_callable_selection() {
 fn fixed_control_source_sibling_does_not_replace_an_ordinary_selected_entry() {
     let source =
         format!("{FIXED_CONTROL_ENTRIES}\ndef identity(z: tensor[2, f32]) -> tensor[2, f32] = z\n");
+    let main_c = |entry: &str| {
+        compile_c(&source, Some(entry))
+            .compile_result
+            .files
+            .iter()
+            .find(|file| file.path == "chelis_main.c")
+            .unwrap()
+            .contents
+            .clone()
+    };
     let artifact = compile_c(&source, Some("identity"));
     assert_eq!(input_names(&artifact), ["z"]);
-    let c = &artifact
-        .compile_result
-        .files
-        .iter()
-        .find(|file| file.path == "chelis_main.c")
-        .unwrap()
-        .contents;
-    assert!(!c.contains("chelis_dropout_unit"));
+    // The selected drawing sibling emits its dropout kernel; the ordinary
+    // entry must not carry it. (The shared random-unit helpers are part of
+    // every translation unit's preamble, so they are no witness.)
+    assert!(main_c("sample").contains("dropout"));
+    assert!(!main_c("identity").contains("dropout"));
 }
 
+/// The key-form analogue of the retired unhandled-`Random` rejection: a draw
+/// without its key is an arity error, never an admitted entry.
 #[test]
-fn fixed_control_hostless_entry_does_not_admit_an_unhandled_draw() {
+fn hostless_entry_rejects_a_keyless_draw_as_an_arity_error() {
     let error = compile_for_execution(CompileRequest {
         source_kind: SourceKind::Surf,
         source: "def main(x: tensor[4, f32]) -> tensor[4, f32] = dropout(x, 0.5f32)\n".into(),
@@ -80,7 +89,7 @@ fn fixed_control_hostless_entry_does_not_admit_an_unhandled_draw() {
     .unwrap_err();
     let message = format!("{error:?}");
     assert!(
-        message.contains("inherited") || message.contains("Random"),
+        message.contains("arity mismatch: expected 3 args, got 2"),
         "{error:?}"
     );
 }
