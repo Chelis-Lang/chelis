@@ -972,7 +972,7 @@
       "ordinal": 2,
       "pattern": "Type::Var(source)",
       "disposition": "defect(#1512)",
-      "reason": "chelis#2158: a `cast_trunc` source variable carries a `Float` requirement, and a `cast` source whose type is an authored binder at the cast is held to `Numeric`, both checked against the bound by `check_declared_dtype_bounds`; a `cast` source that is still an inference variable at the cast is not checked, even when it later resolves to a binder or a `string` ([05-OP-63] also admits `bool`, and no dtype family is the numeric-or-`bool` set), tracked as chelis#2534"
+      "reason": "chelis#2158: a `cast_trunc` source variable carries a `Float` requirement, and a `cast` source whose type is an authored binder at the cast is held to `Numeric`, both checked against the bound by `check_declared_dtype_bounds` when recorded before that check runs (a later narrowing is chelis#2537); a `cast` source that is still an inference variable at the cast is not checked, even when it later resolves to a binder or a `string` ([05-OP-63] also admits `bool`, and no dtype family is the numeric-or-`bool` set), tracked as chelis#2534"
     },
     {
       "file": "expr_record.rs",
