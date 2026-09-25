@@ -5810,9 +5810,10 @@ mod tests {
     /// would demand that def's parameters, and then trap on behalf of code
     /// the caller excluded.
     ///
-    /// Nothing lowers a non-`DrawKey`-keyed draw today, so this is built
-    /// directly. The precondition assert is load-bearing: a `DrawKey`-keyed
-    /// draw is not a trapping draw, and this test would pass vacuously.
+    /// The graph is built directly and carries no declarations, so this
+    /// pins the root-reachability fallback. The precondition assert keeps
+    /// the test honest: a draw that cannot trap is never seeded, and the
+    /// assertions below would then pass vacuously.
     #[test]
     fn a_trapping_draw_owned_by_an_unselected_root_is_not_this_evaluation_s_concern() {
         let mut dag = Dag::new();
@@ -5834,8 +5835,7 @@ mod tests {
             },
             None,
         );
-        // A plain `Load` key, NOT a `DrawKey` output: the draw validates its
-        // own rate, so it can trap by itself.
+        // The draw validates its own runtime rate, so it can trap by itself.
         let k = dag.add_node(RiscOp::Load { name: "k".into() }, vec![], key_ty, None);
         let draw = dag.add_node(RiscOp::Dropout, vec![z, rate, k], ty.clone(), None);
         let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], ty.clone(), None);
