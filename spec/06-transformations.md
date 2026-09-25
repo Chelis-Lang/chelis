@@ -620,18 +620,22 @@ node and removing its execution preserves every effect and trap occurrence.
 Potentially effectful or trapping nodes are observable roots; purity alone does
 not make a possible trap dead.
 
-Observable roots are scoped to the activation being executed. A graph may hold
-several independently executed activations — one per declaration — and an
-evaluation that selects roots executes only the selected ones. A node reachable
-only from an unselected root belongs to a declaration that evaluation does not
-run, so it is not one of that evaluation's observable roots, and its inputs are
-not that evaluation's required inputs. A node the selection also reaches, and a
-node reachable from no root at all, both remain observable roots of every
-activation that contains them.
+Observable roots are scoped to what an evaluation executes. A graph may hold
+the lowered bodies of several top-level declarations; each declaration's
+execution is an *activation*, and an evaluation that selects roots executes the
+selected declarations and no others. A node belongs to the activation of the
+declaration whose body contains it, whether or not any root reaches it: a
+discarded node is still part of its declaration, which is why its effect or
+trap survives step 1. An evaluation's observable roots are the observable roots
+of the activations it executes. A node belonging only to an activation it does
+not execute is not one of them, and that node's inputs are not among the
+evaluation's required inputs. (This scoping is not fully implemented for a
+discarded node of an unexecuted declaration: chelis#2476.)
 
 **Algorithm:**
-1. Mark every effectful node, every potentially trapping node, every `Store`,
-   and every designated output of the selected activation as **live**.
+1. Mark, within each activation the evaluation executes, every effectful node,
+   every potentially trapping node, every `Store`, and every designated output
+   as **live**.
 2. Walk backward through the DAG: for each live node, mark all its input nodes as live.
 3. Remove all nodes not marked as live.
 

@@ -780,6 +780,113 @@ mod tests {
     /// possible trap dead". The retention above hung on the node carrying a
     /// `result_claim_dep`; a plain discarded trapping node had nothing to
     /// keep it, so its trap simply did not occur.
+    /// Every family `may_trap` names, and the float control for each.
+    ///
+    /// Without this, the predicate could lose integer division, `Neg`/`Abs`
+    /// overflow, `CastTrunc`, and the cast-to-`bool` domain case and stay
+    /// green: the rest of the suite reaches `may_trap` only through integer
+    /// `Add`/`Mul` and `Cast` to `i32`. Those are exactly the families the
+    /// change cites as its motivation, so they are the ones that must fail
+    /// loudly when the predicate narrows.
+    #[test]
+    fn every_trapping_family_is_retained_and_its_float_twin_is_not() {
+        use chelis_types::types::Prim;
+
+        fn ty(precision: Prim) -> TensorType {
+            TensorType {
+                dims: Vec::new(),
+                precision,
+            }
+        }
+
+        // (label, op, arity, the dtype that traps, the dtype that cannot)
+        let cases: Vec<(&str, RiscOp, usize, Prim, Prim)> = vec![
+            ("neg overflow", RiscOp::Neg, 1, Prim::Int32, Prim::F32),
+            ("abs overflow", RiscOp::Abs, 1, Prim::Int32, Prim::F32),
+            ("sub overflow", RiscOp::Sub, 2, Prim::Int64, Prim::F64),
+            ("div by zero", RiscOp::Div, 2, Prim::Int32, Prim::F32),
+            (
+                "floor_div by zero",
+                RiscOp::FloorDiv,
+                2,
+                Prim::Int32,
+                Prim::F32,
+            ),
+            (
+                "trunc_div by zero",
+                RiscOp::TruncDiv,
+                2,
+                Prim::Int64,
+                Prim::F32,
+            ),
+            ("mod by zero", RiscOp::Mod, 2, Prim::Int32, Prim::F32),
+            (
+                "cast_trunc domain",
+                RiscOp::CastTrunc {
+                    new_precision: Prim::Int32,
+                },
+                1,
+                Prim::Int32,
+                Prim::F32,
+            ),
+            (
+                "cast to bool domain",
+                RiscOp::Cast {
+                    new_precision: Prim::Bool,
+                },
+                1,
+                Prim::Bool,
+                Prim::F32,
+            ),
+        ];
+
+        for (label, op, arity, trapping_precision, safe_precision) in cases {
+            // A cast carries its target in the op, so the safe twin needs the
+            // op rewritten rather than only the node's output type.
+            let safe_op = match &op {
+                RiscOp::Cast { .. } => RiscOp::Cast {
+                    new_precision: safe_precision,
+                },
+                RiscOp::CastTrunc { .. } => RiscOp::CastTrunc {
+                    new_precision: safe_precision,
+                },
+                other => other.clone(),
+            };
+
+            for (precision, node_op, expect_retained) in [
+                (trapping_precision, op.clone(), true),
+                (safe_precision, safe_op, false),
+            ] {
+                let mut dag = Dag::new();
+                let source = dag.add_node(
+                    RiscOp::Load { name: "x".into() },
+                    Vec::new(),
+                    ty(precision),
+                    None,
+                );
+                let inputs = vec![source; arity];
+                let discarded = dag.add_node(node_op.clone(), inputs, ty(precision), None);
+                let root = dag.add_node(
+                    RiscOp::synth_const(Prim::F32, 0.0),
+                    Vec::new(),
+                    scalar_f32(),
+                    None,
+                );
+                dag.add_root(root);
+
+                let retained = dead_code_eliminate(&dag)
+                    .nodes()
+                    .iter()
+                    .any(|node| node.op == node_op);
+                assert_eq!(
+                    retained, expect_retained,
+                    "{label} at {precision:?}: expected retained={expect_retained}, \
+                     got {retained} (node {discarded:?})"
+                );
+            }
+        }
+    }
+
     #[test]
     fn full_dce_retains_a_trapping_node_with_no_claim() {
         let mut dag = Dag::new();
