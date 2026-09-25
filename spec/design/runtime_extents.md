@@ -1066,6 +1066,13 @@ fresh extents, including symbolic shrink; literal stride one and zero pad
 retain identity under spec/04 §4.7. Derive sources after each final rewrite,
 never retain stale node ids in a cached class list.
 
+Host tensor-helper extraction derives a permutation's result type from its
+operand's ordered physical axes and the complete permutation. Reusing the
+operand shape as a coarse result type would misapply result positions to
+input dimensions during helper instantiation. #2533 exercises this boundary
+with generic `insert`/`permute`, direct and aliased intermediates, widths two
+and three, exact f64 values, effects, and disagreeing result claims.
+
 Both binding and DECLARATION consumers now read the derivation.
 `symbolic_occurrences`, `bind_symbol_from_any_load` and `symbolic_bindings` are
 deleted; `op_declared_output_axes`, `shape_source_for_axis` and
