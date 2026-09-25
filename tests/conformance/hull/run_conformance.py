@@ -326,7 +326,7 @@ def compiler_eval_scalar(exit_code: int, stdout: str) -> NumericScalar | None:
         return None
     if not isinstance(root, dict):
         return None
-    if type(root.get("schema_version")) is not int or root["schema_version"] != 3:
+    if type(root.get("schema_version")) is not int or root["schema_version"] != 4:
         return None
     roots = root.get("roots")
     if not isinstance(roots, list) or len(roots) == 0:

@@ -21,7 +21,7 @@ def scalar(dtype, bits):
 
 
 def envelope(value):
-    return {"schema_version": 3, "roots": [{"node_id": 0, "name": "x", "value": value}], "transcript": []}
+    return {"schema_version": 4, "roots": [{"node_id": 0, "name": "x", "value": value}], "transcript": []}
 
 
 class ExecutionWireTests(unittest.TestCase):
@@ -112,7 +112,7 @@ class ExecutionWireTests(unittest.TestCase):
                 chelis._tensor_value(dict(good, data=data))
 
     def test_facade_eval_checks_exact_stamp_before_visiting_values(self):
-        for version in (None, 1, 2, 4, True, 3.0, "3"):
+        for version in (None, 1, 2, 3, 5, True, 4.0, "4"):
             payload = envelope({"invalid": "must not decode"})
             if version is None:
                 del payload["schema_version"]
@@ -157,8 +157,8 @@ class ExecutionWireTests(unittest.TestCase):
                 chelis._execution_value(bad)
 
     def test_duplicate_json_fields_and_non_json_constants_are_rejected(self):
-        for raw in ('{"schema_version":3,"schema_version":2,"roots":[],"transcript":[]}',
-                    '{"schema_version":3,"roots":[],"transcript":[NaN]}'):
+        for raw in ('{"schema_version":4,"schema_version":3,"roots":[],"transcript":[]}',
+                    '{"schema_version":4,"roots":[],"transcript":[NaN]}'):
             with mock.patch.object(chelis._native, "eval_json", return_value=raw, create=True):
                 with self.assertRaises(ValueError):
                     chelis.eval("x = 1")

@@ -1000,11 +1000,11 @@ fn eval_json_def_only_emits_empty_roots_json() {
         .expect("run chelis eval --json --file");
     assert!(output.status.success(), "def-only eval --json exits 0");
     let stdout = String::from_utf8(output.stdout).expect("utf8 stdout");
-    // Execution wire v3 (chelis#729): EvalResult stamps its payload
-    // version.
+    // EvalResult stamps its execution payload version (v4 since the key
+    // execution values, chelis#2413).
     assert_eq!(
         stdout.trim(),
-        r#"{"schema_version":3,"roots":[],"manifest":{"target":"Eval","entries":[],"requires_main":false}}"#
+        r#"{"schema_version":4,"roots":[],"manifest":{"target":"Eval","entries":[],"requires_main":false}}"#
     );
     let json: Value = serde_json::from_str(stdout.trim()).expect("valid JSON");
     assert_eq!(json["roots"].as_array().expect("roots").len(), 0);

@@ -8,7 +8,7 @@ from capacity_census_wire_adapters import CodecCase, canonical
 def envelope_cases():
     cases = []
     manifest = {"target": "Eval", "entries": [], "requires_main": False}
-    empty = {"schema_version": 3, "roots": [], "manifest": manifest}
+    empty = {"schema_version": 4, "roots": [], "manifest": manifest}
 
     def add(carrier, name, text, expected, error=None, codec="json"):
         cases.append(
@@ -26,11 +26,11 @@ def envelope_cases():
     scalar = '{"dtype":"f64","bits":"8000000000000000"}'
     root = '{"node_id":0,"value":{"type":"scalar","value":' + scalar + "}}"
     inputs = [
-        ("empty", '{"schema_version":3,"roots":[]}', empty, None),
-        ("reordered", '{"roots":[],"schema_version":3}', empty, None),
+        ("empty", '{"schema_version":4,"roots":[]}', empty, None),
+        ("reordered", '{"roots":[],"schema_version":4}', empty, None),
         (
             "scalar",
-            '{"schema_version":3,"roots":[' + root + "]}",
+            '{"schema_version":4,"roots":[' + root + "]}",
             {
                 **empty,
                 "roots": [
@@ -47,13 +47,13 @@ def envelope_cases():
         ),
         (
             "duplicate-version",
-            '{"schema_version":3,"roots":[],"schema_version":3}',
+            '{"schema_version":4,"roots":[],"schema_version":4}',
             None,
             "duplicate field",
         ),
         (
             "duplicate-bits",
-            '{"schema_version":3,"roots":['
+            '{"schema_version":4,"roots":['
             + root.replace('"bits":', '"bits":"8000000000000000","bits":')
             + "]}",
             None,
@@ -61,14 +61,14 @@ def envelope_cases():
         ),
         (
             "duplicate-dtype",
-            '{"schema_version":3,"roots":['
+            '{"schema_version":4,"roots":['
             + root.replace('"dtype":', '"dtype":"f64","dtype":')
             + "]}",
             None,
             "duplicate field",
         ),
     ]
-    for version in (None, 2, 4):
+    for version in (None, 3, 5):
         prefix = "" if version is None else f'"schema_version":{version},'
         suffix = "" if version is None else f',"schema_version":{version}'
         inputs += [
@@ -98,13 +98,13 @@ def envelope_cases():
                 wrapped = '{"kind":"eval",' + wrapped[1:]
                 observed = {"kind": "eval", "envelope": observed} if observed else None
             add(carrier, name, wrapped, observed, error)
-    for version in (2, 3, 4):
+    for version in (3, 4, 5):
         add(
             "EvalResult",
             "producer-version-" + str(version),
             canonical({"schema_version": version, "roots": []}),
-            empty if version == 3 else None,
-            None if version == 3 else "schema_version",
+            empty if version == 4 else None,
+            None if version == 4 else "schema_version",
             "construct",
         )
     failure = '{"ok":false,"stage":"check","errors":[]}'

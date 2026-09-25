@@ -4152,7 +4152,7 @@ mod worker_stack_tests {
                 .find(|root| root["name"] == "depth")
                 .expect("depth root");
             // The tagged int64 and exact value prove the recursion completed.
-            assert_eq!(payload["schema_version"], 3);
+            assert_eq!(payload["schema_version"], 4);
             assert_eq!(depth["value"]["type"], "scalar");
             assert_eq!(depth["value"]["value"]["dtype"], "int64");
             assert_eq!(depth["value"]["value"]["value"].as_i64(), Some(200));

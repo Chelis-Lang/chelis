@@ -52,7 +52,7 @@ def reject_check_json() -> str:
 
 
 def eval_json(value_obj: dict) -> str:
-    return json.dumps({"schema_version": 3, "roots": [{"name": "answer", "value": value_obj}]})
+    return json.dumps({"schema_version": 4, "roots": [{"name": "answer", "value": value_obj}]})
 
 
 def scalar_wire(dtype, value):
@@ -337,7 +337,7 @@ class EvalClassificationTests(unittest.TestCase):
         self.assertEqual(r.bucket, "compiler_crash")
 
 
-class ExecutionV3ConsumerTests(unittest.TestCase):
+class ExecutionV4ConsumerTests(unittest.TestCase):
     def test_floats_decode_at_their_declared_storage_width(self):
         for dtype, bits, expected in [
             ("f16", "3c01", 1.0009765625),
@@ -400,7 +400,7 @@ class ExecutionV3ConsumerTests(unittest.TestCase):
     def test_execution_version_and_json_grammar_are_required(self):
         current = json.loads(eval_json(scalar_wire("int64", 1)))
         self.assertEqual(rc.compiler_eval_scalar(0, json.dumps(current)), 1)
-        for version in [None, 1, 2, 4, True, 3.0]:
+        for version in [None, 1, 2, 3, 5, True, 4.0]:
             candidate = dict(current)
             if version is None:
                 del candidate["schema_version"]

@@ -167,7 +167,7 @@ Every tagged variant must be known to the version 19 decoder. `OneHot` remains o
 IR/specialization marker and backends must not receive it after specialization.
 
 Execution-value envelopes carry the independently required exact
-`schema_version: 3`. Missing, older, and future execution versions are rejected
+`schema_version: 4`. Missing, older, and future execution versions are rejected
 before decoding values. An execution version never substitutes for WireDag
 version validation, or conversely. Tensor bindings in requests use the same
 execution-value carrier grammar. A cache or compiled-context worker handoff

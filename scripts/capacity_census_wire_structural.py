@@ -284,13 +284,13 @@ def structural_evidence():
             *pairs(
                 "EvalResult",
                 "empty",
-                ("version-first-None", "version-first-2", "version-first-4"),
+                ("version-first-None", "version-first-3", "version-first-5"),
                 ("json",),
             ),
             *pairs(
                 "EvalResult",
-                "producer-version-3",
-                ("producer-version-2", "producer-version-4"),
+                "producer-version-4",
+                ("producer-version-3", "producer-version-5"),
                 ("construct",),
             ),
         ),
@@ -299,8 +299,8 @@ def structural_evidence():
             "reordered",
             (
                 "version-last-None",
-                "version-last-2",
-                "version-last-4",
+                "version-last-3",
+                "version-last-5",
                 "duplicate-version",
             ),
             ("json",),

@@ -380,8 +380,8 @@ def eval(
 
 
 def _eval_result(payload: dict[str, Any]) -> EvalResult:
-    if not isinstance(payload, dict) or type(payload.get("schema_version")) is not int or payload["schema_version"] != 3:
-        raise ValueError("execution schema_version must be exactly 3 before decoding values")
+    if not isinstance(payload, dict) or type(payload.get("schema_version")) is not int or payload["schema_version"] != 4:
+        raise ValueError("execution schema_version must be exactly 4 before decoding values")
     # The compiler's root manifest is routing metadata; this facade projects
     # evaluated values. The codec omits an empty transcript.
     _object(payload, {"schema_version", "roots"}, {"manifest", "transcript"})

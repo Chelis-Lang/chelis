@@ -6,7 +6,7 @@ use chelis_compiler_api::schema::{
 
 #[test]
 fn execution_version_is_checked_before_values_in_either_field_order() {
-    for version in ["", "\"schema_version\":2,", "\"schema_version\":4,"] {
+    for version in ["", "\"schema_version\":3,", "\"schema_version\":5,"] {
         for json in [
             format!("{{{version}\"roots\":[{{\"value\":{{\"type\":\"unknown\"}}}}]}}"),
             format!(
@@ -85,12 +85,12 @@ fn batch_envelopes_execute_the_same_version_and_duplicate_controls() {
     use chelis_compiler_api::schema::WireBatchResultEnvelope;
     let batch =
         |eval: &str| format!(r#"{{"results":[{{"kind":"eval","ok":true,"result":{eval}}}]}}"#);
-    let valid = batch(r#"{"schema_version":3,"roots":[]}"#);
+    let valid = batch(r#"{"schema_version":4,"roots":[]}"#);
     let result = serde_json::from_str::<WireBatchResultEnvelope>(&valid);
     assert!(result.is_ok(), "{valid}: {result:?}");
     for eval in [
-        r#"{"roots":[],"schema_version":2}"#,
-        r#"{"roots":[],"schema_version":3,"schema_version":3}"#,
+        r#"{"roots":[],"schema_version":3}"#,
+        r#"{"roots":[],"schema_version":4,"schema_version":4}"#,
     ] {
         assert!(serde_json::from_str::<WireBatchResultEnvelope>(&batch(eval)).is_err());
     }

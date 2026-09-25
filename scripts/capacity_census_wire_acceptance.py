@@ -153,7 +153,7 @@ MUTATION_CONTROLS = (
 )
 
 HULL_CONSUMER_CONTROLS = tuple(
-    "tests.conformance.hull.test_run_conformance.ExecutionV3ConsumerTests." + method
+    "tests.conformance.hull.test_run_conformance.ExecutionV4ConsumerTests." + method
     for method in (
         "test_floats_decode_at_their_declared_storage_width",
         "test_integer_width_limits_are_exact_and_out_of_range_is_rejected",

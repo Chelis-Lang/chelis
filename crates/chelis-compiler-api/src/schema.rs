@@ -785,7 +785,17 @@ impl DiagnosticSpan {
 /// Execution-value schema version: exact stored-bit carriers, numeric scalar
 /// tags, and checked int64 tensor shapes. Readers validate this stamp before
 /// decoding values; older, missing and future versions have no fallback.
-pub const EXECUTION_VALUE_SCHEMA_VERSION: u32 = 3;
+/// Bump it whenever a producer may emit a value an earlier reader cannot
+/// decode, so that reader rejects the payload at the stamp rather than
+/// partway through its values.
+///
+/// Version history:
+/// - `3`: exact stored-bit scalar and storage carriers (chelis#1664).
+/// - `4`: the key execution values of spec/10 section 3.2, a scalar key
+///   `{"type":"key","bits":h}` and a key tensor's storage object
+///   `{"dtype":"key","bits":[h,...]}` (chelis#2413). A version-3 reader has
+///   no spelling for either.
+pub const EXECUTION_VALUE_SCHEMA_VERSION: u32 = 4;
 
 /// The canonical sealed storage carrier, with the exact spec/10 bit codec.
 pub type TensorElements = chelis_types::TensorStorage;

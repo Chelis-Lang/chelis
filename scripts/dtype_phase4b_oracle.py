@@ -1222,7 +1222,7 @@ def validate_normative_contract(
             ("A raw source DTO is not an admitted executable AST.", "wire raw-source admission"),
             ("A reference is resolved only in its declared owner and namespace.", "wire reference scope"),
             ("Bounds alone never establish transport authority.", "wire report numeric authority"),
-            ("`schema_version: 3`", "execution v3 exactness"),
+            ("`schema_version: 4`", "execution v4 exactness"),
         ),
         violations,
     )
