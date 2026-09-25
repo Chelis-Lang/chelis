@@ -234,12 +234,8 @@ fn surf_known_bad_programs_score_below_one() {
             format!("def g(x: f32) -> f32 = {MASKED_ERROR}\ndef f(x: f32) -> f32 = jit(g)(x)\n"),
             ".ch",
         ),
-        // chelis#709: the two effect-handler bodies (now checked).
-        (
-            "with_seed_body",
-            format!("def f() -> f32 = with seed(42i64) {{ {MASKED_ERROR} }}\n"),
-            ".ch",
-        ),
+        // chelis#709: the effect-handler body (now checked). Its `with seed`
+        // sibling left with the retired handler (chelis#2413).
         (
             "with_device_body",
             format!("def f() -> f32 = with device(\"gpu:0\") {{ {MASKED_ERROR} }}\n"),
@@ -248,13 +244,13 @@ fn surf_known_bad_programs_score_below_one() {
         // chelis#709 escalation: an i64 body from an `-> f32` fn.
         (
             "masked_return_type",
-            "def f() -> f32 = with seed(42i64) { cast(5, i64) }\n".to_string(),
+            "def f() -> f32 = with device(\"gpu:0\") { cast(5, i64) }\n".to_string(),
             ".ch",
         ),
         // chelis#731 §C1.5 / chelis#771: an unsuffixed seed literal.
         (
             "unsuffixed_seed",
-            "def f() -> f32 = with seed(42) { add(cast(1.0, f32), cast(2.0, f32)) }\n".to_string(),
+            "def f() -> key = key_from_seed(42)\n".to_string(),
             ".ch",
         ),
         // chelis#755 (Phase 2 join): field access on a multi-variant ADT.
@@ -380,10 +376,7 @@ fn malformed_dp_forms_score_below_one() {
         // A wrong-dtype signed seed remains rejected; negative i64 is valid.
         (
             "dp_negative_int32_seed",
-            wrap(
-                "(handle-effect {effect: random} (lit {type: (t-prim {} i32)} -1) \
-                 (lit {type: (t-prim {} f32)} 2.5))",
-            ),
+            wrap("(app {} (var {} key_from_seed) (lit {type: (t-prim {} i32)} -1))"),
             ".dp",
         ),
         (
@@ -401,7 +394,7 @@ fn malformed_dp_forms_score_below_one() {
         (
             "dp_handle_effect_extra_child",
             wrap(
-                "(handle-effect {effect: random} (lit {type: (t-prim {} i64)} 42) \
+                "(handle-effect {effect: resource} (lit {type: (t-prim {} string)} \"gpu:0\") \
                  (lit {type: (t-prim {} f32)} 2.5) (lit {type: (t-prim {} f32)} 9.0))",
             ),
             ".dp",

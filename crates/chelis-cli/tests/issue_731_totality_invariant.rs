@@ -45,6 +45,9 @@
 //! the flip was ONLY by deleting the `#[ignore]` attribute; the assertions
 //! never weakened. The full corpus runs in the default suite. A new hole
 //! EXTENDS the census and gets filed - it does not edit this set silently.
+//! chelis#2413 retired `with seed`: its body cell became the unsuffixed
+//! `key_from_seed` seed cell, and the `with device` cell carries the
+//! handle-effect body lock that the suffixed `with seed` sibling did.
 //!
 //! chelis#710 filed FOUR forms, not two. Phase 1 closed forms 1-3 (the two
 //! named above plus a `(t-prim {} bogus_dtype)` cast target, covered by
@@ -489,32 +492,24 @@ fn control_reported_errors_keep_the_invariant_vacuous() {
 // The four known holes: red today, flip by un-ignoring after Phase 1.
 // ===========================================================================
 
-/// chelis#709 hole 1 (closed by chelis#731 Phase 1): the `with seed` body used
-/// to type as a silent Type::Error (no `handle-effect` case in infer.rs). The
-/// handle-effect case now checks the body, so its error is reported and the
-/// invariant holds (verdict Reported, no silent Error).
+/// The unsuffixed seed of the retired `with seed` body cell, in key form: an
+/// unsuffixed `key_from_seed` seed is an i32, and its diagnostic is reported
+/// (verdict Reported, no silent Error).
 #[test]
-fn totality_holds_for_with_seed_body() {
-    let program = format!("def f() -> f32 = with seed(42) {{ {MASKED_ERROR} }}\n");
-    assert_totality("with_seed_body", &surf_to_deep(&program));
+fn totality_holds_for_an_unsuffixed_key_seed() {
+    assert_totality(
+        "unsuffixed_key_seed",
+        &surf_to_deep("def f() -> key = key_from_seed(42)\n"),
+    );
 }
 
-/// chelis#731 red team F3: the cell above uses an UNSUFFIXED seed, so its
-/// suffix diagnostic alone satisfies [04-TOT-2] (verdict Reported) even if the
-/// BODY check regressed - the cell is vacuous w.r.t. the handle-effect body
-/// fix. This sibling uses a SUFFIXED seed (`42i64`), so the seed pushes no
-/// diagnostic and the ONLY thing that can make the funnel report is the body's
-/// masked error. If the body check ever silently exempts again, this cell trips
-/// (the handle-effect node carries a silent Type::Error under an empty error
-/// vector). The original cell stays untouched per B2.1.
-#[test]
-fn totality_holds_for_with_seed_suffixed_body_locks_body_check() {
-    let program = format!("def f() -> f32 = with seed(42i64) {{ {MASKED_ERROR} }}\n");
-    assert_totality("with_seed_suffixed_body", &surf_to_deep(&program));
-}
-
-/// chelis#709 hole 2 (closed by chelis#731 Phase 1): same mechanism through
-/// `with device`; the device body is now checked.
+/// chelis#709 hole 2 (closed by chelis#731 Phase 1): the `with device` body
+/// used to type as a silent Type::Error (no `handle-effect` case in infer.rs);
+/// the device body is now checked. The handler expression `"gpu:0"` pushes no
+/// diagnostic, so the ONLY thing that can make the funnel report is the body's
+/// masked error: if the body check ever silently exempts again, this cell trips
+/// (chelis#731 red team F3's lock, carried by this cell since chelis#2413
+/// retired its `with seed(42i64)` sibling).
 #[test]
 fn totality_holds_for_with_device_body() {
     let program = format!("def f() -> f32 = with device(\"gpu:0\") {{ {MASKED_ERROR} }}\n");

@@ -79,8 +79,8 @@ fn corpus() -> Vec<(&'static str, String, usize)> {
         ),
         // The error under an effect wrapper (chelis#709 shape): still one.
         (
-            "cascade_under_with_seed",
-            format!("def f() -> f32 = with seed(42i64) {{ {MASKED_ERROR} }}\n"),
+            "cascade_under_with_device",
+            format!("def f() -> f32 = with device(\"gpu:0\") {{ {MASKED_ERROR} }}\n"),
             1,
         ),
         // The error under an `if` branch: one.

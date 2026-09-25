@@ -182,11 +182,10 @@ const BUILD_REJECTION_ROWS: &[(&str, &str, &str, &str)] = &[
     (
         // #1872: C's sealed entry is now an executed positive in cli.rs.
         // The unimplemented device lane still owns this rejection record.
-        "hip_seeded_dropout",
-        "def noisy(x: tensor[4, f32]) -> tensor[4, f32] = \
-         with seed(42i64) { dropout(x, 0.5) }\n",
+        "hip_keyed_dropout",
+        "def noisy(k: key, x: tensor[4, f32]) -> tensor[4, f32] = dropout(k, x, 0.5)\n",
         "hip",
-        "error: unsupported: compiled `dropout` op at lowered node 4 on `chelis build --target hip` \
+        "error: unsupported: compiled `dropout` op at lowered node 3 on `chelis build --target hip` \
          early capability gate (codegen:hip); unimplemented chelis#1192: compiled `dropout` \
          kernels are not implemented; run this program with `chelis eval`\n",
     ),
