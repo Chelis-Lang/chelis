@@ -2127,9 +2127,11 @@ pub struct WireRecordPatternField {
 ///   other earlier version.
 /// - `19`: the counter-stream bridge operation is deleted with the seed
 ///   handler (chelis#2413); a key comes only from a key operation or a
-///   key-typed `Load`. A version-18 graph may hold that bridge operation,
-///   which has no version-19 spelling, so it is rejected like every other
-///   earlier version.
+///   key-typed `Load`, or from `KeySelect`, a branch's join, which a
+///   runtime `if` whose value is a key lowers to (spec/10 §3.2, Rule S). A
+///   version-18 graph may hold that bridge operation, which has no
+///   version-19 spelling, so it is rejected like every other earlier
+///   version.
 pub const WIRE_DAG_SCHEMA_VERSION: u32 = 19;
 
 /// A typed failure from validating a serialized [`WireDag`] against the
@@ -3344,7 +3346,7 @@ fn wire_axis_origin(
         | WireRiscOp::CheckedUnitAxis { .. }
         | WireRiscOp::KeyFromSeed {} => same_shape_input_origin(node.inputs.len()),
         WireRiscOp::Split { .. } => same_shape_input_origin(1),
-        WireRiscOp::FoldIn {} => same_shape_input_origin(2),
+        WireRiscOp::FoldIn {} | WireRiscOp::KeySelect {} => same_shape_input_origin(2),
         // A draw's data operand is its only same-shape operand: its controls,
         // key and activation are shaped like leading parts of the data.
         WireRiscOp::UniformLike {} | WireRiscOp::Dropout {} | WireRiscOp::DropoutReplay {} => {
@@ -3896,6 +3898,10 @@ pub enum WireRiscOp {
     SplitN {
         count: WireRtDim,
     },
+    /// A branch's join (spec/10 §3.2, Rule S). Inputs are the then and else
+    /// `key` tensors of the output's exact shape, then the then and else
+    /// Bool activations, each shaped like a leading part of that shape.
+    KeySelect {},
     Sum {
         axis: i32,
         /// Accumulator precision, populated per spec/04-type-system.md

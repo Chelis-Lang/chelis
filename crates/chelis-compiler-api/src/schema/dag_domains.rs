@@ -6,7 +6,8 @@ use super::{
 };
 use chelis_ir::dag::{DimInfo, KeyBranch};
 use chelis_ir::verify::{
-    KeyGraph, KeyRole, SplitCount, is_const_false, verify_key_rules, verify_random_operands,
+    KeyGraph, KeyRole, SplitCount, is_const_false, is_const_true, verify_key_rules,
+    verify_random_operands,
 };
 use chelis_types::types::Prim;
 use std::borrow::Cow;
@@ -102,6 +103,7 @@ impl KeyGraph for DecodedKeys<'_> {
                 },
             },
             Some(WireRiscOp::FoldIn {}) => KeyRole::FoldIn,
+            Some(WireRiscOp::KeySelect {}) => KeyRole::KeySelect,
             Some(WireRiscOp::SplitN { count }) => KeyRole::SplitN {
                 count: match count {
                     WireRtDim::Lit { value } => {
@@ -125,6 +127,7 @@ impl KeyGraph for DecodedKeys<'_> {
                 logical: WireLogicalKind::Not,
             }) => KeyRole::Not,
             Some(WireRiscOp::Const { value }) if is_const_false(value) => KeyRole::ConstFalse,
+            Some(WireRiscOp::Const { value }) if is_const_true(value) => KeyRole::ConstTrue,
             _ => KeyRole::Other,
         }
     }

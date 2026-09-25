@@ -341,7 +341,8 @@ fn agreement_op_for_risc(op: &RiscOp) -> AgreementOp {
         | RiscOp::Recip
         // [05-RNG-1] makes every random result bit-identical across lanes,
         // a draw key is a word no lane observes as a result, and [05-RNG-2]
-        // defines every key derivation bit for bit.
+        // defines every key derivation bit for bit; a branch's join selects
+        // one of two such keys.
         | RiscOp::UniformLike
         | RiscOp::Dropout
         | RiscOp::DropoutReplay
@@ -350,6 +351,7 @@ fn agreement_op_for_risc(op: &RiscOp) -> AgreementOp {
         | RiscOp::Split { .. }
         | RiscOp::FoldIn
         | RiscOp::SplitN { .. }
+        | RiscOp::KeySelect
         | RiscOp::Sum { .. }
         | RiscOp::Count { .. }
         | RiscOp::MaxReduce { .. }

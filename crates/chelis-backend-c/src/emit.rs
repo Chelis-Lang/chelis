@@ -1440,6 +1440,7 @@ impl CEmitter {
             RiscOp::Split { branch } => self.emit_split_key(node, *branch, dag),
             RiscOp::FoldIn => self.emit_fold_in(node, dag),
             RiscOp::SplitN { count } => self.emit_split_keys(node, count),
+            RiscOp::KeySelect => self.emit_key_select(node, dag),
             RiscOp::Dropout => self.emit_keyed_dropout(node, dag),
             RiscOp::DropoutReplay => self.emit_keyed_dropout(node, dag),
             RiscOp::UniformLike => self.emit_keyed_uniform_like(node, dag),
@@ -4928,6 +4929,44 @@ impl CEmitter {
         self.line(&format!(
             "(({word}*)t{id}_data)[i] = chelis_key_derive(chelis_key_derive({}, 2ULL), ({word})((const {index_ty}*)t{n}_data)[i]);",
             Self::key_word_expr(key, "i")
+        ));
+        self.indent -= 1;
+        self.line("}");
+    }
+
+    /// Rule S's join (spec/10 section 3.2): element `i` is the then key's
+    /// where the then activation holds for its row, and the else key's
+    /// elsewhere, as the DAG evaluator's `eval_key_select` selects. An
+    /// activation is rank 0 or shaped like a leading part of the keys'
+    /// shape; row `i` of `n` keys reads its element `i / (n / len)`. The
+    /// else key's extents are checked against the then key's first, and the
+    /// declared result's against the then key's.
+    fn emit_key_select(&mut self, node: &DagNode, dag: VerifiedDagView<'_>) {
+        let id = node.id.0;
+        let (then_key, else_key, active) = (node.inputs[0], node.inputs[1], node.inputs[2]);
+        let word = Self::prim_elem_type(Prim::Key);
+        let index = Self::prim_elem_type(Prim::Int64);
+        let byte = Self::prim_elem_type(Prim::Bool);
+        let batched = !dag
+            .get(active)
+            .expect("verified join activation")
+            .output_type
+            .dims
+            .is_empty();
+        let row = if batched {
+            format!("i / (t{id}_size / t{}_size)", active.0)
+        } else {
+            "0".to_string()
+        };
+        self.emit_key_operation_extent_guards("if", node, dag);
+        self.emit_slot_wrapper(id, &node.output_type);
+        self.line(&format!("for ({index} i = 0; i < t{id}_size; i++) {{"));
+        self.indent += 1;
+        self.line(&format!(
+            "(({word}*)t{id}_data)[i] = ((const {byte}*)t{}_data)[{row}] != 0 ? {} : {};",
+            active.0,
+            Self::key_word_expr(then_key, "i"),
+            Self::key_word_expr(else_key, "i")
         ));
         self.indent -= 1;
         self.line("}");

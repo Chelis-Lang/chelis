@@ -802,6 +802,17 @@ pub enum RiscOp {
     SplitN {
         count: RtDim,
     },
+    /// Rule S's join (spec/10 §3.2): the key of a runtime `if` whose value is
+    /// a key. Inputs are `[then_key, else_key, then_active, else_active]`:
+    /// two keys of the result's exact type, then the two arms' Bool
+    /// activations, each shaped like a leading part of the key's shape.
+    /// Input 0 is consumed under `then_active` and input 1 under
+    /// `else_active`. The activations are the two arms of one branch, so
+    /// where the enclosing activation holds exactly one of them does. Element
+    /// `i` is `then_key[i]` where `then_active` holds for its row, and
+    /// `else_key[i]` elsewhere. The result is a fresh key under the enclosing
+    /// activation; the join derives nothing and changes no key.
+    KeySelect,
 
     // --- Reduction ---
     /// `reduce_sum` over `axis`, with the accumulator precision pinned
@@ -1375,12 +1386,13 @@ pub enum RiscAtomDisposition {
 
 impl RiscOp {
     /// The number of operands a key-consuming key operation (`Split`,
-    /// `FoldIn`, `SplitN`) reads before its optional activation, which is
-    /// therefore the activation's input slot; `None` for any other operation.
+    /// `FoldIn`, `SplitN`, `KeySelect`) reads before its activation, which is
+    /// therefore the activation's input slot (a join's then activation, its
+    /// else activation following); `None` for any other operation.
     pub fn key_operation_operand_count(&self) -> Option<usize> {
         match self {
             Self::Split { .. } => Some(1),
-            Self::FoldIn => Some(2),
+            Self::FoldIn | Self::KeySelect => Some(2),
             Self::SplitN {
                 count: RtDim::Node(_),
             } => Some(2),
@@ -1474,6 +1486,9 @@ impl RiscOp {
             Self::Split { .. } => Semantic(Id::SplitKey),
             Self::SplitN { .. } => Semantic(Id::SplitKeys),
             Self::FoldIn => Semantic(Id::FoldIn),
+            // The join is how a runtime `if` over keys is represented, not a
+            // callable Table-A operation: it selects one of two existing keys.
+            Self::KeySelect => Structural,
             Self::Sum { .. } => Semantic(Id::Sum),
             Self::MaxReduce { .. } => Semantic(Id::MaxReduce),
             Self::MinReduce { .. } => Semantic(Id::MinReduce),
@@ -1837,9 +1852,11 @@ impl RiscOp {
             | RiscOp::UniformBoundAdjoint { .. } => false,
 
             // Key derivations produce opaque keys, not a numeric envelope.
-            RiscOp::KeyFromSeed | RiscOp::Split { .. } | RiscOp::FoldIn | RiscOp::SplitN { .. } => {
-                false
-            }
+            RiscOp::KeyFromSeed
+            | RiscOp::Split { .. }
+            | RiscOp::FoldIn
+            | RiscOp::SplitN { .. }
+            | RiscOp::KeySelect => false,
 
             // Argmax/argmin return discrete indices, not a numeric
             // envelope over the reals; outside the forward-bound story.
@@ -2810,7 +2827,8 @@ fn shape_source_for_axis(dag: &Dag, id: NodeId, axis: usize) -> Option<(String, 
         | RiscOp::CastTrunc { .. }
         | RiscOp::KeyFromSeed
         | RiscOp::Split { .. }
-        | RiscOp::FoldIn => shape_source_for_axis(dag, *node.inputs.first()?, axis),
+        | RiscOp::FoldIn
+        | RiscOp::KeySelect => shape_source_for_axis(dag, *node.inputs.first()?, axis),
         // [05-OP-71]: the key's axes pass through; the appended count axis
         // comes from the count, not from the key.
         RiscOp::SplitN { .. } => {
@@ -3808,6 +3826,7 @@ mod tests {
             RiscOp::SplitN {
                 count: RtDim::Lit(3),
             },
+            RiscOp::KeySelect,
             RiscOp::Sum {
                 axis: 0,
                 accumulator: Prim::F32,
@@ -3891,8 +3910,8 @@ mod tests {
         // identities so they cannot inherit a verifier disposition.
         assert_eq!(
             all.len(),
-            65,
-            "one_of_every_risc_op must list all 65 classified samples"
+            66,
+            "one_of_every_risc_op must list all 66 classified samples"
         );
 
         // The classifier returns a definite bool for every variant (no
@@ -3917,13 +3936,14 @@ mod tests {
         // drop the trap. The chelis#2413 key-operand IR replaces the two
         // baked draws with the two key-operand draws and adds their two
         // AD replays (+2 = 27). The four explicit key derivations produce
-        // opaque keys, not numeric envelopes (+4 = 31).
+        // opaque keys, not numeric envelopes (+4 = 31), and so does a
+        // branch's key join (+1 = 32).
         assert_eq!(
             targetable, 34,
             "targetable op count drifted from the pinned WI-2 subset"
         );
         assert_eq!(
-            excluded, 31,
+            excluded, 32,
             "excluded op count drifted from the pinned WI-2 subset"
         );
 
@@ -4032,6 +4052,7 @@ mod tests {
                     | RiscOp::Drop
                     | RiscOp::Realize
                     | RiscOp::FusedElem { .. }
+                    | RiscOp::KeySelect
             );
             assert_eq!(
                 matches!(op.atom_disposition(), RiscAtomDisposition::Structural),

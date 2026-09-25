@@ -1433,7 +1433,8 @@ impl HipEmitter {
             | RiscOp::KeyFromSeed
             | RiscOp::Split { .. }
             | RiscOp::FoldIn
-            | RiscOp::SplitN { .. } => None,
+            | RiscOp::SplitN { .. }
+            | RiscOp::KeySelect => None,
             RiscOp::Copy => Some(Self::cast_kernel_name(node, dag)?),
             // WS-A4: bind `accumulator` instead of `..` per the
             // destructure-`..` memory rule. The kernel name encodes
@@ -2329,7 +2330,8 @@ impl HipEmitter {
             RiscOp::Dropout
             | RiscOp::DropoutReplay
             | RiscOp::UniformBoundAdjoint { .. }
-            | RiscOp::SplitN { .. } => {
+            | RiscOp::SplitN { .. }
+            | RiscOp::KeySelect => {
                 return Err(Unsupported::new(
                     UnsupportedKind::Op(chelis_ir::grad::risc_op_name(&node.op).to_string()),
                     "a key-operand random node in the HIP DAG emitter",
@@ -4852,6 +4854,7 @@ impl HipEmitter {
             | RiscOp::Split { .. }
             | RiscOp::FoldIn
             | RiscOp::SplitN { .. }
+            | RiscOp::KeySelect
             | RiscOp::Copy
             | RiscOp::Drop
             | RiscOp::Sum { .. }

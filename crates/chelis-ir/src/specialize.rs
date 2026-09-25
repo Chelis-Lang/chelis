@@ -805,6 +805,7 @@ fn node_has_contiguous_matrix_slices(dag: &Dag, id: NodeId, matrix_rank: usize) 
         | RiscOp::Split { .. }
         | RiscOp::FoldIn
         | RiscOp::SplitN { .. }
+        | RiscOp::KeySelect
         | RiscOp::Copy
         | RiscOp::Drop
         | RiscOp::Sum { .. }

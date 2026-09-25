@@ -18517,6 +18517,9 @@ impl<'program> LowerCtx<'program> {
             );
             self.random_path_condition = Some(then_path);
         }
+        // Each arm's activation, which a key-valued branch's join consumes
+        // that arm's key under.
+        let then_active = self.draw_activation();
         self.if_branch_depth += 1;
         let then_value = self.lower_expr(then_expr);
         self.if_branch_depth -= 1;
@@ -18559,6 +18562,7 @@ impl<'program> LowerCtx<'program> {
             ),
             None => not_cond,
         });
+        let else_active = self.draw_activation();
         self.if_branch_depth += 1;
         let else_value = self.lower_expr(else_expr);
         self.if_branch_depth -= 1;
@@ -18567,6 +18571,20 @@ impl<'program> LowerCtx<'program> {
         self.branch_path_condition = saved_branch_path;
         let stamped_out_ty = self.type_from_meta(meta);
         let out_ty = self.actualized_runtime_if_output_type(then_node, else_node, &stamped_out_ty);
+        // Rule S (spec/10 section 3.2): a key leaves a where-lowered branch
+        // only through the branch's join, which consumes each arm's key
+        // under that arm's activation. A `Where` would read both keys on
+        // every path.
+        if out_ty.precision == Prim::Key
+            && let (Some(then_active), Some(else_active)) = (then_active, else_active)
+        {
+            return LoweredValue::Node(self.dag.add_node(
+                RiscOp::KeySelect,
+                vec![then_node, else_node, then_active, else_active],
+                out_ty,
+                self.current_span_id.clone(),
+            ));
+        }
         // chelis#616: a leaf-Const branch (the `fail` placeholder) and the
         // mask's `one` Const are shaped like the branch values, but as leaf
         // nodes they have no input edge carrying that relation. Conform the

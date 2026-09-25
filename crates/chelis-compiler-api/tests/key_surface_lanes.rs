@@ -380,3 +380,70 @@ fn grad_through_a_keyed_draw_replays_its_mask() {
     ]);
     both_lanes(source, "grad", &expected);
 }
+
+/// `dropout(fold_in(key_from_seed(7), 1), [1, 2, 3, 4], 0.5)` and the same
+/// draw under `fold_in(.., 2)`, from `join_ref.py` (`slice2_ref.py`'s
+/// `dropout` over `key_ref.py`'s `fold_in`).
+const DROP_FOLD7_1: [u64; 4] = [0x40000000, 0x40800000, 0x00000000, 0x41000000];
+const DROP_FOLD7_2: [u64; 4] = [0x40000000, 0x40800000, 0x40c00000, 0x41000000];
+
+/// Rule S's join (spec/10 section 3.2): a key-valued runtime branch in a
+/// kernel lowers to a `KeySelect`, and the draw it keys equals the taken
+/// arm's plain program in eval and in C. The condition is computed from
+/// data, and the two calls take opposite arms, so both arms run.
+///
+/// Evidentiary status: REGRESSION. At `727e74b41` the C lane rejects the
+/// program (a key reaches a `Where`).
+#[test]
+fn a_key_valued_branch_joins_to_the_taken_arms_key_in_eval_and_c() {
+    let source = "def pick(k: key, x: tensor[4, f32], c: bool) -> tensor[4, f32] = {\n\
+                  \x20 k2 = if c then fold_in(k, 1i64) else fold_in(k, 2i64)\n\
+                  \x20 dropout(k2, x, 0.5f32)\n\
+                  }\n\
+                  def main() = {\n\
+                  \x20 x = to_tensor([1.0f32, 2.0f32, 3.0f32, 4.0f32])\n\
+                  \x20 c = gt(tensor_to_scalar(sum(copy(x), 0i32)), 5.0f32)\n\
+                  \x20 (pick(key_from_seed(7i64), x, c), pick(key_from_seed(7i64), x, not(c)))\n\
+                  }\n";
+    let expected = main_lines(&[
+        tensor(Prim::F32, &[4], &DROP_FOLD7_1),
+        tensor(Prim::F32, &[4], &DROP_FOLD7_2),
+    ]);
+    both_lanes(source, "key join", &expected);
+    // The taken arms' plain programs print the same bits.
+    let plain = "def main() = {\n\
+                 \x20 x = to_tensor([1.0f32, 2.0f32, 3.0f32, 4.0f32])\n\
+                 \x20 (dropout(fold_in(key_from_seed(7i64), 1i64), x, 0.5f32), dropout(fold_in(key_from_seed(7i64), 2i64), x, 0.5f32))\n\
+                 }\n";
+    both_lanes(plain, "taken arms", &expected);
+}
+
+/// Row 0 of `vmap(pick)(split_keys(key_from_seed(7), 2), xs)` sums to 10 and
+/// draws under `fold_in(row, 1)`; row 1 sums to 2 and draws under
+/// `fold_in(row, 2)`, from `join_ref.py`.
+const VMAP_JOIN_ROWS: [u64; 8] = [
+    0x40000000, 0x00000000, 0x40c00000, 0x41000000, 0x00000000, 0x3f800000, 0x3f800000, 0x00000000,
+];
+
+/// `vmap` batches the join's activations: each row's condition, computed
+/// from that row's data, selects that row's arm, in eval and in C.
+///
+/// Evidentiary status: REGRESSION. At `727e74b41` the C lane rejects the
+/// batched `Where` over keys, as it rejects the unbatched one.
+#[test]
+fn a_vmapped_key_join_selects_each_rows_arm_in_eval_and_c() {
+    let source = "def pick(k: key, x: tensor[4, f32]) -> tensor[4, f32] = {\n\
+                  \x20 c = gt(tensor_to_scalar(sum(copy(x), 0i32)), 5.0f32)\n\
+                  \x20 k2 = if c then fold_in(k, 1i64) else fold_in(k, 2i64)\n\
+                  \x20 dropout(k2, x, 0.5f32)\n\
+                  }\n\
+                  def main() = {\n\
+                  \x20 xs = to_tensor([[1.0f32, 2.0f32, 3.0f32, 4.0f32], [0.5f32, 0.5f32, 0.5f32, 0.5f32]])\n\
+                  \x20 vmap(pick)(split_keys(key_from_seed(7i64), 2i64), xs)\n\
+                  }\n";
+    let expected = [format!(
+        "main = {}",
+        tensor(Prim::F32, &[2, 4], &VMAP_JOIN_ROWS)
+    )];
+    both_lanes(source, "vmapped key join", &expected);
+}

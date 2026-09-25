@@ -960,7 +960,7 @@ fn a_key_consumed_twice_is_rejected_for_every_consumer_kind() {
     let second = split(&mut dag, key, KeyBranch::Left);
     dag.add_root(first);
     dag.add_root(second);
-    assert_rejected(&dag, "split twice for the Left branch");
+    assert_rejected(&dag, "split twice for one branch");
     // A split-n key reused by a draw after its derivation (consumed twice).
     let mut dag = Dag::new();
     let key = root_key(&mut dag);
@@ -1058,7 +1058,7 @@ fn a_key_reaching_arithmetic_selection_or_a_shape_dependency_is_rejected() {
     dag.add_root(added);
     assert_rejected(
         &dag,
-        "only a key operation or a random primitive consumes a key",
+        "only a key operation, a join or a random primitive consumes a key",
     );
 
     let mut dag = Dag::new();
@@ -1075,7 +1075,7 @@ fn a_key_reaching_arithmetic_selection_or_a_shape_dependency_is_rejected() {
     dag.add_root(selected);
     assert_rejected(
         &dag,
-        "only a key operation or a random primitive consumes a key",
+        "only a key operation, a join or a random primitive consumes a key",
     );
     // `key` is an active tensor element dtype, but `where` names no `key`,
     // so its own scheme rejects key branches too, independently of V4.
@@ -1113,7 +1113,7 @@ fn a_replay_must_read_its_own_forward_draws_key() {
     for root in [forward, other_forward, replay] {
         dag.add_root(root);
     }
-    assert_rejected(&dag, "changes its forward node");
+    assert_rejected(&dag, "changes the mask contract of");
     // A replay of a key only a derivation consumed has no forward draw.
     let mut dag = Dag::new();
     let key = root_key(&mut dag);
@@ -1129,7 +1129,7 @@ fn a_replay_must_read_its_own_forward_draws_key() {
     );
     dag.add_root(left);
     dag.add_root(replay);
-    assert_rejected(&dag, "that no forward random primitive consumes");
+    assert_rejected(&dag, "which no forward random primitive consumes");
 }
 
 /// `lower_if`'s arm activations over the enclosing path `parent`.
@@ -1934,7 +1934,7 @@ fn a_key_constant_is_rejected_and_folding_keeps_derivations_symbolic() {
     );
     let drawn = draw(&mut dag, constant, None);
     dag.add_root(drawn);
-    assert_rejected(&dag, "only a key operation or a Load produces one");
+    assert_rejected(&dag, "only a key operation, a join or a Load produces one");
 
     // Constant folding over literal seeds and indices leaves every key
     // operation in place, and CSE merges no two of them.

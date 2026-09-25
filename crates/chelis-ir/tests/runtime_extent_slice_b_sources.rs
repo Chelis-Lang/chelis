@@ -619,7 +619,7 @@ fn unsupported_but_well_typed_mapping_yields_the_registered_receipt_not_an_ice()
 
 /// The number of `RiscOp` variants the table below must construct. Bumping
 /// it without adding a row makes the coverage assertion fail.
-const RISC_OP_VARIANTS: usize = 71;
+const RISC_OP_VARIANTS: usize = 72;
 
 /// Adding a `RiscOp` variant breaks this match, which is what forces the
 /// table in `every_risc_op_yields_exactly_one_source_per_output_axis` to
@@ -699,6 +699,7 @@ fn variant_index(op: &RiscOp) -> usize {
         RiscOp::Split { .. } => 68,
         RiscOp::FoldIn => 69,
         RiscOp::SplitN { .. } => 70,
+        RiscOp::KeySelect => 71,
         RiscOp::GuardedFail { .. } => 71,
     }
 }
@@ -1184,6 +1185,18 @@ fn every_risc_op_yields_exactly_one_source_per_output_axis() {
         ty(vec![DimInfo::Lit(2), DimInfo::Lit(3)], Prim::Key),
     );
     nodes.push(folded);
+    let unflagged = add(
+        &mut dag,
+        RiscOp::Logical(LogicalKind::Not),
+        vec![flags],
+        ty(vec![DimInfo::Lit(2), DimInfo::Lit(3)], Prim::Bool),
+    );
+    nodes.push(add(
+        &mut dag,
+        RiscOp::KeySelect,
+        vec![left, folded, flags, unflagged],
+        ty(vec![DimInfo::Lit(2), DimInfo::Lit(3)], Prim::Key),
+    ));
     nodes.push(add(
         &mut dag,
         RiscOp::SplitN {

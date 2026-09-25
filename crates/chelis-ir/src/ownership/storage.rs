@@ -683,13 +683,15 @@ fn classify_nodes(
                         },
                     }
                 }
-                // A derived key is an ordinary key tensor on the C lane. The
-                // HIP lane computes rank-0 derivations while it emits, so
-                // they take no device storage.
+                // A derived or joined key is an ordinary key tensor on the C
+                // lane. The HIP lane computes rank-0 derivations while it
+                // emits, and refuses the rest, so they take no device
+                // storage.
                 RiscOp::KeyFromSeed
                 | RiscOp::Split { .. }
                 | RiscOp::FoldIn
-                | RiscOp::SplitN { .. } => match lane {
+                | RiscOp::SplitN { .. }
+                | RiscOp::KeySelect => match lane {
                     StorageLaneKind::C => StoragePlacement::OwnedSlot {
                         slot: StorageSlotId::UNASSIGNED,
                     },

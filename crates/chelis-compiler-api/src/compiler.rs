@@ -6748,6 +6748,7 @@ fn wire_op(op: &RiscOp) -> WireResult<WireRiscOp> {
             },
         },
         RiscOp::FoldIn => WireRiscOp::FoldIn {},
+        RiscOp::KeySelect => WireRiscOp::KeySelect {},
         RiscOp::SplitN { count } => WireRiscOp::SplitN {
             count: wire_bound(count)?,
         },

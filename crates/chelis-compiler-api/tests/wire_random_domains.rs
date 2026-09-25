@@ -148,7 +148,7 @@ fn a_key_is_consumed_once_and_only_by_a_key_consumer() {
     );
     rejects_domain(
         &foreign,
-        "only a key operation or a random primitive consumes a key",
+        "only a key operation, a join or a random primitive consumes a key",
     );
 
     // A key slot fed by something that is not a key.
@@ -422,7 +422,7 @@ fn the_codec_admits_the_key_chain_and_rejects_every_malformed_key_form() {
 
     let mut two_lefts = key_chain();
     two_lefts["nodes"][3]["op"]["branch"] = json!("left");
-    rejects_domain(&two_lefts, "split twice for the Left branch");
+    rejects_domain(&two_lefts, "split twice for one branch");
 
     let mut split_and_fold = key_chain();
     split_and_fold["nodes"][5]["inputs"][0] = json!(1);
@@ -433,7 +433,7 @@ fn the_codec_admits_the_key_chain_and_rejects_every_malformed_key_form() {
     added["roots"].as_array_mut().unwrap().push(json!(sum));
     rejects_domain(
         &added,
-        "only a key operation or a random primitive consumes a key",
+        "only a key operation, a join or a random primitive consumes a key",
     );
 
     let mut selected = key_chain();
@@ -459,7 +459,7 @@ fn the_codec_admits_the_key_chain_and_rejects_every_malformed_key_form() {
     // key-precision `where` is also no key operation (V1).
     rejects_domain(
         &selected,
-        &format!("key 11 reaches node {chosen} input 1; only a key operation"),
+        &format!("at node 11 reaches input 1 of node {chosen}; only a key operation"),
     );
 
     let mut dependency = key_chain();
@@ -648,7 +648,7 @@ fn the_codec_admits_the_key_chain_and_rejects_every_malformed_key_form() {
         "f32",
     );
     replay["roots"] = json!([9, replayed]);
-    rejects_domain(&replay, "that no forward random primitive consumes");
+    rejects_domain(&replay, "which no forward random primitive consumes");
 }
 
 /// Rule V3 on the wire: two draws share a key only under exclusive arms.
@@ -700,6 +700,71 @@ fn the_codec_admits_exclusive_arms_and_rejects_overlapping_ones() {
     };
     accepts(&arms(true));
     rejects_domain(&arms(false), "whose activations are not exclusive");
+}
+
+/// A join's shape on the wire: `key_chain`'s rooted `fold_in` key and a
+/// loaded key, joined under the activations `form` names.
+#[derive(Clone, Copy)]
+enum Join {
+    Arms,
+    Overlapping,
+    RootedTwice,
+}
+
+fn join_chain(form: Join) -> Value {
+    let mut graph = key_chain();
+    let load = |graph: &mut Value, name: &str, precision: &str| {
+        push(
+            graph,
+            json!({"kind":"load","name":name}),
+            &[],
+            &[],
+            precision,
+        )
+    };
+    let condition = load(&mut graph, "c", "bool");
+    let unrelated = load(&mut graph, "d", "bool");
+    let other = load(&mut graph, "b", "key");
+    let negated = push(
+        &mut graph,
+        json!({"kind":"logical","logical":"not"}),
+        &[condition],
+        &[],
+        "bool",
+    );
+    let else_arm = match form {
+        Join::Overlapping => unrelated,
+        Join::Arms | Join::RootedTwice => negated,
+    };
+    let joined = push(
+        &mut graph,
+        json!({"kind":"key_select"}),
+        &[11, other, condition, else_arm],
+        &[],
+        "key",
+    );
+    graph["roots"] = match form {
+        Join::RootedTwice => json!([9, joined, joined]),
+        Join::Arms | Join::Overlapping => json!([9, joined]),
+    };
+    graph
+}
+
+/// Rule S on the wire (spec/10 §3.2): a `key_select` joins two keys under
+/// the two arms of one branch, and its result is one key; the decoder runs
+/// the IR verifier's rules, so it rejects a join over activations that are
+/// not exclusive, and a join rooted twice.
+///
+/// Evidentiary status: DISPOSITION LOCK. The operation is new in this
+/// change; at `727e74b41` the decoder has no `key_select` spelling.
+#[test]
+fn the_codec_admits_a_join_of_two_arms_and_rejects_overlapping_ones() {
+    accepts(&join_chain(Join::Arms));
+    rejects_domain(
+        &join_chain(Join::Overlapping),
+        "joins keys under activations that are not the two arms of one branch",
+    );
+    rejects_domain(&join_chain(Join::RootedTwice), "is a graph root twice");
 }
 
 /// Rule V3 on the wire after constant folding: an activation that is the
@@ -859,7 +924,7 @@ fn gated_split_chain(form: GatedSplit) -> Value {
 fn the_codec_admits_a_gated_key_operation_and_confines_its_keys() {
     accepts(&gated_split_chain(GatedSplit::Exclusive));
     for (form, reason) in [
-        (GatedSplit::Escaping, "uses it outside that activation"),
+        (GatedSplit::Escaping, "consumes it outside that activation"),
         (GatedSplit::Rooted, "and is a graph root"),
         (
             GatedSplit::Overlapping,
@@ -909,7 +974,7 @@ fn a_replay_reads_only_its_forward_draws_key_under_that_draws_controls() {
 
     let mut replay_reads_uniform_key = dag.clone();
     replay_reads_uniform_key["nodes"][replay]["inputs"][2] = json!(uniform_key);
-    rejects_domain(&replay_reads_uniform_key, "changes its forward node");
+    rejects_domain(&replay_reads_uniform_key, "changes the mask contract of");
 
     // Another rate than the forward draw's, even of equal value.
     let mut replay_changes_rate = dag.clone();
@@ -920,7 +985,7 @@ fn a_replay_reads_only_its_forward_draws_key_under_that_draws_controls() {
         "f32",
     );
     replay_changes_rate["nodes"][replay + 1]["inputs"][1] = json!(other_rate);
-    rejects_domain(&replay_changes_rate, "changes its forward node");
+    rejects_domain(&replay_changes_rate, "changes the mask contract of");
 
     // A loaded key no forward draw consumes.
     let mut replay_reads_unconsumed_key = dag.clone();
@@ -933,7 +998,7 @@ fn a_replay_reads_only_its_forward_draws_key_under_that_draws_controls() {
     replay_reads_unconsumed_key["nodes"][replay + 1]["inputs"][2] = json!(unconsumed);
     rejects_domain(
         &replay_reads_unconsumed_key,
-        "that no forward random primitive consumes",
+        "which no forward random primitive consumes",
     );
 
     // A replay read is not a use, but a second draw on the forward key is.
@@ -1232,17 +1297,17 @@ fn the_verifier_and_the_codec_share_one_operand_rule() {
         (
             uniform_declaring(2),
             uniform_declaring(3),
-            "node 6: uniform_like must preserve its float template's exact shape and dtype",
+            "the `uniform_like` at node 6: uniform_like must preserve its float template's exact shape and dtype",
         ),
         (
             split_declaring("m"),
             split_declaring("n"),
-            "node 1: key operation must be element-wise over one exact shape, with a split's count axis appended last",
+            "the left `split_key` at node 1: key operation must be element-wise over one exact shape, with a split's count axis appended last",
         ),
         (
             adjoint_over(7),
             adjoint_over(5),
-            "node 8: a uniform bound adjoint is a value of its template's dtype, shaped like a leading part of its key's shape, over a cotangent of its template's exact type",
+            "the `uniform_like` bound adjoint at node 8: a uniform bound adjoint is a value of its template's dtype, shaped like a leading part of its key's shape, over a cotangent of its template's exact type",
         ),
     ];
     for (divergent, agreeing, sentence) in cases {
