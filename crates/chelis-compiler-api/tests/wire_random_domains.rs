@@ -1,8 +1,9 @@
-//! spec/10 §§3.2–3.4 (wire v17) and [05-OP-8/37]: random nodes carry no
-//! fields; their controls and key are operands. Every key is produced by a
-//! `DrawKey` and consumed at most once; adjoint replays read a key without
-//! consuming it, and no key is a graph root or a shape dependency. These tests
-//! exercise codecs and object admission, not random kernel output.
+//! spec/10 §§3.2–3.4 and [05-OP-8/37]: random nodes carry no fields; their
+//! controls and key are operands. A key is produced by a key operation or
+//! enters as a key-precision `Load`, and is consumed at most once; adjoint
+//! replays read a key without consuming it, and no key is a shape dependency
+//! or a constant. These tests exercise codecs and object admission, not
+//! random kernel output.
 use chelis_compiler_api::schema::{
     CheckRequest, LowerRequest, SourceKind, WIRE_DAG_SCHEMA_VERSION, WireDag, WireDagDecodeError,
     WireDagNode,
@@ -74,17 +75,13 @@ fn input(dag: &Value, node: usize, slot: usize) -> usize {
     usize::try_from(dag["nodes"][node]["inputs"][slot].as_u64().unwrap()).unwrap()
 }
 
-/// A handled runtime-rate dropout and a uniform draw: two scoped draw keys
-/// of one `with seed` region, each consumed by its primitive.
-const HANDLED: &str = concat!(
-    "def sample(x: tensor[2, f32], rate: f32) -> (tensor[2, f32], tensor[2, f32]) = with seed(7i64) {\n",
-    "  (dropout(copy(x), rate), uniform_like(x, 0.0f32, 1.0f32))\n",
-    "}\n"
-);
+/// A runtime-rate dropout and a uniform draw, each keyed by its own key
+/// parameter: two key-precision `Load`s, each consumed by its primitive.
+const KEYED: &str = "def sample(k: key, j: key, x: tensor[2, f32], rate: f32) -> (tensor[2, f32], tensor[2, f32]) = (dropout(k, copy(x), rate), uniform_like(j, x, 0.0f32, 1.0f32))\n";
 
 #[test]
 fn lowered_key_operand_draws_round_trip_with_operand_controls() {
-    let dag = lower(HANDLED, "sample");
+    let dag = lower(KEYED, "sample");
     accepts(&dag);
     let dropout = first(&dag, "dropout");
     let uniform = first(&dag, "uniform_like");
@@ -94,24 +91,11 @@ fn lowered_key_operand_draws_round_trip_with_operand_controls() {
     assert_eq!(dag["nodes"][uniform]["inputs"].as_array().unwrap().len(), 4);
     let dropout_key = &dag["nodes"][input(&dag, dropout, 2)];
     let uniform_key = &dag["nodes"][input(&dag, uniform, 3)];
-    for (key, draw) in [(dropout_key, "dropout"), (uniform_key, "uniform_like")] {
-        assert_eq!(key["op"]["kind"], "draw_key");
-        assert_eq!(key["op"]["draw"], draw);
-        assert_eq!(key["op"]["dtype"], "f32");
-        assert_eq!(key["op"]["handler"]["kind"], "scoped");
+    for (key, name) in [(dropout_key, "k"), (uniform_key, "j")] {
+        assert_eq!(key["op"], json!({"kind":"load","name":name}));
+        assert_eq!(key["inputs"], json!([]));
         assert_eq!(key["output_type"], json!({"dims":[],"precision":"key"}));
-        let seed = usize::try_from(key["inputs"][0].as_u64().unwrap()).unwrap();
-        assert_eq!(dag["nodes"][seed]["op"]["kind"], "const");
-        assert_eq!(
-            dag["nodes"][seed]["output_type"],
-            json!({"dims":[],"precision":"int64"})
-        );
     }
-    // One region, one scoped instance.
-    assert_eq!(
-        dropout_key["op"]["handler"]["instance"],
-        uniform_key["op"]["handler"]["instance"]
-    );
     // The runtime rate reaches the primitive as its operand.
     assert_eq!(
         dag["nodes"][input(&dag, dropout, 1)]["op"]["kind"],
@@ -121,7 +105,7 @@ fn lowered_key_operand_draws_round_trip_with_operand_controls() {
 
 #[test]
 fn version_16_random_payloads_have_no_version_17_spelling() {
-    let dag = lower(HANDLED, "sample");
+    let dag = lower(KEYED, "sample");
     let dropout = first(&dag, "dropout");
     for payload in [
         json!({"kind":"dropout","rate":{"dtype":"f32","bits":"3f000000"},"seed":7}),
@@ -143,7 +127,7 @@ fn version_16_random_payloads_have_no_version_17_spelling() {
 
 #[test]
 fn a_key_is_consumed_once_and_only_by_a_key_consumer() {
-    let dag = lower(HANDLED, "sample");
+    let dag = lower(KEYED, "sample");
     let dropout = first(&dag, "dropout");
     let uniform = first(&dag, "uniform_like");
     let dropout_key = input(&dag, dropout, 2);
@@ -176,7 +160,8 @@ fn a_key_is_consumed_once_and_only_by_a_key_consumer() {
         "requires a key batch matching its data's leading axes",
     );
 
-    // A draw key's key derived from: only its draw consumes it.
+    // A drawn key derived from as well: a derivation consumes its parent
+    // ([05-OP-70]), so the draw and the split are two uses.
     let mut derived = dag.clone();
     let id = derived["nodes"].as_array().unwrap().len();
     derived["nodes"].as_array_mut().unwrap().push(
@@ -185,15 +170,48 @@ fn a_key_is_consumed_once_and_only_by_a_key_consumer() {
         "output_type":{"dims":[],"precision":"key"}}),
     );
     derived["roots"].as_array_mut().unwrap().push(json!(id));
-    rejects_domain(&derived, "a draw key's key feeds only its draw");
+    rejects_domain(&derived, "is consumed twice");
 }
 
-/// spec/10 §3.2 (v18): a key enters a graph as a key operation's or draw
-/// key's output or as a key-precision `Load`, and may be a root; it is never
-/// a shape dependency, and no constant carries one.
+/// A key computed inside a lowered definition is used once: the draw that
+/// consumes it is its only reader, and no compiler-inserted `Drop` reads it
+/// again (a `Drop` of a key would be a second use and a key reaching an
+/// operation other than a key consumer). Covers `key_from_seed` and
+/// `fold_in`.
+///
+/// Evidentiary status: REGRESSION TEST. At d1b33808f `lower` fails at the
+/// schema stage ("node N produces a key, but only a key operation or a Load
+/// produces one"): the implicit-drop pass drops every unconsumed non-`Load`
+/// value, and slice 3 removed the `DrawKey` exclusion without excluding the
+/// key operations that replaced it.
+#[test]
+fn a_computed_key_is_consumed_by_its_draw_alone() {
+    let source = "def sample(k: key, x: tensor[2, f32], rate: f32) -> (tensor[2, f32], tensor[2, f32]) = (dropout(key_from_seed(7i64), copy(x), rate), uniform_like(fold_in(k, 3i64), x, 0.0f32, 1.0f32))\n";
+    let dag = lower(source, "sample");
+    accepts(&dag);
+    for (draw, slot, producer) in [
+        ("dropout", 2, "key_from_seed"),
+        ("uniform_like", 3, "fold_in"),
+    ] {
+        let draw = first(&dag, draw);
+        let key = input(&dag, draw, slot);
+        assert_eq!(dag["nodes"][key]["op"]["kind"], producer);
+        let readers = dag["nodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|node| node["inputs"].as_array().unwrap().contains(&json!(key)))
+            .count();
+        assert_eq!(readers, 1, "key {key} has another reader: {dag}");
+    }
+}
+
+/// spec/10 §3.2: a key enters a graph as a key operation's output or as a
+/// key-precision `Load`, and may be a root; it is never a shape dependency,
+/// and no constant carries one.
 #[test]
 fn a_key_may_be_loaded_or_rooted_and_is_never_a_dependency_or_a_constant() {
-    let dag = lower(HANDLED, "sample");
+    let dag = lower(KEYED, "sample");
     let dropout = first(&dag, "dropout");
     let key = input(&dag, dropout, 2);
 
@@ -202,19 +220,19 @@ fn a_key_may_be_loaded_or_rooted_and_is_never_a_dependency_or_a_constant() {
     let id = loaded["nodes"].as_array().unwrap().len();
     loaded["nodes"].as_array_mut().unwrap().push(
         json!({"shape_deps":[],"span_id":null,"merged_spans":[],"id":id,
-        "op":{"kind":"load","name":"k"},"inputs":[],
+        "op":{"kind":"load","name":"unused"},"inputs":[],
         "output_type":{"dims":[],"precision":"key"}}),
     );
     accepts(&loaded);
 
-    // The loaded key as a root. A draw key's key is its draw's alone, so a
-    // consumed draw key is no root.
+    // The loaded key as a root. A root is a key's one use, so a key its draw
+    // consumed is no root.
     let mut loaded_root = loaded.clone();
     loaded_root["roots"].as_array_mut().unwrap().push(json!(id));
     accepts(&loaded_root);
     let mut key_root = dag.clone();
     key_root["roots"].as_array_mut().unwrap().push(json!(key));
-    rejects_domain(&key_root, "a draw key's key feeds only its draw");
+    rejects_domain(&key_root, "is a graph root and is also consumed");
 
     // A key as a shape dependency of its own consumer.
     let mut key_dependency = dag.clone();
@@ -294,6 +312,31 @@ fn key_chain() -> Value {
         wire_node(11, json!({"kind":"fold_in"}), &[3, 10], &[], "key"),
     ];
     json!({"schema_version": WIRE_DAG_SCHEMA_VERSION, "nodes": nodes, "roots": [9, 11]})
+}
+
+/// Insert an input-free node as node 0, renumbering every later reference,
+/// so an existing consumer may read it as an earlier node.
+fn prepend(graph: &mut Value, op: Value, dims: &[u64], precision: &str) -> usize {
+    let shift = |value: &mut Value| {
+        *value = json!(value.as_u64().unwrap() + 1);
+    };
+    for node in graph["nodes"].as_array_mut().unwrap() {
+        shift(&mut node["id"]);
+        for input in node["inputs"].as_array_mut().unwrap() {
+            shift(input);
+        }
+        for dependency in node["shape_deps"].as_array_mut().unwrap() {
+            shift(dependency);
+        }
+    }
+    for root in graph["roots"].as_array_mut().unwrap() {
+        shift(root);
+    }
+    graph["nodes"]
+        .as_array_mut()
+        .unwrap()
+        .insert(0, wire_node(0, op, &[], dims, precision));
+    0
 }
 
 fn push(graph: &mut Value, op: Value, inputs: &[usize], dims: &[u64], precision: &str) -> usize {
@@ -625,22 +668,18 @@ fn the_codec_admits_a_constant_false_arm_and_rejects_two_true_ones() {
 }
 
 /// spec/10 §3.2: a key is read only by the draw that consumes it and that
-/// draw's replays, and a `DrawKey` carries its draw and that draw's controls.
-/// The codec applies the IR verifier's key rules, so it rejects each payload
+/// draw's replays, and a replay reads its forward draw's own controls. The
+/// codec applies the IR verifier's key rules, so it rejects each payload
 /// below exactly when `verify` would.
 ///
-/// Evidentiary status: REGRESSION TEST. At 7d0b996ca `from_validated_json`
-/// accepted all five payloads.
+/// Evidentiary status: REGRESSION TEST for the replay payloads (at 7d0b996ca
+/// `from_validated_json` accepted them); the counter-stream draw key's own
+/// control check has no key-form subject and is gone with `DrawKey`.
 #[test]
 fn a_replay_reads_only_its_forward_draws_key_under_that_draws_controls() {
     let source = concat!(
-        "def loss(x: tensor[4, f32]) -> f32 ! { Random } = tensor_to_scalar(sum(dropout(x, 0.5f32), 0i32))\n",
-        "def sample(x: tensor[4, f32]) -> (tensor[4, f32], tensor[4, f32]) = with seed(7i64) {\n",
-        "  dead = dropout(copy(x), 0.25f32)\n",
-        "  u = uniform_like(copy(x), 0.0f32, 1.0f32)\n",
-        "  g = grad(loss)(x)\n",
-        "  (g, u)\n",
-        "}\n"
+        "def loss(k: key, x: tensor[4, f32]) -> f32 = tensor_to_scalar(sum(dropout(k, x, 0.5f32), 0i32))\n",
+        "def sample(g: key, u: key, x: tensor[4, f32]) -> (tensor[4, f32], tensor[4, f32]) = (grad(loss, wrt=x)(g, copy(x)), uniform_like(u, x, 0.0f32, 1.0f32))\n"
     );
     let dag = lower(source, "sample");
     accepts(&dag);
@@ -648,74 +687,88 @@ fn a_replay_reads_only_its_forward_draws_key_under_that_draws_controls() {
     let uniform = first(&dag, "uniform_like");
     let forward_key = input(&dag, replay, 2);
     let uniform_key = input(&dag, uniform, 3);
-    // The discarded dropout's key: scoped, and neither the replay's nor the
-    // uniform draw's.
-    let dead_key = dag["nodes"]
+    assert_eq!(
+        dag["nodes"][forward_key]["op"],
+        json!({"kind":"load","name":"g"})
+    );
+    let forward = dag["nodes"]
         .as_array()
         .unwrap()
         .iter()
-        .enumerate()
-        .position(|(id, node)| {
-            node["op"]["kind"] == "draw_key"
-                && node["op"]["handler"]["kind"] == "scoped"
-                && id != forward_key
-                && id != uniform_key
-        })
-        .expect("the discarded dropout keeps its scoped draw key");
-    let dead_rate = input(&dag, dead_key, 1);
+        .position(|node| node["op"]["kind"] == "dropout" && node["inputs"][2] == json!(forward_key))
+        .expect("the replay's forward dropout consumes the same key");
+    assert_eq!(input(&dag, replay, 1), input(&dag, forward, 1));
 
     let mut replay_reads_uniform_key = dag.clone();
     replay_reads_uniform_key["nodes"][replay]["inputs"][2] = json!(uniform_key);
     rejects_domain(&replay_reads_uniform_key, "changes its forward node");
 
+    // Another rate than the forward draw's, even of equal value.
     let mut replay_changes_rate = dag.clone();
-    replay_changes_rate["nodes"][replay]["inputs"][1] = json!(dead_rate);
+    let other_rate = prepend(
+        &mut replay_changes_rate,
+        json!({"kind":"const","value":{"dtype":"f32","bits":"3f000000"}}),
+        &[],
+        "f32",
+    );
+    replay_changes_rate["nodes"][replay + 1]["inputs"][1] = json!(other_rate);
     rejects_domain(&replay_changes_rate, "changes its forward node");
 
-    let mut key_validates_other_rate = dag.clone();
-    key_validates_other_rate["nodes"][forward_key]["inputs"][1] = json!(dead_rate);
-    rejects_domain(&key_validates_other_rate, "does not validate the controls");
-
+    // A loaded key no forward draw consumes.
     let mut replay_reads_unconsumed_key = dag.clone();
-    replay_reads_unconsumed_key["nodes"][replay]["inputs"][2] = json!(dead_key);
+    let unconsumed = prepend(
+        &mut replay_reads_unconsumed_key,
+        json!({"kind":"load","name":"unconsumed"}),
+        &[],
+        "key",
+    );
+    replay_reads_unconsumed_key["nodes"][replay + 1]["inputs"][2] = json!(unconsumed);
     rejects_domain(
         &replay_reads_unconsumed_key,
         "that no forward random primitive consumes",
     );
 
+    // A replay read is not a use, but a second draw on the forward key is.
     let mut uniform_consumes_dropout_key = dag.clone();
-    uniform_consumes_dropout_key["nodes"][uniform]["inputs"][3] = json!(dead_key);
-    rejects_domain(
-        &uniform_consumes_dropout_key,
-        "does not validate the controls",
-    );
+    uniform_consumes_dropout_key["nodes"][uniform]["inputs"][3] = json!(forward_key);
+    rejects_domain(&uniform_consumes_dropout_key, "is consumed twice");
 }
 
 #[test]
 fn random_controls_seeds_and_keys_keep_their_structural_types() {
-    let dag = lower(HANDLED, "sample");
+    let dag = lower(KEYED, "sample");
     let dropout = first(&dag, "dropout");
-    let key = input(&dag, dropout, 2);
-    let seed = input(&dag, key, 0);
-    let data = input(&dag, dropout, 0);
 
     // The rate is a rank-zero value of the data dtype, never an integer.
     let mut integer_rate = dag.clone();
-    integer_rate["nodes"][dropout]["inputs"][1] = json!(seed);
+    let seed = prepend(
+        &mut integer_rate,
+        json!({"kind":"const","value":{"dtype":"int64","value":7}}),
+        &[],
+        "int64",
+    );
+    integer_rate["nodes"][dropout + 1]["inputs"][1] = json!(seed);
     rejects_domain(
         &integer_rate,
         "random control must be a value of the draw's dtype",
     );
 
-    // A scoped draw key's first input is its literal int64 seed.
-    let mut runtime_seed = dag.clone();
-    runtime_seed["nodes"][key]["inputs"][0] = json!(data);
-    rejects_domain(&runtime_seed, "literal seed");
+    // [05-OP-69]: a seed is an int64 tensor, never the draw's float data.
+    let mut float_seed = key_chain();
+    let float = prepend(
+        &mut float_seed,
+        json!({"kind":"const","value":{"dtype":"f32","bits":"40e00000"}}),
+        &[],
+        "f32",
+    );
+    // `key_chain`'s node 1 is its `key_from_seed`, now node 2.
+    float_seed["nodes"][2]["inputs"][0] = json!(float);
+    rejects_domain(&float_seed, "key operation reads the wrong operand dtype");
 
-    // A draw key produces one rank-zero key.
-    let mut numeric_key = dag.clone();
-    numeric_key["nodes"][key]["output_type"]["precision"] = json!("f32");
-    rejects_domain(&numeric_key, "draw key produces one rank-zero key");
+    // A key operation produces a key of its input's shape, never a number.
+    let mut numeric_key = key_chain();
+    numeric_key["nodes"][2]["output_type"]["precision"] = json!("f32");
+    rejects_domain(&numeric_key, "does not produce keys");
 
     // A missing key operand is a malformed primitive.
     let mut keyless = dag.clone();
@@ -727,42 +780,51 @@ fn random_controls_seeds_and_keys_keep_their_structural_types() {
 }
 
 #[test]
-fn gradient_random_lowering_preserves_scalar_bool_activation() {
-    // spec/06 §§2.10.1/2.11 and [05-OP-8]: differentiation keeps the
-    // handled forward stream, including the IR's Bool path activation on
-    // both the draw key and its primitive.
+fn gradient_random_lowering_admits_only_a_scalar_bool_activation() {
+    // spec/06 §2.11 and [05-OP-8]: differentiating through a keyed draw
+    // keeps its key a single-use operand, and a draw's optional path
+    // activation is exactly one Bool of rank zero on every encode/decode
+    // path; a consumer cannot replace it with a numeric scalar.
     let source = concat!(
-        "def loss(x: tensor[2, f32]) -> f32 ! { Random } = tensor_to_scalar(sum(mul(copy(x), uniform_like(x, 0.0f32, 1.0f32)), 0))\n",
-        "def derivative(x: tensor[2, f32]) -> tensor[2, f32] = with seed(7i64) { grad(loss)(x) }\n"
+        "def loss(k: key, x: tensor[2, f32]) -> f32 = tensor_to_scalar(sum(mul(copy(x), uniform_like(k, x, 0.0f32, 1.0f32)), 0))\n",
+        "def derivative(g: key, x: tensor[2, f32]) -> tensor[2, f32] = grad(loss, wrt=x)(g, x)\n"
     );
     let dag = lower(source, "derivative");
-    // `loss`'s own region draws without an activation; the differentiated
-    // copy inside `derivative` carries one.
-    let uniform = dag["nodes"]
+    accepts(&dag);
+    // The differentiated copy draws once, keyed by `derivative`'s own key,
+    // and its backward pass reads the forward value rather than redrawing.
+    let draws = dag["nodes"]
         .as_array()
         .unwrap()
         .iter()
-        .position(|node| {
-            node["op"]["kind"] == "uniform_like"
-                && node["inputs"]
-                    .as_array()
-                    .is_some_and(|inputs| inputs.len() == 5)
+        .enumerate()
+        .filter(|(_, node)| node["op"]["kind"] == "uniform_like")
+        .map(|(id, _)| id)
+        .collect::<Vec<_>>();
+    let keyed_by_g = draws
+        .iter()
+        .copied()
+        .filter(|draw| {
+            dag["nodes"][input(&dag, *draw, 3)]["op"] == json!({"kind":"load","name":"g"})
         })
-        .expect("gradient lowering must emit a UniformLike with a path activation");
-    let activation = input(&dag, uniform, 4);
-    let key = input(&dag, uniform, 3);
-    assert_eq!(
-        dag["nodes"][activation]["output_type"],
-        json!({"dims":[],"precision":"bool"})
-    );
-    let key_inputs = dag["nodes"][key]["inputs"].as_array().unwrap();
-    assert_eq!(key_inputs.last(), Some(&json!(activation)));
-    accepts(&dag);
+        .collect::<Vec<_>>();
+    assert_eq!(keyed_by_g.len(), 1, "{draws:?}");
+    let uniform = keyed_by_g[0];
 
-    // The actual producer's activation still owes wire admission on every
-    // encode/decode path; a consumer cannot replace it with a numeric scalar.
-    let mut malformed = dag.clone();
-    malformed["nodes"][activation]["op"] = json!({"kind":"load","name":"bad_activation"});
+    let mut active = dag.clone();
+    let activation = prepend(
+        &mut active,
+        json!({"kind":"load","name":"active"}),
+        &[],
+        "bool",
+    );
+    active["nodes"][uniform + 1]["inputs"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!(activation));
+    accepts(&active);
+
+    let mut malformed = active.clone();
     malformed["nodes"][activation]["output_type"]["precision"] = json!("f32");
     rejects_domain(&malformed, "exactly one Bool activation");
 }

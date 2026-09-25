@@ -183,7 +183,7 @@ RUST_CONSUMER_CONTROLS = (
             "version_16_random_payloads_have_no_version_17_spelling",
             "a_key_is_consumed_once_and_only_by_a_key_consumer",
             "random_controls_seeds_and_keys_keep_their_structural_types",
-            "gradient_random_lowering_preserves_scalar_bool_activation",
+            "gradient_random_lowering_admits_only_a_scalar_bool_activation",
         ),
     ),
     (

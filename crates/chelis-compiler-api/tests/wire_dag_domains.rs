@@ -42,15 +42,13 @@ fn live_lowering_emits_exact_control_carriers_as_operands() {
     let lower = |body: &str| {
         chelis_compiler_api::compiler::lower(LowerRequest {
             source_kind: SourceKind::Surf,
-            source: format!(
-                "def sample(x: tensor[2, f32]) -> tensor[2, f32] = with seed(7i64) {{ {body} }}\n"
-            ),
+            source: format!("def sample(k: key, x: tensor[2, f32]) -> tensor[2, f32] = {body}\n"),
             entry: Some("sample".into()),
         })
     };
-    // Wire v17: the bounds are exact f32 carriers on ordinary constant
-    // operands of the draw, never fields of the random node.
-    let lowered = lower("uniform_like(x, 0.1f32, 1.0f32)").unwrap();
+    // The bounds are exact f32 carriers on ordinary constant operands of the
+    // draw, never fields of the random node.
+    let lowered = lower("uniform_like(k, x, 0.1f32, 1.0f32)").unwrap();
     let wire = serde_json::to_value(lowered).unwrap();
     let nodes = wire["dag"]["nodes"].as_array().unwrap();
     let uniform = nodes
@@ -65,8 +63,8 @@ fn live_lowering_emits_exact_control_carriers_as_operands() {
     assert_eq!(operand(1), float("3dcccccd"));
     assert_eq!(operand(2), float("3f800000"));
     // [05-OP-37]: a rate outside [0, 1) is refused by the draw at execution,
-    // before it takes an ordinal; lowering carries it as an operand.
-    lower("dropout(x, 1.0f32)").unwrap();
+    // before it draws; lowering carries it as an operand.
+    lower("dropout(k, x, 1.0f32)").unwrap();
 }
 
 #[test]
