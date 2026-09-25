@@ -876,6 +876,13 @@
     },
     {
       "file": "declarations.rs",
+      "function": "type_mentions_key",
+      "ordinal": 1,
+      "pattern": "Type::Fn(_ , _) | Type::Var(_) | Type::Unit | Type::Error(_)",
+      "disposition": "not_a_route"
+    },
+    {
+      "file": "declarations.rs",
       "function": "validate_deferred_borrow_vars",
       "ordinal": 1,
       "pattern": "Type::Var(_) | Type::Prim(_) | Type::Unit | Type::Fn(_ , _)",
