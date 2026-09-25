@@ -5783,7 +5783,7 @@ pub unsafe extern "C" fn chelis_tensor_concat(
         }
         for axis2 in 0..(*tensor).rank() as usize {
             if axis2 != axis_i && (*tensor).shape()[axis2] != (*first).shape()[axis2] {
-                runtime_fail!("Domain: concat expects matching non-concatenated axes");
+                runtime_fail!("numeric trap: domain in concat at i64\nconcat expects matching non-concatenated axes");
             }
         }
         // [05-OP-33]: output extents use checked arithmetic. Unchecked, this
@@ -5791,7 +5791,15 @@ pub unsafe extern "C" fn chelis_tensor_concat(
         // from the allocator, where the atom mandates `Overflow`.
         out_shape[axis_i] = out_shape[axis_i]
             .checked_add((*tensor).shape()[axis_i])
-            .unwrap_or_else(|| runtime_fail!("Overflow: concat output extent exceeds i64"));
+            .unwrap_or_else(|| runtime_fail!("numeric trap: overflow in concat at i64"));
+    }
+    // Validate the complete output metadata under concat's attribution before
+    // the allocator can report the same overflow as a different operation.
+    if let Err(error) = ShapeMetadata::contiguous(&out_shape, dtype) {
+        match error {
+            MetadataError::Overflow(_) => runtime_fail!("numeric trap: overflow in concat at i64"),
+            MetadataError::Domain(_) => runtime_fail!("numeric trap: domain in concat at i64"),
+        }
     }
     let out = chelis_alloc(
         (*first).rank(),

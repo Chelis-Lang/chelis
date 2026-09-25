@@ -8416,12 +8416,14 @@ impl<'a> HostEmitter<'a> {
         let mut item_vars = Vec::with_capacity(items.len());
         for (index, item) in items.iter().enumerate() {
             let item_var = self.next_temp(&format!("list_item{index}"));
-            self.emit_expr_to_var(item, &item_var, item_ty)?;
+            let actual_ty = host_type(item);
+            require_list_element_abi_type(item_ty, &actual_ty)?;
+            self.emit_expr_to_var(item, &item_var, &actual_ty)?;
             self.lines.push(format!(
                 "{}{}[{index}] = {};",
                 self.indent,
                 values_name,
-                self.box_aggregate_value_expr(&item_var, item_ty, item)?
+                self.box_aggregate_value_expr(&item_var, &actual_ty, item)?
             ));
             item_vars.push(item_var);
         }
@@ -10037,6 +10039,21 @@ fn require_same_abi_type(
             context,
         ))
     }
+}
+
+fn require_list_element_abi_type(
+    expected: &HostType,
+    actual: &HostType,
+) -> Result<(), Unsupported> {
+    if let (HostType::Tensor(expected), HostType::Tensor(actual)) = (expected, actual) {
+        // Symbolic axis names are checker identities, not different C tensor
+        // representations. A literal can likewise inhabit a joined list
+        // element type; the consumer checks concrete extent relationships.
+        if expected.precision == actual.precision && expected.dims.len() == actual.dims.len() {
+            return Ok(());
+        }
+    }
+    require_same_abi_type(expected, actual, "list element")
 }
 
 fn option_inner_type(ty: &HostType) -> Result<HostType, Unsupported> {

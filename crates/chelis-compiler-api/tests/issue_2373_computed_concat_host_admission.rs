@@ -72,6 +72,33 @@ fn direct_copy_and_arithmetic_producers_keep_full_result() {
 }
 
 #[test]
+fn checked_matmul_producer_routes_runtime_width_to_host() {
+    let source = "def join[s](x: tensor[s, s, f32]) -> tensor[s, *, f32] = {\n  product = matmul(x, x)\n  concat([product, product], 1i32)\n}\noutput = join(to_tensor([[1.0f32, 2.0f32], [3.0f32, 4.0f32]]))\n";
+    let checked = check(CheckRequest {
+        source_kind: SourceKind::Surf,
+        source: source.into(),
+    })
+    .expect("check report");
+    assert_eq!(checked.score.get(), 1.0, "{checked:?}");
+    assert!(checked.errors.is_empty(), "{checked:?}");
+    let evaluated = eval(EvalRequest {
+        source_kind: SourceKind::Surf,
+        source: source.into(),
+        bindings: BTreeMap::new(),
+    })
+    .expect("legal computed width must execute");
+    let output = evaluated
+        .roots
+        .iter()
+        .find(|root| root.name.as_deref() == Some("output"))
+        .expect("output root");
+    assert_eq!(
+        serde_json::to_value(&output.value).unwrap(),
+        serde_json::json!({"type":"tensor","value":{"shape":[2,4],"data":{"dtype":"f32","bits":["40e00000","41200000","40e00000","41200000","41700000","41b00000","41700000","41b00000"]}}})
+    );
+}
+
+#[test]
 fn computed_producer_does_not_admit_bad_axis_or_shape() {
     for (source, expected) in [
         (
