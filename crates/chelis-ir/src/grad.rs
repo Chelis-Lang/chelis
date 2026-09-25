@@ -814,8 +814,24 @@ fn prune_to_requested_outputs(
         // the loop is not. A forward draw key advances its handler whether or
         // not the pruned gradient reads its key, and a key-sourced draw or a
         // runtime-count `SplitN` can trap by itself (chelis#2413).
+        //
+        // chelis#2368 / chelis#2440: seed observable roots too, but only
+        // FORWARD ones. A backward-synthesized adjoint carries no trap
+        // obligation of its own — that belongs to the forward node it was
+        // derived from — and it is scaffolding for a gradient that may not
+        // be requested.
+        //
+        // Seeding them resurrects integer adjoint machinery that was
+        // previously pruned as dead: the backward pass builds an extrema
+        // adjoint for an integer `MaxElem` used only to form a predicate,
+        // and keeping it alive fails verification as non-differentiable.
+        // That is exactly what `issue_1306_direct_arithmetic`'s
+        // `integer_extrema_used_only_to_form_a_predicate_do_not_poison_float_ad`
+        // pins, and it caught this. chelis#2413's seed keeps its own
+        // unconditional form: a random node is never a synthesized adjoint.
+        let synthesized = node.span_id.as_deref() == Some(GRAD_SYNTH_MARKER);
         if matches!(node.op, RiscOp::Store { .. } | RiscOp::DrawKey { .. })
-            || node.op.is_unconditional_effect()
+            || (!synthesized && node.is_observable_root())
             || dag.random_node_may_trap(node)
         {
             live[node.id.0] = true;

@@ -358,10 +358,12 @@ fn dead_code_eliminate_impl(
         // `implicit_observations`. A projected slice may legitimately drop an
         // unrelated `Store`, but never an abort: [05-OP-68] says it may not
         // be removed, and a slice that silently skipped one would report a
-        // successful result for a program that aborts. chelis#2413: a random
-        // node that can trap by itself is in the same class.
+        // successful result for a program that aborts. chelis#2440: a
+        // potentially trapping node is in that class too, which is what
+        // `is_observable_root` names; chelis#2413's self-trapping random
+        // node joins it from the same §5.2 sentence.
         if (implicit_observations && observed)
-            || node.op.is_unconditional_effect()
+            || node.is_observable_root()
             || dag.random_node_may_trap(node)
         {
             live[node.id.0] = true;
@@ -768,6 +770,91 @@ mod tests {
                 .any(|node| matches!(node.op, RiscOp::Cast { .. })),
             "full DCE must retain a potentially trapping claimed producer"
         );
+    }
+
+    /// chelis#2440: the same obligation without a result claim.
+    ///
+    /// `spec/06-transformations.md` §5.2 is prescriptive — "Mark every
+    /// effectful node, every potentially trapping node, every `Store`, and
+    /// every designated output as live", and "purity alone does not make a
+    /// possible trap dead". The retention above hung on the node carrying a
+    /// `result_claim_dep`; a plain discarded trapping node had nothing to
+    /// keep it, so its trap simply did not occur.
+    #[test]
+    fn full_dce_retains_a_trapping_node_with_no_claim() {
+        let mut dag = Dag::new();
+        let source = dag.add_node(
+            RiscOp::Load { name: "x".into() },
+            Vec::new(),
+            scalar_f32(),
+            None,
+        );
+        let trapping = dag.add_node(
+            RiscOp::Cast {
+                new_precision: chelis_types::types::Prim::Int32,
+            },
+            vec![source],
+            TensorType {
+                dims: Vec::new(),
+                precision: chelis_types::types::Prim::Int32,
+            },
+            None,
+        );
+        let root = dag.add_node(
+            RiscOp::synth_const(chelis_types::types::Prim::F32, 0.0),
+            Vec::new(),
+            scalar_f32(),
+            None,
+        );
+        dag.add_root(root);
+        let pruned = dead_code_eliminate(&dag);
+        assert!(
+            pruned
+                .nodes()
+                .iter()
+                .any(|node| matches!(node.op, RiscOp::Cast { .. })),
+            "a discarded cast into an integer width can trap, so §5.2 makes it \
+             an observable root even with no claim and no consumer"
+        );
+        let _ = trapping;
+    }
+
+    /// The negative control: §5.2's own example removes a FLOAT `Add`, which
+    /// cannot trap. Over-retaining is safe but not free, so the predicate
+    /// must stay dtype-aware rather than keeping all arithmetic alive.
+    #[test]
+    fn full_dce_still_removes_a_non_trapping_dead_node() {
+        let mut dag = Dag::new();
+        let source = dag.add_node(
+            RiscOp::Load { name: "x".into() },
+            Vec::new(),
+            scalar_f32(),
+            None,
+        );
+        let one = dag.add_node(
+            RiscOp::synth_const(chelis_types::types::Prim::F32, 1.0),
+            Vec::new(),
+            scalar_f32(),
+            None,
+        );
+        // Float addition produces infinities, never a trap.
+        let dead = dag.add_node(RiscOp::Add, vec![source, one], scalar_f32(), None);
+        let root = dag.add_node(
+            RiscOp::synth_const(chelis_types::types::Prim::F32, 0.0),
+            Vec::new(),
+            scalar_f32(),
+            None,
+        );
+        dag.add_root(root);
+        let pruned = dead_code_eliminate(&dag);
+        assert!(
+            !pruned
+                .nodes()
+                .iter()
+                .any(|node| matches!(node.op, RiscOp::Add)),
+            "a dead float add cannot trap and must still be eliminated"
+        );
+        let _ = dead;
     }
 
     #[test]

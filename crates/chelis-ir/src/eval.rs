@@ -2886,8 +2886,9 @@ fn activation_live_mask(dag: &Dag, roots: &[NodeId]) -> Vec<bool> {
 fn live_mask_from(dag: &Dag, mut stack: Vec<NodeId>, unselected: &[bool]) -> Vec<bool> {
     let mut live = vec![false; dag.len()];
     // chelis#2368: effect nodes are live because they are effects, not
-    // because a value reaches them. chelis#2413: so is a random node that can
-    // trap by itself.
+    // because a value reaches them. chelis#2440: so is a potentially
+    // trapping one, which is what `is_observable_root` names. chelis#2413:
+    // so is a random node that can trap by itself.
     //
     // chelis#2476 scopes BOTH to the selection. An abort, or a trapping
     // draw, inside a root this evaluation did not select belongs to a
@@ -2905,7 +2906,7 @@ fn live_mask_from(dag: &Dag, mut stack: Vec<NodeId>, unselected: &[bool]) -> Vec
         dag.nodes()
             .iter()
             .filter(|node| {
-                (node.op.is_unconditional_effect() || dag.random_node_may_trap(node))
+                (node.is_observable_root() || dag.random_node_may_trap(node))
                     && !unselected[node.id.0]
             })
             .map(|node| node.id),

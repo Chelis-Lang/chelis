@@ -2034,6 +2034,56 @@ pub struct DagNode {
     pub result_claim_deps: Vec<NodeId>,
 }
 
+impl DagNode {
+    /// chelis#2440: whether this node is an observable root for dead-code
+    /// elimination, per `spec/06-transformations.md` §5.2.
+    ///
+    /// That section is prescriptive rather than advisory: *"Mark every
+    /// effectful node, every potentially trapping node, every `Store`, and
+    /// every designated output as live"*, and *"purity alone does not make a
+    /// possible trap dead"*. So the question is not whether the trap is
+    /// likely or statically decidable — only whether it is possible.
+    ///
+    /// Deliberately conservative. Over-retaining costs dead code; under-
+    /// retaining loses a trap, which is the defect this exists to prevent.
+    /// The section's own example removes a FLOAT `Add`, which is consistent:
+    /// float arithmetic never traps here, integer arithmetic can.
+    pub fn is_observable_root(&self) -> bool {
+        self.op.is_unconditional_effect() || self.may_trap()
+    }
+
+    /// Whether executing this node can raise a [`NumericTrap`].
+    ///
+    /// Integer arithmetic overflows, integer division and remainder divide by
+    /// zero, and a cast into an integer or bool width can be out of domain.
+    /// Float arithmetic never traps — it produces infinities and NaN.
+    fn may_trap(&self) -> bool {
+        let precision = self.output_type.precision;
+        match &self.op {
+            // Overflow at the dtype's range.
+            RiscOp::Add | RiscOp::Sub | RiscOp::Mul | RiscOp::Neg | RiscOp::Abs => {
+                precision.is_integer()
+            }
+            // DivZero, and Overflow for MIN / -1.
+            RiscOp::Div | RiscOp::FloorDiv | RiscOp::TruncDiv | RiscOp::Mod => {
+                precision.is_integer()
+            }
+            // Domain for a non-finite or fractional source, Overflow for a
+            // source outside the target range. `CastTrunc` is included on
+            // the conservative side: it truncates the fractional case, but
+            // the non-finite and out-of-range cases remain trap candidates.
+            // Read the cast's OWN target, not the node's output type. They
+            // agree today; if a lowering ever let them drift, deriving the
+            // seed from the output type would silently switch the trap
+            // retention off rather than fail.
+            RiscOp::Cast { new_precision } | RiscOp::CastTrunc { new_precision } => {
+                new_precision.is_integer() || *new_precision == Prim::Bool
+            }
+            _ => false,
+        }
+    }
+}
+
 /// The RISC DAG — an append-only, topologically-ordered vector of [`DagNode`]s.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Dag {
