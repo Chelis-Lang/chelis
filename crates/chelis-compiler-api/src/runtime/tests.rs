@@ -3591,6 +3591,30 @@ fn scalar_payload_dtype_is_the_storage_variant() {
     assert_eq!(payload.as_f64_lossy(), 1.5);
 }
 
+/// chelis#2413 (B4): a key element, such as the one element of a rank-0 key
+/// tensor a staged host plan captures as a scalar, becomes the key variant,
+/// never a numeric scalar, so a draw reads it as its key and every
+/// diagnostic renders it. `split(key_from_seed(7))`'s left key is
+/// `aa3896172f9a3213` in `key_ref.py`.
+///
+/// Evidentiary status: REGRESSION TEST. At `b005bb19b` the constructor
+/// returned a `Scalar` holding the key and describing it panicked in
+/// `element_ref` ("a random key has no observation form").
+#[test]
+fn a_key_element_is_the_key_variant_and_describes_without_panicking() {
+    let seed = chelis_types::scalar_from_i64("test", Prim::Int64, 7).expect("7 is an i64");
+    let (key, _) = chelis_types::RandomKey::from_seed(seed)
+        .expect("every i64 seeds a key")
+        .split();
+    let value = RuntimeValue::from_scalar_value(chelis_types::ScalarValue::from_key(key));
+    assert!(
+        matches!(value, RuntimeValue::Key(inner) if inner == key),
+        "{value:?}"
+    );
+    assert_eq!(describe_value(&value), "key(aa3896172f9a3213)");
+    assert_eq!(describe_argument(Some(&value)), "key(aa3896172f9a3213)");
+}
+
 fn numeric_scalar(prim: Prim, integer: i64, float: f64) -> RuntimeValue {
     if prim.is_integer() {
         RuntimeValue::from_scalar_value(

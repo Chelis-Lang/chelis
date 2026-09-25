@@ -110,17 +110,14 @@ pub enum TransformKind {
 /// `finalize_scalar` / `scalar_from_*` chokepoints (the section C3
 /// privacy contract). The former in-crate `ScalarBits` enum and its
 /// wrapping `from_f64_as` / `from_i64_as` raw constructors are deleted.
+/// It never holds a key: [`RuntimeValue::from_scalar_value`], its one
+/// construction site, turns a key element into [`RuntimeValue::Key`].
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ScalarPayload {
     value: chelis_types::ScalarValue,
 }
 
 impl ScalarPayload {
-    /// Wrap a module-finalized scalar.
-    pub(crate) fn from_value(value: chelis_types::ScalarValue) -> Self {
-        Self { value }
-    }
-
     /// Read the source-level dtype (the storage variant's own dtype).
     pub(crate) fn dtype(&self) -> Prim {
         self.value.prim()
@@ -266,10 +263,17 @@ impl RuntimeValue {
         }
     }
 
-    /// Wrap a module-finalized scalar (the WS-A0 invariant holds by
-    /// construction: the storage variant IS the dtype).
+    /// Wrap a module-finalized element (the WS-A0 invariant holds by
+    /// construction: the storage variant IS the dtype). A key element, such
+    /// as a rank-0 key tensor's one element, becomes a [`RuntimeValue::Key`]:
+    /// a key is never a numeric [`RuntimeValue::Scalar`], so every consumer
+    /// that reads a key and every renderer sees the key variant.
     pub(crate) fn from_scalar_value(value: chelis_types::ScalarValue) -> Self {
-        RuntimeValue::Scalar(ScalarPayload::from_value(value))
+        // The payload's only construction site: a key never becomes one.
+        match value.as_key() {
+            Some(key) => RuntimeValue::Key(key),
+            None => RuntimeValue::Scalar(ScalarPayload { value }),
+        }
     }
 
     /// Default-narrowed integer literal per spec §5.3: bare integer
