@@ -3756,22 +3756,11 @@ fn route_tensor_inputs_from_dag(
 }
 
 fn required_inputs_for_dag_root(dag: &Dag, root: NodeId) -> BTreeSet<String> {
-    let mut stack = vec![root];
-    let mut seen = UnordSet::new();
-    let mut required = BTreeSet::new();
-    while let Some(node_id) = stack.pop() {
-        if !seen.insert(node_id) {
-            continue;
-        }
-        let Some(node) = dag.get(node_id) else {
-            continue;
-        };
-        if let RiscOp::Load { name } = &node.op {
-            required.insert(name.as_str().to_string());
-        }
-        stack.extend(node.inputs.iter().copied());
-    }
-    required
+    // The evaluator's own live set (spec/06 §5.2), not the root's data
+    // closure: a discarded trapping node of the root's declaration demands
+    // its parameter, so routing by data dependencies alone would drop a
+    // binding the evaluator then reports missing.
+    chelis_ir::eval::required_load_names(dag, &[root])
 }
 
 /// The library payload threaded through `eval_compiled` so the host

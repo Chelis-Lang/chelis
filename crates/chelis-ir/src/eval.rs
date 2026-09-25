@@ -18,6 +18,7 @@
 use chelis_abi::metadata::{MetadataError, ShapeMetadata};
 use chelis_unord::{UnordMap, UnordSet};
 use std::borrow::Cow;
+use std::collections::BTreeSet;
 
 use crate::dag::{
     ComparisonKind, Dag, DagNode, DimExpr, DimInfo, ExtremaKind, ExtremaOperand, FusedInput,
@@ -2786,6 +2787,25 @@ where
 fn live_mask_for_roots(dag: &Dag, roots: &[NodeId]) -> Vec<bool> {
     let unselected = dag.outside_selection(roots);
     live_mask_from(dag, roots.to_vec(), &unselected)
+}
+
+/// The names of the `Load`s an evaluation of `roots` reads: every `Load` in
+/// its live set ([`live_mask_for_roots`]), which is the roots' value graphs
+/// plus every observable root of a declaration the selection enters
+/// (spec/06 §5.2). This is exactly the set `resolve_load_inputs` demands, so
+/// an input router that reads it can never filter away a binding the
+/// evaluator then reports missing: a discarded trapping node's parameter is
+/// required although no root's value reads it.
+pub fn required_load_names(dag: &Dag, roots: &[NodeId]) -> BTreeSet<String> {
+    let live = live_mask_for_roots(dag, roots);
+    dag.nodes()
+        .iter()
+        .filter(|node| live[node.id.0])
+        .filter_map(|node| match &node.op {
+            RiscOp::Load { name } => Some(name.as_str().to_owned()),
+            _ => None,
+        })
+        .collect()
 }
 
 fn live_mask_from(dag: &Dag, mut stack: Vec<NodeId>, unselected: &[bool]) -> Vec<bool> {
