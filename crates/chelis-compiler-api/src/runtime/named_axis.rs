@@ -489,7 +489,20 @@ pub(super) fn pack_dag_roots(
             precision,
             "the DAG evaluator finalizes at the root's declared dtype"
         );
-        packed.push(RuntimeValue::Tensor(RuntimeTensorValue::new(tensor)));
+        // A rank-0 key root is a scalar key value; the interpreter has no
+        // rank-0 key tensor of its own (spec/10 section 3.2).
+        let scalar_key = (precision == Prim::Key && tensor.shape.is_empty())
+            .then(|| {
+                tensor
+                    .storage()
+                    .keys()
+                    .and_then(|keys| keys.first().copied())
+            })
+            .flatten();
+        packed.push(match scalar_key {
+            Some(key) => RuntimeValue::Key(key),
+            None => RuntimeValue::Tensor(RuntimeTensorValue::new(tensor)),
+        });
     }
     if packed.len() == 1 {
         Ok(packed.pop().expect("checked length"))

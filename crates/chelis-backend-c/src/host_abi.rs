@@ -44,6 +44,11 @@ pub(crate) enum HostAbiType {
     Float64,
     Bool,
     String,
+    /// A scalar random key ([05-OP-69]..[05-OP-72]): the C value
+    /// `chelis_key`, `typedef struct { uint64_t bits; } chelis_key;`, whose
+    /// `bits` are the key's 64 bits. It is never an integer: it has no
+    /// arithmetic, cast or comparison (spec/04 section 1.1).
+    Key,
     /// A typed C function-pointer parameter or direct callback argument.
     ///
     /// This is deliberately not a general value representation.  The only
@@ -172,15 +177,7 @@ impl HostAbiType {
                     ),
                 ));
             }
-            ConcreteHostType::Scalar(Prim::Key) => {
-                return Err(rejected_dtype(
-                    Prim::Key,
-                    chelis_types::deliberate_rejection!(
-                        "[05-RNG-1]",
-                        "a random key has no host ABI carrier; it exists only inside a graph"
-                    ),
-                ));
-            }
+            ConcreteHostType::Scalar(Prim::Key) => Self::Key,
             ConcreteHostType::Function(_, _) => {
                 return Err(unsupported_function_value(ty, "C host ABI value selection"));
             }
@@ -237,6 +234,7 @@ impl HostAbiType {
             Self::Float64 => Some("double"),
             Self::Bool => Some("bool"),
             Self::String => Some("chelis_string"),
+            Self::Key => Some("chelis_key"),
             Self::Callback(_, _) => None,
             Self::Adt(_, _) => Some("chelis_adt*"),
             Self::List(_) => Some("chelis_list*"),

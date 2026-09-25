@@ -1184,6 +1184,15 @@ pub(super) fn runtime_value_to_dag_input_lossy(
             };
             Ok((tensor.value.clone(), ty))
         }
+        // A scalar key enters the transformed graph as the rank-0 key tensor
+        // its key `Load` reads; it carries no cotangent (spec/06 section 2.11).
+        RuntimeValue::Key(key) => Ok((
+            IrTensorValue::from_storage(vec![], chelis_types::TensorStorage::from_keys(vec![*key])),
+            TensorType {
+                dims: vec![],
+                precision: Prim::Key,
+            },
+        )),
         RuntimeValue::Scalar(payload) if payload.dtype().is_float() => {
             let precision = fn_expr
                 .and_then(|e| param_precision_at(e, index))
@@ -1434,7 +1443,7 @@ pub(super) fn make_var_with_type(name: &str, ty: &TensorType, span: Span) -> Exp
         Prim::Int64 => "i64",
         Prim::Bool => "bool",
         Prim::String => "string",
-        Prim::Key => panic!("a random key has no Deep type spelling and never binds a variable"),
+        Prim::Key => "key",
     };
     let prim_node = empty_node(
         DeepTag::TPrim,

@@ -2741,26 +2741,15 @@ impl<'a> EvalContext<'a> {
         }
     }
 
-    /// The active handler's next [05-RNG-1] key, advancing its ordinal. A
-    /// draw outside every handler is an internal error: the checker rejects
-    /// an unhandled Random effect, and no draw falls back to seed 0.
-    fn next_random_key(&mut self, op: &str) -> Result<chelis_types::RandomKey, String> {
-        let seed = self
-            .random_seed
-            .ok_or_else(|| format!("internal: {op} was evaluated outside every Random handler"))?;
-        let counter = self.random_counter;
-        self.random_counter = self.random_counter.saturating_add(1);
-        Ok(chelis_types::RandomKey::from_counter(seed, counter))
-    }
-
-    /// [05-OP-37] in the host walk: the rate is the input dtype's tagged
-    /// scalar, validated before the draw consumes its ordinal.
+    /// [05-OP-37] in the host walk: `dropout(k, x, rate)`. The rate is the
+    /// input dtype's tagged scalar, validated before any element is drawn
+    /// from the key.
     fn eval_dropout_builtin(&mut self, args: &[RuntimeValue]) -> Result<RuntimeValue, String> {
-        let input = expect_tensor_arg(args, 0)?;
-        let rate = expect_float_control(args, 1, "dropout")?;
+        let key = expect_key_arg(args, 0, "dropout")?;
+        let input = expect_tensor_arg(args, 1)?;
+        let rate = expect_float_control(args, 2, "dropout")?;
         let prepared = chelis_types::PreparedDropout::new(input.value.storage(), rate)
             .map_err(|error| error.to_string())?;
-        let key = self.next_random_key("dropout")?;
         let storage = prepared.apply(key).map_err(|error| error.to_string())?;
         Ok(RuntimeValue::Tensor(RuntimeTensorValue::new(
             IrTensorValue::from_storage(input.value.shape.clone(), storage),
@@ -2775,20 +2764,49 @@ impl<'a> EvalContext<'a> {
         result_type_expr: Option<&Expr>,
     ) -> Result<RuntimeValue, String> {
         match name {
-            // [05-OP-69]..[05-OP-72]: the checker types the key operations,
-            // and the host interpreter has no key value to evaluate them
-            // over until the key carrier lands; refuse loudly.
-            "key_from_seed" | "split_key" | "split_keys" | "fold_in" => {
-                Err(chelis_types::unsupported::Unsupported::new(
-                    chelis_types::unsupported::UnsupportedKind::Builtin(name.to_string()),
-                    "the host interpreter, which has no random key value yet",
-                    chelis_types::unsupported::Stage::Runtime,
-                    chelis_types::unimplemented_rejection!(
-                        2413,
-                        "the key operations are checked but not yet evaluated or lowered"
+            // [05-OP-69]..[05-OP-72]: the key operations over the scalar key
+            // value, with the kernels every lane shares.
+            "key_from_seed" => {
+                let seed = expect_i64_key_operand(args, 0, "key_from_seed")?;
+                chelis_types::RandomKey::from_seed(seed)
+                    .map(RuntimeValue::Key)
+                    .map_err(|error| error.to_string())
+            }
+            "split_key" => {
+                let (left, right) = expect_key_arg(args, 0, "split_key")?.split();
+                Ok(RuntimeValue::Tuple(vec![
+                    RuntimeValue::Key(left),
+                    RuntimeValue::Key(right),
+                ]))
+            }
+            "fold_in" => {
+                let key = expect_key_arg(args, 0, "fold_in")?;
+                let n = expect_i64_key_operand(args, 1, "fold_in")?;
+                key.fold_in(n)
+                    .map(RuntimeValue::Key)
+                    .map_err(|error| error.to_string())
+            }
+            "split_keys" => {
+                let key = expect_key_arg(args, 0, "split_keys")?;
+                let count = expect_i64_key_operand(args, 1, "split_keys")?
+                    .as_i64_exact()
+                    .ok_or_else(|| "split_keys expects an i64 count".to_string())?;
+                // [05-OP-71]: a negative count traps before allocation, as
+                // the DAG evaluator and the C lane trap.
+                let count = usize::try_from(count).map_err(|_| {
+                    chelis_types::NumericTrap::Domain {
+                        op: "split_keys",
+                        prim: Prim::Int64,
+                    }
+                    .to_string()
+                })?;
+                check_split_keys_declared_extent(result_type_expr, count)?;
+                Ok(RuntimeValue::Tensor(RuntimeTensorValue::new(
+                    IrTensorValue::from_storage(
+                        vec![count],
+                        chelis_types::TensorStorage::from_keys(key.split_n(count)),
                     ),
-                )
-                .to_string())
+                )))
             }
             "add" => numeric_binop(args, Some(IntBinOp::Add), Some(FloatBinOp::Add)),
             "sub" => numeric_binop(args, Some(IntBinOp::Sub), Some(FloatBinOp::Sub)),
@@ -2847,13 +2865,13 @@ impl<'a> EvalContext<'a> {
             "gte" => ordered_compare(args, CompareOp::Gte),
             "lte" => ordered_compare(args, CompareOp::Lte),
             "uniform_like" => {
-                let template = expect_tensor_arg(args, 0)?;
-                let low = expect_float_control(args, 1, "uniform_like")?;
-                let high = expect_float_control(args, 2, "uniform_like")?;
-                // [05-OP-8]: the bounds validate before the draw consumes
-                // its ordinal.
+                let key = expect_key_arg(args, 0, "uniform_like")?;
+                let template = expect_tensor_arg(args, 1)?;
+                let low = expect_float_control(args, 2, "uniform_like")?;
+                let high = expect_float_control(args, 3, "uniform_like")?;
+                // [05-OP-8]: the bounds validate before any element is drawn
+                // from the key.
                 let prepared = prepare_uniform_like(&template, low, high)?;
-                let key = self.next_random_key("uniform_like")?;
                 Ok(RuntimeValue::Tensor(uniform_like_value(
                     &template, &prepared, key,
                 )?))
@@ -4576,6 +4594,80 @@ fn runtime_values_equal(lhs: &RuntimeValue, rhs: &RuntimeValue) -> Result<bool, 
 /// interpreter applies to its own frame (chelis#729); a scalar becomes an
 /// exact rank-0 tensor at the declared prim, the way `scalar_to_tensor` builds
 /// one and the way the C wrapper boxes a scalar parameter.
+/// The scalar key operand of a key operation or draw: a key value, or the
+/// rank-0 key tensor a kernel returns for one.
+fn expect_key_arg(
+    args: &[RuntimeValue],
+    index: usize,
+    op: &str,
+) -> Result<chelis_types::RandomKey, String> {
+    match args.get(index) {
+        Some(RuntimeValue::Key(key)) => Ok(*key),
+        Some(RuntimeValue::Tensor(tensor)) if tensor.value.shape.is_empty() => tensor
+            .value
+            .storage()
+            .keys()
+            .and_then(|keys| keys.first().copied())
+            .ok_or_else(|| format!("{op} expects a key at index {index}")),
+        other => Err(format!(
+            "{op} expects a key at index {index}, got {}",
+            describe_argument(other)
+        )),
+    }
+}
+
+/// The i64 seed or index operand of a key operation ([05-OP-69],
+/// [05-OP-71], [05-OP-72]).
+fn expect_i64_key_operand(
+    args: &[RuntimeValue],
+    index: usize,
+    op: &str,
+) -> Result<chelis_types::ScalarValue, String> {
+    match args.get(index) {
+        Some(RuntimeValue::Scalar(payload)) if payload.dtype() == Prim::Int64 => {
+            Ok(payload.value())
+        }
+        Some(RuntimeValue::Tensor(tensor))
+            if tensor.value.shape.is_empty() && tensor.value.prim() == Prim::Int64 =>
+        {
+            Ok(tensor.value.storage().scalar_at(0))
+        }
+        other => Err(format!(
+            "{op} expects an i64 at index {index}, got {}",
+            describe_argument(other)
+        )),
+    }
+}
+
+/// [05-OP-71]: a literal extent the checked result type declares for the
+/// count axis is a claim about the runtime count, checked before any key
+/// exists, as the DAG evaluator and the C lane check it.
+fn check_split_keys_declared_extent(
+    result_type_expr: Option<&Expr>,
+    count: usize,
+) -> Result<(), String> {
+    let literal_extent = |dim: &Expr| match dim.carrier() {
+        ExprCarrier::Atom(Atom::Int(extent)) => Some(*extent),
+        ExprCarrier::DecodedNode(DeepTag::Lit, _, [Expr::Atom(Atom::Int(extent), _), ..]) => {
+            Some(*extent)
+        }
+        _ => None,
+    };
+    let Some(declared) = result_type_expr.and_then(|ty| match ty.carrier() {
+        ExprCarrier::DecodedNode(DeepTag::TTensor, _, [dim, _precision]) => literal_extent(dim),
+        _ => None,
+    }) else {
+        return Ok(());
+    };
+    if usize::try_from(declared).ok() == Some(count) {
+        Ok(())
+    } else {
+        Err(format!(
+            "split_keys: the count {count} does not equal the extent {declared} its type declares"
+        ))
+    }
+}
+
 fn stage_kernel_argument(
     def: &str,
     param: &str,
@@ -4583,7 +4675,17 @@ fn stage_kernel_argument(
     prim: Prim,
 ) -> Result<IrTensorValue, String> {
     match value {
+        // A key tensor enters a kernel as it is: a key has no conversion.
+        RuntimeValue::Tensor(tensor) if tensor.value.prim() == Prim::Key && prim == Prim::Key => {
+            Ok(tensor.value.clone())
+        }
         RuntimeValue::Tensor(tensor) => Ok(ingress_tensor_to_declared(tensor.clone(), prim)?.value),
+        // A scalar key enters a kernel as the rank-0 key tensor its key
+        // `Load` reads (spec/10 section 3.2).
+        RuntimeValue::Key(key) if prim == Prim::Key => Ok(IrTensorValue::from_storage(
+            vec![],
+            chelis_types::TensorStorage::from_keys(vec![*key]),
+        )),
         RuntimeValue::Scalar(payload) if payload.dtype().is_integer() => {
             Ok(RuntimeTensorValue::from_wide_int(
                 "kernel argument",

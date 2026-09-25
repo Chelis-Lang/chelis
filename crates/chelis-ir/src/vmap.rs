@@ -64,6 +64,14 @@ pub fn vectorize_axis0_with_node_map_and_captures(
     // An element-derived scalar would make the result ragged, which the dense
     // tensor IR cannot represent.
     let shared_bound_nodes = shared_bound_nodes(dag)?;
+    // A captured key that nothing reads is not broadcast to any row; the
+    // lexical scope seeds a Load for every enclosing binding, used or not.
+    let read_nodes = dag
+        .nodes()
+        .iter()
+        .flat_map(|node| node.inputs.iter().chain(node.shape_deps.iter()).copied())
+        .chain(dag.roots().iter().copied())
+        .collect::<UnordSet<NodeId>>();
     let mut mapped_ids = Vec::with_capacity(dag.nodes().len());
     let mut expanded_shared = UnordMap::<NodeId, NodeId>::new();
 
@@ -77,7 +85,10 @@ pub fn vectorize_axis0_with_node_map_and_captures(
         // draw consumes its own row of a mapped `tensor[n, key]`. Broadcasting
         // one captured key to every row would consume it once per row, and a
         // counter-stream draw key has no per-row key at all (chelis#2409).
-        if captured_load && node.output_type.precision == chelis_types::types::Prim::Key {
+        if captured_load
+            && node.output_type.precision == chelis_types::types::Prim::Key
+            && read_nodes.contains(&node.id)
+        {
             return Err(format!(
                 "vmap cannot broadcast captured key {:?} to every row; a vmapped key must be a mapped tensor of keys",
                 node.op

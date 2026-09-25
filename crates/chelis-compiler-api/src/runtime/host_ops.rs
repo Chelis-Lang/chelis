@@ -2966,26 +2966,26 @@ fn render_tensor(tensor: &RuntimeTensorValue) -> String {
     // width), so the former f64-image bridge `render_tensor_element` and
     // its tag-vs-bits disagreement arm are structurally unreachable: the
     // storage variant IS the tag.
+    // A key has no numeric element; it renders as its 64 bits (spec/10
+    // section 3.1's key storage carrier spells the same 16 digits).
+    let keys = tensor.value.storage().keys();
+    let element = |index: usize| match keys {
+        Some(keys) => render_key(keys[index]),
+        None => chelis_types::format_element(
+            tensor.precision,
+            tensor.value.storage().element_ref(index),
+        ),
+    };
     if tensor.value.shape.is_empty() {
         assert!(
             !tensor.value.is_empty(),
             "render_tensor: rank-0 tensor with no element (IrTensorValue \
              guarantees numel(shape=[]) == 1 at construction)"
         );
-        return chelis_types::format_element(
-            tensor.precision,
-            tensor.value.storage().element_ref(0),
-        );
+        return element(0);
     }
     let visible = tensor.value.len().min(TENSOR_RENDER_LIMIT);
-    let mut elements: Vec<String> = (0..visible)
-        .map(|index| {
-            chelis_types::format_element(
-                tensor.precision,
-                tensor.value.storage().element_ref(index),
-            )
-        })
-        .collect();
+    let mut elements: Vec<String> = (0..visible).map(element).collect();
     if tensor.value.len() > visible {
         elements.push("...".to_string());
     }
@@ -2999,10 +2999,15 @@ fn render_tensor(tensor: &RuntimeTensorValue) -> String {
 // pub(crate): compiler.rs pre-renders each evaluated root's display text
 // through this exact function (the [05-OBS-1] single renderer) while the
 // dtype tags still exist; see `EvaluatedRoot::display`.
+fn render_key(key: RandomKey) -> String {
+    chelis_types::format_key(key)
+}
+
 pub(crate) fn render_value(value: &RuntimeValue) -> String {
     use chelis_types::{ElementRef, format_element};
     match value {
         RuntimeValue::Tensor(tensor) => render_tensor(tensor),
+        RuntimeValue::Key(key) => render_key(*key),
         RuntimeValue::Scalar(payload) => {
             // Scalars carry their dtype in the sealed storage variant
             // (the dtype/bits invariant holds by construction), so every

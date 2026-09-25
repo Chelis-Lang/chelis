@@ -2026,6 +2026,7 @@ fn install_exact_op35_dependency_contracts(
                 rvars: vec![],
                 body: Type::Fn(
                     vec![
+                        Type::Prim(Prim::Key),
                         Type::Ref(Box::new(Type::Var(template))),
                         Type::Var(low),
                         Type::Var(high),

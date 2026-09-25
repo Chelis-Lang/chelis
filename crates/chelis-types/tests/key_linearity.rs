@@ -6,9 +6,8 @@
 //! runs the type checker and then the linearity checker, the two phases
 //! `chelis check` runs before effects are reported.
 //!
-//! Slice-2 note: "reuse after a draw" is stated here through the key
-//! consuming builtins, because the random draws do not take a key until the
-//! surface switch; add the draw form when `dropout` and `uniform_like` do.
+//! The random draws [05-OP-8] and [05-OP-37] take their key first and
+//! consume it, like the key operations.
 
 use chelis_surf::desugar::desugar_program;
 use chelis_surf::parser::parse_str;
@@ -94,6 +93,42 @@ fn reusing_a_key_after_a_key_operation_is_rejected() {
     rejects_reuse(
         "a sig-typed parameter used twice",
         "sig dup: key -> (key, key)\ndef dup(k) = (k, k)\n",
+    );
+}
+
+#[test]
+fn reusing_a_key_after_a_draw_is_rejected() {
+    rejects_reuse(
+        "dropout twice with one key",
+        "def bad(k: key, x: tensor[4, f32]) -> (tensor[4, f32], tensor[4, f32]) = \
+         (dropout(k, x, 0.5f32), dropout(k, x, 0.5f32))\n",
+    );
+    rejects_reuse(
+        "uniform_like then split_key",
+        "def bad(k: key, t: tensor[2, f32]) -> (tensor[2, f32], (key, key)) = {\n  u = \
+         uniform_like(k, t, 0.0f32, 1.0f32)\n  (u, split_key(k))\n}\n",
+    );
+    rejects_reuse(
+        "a draw after the key was split",
+        "def bad(k: key, x: tensor[4, f32]) -> (tensor[4, f32], key) = {\n  (a, _) = \
+         split_key(k)\n  (dropout(k, x, 0.5f32), a)\n}\n",
+    );
+    accepts(
+        "each draw takes its own half",
+        "def good(k: key, x: tensor[4, f32]) -> (tensor[4, f32], tensor[4, f32]) = {\n  (a, b) \
+         = split_key(k)\n  (dropout(a, x, 0.5f32), uniform_like(b, x, 0.0f32, 1.0f32))\n}\n",
+    );
+    accepts(
+        "one draw per selected arm",
+        "def good(k: key, x: tensor[4, f32], c: bool) -> tensor[4, f32] = if c then dropout(k, x, \
+         0.5f32) else uniform_like(k, x, 0.0f32, 1.0f32)\n",
+    );
+    // The tensor a draw reads is borrowed, so it stays live for the second
+    // draw; only the key is consumed.
+    accepts(
+        "the data operand is borrowed",
+        "def good(k: key, x: tensor[4, f32]) -> (tensor[4, f32], tensor[4, f32]) = {\n  (a, b) \
+         = split_key(k)\n  (dropout(a, x, 0.5f32), dropout(b, x, 0.5f32))\n}\n",
     );
 }
 

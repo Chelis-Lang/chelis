@@ -159,6 +159,11 @@ pub enum RuntimeValue {
     /// [`ScalarPayload`] (C1) so struct-literal initialization can no
     /// longer bypass the invariant. See `spec/04-type-system.md` §1.1.
     Scalar(ScalarPayload),
+    /// A scalar random key ([05-OP-69]..[05-OP-72]). It has no numeric
+    /// value, so it is its own variant rather than a [`Self::Scalar`]: no
+    /// numeric path can read it. A `tensor[n, key]` is a [`Self::Tensor`]
+    /// whose storage is a key buffer.
+    Key(chelis_types::RandomKey),
     Bool(bool),
     String(String),
     List(Vec<RuntimeValue>),
@@ -920,6 +925,22 @@ pub(crate) fn runtime_value_to_schema(value: &RuntimeValue) -> Result<ExecutionV
         RuntimeValue::Scalar(payload) => ExecutionValue::Scalar {
             value: payload.value().try_into()?,
         },
+        // spec/10 section 3.1's scalar key execution value is not carried
+        // yet; refuse loudly rather than print a key as a number.
+        RuntimeValue::Key(_) => {
+            return Err(chelis_types::unsupported::Unsupported::new(
+                chelis_types::unsupported::UnsupportedKind::Construct(
+                    "a scalar key execution value".to_string(),
+                ),
+                "the execution-value schema",
+                chelis_types::unsupported::Stage::Runtime,
+                chelis_types::unimplemented_rejection!(
+                    2413,
+                    "the key execution value carrier lands with the public-entry key carrier"
+                ),
+            )
+            .to_string());
+        }
         RuntimeValue::Bool(value) => ExecutionValue::Bool { value: *value },
         RuntimeValue::String(value) => ExecutionValue::String {
             value: value.clone(),

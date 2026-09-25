@@ -478,10 +478,9 @@ fn infer_app_effects(
         ));
     }
 
+    // [05-RNG-1]: a random draw is a pure function of the key it is given,
+    // so `dropout` and `uniform_like` introduce no effect.
     let builtin_name = kids.first().and_then(var_name);
-    if matches!(builtin_name, Some("dropout" | "uniform_like")) {
-        effects.insert(Effect::Random);
-    }
     if matches!(
         builtin_name,
         Some(

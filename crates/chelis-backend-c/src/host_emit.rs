@@ -831,6 +831,59 @@ fn append_uniform_sample_helper(out: &mut Vec<String>) {
         "typedef struct { uint64_t seed; uint64_t counter; int active; } chelis_rng_state;"
             .to_string(),
     );
+    // A host scalar key ([05-OP-69]..[05-OP-72]), `chelis_runtime.h`'s
+    // `chelis_key`, and its rank-0 key tensor, the form a kernel's key
+    // `Load` reads and a boxed key takes.
+    for line in [
+        "static inline chelis_key chelis_key_from_seed_bits(long long seed) {",
+        "    chelis_key key = { (unsigned long long)seed };",
+        "    return key;",
+        "}",
+        "static inline chelis_key chelis_key_derive_value(chelis_key key, unsigned long long index) {",
+        "    chelis_key derived = { chelis_key_derive(key.bits, index) };",
+        "    return derived;",
+        "}",
+        "static inline chelis_key chelis_key_fold_in(chelis_key key, long long n) {",
+        "    return chelis_key_derive_value(chelis_key_derive_value(key, 2ULL), (unsigned long long)n);",
+        "}",
+        "static inline chelis_tensor *chelis_key_tensor(chelis_key key) {",
+        "    chelis_tensor *tensor = chelis_alloc(0, NULL, CHELIS_DTYPE_KEY);",
+        "    chelis_tensor_write *guard = chelis_tensor_begin_write(tensor);",
+        "    chelis_write_view view = chelis_tensor_write_view(guard);",
+        "    ((unsigned long long *)view.data)[0] = key.bits;",
+        "    chelis_tensor_end_write(guard);",
+        "    return tensor;",
+        "}",
+        "static inline chelis_key chelis_key_of_tensor(const chelis_tensor *tensor) {",
+        "    chelis_read_view view = chelis_tensor_read_view(tensor);",
+        "    if (view.dtype != CHELIS_DTYPE_KEY || view.count != 1) {",
+        "        fprintf(stderr, \"internal: a scalar key is not a rank-0 key tensor\\n\");",
+        "        abort();",
+        "    }",
+        "    chelis_key key = { ((const unsigned long long *)view.data)[0] };",
+        "    return key;",
+        "}",
+        "static inline chelis_key chelis_key_take_value(chelis_value value) {",
+        "    chelis_tensor *tensor = chelis_tensor_take_value(value);",
+        "    chelis_key key = chelis_key_of_tensor(tensor);",
+        "    chelis_tensor_release(tensor);",
+        "    return key;",
+        "}",
+        "static inline chelis_tensor *chelis_split_keys_tensor(chelis_key key, long long count) {",
+        "    if (count < 0) chelis_numeric_trap(\"numeric trap: domain in split_keys at i64\");",
+        "    int64_t extent = (int64_t)count;",
+        "    chelis_tensor *tensor = chelis_alloc(1, &extent, CHELIS_DTYPE_KEY);",
+        "    chelis_tensor_write *guard = chelis_tensor_begin_write(tensor);",
+        "    chelis_write_view view = chelis_tensor_write_view(guard);",
+        "    for (long long j = 0; j < count; j++) {",
+        "        ((unsigned long long *)view.data)[j] = chelis_key_fold_in(key, j).bits;",
+        "    }",
+        "    chelis_tensor_end_write(guard);",
+        "    return tensor;",
+        "}",
+    ] {
+        out.push(line.to_string());
+    }
 }
 
 /// Translation-unit-local support for Std.Io.Json's canonical object
@@ -3568,6 +3621,26 @@ impl<'a> HostEmitter<'a> {
         args: &[HostExpr],
         arg_vars: &[(String, HostType)],
     ) -> Result<(), Unsupported> {
+        // [05-OP-8]: `uniform_like(k, template, low, high)`; the key is the
+        // first operand, and the rest keep their positions relative to it.
+        let key_var = match arg_vars.first() {
+            Some((var, HostType::Key)) => var.clone(),
+            _ => {
+                return Err(Unsupported::new(
+                    UnsupportedKind::Builtin("uniform_like".to_string()),
+                    "`chelis build` host emission",
+                    Stage::Codegen("c"),
+                    chelis_types::deliberate_rejection!(
+                        "[04-TOT-2]",
+                        "uniform_like's first operand must be a key; the checker types it \
+                         as one, so a non-key here is an internal desync"
+                    ),
+                ));
+            }
+        };
+        // The key check above proves both slices non-empty.
+        let args = &args[1..];
+        let arg_vars = &arg_vars[1..];
         let template = match arg_vars.first() {
             Some((var, HostType::Tensor(_))) => var.clone(),
             _ => {
@@ -3591,25 +3664,10 @@ impl<'a> HostEmitter<'a> {
         let low_f64_expr = format!("((double)({low_f32_expr}))");
         let high_f64_expr = format!("((double)({high_f32_expr}))");
 
-        // A draw outside an active scope is reachable, not an internal
-        // desync: a top-level binding with an unhandled `Random` is a hard
-        // check error, but an exported `def` carrying one is not, and its
-        // generated wrapper initializes `__chelis_rng` inactive. Abort there
-        // rather than draw from a stream no handler owns.
-        let key = self.next_temp("uniform_key");
-        self.lines.push(format!(
-            "{}if (__chelis_rng == NULL || !__chelis_rng->active) {{",
-            self.indent
-        ));
-        self.lines.push(format!(
-            "{}    fprintf(stderr, \"uniform_like requires an active host RNG scope\\n\");",
-            self.indent
-        ));
-        self.lines.push(format!("{}    abort();", self.indent));
-        self.lines.push(format!("{}}}", self.indent));
+        let key = format!("{key_var}.bits");
         // [05-OP-8] validates finite bounds, `low <= high` and a finite
-        // difference at the draw's arithmetic width before it consumes an
-        // ordinal: f64 subtracts the widened bounds, every other float dtype
+        // difference at the draw's arithmetic width before any element is
+        // drawn: f64 subtracts the widened bounds, every other float dtype
         // subtracts in f32.
         let low = self.next_temp("uniform_low");
         let high = self.next_temp("uniform_high");
@@ -3647,11 +3705,6 @@ impl<'a> HostEmitter<'a> {
         ));
         self.lines.push(format!("{ind}    }}"));
         self.lines.push(format!("{ind}}}"));
-        self.lines.push(format!(
-            "{}uint64_t {key} = chelis_random_key(__chelis_rng->seed, __chelis_rng->counter++);",
-            self.indent
-        ));
-
         self.lines.push(format!(
             "{}{target} = chelis_host_alloc_like({template}, chelis_host_tensor_dtype({template}));",
             self.indent
@@ -5411,6 +5464,58 @@ impl<'a> HostEmitter<'a> {
             let arg_ty = expected_builtin_arg_ty(name, ty, index).unwrap_or(inferred_ty);
             self.emit_expr_to_var(arg, &arg_name, &arg_ty)?;
             arg_vars.push((arg_name, arg_ty));
+        }
+
+        // [05-OP-69]..[05-OP-72]: the key operations over host scalar keys,
+        // with the same derivation the kernels use (`chelis_key_derive`).
+        match name {
+            "key_from_seed" => {
+                self.lines.push(format!(
+                    "{}{target} = chelis_key_from_seed_bits((long long){});",
+                    self.indent, arg_vars[0].0
+                ));
+                return Ok(());
+            }
+            "fold_in" => {
+                self.lines.push(format!(
+                    "{}{target} = chelis_key_fold_in({}, (long long){});",
+                    self.indent, arg_vars[0].0, arg_vars[1].0
+                ));
+                return Ok(());
+            }
+            "split_key" => {
+                let halves = self.next_temp("split_key_values");
+                let ind = self.indent.clone();
+                let key = &arg_vars[0].0;
+                self.lines.push(format!("{ind}chelis_value {halves}[2];"));
+                for index in 0..2 {
+                    self.lines.push(format!(
+                        "{ind}{halves}[{index}] = {};",
+                        self.box_value_expr(
+                            &format!("chelis_key_derive_value({key}, {index}ULL)"),
+                            &HostType::Key
+                        )?
+                    ));
+                }
+                // The tuple retains its items, so the boxes are released
+                // here, as every other tuple construction releases them.
+                self.lines.push(format!(
+                    "{ind}{target} = chelis_tuple_from_values({halves}, 2);"
+                ));
+                for index in 0..2 {
+                    self.lines
+                        .push(format!("{ind}chelis_value_release({halves}[{index}]);"));
+                }
+                return Ok(());
+            }
+            "split_keys" => {
+                self.lines.push(format!(
+                    "{}{target} = chelis_split_keys_tensor({}, (long long){});",
+                    self.indent, arg_vars[0].0, arg_vars[1].0
+                ));
+                return Ok(());
+            }
+            _ => {}
         }
 
         if name == "__json_canonical_object_entries" {
@@ -7455,11 +7560,18 @@ impl<'a> HostEmitter<'a> {
                 // Preserve the declared dtype and stored bits through the
                 // existing tagged scalar carrier; no scalar class falls back
                 // to f32 or interprets f16/bf16 storage as an integer value.
-                let scalar = scalar_carrier_expr(&value_name, &inferred_ty)?;
-                self.lines.push(format!(
-                    "{}{tensor_name} = chelis_scalar_tensor({scalar});",
-                    self.indent
-                ));
+                // A key has no scalar carrier: it enters the kernel as the
+                // rank-0 key tensor its key `Load` reads.
+                let tensor = if inferred_ty == HostType::Key {
+                    format!("chelis_key_tensor({value_name})")
+                } else {
+                    format!(
+                        "chelis_scalar_tensor({})",
+                        scalar_carrier_expr(&value_name, &inferred_ty)?
+                    )
+                };
+                self.lines
+                    .push(format!("{}{tensor_name} = {tensor};", self.indent));
                 (tensor_name.clone(), Some(tensor_name))
             };
             tensor_args.push(entry);
@@ -9108,6 +9220,9 @@ impl<'a> HostEmitter<'a> {
                 "chelis_value_box_scalar(chelis_scalar_from_bits(CHELIS_DTYPE_BOOL, (uint64_t)({value} ? 1 : 0)))"
             ),
             HostType::String => format!("chelis_value_take_string({value})"),
+            // A key has no scalar carrier ([05-OP-31] governs numeric and
+            // bool scalars); a boxed key is its rank-0 key tensor.
+            HostType::Key => format!("chelis_value_take_tensor(chelis_key_tensor({value}))"),
             HostType::Adt(_, _) => format!("chelis_value_take_adt({value})"),
             HostType::Tensor(_) => format!("chelis_value_take_tensor({value})"),
             HostType::List(_) => format!("chelis_value_take_list({value})"),
@@ -9172,6 +9287,7 @@ impl<'a> HostEmitter<'a> {
                 format!("chelis_host_scalar_as_bool(chelis_value_unbox_scalar({value_expr}))")
             }
             HostType::String => format!("chelis_string_take_value({value_expr})"),
+            HostType::Key => format!("chelis_key_take_value({value_expr})"),
             HostType::Adt(_, _) => format!("chelis_adt_take_value({value_expr})"),
             HostType::Tensor(_) => format!("chelis_tensor_take_value({value_expr})"),
             HostType::List(_) => format!("chelis_list_take_value({value_expr})"),
@@ -9954,6 +10070,7 @@ fn host_type_may_carry_result_origin(ty: &HostType) -> bool {
         | HostType::Float64
         | HostType::Bool
         | HostType::String
+        | HostType::Key
         | HostType::Callback(_, _)
         | HostType::Dict(_, _)
         | HostType::MappedFile
@@ -10073,6 +10190,7 @@ fn checked_cast_abi_axis(ty: &HostType) -> Result<(Prim, CheckedCastSurface), Un
         HostType::Bool => Ok((Prim::Bool, CheckedCastSurface::Scalar)),
         HostType::Tensor(tensor) => Ok((tensor.precision, CheckedCastSurface::Tensor)),
         HostType::String
+        | HostType::Key
         | HostType::Callback(_, _)
         | HostType::Adt(_, _)
         | HostType::List(_)

@@ -25,6 +25,7 @@ typedef struct chelis_option chelis_option;
 typedef struct chelis_mapped_file chelis_mapped_file;
 
 typedef struct { chelis_dtype dtype; uint8_t reserved[7]; uint64_t bits; } chelis_scalar;
+typedef struct { uint64_t bits; } chelis_key;
 typedef uint8_t chelis_value_tag;
 enum { CHELIS_VALUE_UNIT = 0, CHELIS_VALUE_SCALAR = 1, CHELIS_VALUE_STRING = 2, CHELIS_VALUE_TENSOR = 3, CHELIS_VALUE_LIST = 4, CHELIS_VALUE_TUPLE = 5, CHELIS_VALUE_DICT = 6, CHELIS_VALUE_ADT = 7, CHELIS_VALUE_OPTION = 8, CHELIS_VALUE_MAPPED_FILE = 9 };
 typedef union { chelis_scalar scalar; void *handle; } chelis_value_payload;

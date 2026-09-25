@@ -2406,8 +2406,14 @@ pub fn builtin_env() -> (Env, VarGen) {
             tvar_restrictions: vec![(precision, TypeVarRestriction::ActiveFloat)],
             dvars: vec![],
             rvars: vec![rank],
+            // [05-OP-37]: the key comes first and is consumed; the tensor is
+            // borrowed.
             body: Type::Fn(
-                vec![borrowed(input.clone()), Type::Var(precision)],
+                vec![
+                    Type::Prim(Prim::Key),
+                    borrowed(input.clone()),
+                    Type::Var(precision),
+                ],
                 Box::new(input),
             ),
         };
@@ -2422,8 +2428,11 @@ pub fn builtin_env() -> (Env, VarGen) {
             tvar_restrictions: vec![],
             dvars: vec![],
             rvars: vec![],
+            // [05-OP-8]: the key comes first and is consumed; the template
+            // is borrowed.
             body: Type::Fn(
                 vec![
+                    Type::Prim(Prim::Key),
                     borrowed(Type::Var(input)),
                     Type::Prim(Prim::F32),
                     Type::Prim(Prim::F32),

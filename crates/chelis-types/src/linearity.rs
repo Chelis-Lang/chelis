@@ -2664,7 +2664,6 @@ fn builtin_arg_is_borrowed(name: Option<&str>, arg_index: usize) -> bool {
                 | "floor"
                 | "ceil"
                 | "round"
-                | "uniform_like"
                 | "cmplt"
                 | "not"
                 | "relu"
@@ -2685,7 +2684,6 @@ fn builtin_arg_is_borrowed(name: Option<&str>, arg_index: usize) -> bool {
                 | "pad"
                 | "shrink"
                 | "stride"
-                | "dropout"
                 | "print"
                 | "debug"
                 | "to_string"
@@ -2698,6 +2696,9 @@ fn builtin_arg_is_borrowed(name: Option<&str>, arg_index: usize) -> bool {
                 | "index",
             0
         ) | ("conv", 0 | 1)
+        // [05-OP-8] and [05-OP-37] consume their key (operand 0) and borrow
+        // the tensor they read (operand 1).
+        | ("uniform_like" | "dropout", 1)
             | ("einsum", 1 | 2)
             | ("split", 0)
             | ("gather", 0 | 1)
@@ -3021,12 +3022,14 @@ const KEY_REUSE_SUGGESTION: &str = "Keys are single-use: derive a fresh key for 
      `split_key(k)` or `split_keys(k, n)` instead of reusing `k`";
 
 /// spec/04 section 1.1: the (builtin, operand position) pairs whose atom
-/// names `key`. [05-OP-70..72] take their key first; `drop` ([05-OP-67])
-/// consumes any value.
+/// names `key`. [05-OP-70..72], [05-OP-8] and [05-OP-37] take their key
+/// first; `drop` ([05-OP-67]) consumes any value.
 const KEY_OPERAND_BUILTINS: &[(&str, usize)] = &[
     ("split_key", 0),
     ("split_keys", 0),
     ("fold_in", 0),
+    ("dropout", 0),
+    ("uniform_like", 0),
     ("drop", 0),
 ];
 

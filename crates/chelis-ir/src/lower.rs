@@ -437,38 +437,6 @@ fn raise_fatal_lowering_error(
     raise_lowering_diagnostic(LowerDiagnostic::new(message, span, span_id).fatal())
 }
 
-/// chelis#2409: `vmap` over a function that draws has no conforming reading
-/// under the counter-stream bridge. Eval drew every row at seed zero and C
-/// drew the whole batch at one ordinal, both silently outside spec/06 §3.2.
-/// Until explicit keys define `vmap` over key rows
-/// (`spec/design/randomness_explicit_keys.md`), every lane refuses it.
-fn reject_vmap_over_draws(body_dag: &Dag, transform: &str, body: &Expr) {
-    let draws = body_dag
-        .nodes()
-        .iter()
-        .any(|node| matches!(node.op, RiscOp::DrawKey { .. }));
-    if draws {
-        raise_fatal_unsupported(
-            Unsupported::new(
-                UnsupportedKind::Construct(format!(
-                    "`{transform}` over a function that draws from `Random`"
-                )),
-                "IR lowering",
-                Stage::Lowering,
-                chelis_types::unimplemented_rejection!(
-                    2409,
-                    "vmap over a function that draws has no conforming batched stream \
-                     until explicit random keys define vmap over key rows; the previous \
-                     lowering drew every row at seed zero in eval and the whole batch at \
-                     one ordinal in C"
-                ),
-            ),
-            Some(body.span()),
-            body.span_id().map(ToOwned::to_owned),
-        );
-    }
-}
-
 fn raise_fatal_unsupported(
     unsupported: Unsupported,
     span: Option<Span>,
@@ -3964,9 +3932,7 @@ fn ty_expr_to_deep(ty: &TensorType) -> Expr {
         chelis_types::types::Prim::Int64 => "i64",
         chelis_types::types::Prim::Bool => "bool",
         chelis_types::types::Prim::String => "string",
-        chelis_types::types::Prim::Key => {
-            panic!("a random key has no Deep type spelling; no lowered def returns one")
-        }
+        chelis_types::types::Prim::Key => "key",
     };
     // Decode-once (chelis#731 Phase 3): this is a PROGRAMMATIC producer
     // running in the lowerer, downstream of the stamper and the desugarer,
@@ -6807,14 +6773,6 @@ fn permuted_tensor_type(ty: &TensorType, axes: &[usize]) -> TensorType {
     }
 }
 
-/// One `with seed` handler region lowered inside a graph: its literal seed's
-/// two's-complement bits and the region's scoped handler instance.
-#[derive(Debug, Clone, Copy)]
-struct RandomScope {
-    instance: u32,
-    seed: u64,
-}
-
 struct LowerCtx<'program> {
     host_program: Option<&'program crate::host::HostLoweringSession<'program>>,
     host_sources: Vec<crate::host::staged::HostSource>,
@@ -6923,12 +6881,6 @@ struct LowerCtx<'program> {
     /// `None` outside those subcontexts, where the branch path alone is the
     /// path.
     random_path_condition: Option<NodeId>,
-    /// The `with seed` handler region lowered inside this graph that encloses
-    /// the expression being lowered, or `None` when draws inherit the stream
-    /// the graph's caller holds (`spec/design/randomness_counter_stream.md`
-    /// §2). Each region gets its own [`crate::dag::RandomHandler::Scoped`]
-    /// instance, so two regions with equal seeds keep separate counters.
-    random_scope: Option<RandomScope>,
     /// The next unused scoped-handler instance in this graph. A subcontext
     /// whose graph is spliced back continues this numbering and hands it
     /// back, so instances stay unique after the splice.
@@ -7078,7 +7030,6 @@ impl<'program> LowerCtx<'program> {
             program_defs: program_defs.into(),
             program_signatures: program_signatures.into(),
             random_path_condition: None,
-            random_scope: None,
             next_random_instance: 0,
             if_branch_depth: 0,
             linearity,
@@ -7261,62 +7212,22 @@ impl<'program> LowerCtx<'program> {
         TensorType { dims, precision }
     }
 
-    /// Lower one draw of a key-operand random primitive
-    /// (`spec/design/randomness_counter_stream.md` §2): a
-    /// [`RiscOp::DrawKey`] that takes the next ordinal of the enclosing
-    /// handler, then the primitive consuming that key. The draw key reads the
-    /// innermost `with seed` region lowered in this graph, else the stream the
-    /// graph's caller holds. Both nodes carry the position's
-    /// [`Self::draw_activation`] when it has one.
+    /// Lower one draw of a key-operand random primitive ([05-OP-8],
+    /// [05-OP-37]): the primitive consuming `key`, the lowered source key
+    /// operand. The draw carries the position's [`Self::draw_activation`]
+    /// when it has one, so a draw in a where-lowered arm validates its
+    /// controls only when its arm is selected, and two draws in exclusive
+    /// arms may share one key (spec/10 section 3.2, rule V3).
     fn lower_keyed_draw(
         &mut self,
         draw: crate::dag::RandomDraw,
+        key: NodeId,
         data: NodeId,
         controls: &[NodeId],
         ty: TensorType,
     ) -> NodeId {
         let span = self.current_span_id.clone();
-        let scalar = |precision| TensorType {
-            dims: Vec::new(),
-            precision,
-        };
-        let (handler, seed) = match self.random_scope {
-            Some(scope) => {
-                let value = chelis_types::finalize_scalar(
-                    "with seed",
-                    Prim::Int64,
-                    chelis_types::RawScalar::Int(scope.seed as i64),
-                )
-                .expect("an i64 seed is exact at i64");
-                let seed = self.dag.add_node(
-                    RiscOp::Const { value },
-                    Vec::new(),
-                    scalar(Prim::Int64),
-                    span.clone(),
-                );
-                (
-                    crate::dag::RandomHandler::Scoped {
-                        instance: scope.instance,
-                    },
-                    Some(seed),
-                )
-            }
-            None => (crate::dag::RandomHandler::Inherited, None),
-        };
         let activation = self.draw_activation();
-        let key = self.dag.add_node(
-            RiscOp::DrawKey {
-                handler,
-                draw,
-                dtype: ty.precision,
-            },
-            seed.into_iter()
-                .chain(controls.iter().copied())
-                .chain(activation)
-                .collect(),
-            scalar(Prim::Key),
-            span.clone(),
-        );
         let op = match draw {
             crate::dag::RandomDraw::Dropout => RiscOp::Dropout,
             crate::dag::RandomDraw::UniformLike => RiscOp::UniformLike,
@@ -7327,6 +7238,41 @@ impl<'program> LowerCtx<'program> {
             .chain(activation)
             .collect();
         self.dag.add_node(op, inputs, ty, span)
+    }
+
+    /// `[05-OP-70]` `split_key(k)`: two IR nodes, `Split{Left}` and
+    /// `Split{Right}`, because an IR node has one output. Each half has the
+    /// key's shape.
+    fn lower_split_key(&mut self, key_expr: &Expr) -> LoweredValue {
+        let key = self.lower_expr_node(key_expr, "split_key key");
+        let key_ty = self.key_operand_type(key);
+        let span = self.current_span_id.clone();
+        let halves = [crate::dag::KeyBranch::Left, crate::dag::KeyBranch::Right]
+            .into_iter()
+            .map(|branch| {
+                LoweredValue::Node(self.dag.add_node(
+                    RiscOp::Split { branch },
+                    vec![key],
+                    key_ty.clone(),
+                    span.clone(),
+                ))
+            })
+            .collect();
+        LoweredValue::Tuple(halves)
+    }
+
+    /// The type of a lowered key operand: its own shape at dtype `key`.
+    fn key_operand_type(&self, key: NodeId) -> TensorType {
+        TensorType {
+            dims: self
+                .dag
+                .get(key)
+                .expect("a lowered key operand is a node of this graph")
+                .output_type
+                .dims
+                .clone(),
+            precision: Prim::Key,
+        }
     }
 
     /// The activation of a draw lowered at the current position: the path
@@ -9704,6 +9650,9 @@ impl<'program> LowerCtx<'program> {
             {
                 return value;
             }
+            if func_name == "split_key" && kids.len() == 2 {
+                return self.lower_split_key(&kids[1]);
+            }
             return LoweredValue::Node(self.lower_builtin_app(
                 func_name,
                 &kids[1..],
@@ -10185,7 +10134,6 @@ impl<'program> LowerCtx<'program> {
         // Random wrapper adjoints are pathwise: the differentiated graph's
         // draws read the same handler as the forward execution, and its
         // scoped instances continue this graph's numbering.
-        subctx.random_scope = self.random_scope;
         subctx.next_random_instance = self.next_random_instance;
         subctx.allow_host_list_ad_rewrites = true;
         // Subctx inherits the parent's current span so synthesized loads
@@ -11540,7 +11488,6 @@ impl<'program> LowerCtx<'program> {
         // runtime extent witness.
         let captured_bindings = self.seed_subctx_with_lexical_scope(&mut subctx, &param_names);
         let root_value = subctx.lower_resolved_body(fn_expr, &param_names, body);
-        reject_vmap_over_draws(&subctx.dag, "vmap", body);
         for root in root_value.flatten_nodes() {
             subctx.dag.add_root(root);
         }
@@ -11831,7 +11778,6 @@ impl<'program> LowerCtx<'program> {
         let output = subctx
             .lower_resolved_body(fn_expr, &param_names, body)
             .expect_node("vmap(grad(...)) requires a scalar floating output");
-        reject_vmap_over_draws(&subctx.dag, "vmap(grad(...))", body);
         if subctx
             .callable_dependency_state
             .output_depends_on_unresolved(&subctx.dag, output)
@@ -12380,7 +12326,67 @@ impl<'program> LowerCtx<'program> {
                     self.attach_reuse_hint(node, app_span, &[x])
                 }
             }
-            "uniform_like" if args.len() == 3 => {
+            // [05-OP-69]: `key_from_seed(seed)`, element-wise over the seed's
+            // shape. Never constant-folded, so a derived key stays symbolic.
+            "key_from_seed" if args.len() == 1 => {
+                let seed = self.lower_expr_node(&args[0], "key_from_seed seed");
+                let key_ty = self.key_operand_type(seed);
+                self.dag.add_node(
+                    RiscOp::KeyFromSeed,
+                    vec![seed],
+                    key_ty,
+                    self.current_span_id.clone(),
+                )
+            }
+            // [05-OP-72]: `fold_in(k, n)` over exactly equal shapes.
+            "fold_in" if args.len() == 2 => {
+                let key = self.lower_expr_node(&args[0], "fold_in key");
+                let n = self.lower_expr_node(&args[1], "fold_in index");
+                let key_ty = self.key_operand_type(key);
+                self.dag.add_node(
+                    RiscOp::FoldIn,
+                    vec![key, n],
+                    key_ty,
+                    self.current_span_id.clone(),
+                )
+            }
+            // [05-OP-71]: `split_keys(k, n)` appends the count axis. A literal
+            // count is a literal extent; any other count is the rank-0 i64
+            // node the split reads at run time, and the extent the checked
+            // type declares for that axis is a claim every lane checks
+            // against it before any key exists.
+            "split_keys" if args.len() == 2 => {
+                let key = self.lower_expr_node(&args[0], "split_keys key");
+                let mut inputs = vec![key];
+                let count = self.lower_one_bound(&args[1], &mut inputs, "split_keys count");
+                let mut out_ty = self.key_operand_type(key);
+                let stamped = (ty.dims.len() == out_ty.dims.len() + 1)
+                    .then(|| ty.dims.last().cloned())
+                    .flatten();
+                let count_dim = match (&count, stamped) {
+                    // A literal claim on a literal count is checked like any
+                    // other declared extent; a fresh checker extent that the
+                    // program never pinned is the literal itself.
+                    (RtDim::Lit(_), Some(DimInfo::Lit(claimed))) => DimInfo::Lit(claimed),
+                    (RtDim::Lit(value), _) => DimInfo::Lit(*value),
+                    // A runtime count declares its axis (`op_declared_output_axes`).
+                    (_, Some(stamped)) => stamped,
+                    (_, None) => {
+                        DimInfo::Named(format!("_split_keys_{}", self.dag.nodes().len()), None)
+                    }
+                };
+                out_ty.dims.push(count_dim);
+                self.dag.add_node(
+                    RiscOp::SplitN { count },
+                    inputs,
+                    out_ty,
+                    self.current_span_id.clone(),
+                )
+            }
+            "uniform_like" if args.len() == 4 => {
+                // [05-OP-8]: the key comes first and is consumed.
+                let key = self.lower_expr_node(&args[0], "uniform_like key");
+                let args = &args[1..];
                 let template = self.lower_expr_node(&args[0], "uniform_like template");
                 // UniformLike is shape-preserving over its template input, so
                 // its type is the template's actual tensor type, not an
@@ -12397,13 +12403,17 @@ impl<'program> LowerCtx<'program> {
                 let high = self.lower_expr_node(&args[2], "uniform_like high bound");
                 let node = self.lower_keyed_draw(
                     crate::dag::RandomDraw::UniformLike,
+                    key,
                     template,
                     &[low, high],
                     resolved_ty,
                 );
                 self.attach_reuse_hint(node, app_span, &[template])
             }
-            "dropout" if args.len() == 2 => {
+            "dropout" if args.len() == 3 => {
+                // [05-OP-37]: the key comes first and is consumed.
+                let key = self.lower_expr_node(&args[0], "dropout key");
+                let args = &args[1..];
                 let x = self.lower_expr_node(&args[0], "dropout input");
                 // Dropout preserves its operand's shape. Inlined AD metadata
                 // can still name the callee's formal axes after a runtime
@@ -12417,8 +12427,13 @@ impl<'program> LowerCtx<'program> {
                 // dtype, validated by the draw at execution before it consumes
                 // an ordinal.
                 let rate = self.lower_expr_node(&args[1], "dropout rate");
-                let node =
-                    self.lower_keyed_draw(crate::dag::RandomDraw::Dropout, x, &[rate], resolved_ty);
+                let node = self.lower_keyed_draw(
+                    crate::dag::RandomDraw::Dropout,
+                    key,
+                    x,
+                    &[rate],
+                    resolved_ty,
+                );
                 self.attach_reuse_hint(node, app_span, &[x])
             }
 
@@ -17013,7 +17028,10 @@ impl<'program> LowerCtx<'program> {
                         self.current_span_id.clone(),
                     );
                 }
-                let seed = self.extract_u64_value(&kids[0]).unwrap_or_else(|| {
+                // [05-RNG-1]: a draw reads the key it is given, so the
+                // handler scopes no draw; its seed is still validated until
+                // the `with seed` form is deleted (chelis#2413).
+                let _seed = self.extract_u64_value(&kids[0]).unwrap_or_else(|| {
                     let unsupported = Unsupported::new(
                         UnsupportedKind::Construct(
                             "an explicit random seed that is not a statically-resolvable signed \
@@ -17035,18 +17053,11 @@ impl<'program> LowerCtx<'program> {
                         kids[0].span_id().map(ToOwned::to_owned),
                     )
                 });
-                let saved_random_scope = self.random_scope;
-                self.random_scope = Some(RandomScope {
-                    instance: self.next_random_instance,
-                    seed,
-                });
                 self.next_random_instance = self
                     .next_random_instance
                     .checked_add(1)
                     .expect("scoped Random handler instances fit u32");
-                let result = self.lower_expr(&kids[1]);
-                self.random_scope = saved_random_scope;
-                result
+                self.lower_expr(&kids[1])
             }
             Ok(EffectKind::Resource) if kids.len() >= 2 => {
                 // An observed lowering records the Resource requirement it
