@@ -1,7 +1,8 @@
 //! Step 1 of chelis#2413: native C execution of the explicit key operations
 //! on hand-built graphs, against `key_ref_ext.py`'s independent
 //! transcription of [05-RNG-2], [05-OP-8] and [05-OP-37], against the
-//! counter-stream C draws, and against the DAG evaluator.
+//! counter-stream C draws, and against the DAG evaluator; and spec/04
+//! §1.1.3's HIP `key` cell against the HIP build.
 mod ownership_support;
 
 use chelis_ir::dag::{
@@ -1809,4 +1810,470 @@ fn a_float_parameter_given_a_key_tensor_names_the_key_in_c() {
         ),
         "{stderr}"
     );
+}
+
+// ---- grad over draws keyed by a runtime-count split ----
+
+/// A node whose leading axis is `n`, the axis a runtime-count split declares
+/// and the data it batches binds, followed by `trailing` literal axes.
+fn over_n(
+    dag: &mut Dag,
+    op: RiscOp,
+    inputs: Vec<NodeId>,
+    trailing: &[usize],
+    prim: Prim,
+) -> NodeId {
+    dag.add_node(
+        op,
+        inputs,
+        TensorType {
+            dims: named_dims("n", trailing),
+            precision: prim,
+        },
+        None,
+    )
+}
+
+/// `split_keys(key(seed), count)` with its count axis declared `n`.
+fn runtime_split_over_n(dag: &mut Dag, seed: i64, count: NodeId) -> NodeId {
+    let seed = i64_const(dag, seed);
+    let root = node(dag, RiscOp::KeyFromSeed, vec![seed], &[], Prim::Key);
+    over_n(
+        dag,
+        RiscOp::SplitN {
+            count: RtDim::Node(1),
+        },
+        vec![root, count],
+        &[],
+        Prim::Key,
+    )
+}
+
+/// `sum(value)` over `[n, 4]`, one axis at a time.
+fn total_over_n(dag: &mut Dag, value: NodeId, prim: Prim) -> NodeId {
+    let rows = over_n(
+        dag,
+        RiscOp::sum_default(1, prim).unwrap(),
+        vec![value],
+        &[],
+        prim,
+    );
+    node(
+        dag,
+        RiscOp::sum_default(0, prim).unwrap(),
+        vec![rows],
+        &[],
+        prim,
+    )
+}
+
+/// The pruned gradient graph of `forward`'s `output` with respect to `wrt`,
+/// rooted at the gradients in `wrt`'s order.
+fn gradient_graph(forward: &Dag, output: NodeId, wrt: &[NodeId]) -> Dag {
+    let result = chelis_ir::grad::grad_dag_checked(forward, output, wrt)
+        .unwrap_or_else(|error| panic!("grad: {error:?}"));
+    let mut dag = result.dag.clone();
+    dag.set_roots(wrt.iter().map(|id| result.grad_nodes[id]).collect());
+    chelis_ir::optimize::dead_code_eliminate(&dag)
+}
+
+/// Both lanes stop at the split with the same extent line and trap.
+fn assert_count_mismatch_traps_in_both_lanes(
+    dag: Dag,
+    inputs: &[(&str, Input)],
+    rows: usize,
+    count: i64,
+) {
+    let context = format!("extent `n`: claimed = {rows}, split_keys axis 0 = {count}");
+    let trap = "numeric trap: domain in split_keys at i64";
+    let eval = run_eval(&dag, inputs).unwrap_err();
+    assert_eq!(eval, format!("{context}\n{trap}"));
+    let stderr = run_c_failure(dag, inputs);
+    assert!(stderr.contains(&format!("{context}\n{trap}")), "{stderr}");
+}
+
+/// chelis#2413: `grad` of `sum(dropout(x, 0.5, split_keys(key(11), c)))`
+/// with a runtime count `c`, given as a parameter or read as `shape(x, 0)`.
+/// Each element's gradient is the forward mask's scale or zero, so it equals
+/// the forward dropout of ones; eval and C agree on it bit for bit, a zero
+/// count runs, and a count other than `x`'s rows traps identically in both.
+///
+/// Evidentiary status: REGRESSION TEST. At 034eb0f9b `grad` refused both
+/// graphs: its runtime-extent pass made every node over `n` depend on the
+/// split's key, which the key rules reject.
+#[test]
+fn grad_of_a_dropout_keyed_by_a_runtime_count_split_agrees_in_c_and_eval() {
+    for prim in [Prim::F32, Prim::F64] {
+        for count_from_data in [false, true] {
+            let mut forward = Dag::new();
+            let x = over_n(
+                &mut forward,
+                RiscOp::Load { name: "x".into() },
+                vec![],
+                &[4],
+                prim,
+            );
+            let count = if count_from_data {
+                node(
+                    &mut forward,
+                    RiscOp::Shape { axis: 0 },
+                    vec![x],
+                    &[],
+                    Prim::Int64,
+                )
+            } else {
+                load(&mut forward, "c", &[], Prim::Int64)
+            };
+            let keys = runtime_split_over_n(&mut forward, 11, count);
+            let rate = float_const(&mut forward, prim, 0.5);
+            let drawn = over_n(
+                &mut forward,
+                RiscOp::Dropout,
+                vec![x, rate, keys],
+                &[4],
+                prim,
+            );
+            let total = total_over_n(&mut forward, drawn, prim);
+            forward.add_root(total);
+            let backward = gradient_graph(&forward, total, &[x]);
+            let mut mask = forward.clone();
+            mask.set_roots(vec![drawn]);
+            let mask = chelis_ir::optimize::dead_code_eliminate(&mask);
+
+            let inputs = |count: i64, rows: usize, fill: fn(usize) -> f64| {
+                [
+                    ("c", Input::Ints(vec![], vec![count])),
+                    (
+                        "x",
+                        Input::Floats(prim, vec![rows, 4], (0..rows * 4).map(fill).collect()),
+                    ),
+                ]
+            };
+            let want = run_eval(&mask, &inputs(3, 3, |_| 1.0)).unwrap();
+            assert!(want[0].contains(&0), "{prim:?}: {want:x?}");
+            assert!(want[0].iter().any(|bits| *bits != 0), "{prim:?}: {want:x?}");
+            let data = inputs(3, 3, |i| 1.0 + i as f64);
+            assert_eq!(run_eval(&backward, &data).unwrap(), want, "{prim:?}");
+            assert_eq!(run_c(backward.clone(), &data), want, "{prim:?}");
+            let empty = inputs(0, 0, |_| 1.0);
+            assert_eq!(
+                run_eval(&backward, &empty).unwrap(),
+                vec![Vec::<u64>::new()]
+            );
+            assert_eq!(run_c(backward.clone(), &empty), vec![Vec::<u64>::new()]);
+            if !count_from_data {
+                assert_count_mismatch_traps_in_both_lanes(backward, &inputs(4, 3, |_| 1.0), 3, 4);
+            }
+        }
+    }
+}
+
+/// chelis#2413: `grad` of `sum(uniform_like(t, lo, hi, keys) * w)` with a
+/// per-row `lo: [n]`, a shared `hi`, and `keys = split_keys(key(5), c)` for
+/// a runtime count `c`. Both bound adjoints agree in eval and C bit for bit,
+/// a zero count gives an empty `lo` gradient and a zero `hi` gradient, and a
+/// count other than the rows traps identically in both lanes.
+///
+/// Evidentiary status: REGRESSION TEST. At 034eb0f9b `grad` refused the
+/// graph for the same key dependency.
+#[test]
+fn grad_of_per_row_uniform_bounds_over_a_runtime_count_split_agrees_in_c_and_eval() {
+    for prim in [Prim::F32, Prim::F64] {
+        let mut forward = Dag::new();
+        let count = load(&mut forward, "c", &[], Prim::Int64);
+        let t = over_n(
+            &mut forward,
+            RiscOp::Load { name: "t".into() },
+            vec![],
+            &[4],
+            prim,
+        );
+        let lo = over_n(
+            &mut forward,
+            RiscOp::Load { name: "lo".into() },
+            vec![],
+            &[],
+            prim,
+        );
+        let hi = load(&mut forward, "hi", &[], prim);
+        let w = over_n(
+            &mut forward,
+            RiscOp::Load { name: "w".into() },
+            vec![],
+            &[4],
+            prim,
+        );
+        let keys = runtime_split_over_n(&mut forward, 5, count);
+        let drawn = over_n(
+            &mut forward,
+            RiscOp::UniformLike,
+            vec![t, lo, hi, keys],
+            &[4],
+            prim,
+        );
+        let weighted = over_n(&mut forward, RiscOp::Mul, vec![drawn, w], &[4], prim);
+        let total = total_over_n(&mut forward, weighted, prim);
+        forward.add_root(total);
+        let backward = gradient_graph(&forward, total, &[lo, hi]);
+
+        let inputs = |count: i64, rows: usize| {
+            [
+                ("c", Input::Ints(vec![], vec![count])),
+                ("t", Input::Floats(prim, vec![rows, 4], vec![0.0; rows * 4])),
+                (
+                    "lo",
+                    Input::Floats(
+                        prim,
+                        vec![rows],
+                        (0..rows).map(|r| r as f64 - 1.0).collect(),
+                    ),
+                ),
+                ("hi", Input::Floats(prim, vec![], vec![3.0])),
+                (
+                    "w",
+                    Input::Floats(
+                        prim,
+                        vec![rows, 4],
+                        (0..rows * 4).map(|i| 0.5 + i as f64 * 0.25).collect(),
+                    ),
+                ),
+            ]
+        };
+        let eval = run_eval(&backward, &inputs(3, 3)).unwrap();
+        assert_eq!(
+            eval.iter().map(Vec::len).collect::<Vec<_>>(),
+            [3, 1],
+            "{prim:?}"
+        );
+        assert_eq!(run_c(backward.clone(), &inputs(3, 3)), eval, "{prim:?}");
+        let zero = vec![Vec::new(), float_bits(prim, &[0.0])];
+        assert_eq!(
+            run_eval(&backward, &inputs(0, 0)).unwrap(),
+            zero,
+            "{prim:?}"
+        );
+        assert_eq!(run_c(backward.clone(), &inputs(0, 0)), zero, "{prim:?}");
+        assert_count_mismatch_traps_in_both_lanes(backward, &inputs(4, 3), 3, 4);
+    }
+}
+
+// ---- spec/04 §1.1.3's HIP `key` cell, through the product gate ----
+
+/// The HIP build of a lowered graph as `chelis build --target hip` and the
+/// compiler API run it: dead-code elimination, BLAS selection, the capability
+/// gate `reject_unsupported_hip_ops`, then fusion, ownership and emission.
+/// The error names the stage that refused.
+fn hip_build(dag: &Dag) -> Result<(), String> {
+    let dag = chelis_ir::optimize::dead_code_eliminate(dag);
+    let specialized = chelis_ir::specialize::specialize_for_blas(&dag);
+    chelis_compiler_api::compiler::reject_unsupported_hip_ops(&specialized)
+        .map_err(|error| format!("gate: {error:?}"))?;
+    let selected = chelis_backend_hip::prepare_dag_for_codegen(chelis_ir::fuse::fuse(&specialized));
+    let verified = chelis_ir::ownership::lower_dag_ownership(selected)
+        .and_then(chelis_ir::ownership::verify_ownership)
+        .map_err(|error| format!("ownership: {error}"))?;
+    chelis_backend_hip::codegen_hip(verified, "sample")
+        .map(|_| ())
+        .map_err(|error| format!("emission: {error}"))
+}
+
+/// How a draw's key reaches it, one case per clause of the HIP `key` cell.
+#[derive(Clone, Copy, Debug)]
+enum HipKey {
+    /// The key a `with seed` region lowered into the graph gives its draw.
+    WithSeed,
+    /// The same key for a draw under a runtime activation.
+    WithSeedActivated,
+    /// The same key for a draw with a runtime bound.
+    WithSeedRuntimeBound,
+    /// The key of the caller's stream: no `with seed` region in the graph.
+    Inherited,
+    /// A `with seed` key for a dropout rather than a `uniform_like`.
+    WithSeedDropout,
+    /// `key_from_seed(7)`.
+    FromSeed,
+    /// `fold_in(split_key(key_from_seed(-3)).1, 9)`.
+    Derived,
+    /// A row of `split_keys(key_from_seed(7), 3)`, keying a `[3, 8]` draw.
+    SplitRows,
+    /// A key parameter.
+    Parameter,
+    /// `key_from_seed(7)` returned as a result.
+    Result,
+}
+
+/// A graph whose only key reaches a draw by `how`, or is the result, at
+/// template dtype `prim`. It holds only the nodes that case uses, since the
+/// verifier rejects a dangling node.
+fn hip_key_graph(how: HipKey, prim: Prim) -> Dag {
+    let mut dag = Dag::new();
+    let scoped = RandomHandler::Scoped { instance: 0 };
+    let draw_key = |dag: &mut Dag, handler: RandomHandler, draw: RandomDraw, controls| {
+        node(
+            dag,
+            RiscOp::DrawKey {
+                handler,
+                draw,
+                dtype: prim,
+            },
+            controls,
+            &[],
+            Prim::Key,
+        )
+    };
+    if let HipKey::Result = how {
+        let seed = i64_const(&mut dag, 7);
+        let key = node(&mut dag, RiscOp::KeyFromSeed, vec![seed], &[], Prim::Key);
+        dag.add_root(key);
+        return dag;
+    }
+    let rows = if let HipKey::SplitRows = how {
+        vec![3, 8]
+    } else {
+        vec![8]
+    };
+    let like = load(&mut dag, "like", &rows, prim);
+    if let HipKey::WithSeedDropout = how {
+        let seed = i64_const(&mut dag, 7);
+        let rate = float_const(&mut dag, prim, 0.5);
+        let key = draw_key(&mut dag, scoped, RandomDraw::Dropout, vec![seed, rate]);
+        let dropped = node(
+            &mut dag,
+            RiscOp::Dropout,
+            vec![like, rate, key],
+            &rows,
+            prim,
+        );
+        dag.add_root(dropped);
+        return dag;
+    }
+    let low = match how {
+        HipKey::WithSeedRuntimeBound => load(&mut dag, "low", &[], Prim::F32),
+        _ => float_const(&mut dag, Prim::F32, 0.0),
+    };
+    let high = float_const(&mut dag, Prim::F32, 1.0);
+    let (key, active) = match how {
+        HipKey::WithSeed | HipKey::WithSeedRuntimeBound => {
+            let seed = i64_const(&mut dag, 7);
+            let controls = vec![seed, low, high];
+            (
+                draw_key(&mut dag, scoped, RandomDraw::UniformLike, controls),
+                None,
+            )
+        }
+        HipKey::WithSeedActivated => {
+            let seed = i64_const(&mut dag, 7);
+            let active = load(&mut dag, "active", &[], Prim::Bool);
+            let controls = vec![seed, low, high, active];
+            (
+                draw_key(&mut dag, scoped, RandomDraw::UniformLike, controls),
+                Some(active),
+            )
+        }
+        HipKey::Inherited => {
+            let handler = RandomHandler::Inherited;
+            let controls = vec![low, high];
+            (
+                draw_key(&mut dag, handler, RandomDraw::UniformLike, controls),
+                None,
+            )
+        }
+        HipKey::FromSeed => {
+            let seed = i64_const(&mut dag, 7);
+            (
+                node(&mut dag, RiscOp::KeyFromSeed, vec![seed], &[], Prim::Key),
+                None,
+            )
+        }
+        HipKey::Derived => {
+            let seed = i64_const(&mut dag, -3);
+            let root = node(&mut dag, RiscOp::KeyFromSeed, vec![seed], &[], Prim::Key);
+            let right = RiscOp::Split {
+                branch: KeyBranch::Right,
+            };
+            let right = node(&mut dag, right, vec![root], &[], Prim::Key);
+            let nine = i64_const(&mut dag, 9);
+            (
+                node(&mut dag, RiscOp::FoldIn, vec![right, nine], &[], Prim::Key),
+                None,
+            )
+        }
+        HipKey::SplitRows => {
+            let seed = i64_const(&mut dag, 7);
+            let root = node(&mut dag, RiscOp::KeyFromSeed, vec![seed], &[], Prim::Key);
+            let split = RiscOp::SplitN {
+                count: RtDim::Lit(3),
+            };
+            (node(&mut dag, split, vec![root], &[3], Prim::Key), None)
+        }
+        HipKey::Parameter => (load(&mut dag, "k", &[], Prim::Key), None),
+        HipKey::Result | HipKey::WithSeedDropout => unreachable!("built above"),
+    };
+    let inputs = [like, low, high, key].into_iter().chain(active).collect();
+    let drawn = node(&mut dag, RiscOp::UniformLike, inputs, &rows, prim);
+    dag.add_root(drawn);
+    dag
+}
+
+/// spec/04 §1.1.3's HIP `key` cell, driven through the product path rather
+/// than the emitter: the HIP build admits a key only as the key a `with
+/// seed` region lowered into the graph gives one of its `uniform_like` draws
+/// with literal bounds and no activation. The gate refuses every key
+/// operation, key parameter and key result, and emission refuses the other
+/// draw keys.
+///
+/// Evidentiary status: CLAIM LOCK. It pins the cell to the gate; at
+/// 034eb0f9b the cell named key operations this gate refuses.
+#[test]
+fn the_hip_build_admits_only_a_with_seed_draws_key() {
+    let gate = "does not support tensor precision `key`";
+    let cases = [
+        (HipKey::WithSeed, None),
+        (
+            HipKey::WithSeedActivated,
+            Some("a HIP draw key under a runtime activation"),
+        ),
+        (
+            HipKey::WithSeedRuntimeBound,
+            Some("a HIP draw key with runtime bounds"),
+        ),
+        (
+            HipKey::Inherited,
+            Some("a HIP draw key that inherits its caller's Random stream"),
+        ),
+        (
+            HipKey::WithSeedDropout,
+            Some("a key-operand random node in the HIP DAG emitter"),
+        ),
+        (HipKey::FromSeed, Some(gate)),
+        (HipKey::Derived, Some(gate)),
+        (HipKey::SplitRows, Some(gate)),
+        (HipKey::Parameter, Some(gate)),
+        (HipKey::Result, Some(gate)),
+    ];
+    for prim in [Prim::F32, Prim::F64] {
+        for (how, refusal) in cases {
+            let dag = hip_key_graph(how, prim);
+            assert_eq!(
+                chelis_ir::verify::verify(&dag),
+                Vec::<String>::new(),
+                "{how:?} {prim:?}"
+            );
+            match (hip_build(&dag), refusal) {
+                (Ok(()), None) => {}
+                (Err(error), Some(needle)) => {
+                    let stage = if needle == gate {
+                        "gate: "
+                    } else {
+                        "emission: "
+                    };
+                    assert!(
+                        error.starts_with(stage) && error.contains(needle),
+                        "{how:?} {prim:?}: expected {stage}`{needle}`, got {error}"
+                    );
+                }
+                (outcome, _) => panic!("{how:?} {prim:?}: {outcome:?}"),
+            }
+        }
+    }
 }

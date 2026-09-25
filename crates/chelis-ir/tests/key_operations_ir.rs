@@ -11,7 +11,7 @@
 
 use chelis_ir::dag::{
     Dag, DimInfo, KeyBranch, LogicalKind, NodeId, RandomDraw, RandomHandler, RiscOp, RtDim,
-    TensorType, UniformBound,
+    TensorType, UniformBound, record_runtime_dim_shape_deps,
 };
 use chelis_ir::eval::{RandomFrame, TensorValue, eval_tensor_roots_with_frame};
 use chelis_ir::grad::grad_dag_checked;
@@ -2126,6 +2126,93 @@ fn a_key_takes_no_cotangent_and_grad_replays_the_forward_key() {
         .map(|keep| if *keep { 2.0 } else { 0.0 })
         .collect();
     assert_eq!(out[&gradient].to_f64_lossy_vec(), expected);
+}
+
+/// A runtime-count split declares its count axis `n`, which the data it
+/// batches also binds, but its value is a key, and no node takes a key as a
+/// dependency (V4). `grad`'s runtime-extent pass records none on it, whether
+/// the count is a parameter or read from the data with `shape(x, 0)`, and the
+/// backward graph verifies with the split still in it.
+#[test]
+fn grad_records_no_dependency_on_a_runtime_count_split() {
+    for count_from_data in [false, true] {
+        let prim = Prim::F32;
+        let mut dag = Dag::new();
+        let x = dag.add_node(
+            RiscOp::Load { name: "x".into() },
+            vec![],
+            named_ty(&["n"], &[4], prim),
+            None,
+        );
+        let count = if count_from_data {
+            node(
+                &mut dag,
+                RiscOp::Shape { axis: 0 },
+                vec![x],
+                &[],
+                Prim::Int64,
+            )
+        } else {
+            load(&mut dag, "c", &[], Prim::Int64)
+        };
+        let seed = i64_const(&mut dag, 11);
+        let root = node(&mut dag, RiscOp::KeyFromSeed, vec![seed], &[], Prim::Key);
+        let keys = dag.add_node(
+            RiscOp::SplitN {
+                count: RtDim::Node(1),
+            },
+            vec![root, count],
+            named_ty(&["n"], &[], Prim::Key),
+            None,
+        );
+        let rate = float_const(&mut dag, prim, 0.5);
+        let drawn = dag.add_node(
+            RiscOp::Dropout,
+            vec![x, rate, keys],
+            named_ty(&["n"], &[4], prim),
+            None,
+        );
+        let rows = dag.add_node(
+            RiscOp::sum_default(1, prim).unwrap(),
+            vec![drawn],
+            named_ty(&["n"], &[], prim),
+            None,
+        );
+        let total = node(
+            &mut dag,
+            RiscOp::sum_default(0, prim).unwrap(),
+            vec![rows],
+            &[],
+            prim,
+        );
+        dag.add_root(total);
+        assert_eq!(verify(&dag), Vec::<String>::new());
+
+        let mut recorded = dag.clone();
+        record_runtime_dim_shape_deps(&mut recorded);
+        assert_eq!(
+            verify(&recorded),
+            Vec::<String>::new(),
+            "count from data: {count_from_data}"
+        );
+        assert!(
+            recorded
+                .nodes()
+                .iter()
+                .all(|node| !node.shape_deps.contains(&keys)),
+            "count from data: {count_from_data}"
+        );
+
+        let grad = grad_dag_checked(&dag, total, &[x])
+            .unwrap_or_else(|error| panic!("count from data {count_from_data}: {error:?}"));
+        assert_eq!(verify(&grad.dag), Vec::<String>::new());
+        assert!(
+            grad.dag
+                .nodes()
+                .iter()
+                .any(|node| matches!(node.op, RiscOp::SplitN { .. }))
+        );
+    }
 }
 
 #[test]

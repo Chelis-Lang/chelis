@@ -2519,6 +2519,13 @@ pub(crate) fn op_declared_axes_by_node(dag: &Dag) -> UnordMap<NodeId, Vec<(Strin
 pub fn record_runtime_dim_shape_deps(dag: &mut Dag) {
     let mut declarers: UnordMap<String, NodeId> = UnordMap::new();
     for node in dag.nodes() {
+        // chelis#2413: a runtime-count `SplitN` declares its count axis, but
+        // its value is a key, which no node may take as a dependency (spec/10
+        // §3.2). It needs no edge: a runtime count can trap, so every pruner
+        // keeps the split live by itself (`Dag::random_node_may_trap`).
+        if node.output_type.precision == Prim::Key {
+            continue;
+        }
         for (symbol, _) in op_declared_output_axes(dag, node) {
             declarers.entry(symbol).or_insert(node.id);
         }
