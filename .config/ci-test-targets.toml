@@ -1089,6 +1089,11 @@ packages = ["chelis-e2e"]
 # Exact explicit-binder migration examples and their direct executable owners.
 # Keep these file-specific: a new example must establish its own evidence.
 [[path_rule]]
+prefix = "examples/checked_host_local_ascription.ch"
+disposition = "packages"
+packages = ["chelis-cli"]
+
+[[path_rule]]
 prefix = "examples/checked_runtime_extents.ch"
 disposition = "packages"
 packages = ["chelis-cli"]

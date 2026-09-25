@@ -596,6 +596,14 @@ fn parity_list_foundation() {
 }
 
 #[test]
+fn parity_checked_host_local_ascription() {
+    drive_parity(
+        &examples_root().join("checked_host_local_ascription.ch"),
+        true,
+    );
+}
+
+#[test]
 fn parity_checked_runtime_extents() {
     drive_parity(&examples_root().join("checked_runtime_extents.ch"), true);
 }

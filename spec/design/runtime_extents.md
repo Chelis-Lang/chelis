@@ -568,6 +568,16 @@ rows have receipt identities independent from the local-ascription leaf below.
 
 ##### Local tensor ascriptions (#2110, split from #1948)
 
+The host initializer path retains the selected checker's literal claims instead
+of forcing a host tensor builder into a tensor helper. The bounded #2374
+matrix covers `pad_sequences_to` on Eval and linked C: exact values, runtime
+agreement and disagreement on either axis, aliases, effect order, and literal
+static rejection. Its batch and width observations come from evaluated
+operands before output allocation. Named local host witnesses remain an
+explicit unsupported residual of #2374; this path does not establish general
+host-builder preallocation coverage.
+
+
 A local tensor ascription is an extent claim under C2.3 even though it is not a
 function result. Lowering records a `LocalAscriptionClaim` at the annotated
 binding, attaches it to the initializer's producing operation before aliases
