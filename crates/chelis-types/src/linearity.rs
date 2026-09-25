@@ -525,16 +525,7 @@ pub fn check_linearity(program: &CheckedProgram) -> Result<CheckedProgram, Vec<C
     // linearity is the third-largest front-end phase on a declaration-heavy
     // program. Abandoning the walk proves nothing about the tail, so this is a
     // hard failure rather than a partial `Ok` (covered-or-rejected).
-    let cancel = crate::cancel::current_cancel_token();
-    for expr in program.annotated_exprs() {
-        if cancel.as_ref().is_some_and(CancelToken::is_cancelled) {
-            checker
-                .errors
-                .push(crate::cancel::cancellation_check_error());
-            break;
-        }
-        checker.check_top_level(expr, &mut scope);
-    }
+    checker.check_program_items(program.annotated_exprs(), &mut scope);
 
     if checker.errors.is_empty() {
         Ok(program.clone().with_linearity(checker.info))
@@ -672,16 +663,7 @@ pub fn check_linearity_with_context(
     // Walk ONLY new-code bodies. Library bodies are never re-walked,
     // so library tensor parameters never enter the new-code scope.
     // chelis#930: cancellable at the same grain as [`check_linearity`].
-    let cancel = crate::cancel::current_cancel_token();
-    for expr in new_program.annotated_exprs() {
-        if cancel.as_ref().is_some_and(CancelToken::is_cancelled) {
-            checker
-                .errors
-                .push(crate::cancel::cancellation_check_error());
-            break;
-        }
-        checker.check_top_level(expr, &mut scope);
-    }
+    checker.check_program_items(new_program.annotated_exprs(), &mut scope);
 
     if checker.errors.is_empty() {
         Ok(new_program.clone().with_linearity(checker.info))
@@ -690,7 +672,66 @@ pub fn check_linearity_with_context(
     }
 }
 
+/// The body of a top-level `def` whose initializer is a lambda, which
+/// [04-INF-7] makes a function declaration rather than an eager value.
+fn function_declaration_body(children: &[Expr]) -> Option<&Expr> {
+    children.first().and_then(symbol_name)?;
+    children
+        .get(1)
+        .filter(|body| matches!(get_tag_expr(body), Some(DeepTag::Fn)))
+}
+
 impl Checker {
+    /// Walk a program's top-level initializers in order, then its function
+    /// declarations, cancellable between items (chelis#930).
+    fn check_program_items(&mut self, exprs: &[Expr], scope: &mut LinearScope) {
+        let cancel = crate::cancel::current_cancel_token();
+        let cancelled = || cancel.as_ref().is_some_and(CancelToken::is_cancelled);
+        for expr in exprs {
+            if cancelled() {
+                self.errors.push(crate::cancel::cancellation_check_error());
+                return;
+            }
+            self.check_top_level(expr, scope);
+        }
+        for expr in exprs {
+            if cancelled() {
+                self.errors.push(crate::cancel::cancellation_check_error());
+                return;
+            }
+            self.check_function_declarations(expr, scope);
+        }
+    }
+
+    /// chelis#2549: a function declaration ([04-INF-7]) is not a closure
+    /// created in the top-level scope, and a call may run after every
+    /// top-level initializer, including from another module. Each body is
+    /// therefore checked against its own clone of the full top-level scope
+    /// as it stands once every initializer has been walked: a value some
+    /// initializer consumes is rejected whatever the def's text position,
+    /// and nothing the body does changes top-level ownership state.
+    fn check_function_declarations(&mut self, expr: &Expr, scope: &LinearScope) {
+        match expr.carrier() {
+            ExprCarrier::DecodedNode(DeepTag::Module, _, children) => {
+                for child in children.iter().skip(1) {
+                    self.check_function_declarations(child, scope);
+                }
+            }
+            ExprCarrier::DecodedNode(DeepTag::Def, _, children) => {
+                if let Some(body) = function_declaration_body(children) {
+                    let mut declaration_scope = scope.clone();
+                    self.check_expr(body, &mut declaration_scope);
+                }
+            }
+            ExprCarrier::DecodedNode(_, _, _)
+            | ExprCarrier::StructuralList(_)
+            | ExprCarrier::UndecodableHead(_, _, _)
+            | ExprCarrier::Atom(_)
+            | ExprCarrier::MetadataMap(_)
+            | ExprCarrier::MetadataExpression(_) => {}
+        }
+    }
+
     fn check_top_level(&mut self, expr: &Expr, scope: &mut LinearScope) {
         // Linearity-F3 PR 1 + PR 2: recurse through `(module {} name
         // children...)` wrappers so module-wrapped top-level defs
@@ -715,17 +756,10 @@ impl Checker {
                         self.invalid_borrow(body, "borrow cannot be returned from a function");
                         return;
                     }
-                    // chelis#2549: a def whose initializer is a lambda is a
-                    // function declaration ([04-INF-7]), not a closure
-                    // created in the top-level scope. Its free references
-                    // keep their declaration scope and every call's result
-                    // is a new owner ([04-LIN-4]), so its body is checked
-                    // against a fork of the top-level scope: the body still
-                    // sees every earlier consume, but nothing it does can
-                    // consume a top-level binding for later readers.
-                    if matches!(get_tag_expr(body), Some(DeepTag::Fn)) {
-                        let mut declaration_scope = scope.clone();
-                        self.check_expr(body, &mut declaration_scope);
+                    // chelis#2549: a function declaration's body is checked by
+                    // `check_function_declarations` once every initializer
+                    // has been walked, never at the def's text position.
+                    if function_declaration_body(children).is_some() {
                         return;
                     }
                     // V2-F4: top-level `def name() = x` where the body is a

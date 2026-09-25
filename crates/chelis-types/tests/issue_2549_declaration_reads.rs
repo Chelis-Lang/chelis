@@ -13,10 +13,12 @@
 //! importing module of a package) was rejected with "already consumed by
 //! closure capture".
 //!
+//! A declaration may be called after every top-level initializer, so its body
+//! is checked against the ownership state once every initializer has run.
 //! The negative controls pin what stays rejected: consumes inside one
 //! declaration body, an anonymous closure created by an eager value
-//! initializer ([04-LIN-2]), and a declaration that reads a value an
-//! earlier initializer already consumed.
+//! initializer ([04-LIN-2]), and a declaration that reads a value some
+//! initializer consumes, whether the def sits before or after that consume.
 
 use chelis_surf::desugar::desugar_program;
 use chelis_surf::parser::parse_str;
@@ -246,8 +248,10 @@ def first() -> Holder = held
 }
 
 #[test]
-fn match_after_a_declaration_reading_the_scrutinee_is_accepted() {
-    assert_clean(
+fn declaration_reading_a_value_a_later_match_consumes_is_rejected() {
+    // The declaration may be called after the match, so its text position
+    // before the match does not make the read valid.
+    assert_use_after_consume(
         linearity(
             r#"
 type Holder =
@@ -260,6 +264,101 @@ m = match held with {
 z = first().items
 "#,
         ),
-        "a match on `held` after a declaration that reads it",
+        &["variable `held`", "match scrutinee"],
+        "a declaration reading a value a later match scrutinee consumes",
+    );
+}
+
+/// Place `declaration` before and after `consume`, then `tail` last, and
+/// assert both orders are rejected with the same consume named: a
+/// declaration's verdict never depends on where its def sits in the text.
+fn assert_rejected_in_both_orders(
+    declaration: &str,
+    consume: &str,
+    tail: &str,
+    fragments: &[&str],
+    what: &str,
+) {
+    let prelude = "sampled = to_tensor([1.0f32, 2.0f32])\n\
+                   def eat(t: tensor[2, f32]) -> tensor[2, f32] = add(t, t)\n";
+    for (order, source) in [
+        (
+            "declaration before the consume",
+            format!("{prelude}{declaration}\n{consume}\n{tail}\n"),
+        ),
+        (
+            "declaration after the consume",
+            format!("{prelude}{consume}\n{declaration}\n{tail}\n"),
+        ),
+    ] {
+        assert_use_after_consume(linearity(&source), fragments, &format!("{what}, {order}"));
+    }
+}
+
+#[test]
+fn declaration_and_a_top_level_realize_are_rejected_in_both_orders() {
+    assert_rejected_in_both_orders(
+        "def first() -> tensor[2, f32] = sampled",
+        "y = realize(sampled)",
+        "z = first()",
+        &["variable `sampled`", "realize"],
+        "a declaration reading `sampled` beside `y = realize(sampled)`",
+    );
+}
+
+#[test]
+fn declaration_and_a_consuming_parameter_are_rejected_in_both_orders() {
+    assert_rejected_in_both_orders(
+        "def first() -> tensor[2, f32] = sampled",
+        "y = eat(sampled)",
+        "z = add(first(), y)",
+        &["variable `sampled`", "eat"],
+        "a declaration reading `sampled` beside `y = eat(sampled)`",
+    );
+}
+
+#[test]
+fn consuming_declaration_body_and_a_top_level_realize_are_rejected_in_both_orders() {
+    assert_rejected_in_both_orders(
+        "def first() -> tensor[2, f32] = realize(sampled)",
+        "b = realize(sampled)",
+        "c = add(first(), b)",
+        &["variable `sampled`", "realize"],
+        "a declaration consuming `sampled` beside `b = realize(sampled)`",
+    );
+}
+
+#[test]
+fn declarations_reading_a_list_of_tensors_value_are_accepted() {
+    assert_clean(
+        linearity(
+            r#"
+stack = [to_tensor([1.0f32, 2.0f32]), to_tensor([3.0f32, 4.0f32])]
+def lone() -> List[tensor[2, f32]] = stack
+def ltwo() -> List[tensor[2, f32]] = stack
+def total(xs: List[tensor[2, f32]]) -> tensor[2, f32] = fold(fn (acc: tensor[2, f32], x: tensor[2, f32]) -> add(acc, x), to_tensor([0.0f32, 0.0f32]), xs)
+b = add(total(lone()), total(ltwo()))
+"#,
+        ),
+        "two declarations reading the list value `stack`",
+    );
+}
+
+#[test]
+fn declaration_reading_a_list_value_an_initializer_consumes_is_rejected() {
+    // `total` takes its list by owned parameter, so `c = total(stack)`
+    // consumes `stack` for every later reader, declarations included.
+    assert_use_after_consume(
+        linearity(
+            r#"
+stack = [to_tensor([1.0f32, 2.0f32]), to_tensor([3.0f32, 4.0f32])]
+def lone() -> List[tensor[2, f32]] = stack
+def total(xs: List[tensor[2, f32]]) -> tensor[2, f32] = fold(fn (acc: tensor[2, f32], x: tensor[2, f32]) -> add(acc, x), to_tensor([0.0f32, 0.0f32]), xs)
+c = total(stack)
+b = total(lone())
+"#,
+        ),
+        &["variable `stack`", "total"],
+        "a declaration reading `stack` after `c = total(stack)` consumes it",
     );
 }

@@ -6,11 +6,16 @@
 //! free reference keeps its declaration scope ([04-INF-7], [04-LIN-4]). The
 //! checker used to treat the first such declaration as a closure that
 //! consumed the value, so the second importer failed every lane with
-//! "already consumed by closure capture". The negative control keeps a real
-//! consume-then-reuse inside one declaration body rejected through the same
-//! package path.
+//! "already consumed by closure capture". A declaration may be called after
+//! every initializer of the linked program, so the negative controls keep a
+//! declaration that reads a value some initializer consumes rejected, in the
+//! library or in a later-sorted module, as well as a consume-then-reuse inside
+//! one declaration body.
+
+mod common;
 
 use assert_cmd::Command;
+use common::{gcc_available, link_generated, parse_tensor_data};
 use std::fs;
 use std::path::{Path, PathBuf};
 use tempfile::{TempDir, tempdir};
@@ -135,6 +140,22 @@ fn three_importers_and_a_second_import_path_evaluate_and_build() {
         out.join("d.c").is_file(),
         "build must emit C; stderr: {stderr}"
     );
+    if !gcc_available() {
+        eprintln!("skipped the native run of d.c: no host C compiler");
+        return;
+    }
+    let status = link_generated(&out, "d.c", "d");
+    assert!(status.success(), "link failed: {status}");
+    let run = std::process::Command::new(out.join("d"))
+        .output()
+        .expect("compiled binary should run");
+    let native = String::from_utf8(run.stdout).expect("UTF-8 stdout");
+    assert!(run.status.success(), "compiled d failed: {native}");
+    assert_eq!(
+        parse_tensor_data(&native, "main"),
+        parse_tensor_data(&stdout, "main"),
+        "compiled C must print eval's `main`; native stdout: {native}"
+    );
 }
 
 #[test]
@@ -176,5 +197,45 @@ fn consume_then_reuse_inside_one_importing_declaration_is_still_rejected() {
             && stderr.contains("already consumed by realize")
             && !stderr.contains(CONSUMED_BY_CAPTURE),
         "the only rejection must be the realize consume of `sampled`; stderr: {stderr}"
+    );
+}
+
+#[test]
+fn importer_declaration_reading_a_value_the_library_consumes_is_rejected() {
+    let a = importer("A");
+    let (dir, root) = shared_value_package(&[("src/a.ch", &a)]);
+    write_file(
+        &root.join("drawlib/src/draw.ch"),
+        "module Drawlib.Draw\nexport (sampled)\nsampled = to_tensor([1.0f32, 1.0f32])\n\
+         spent = realize(sampled)\n",
+    );
+    write_file(
+        &root.join("drawlib/src/extra.ch"),
+        "module Drawlib.Extra\nexport (again)\n\
+         def again() -> tensor[2, f32] = to_tensor([1.0f32, 1.0f32])\n",
+    );
+    let cache = dir.path().join("cache");
+    let (ok, _stdout, stderr) = chelis(&root, &cache, &["eval", "--file", "src/a.ch"]);
+    assert!(!ok, "App.A reads `sampled` after the library consumes it");
+    assert!(
+        stderr.contains("sampled`") && stderr.contains("already consumed by realize"),
+        "the rejection must be the library's realize of `sampled`; stderr: {stderr}"
+    );
+}
+
+#[test]
+fn declaration_before_a_later_module_consume_is_rejected() {
+    // App.A's declaration sorts before App.Z's consuming initializer, and
+    // App.Z's own `main` is called after it, so App.A's text position cannot
+    // make the read valid.
+    let a = importer("A");
+    let z = "module App.Z\nimport Drawlib.Draw (sampled)\nspent = realize(sampled)\n";
+    let (dir, root) = shared_value_package(&[("src/a.ch", &a), ("src/z.ch", z)]);
+    let cache = dir.path().join("cache");
+    let (ok, _stdout, stderr) = chelis(&root, &cache, &["eval", "--file", "src/a.ch"]);
+    assert!(!ok, "App.A reads `sampled` that App.Z consumes");
+    assert!(
+        stderr.contains("sampled`") && stderr.contains("already consumed by realize"),
+        "the rejection must be App.Z's realize of `sampled`; stderr: {stderr}"
     );
 }
