@@ -15,7 +15,7 @@ CLAUSES = {
     5: ("to_csv", "quoting", "non-differentiable"),
     6: ("truncated toward zero", "outside the target range it traps `overflow`", "non-differentiable"),
     7: ("exact `i64`", "negative value", "zero-cotangent adjoint"),
-    8: ("every active float", "same dtype", "Random call ordinal", "pathwise adjoint"),
+    8: ("every active float", "same dtype", "unit value of `word(k, i)`", "pathwise adjoint"),
     9: ("every active tensor element dtype", "no arithmetic", "runtime List shapes", "balanced tree"),
     10: ("`width` SHALL be non-negative", "same dtype", "truncated source cells"),
     11: ("`f16`, `bf16`, `f32`, or `f64`", "zero-length axis", "adjoint"),
