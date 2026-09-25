@@ -6337,6 +6337,24 @@ enum LoweredValue {
     },
 }
 
+/// A tuple whose every leaf is a key (spec/04 §8.4.1), such as the pair
+/// `split_key` returns. The graph carries each key as a key node and a tuple
+/// of them as a lowered tuple, so a staged host region never takes one as an
+/// opaque host value: a `tuple-get` or a draw could not read it back
+/// ([05-OP-70]).
+fn key_only_aggregate(ty: &crate::host_type_state::HostTypeTerm) -> bool {
+    use crate::host_type_state::{HostPrecisionTerm, HostTypeTerm};
+    fn key_leaf(ty: &HostTypeTerm) -> bool {
+        match ty {
+            HostTypeTerm::Scalar(HostPrecisionTerm::Concrete(Prim::Key)) => true,
+            HostTypeTerm::Tensor(tensor) => tensor.precision == Prim::Key,
+            HostTypeTerm::Tuple(items) => !items.is_empty() && items.iter().all(key_leaf),
+            _ => false,
+        }
+    }
+    matches!(ty, HostTypeTerm::Tuple(_)) && key_leaf(ty)
+}
+
 const RUNTIME_LIST_VIEW_CTOR: &str = "__chelis_runtime_list_view";
 
 #[derive(Clone)]
@@ -7957,7 +7975,11 @@ impl<'program> LowerCtx<'program> {
         };
         let is_var = matches!(stamped_parts(expr), Some((DeepTag::Var, _, _)));
         let is_callable = matches!(ty, HostTypeTerm::Fn(..));
-        if ty.is_unresolved() || matches!(ty, HostTypeTerm::Tensor(_)) || (is_var != is_callable) {
+        if ty.is_unresolved()
+            || matches!(ty, HostTypeTerm::Tensor(_))
+            || (is_var != is_callable)
+            || key_only_aggregate(&ty)
+        {
             return None;
         }
         let mut referenced = UnordSet::new();
