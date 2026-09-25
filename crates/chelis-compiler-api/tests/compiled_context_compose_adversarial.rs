@@ -1186,42 +1186,60 @@ fn gextra_source_hash_differs_when_only_module_name_differs() {
     );
 }
 
-// ─── G-extra — Library Random-effecting helper called from new code ──────
+// ─── G-extra — Library keyed-draw helper called from new code ────────────
 
 #[test]
-fn gextra_library_random_call_from_new_code_must_be_handled_or_rejected() {
+fn gextra_library_keyed_draw_from_new_code_agrees_across_context_and_monolith() {
     // RFC v5 (RT-1 F2 bypass): the monolithic baseline formats the reef-linked
     // library (internal-name mangled) and evaluates it; declare the linked
     // provenance, matching the now-guarded production paths.
     let _linked = chelis_compiler_api::install_linked_program_guard();
-    // Library function performs Random (calls dropout). If new code
-    // calls it WITHOUT a handler, the unhandled-effect validator must
-    // reject with a Random-mentioning error. (This is the core Phase D
-    // composition contract for new code at the Phase G surface.)
+    // The library helper draws with the key it is given. New code that calls
+    // it without a key is an arity error and new code that passes one is
+    // accepted, identically under `check_in_context` and the monolithic
+    // baseline. (Under the retired counter stream this was the unhandled
+    // `Random` composition contract.)
     let library = "module Mylib.Math\nexport (lib_drop)\n\n\
-                   def lib_drop(t: tensor[3, f32]) -> tensor[3, f32] = dropout(t, cast(0.5, f32))\n";
+                   def lib_drop(k: key, t: tensor[3, f32]) -> tensor[3, f32] = dropout(k, t, cast(0.5, f32))\n";
     let main = "module App.Main\n\ndef placeholder() -> i32 = cast(0, i32)\n";
     let (_dir, root) = build_pkg(library, main);
     let ctx = compile_reef_context(Path::new("/tmp/x"), &root).expect("ctx");
 
-    let snippet = "module App.Eval\nimport Mylib.Math (lib_drop)\n\n\
-                   def caller(t: tensor[3, f32]) -> tensor[3, f32] = lib_drop(t)\n";
-
-    let mono = prepare_eval(EvalRequest {
-        source_kind: SourceKind::Surf,
-        source: format_library_plus_snippet(&root, snippet),
-        bindings: BTreeMap::new(),
-    });
-    let inctx = check_in_context(&ctx, snippet);
-    let mono_rejects = mono.is_err();
-    let inctx_rejects = inctx.is_err();
-    let mono_err = mono.err();
-    let inctx_err = inctx.err();
-    assert_eq!(
-        mono_rejects, inctx_rejects,
-        "Random-handler enforcement must agree across with_context vs monolithic; \
-         mono_err={mono_err:?}, inctx_err={inctx_err:?}"
-    );
+    for (snippet, rejects) in [
+        (
+            "module App.Eval\nimport Mylib.Math (lib_drop)\n\n\
+             def caller(t: tensor[3, f32]) -> tensor[3, f32] = lib_drop(t)\n",
+            true,
+        ),
+        (
+            "module App.Eval\nimport Mylib.Math (lib_drop)\n\n\
+             def caller(t: tensor[3, f32]) -> tensor[3, f32] = lib_drop(key_from_seed(7i64), t)\n",
+            false,
+        ),
+    ] {
+        let mono = prepare_eval(EvalRequest {
+            source_kind: SourceKind::Surf,
+            source: format_library_plus_snippet(&root, snippet),
+            bindings: BTreeMap::new(),
+        });
+        let inctx = check_in_context(&ctx, snippet);
+        let errors = (
+            format!("{:?}", mono.as_ref().err()),
+            format!("{:?}", inctx.as_ref().err()),
+        );
+        assert_eq!(
+            (mono.is_err(), inctx.is_err()),
+            (rejects, rejects),
+            "keyed-draw composition must agree across with_context vs monolithic; \
+             snippet={snippet}, errors={errors:?}"
+        );
+        if rejects {
+            assert!(
+                errors.0.contains("arity") && errors.1.contains("arity"),
+                "a keyless call is an arity error on both paths: {errors:?}"
+            );
+        }
+    }
 }
 
 // ─── G-extra — Repeated check_in_context calls do not mutate context ─────

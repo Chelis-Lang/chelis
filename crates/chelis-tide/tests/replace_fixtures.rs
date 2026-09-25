@@ -16,8 +16,9 @@ pub const TENSOR_DEEP: &str = r#"(module {}
 
 pub const TENSOR_WELL_TYPED_BODY: &str = "(app {} (var {} relu) (var {} x))";
 
-pub const TENSOR_EFFECTING_BODY: &str =
-    "(app {} (var {} dropout) (var {} x) (lit {type: (t-prim {} f32)} 0.5))";
+/// `debug` performs `IO`, which the declared-pure `passthrough` forbids. (A
+/// random draw is no effect: it takes an explicit key.)
+pub const TENSOR_EFFECTING_BODY: &str = "(app {} (var {} debug) (var {} x))";
 
 pub const TENSOR_LINEARITY_BODY: &str =
     "(let {} (bind {} y (realize {} (var {} x))) (app {} (var {} add) (var {} x) (var {} y)))";
@@ -37,6 +38,7 @@ pub const ADD_TENSOR_IDENTITY: &str = r#"(defsig {}
     (var {} y)))
 "#;
 
+/// A declared-pure function whose body performs `IO` through `debug`.
 pub const ADD_TENSOR_EFFECTING: &str = r#"(defsig {}
   added_noisy
   (t-fn {eff: (effects {})}
@@ -47,7 +49,7 @@ pub const ADD_TENSOR_EFFECTING: &str = r#"(defsig {}
   (fn {}
     (params {}
       (y {type: (t-tensor {} (d-lit {} 4) (t-prim {} f32))}))
-    (app {} (var {} dropout) (var {} y) (lit {type: (t-prim {} f32)} 0.5))))
+    (app {} (var {} debug) (var {} y))))
 "#;
 
 pub const ADD_TENSOR_LINEARITY: &str = r#"(defsig {}
