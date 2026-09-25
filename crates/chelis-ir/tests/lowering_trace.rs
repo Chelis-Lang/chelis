@@ -48,13 +48,11 @@ fn feature_off_lane_defers_to_the_feature_owned_trace_oracle() {}
 
 #[cfg(feature = "lowering-trace")]
 #[test]
-fn trace_captures_the_actual_ad_call_with_its_scoped_draw_key() {
+fn trace_captures_the_actual_ad_call_with_its_draw_key() {
     let program = checked(
         r#"
-def loss(x: tensor[32, f32]) -> f32 = with seed(42i64) {
-  identity = with seed(42i64) { x }
-  tensor_to_scalar(sum(dropout(identity, 0.5f32), 0))
-}
+def loss(x: tensor[32, f32]) -> f32 =
+  tensor_to_scalar(sum(dropout(key_from_seed(42i64), x, 0.5f32), 0))
 def derivative(x: tensor[32, f32]) -> tensor[32, f32] = grad(loss)(x)
 "#,
     );
@@ -66,15 +64,7 @@ def derivative(x: tensor[32, f32]) -> tensor[32, f32] = grad(loss)(x)
     let draw_keys = |dag: &Dag| {
         dag.nodes()
             .iter()
-            .filter(|node| {
-                matches!(
-                    node.op,
-                    RiscOp::DrawKey {
-                        handler: chelis_ir::dag::RandomHandler::Scoped { .. },
-                        ..
-                    }
-                )
-            })
+            .filter(|node| matches!(node.op, RiscOp::KeyFromSeed))
             .count()
     };
     assert_eq!(draw_keys(&gradient.forward), 1);
@@ -92,13 +82,11 @@ def derivative(x: tensor[32, f32]) -> tensor[32, f32] = grad(loss)(x)
             .count(),
         1
     );
-    // Execute the captured backward graph itself. Its key belongs to the
-    // local seed handler, so no outer Random frame is needed.
-    let mut frame = chelis_ir::eval::RandomFrame::unhandled();
-    let values = chelis_ir::eval::eval_tensor_roots_with_frame(
+    // Execute the captured backward graph itself: its key is derived inside
+    // it, so it needs no outer input but `x`.
+    let values = chelis_ir::eval::eval_tensor_roots_exact(
         &gradient.backward,
         &[gradient.gradients[&gradient.wrt[0]]],
-        &mut frame,
         |name| {
             (name == "x").then(|| chelis_ir::eval::TensorValue::from_vec(vec![32], vec![1.0; 32]))
         },
@@ -110,14 +98,14 @@ def derivative(x: tensor[32, f32]) -> tensor[32, f32] = grad(loss)(x)
         .iter()
         .map(|value| (*value as f32).to_bits())
         .collect::<Vec<_>>();
-    // Independent BigInt splitmix/rotate reference, high53 -> f32 comparison;
-    // pinned full output, not expectations recovered from the candidate.
+    // `key_ref.py`'s independent transcription of [05-RNG-1] for
+    // `key_from_seed(42)`, high53 -> f32 comparison; pinned full output, not
+    // expectations recovered from the candidate.
     let expected = [
-        0, 2, 0, 0, 0, 0, 2, 0, 0, 2, 2, 0, 0, 2, 0, 2, 2, 2, 2, 0, 0, 0, 0, 0, 2, 2, 2, 2, 2, 2,
+        0, 0, 0, 0, 0, 0, 2, 2, 0, 0, 0, 2, 0, 0, 2, 2, 0, 2, 2, 0, 0, 0, 0, 2, 0, 0, 2, 0, 0, 2,
         2, 2,
     ];
     assert_eq!(bits, expected.map(|value| (value as f32).to_bits()));
-    assert_eq!(frame.inherited_counter(), None);
 }
 
 #[cfg(feature = "lowering-trace")]

@@ -779,7 +779,6 @@ fn all_previously_supported_host_combinators_reach_the_verified_boundary() {
         "xs = [1i64, 2i64]\nys = scan(fn (acc: i64, v: i64) -> add(acc, v), 0i64, xs)\n",
         "xs = [1i64, 2i64]\nys = partition(fn (v: i64) -> gt(v, 1i64), xs)\n",
         "xs = [1i64, 2i64]\nys = flat_map(fn (v: i64) -> [v, v], xs)\n",
-        "sampled = with seed(7i64) { 1i64 }\n",
     ] {
         verify_ownership(lower_source(source).unwrap()).unwrap();
     }
@@ -802,7 +801,6 @@ fn supported_combinators_keep_their_preexisting_typed_failure_twins() {
     );
     assert_front_rejects("xs = [1i64]\nys = partition(fn (v: i64) -> missing(v), xs)\n");
     assert_front_rejects("xs = [1i64]\nys = flat_map(fn (v: i64) -> missing(v), xs)\n");
-    assert_front_rejects("sampled = with seed(7i64) { missing }\n");
 }
 
 #[test]

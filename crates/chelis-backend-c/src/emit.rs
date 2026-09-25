@@ -4344,11 +4344,6 @@ impl CEmitter {
         }
     }
 
-    /// Record a forward draw: the key's handler state after the draw, and the
-    /// seed and ordinal it used.
-
-    /// Record a replay reading its forward draw's key, when that draw ran.
-
     /// [05-OP-37] over an operand rate and a key, and its pathwise replay
     /// over a cotangent: drop where the arithmetic-width unit is below the
     /// rate, else the finalized `div(x, sub(1p, rate))`.

@@ -227,10 +227,8 @@ def selected(
 fn drawing_helper_trace_captures_the_actual_pre_and_post_ad_graphs() {
     let program = manifested(
         r#"
-def loss(x: tensor[32, f32]) -> f32 = with seed(42i64) {
-  draw_free = with seed(7i64) { x }
-  tensor_to_scalar(sum(dropout(draw_free, 0.5f32), 0))
-}
+def loss(x: tensor[32, f32]) -> f32 =
+  tensor_to_scalar(sum(dropout(key_from_seed(42i64), x, 0.5f32), 0))
 def derivative(x: tensor[32, f32]) -> tensor[32, f32] = grad(loss)(x)
 "#,
     );
@@ -245,7 +243,7 @@ def derivative(x: tensor[32, f32]) -> tensor[32, f32] = grad(loss)(x)
     let count = |dag: &chelis_ir::Dag, op: fn(&RiscOp) -> bool| {
         dag.nodes().iter().filter(|node| op(&node.op)).count()
     };
-    let draw_key = |op: &RiscOp| matches!(op, RiscOp::DrawKey { .. });
+    let draw_key = |op: &RiscOp| matches!(op, RiscOp::KeyFromSeed);
     assert_eq!(count(&gradient.forward, draw_key), 1);
     assert_eq!(
         count(&gradient.backward, draw_key),
@@ -270,7 +268,7 @@ fn resource_requirement_survives_actual_ad_splice() {
     let program = manifested(
         r#"
 def loss(x: tensor[4, f32]) -> f32 = with device("cpu:author-device") {
-  with seed(42i64) { tensor_to_scalar(sum(dropout(x, 0.5f32), 0)) }
+  tensor_to_scalar(sum(dropout(key_from_seed(42i64), x, 0.5f32), 0))
 }
 def derivative(x: tensor[4, f32]) -> tensor[4, f32] = grad(loss)(x)
 "#,
@@ -291,7 +289,7 @@ def derivative(x: tensor[4, f32]) -> tensor[4, f32] = grad(loss)(x)
         backward
             .nodes()
             .iter()
-            .filter(|node| matches!(node.op, RiscOp::DrawKey { .. }))
+            .filter(|node| matches!(node.op, RiscOp::KeyFromSeed))
             .count(),
         1,
         "backward replay adds a node but no draw key"

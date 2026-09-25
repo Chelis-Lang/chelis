@@ -593,15 +593,10 @@ fn serde_rejects_duplicate_core_and_extension_entries_in_json_and_binary() {
 #[test]
 fn unknown_effect_diagnostics_preserve_the_kind_at_text_and_serde_ingress() {
     use chelis_deep::{Atom, Expr, Metadata, Span};
-    for kind in ["resource"] {
-        parse_str(&format!(
-            "(handle-effect {{effect: {kind}}} (lit {{}} 1) (lit {{}} 2))"
-        ))
-        .unwrap();
-        let value = Expr::Atom(Atom::Name(kind.into()), Span::new(0, 0));
-        let wire = serde_json::json!({"entries": [["effect", value]]});
-        assert!(serde_json::from_value::<Metadata>(wire).is_ok());
-    }
+    parse_str("(handle-effect {effect: resource} (lit {} 1) (lit {} 2))").unwrap();
+    let value = Expr::Atom(Atom::Name("resource".into()), Span::new(0, 0));
+    let wire = serde_json::json!({"entries": [["effect", value]]});
+    assert!(serde_json::from_value::<Metadata>(wire).is_ok());
     // `random` was a handler kind until the counter stream was retired
     // (#2413); it is now as unknown as `teleport` at both ingresses.
     for kind in ["teleport", "random"] {

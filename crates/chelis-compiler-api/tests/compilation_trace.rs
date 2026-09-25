@@ -47,14 +47,8 @@ fn direct_drawing_entry_pairs_actual_helper_normalization_and_complete_artifact(
                 .after_drops
                 .nodes()
                 .iter()
-                .any(|node| matches!(
-                    node.op,
-                    chelis_ir::dag::RiscOp::DrawKey {
-                        handler: chelis_ir::dag::RandomHandler::Scoped { .. },
-                        ..
-                    }
-                )),
-            "the captured lowering carries the entry's draw key"
+                .any(|node| matches!(node.op, chelis_ir::dag::RiscOp::Dropout)),
+            "the captured lowering carries the entry's draw"
         );
         selected.roots().len()
     })
