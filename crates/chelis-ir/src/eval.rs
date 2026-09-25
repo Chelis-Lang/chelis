@@ -464,7 +464,7 @@ fn rank0_bool(value: &TensorValue, what: &str) -> Result<bool, String> {
 
 /// The keys a key-operand random primitive draws with
 /// (`spec/10-serialization.md` §3.2).
-enum DrawKeys<'a> {
+enum KeyOperand<'a> {
     /// A rank-0 activation is false: the primitive validates and draws
     /// nothing and produces positive zeros.
     Inactive,
@@ -481,7 +481,7 @@ enum DrawKeys<'a> {
     },
 }
 
-impl DrawKeys<'_> {
+impl KeyOperand<'_> {
     fn row_active(&self, row: usize) -> bool {
         match self {
             Self::Rows {
@@ -511,7 +511,7 @@ fn draw_keys<'a>(
     node: &DagNode,
     key_slot: usize,
     values: &'a UnordMap<NodeId, TensorValue>,
-) -> Result<DrawKeys<'a>, String> {
+) -> Result<KeyOperand<'a>, String> {
     let activation = match node.inputs.get(key_slot + 1) {
         Some(activation) => Some(
             values
@@ -524,7 +524,7 @@ fn draw_keys<'a>(
         && activation.shape.is_empty()
         && !rank0_bool(activation, "random primitive activation")?
     {
-        return Ok(DrawKeys::Inactive);
+        return Ok(KeyOperand::Inactive);
     }
     let key = node
         .inputs
@@ -541,7 +541,7 @@ fn draw_keys<'a>(
         .keys()
         .ok_or_else(|| format!("random primitive at node {} has a non-key key", node.id.0))?;
     if key.shape.is_empty() {
-        return Ok(DrawKeys::Scalar(keys[0]));
+        return Ok(KeyOperand::Scalar(keys[0]));
     }
     let active = activation.filter(|activation| !activation.shape.is_empty());
     if active.is_some_and(|active| !key.shape.starts_with(&active.shape)) {
@@ -550,7 +550,7 @@ fn draw_keys<'a>(
             node.id.0, key.shape
         ));
     }
-    Ok(DrawKeys::Rows {
+    Ok(KeyOperand::Rows {
         keys,
         shape: &key.shape,
         active,
@@ -706,19 +706,19 @@ fn stack_draw_rows(
     node: &DagNode,
     data: &TensorValue,
     prim: Prim,
-    keys: DrawKeys<'_>,
+    keys: KeyOperand<'_>,
     mut draw: impl FnMut(usize, RandomKey, &[usize], usize) -> Result<TensorStorage, String>,
 ) -> Result<TensorStorage, String> {
     match keys {
-        DrawKeys::Inactive => zero_storage(prim, data.len()),
-        DrawKeys::Scalar(key) => draw(0, key, &[], data.len()),
-        DrawKeys::Rows {
+        KeyOperand::Inactive => zero_storage(prim, data.len()),
+        KeyOperand::Scalar(key) => draw(0, key, &[], data.len()),
+        KeyOperand::Rows {
             keys: rows,
             shape,
             active,
         } => {
             let row_len = batched_row_len(data, shape, node)?;
-            let keys = DrawKeys::Rows {
+            let keys = KeyOperand::Rows {
                 keys: rows,
                 shape,
                 active,
@@ -741,7 +741,7 @@ fn eval_dropout(
     node: &DagNode,
     data: &TensorValue,
     rate: &TensorValue,
-    keys: DrawKeys<'_>,
+    keys: KeyOperand<'_>,
 ) -> Result<TensorValue, String> {
     let storage = stack_draw_rows(node, data, data.prim(), keys, |row, key, shape, row_len| {
         let gathered;
@@ -766,7 +766,7 @@ fn eval_uniform_like(
     low: &TensorValue,
     high: &TensorValue,
     prim: Prim,
-    keys: DrawKeys<'_>,
+    keys: KeyOperand<'_>,
 ) -> Result<TensorValue, String> {
     let storage = stack_draw_rows(node, template, prim, keys, |row, key, shape, row_len| {
         let low = row_control(low, row, shape, "uniform_like low bound")?;
@@ -788,17 +788,17 @@ fn eval_uniform_bound_adjoint(
     g: &TensorValue,
     bound: crate::dag::UniformBound,
     prim: Prim,
-    keys: DrawKeys<'_>,
+    keys: KeyOperand<'_>,
 ) -> Result<TensorValue, String> {
     let bound = match bound {
         crate::dag::UniformBound::Low => chelis_types::UniformBound::Low,
         crate::dag::UniformBound::High => chelis_types::UniformBound::High,
     };
     match keys {
-        DrawKeys::Inactive => {
+        KeyOperand::Inactive => {
             zero_tensor("uniform_like", &concrete_shape(&node.output_type)?, prim)
         }
-        DrawKeys::Scalar(key) => {
+        KeyOperand::Scalar(key) => {
             let value = uniform_like_bound_adjoint(g.storage(), key, bound)
                 .map_err(|error| error.to_string())?;
             Ok(TensorValue::from_storage(
@@ -806,13 +806,13 @@ fn eval_uniform_bound_adjoint(
                 tensor_from_scalars(prim, &[value]),
             ))
         }
-        DrawKeys::Rows {
+        KeyOperand::Rows {
             keys: rows,
             shape,
             active,
         } => {
             let row_len = batched_row_len(g, shape, node)?;
-            let keys = DrawKeys::Rows {
+            let keys = KeyOperand::Rows {
                 keys: rows,
                 shape,
                 active,

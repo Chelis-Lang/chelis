@@ -583,8 +583,8 @@ const _: () = {
     // Version 18 (chelis#2413) adds the explicit key operations. They produce
     // keys, not float values; `SplitN`'s count is the tagged `WireRtDim` an
     // `Expand` size is, so they join the same group.
-    // Version 19 (chelis#2413) deletes the `DrawKey` bridge; it adds no
-    // operation.
+    // Version 19 (chelis#2413) deletes the counter-stream bridge operation;
+    // it adds no operation.
     assert!(WIRE_DAG_SCHEMA_VERSION == 19);
 };
 

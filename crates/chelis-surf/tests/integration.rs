@@ -635,7 +635,7 @@ fn parsed_surf_expression_spans_enter_deep_metadata() {
 }
 
 #[test]
-fn retired_with_seed_and_random_effect_are_typed_parse_errors() {
+fn retired_seed_handler_and_random_effect_are_typed_parse_errors() {
     // The counter stream's `with seed` handler and `Random` effect were
     // retired with the explicit key switch (#2413); both are typed parse
     // errors that point at explicit keys.

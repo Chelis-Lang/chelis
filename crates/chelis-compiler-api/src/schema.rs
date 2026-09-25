@@ -2114,10 +2114,10 @@ pub struct WireRecordPatternField {
 /// - `17`: random primitives take their controls and a key as operands
 ///   (chelis#2413). `UniformLike` and `Dropout` carry no fields; their inputs
 ///   are the data or template, the controls, the key and an optional Bool
-///   activation. The bridge `DrawKey` produced each key, `DropoutReplay` and
-///   `UniformBoundAdjoint` read a forward draw's key, and `key` is a
-///   structural precision with no literal carrier. A version-16 random node's
-///   baked controls and seed have no version-17 spelling.
+///   activation. A counter-stream bridge operation produced each key,
+///   `DropoutReplay` and `UniformBoundAdjoint` read a forward draw's key, and
+///   `key` is a structural precision with no literal carrier. A version-16
+///   random node's baked controls and seed have no version-17 spelling.
 /// - `18`: the explicit key operations `KeyFromSeed`, `Split`, `FoldIn` and
 ///   `SplitN` ([05-OP-69..72], chelis#2413). `key` is a precision at any
 ///   rank; a key may enter as a `Load` and be a root; a draw may take a
@@ -2125,10 +2125,11 @@ pub struct WireRecordPatternField {
 ///   controls and activation shaped like a leading part of the batch. A
 ///   version-17 graph holds no key operation and is rejected like every
 ///   other earlier version.
-/// - `19`: the counter-stream bridge `DrawKey` is deleted with the `with
-///   seed` handler (chelis#2413); a key comes only from a key operation or a
-///   key-typed `Load`. A version-18 graph may hold a `DrawKey`, which has no
-///   version-19 spelling, so it is rejected like every other earlier version.
+/// - `19`: the counter-stream bridge operation is deleted with the seed
+///   handler (chelis#2413); a key comes only from a key operation or a
+///   key-typed `Load`. A version-18 graph may hold that bridge operation,
+///   which has no version-19 spelling, so it is rejected like every other
+///   earlier version.
 pub const WIRE_DAG_SCHEMA_VERSION: u32 = 19;
 
 /// A typed failure from validating a serialized [`WireDag`] against the

@@ -5076,7 +5076,7 @@ mod tests {
     }
 
     #[test]
-    fn with_seed_handler_is_a_typed_rejection() {
+    fn retired_seed_handler_is_a_typed_rejection() {
         // `with seed` was retired with the explicit key switch (#2413): the
         // parser names the retired form and points at explicit keys.
         let err = p_err("def f() = with seed(42i64) { dropout(x, 0.5) }");

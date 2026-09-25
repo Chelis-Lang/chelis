@@ -2044,17 +2044,14 @@ fn hip_key_graph(how: HipKey, prim: Prim) -> Dag {
     dag
 }
 
-/// spec/04 §1.1.3's HIP `key` cell, driven through the product path rather
-/// than the emitter: the HIP build admits a key only as the key a `with
-/// seed` region lowered into the graph gives one of its `uniform_like` draws
-/// with literal bounds and no activation. The gate refuses every key
-/// operation, key parameter and key result, and emission refuses the other
-/// draw keys.
+/// spec/04 §1.1.3's HIP `key` cell ("operation-limited: no operation"),
+/// driven through the product path rather than the emitter: the gate refuses
+/// every key operation, key parameter and key result.
 ///
 /// Evidentiary status: CLAIM LOCK. It pins the cell to the gate; at
 /// 034eb0f9b the cell named key operations this gate refuses.
 #[test]
-fn the_hip_build_admits_only_a_with_seed_draws_key() {
+fn the_hip_build_admits_no_key() {
     let gate = "does not support tensor precision `key`";
     let cases = [
         (HipKey::FromSeed, Some(gate)),

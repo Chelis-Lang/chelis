@@ -860,14 +860,14 @@ const CACHE_MAGIC: &[u8] = b"CHELIS_CTX_V23\n";
 /// variants, so bincode variant indices shifted, and the lowered library's
 /// program definitions and signatures are node-spelled on every ingress.
 /// V29 (chelis#2413): the lowered library's random draws are key-operand
-/// nodes fed by `DrawKey` and the baked random variants are gone, so bincode
-/// variant indices shift. V28 was an intermediate state of the same change
+/// nodes fed by a counter-stream bridge operation and the baked random
+/// variants are gone, so bincode variant indices shift. V28 was an intermediate state of the same change
 /// and never shipped.
 /// V30 (chelis#2413): the explicit key operations join `RiscOp` and `key`
 /// becomes a storage dtype, so bincode variant indices shift again.
-/// V31 (chelis#2413): `RiscOp::DrawKey`, the `Random` effect and the `random`
-/// handler kind are deleted with the counter stream, so bincode variant
-/// indices shift again.
+/// V31 (chelis#2413): the counter-stream bridge `RiscOp` variant, the `Random`
+/// effect and the `random` handler kind are deleted with the counter stream,
+/// so bincode variant indices shift again.
 const CACHE_FORMAT_VERSION: u32 = 31;
 
 /// On-disk envelope for the Phase I cache. The full file layout is:
