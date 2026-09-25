@@ -1112,6 +1112,42 @@ prefix = "examples/dropout_staged_claim.ch"
 disposition = "packages"
 packages = ["chelis-cli"]
 
+# chelis#2413 explicit-key examples. Each is exercised by
+# chelis-cli::parity (its per-file lane test), by
+# chelis-e2e::spec_all_executable_examples_parse_and_check and
+# example_corpus_validate, by chelis-surf's fmt_idempotent_on_repo_ch_corpus
+# (which failed on their retired `with seed` form), and additionally:
+# dropout_entry.ch by cli.rs's fixed-control C-entry test,
+# dropout_fixed_stream.ch by dropout_fixed_stream_cli, and
+# dropout_static_rate.ch by cli.rs and
+# chelis-compiler-api::dropout_fixed_stream_api.
+[[path_rule]]
+prefix = "examples/dropout_entry.ch"
+disposition = "packages"
+packages = ["chelis-cli", "chelis-e2e", "chelis-surf"]
+
+[[path_rule]]
+prefix = "examples/dropout_fixed_stream.ch"
+disposition = "packages"
+packages = ["chelis-cli", "chelis-e2e", "chelis-surf"]
+
+[[path_rule]]
+prefix = "examples/dropout_static_rate.ch"
+disposition = "packages"
+packages = ["chelis-cli", "chelis-compiler-api", "chelis-e2e", "chelis-surf"]
+
+[[path_rule]]
+prefix = "examples/signed_seed.ch"
+disposition = "packages"
+packages = ["chelis-cli", "chelis-e2e", "chelis-surf"]
+
+# Illustrative source read by chelis-e2e::example_corpus_validate and
+# chelis-surf's fmt_idempotent_on_repo_ch_corpus.
+[[path_rule]]
+prefix = "examples/illustrative/effects_handlers.ch"
+disposition = "packages"
+packages = ["chelis-e2e", "chelis-surf"]
+
 [[path_rule]]
 prefix = "examples/illustrative/mlp.ch"
 disposition = "packages"
