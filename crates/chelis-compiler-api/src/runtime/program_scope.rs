@@ -290,7 +290,7 @@ impl<'s> ReachWalk<'s> {
     fn applied(&mut self, function: &Expr) {
         let function = peel(function);
         if let Some(name) = var_name(function) {
-            self.call(&name.to_owned());
+            self.call(name);
         } else if let Some((DeepTag::Fn, _)) = super::tagged_expr_children(function) {
             self.function(function);
         }
@@ -362,7 +362,7 @@ impl<'s> ReachWalk<'s> {
                     return;
                 };
                 if let Some(name) = var_name(callee) {
-                    self.call(&name.to_owned());
+                    self.call(name);
                 } else if let Some((DeepTag::Grad | DeepTag::Vmap, transform)) =
                     super::tagged_expr_children(callee)
                     && let Some(target) = transform.first()
