@@ -18872,12 +18872,9 @@ fn infer_builtin_host_type_from_arg_tys_unchecked(
         // is itself a rank-zero key tensor wherever it was projected from a
         // `split_key` result, so a search for the first tensor operand
         // would type the draw as its key.
-        "uniform_like" | "dropout" => Some(
-            arg_tys
-                .get(1)
-                .cloned()
-                .unwrap_or_else(fresh_host_inference),
-        ),
+        "uniform_like" | "dropout" => {
+            Some(arg_tys.get(1).cloned().unwrap_or_else(fresh_host_inference))
+        }
         "add" | "sub" | "mul" | "div" | "floor_div" | "trunc_div" | "neg" | "exp" | "log"
         | "sin" | "sqrt" | "relu" | "sigmoid" | "tanh" | "silu" | "gelu" | "max_elem"
         | "min_elem" | "copy" | "softmax" => {

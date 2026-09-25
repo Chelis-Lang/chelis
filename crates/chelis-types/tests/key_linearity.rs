@@ -481,8 +481,7 @@ const TOP_LEVEL_KEY: &str =
 /// created there. Each refusal must survive that change.
 #[test]
 fn a_function_declaration_never_captures_a_top_level_key() {
-    let declaration =
-        "def f(x: tensor[4, f32]) -> tensor[4, f32] = dropout(k0, x, 0.5f32)\n";
+    let declaration = "def f(x: tensor[4, f32]) -> tensor[4, f32] = dropout(k0, x, 0.5f32)\n";
     for (call, suffix) in [("uncalled", ""), ("called", "out = f(x0)\n")] {
         let name = format!("a declaration reading `k0`, {call}");
         let captures =
