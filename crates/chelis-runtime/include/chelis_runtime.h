@@ -324,6 +324,10 @@ static inline int64_t chelis_int_shr(int64_t value, int64_t amount, int bits) {
     return chelis_int_from_twos(shifted, bits);
 }
 chelis_scalar chelis_scalar_from_bits(chelis_dtype dtype, uint64_t bits);
+/* [05-OP-69]: the key of a seed, whose bits are the seed's two's-complement
+ * bits with no mixing. A key is never a bare integer at the boundary: a public
+ * entry takes and returns it as this carrier (spec/08 section 2). */
+chelis_key chelis_key_from_seed(int64_t seed);
 chelis_value chelis_value_box_scalar(chelis_scalar value);
 chelis_scalar chelis_value_unbox_scalar(chelis_value value);
 chelis_tensor *chelis_scalar_tensor(chelis_scalar value);

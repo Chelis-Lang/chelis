@@ -196,6 +196,13 @@
     },
     {
       "kind": "header-export",
+      "id": "chelis_runtime.h: chelis_key chelis_key_from_seed ( int64_t seed ) ;",
+      "flags": [
+        "numeric-op"
+      ]
+    },
+    {
+      "kind": "header-export",
       "id": "chelis_runtime.h: chelis_list * chelis_dict_entries ( const chelis_dict * dict ) ;",
       "flags": []
     },
@@ -1368,6 +1375,13 @@
     {
       "kind": "header-struct",
       "id": "chelis_runtime.h: typedef struct { chelis_value_tag tag ; uint8_t reserved [ 7 ] ; chelis_value_payload payload ; } chelis_value",
+      "flags": [
+        "numeric-op"
+      ]
+    },
+    {
+      "kind": "header-struct",
+      "id": "chelis_runtime.h: typedef struct { uint64_t bits ; } chelis_key",
       "flags": [
         "numeric-op"
       ]

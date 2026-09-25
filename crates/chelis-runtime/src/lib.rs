@@ -986,6 +986,16 @@ pub struct chelis_scalar {
     pub bits: u64,
 }
 
+/// spec/08 section 2's published scalar key carrier,
+/// `typedef struct { uint64_t bits; } chelis_key;`: `bits` are the key's 64
+/// bits ([05-RNG-2]). The struct, not a bare integer, is the key's tag at the
+/// C boundary.
+#[repr(C)]
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub struct chelis_key {
+    pub bits: u64,
+}
+
 #[repr(transparent)]
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub struct chelis_value_tag(pub u8);
@@ -2280,6 +2290,15 @@ pub extern "C" fn chelis_scalar_from_bits(dtype: chelis_dtype, bits: u64) -> che
     };
     validate_scalar(value, "chelis_scalar_from_bits");
     value
+}
+
+/// [05-OP-69] `key_from_seed`: the key whose 64 bits are the seed's
+/// two's-complement bits, with no mixing. Every `int64_t` is a valid seed.
+#[no_mangle]
+pub extern "C" fn chelis_key_from_seed(seed: i64) -> chelis_key {
+    chelis_key {
+        bits: u64::from_ne_bytes(seed.to_ne_bytes()),
+    }
 }
 
 #[no_mangle]

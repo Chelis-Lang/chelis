@@ -680,6 +680,15 @@ const FINAL_TAGGED_TRANSPORT_ROWS: &[StaticSurfaceDescriptor] = &[
         "chelis_runtime.h: typedef struct { chelis_value_tag tag ; uint8_t reserved [ 7 ] ; chelis_value_payload payload ; } chelis_value",
         &["numeric-op"],
     ),
+    // spec/08 section 2's scalar key carrier (dtype_semantics.md section C6,
+    // "Random-key carriers"): the nominal struct is the key's tag, so its
+    // 64-bit `bits` field is a key and never a bare integer.
+    StaticSurfaceDescriptor::new(
+        PRIMARY_CENSUS_FAMILY,
+        "header-struct",
+        "chelis_runtime.h: typedef struct { uint64_t bits ; } chelis_key",
+        &["numeric-op"],
+    ),
     StaticSurfaceDescriptor::new(
         PRIMARY_CENSUS_FAMILY,
         "header-struct",
@@ -1715,6 +1724,17 @@ const FINAL_NUMERIC_OPERATION_ROWS: &[FinalNumericOperationRegistration] = &[
         ),
         atom: "[05-OP-31]",
         authority_anchor: "the exact stored image and all unused high bits are zero",
+    },
+    // The key of an i64 seed; the seed is the numeric operand.
+    FinalNumericOperationRegistration {
+        surface: StaticSurfaceDescriptor::new(
+            PRIMARY_CENSUS_FAMILY,
+            "header-export",
+            "chelis_runtime.h: chelis_key chelis_key_from_seed ( int64_t seed ) ;",
+            &["numeric-op"],
+        ),
+        atom: "[05-OP-69]",
+        authority_anchor: "Its published C form is\n> `chelis_key chelis_key_from_seed(int64_t seed)`",
     },
     FinalNumericOperationRegistration {
         surface: StaticSurfaceDescriptor::new(

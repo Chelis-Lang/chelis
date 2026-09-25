@@ -104,6 +104,10 @@ fn header_has_only_the_exact_tagged_dynamic_rank_abi() {
         "chelis_write_view chelis_tensor_write_view(const chelis_tensor_write *guard);",
         "void chelis_tensor_end_write(chelis_tensor_write *guard);",
         "void chelis_fill_scalar(chelis_tensor_write *guard, chelis_scalar value);",
+        // spec/08 section 2 and [05-OP-69]: the published scalar key carrier
+        // and its one constructor.
+        "typedef struct { uint64_t bits; } chelis_key;",
+        "chelis_key chelis_key_from_seed(int64_t seed);",
     ] {
         assert!(header.contains(required), "missing exact declaration: {required}");
     }
@@ -168,6 +172,9 @@ _Static_assert(sizeof(chelis_write_view) == 24, "write view size");
 _Static_assert(offsetof(chelis_write_view, data) == 0, "write view data offset");
 _Static_assert(offsetof(chelis_write_view, count) == 8, "write view count offset");
 _Static_assert(offsetof(chelis_write_view, dtype) == 16, "write view dtype offset");
+_Static_assert(sizeof(chelis_key) == 8, "key size");
+_Static_assert(offsetof(chelis_key, bits) == 0, "key bits offset");
+_Static_assert(sizeof(((chelis_key *)0)->bits) == 8, "key bits width");
 
 int main(void) {
     chelis_tensor *tensor = NULL;
