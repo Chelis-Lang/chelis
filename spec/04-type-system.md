@@ -3008,6 +3008,15 @@ That gives the compiler a stronger basis for safe in-place buffer reuse.
   at closure creation time; a capture whose body uses are all borrow-reads borrows the
   outer binding instead. Which binding a consuming capture lands on is [04-LIN-2]'s
   subject below.
+- A top-level function declaration ([04-INF-7]) is not a closure creation, and checking
+  it never changes top-level ownership state. Because a declaration may be called after
+  every top-level initializer, including from another module, its body is checked
+  against the ownership state that holds once every top-level initializer has run: a
+  free reference to a top-level value that no initializer consumes does not consume it,
+  and one to a value that an initializer consumes is rejected whatever the textual
+  order. A consuming use of such a reference yields each call's owned result through a
+  copy, per [04-LIN-4], so a declaration cannot use a key-carrying top-level value,
+  whose copy [04-LIN-9] refuses.
 - Ordinary consuming fan-out is handled by inserted copies, except on a
   key-carrying value, which [04-LIN-9] makes affine. Diagnostics remain for
   invalid borrows, borrow escapes, impossible branch/loop ownership, and recursive or
