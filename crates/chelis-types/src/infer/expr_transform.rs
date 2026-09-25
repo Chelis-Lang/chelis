@@ -539,6 +539,15 @@ pub(super) fn vmap_transform_param_type(
             let dims = vmap_transform_dims(dims, axis, batch_var, vg, subst, mapped_axis_renaming)?;
             Ok(Type::Tensor(dims, precision.clone()))
         }
+        // spec/design/randomness_explicit_keys.md section 3 and [04-LIN-9]:
+        // `vmap` maps no other scalar formal, but a key formal is mapped. Its
+        // actual is a `tensor[batch, key]` whose row `b` is application `b`'s
+        // key, so a scalar key actual, which every row would consume, fails
+        // to unify.
+        Type::Prim(Prim::Key) => Ok(Type::Tensor(
+            vec![Dim::Var(batch_var)],
+            TensorPrec::Concrete(Prim::Key),
+        )),
         Type::Tuple(elements) => Ok(Type::Tuple(
             elements
                 .iter()

@@ -58,8 +58,8 @@ no arithmetic, comparison, cast, literal, or default value. [05-OP-69] creates
 keys, [05-OP-70] through [05-OP-72] derive them, and a draw keyed by a key
 reads it under [05-RNG-2]. An operation admits `key` elements only where its
 own atom names `key`: a domain written as every active tensor element dtype
-admits exactly the nine active data element dtypes. (Source and Deep ingress
-do not yet accept the `key` spelling; chelis#2413.)
+admits exactly the nine active data element dtypes. Keys are affine
+([04-LIN-9]).
 
 Code, tests, examples, and stdlib signatures referenced from any active spec
 section must use these set names with exactly those meanings. The reserved
@@ -2932,6 +2932,10 @@ live. For an unconsumed local owner, the compiler inserts `Drop` at the earliest
 post-dominating point after its last use, as [04-LIN-8] requires. Lexical scope
 exit is the fallback only when no earlier valid terminal point can be proved.
 
+Random keys are the exception to copying. A key-carrying value (§8.4.1) is
+affine: it is used at most once, never copied or borrowed, and may be dropped
+unused ([04-LIN-9]). A second key comes from deriving one, never from a copy.
+
 ### 8.2 Type Representation
 
 ```scheme
@@ -3013,7 +3017,8 @@ That gives the compiler a stronger basis for safe in-place buffer reuse.
   at closure creation time; a capture whose body uses are all borrow-reads borrows the
   outer binding instead. Which binding a consuming capture lands on is [04-LIN-2]'s
   subject below.
-- Ordinary consuming fan-out is handled by inserted copies. Diagnostics remain for
+- Ordinary consuming fan-out is handled by inserted copies, except on a
+  key-carrying value, which [04-LIN-9] makes affine. Diagnostics remain for
   invalid borrows, borrow escapes, impossible branch/loop ownership, and recursive or
   cyclic consume cases for which a unique terminal path cannot be proven.
 - **Destructured components are excepted from copy insertion.** A binding introduced by
@@ -3119,6 +3124,25 @@ lexical binding, change which callable is selected, or memoize function results.
 > An implementation may reclaim later only when an explicitly live owner or
 > view requires the storage; recursion depth alone is not such a reason.
 
+> **[04-LIN-9]** A key-carrying value (§8.4.1) is affine: it SHALL have
+> at most one consuming use on every control-flow path, and it needs none,
+> so an unused one is dropped. No explicit or compiler-inserted `copy`
+> applies to it, so the copies that [04-LIN-3], [04-LIN-5] and [04-LIN-6]
+> allow for another owned value are refused for it. It SHALL NOT be
+> borrowed, copied, captured by a closure, or read by any operation that
+> leaves it live, and no signature SHALL declare a borrowed key-carrying
+> parameter. Binding it to another name moves it. Every call consumes a
+> key-carrying argument, including the otherwise observational arguments of
+> a `grad(f)(...)` or `vmap(f)(...)` call. A key inside a key-carrying
+> value is reached only by consuming that value: a destructuring `let` or
+> `match` pattern; a tuple projection, which takes each key-carrying
+> component at most once and leaves the tuple unusable as a whole; a field
+> access, which consumes the whole value; or `vmap` over a key axis, which
+> gives each row to one application. Reading a consumed key's bits again in
+> a backward pass or a checkpoint recomputation is not a use. A violation
+> is a type error whose suggested repair derives fresh keys with
+> `split_key` or `split_keys` ([05-OP-70], [05-OP-71]), never `copy`.
+
 Diagnostics for violations of these rules SHALL name a binding the
 program's source spells — the alias or component name written at the
 faulting use — never a compiler-synthesized intermediate.
@@ -3155,6 +3179,25 @@ visible at check time. When the linearity checker runs against composed
 contexts (library + new code), both halves are resolved in one pass so a
 new-code `Outer` whose carrier classification depends on a library `Inner` is
 recognized correctly.
+
+#### 8.4.1 Key-carrying types
+
+A type **carries a key** iff it is in the least relation satisfying:
+
+- `key` carries a key, and so does `tensor[..., key]`.
+- `(t1, t2, ...)` carries a key iff some `ti` does.
+- `&U` carries a key iff `U` does.
+- `U[arg1, arg2, ...]` carries a key iff `U` is key-carrying, **or** some
+  `argi` carries a key.
+- Function types `t-fn` carry no key, even when their parameters or return
+  do. A closure never captures a key ([04-LIN-9]).
+
+An ADT is **key-carrying** iff one of its variant fields has a type that
+carries a key. The relation is resolved as the §8.4 carrier set is: a least
+fixed point over every `deftype` visible at check time, library and new code
+together. A value that carries both a tensor and a key follows §8.4 and
+[04-LIN-9] at once, and [04-LIN-9] refuses the borrows and copies that §8.3
+would otherwise allow it.
 
 ### 8.5 Type-Name Uniqueness
 

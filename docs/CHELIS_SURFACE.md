@@ -177,6 +177,10 @@ broadcast axis). The named-axis and four-argument anchored forms belong to `inse
 | `load` | `(source, shape...) -> tensor[shape,p]` | zero gradient |
 | `dropout` | `(&tensor[D,p_float], rate: p_float) -> tensor[D,p_float]` | all active float dtypes; fixed-control input AD replays its forward mask; introduces `Random`. C build accepts source-fixed rates/seeds through sealed direct entries and host helpers; runtime controls and HIP/Metal remain unsupported. |
 | `uniform_like` | `(&tensor[D,p], lo: f32, hi: f32) -> tensor[D,p]` | active float `p`; zero gradient; introduces `Random`; seeded via `with seed(Ni64) { }` |
+| `key_from_seed` | `(i64) -> key` | [05-OP-69]; non-differentiable |
+| `split_key` | `(key) -> (key, key)` | [05-OP-70]; consumes its key ([04-LIN-9]) |
+| `split_keys` | `(key, i64) -> tensor[n, key]` | [05-OP-71]; consumes its key; `n` is the runtime count |
+| `fold_in` | `(key, i64) -> key` | [05-OP-72]; consumes its key |
 
 Internal-only `RiscOp`s not directly callable from Surf: `Store`, `Copy`, `Drop`,
 `Realize`, `Cast`, `FusedElem`, `OneHot`, `BlasMatmul` (the `matmul` specialization
@@ -415,6 +419,7 @@ Tier-1 DAG:   add sub mul div floor_div trunc_div max_elem min_elem cmplt neg re
               argmin_reduce reduce_window_max reduce_window_min reduce_window_sum
               reduce_window_mean reshape permute expand insert pad shrink stride
               uniform_like gather scatter_replace scatter_elements
+              key_from_seed split_key split_keys fold_in
 Tier-2 DAG:   eq neq lt gt lte gte and or not relu sigmoid tanh silu gelu
               softmax mean matmul layer_norm conv
 Host lane:    cumsum sort einsum diagonal trace where clamp concat split scatter

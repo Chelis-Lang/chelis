@@ -58,6 +58,7 @@ pub enum DiagnosticKind {
     UseAfterConsume,
     UnconsumedLinear,
     InvalidBorrow,
+    KeyReuse,
     CycleDetected,
     UnsupportedTensorPrecision,
     DuplicateDefinition,
@@ -86,7 +87,7 @@ pub enum DiagnosticKind {
 }
 
 impl DiagnosticKind {
-    pub const ALL: [Self; 55] = [
+    pub const ALL: [Self; 56] = [
         Self::SurfParseError,
         Self::DeepParseError,
         Self::MacroError,
@@ -125,6 +126,7 @@ impl DiagnosticKind {
         Self::UseAfterConsume,
         Self::UnconsumedLinear,
         Self::InvalidBorrow,
+        Self::KeyReuse,
         Self::CycleDetected,
         Self::UnsupportedTensorPrecision,
         Self::DuplicateDefinition,
@@ -184,6 +186,7 @@ impl DiagnosticKind {
             Self::UseAfterConsume => "UseAfterConsume",
             Self::UnconsumedLinear => "UnconsumedLinear",
             Self::InvalidBorrow => "InvalidBorrow",
+            Self::KeyReuse => "KeyReuse",
             Self::CycleDetected => "CycleDetected",
             Self::UnsupportedTensorPrecision => "UnsupportedTensorPrecision",
             Self::DuplicateDefinition => "DuplicateDefinition",

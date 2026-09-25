@@ -238,6 +238,11 @@ pub enum CheckErrorKind {
     UseAfterConsume,
     UnconsumedLinear,
     InvalidBorrow,
+    /// [04-LIN-9]: a random key, or a value that carries one, is used a
+    /// second time, borrowed, copied, captured by a closure, or read by an
+    /// operation that leaves it live. Keys are affine; the repair derives
+    /// fresh keys with `split_key` or `split_keys`, never `copy`.
+    KeyReuse,
     CycleDetected,
     /// A tensor type uses a precision the Phase 0f backend cannot represent
     /// (currently f16, bf16, f64, f8e4m3). Host scalar precisions are unaffected.
@@ -337,6 +342,7 @@ impl CheckErrorKind {
             CheckErrorKind::UseAfterConsume => "UseAfterConsume",
             CheckErrorKind::UnconsumedLinear => "UnconsumedLinear",
             CheckErrorKind::InvalidBorrow => "InvalidBorrow",
+            CheckErrorKind::KeyReuse => "KeyReuse",
             CheckErrorKind::CycleDetected => "CycleDetected",
             CheckErrorKind::UnsupportedTensorPrecision => "UnsupportedTensorPrecision",
             CheckErrorKind::DuplicateDefinition => "DuplicateDefinition",
@@ -377,6 +383,7 @@ impl CheckErrorKind {
             CheckErrorKind::UseAfterConsume => 0.9,
             CheckErrorKind::UnconsumedLinear => 0.9,
             CheckErrorKind::InvalidBorrow => 0.8,
+            CheckErrorKind::KeyReuse => 0.9,
             CheckErrorKind::CycleDetected => 0.9,
             CheckErrorKind::UnsupportedTensorPrecision => 0.8,
             CheckErrorKind::DuplicateDefinition => 0.9,

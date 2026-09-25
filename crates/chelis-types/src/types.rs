@@ -211,6 +211,7 @@ impl Prim {
             "i64" => Some(Prim::Int64),
             "bool" => Some(Prim::Bool),
             "string" => Some(Prim::String),
+            "key" => Some(Prim::Key),
             _ => None,
         }
     }
@@ -250,7 +251,6 @@ impl Prim {
     /// formats. Language and Deep ingress must use [`Self::parse_name`].
     pub fn parse_interchange_name(s: &str) -> Option<Prim> {
         match s {
-            "key" => Some(Prim::Key),
             "int8" => Some(Prim::Int8),
             "int16" => Some(Prim::Int16),
             "int32" => Some(Prim::Int32),
@@ -1117,7 +1117,7 @@ mod prim_classification_tests {
 
     #[test]
     fn parse_name_round_trips_through_name() {
-        for prim in ALL_PRIMS.iter().filter(|prim| **prim != Prim::Key) {
+        for prim in ALL_PRIMS {
             let name = prim.name();
             assert_eq!(
                 Prim::parse_name(name),
@@ -1128,12 +1128,12 @@ mod prim_classification_tests {
     }
 
     // chelis#2413: a random key is an active tensor element dtype with
-    // runtime storage. No source or Deep spelling reaches it yet, it is not
-    // numeric, it is not one of the nine active data element dtypes, and it
-    // has no cast.
+    // runtime storage and the source and Deep spelling `key` (spec/04
+    // section 1.1). It is not numeric, it is not one of the nine active data
+    // element dtypes, and it has no cast.
     #[test]
-    fn a_random_key_has_an_interchange_spelling_and_no_source_spelling() {
-        assert_eq!(Prim::parse_name("key"), None);
+    fn a_random_key_has_one_spelling_in_source_deep_and_interchange() {
+        assert_eq!(Prim::parse_name("key"), Some(Prim::Key));
         assert_eq!(Prim::parse_interchange_name("key"), Some(Prim::Key));
         assert_eq!(Prim::Key.interchange_name(), "key");
         assert!(!Prim::Key.is_numeric());

@@ -4,7 +4,7 @@
 // `f8e4m3` is reserved, not active. `DEFERRED_DTYPE_NAMES` keeps it on the
 // primitive-request path so the checker reports [04-DTYPE-1].
 const PRIMITIVES: &[&str] = &[
-    "f32", "f64", "f16", "bf16", "i8", "i16", "i32", "i64", "bool", "string", "unit",
+    "f32", "f64", "f16", "bf16", "i8", "i16", "i32", "i64", "bool", "string", "key", "unit",
 ];
 
 const RETIRED_INTEGER_DTYPE_NAMES: &[&str] = &["int8", "int16", "int32", "int64"];

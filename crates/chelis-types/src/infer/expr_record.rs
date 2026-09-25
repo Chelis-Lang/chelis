@@ -1050,6 +1050,22 @@ pub(crate) fn cast_result_from_settled_source(
     new_prec: Prim,
     mode: CastMode,
 ) -> Result<Type, Box<CheckError>> {
+    // spec/04 section 1.1: a key has no cast in either direction. The target
+    // rules below refuse a key target; this refuses a key source, scalar or
+    // tensor, before any target is considered.
+    if matches!(
+        resolved,
+        Type::Prim(Prim::Key) | Type::Tensor(_, TensorPrec::Concrete(Prim::Key))
+    ) {
+        return Err(Box::new(CheckError::new(
+            CheckErrorKind::UnsupportedTensorPrecision,
+            format!(
+                "cast has no `key` source: a random key has no numeric value to convert \
+                 (spec/04-type-system.md section 1.1), got {resolved}"
+            ),
+            vec!["Derive keys with `split_key`, `split_keys` or `fold_in` instead".to_string()],
+        )));
+    }
     match resolved {
         Type::Tensor(dims, src_prec) => {
             // spec/04 §1.1: a key has no cast, so a cast target is a data

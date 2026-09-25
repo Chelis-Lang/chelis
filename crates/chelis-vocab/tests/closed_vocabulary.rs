@@ -50,6 +50,7 @@ fn diagnostic_kind_wire_spellings_are_closed_and_stable() {
         (DiagnosticKind::UseAfterConsume, "UseAfterConsume"),
         (DiagnosticKind::UnconsumedLinear, "UnconsumedLinear"),
         (DiagnosticKind::InvalidBorrow, "InvalidBorrow"),
+        (DiagnosticKind::KeyReuse, "KeyReuse"),
         (DiagnosticKind::CycleDetected, "CycleDetected"),
         (
             DiagnosticKind::UnsupportedTensorPrecision,
@@ -137,6 +138,7 @@ fn diagnostic_kind_consumer_match_is_a_compile_time_ratchet() {
             | DiagnosticKind::UseAfterConsume
             | DiagnosticKind::UnconsumedLinear
             | DiagnosticKind::InvalidBorrow
+            | DiagnosticKind::KeyReuse
             | DiagnosticKind::CycleDetected
             | DiagnosticKind::UnsupportedTensorPrecision
             | DiagnosticKind::DuplicateDefinition

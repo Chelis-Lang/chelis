@@ -29,6 +29,11 @@ pub const BUILTIN_NAMES: &[&str] = &[
     "ceil",
     "round",
     "uniform_like",
+    // [05-OP-69]..[05-OP-72]: the random key operations (spec/05 section 2.7).
+    "key_from_seed",
+    "split_key",
+    "split_keys",
+    "fold_in",
     "cmplt",
     "sub",
     "div",
@@ -911,6 +916,50 @@ pub const BUILTINS: &[BuiltinDecl] = &[
         inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::Universal,
         shape_class: ShapeClass::Identity,
+        axis_arguments: AxisArgumentLayout::NoAxes,
+    },
+    // [05-OP-69]..[05-OP-72]: the random key operations. Each scheme is
+    // monomorphic in its key and count operands, and the affine key rule
+    // ([04-LIN-9]) is the linearity checker's, not the signature's.
+    BuiltinDecl {
+        name: "key_from_seed",
+        capability: NUMERIC_CAPABILITY,
+        inference: InferenceDisposition::GenericAccepted {
+            reason: "the monomorphic signature (i64) -> key fully determines this builtin type",
+        },
+        realizability: Realizability::Universal,
+        shape_class: ShapeClass::Rewriting,
+        axis_arguments: AxisArgumentLayout::NoAxes,
+    },
+    BuiltinDecl {
+        name: "split_key",
+        capability: NUMERIC_CAPABILITY,
+        inference: InferenceDisposition::GenericAccepted {
+            reason: "the monomorphic signature (key) -> (key, key) fully determines this builtin type",
+        },
+        realizability: Realizability::Universal,
+        shape_class: ShapeClass::Rewriting,
+        axis_arguments: AxisArgumentLayout::NoAxes,
+    },
+    BuiltinDecl {
+        name: "split_keys",
+        capability: NUMERIC_CAPABILITY,
+        inference: InferenceDisposition::GenericAccepted {
+            reason: "the signature (key, i64) -> tensor[n, key] fully determines this builtin type; \
+                     n is a fresh extent per call that the runtime count must equal",
+        },
+        realizability: Realizability::Universal,
+        shape_class: ShapeClass::Rewriting,
+        axis_arguments: AxisArgumentLayout::NoAxes,
+    },
+    BuiltinDecl {
+        name: "fold_in",
+        capability: NUMERIC_CAPABILITY,
+        inference: InferenceDisposition::GenericAccepted {
+            reason: "the monomorphic signature (key, i64) -> key fully determines this builtin type",
+        },
+        realizability: Realizability::Universal,
+        shape_class: ShapeClass::Rewriting,
         axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
@@ -2713,6 +2762,52 @@ pub fn builtin_env() -> (Env, VarGen) {
     tensor_unop("ceil", &mut env, &mut vg);
     tensor_unop("round", &mut env, &mut vg);
     tensor_with_bounds("uniform_like", &mut env, &mut vg);
+
+    // [05-OP-69]..[05-OP-72] (spec/05 section 2.7): the random key
+    // operations. The key operand of `split_key`, `split_keys` and `fold_in`
+    // is owned, never borrowed: [04-LIN-9] makes every key affine, and these
+    // are its consuming uses. `split_keys`'s extent is the runtime count `n`
+    // ([05-OP-71]), so each call's result extent is a fresh dimension that
+    // the surrounding program pins; the lowered graph checks the declared
+    // extent against the count at run time.
+    let key = Type::Prim(Prim::Key);
+    let count = Type::Prim(Prim::Int64);
+    env.bind(
+        "key_from_seed".to_string(),
+        Scheme::mono(Type::Fn(vec![count.clone()], Box::new(key.clone()))),
+    );
+    env.bind(
+        "split_key".to_string(),
+        Scheme::mono(Type::Fn(
+            vec![key.clone()],
+            Box::new(Type::Tuple(vec![key.clone(), key.clone()])),
+        )),
+    );
+    env.bind(
+        "fold_in".to_string(),
+        Scheme::mono(Type::Fn(
+            vec![key.clone(), count.clone()],
+            Box::new(key.clone()),
+        )),
+    );
+    let key_rows = vg.fresh_dvar();
+    env.bind(
+        "split_keys".to_string(),
+        Scheme {
+            constraints: vec![],
+            tvars: vec![],
+            tvar_restrictions: vec![],
+            dvars: vec![key_rows],
+            rvars: vec![],
+            body: Type::Fn(
+                vec![key, count],
+                Box::new(Type::Tensor(
+                    vec![Dim::Var(key_rows)],
+                    TensorPrec::Concrete(Prim::Key),
+                )),
+            ),
+        },
+    );
 
     cmplt_sig("cmplt", &mut env, &mut vg);
 

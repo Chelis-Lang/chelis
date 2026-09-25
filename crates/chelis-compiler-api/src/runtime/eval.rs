@@ -2775,6 +2775,21 @@ impl<'a> EvalContext<'a> {
         result_type_expr: Option<&Expr>,
     ) -> Result<RuntimeValue, String> {
         match name {
+            // [05-OP-69]..[05-OP-72]: the checker types the key operations,
+            // and the host interpreter has no key value to evaluate them
+            // over until the key carrier lands; refuse loudly.
+            "key_from_seed" | "split_key" | "split_keys" | "fold_in" => {
+                Err(chelis_types::unsupported::Unsupported::new(
+                    chelis_types::unsupported::UnsupportedKind::Builtin(name.to_string()),
+                    "the host interpreter, which has no random key value yet",
+                    chelis_types::unsupported::Stage::Runtime,
+                    chelis_types::unimplemented_rejection!(
+                        2413,
+                        "the key operations are checked but not yet evaluated or lowered"
+                    ),
+                )
+                .to_string())
+            }
             "add" => numeric_binop(args, Some(IntBinOp::Add), Some(FloatBinOp::Add)),
             "sub" => numeric_binop(args, Some(IntBinOp::Sub), Some(FloatBinOp::Sub)),
             "mul" => numeric_binop(args, Some(IntBinOp::Mul), Some(FloatBinOp::Mul)),
