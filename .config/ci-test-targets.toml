@@ -1366,6 +1366,24 @@ reason = "the required Hull gate executes every frozen program against the candi
 tracking_issue = "chelis#1592"
 
 [[path_rule]]
+prefix = "tests/conformance/hull/run_conformance.py"
+disposition = "owner"
+workflow = "conformance.yml"
+job = "conformance"
+cadence = "pull_request and push"
+reason = "the required Hull gate runs this runner against the candidate compiler, and its unit tests run in the same job"
+tracking_issue = "chelis#1592"
+
+[[path_rule]]
+prefix = "tests/conformance/hull/test_run_conformance.py"
+disposition = "owner"
+workflow = "conformance.yml"
+job = "conformance"
+cadence = "pull_request and push"
+reason = "the required Hull job's conformance unit-test step executes this module"
+tracking_issue = "chelis#1592"
+
+[[path_rule]]
 prefix = "tests/conformance/hull/build_corpus.py"
 disposition = "owner"
 workflow = "ci.yml"
