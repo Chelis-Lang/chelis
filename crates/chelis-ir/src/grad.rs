@@ -161,6 +161,24 @@ impl fmt::Display for AdError {
 
 impl std::error::Error for AdError {}
 
+/// Whether a [`RiscOp::Cast`] from `source` to `target` is the
+/// piecewise-constant float-to-integer / float-to-bool pair that
+/// `spec/04-type-system.md` [04-NUM-14] forbids from contributing a
+/// silent zero gradient (chelis#2178).
+///
+/// The atom splits the checked cast three ways for AD:
+///
+/// * float -> float has the exact backward cast `cast(g, source_dtype)`;
+/// * float -> integer or float -> bool is piecewise constant and is a
+///   structural `grad` rejection with
+///   [`AdRejectionReason::PiecewiseConstant`] -- the same reason
+///   `floor`, `ceil`, `round`, and `cast_trunc` carry;
+/// * a non-float source carries no cotangent in the first place, so
+///   there is no gradient to suppress and nothing to reject.
+fn is_piecewise_constant_cast(source: Prim, target: Prim) -> bool {
+    source.is_float() && (target.is_integer() || target == Prim::Bool)
+}
+
 /// Run reverse-mode AD on `forward` and return a diagnostic error if the
 /// gradient cannot be computed for a structural reason (non-differentiable
 /// ops such as `Argmax`/`Argmin` on the live forward graph, or an unsupported
@@ -369,6 +387,27 @@ fn grad_dag_checked_impl(
             RiscOp::TruncDiv => {
                 return Err(AdError::NotSupported {
                     op: "trunc_div",
+                    reason: AdRejectionReason::PiecewiseConstant,
+                });
+            }
+            // chelis#2178 / [04-NUM-14]: the CHECKED default `cast`
+            // from a float source to an integer or bool target is
+            // piecewise constant on exactly the same grounds as
+            // `cast_trunc` -- the atom says it "never contributes a
+            // silent zero". A float-to-float cast keeps [04-NUM-14]'s
+            // exact backward cast, and a non-float source carries no
+            // cotangent to suppress, so neither is rejected here.
+            RiscOp::Cast { new_precision }
+                if node
+                    .inputs
+                    .first()
+                    .and_then(|x| forward.get(*x))
+                    .is_some_and(|src| {
+                        is_piecewise_constant_cast(src.output_type.precision, *new_precision)
+                    }) =>
+            {
+                return Err(AdError::NotSupported {
+                    op: "cast",
                     reason: AdRejectionReason::PiecewiseConstant,
                 });
             }
@@ -2074,7 +2113,20 @@ fn compute_adjoints(
                     None,
                 );
                 Some(vec![(x, dx)])
+            } else if is_piecewise_constant_cast(input_ty.precision, node.output_type.precision) {
+                // chelis#2178 / [04-NUM-14]: a float source cast to an
+                // integer or bool target is piecewise constant and
+                // "never contributes a silent zero". There is no
+                // adjoint; `grad_dag_checked`'s live-node scan already
+                // rejected it with the structured `AdError`, and this
+                // arm keeps the unchecked entry point from inventing
+                // one -- the same treatment `CastTrunc` gets below.
+                None
             } else {
+                // A non-float source (integer or bool) carries no
+                // cotangent at all, so the zero seeded here is the
+                // absence of a gradient variable rather than a
+                // suppressed one.
                 let zero = dag.add_node(
                     RiscOp::synth_const(input_ty.precision, 0.0),
                     vec![],
@@ -3180,8 +3232,11 @@ mod tests {
         assert!((dx - expected).abs() < 1e-4);
     }
 
-    #[test]
-    fn grad_cast_to_int_is_zero() {
+    /// chelis#2178 / [04-NUM-14]: build `add(cast(cast(x, discrete), f32),
+    /// cast(cast(x, discrete), f32))` over an f32 load and return the
+    /// `(dag, output)` pair, so the discrete cast sits on the live
+    /// gradient path rather than in a dead corner of the graph.
+    fn float_to_discrete_roundtrip(discrete: Prim) -> (Dag, NodeId, NodeId) {
         let mut dag = Dag::new();
         let x = dag.add_node(
             RiscOp::Load { name: "x".into() },
@@ -3189,16 +3244,16 @@ mod tests {
             scalar_f32(),
             None,
         );
-        let int_ty = TensorType {
+        let discrete_ty = TensorType {
             dims: vec![],
-            precision: Prim::Int32,
+            precision: discrete,
         };
         let casted = dag.add_node(
             RiscOp::Cast {
-                new_precision: Prim::Int32,
+                new_precision: discrete,
             },
             vec![x],
-            int_ty.clone(),
+            discrete_ty,
             None,
         );
         let recast = dag.add_node(
@@ -3210,15 +3265,156 @@ mod tests {
             None,
         );
         let out = dag.add_node(RiscOp::Add, vec![recast, recast], scalar_f32(), None);
+        (dag, x, out)
+    }
 
-        let grad_result = grad_dag(&dag, out, &[x]).unwrap();
+    /// chelis#2178 / [04-NUM-14]: "A float source cast to an integer or
+    /// bool target is piecewise constant and structurally rejects `grad`
+    /// with `AdRejectionReason::PiecewiseConstant`; it never contributes
+    /// a silent zero."
+    ///
+    /// This test replaces `grad_cast_to_int_is_zero`, which pinned the
+    /// silent zero the atom forbids. That assertion arrived in the bulk
+    /// MNIST commit `6b44017bf` rather than in any change about cast
+    /// adjoint semantics, so inverting it is a correction of drift, not
+    /// a reversal of a decided contract.
+    #[test]
+    fn grad_cast_float_to_integer_rejects() {
+        for target in [Prim::Int8, Prim::Int16, Prim::Int32, Prim::Int64] {
+            let (dag, x, out) = float_to_discrete_roundtrip(target);
+            // `GradResult` is deliberately not `Debug`, so `expect_err`
+            // is unavailable; match instead of widening a public type.
+            let err = match grad_dag_checked(&dag, out, &[x]) {
+                Ok(_) => panic!(
+                    "[04-NUM-14]: f32 -> {} under grad must reject, not produce a gradient",
+                    target.name()
+                ),
+                Err(err) => err,
+            };
+            assert_eq!(
+                err,
+                AdError::NotSupported {
+                    op: "cast",
+                    reason: AdRejectionReason::PiecewiseConstant,
+                },
+                "f32 -> {} must reject with PiecewiseConstant; got {err:?}",
+                target.name()
+            );
+        }
+    }
+
+    /// chelis#2178 / [04-NUM-14]: the bool target carries the same rule
+    /// as the integer targets, and is measured separately because
+    /// `Prim::Bool` is not `Prim::is_integer()`.
+    #[test]
+    fn grad_cast_float_to_bool_rejects() {
+        let (dag, x, out) = float_to_discrete_roundtrip(Prim::Bool);
+        let err = match grad_dag_checked(&dag, out, &[x]) {
+            Ok(_) => {
+                panic!("[04-NUM-14]: f32 -> bool under grad must reject, not produce a gradient")
+            }
+            Err(err) => err,
+        };
+        assert_eq!(
+            err,
+            AdError::NotSupported {
+                op: "cast",
+                reason: AdRejectionReason::PiecewiseConstant,
+            },
+            "f32 -> bool must reject with PiecewiseConstant; got {err:?}"
+        );
+    }
+
+    /// chelis#2178 negative parity, dead-node half: the live-node scan
+    /// bounds the rejection to the gradient path. A float-to-integer
+    /// cast that the output does not reach is not on that path, so it
+    /// must not reject -- otherwise the fix would turn unrelated index
+    /// and metadata arithmetic into a grad failure.
+    #[test]
+    fn grad_cast_float_to_integer_off_the_gradient_path_is_accepted() {
+        let mut dag = Dag::new();
+        let x = dag.add_node(
+            RiscOp::Load { name: "x".into() },
+            vec![],
+            scalar_f32(),
+            None,
+        );
+        // Dead: nothing downstream of `out` reaches this cast.
+        let _dead = dag.add_node(
+            RiscOp::Cast {
+                new_precision: Prim::Int32,
+            },
+            vec![x],
+            TensorType {
+                dims: vec![],
+                precision: Prim::Int32,
+            },
+            None,
+        );
+        let out = dag.add_node(RiscOp::Mul, vec![x, x], scalar_f32(), None);
+
+        let grad_result = grad_dag_checked(&dag, out, &[x])
+            .expect("a dead float-to-int cast must not reject grad");
         let mut inputs = UnordMap::new();
-        inputs.insert("x".to_string(), 1.0);
+        inputs.insert("x".to_string(), 3.0);
         let vals = eval_scalar(&grad_result.dag, &inputs);
         let dx = vals[&grad_result.grad_nodes[&x]];
         assert!(
-            dx.abs() < 1e-6,
-            "integer cast gradient should be zero, got {dx}"
+            (dx - 6.0).abs() < 1e-6,
+            "d(x*x)/dx at x=3 must be 6.0; got {dx}"
+        );
+    }
+
+    /// chelis#2178 negative parity, discrete-source half: [04-NUM-14]
+    /// says "A bool or integer source is a discrete forward-only value
+    /// and carries no cotangent, irrespective of target." That is not a
+    /// suppressed gradient, so an integer-to-float cast keeps its zero
+    /// seed and must NOT reject -- the behaviour
+    /// `grad_zero_placeholder_matrix::grad_without_abs_is_correct_in_both_lanes`
+    /// depends on.
+    #[test]
+    fn grad_cast_integer_source_is_accepted_and_contributes_zero() {
+        let mut dag = Dag::new();
+        let w = dag.add_node(
+            RiscOp::Load { name: "w".into() },
+            vec![],
+            TensorType {
+                dims: vec![],
+                precision: Prim::Int32,
+            },
+            None,
+        );
+        let x = dag.add_node(
+            RiscOp::Load { name: "x".into() },
+            vec![],
+            scalar_f32(),
+            None,
+        );
+        let w_f32 = dag.add_node(
+            RiscOp::Cast {
+                new_precision: Prim::F32,
+            },
+            vec![w],
+            scalar_f32(),
+            None,
+        );
+        let out = dag.add_node(RiscOp::Mul, vec![x, w_f32], scalar_f32(), None);
+
+        let grad_result = grad_dag_checked(&dag, out, &[x, w])
+            .expect("[04-NUM-14]: an integer source carries no cotangent, it does not reject");
+        let mut inputs = UnordMap::new();
+        inputs.insert("x".to_string(), 2.0);
+        inputs.insert("w".to_string(), 5.0);
+        let vals = eval_scalar(&grad_result.dag, &inputs);
+        let dx = vals[&grad_result.grad_nodes[&x]];
+        assert!(
+            (dx - 5.0).abs() < 1e-6,
+            "d(x*w)/dx must be w = 5.0; got {dx}"
+        );
+        let dw = vals[&grad_result.grad_nodes[&w]];
+        assert!(
+            dw.abs() < 1e-6,
+            "an integer source carries no cotangent; got {dw}"
         );
     }
 
