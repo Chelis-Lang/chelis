@@ -2781,8 +2781,8 @@ where
     Ok((inputs, resolved_loads))
 }
 
-/// The nodes `roots` need, with every effect node and every random node that
-/// can trap by itself.
+/// The nodes `roots` need, with every observable root
+/// ([`Dag::is_observable_root`]) of a declaration the selection enters.
 fn live_mask_for_roots(dag: &Dag, roots: &[NodeId]) -> Vec<bool> {
     let unselected = dag.outside_selection(roots);
     live_mask_from(dag, roots.to_vec(), &unselected)
@@ -2791,29 +2791,21 @@ fn live_mask_for_roots(dag: &Dag, roots: &[NodeId]) -> Vec<bool> {
 fn live_mask_from(dag: &Dag, mut stack: Vec<NodeId>, unselected: &[bool]) -> Vec<bool> {
     let mut live = vec![false; dag.len()];
     // chelis#2368: effect nodes are live because they are effects, not
-    // because a value reaches them. chelis#2413: so is a random node that can
-    // trap by itself.
+    // because a value reaches them; chelis#2440 and chelis#2413: so is a
+    // potentially trapping node, numeric or random. One predicate names the
+    // class ([`Dag::is_observable_root`]).
     //
-    // chelis#2476 scopes BOTH to the selection ([`Dag::outside_selection`]).
-    // An abort, or a trapping draw, in a declaration this evaluation does not
-    // enter is not its concern, so firing it would abort on behalf of code
-    // the caller excluded, and would demand that declaration's parameters as
-    // inputs. The seed still reaches every abort and trapping draw the
-    // selected roots' own activation contains, including the discarded ones,
-    // which is what [05-OP-68] is about.
-    //
-    // The two disjuncts are one class — `random_node_may_trap` documents
-    // itself as an observable root under the same spec/06 §5.2 rule — so
-    // they take the same scoping. Leaving the newer one unscoped would put
-    // two seeds of one class on different rules, and re-arm chelis#2476
-    // along the second one.
+    // chelis#2476 scopes it to the selection ([`Dag::outside_selection`]).
+    // An abort, or a trap, in a declaration this evaluation does not enter is
+    // not its concern, so firing it would abort on behalf of code the caller
+    // excluded, and would demand that declaration's parameters as inputs. The
+    // seed still reaches every observable root of the declarations the
+    // selection enters, including the discarded ones, which is what
+    // [05-OP-68] is about.
     stack.extend(
         dag.nodes()
             .iter()
-            .filter(|node| {
-                (node.op.is_unconditional_effect() || dag.random_node_may_trap(node))
-                    && !unselected[node.id.0]
-            })
+            .filter(|node| dag.is_observable_root(node) && !unselected[node.id.0])
             .map(|node| node.id),
     );
     while let Some(id) = stack.pop() {
@@ -5988,6 +5980,109 @@ mod tests {
             );
             let _ = (unselected, z);
         }
+    }
+
+    /// chelis#2440's trap seed meets chelis#2476's scoping. The integer
+    /// arithmetic in a declaration nobody selected can overflow, so the seed
+    /// would mark it live and `resolve_load_inputs` would then demand that
+    /// declaration's parameter — the chelis#991 shape, arriving through the
+    /// trap seed instead of the abort one.
+    ///
+    /// The float twin is the control: it cannot trap, so it is never seeded
+    /// and the scoping is not what keeps it dead.
+    #[test]
+    fn a_trapping_node_owned_by_an_unselected_root_is_not_this_evaluation_s_concern() {
+        fn program(precision: Prim) -> (Dag, NodeId, NodeId, NodeId) {
+            let ty = TensorType {
+                dims: vec![DimInfo::Lit(3)],
+                precision,
+            };
+            let mut dag = Dag::new();
+            let g_decl = dag.declare("g");
+            let main_decl = dag.declare("main");
+            let z = dag.add_node(
+                g_decl,
+                RiscOp::Load { name: "z".into() },
+                vec![],
+                ty.clone(),
+                None,
+            );
+            let g = dag.add_node(g_decl, RiscOp::Mul, vec![z, z], ty.clone(), None);
+            let x = dag.add_node(
+                main_decl,
+                RiscOp::Load { name: "x".into() },
+                vec![],
+                ty.clone(),
+                None,
+            );
+            let main = dag.add_node(main_decl, RiscOp::Add, vec![x, x], ty, None);
+            dag.add_root(g);
+            dag.add_root(main);
+            (dag, z, g, main)
+        }
+
+        let (dag, z, g, main) = program(Prim::Int32);
+        assert!(
+            dag.is_observable_root(dag.get(g).expect("node")),
+            "precondition: integer arithmetic must be a trapping node, or this \
+             test passes for the wrong reason"
+        );
+        let live = live_mask_for_roots(&dag, &[main]);
+        assert!(
+            !live[g.0],
+            "a trapping node owned by the unselected root is not seeded"
+        );
+        assert!(
+            !live[z.0],
+            "so its parameter never becomes a required input"
+        );
+        assert!(
+            live_mask_for_roots(&dag, &[main, g])[g.0],
+            "selecting its owner runs it, so the trap still occurs"
+        );
+
+        let (float_dag, float_z, float_g, float_main) = program(Prim::F32);
+        assert!(
+            !float_dag.is_observable_root(float_dag.get(float_g).expect("node")),
+            "control: float arithmetic cannot trap, so it is never seeded at all"
+        );
+        let float_live = live_mask_for_roots(&float_dag, &[float_main]);
+        assert!(!float_live[float_g.0] && !float_live[float_z.0]);
+    }
+
+    /// With no declared roots the whole graph is the program, so the scoping
+    /// is a no-op and a discarded trapping node is still seeded — it must
+    /// execute, and its input is genuinely required.
+    #[test]
+    fn a_rootless_dag_still_seeds_its_discarded_trapping_node() {
+        let mut dag = Dag::new();
+        let decl = dag.declare("main");
+        let ty = TensorType {
+            dims: vec![DimInfo::Lit(3)],
+            precision: Prim::Int32,
+        };
+        let x = dag.add_node(
+            decl,
+            RiscOp::Load { name: "x".into() },
+            vec![],
+            ty.clone(),
+            None,
+        );
+        let y = dag.add_node(
+            decl,
+            RiscOp::Load { name: "y".into() },
+            vec![],
+            ty.clone(),
+            None,
+        );
+        let live_add = dag.add_node(decl, RiscOp::Add, vec![x, x], ty.clone(), None);
+        let discarded = dag.add_node(decl, RiscOp::Add, vec![y, y], ty, None);
+
+        let live = live_mask_for_roots(&dag, &[live_add]);
+        assert!(
+            live[discarded.0] && live[y.0],
+            "nothing was deselected, so the trap seed still reaches it"
+        );
     }
 
     /// chelis#2413 put a trapping draw beside the `[05-OP-68]` abort in the

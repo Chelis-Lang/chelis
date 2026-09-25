@@ -3732,18 +3732,15 @@ fn verify_with_dangling_policy(dag: &Dag, reject_dangling: bool) -> Vec<String> 
             && !dag.is_root(node.id)
             && !is_implicit_root
             && consumers[node.id.0] == 0
-            // chelis#2368 / [05-OP-68]: a guarded abort joins `Store` and
-            // `Drop` as an effect node. Its result may legitimately have no
-            // consumer — the abort is the point — so requiring one would
-            // force it back into the value graph, which is exactly the
-            // reachability criterion that let DCE sweep it. chelis#2413: a
-            // random node that can trap by itself is an observable root that
-            // DCE keeps (spec/06 §5.2), so it may dangle too.
-            && !matches!(
-                node.op,
-                RiscOp::Store { .. } | RiscOp::Drop | RiscOp::GuardedFail { .. }
-            )
-            && !dag.random_node_may_trap(node)
+            // chelis#2368 / chelis#2440: an observable root may legitimately
+            // have no consumer; firing, or trapping, is the point. Requiring
+            // one would force it back into the value graph, which is exactly
+            // the reachability criterion that let DCE sweep it. This is the
+            // verifier agreeing with the DCE seed ([`Dag::is_observable_root`],
+            // `spec/06-transformations.md` §5.2) rather than carving an
+            // exception out of it.
+            && !matches!(node.op, RiscOp::Store { .. } | RiscOp::Drop)
+            && !dag.is_observable_root(node)
         {
             errors.push(format!(
                 "node {} is dangling: it has no consumers and is not a DAG root",
@@ -5986,6 +5983,48 @@ mod tests {
         );
         let errs = verify(&dag);
         assert!(errs.iter().any(|e| e.contains("dangling")));
+    }
+
+    /// chelis#2440 widened the dangling exemption from a `GuardedFail`
+    /// match to every observable root. The pair below is the boundary: an
+    /// unconsumed INTEGER add is retained because it can overflow, and the
+    /// otherwise identical FLOAT add is still rejected. Without the second
+    /// half the exemption could drift into "any arithmetic may dangle".
+    #[test]
+    fn an_unconsumed_integer_add_is_not_dangling_but_its_float_twin_is() {
+        fn dag_with(precision: Prim) -> Dag {
+            let ty = TensorType {
+                dims: vec![DimInfo::Lit(2)],
+                precision,
+            };
+            let mut dag = Dag::new();
+            let decl = dag.declare("test");
+            let x = dag.add_node(
+                decl,
+                RiscOp::Load { name: "x".into() },
+                vec![],
+                ty.clone(),
+                None,
+            );
+            let root = dag.add_node(decl, RiscOp::Add, vec![x, x], ty.clone(), None);
+            dag.add_node(decl, RiscOp::Mul, vec![x, x], ty, None);
+            dag.add_root(root);
+            dag
+        }
+
+        let integer = verify(&dag_with(Prim::Int32));
+        assert!(
+            !integer.iter().any(|e| e.contains("dangling")),
+            "an unconsumed integer node can overflow, so it is an observable \
+             root, not dangling: {integer:?}"
+        );
+
+        let float = verify(&dag_with(Prim::F32));
+        assert!(
+            float.iter().any(|e| e.contains("dangling")),
+            "float arithmetic cannot trap, so an unconsumed float node is \
+             still dangling: {float:?}"
+        );
     }
 
     #[test]

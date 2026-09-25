@@ -2063,6 +2063,43 @@ pub struct DagNode {
     pub decl: DeclId,
 }
 
+impl DagNode {
+    /// chelis#2440: whether executing this numeric node can raise a
+    /// [`NumericTrap`]. Deliberately conservative: over-retaining costs dead
+    /// code, under-retaining loses a trap. `spec/06-transformations.md`
+    /// §5.2's own example removes a FLOAT `Add`, which is consistent: float
+    /// arithmetic never traps here, integer arithmetic can.
+    ///
+    /// Integer arithmetic overflows, integer division and remainder divide by
+    /// zero, and a cast into an integer or bool width can be out of domain.
+    /// Float arithmetic never traps — it produces infinities and NaN.
+    fn may_trap_numerically(&self) -> bool {
+        let precision = self.output_type.precision;
+        match &self.op {
+            // Overflow at the dtype's range.
+            RiscOp::Add | RiscOp::Sub | RiscOp::Mul | RiscOp::Neg | RiscOp::Abs => {
+                precision.is_integer()
+            }
+            // DivZero, and Overflow for MIN / -1.
+            RiscOp::Div | RiscOp::FloorDiv | RiscOp::TruncDiv | RiscOp::Mod => {
+                precision.is_integer()
+            }
+            // Domain for a non-finite or fractional source, Overflow for a
+            // source outside the target range. `CastTrunc` is included on
+            // the conservative side: it truncates the fractional case, but
+            // the non-finite and out-of-range cases remain trap candidates.
+            // Read the cast's OWN target, not the node's output type. They
+            // agree today; if a lowering ever let them drift, deriving the
+            // seed from the output type would silently switch the trap
+            // retention off rather than fail.
+            RiscOp::Cast { new_precision } | RiscOp::CastTrunc { new_precision } => {
+                new_precision.is_integer() || *new_precision == Prim::Bool
+            }
+            _ => false,
+        }
+    }
+}
+
 /// The RISC DAG — an append-only, topologically-ordered vector of [`DagNode`]s.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Dag {
@@ -2328,11 +2365,35 @@ impl Dag {
         &self.roots
     }
 
-    /// chelis#2413: whether a random node can trap by itself, and so is an
-    /// observable root for dead-code elimination (`spec/06-transformations.md`
-    /// §5.2, "purity alone does not make a possible trap dead"). This one
-    /// predicate is read by the evaluator's seeds, dead-code elimination and
-    /// every other liveness reader.
+    /// Whether `node` is an observable root (`spec/06-transformations.md`
+    /// §5.2): it must execute because of what it does, not because a value
+    /// reaches it. "Potentially effectful or trapping nodes are observable
+    /// roots; purity alone does not make a possible trap dead."
+    ///
+    /// The members: an unconditional effect (chelis#2368, [05-OP-68]); a
+    /// numeric node that can trap (chelis#2440); and a random node that can
+    /// trap by itself ([`Self::random_node_may_trap`], chelis#2413). A
+    /// backward-synthesized adjoint is not a numeric member: its trap
+    /// obligation belongs to the forward node it was derived from, and it is
+    /// scaffolding for a gradient that may not be requested (seeding one
+    /// resurrects integer adjoint machinery that fails verification as
+    /// non-differentiable; `issue_1306_direct_arithmetic` pins it).
+    ///
+    /// This is the one seed predicate. The evaluator, dead-code elimination,
+    /// `grad`'s pruner, the verifier's dangling rule and the host transform
+    /// runner all read it; the evaluator and dead-code elimination then keep
+    /// only the seeds whose declaration the evaluation enters
+    /// ([`Self::outside_selection`]), and a node whose activation is false
+    /// checks nothing when it runs.
+    pub fn is_observable_root(&self, node: &DagNode) -> bool {
+        let synthesized_adjoint = node.span_id.as_deref() == Some(crate::grad::GRAD_SYNTH_MARKER);
+        node.op.is_unconditional_effect()
+            || (node.may_trap_numerically() && !synthesized_adjoint)
+            || self.random_node_may_trap(node)
+    }
+
+    /// chelis#2413: whether a random node can trap by itself, the random
+    /// member of [`Self::is_observable_root`].
     ///
     /// A draw validates its own controls and key batch ([05-OP-37]/[05-OP-8])
     /// and cannot trap only when every guard is statically satisfied:

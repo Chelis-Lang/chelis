@@ -488,12 +488,10 @@ impl<'a> EvalContext<'a> {
                 ));
             }
         };
-        // A random node that can trap is an observation (spec/06 section
-        // 5.2), so a graph that draws executes even when it has no roots.
-        let draws = dag
-            .nodes()
-            .iter()
-            .any(|node| dag.random_node_may_trap(node));
+        // An observable root (spec/06 section 5.2: an abort, or a node that
+        // can trap) must execute, so a graph that holds one executes even
+        // when it has no roots.
+        let observes = dag.nodes().iter().any(|node| dag.is_observable_root(node));
 
         // Forward-evaluate the lowered DAG, satisfying `RiscOp::Load`
         // by looking up placeholder names in our staged inputs (or
@@ -509,7 +507,8 @@ impl<'a> EvalContext<'a> {
         if roots.is_empty() {
             // Preserve the historical empty-root early-return behavior. In
             // particular, [] must not turn an empty legacy grad into ALL-node
-            // input preparation. A graph that draws still executes below.
+            // input preparation. A graph with an observable root still
+            // executes below.
             if matches!(kind, TransformKind::Grad)
                 && !arg_repacks.is_empty()
                 && arg_repacks.iter().all(
@@ -528,7 +527,7 @@ impl<'a> EvalContext<'a> {
                 } else {
                     RuntimeValue::Tuple(empty_slots.collect::<Result<_, _>>()?)
                 };
-                if !draws {
+                if !observes {
                     return Ok(packed);
                 }
                 empty_packed = Some(packed);
