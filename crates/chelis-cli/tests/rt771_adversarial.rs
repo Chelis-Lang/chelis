@@ -4,19 +4,16 @@
 //! (`issue_771_seed_width_parity.rs`) uses, but parameterizes the seed
 //! *expression* to characterize the peel's edge cases.
 //!
-//! ## What the red team established
+//! ## What the probes pin
 //!
-//! The `with seed(...)` random handler is gated in the SHARED front-end
-//! (`chelis-effects` `validate_handler_expr`): a `random` handler whose seed
-//! is not an int LITERAL (`int_literal`: a bare `Atom::Int` or a single
-//! `(lit … Atom::Int)`) is REJECTED with
-//! `with seed(...) requires a signed i64 literal seed` in BOTH lanes
-//! (check/eval AND build all run the gate). So every "computed" seed
-//! (negation `-1`, `cast(..)`, `add(..)`, a float) fails LOUDLY and
-//! IDENTICALLY across lanes — never a silent divergence. The eval
-//! `eval_expr` fallback the PR keeps is therefore dead code on every checked
-//! path (the gate's accept-set is a subset of the peel's, and the peel
-//! returns the same value on it). These probes pin exactly that.
+//! The red team of PR #777 pinned the retired `with seed(...)` handler's
+//! literal-seed gate. Under explicit keys (chelis#2413) a seed reaches the
+//! draw through `key_from_seed(seed: i64)`, which takes any `i64` value,
+//! literal or computed ([05-OP-69]). A seed expression whose dtype is not
+//! `i64` (an unsuffixed negative literal, a float, i32 arithmetic) fails
+//! LOUDLY and IDENTICALLY in both lanes at the checker, never as a silent
+//! divergence; an `i64` seed, literal or computed, reaches the key at full
+//! width in both lanes, and the lanes agree with `common::key_ref`.
 //!
 //! Run with `--no-capture` to see the LANE-OUTCOME lines.
 
@@ -28,12 +25,13 @@ mod common;
 
 use common::{build_and_run, parse_tensor_data, write_file};
 
-/// 8-element f32 [0,1) uniform seeded by an arbitrary seed EXPRESSION string.
+/// 8-element f32 [0,1) uniform keyed by `key_from_seed` of an arbitrary seed
+/// EXPRESSION string.
 fn seeded_uniform_expr(seed_expr: &str) -> String {
     let zeros = ["cast(0.0, f32)"; 8].join(", ");
     format!(
         "template = to_tensor([{zeros}])\n\
-         sampled = with seed({seed_expr}) {{ uniform_like(copy(template), 0.0, 1.0) }}\n"
+         sampled = uniform_like(key_from_seed({seed_expr}), copy(template), 0.0, 1.0)\n"
     )
 }
 
@@ -107,28 +105,39 @@ fn outcome(tag: &str, seed_expr: &str) -> (Lane, Lane) {
     (e, c)
 }
 
-/// A "computed" seed must be REJECTED loudly and IDENTICALLY in both lanes —
-/// the shared effects gate makes this the only reachable outcome, so there is
-/// no silent divergence to hide behind the recorded residual.
-fn assert_both_reject(tag: &str, seed_expr: &str) {
+/// A seed whose dtype is not `i64` must be REJECTED loudly and IDENTICALLY in
+/// both lanes, by the checker's diagnostic containing `diagnostic`.
+fn assert_both_reject(tag: &str, seed_expr: &str, diagnostic: &str) {
     let (e, c) = outcome(tag, seed_expr);
     match (e, c) {
         (Lane::Err(em), Lane::Err(_)) => assert!(
-            em.contains("requires a signed i64 literal seed"),
-            "{seed_expr}: eval rejected but not via the seed-literal gate: {em}"
+            em.contains(diagnostic),
+            "{seed_expr}: eval rejected but not with `{diagnostic}`: {em}"
         ),
         (e, c) => panic!("{seed_expr}: expected BOTH-ERR, got eval={e:?} c={c:?}"),
     }
 }
 
-/// A literal seed must AGREE bit-for-bit across lanes post-fix.
-fn assert_both_agree(tag: &str, seed_expr: &str) {
+/// An `i64` seed must AGREE bit-for-bit across lanes, and with the
+/// `common::key_ref` draw of `key_from_seed(seed)`.
+fn assert_both_agree(tag: &str, seed_expr: &str, seed: i64) {
     let (e, c) = outcome(tag, seed_expr);
     match (e, c) {
-        (Lane::Ok(a), Lane::Ok(b)) => assert!(
-            bit_equal(&a, &b),
-            "{seed_expr}: lanes must be f32-bit-equal\n eval={a:?}\n c   ={b:?}"
-        ),
+        (Lane::Ok(a), Lane::Ok(b)) => {
+            assert!(
+                bit_equal(&a, &b),
+                "{seed_expr}: lanes must be f32-bit-equal\n eval={a:?}\n c   ={b:?}"
+            );
+            let reference =
+                common::key_ref::uniform_f32(common::key_ref::key_from_seed(seed), 8, 0.0, 1.0)
+                    .into_iter()
+                    .map(f64::from)
+                    .collect::<Vec<_>>();
+            assert!(
+                bit_equal(&a, &reference),
+                "{seed_expr}: eval must draw key_from_seed({seed})\n eval={a:?}\n ref ={reference:?}"
+            );
+        }
         (e, c) => panic!("{seed_expr}: expected BOTH-OK agreeing, got eval={e:?} c={c:?}"),
     }
 }
@@ -136,53 +145,50 @@ fn assert_both_agree(tag: &str, seed_expr: &str) {
 #[test]
 fn rt_2a_negative_seed_rejected_both_lanes() {
     // Unsuffixed negative seeds remain rejected: their dtype is not i64.
-    assert_both_reject("2a", "-1");
-    assert_both_reject("2a", "-2147483649");
+    assert_both_reject("2a", "-1", "expected i64, got i32");
+    assert_both_reject("2a", "-2147483649", "out of range for default i32");
 }
 
 #[test]
 fn rt_2c_float_seed_rejected_both_lanes() {
-    // 1.5 is Atom::Float: peel returns None, gate rejects before eval fallback.
-    assert_both_reject("2c", "1.5");
+    // 1.5 is an f32 literal, not an i64 seed.
+    assert_both_reject("2c", "1.5", "expected i64, got f32");
 }
 
 #[test]
-fn rt_2d_cast_wrapped_seed_rejected_both_lanes() {
-    // The recorded residual calls this "computed"; the gate rejects it, so the
-    // narrowing it warns about is NOT reachable through the checked pipeline.
-    assert_both_reject("2d", "cast(4294967295, i64)");
+fn rt_2d_cast_wrapped_seed_reaches_the_key_at_full_width_in_both_lanes() {
+    // The recorded residual warned that a cast-wrapped seed could narrow to
+    // i32 (`-1`); the key must be that of 4294967295 in both lanes.
+    assert_both_agree("2d", "cast(4294967295, i64)", 4_294_967_295);
 }
 
 #[test]
-fn rt_2e_add_computed_seed_rejected_both_lanes() {
-    assert_both_reject("2e", "add(2147483647, 1)");
+fn rt_2e_i32_computed_seed_rejected_and_i64_computed_seed_agrees() {
+    assert_both_reject("2e", "add(2147483647, 1)", "expected i64, got i32");
+    assert_both_agree("2e", "add(2147483647i64, 1i64)", 2_147_483_648);
 }
 
 #[test]
 fn rt_4_literal_boundaries_agree() {
-    // i64-suffixed literals across the i32/i64 boundary pass the gate and
-    // must be lane-identical. chelis#731 Phase 1 makes the seed's i64 suffix a
-    // checker requirement (an unsuffixed literal is now a type error), so the
-    // boundary seeds carry the `i64` suffix; the suffix is meta-only and does
-    // not change the seed's raw-atom value the peel reads, so lane parity holds.
-    for s in [
-        "2147483646i64",
-        "2147483647i64",
-        "2147483648i64",
-        "2147483649i64",
-        "4294967296i64",
+    // i64-suffixed literals across the i32/i64 boundary are lane-identical
+    // and draw their own key; an unsuffixed literal is an i32, a type error.
+    for (s, seed) in [
+        ("2147483646i64", 2_147_483_646),
+        ("2147483647i64", 2_147_483_647),
+        ("2147483648i64", 2_147_483_648),
+        ("2147483649i64", 2_147_483_649),
+        ("4294967296i64", 4_294_967_296),
     ] {
-        assert_both_agree("4", s);
+        assert_both_agree("4", s, seed);
     }
 }
 
 /// 2b: an i64-*suffixed* seed literal `Ni64` desugars to
-/// `(lit {type: (t-prim {} i64)} N)`. The peel is meta-agnostic (it reads
-/// the raw atom whether the meta says i32 or i64), so a suffixed seed
-/// reads full width and agrees with C — the design-intended §C1.5 form.
+/// `(lit {type: (t-prim {} i64)} N)` and reaches the key at full width in
+/// both lanes.
 #[test]
 fn rt_2b_suffixed_int64_seed_agrees() {
-    assert_both_agree("2b", "4294967295i64");
+    assert_both_agree("2b", "4294967295i64", 4_294_967_295);
 }
 
 /// Oracle robustness (protocol item 3): `parse_tensor_data` must FAIL LOUDLY,

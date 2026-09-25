@@ -477,18 +477,19 @@ fn rt_control_float_cos_still_works_both_lanes() {
     assert!(ok, "float cos must keep building; stderr: {stderr}");
 }
 
-/// `with seed(...) { ... }` (a KNOWN effect kind) must keep working after
-/// the rows 9/20 string-match conversion.
+/// `with device(...) { ... }` (a KNOWN effect kind) must keep working after
+/// the rows 9/20 string-match conversion. The control used the `random`
+/// kind until chelis#2413 retired it; `device` is the remaining known kind.
 #[test]
-fn rt_control_random_effect_still_works() {
+fn rt_control_known_effect_kind_still_works() {
     let program = "module M.Main\n\
-         def f() -> tensor[2, f32] = with seed(42i64) { uniform_like(to_tensor([0.0, 0.0]), 0.0, 1.0) }\n\
+         def f() -> tensor[2, f32] = with device(\"gpu:0\") { to_tensor([2.5f32, 1.0f32]) }\n\
          out = print(f())\n";
     match eval_full(program, ".ch") {
         Ok(stdout) => assert!(
-            stdout.contains("data=["),
-            "seeded uniform must produce a tensor; got: {stdout}"
+            stdout.contains("data=[2.5, 1.0]"),
+            "the handled body must produce its tensor; got: {stdout}"
         ),
-        Err(stderr) => panic!("the `random` effect kind must keep evaluating; got: {stderr}"),
+        Err(stderr) => panic!("the `device` effect kind must keep evaluating; got: {stderr}"),
     }
 }
