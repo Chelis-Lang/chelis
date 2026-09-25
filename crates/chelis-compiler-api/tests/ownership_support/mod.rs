@@ -250,6 +250,19 @@ pub fn run_expect_failure(source: &GeneratedProgram, driver: &str) {
     );
 }
 
+/// Run a program that must terminate unsuccessfully, and return its stderr.
+#[allow(dead_code)]
+pub fn run_failure_stderr(source: &GeneratedProgram, driver: &str) -> String {
+    let (_dir, binary) = compile_program(source, &[], driver);
+    let output = Command::new(binary).output().expect("execute failing C");
+    assert!(
+        !output.status.success(),
+        "expected a failing program: stdout={}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    String::from_utf8_lossy(&output.stderr).into_owned()
+}
+
 fn execute_program(source: &GeneratedProgram, peers: &[String], driver: &str) -> (Value, String) {
     let (_dir, binary) = compile_program(source, peers, driver);
     let ledger = binary.with_file_name("ledger.jsonl");

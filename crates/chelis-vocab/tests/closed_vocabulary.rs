@@ -239,6 +239,7 @@ fn representation_variants_have_current_widths_and_payload_status() {
         (Repr::TwosComplement32, 4, false),
         (Repr::TwosComplement64, 8, false),
         (Repr::Bool8, 1, false),
+        (Repr::Word64, 8, false),
     ];
     assert_eq!(Repr::ALL, expected.map(|(repr, ..)| repr));
 
@@ -256,6 +257,11 @@ fn equal_width_representations_keep_distinct_identities() {
     );
     assert_ne!(Repr::Ieee754Binary32, Repr::TwosComplement32);
     assert_ne!(Repr::Bool8, Repr::TwosComplement8);
+    assert_eq!(
+        Repr::Word64.byte_width(),
+        Repr::TwosComplement64.byte_width()
+    );
+    assert_ne!(Repr::Word64, Repr::TwosComplement64);
 }
 
 #[test]
@@ -271,6 +277,7 @@ fn representation_consumer_match_is_a_compile_time_ratchet() {
             Repr::TwosComplement32 => "twos-complement-32",
             Repr::TwosComplement64 => "twos-complement-64",
             Repr::Bool8 => "bool8",
+            Repr::Word64 => "word64",
         }
     }
 
@@ -354,6 +361,14 @@ fn runtime_dtype_ids_names_macros_representations_and_widths_round_trip() {
             Repr::TwosComplement16,
             2,
         ),
+        (
+            RuntimeDType::Key,
+            9,
+            "key",
+            "CHELIS_DTYPE_KEY",
+            Repr::Word64,
+            8,
+        ),
     ];
     assert_eq!(RuntimeDType::ALL, expected.map(|(dtype, ..)| dtype));
 
@@ -412,6 +427,7 @@ fn runtime_dtype_consumer_match_is_a_compile_time_ratchet() {
             RuntimeDType::F16 => "u16-f16",
             RuntimeDType::I8 => "i8",
             RuntimeDType::I16 => "i16",
+            RuntimeDType::Key => "u64-key",
         }
     }
 

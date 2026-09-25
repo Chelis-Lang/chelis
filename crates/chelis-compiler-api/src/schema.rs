@@ -2105,7 +2105,14 @@ pub struct WireRecordPatternField {
 ///   `UniformBoundAdjoint` read a forward draw's key, and `key` is a
 ///   structural precision with no literal carrier. A version-16 random node's
 ///   baked controls and seed have no version-17 spelling.
-pub const WIRE_DAG_SCHEMA_VERSION: u32 = 17;
+/// - `18`: the explicit key operations `KeyFromSeed`, `Split`, `FoldIn` and
+///   `SplitN` ([05-OP-69..72], chelis#2413). `key` is a precision at any
+///   rank; a key may enter as a `Load` and be a root; a draw may take a
+///   key batch of any rank shaped like its data's leading axes, with
+///   controls and activation shaped like a leading part of the batch. A
+///   version-17 graph holds no key operation and is rejected like every
+///   other earlier version.
+pub const WIRE_DAG_SCHEMA_VERSION: u32 = 18;
 
 /// A typed failure from validating a serialized [`WireDag`] against the
 /// supported schema version (WI-2). This is deliberately its own error
@@ -2407,7 +2414,7 @@ impl WireDag {
                             then_value,
                             &shape_participants,
                         )
-                        || !branch_precision.is_some_and(|prim| prim.is_valid_tensor_precision())
+                        || !branch_precision.is_some_and(|prim| prim.is_data_element_dtype())
                     {
                         return Err(WireDagContractError::new(format!(
                             "WireDag Where node {} requires a same-shape Bool condition and exactly matching branch/output types",
@@ -2565,6 +2572,29 @@ impl WireDag {
                     if node.inputs.len() != expected_inputs {
                         return Err(WireDagContractError::new(format!(
                             "WireDag Expand node {} has {} inputs; size requires {expected_inputs}",
+                            node.id,
+                            node.inputs.len()
+                        )));
+                    }
+                }
+                WireRiscOp::SplitN { count } => {
+                    validate_wire_rt_dim(&self.nodes, index, node, count, false, false, "SplitN")?;
+                    let expected_inputs = match count {
+                        WireRtDim::Lit { .. } => 1,
+                        WireRtDim::Node { input: 1 } => 2,
+                        WireRtDim::Node { input } => {
+                            return Err(WireDagContractError::new(format!(
+                                "WireDag SplitN node {} count must reference absolute input slot 1, found {input}",
+                                node.id
+                            )));
+                        }
+                        WireRtDim::InputAxis { .. } | WireRtDim::ToEnd | WireRtDim::Sym { .. } => {
+                            unreachable!("owner validation rejects forbidden SplitN carriers")
+                        }
+                    };
+                    if node.inputs.len() != expected_inputs {
+                        return Err(WireDagContractError::new(format!(
+                            "WireDag SplitN node {} has {} inputs; count requires {expected_inputs}",
                             node.id,
                             node.inputs.len()
                         )));
@@ -3280,9 +3310,6 @@ fn wire_axis_origin(
         | WireRiscOp::Floor
         | WireRiscOp::Ceil
         | WireRiscOp::Round
-        | WireRiscOp::UniformLike {}
-        | WireRiscOp::Dropout {}
-        | WireRiscOp::DropoutReplay {}
         | WireRiscOp::Store { .. }
         | WireRiscOp::Copy
         | WireRiscOp::Drop
@@ -3290,7 +3317,27 @@ fn wire_axis_origin(
         | WireRiscOp::Cast { .. }
         | WireRiscOp::CastTrunc { .. }
         | WireRiscOp::FusedElem { .. }
-        | WireRiscOp::CheckedUnitAxis { .. } => same_shape_input_origin(),
+        | WireRiscOp::CheckedUnitAxis { .. }
+        | WireRiscOp::KeyFromSeed {}
+        | WireRiscOp::Split { .. }
+        | WireRiscOp::FoldIn {} => same_shape_input_origin(),
+        // A draw's data operand is its only same-shape operand: its controls,
+        // key and activation are shaped like leading parts of the data.
+        WireRiscOp::UniformLike {} | WireRiscOp::Dropout {} | WireRiscOp::DropoutReplay {} => {
+            input_axis(0, axis)
+        }
+        // [05-OP-71]: the key's axes pass through; the count axis is last.
+        WireRiscOp::SplitN { count } => {
+            let key_rank = wire_node_by_id(nodes, *node.inputs.first()?)?
+                .output_type
+                .dims
+                .len();
+            if axis < key_rank {
+                input_axis(0, axis)
+            } else {
+                wire_rt_dim_origin(nodes, node, count, fuel - 1, relevant_shape_sources)
+            }
+        }
         WireRiscOp::Permute { axes } => input_axis(0, usize::try_from(*axes.get(axis)?).ok()?),
         WireRiscOp::Expand {
             axis: expanded,
@@ -3651,6 +3698,15 @@ pub enum WireUniformBound {
     High,
 }
 
+/// Which half of `[05-OP-70]`'s pair a `Split` produces: `derive(k, 0)` or
+/// `derive(k, 1)` of `[05-RNG-2]`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WireKeyBranch {
+    Left,
+    Right,
+}
+
 /// The handler whose stream a `DrawKey` reads: the stream the graph's caller
 /// holds, or a `with seed` region lowered inside the graph. `instance` is an
 /// opaque region identity, not a count or a numeric value.
@@ -3799,10 +3855,10 @@ pub enum WireRiscOp {
     Ceil,
     Round,
     /// `[05-OP-8]`. Inputs are `[template, low, high, key]`, optionally
-    /// followed by one rank-zero Bool activation.
+    /// followed by one Bool activation, shaped as spec/10 §3.2 fixes.
     UniformLike {},
     /// `[05-OP-37]`. Inputs are `[x, rate, key]`, optionally followed by one
-    /// rank-zero Bool activation.
+    /// Bool activation, shaped as spec/10 §3.2 fixes.
     Dropout {},
     /// The `[05-OP-37]` pathwise adjoint. Inputs are `[g, rate, key]`,
     /// optionally followed by the forward draw's activation; it reads its
@@ -3822,6 +3878,22 @@ pub enum WireRiscOp {
         handler: WireRandomHandler,
         draw: WireRandomDraw,
         dtype: String,
+    },
+    /// `[05-OP-69]`. Input is one `int64` tensor; the output is the `key`
+    /// tensor of the same shape.
+    KeyFromSeed {},
+    /// One half of `[05-OP-70]`. Input is one `key` tensor; the output has
+    /// its shape.
+    Split {
+        branch: WireKeyBranch,
+    },
+    /// `[05-OP-72]`. Inputs are a `key` tensor and an `int64` tensor of
+    /// exactly equal shape.
+    FoldIn {},
+    /// `[05-OP-71]`. Input is one `key` tensor, then the count node when
+    /// `count` is a `Node`; the output appends the count axis last.
+    SplitN {
+        count: WireRtDim,
     },
     Sum {
         axis: i32,

@@ -45,6 +45,8 @@ fn padding_preserves_each_representation_and_empty_exact_extents() {
                 RuntimeDType::I16 => 0x7fff,
                 RuntimeDType::I8 => 0x7f,
                 RuntimeDType::Bool => 1,
+                // A key has no [05-OP-31] scalar carrier, so no pad value.
+                RuntimeDType::Key => continue,
             };
             let dtype = dtype.id() as chelis_dtype;
             let rows = rows(dtype, bit_pattern);

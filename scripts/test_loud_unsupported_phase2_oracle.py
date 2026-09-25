@@ -72,9 +72,9 @@ class LoudUnsupportedPhase2OracleTests(unittest.TestCase):
         source = (oracle.REPO_ROOT / oracle.VOCAB_SOURCE).read_text(encoding="utf-8")
         mutated = oracle.mutate_runtime_dtype(source)
         self.assertNotEqual(mutated, source)
-        self.assertIn("Phase2OracleDType = 9", mutated)
-        self.assertIn("pub const ALL: [Self; 10]", mutated)
-        self.assertIn("9 => Ok(Self::Phase2OracleDType)", mutated)
+        self.assertIn("Phase2OracleDType = 10", mutated)
+        self.assertIn("pub const ALL: [Self; 11]", mutated)
+        self.assertIn("10 => Ok(Self::Phase2OracleDType)", mutated)
         self.assertIn('Self::Phase2OracleDType => "phase2-oracle-dtype"', mutated)
         self.assertIn("Self::Phase2OracleDType => (Repr::Ieee754Binary32, Some(A::Ieee754Binary32))", mutated)
         self.assertNotIn(
@@ -113,15 +113,15 @@ class LoudUnsupportedPhase2OracleTests(unittest.TestCase):
 
     def test_dtype_mutation_refuses_a_drifted_owner_shape(self) -> None:
         source = (oracle.REPO_ROOT / oracle.VOCAB_SOURCE).read_text(encoding="utf-8")
-        drifted = source.replace("8 => Ok(Self::I16),", "8 => Ok(Self::I16), /* moved */")
+        drifted = source.replace("9 => Ok(Self::Key),", "9 => Ok(Self::Key), /* moved */")
         with self.assertRaisesRegex(oracle.OracleFailure, "RuntimeDType owner shape drifted"):
             oracle.mutate_runtime_dtype(drifted)
 
     def test_dtype_mutation_refuses_a_drifted_c_macro_owner_shape(self) -> None:
         source = (oracle.REPO_ROOT / oracle.VOCAB_SOURCE).read_text(encoding="utf-8")
         drifted = source.replace(
-            'Self::I16 => "CHELIS_DTYPE_I16",',
-            'Self::I16 => "CHELIS_DTYPE_I16_DRIFTED",',
+            'Self::Key => "CHELIS_DTYPE_KEY",',
+            'Self::Key => "CHELIS_DTYPE_KEY_DRIFTED",',
         )
         with self.assertRaisesRegex(oracle.OracleFailure, "RuntimeDType owner shape drifted"):
             oracle.mutate_runtime_dtype(drifted)

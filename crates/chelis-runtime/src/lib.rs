@@ -58,6 +58,9 @@ pub const CHELIS_DTYPE_F16: chelis_dtype = RuntimeDType::F16.id() as chelis_dtyp
 // `int8_t*` / `int16_t*` for direct element access.
 pub const CHELIS_DTYPE_I8: chelis_dtype = RuntimeDType::I8.id() as chelis_dtype;
 pub const CHELIS_DTYPE_I16: chelis_dtype = RuntimeDType::I16.id() as chelis_dtype;
+// chelis#2413: a random key ([05-RNG-2]) is an opaque 64-bit word stored
+// through [`KeyWord`], never an integer tensor.
+pub const CHELIS_DTYPE_KEY: chelis_dtype = RuntimeDType::Key.id() as chelis_dtype;
 
 // `TensorElement` trait.  Closes the architectural piece of the
 // `CRuntime-F32Coupling` §5 entry by giving each Rust primitive a
@@ -216,6 +219,33 @@ impl From<Bool8> for bool {
     #[inline]
     fn from(value: Bool8) -> Self {
         value.get()
+    }
+}
+
+/// One element of random-key tensor storage: an opaque 64-bit word
+/// ([05-RNG-2], `Repr::Word64`).
+///
+/// A key has no arithmetic, comparison, or cast, so the runtime never reads
+/// one as a number. It is a newtype rather than `u64` or `i64` for the reason
+/// [`Bool8`] is not `u8`: `Repr::Word64` and `Repr::TwosComplement64` share a
+/// width and are not interchangeable, and a distinct element type is what
+/// stops key storage and i64 storage being cross-wired. Every bit pattern is
+/// a key.
+#[repr(transparent)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct KeyWord(u64);
+
+impl KeyWord {
+    #[inline]
+    #[must_use]
+    pub const fn from_bits(bits: u64) -> Self {
+        Self(bits)
+    }
+
+    #[inline]
+    #[must_use]
+    pub const fn bits(self) -> u64 {
+        self.0
     }
 }
 
@@ -592,10 +622,27 @@ unsafe fn tensor_metadata_dtype(tensor: *const chelis_tensor, context: &str) -> 
 /// Validate a complete operation input set before any caller reads shape or
 /// data fields. Public [05-OP-33] entries use this route so adding a second or
 /// third operand cannot accidentally reintroduce validate-after-dereference.
+/// No [05-OP-33] data operation names `key`, so a key tensor is a forbidden
+/// carrier here.
 unsafe fn validate_tensor_inputs<const N: usize>(
     inputs: [(*const chelis_tensor, &str); N],
 ) -> [RuntimeDType; N] {
-    std::array::from_fn(|index| unsafe { tensor_dtype(inputs[index].0, inputs[index].1) })
+    std::array::from_fn(|index| {
+        let (tensor, context) = inputs[index];
+        require_data_element_dtype(unsafe { tensor_dtype(tensor, context) }, context)
+    })
+}
+
+/// spec/04 §1.1: an operation admits `key` elements only where its own atom
+/// names `key`. [05-OP-31] names it for storage, views and copies, which
+/// carry a key tensor's words; the [05-OP-33] data operations name it
+/// nowhere, so each rejects a key tensor at entry rather than copying or
+/// duplicating its keys by width.
+fn require_data_element_dtype(dtype: RuntimeDType, context: &str) -> RuntimeDType {
+    if dtype == RuntimeDType::Key {
+        runtime_fail!("Domain: {context}: key is not an active data element dtype");
+    }
+    dtype
 }
 
 fn require_signed_integer_dtype(dtype: RuntimeDType, context: &str) -> RuntimeDType {
@@ -605,7 +652,8 @@ fn require_signed_integer_dtype(dtype: RuntimeDType, context: &str) -> RuntimeDT
         | RuntimeDType::Bf16
         | RuntimeDType::F16
         | RuntimeDType::F32
-        | RuntimeDType::F64 => {
+        | RuntimeDType::F64
+        | RuntimeDType::Key => {
             runtime_fail!("Domain: {context} requires a signed-integer dtype")
         }
     }
@@ -621,7 +669,7 @@ fn require_signed_integer_or_float_dtype(dtype: RuntimeDType, context: &str) -> 
         | RuntimeDType::F16
         | RuntimeDType::F32
         | RuntimeDType::F64 => dtype,
-        RuntimeDType::Bool => {
+        RuntimeDType::Bool | RuntimeDType::Key => {
             runtime_fail!("Domain: {context} requires a signed-integer or float dtype")
         }
     }
@@ -644,6 +692,7 @@ fn default_sum_result_dtype(dtype: RuntimeDType) -> RuntimeDType {
         | RuntimeDType::F32
         | RuntimeDType::F64 => dtype,
         RuntimeDType::Bool => runtime_fail!("Domain: bool has no default sum result dtype"),
+        RuntimeDType::Key => runtime_fail!("Domain: key has no default sum result dtype"),
     }
 }
 
@@ -997,7 +1046,8 @@ unsafe fn read_index_slot(t: *const chelis_tensor, linear: usize, dtype: Runtime
         | RuntimeDType::Bf16
         | RuntimeDType::F16
         | RuntimeDType::F32
-        | RuntimeDType::F64 => runtime_fail!(
+        | RuntimeDType::F64
+        | RuntimeDType::Key => runtime_fail!(
             "Domain: internal index read requires a signed-integer dtype, got {}",
             diagnostic_dtype_name(dtype)
         ),
@@ -1021,7 +1071,7 @@ pub struct chelis_dict_entry {
 
 fn scalar_used_bits(dtype: RuntimeDType) -> u32 {
     match dtype {
-        RuntimeDType::F64 | RuntimeDType::I64 => 64,
+        RuntimeDType::F64 | RuntimeDType::I64 | RuntimeDType::Key => 64,
         RuntimeDType::F32 | RuntimeDType::I32 => 32,
         RuntimeDType::Bf16 | RuntimeDType::F16 | RuntimeDType::I16 => 16,
         RuntimeDType::Bool | RuntimeDType::I8 => 8,
@@ -1030,6 +1080,10 @@ fn scalar_used_bits(dtype: RuntimeDType) -> u32 {
 
 fn validate_scalar(value: chelis_scalar, context: &str) -> RuntimeDType {
     let dtype = require_runtime_dtype(value.dtype, context);
+    if dtype == RuntimeDType::Key {
+        // [05-OP-31]'s scalar carrier governs numeric and bool scalars only.
+        runtime_fail!("Domain: {context}: a key is not a scalar carrier");
+    }
     if value.reserved != [0; 7] {
         runtime_fail!("Domain: {context}: scalar reserved bytes must be zero");
     }
@@ -2788,6 +2842,14 @@ pub unsafe extern "C" fn chelis_tensor_write_literal(
 ) {
     let op = "const";
     let tensor = lock_live_write_guard(guard, op);
+    if tensor.metadata.dtype() == RuntimeDType::Key {
+        // [05-OP-31]: a key has no literal carrier, so no literal writes a
+        // key tensor, an empty one included, whose loop below checks nothing.
+        affine_result::<()>(
+            Err(MetadataError::Domain("a key tensor has no literal".into())),
+            op,
+        );
+    }
     let count = affine_scalar(count, op);
     if count != tensor.metadata.elements().get() || (count > 0 && values.is_null()) {
         affine_result::<()>(
@@ -3484,6 +3546,15 @@ fn reduction_exemplar(value: chelis_scalar, op: &str) -> RuntimeDType {
             .map_err(|_| MetadataError::Domain("unknown scalar dtype".into())),
         op,
     );
+    if dtype == RuntimeDType::Key {
+        // [05-OP-31]: a `chelis_scalar` never carries a key.
+        affine_result::<()>(
+            Err(MetadataError::Domain(
+                "a key is not a scalar carrier".into(),
+            )),
+            op,
+        );
+    }
     let width = scalar_used_bits(dtype);
     if value.reserved != [0; 7]
         || (width < 64 && value.bits >> width != 0)
@@ -3819,7 +3890,7 @@ pub unsafe extern "C" fn chelis_tensor_reshape(
     shape: *const chelis_list,
 ) -> *mut chelis_tensor {
     let context = "chelis_tensor_reshape";
-    let dtype = tensor_dtype(tensor, context);
+    let [dtype] = validate_tensor_inputs([(tensor, context)]);
     require_live_kind(shape.cast(), ownership_ledger::Kind::List, context);
     let items = (*shape).live();
     metadata_or_fail(ShapeMetadata::checked_rank(items.len()), context);
@@ -4108,6 +4179,9 @@ fn render_scalar(value: chelis_scalar) -> String {
         RuntimeDType::I16 => (value.bits as u16 as i16).to_string(),
         RuntimeDType::I8 => (value.bits as u8 as i8).to_string(),
         RuntimeDType::Bool => if value.bits == 1 { "true" } else { "false" }.to_owned(),
+        RuntimeDType::Key => {
+            runtime_fail!("Domain: chelis_string_from_scalar: a key has no text form")
+        }
     }
 }
 
@@ -4240,6 +4314,7 @@ pub unsafe extern "C" fn chelis_parse_scalar(
         RuntimeDType::F16 | RuntimeDType::Bf16 | RuntimeDType::F32 | RuntimeDType::F64 => {
             parse_float_scalar(text, dtype)
         }
+        RuntimeDType::Key => runtime_fail!("Domain: chelis_parse_scalar: a key has no text form"),
     };
     match parsed {
         Some(value) => new_option(Some(chelis_value_box_scalar(value)), "chelis_parse_scalar"),
@@ -5128,7 +5203,10 @@ pub unsafe extern "C" fn chelis_dict_get_scalar(
     key: chelis_value,
     dtype: chelis_dtype,
 ) -> *mut chelis_option {
-    let dtype = require_runtime_dtype(dtype, "chelis_dict_get_scalar dtype");
+    let dtype = require_data_element_dtype(
+        require_runtime_dtype(dtype, "chelis_dict_get_scalar dtype"),
+        "chelis_dict_get_scalar dtype",
+    );
     let option = chelis_dict_get(dict, key);
     let Some(value) = (*option).value else {
         return option;
@@ -5458,6 +5536,7 @@ unsafe fn write_scalar_bits(tensor: *mut chelis_tensor, index: usize, value: che
             *data.cast::<u16>() = value.bits as u16
         }
         RuntimeDType::Bool | RuntimeDType::I8 => *data = value.bits as u8,
+        RuntimeDType::Key => runtime_fail!("Domain: a key tensor has no scalar ingress"),
     }
 }
 
@@ -5492,7 +5571,10 @@ pub unsafe extern "C" fn chelis_tensor_from_values(
     list: *const chelis_list,
     dtype: chelis_dtype,
 ) -> *mut chelis_tensor {
-    let dtype = require_runtime_dtype(dtype, "chelis_tensor_from_values dtype");
+    let dtype = require_data_element_dtype(
+        require_runtime_dtype(dtype, "chelis_tensor_from_values dtype"),
+        "chelis_tensor_from_values dtype",
+    );
     let shape = nested_list_shape(list);
     let rank = i32::try_from(shape.len())
         .unwrap_or_else(|_| runtime_fail!("Overflow: chelis_tensor_from_values rank exceeds i32"));
@@ -5509,7 +5591,8 @@ pub unsafe extern "C" fn chelis_tensor_from_values(
 
 #[no_mangle]
 pub unsafe extern "C" fn chelis_tensor_elements(tensor: *const chelis_tensor) -> *mut chelis_list {
-    let dtype = tensor_dtype(tensor, "chelis_tensor_elements input");
+    // Checked at entry, not per element, so an empty key tensor is rejected.
+    let [dtype] = validate_tensor_inputs([(tensor, "chelis_tensor_elements input")]);
     let count = metadata_or_fail(
         (*tensor).metadata.elements().scratch_len::<chelis_value>(),
         "tensor elements output",
@@ -5561,6 +5644,9 @@ pub unsafe extern "C" fn chelis_tensor_elements(tensor: *const chelis_tensor) ->
             RuntimeDType::F16 => {
                 let bits = *(tensor_data(tensor) as *const u16).add(i);
                 internal_value_from_f16_bits(bits)
+            }
+            RuntimeDType::Key => {
+                runtime_fail!("Domain: chelis_tensor_elements: a key tensor has no element values")
             }
         };
         items.push(value);
@@ -5681,7 +5767,9 @@ pub unsafe extern "C" fn chelis_tensor_concat(
         .collect::<Vec<_>>();
     let dtypes = tensors
         .iter()
-        .map(|tensor| tensor_dtype(*tensor, "concat input"))
+        .map(|tensor| {
+            require_data_element_dtype(tensor_dtype(*tensor, "concat input"), "concat input")
+        })
         .collect::<Vec<_>>();
     let first = tensors[0];
     let dtype = dtypes[0];
@@ -5741,7 +5829,7 @@ pub unsafe extern "C" fn chelis_tensor_split(
     axis: i32,
     sizes: *const chelis_list,
 ) -> *mut chelis_list {
-    let dtype = tensor_dtype(tensor, "split input");
+    let [dtype] = validate_tensor_inputs([(tensor, "split input")]);
     let axis_i = tensor_normalize_axis(tensor, axis, "split");
     // [05-OP-33]: split takes "nonnegative i64 sizes whose checked sum
     // equals the selected extent". Both halves matter. An unchecked `+=`
@@ -5905,6 +5993,7 @@ pub unsafe extern "C" fn chelis_tensor_cmplt(
         RuntimeDType::F16 => cmp_loop::<half::f16>(lm, rm, out_buf, size),
         RuntimeDType::Bf16 => cmp_loop::<half::bf16>(lm, rm, out_buf, size),
         RuntimeDType::Bool => runtime_fail!("cmplt is undefined for bool tensors"),
+        RuntimeDType::Key => runtime_fail!("cmplt is undefined for key tensors"),
     }
     out
 }
@@ -6020,6 +6109,9 @@ unsafe fn tensor_scatter(
             RuntimeDType::I8 => scatter_add_all::<i8>(out, updates, &additive_leaves),
             RuntimeDType::Bool => {
                 runtime_fail!("scatter add-mode is undefined for bool tensors");
+            }
+            RuntimeDType::Key => {
+                runtime_fail!("scatter add-mode is undefined for key tensors");
             }
         }
     }
@@ -6169,6 +6261,7 @@ pub unsafe extern "C" fn chelis_tensor_cumsum(
         RuntimeDType::I16 => cumsum_loop::<i16, i32, i32>(tensor, out, &iteration),
         RuntimeDType::I8 => cumsum_loop::<i8, i32, i32>(tensor, out, &iteration),
         RuntimeDType::Bool => runtime_fail!("cumsum is undefined for bool tensors"),
+        RuntimeDType::Key => runtime_fail!("cumsum is undefined for key tensors"),
     }
     out
 }
@@ -6268,6 +6361,7 @@ pub unsafe extern "C" fn chelis_tensor_sort(
         RuntimeDType::F16 => sort_loop::<half::f16>(values, indices_data, &iteration),
         RuntimeDType::Bf16 => sort_loop::<half::bf16>(values, indices_data, &iteration),
         RuntimeDType::Bool => runtime_fail!("sort is undefined for bool tensors"),
+        RuntimeDType::Key => runtime_fail!("sort is undefined for key tensors"),
     }
     let items = [
         chelis_value_take_tensor(values),
@@ -6282,7 +6376,7 @@ pub unsafe extern "C" fn chelis_tensor_diagonal(
     axis1: i32,
     axis2: i32,
 ) -> *mut chelis_tensor {
-    let dtype = tensor_dtype(tensor, "diagonal input");
+    let [dtype] = validate_tensor_inputs([(tensor, "diagonal input")]);
     let axis1_i = tensor_normalize_axis(tensor, axis1, "diagonal");
     let axis2_i = tensor_normalize_axis(tensor, axis2, "diagonal");
     if axis1_i == axis2_i {
@@ -6462,6 +6556,10 @@ pub unsafe extern "C" fn chelis_tensor_trace(
             chelis_tensor_release(diag);
             runtime_fail!("trace is undefined for bool tensors");
         }
+        RuntimeDType::Key => {
+            chelis_tensor_release(diag);
+            runtime_fail!("trace is undefined for key tensors");
+        }
     }
     chelis_tensor_release(diag);
     out
@@ -6553,6 +6651,7 @@ pub unsafe extern "C" fn chelis_tensor_clamp(
             clamp_loop::<half::bf16>(tensor, lo, hi, out, size, lo_scalar, hi_scalar)
         }
         RuntimeDType::Bool => runtime_fail!("clamp is undefined for bool tensors"),
+        RuntimeDType::Key => runtime_fail!("clamp is undefined for key tensors"),
     }
     out
 }
@@ -7174,6 +7273,7 @@ unsafe fn tensor_elem_to_string(t: *const chelis_tensor, dtype: RuntimeDType, i:
             let bits = *(tensor_data(t) as *const u16).add(i);
             format_shortest(f64::from(half::f16::from_bits(bits)), RuntimeDType::F16)
         }
+        RuntimeDType::Key => runtime_fail!("Domain: tensor formatting: a key has no text form"),
     }
 }
 
@@ -7182,7 +7282,8 @@ unsafe fn tensor_elem_to_string(t: *const chelis_tensor, dtype: RuntimeDType, i:
 const TENSOR_RENDER_LIMIT: usize = 32;
 
 unsafe fn tensor_to_string(t: *const chelis_tensor) -> String {
-    let dtype = tensor_dtype(t, "tensor formatting");
+    // Checked at entry, not per element, so an empty key tensor is rejected.
+    let [dtype] = validate_tensor_inputs([(t, "tensor formatting")]);
     // [05-OBS-4]: a rank-0 tensor renders as its single element, bare -
     // the `tensor(shape=[], data=[..])` wrapper is not an exit form.
     if (*t).rank() == 0 {

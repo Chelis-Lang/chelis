@@ -13,7 +13,8 @@ enum {
     CHELIS_DTYPE_BF16 = 5,
     CHELIS_DTYPE_F16 = 6,
     CHELIS_DTYPE_I8 = 7,
-    CHELIS_DTYPE_I16 = 8
+    CHELIS_DTYPE_I16 = 8,
+    CHELIS_DTYPE_KEY = 9
 };
 
 #endif

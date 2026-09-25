@@ -65,7 +65,7 @@ BASELINE_PATH = REPO_ROOT / "spec/design/runtime_representation_phase0_inventory
 # design amendment when the finished foundation or a mutation binding changes.
 # Release reproducers, hardware probes, counts, and ordinary configuration are
 # deliberately outside this digest.
-FREEZE_SHA256 = "f17c376e0f4ee34ae3736bffd3dc39a0fe1535201fdf2ebe1c73503682a2f425"
+FREEZE_SHA256 = "a90d2e9c1e42b01cdcd2338444f5c982e6f0163bb57c9ec38d326e6cef3aefa2"
 PHASE0_COMMAND = (
     "uv run --managed-python --python 3.11 --no-project python "
     "scripts/runtime_representation_oracle.py --phase 0"
@@ -1346,10 +1346,16 @@ unsafe fn {marker}(tensor: *mut crate::chelis_tensor) -> *mut u8 {{
 
 
 def mutate_incomplete_dtype(source: str) -> str:
-    anchor = "    I16 = 8,\n}"
+    # Anchor on the declaration, not on its last variant: appending a dtype is
+    # the change this witness exists for, so a last-variant anchor drifts on
+    # exactly that change.
+    anchor = "pub enum RuntimeDType {\n"
     if source.count(anchor) != 1:
         raise OracleFailure("incomplete-dtype mutation anchor drifted")
-    return source.replace(anchor, "    I16 = 8,\n    Phase0Probe = 127,\n}", 1)
+    tail = source.find("\n}", source.index(anchor))
+    if tail < 0:
+        raise OracleFailure("incomplete-dtype mutation anchor drifted")
+    return source[:tail] + "\n    Phase0Probe = 127," + source[tail:]
 
 
 def mutate_incomplete_arithmetic_repr(source: str) -> str:
