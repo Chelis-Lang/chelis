@@ -98,9 +98,9 @@ pub(super) struct InferenceProduct {
 struct InferredAdmissionContract {
     subject: String,
     variable: TypeVar,
-    /// Declared capabilities in the enclosing function. A local hole may
+    /// The enclosing declaration's authored type binders. A local hole may
     /// resolve to one of these without requiring a concrete instantiation.
-    givens: Vec<(TypeVar, TypeVarRestriction)>,
+    binders: Vec<TypeVar>,
     failed_application: Option<ErrorWitness>,
 }
 
@@ -113,11 +113,15 @@ impl InferredAdmissionContract {
             .into_iter()
             .filter_map(|variable| {
                 let required = subst.tvar_restriction(variable)?;
-                let provided = self.givens.iter().any(|(given, bound)| {
-                    subst.apply(&Type::Var(*given)) == Type::Var(variable)
-                        && bound.intersect(required) == Some(*bound)
-                });
-                (!provided).then_some((variable, required))
+                // A hole that resolved to an authored binder carries that
+                // binder's requirement, which `check_declared_dtype_bounds`
+                // decides against the declared bound. Deciding it here too
+                // reported one defect twice (chelis#2158 round 1).
+                let binder = self
+                    .binders
+                    .iter()
+                    .any(|binder| subst.apply(&Type::Var(*binder)) == Type::Var(variable));
+                (!binder).then_some((variable, required))
             })
             .collect()
     }
@@ -189,6 +193,19 @@ pub(super) enum PostAppReplay {
     /// the shape diagnostic would be reported twice. The dtype validators
     /// overlap no shape rule, so the two replays are independent.
     DtypeAdmissibility,
+}
+
+/// A borrowed view of one `PostApp` entry's replay inputs, so the ready replay
+/// and the rigid-binder decision (chelis#2216) hand the same call to
+/// [`InferenceProduct::replay_post_app`].
+#[derive(Clone, Copy)]
+pub(super) struct PostAppCall<'a> {
+    pub(super) replay: PostAppReplay,
+    pub(super) site: usize,
+    pub(super) node: &'a DeepNode,
+    pub(super) kids: &'a [deep::Expr],
+    pub(super) func_name: &'a str,
+    pub(super) env: &'a Env,
 }
 
 #[derive(Clone)]
@@ -419,7 +436,7 @@ impl InferenceProduct {
                 subst.tvar_restriction(*variable).is_none()
                     && !env.active_declared_type_names().contains_key(variable)
             });
-        self.record_admission_variables(subject, variables, env, subst);
+        self.record_admission_variables(subject, variables, env);
     }
 
     fn record_admission_variables(
@@ -427,29 +444,19 @@ impl InferenceProduct {
         subject: &str,
         variables: impl IntoIterator<Item = TypeVar>,
         env: &Env,
-        subst: &Subst,
     ) {
-        let givens: Vec<_> = env
+        let binders: Vec<TypeVar> = env
             .active_declared_type_names()
             .to_sorted()
             .into_iter()
-            .filter_map(|(variable, _)| {
-                // Unification can move a declared variable's restriction to
-                // its representative before a call result is registered.
-                let Type::Var(resolved) = subst.apply(&Type::Var(*variable)) else {
-                    return None;
-                };
-                subst
-                    .tvar_restriction(resolved)
-                    .map(|bound| (*variable, bound))
-            })
+            .map(|(variable, _)| *variable)
             .collect();
         for variable in variables {
             self.inferred_admission_contracts
                 .push(InferredAdmissionContract {
                     subject: subject.to_string(),
                     variable,
-                    givens: givens.clone(),
+                    binders: binders.clone(),
                     failed_application: None,
                 });
         }
@@ -528,7 +535,6 @@ impl InferenceProduct {
             &format!("result of `{}`", name.unwrap_or("<function value>")),
             variables,
             env,
-            subst,
         );
     }
 
@@ -828,6 +834,15 @@ impl InferenceProduct {
         self.deferred_shape_checks.iter().any(
             |check| matches!(&check.rule, DeferredShapeRule::PostApp { site, .. } if *site == key),
         )
+    }
+
+    /// Whether any call is suspended on this product's ledger. The
+    /// rigid-binder decision (chelis#2216) asks it of the scratch product a
+    /// replay ran on, to see a call that suspended again.
+    pub(super) fn has_post_app_checks(&self) -> bool {
+        self.deferred_shape_checks
+            .iter()
+            .any(|check| matches!(check.rule, DeferredShapeRule::PostApp { .. }))
     }
 
     /// Is this call already suspended for a FULL route replay?
@@ -1144,22 +1159,7 @@ impl InferenceProduct {
                     )
                 }
                 DeferredShapeRule::PostApp {
-                    replay: PostAppReplay::DtypeAdmissibility,
-                    node,
-                    kids,
-                    func_name,
-                    env,
-                    ..
-                } => {
-                    let settled: Vec<Type> =
-                        check.arg_tys.iter().map(|ty| subst.apply(ty)).collect();
-                    replay_dtype_admissibility(
-                        node, kids, func_name, env, &settled, vg, subst, errors, self,
-                    );
-                    continue;
-                }
-                DeferredShapeRule::PostApp {
-                    replay: PostAppReplay::Route,
+                    replay,
                     site,
                     node,
                     kids,
@@ -1168,31 +1168,91 @@ impl InferenceProduct {
                 } => {
                     let settled: Vec<Type> =
                         check.arg_tys.iter().map(|ty| subst.apply(ty)).collect();
-                    let mut replay_env = (**env).clone();
-                    // chelis#1512 round 2 P2-1: `node` is the ledger's own
-                    // clone and dies with this iteration. Carry the original
-                    // site so a route that re-registers inside the replay
-                    // keys its entry by the live node, not by this clone.
-                    self.replaying_post_app = Some((std::ptr::from_ref(node).addr(), *site));
-                    let replayed = finish_unified_app(
+                    let call = PostAppCall {
+                        replay: *replay,
+                        site: *site,
                         node,
                         kids,
-                        Some(func_name.clone()),
+                        func_name,
+                        env,
+                    };
+                    self.replay_post_app(
+                        call,
                         settled,
-                        check.result_ty.clone(),
-                        &mut replay_env,
+                        &check.result_ty,
                         vg,
                         subst,
                         adt_reg,
                         errors,
-                        self,
-                        None,
+                        false,
                     );
-                    self.replaying_post_app = None;
-                    reconcile_replayed_result(func_name, &check.result_ty, replayed, subst, errors)
+                    continue;
                 }
             };
             let _ = resolved;
+        }
+    }
+
+    /// Re-decide one suspended `PostApp` call against the operand types
+    /// `settled`.
+    ///
+    /// The ready replay above and the rigid-binder decision at the declaration
+    /// boundary (chelis#2216) both run this one function, so a call cannot be
+    /// decided one way when its operand binds and another way at a binder's
+    /// instantiation.
+    ///
+    /// `resuspend` makes a dtype replay record a fresh suspension on this
+    /// product when an operand is still unresolved, as a route replay always
+    /// does. The rigid-binder decision asks for it, to see a call that cannot
+    /// be decided at an arbitrary type; the ready replay does not.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn replay_post_app(
+        &mut self,
+        call: PostAppCall<'_>,
+        settled: Vec<Type>,
+        result_ty: &Type,
+        vg: &mut VarGen,
+        subst: &mut Subst,
+        adt_reg: &AdtRegistry,
+        errors: &mut DiagnosticSink<'_>,
+        resuspend: bool,
+    ) {
+        match call.replay {
+            PostAppReplay::DtypeAdmissibility => replay_dtype_admissibility(
+                call.node,
+                call.kids,
+                call.func_name,
+                call.env,
+                &settled,
+                vg,
+                subst,
+                errors,
+                self,
+                resuspend,
+            ),
+            PostAppReplay::Route => {
+                // chelis#1512 round 2 P2-1: `node` is the ledger's own clone
+                // and dies with this replay. Carry the original site so a
+                // route that re-registers inside the replay keys its entry by
+                // the live node, not by this clone.
+                self.replaying_post_app = Some((std::ptr::from_ref(call.node).addr(), call.site));
+                let replayed = finish_unified_app(
+                    call.node,
+                    call.kids,
+                    Some(call.func_name.to_string()),
+                    settled,
+                    result_ty.clone(),
+                    call.env,
+                    vg,
+                    subst,
+                    adt_reg,
+                    errors,
+                    self,
+                    None,
+                );
+                self.replaying_post_app = None;
+                reconcile_replayed_result(call.func_name, result_ty, replayed, subst, errors);
+            }
         }
     }
 
@@ -1209,7 +1269,56 @@ impl InferenceProduct {
     ) {
         self.replay_ready_shape_checks(vg, subst, adt_reg, errors);
         self.finish_admission_contracts(declaration, subst, errors);
-        for check in self.deferred_shape_checks.drain(..) {
+        // chelis#2216: an operand that an authored binder denotes never binds,
+        // so a call suspended on it is decided here, at the binder's
+        // instantiations, rather than dropped with the unresolved ones below.
+        //
+        // Every entry of a shape rule of its own (`sum`, `matmul`, ...) still
+        // unresolved here is rejected below, and the dtype replay of the same
+        // call waits on the same operand. Deciding that replay too would report
+        // one operand twice, so an operand a shape entry waits on is left to it.
+        let checks = std::mem::take(&mut self.deferred_shape_checks);
+        let shape_rule_operands: Vec<TypeVar> = checks
+            .iter()
+            .filter(|check| !matches!(check.rule, DeferredShapeRule::PostApp { .. }))
+            .flat_map(|check| &check.arg_tys)
+            .filter_map(|ty| match type_for_readonly_check(ty, subst) {
+                Type::Var(var) => Some(var),
+                _ => None,
+            })
+            .collect();
+        for check in checks {
+            if let DeferredShapeRule::PostApp {
+                replay,
+                site,
+                node,
+                kids,
+                func_name,
+                env,
+            } = &check.rule
+            {
+                let call = PostAppCall {
+                    replay: *replay,
+                    site: *site,
+                    node,
+                    kids,
+                    func_name,
+                    env,
+                };
+                if decide_at_rigid_binder_instantiations(
+                    call,
+                    &check.arg_tys,
+                    &check.result_ty,
+                    &shape_rule_operands,
+                    declaration,
+                    vg,
+                    subst,
+                    adt_reg,
+                    errors,
+                ) {
+                    continue;
+                }
+            }
             let (operation, names_declaration) = match check.rule {
                 DeferredShapeRule::Matmul => ("matmul".to_string(), false),
                 DeferredShapeRule::Reduction { name } => (name, false),
@@ -1221,9 +1330,10 @@ impl InferenceProduct {
                 }
                 DeferredShapeRule::ShapeRoute { route, .. } => (route.builtin(), false),
                 // A deferred PostApp route that binds at a local monomorphic
-                // application is replayed and validated before this boundary.
-                // Still-unresolved non-contract PostApp routes retain their
-                // existing non-tensor disposition below.
+                // application is replayed and validated before this boundary,
+                // and one whose operand is an authored binder was decided
+                // above. Still-unresolved non-contract PostApp routes retain
+                // their existing non-tensor disposition below.
                 //
                 // [04-INF-9] is narrower: an authored generic wrapper may not
                 // publish a body-inferred collection operation contract. A
