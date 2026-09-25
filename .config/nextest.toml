@@ -202,7 +202,7 @@ path = "junit.xml"
 # backstop, after the other 872 selected tests had passed. The two census
 # owners keep a 150-period backstop, over three times the wire census's
 # measured cold time, so a stuck census still reports inside the Dtype job's
-# 360-minute limit.
+# 270-minute limit.
 [[profile.ci-full.overrides]]
 filter = '''(binary_id(/^chelis-compiler-api::capacity_census_wire$/) & test(/^wire_schema_numeric_fields_match_the_reviewed_baseline$/)) + (binary_id(/^chelis-python::capacity_census_bindings$/) & test(/^registered_pyfunctions_match_the_reviewed_rustdoc_signatures$/))'''
 slow-timeout = { period = "60s", terminate-after = 150 }

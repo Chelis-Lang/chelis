@@ -256,10 +256,11 @@ jobs:
     # while its exhaustive compiled witness was still executing at 60 minutes.
     # chelis#2394: observed builds cannot reuse census targets restored under
     # another checkout path, so hosted candidate dispatches build the census
-    # cold. The first such run was cancelled at 115 minutes with the binding
-    # census still running. Allow the six-hour GitHub-hosted maximum until a
-    # completed cold run is measured.
-    timeout-minutes: 360
+    # cold. A complete cold run (36105072614) took 169 minutes, with the
+    # binding census alone taking 5664 s. If that census instead reaches its
+    # 9000 s ci-full backstop the job needs about 225 minutes, so a stuck
+    # census is still killed and reported inside this limit.
+    timeout-minutes: 270
     permissions:
       contents: read
       issues: read
@@ -433,11 +434,11 @@ jobs:
     # Python/DLPack cohort before the still-running binding census was cancelled
     # at 90 minutes. chelis#2394: this job restores no census target and
     # observed builds rebuild every unit rust-cache restores without its
-    # observation state, so the census builds cold under observation. The first
-    # such run was cancelled at 145 minutes with the binding census still
-    # running. Allow the six-hour GitHub-hosted maximum until a completed cold
-    # run is measured.
-    timeout-minutes: 360
+    # observation state, so the census builds cold under observation. Complete
+    # cold runs took 128 and 135 minutes (36090959279, 36105072614), and one
+    # was cancelled at 145. The runtime-representation profile sets no
+    # per-test backstop, so this limit keeps about 1.5 times the slower run.
+    timeout-minutes: 210
     permissions:
       contents: read
     env:

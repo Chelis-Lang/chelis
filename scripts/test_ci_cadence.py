@@ -59,11 +59,15 @@ def assert_extended(test, pr, nightly):
             if name.startswith("generalize")
             else 45
         )
-        if name in ("runtime-representation-phase0-oracle", "dtype-phase3-oracle"):
+        census_limits = {
             # chelis#2394: a hosted candidate dispatch builds the census cold
-            # under observation, so both census-running oracles may use the
-            # six-hour GitHub-hosted maximum.
-            test.assertEqual(job["timeout-minutes"], 360)
+            # under observation. The limits keep measured cold runs, and for
+            # dtype a census stuck at its ci-full backstop, inside the job.
+            "runtime-representation-phase0-oracle": 210,
+            "dtype-phase3-oracle": 270,
+        }
+        if name in census_limits:
+            test.assertEqual(job["timeout-minutes"], census_limits[name])
         else:
             # Keep the complete oracle budget as well as cold Devenv setup headroom.
             test.assertEqual(job["timeout-minutes"], execution_budget + 25)
