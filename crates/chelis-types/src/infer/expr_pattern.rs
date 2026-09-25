@@ -1004,7 +1004,7 @@ fn literal_pattern_failure_at(prim: Prim, atom: &LiteralPatternAtom<'_>) -> Opti
 /// The members of a dtype family, integers narrowest first and then the
 /// floats in [`Prim::ACTIVE_FLOATS`] order, so a rejection names the same
 /// member on every run.
-fn family_members(family: TypeVarRestriction) -> impl Iterator<Item = Prim> {
+pub(super) fn family_members(family: TypeVarRestriction) -> impl Iterator<Item = Prim> {
     Prim::ACTIVE_INTEGERS
         .into_iter()
         .chain(Prim::ACTIVE_FLOATS)

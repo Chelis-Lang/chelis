@@ -345,6 +345,48 @@ def generated_phase_b_corpus() -> tuple[CorpusRow, ...]:
 
     rows = (
         _row(
+            "producer.insert.claim_effects.eval",
+            "executes_exactly",
+            EXECUTES,
+            "cli_producer_guard_order.eval_insert_result_guard_owns_attribution_and_effect_order",
+        ),
+        _row(
+            "producer.insert.claim_effects.c",
+            "lane_divergent",
+            EXECUTES,
+            "cli_producer_guard_order.c_insert_result_guard_owns_attribution_and_effect_order",
+        ),
+        _row(
+            "producer.insert.forwarded_axis.eval",
+            "lane_divergent",
+            EXECUTES,
+            "cli_producer_guard_order.eval_forwarded_insert_axis_keeps_result_ownership",
+        ),
+        _row(
+            "producer.insert.forwarded_axis.c",
+            "lane_divergent",
+            EXECUTES,
+            "cli_producer_guard_order.c_forwarded_insert_axis_keeps_result_ownership",
+        ),
+        _row(
+            "producer.input_entry.eval_c",
+            "executes_exactly",
+            EXECUTES,
+            "cli_producer_guard_order.input_axis_claim_still_precedes_body_on_both_lanes",
+        ),
+        _row(
+            "producer.insert.site",
+            "lane_divergent",
+            EXECUTES,
+            "ir_producer_guard_sites.interface_sized_insert_has_one_local_result_claim",
+        ),
+        _row(
+            "producer.missing_axis",
+            "ice",
+            TERMINAL_CONTROL,
+            "ir_producer_guard_sites.missing_result_axis_is_a_checked_error",
+        ),
+        _row(
             "class.load_load.c",
             "silent_unguarded",
             EXECUTES,
@@ -486,15 +528,14 @@ def generated_phase_b_corpus() -> tuple[CorpusRow, ...]:
             EXECUTES,
             "literal_claim.literal_result_claim_contract",
         ),
-        # B2h: the eval twin of the driven row. The value-binding form applies
-        # `f` through the kernel the C lane emits for it, and the literal input
-        # extent is checked at the kernel's entry by the DAG evaluator, the
-        # eval analogue of the C ABI preamble.
+        # The Eval fixture owns an independent literal result at insert.
+        # The C ABI fixture below separately declares a literal input extent;
+        # that input obligation remains an entry guard.
         _row(
             "expand.literal_claim.exported_kernel.eval",
             "silent_unguarded",
             EXECUTES,
-            "cli_slice_b.a_literal_claim_over_a_runtime_read_traps_at_entry_on_eval",
+            "cli_slice_b.a_literal_claim_over_a_runtime_read_traps_at_producer_on_eval",
         ),
         _row(
             "expand.literal_claim.exported_kernel.c",

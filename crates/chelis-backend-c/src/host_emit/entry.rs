@@ -565,7 +565,7 @@ mod tests {
     }
 
     #[test]
-    fn lowered_mixed_result_claim_delegates_the_following_rows_guard() {
+    fn lowered_mixed_result_claim_keeps_rows_at_entry_and_literal_local() {
         let verified = verified_host_from_source(
             "def f(z: tensor[rows, f32], a: tensor[cols, f32], q: tensor[rows, f32]) -> tensor[rows, 3, f32] = insert(add(z, q), 1i32, shape(a, 0i32))",
         );
@@ -577,15 +577,22 @@ mod tests {
         let helper_guards = helper.dag().entry_extent_guards();
         assert!(
             matches!(helper_guards.as_slice(), [
-                EntryExtentGuard::Literal { required: 3, .. },
                 EntryExtentGuard::Named { claim, .. }
             ] if claim == "rows"),
             "{helper_guards:#?}"
         );
-        assert_eq!(
-            delegated_function_guards(function, &[helper]),
-            plan.guards()
-        );
+        // The literal belongs to insert, while rows still belongs to entry.
+        // Eval/C agreement and independent mismatch cases execute in
+        // issue_2377_producer_guards::mixed_named_entry_and_literal_result_keep_distinct_owners.
+        let local = helper.dag().local_dim_guard_sites().unwrap();
+        let literal = local
+            .iter()
+            .filter(|(_, claim)| claim.claim == "3")
+            .collect::<Vec<_>>();
+        assert_eq!(literal.len(), 1, "{local:#?}");
+        assert_eq!(literal[0].0.1, 1);
+        assert_eq!(literal[0].1.op, "insert");
+        assert!(delegated_function_guards(function, &[helper]).is_empty());
         assert!(helper_coverage_with_verified(function, &[helper]).variants[0][0].is_empty());
     }
 
@@ -627,28 +634,37 @@ mod tests {
             &projection.variants[0][0],
         )
         .unwrap();
-        assert!(
-            !discharged.contains("numeric trap: domain in load at i64"),
-            "{discharged}"
-        );
-        let full =
-            CEmitter::emit_verified_dag_with_options(dag.emission(), "unguarded", options, &[])
-                .unwrap();
-        assert_eq!(
-            full.matches("numeric trap: domain in load at i64").count(),
-            1,
-            "{full}"
-        );
+        let seq_diagnostic = "extent `seq`: a axis 0 = %lld, b axis 0 = %lld";
+        let seq_comparison =
+            "if (chelis_tensor_shape(inputs[1], 0) != chelis_tensor_shape(inputs[0], 0)) {";
+        assert!(!discharged.contains(seq_diagnostic), "{discharged}");
+        assert!(!discharged.contains(seq_comparison), "{discharged}");
+        let full = CEmitter::emit_verified_dag_with_options(
+            dag.emission(),
+            "unguarded",
+            options,
+            &[],
+        )
+        .unwrap();
+        assert_eq!(full.matches(seq_diagnostic).count(), 1, "{full}");
+        assert_eq!(full.matches(seq_comparison).count(), 1, "{full}");
         let standalone = crate::codegen_with_options(dag, "standalone", options).unwrap();
-        assert_eq!(
-            standalone
-                .c_source
-                .matches("numeric trap: domain in load at i64")
-                .count(),
-            1,
-            "{}",
-            standalone.c_source
-        );
+        assert_eq!(standalone.c_source.matches(seq_diagnostic).count(), 1);
+        assert_eq!(standalone.c_source.matches(seq_comparison).count(), 1);
+        for source in [&discharged, &full, &standalone.c_source] {
+            for slot in 0..2 {
+                assert!(
+                    source.contains(&format!("if (chelis_tensor_rank(inputs[{slot}]) != 1) {{")),
+                    "{source}"
+                );
+                assert!(
+                    source.contains(&format!(
+                        "if (chelis_tensor_read_view(inputs[{slot}]).dtype != CHELIS_DTYPE_F32) {{"
+                    )),
+                    "{source}"
+                );
+            }
+        }
     }
 
     #[test]

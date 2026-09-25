@@ -457,6 +457,16 @@ fn parity_grad_wrt_order() {
 }
 
 #[test]
+fn parity_grad_disconnected() {
+    let path = examples_root().join("grad_disconnected.ch");
+    drive_parity(&path, true);
+    assert_eq!(
+        run_eval(&path),
+        b"out = tensor(shape=[2, 3], data=[0.0, 0.0, 0.0, 0.0, 0.0, 0.0])\n"
+    );
+}
+
+#[test]
 fn parity_grad_extent_claim() {
     let path = examples_root().join("grad_extent_claim.ch");
     drive_parity(&path, true);
@@ -593,6 +603,14 @@ fn parity_iter_foundation() {
 #[test]
 fn parity_list_foundation() {
     drive_parity(&examples_root().join("list_foundation.ch"), true);
+}
+
+#[test]
+fn parity_checked_host_local_ascription() {
+    drive_parity(
+        &examples_root().join("checked_host_local_ascription.ch"),
+        true,
+    );
 }
 
 #[test]
@@ -860,4 +878,9 @@ fn parity_comparator_rejects_non_tensor_diff() {
     let a = b"len=4, items=4, shape=2x2\n";
     let b = b"len=5, items=4, shape=2x2\n";
     assert!(assert_parity(a, b, "byte-diff").is_err());
+}
+
+#[test]
+fn parity_generic_host_permutation() {
+    drive_parity(&examples_root().join("generic_host_permutation.ch"), true);
 }

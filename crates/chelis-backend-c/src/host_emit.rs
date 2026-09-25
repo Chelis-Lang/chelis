@@ -2056,6 +2056,7 @@ impl HostResultClaim {
         frame_name: &str,
         parent: &str,
         claims_name: Option<&str>,
+        outer_claims_first: bool,
     ) -> Vec<String> {
         let mut lines = vec![format!("{indent}const int64_t {axes_name}[][2] = {{")];
         for (axis, required) in &self.axes {
@@ -2063,9 +2064,10 @@ impl HostResultClaim {
         }
         lines.push(format!("{indent}}};"));
         lines.push(format!(
-            "{indent}const __chelis_host_result_claim {frame_name} = {{ {parent}, {}, {}, {axes_name} }};",
+            "{indent}const __chelis_host_result_claim {frame_name} = {{ {parent}, {}, {}, {axes_name}, {} }};",
             self.rank,
-            self.axes.len()
+            self.axes.len(),
+            i32::from(outer_claims_first),
         ));
         if let Some(claims_name) = claims_name {
             lines.push(format!(
@@ -2106,6 +2108,7 @@ fn append_host_result_claim_support(out: &mut Vec<String>) {
     int64_t rank;
     int64_t count;
     const int64_t (*axes)[2];
+    int outer_claims_first;
 } __chelis_host_result_claim;
 
 typedef struct __chelis_host_result_origin {
@@ -2296,9 +2299,10 @@ static const __chelis_host_result_origin *__chelis_host_result_origin_interface_
 fn append_host_result_claim_checks(out: &mut Vec<String>) {
     out.push(r#"
 static void __chelis_check_host_result_extent_claims(const __chelis_host_result_claim *claims, int64_t rank, const int64_t (*observations)[3], int64_t count, const char *op, const char *trap) {
-    for (; claims != NULL; claims = claims->next) {
-        if (rank != claims->rank) continue;
-        for (int64_t i = 0; i < claims->count; ++i) {
+    if (claims == NULL) return;
+    if (claims->outer_claims_first) __chelis_check_host_result_extent_claims(claims->next, rank, observations, count, op, trap);
+    {
+        if (rank == claims->rank) for (int64_t i = 0; i < claims->count; ++i) {
             for (int64_t j = 0; j < count; ++j) {
                 if (claims->axes[i][0] != observations[j][0]) continue;
                 int64_t required = claims->axes[i][1];
@@ -2310,12 +2314,14 @@ static void __chelis_check_host_result_extent_claims(const __chelis_host_result_
             }
         }
     }
+    if (!claims->outer_claims_first) __chelis_check_host_result_extent_claims(claims->next, rank, observations, count, op, trap);
 }
 
 static void __chelis_check_host_result_claims(const __chelis_host_result_claim *claims, const chelis_tensor *value, const char *op, const char *trap) {
-    for (; claims != NULL; claims = claims->next) {
-        if (chelis_tensor_rank(value) != claims->rank) continue;
-        for (int64_t i = 0; i < claims->count; ++i) {
+    if (claims == NULL) return;
+    if (claims->outer_claims_first) __chelis_check_host_result_claims(claims->next, value, op, trap);
+    {
+        if (chelis_tensor_rank(value) == claims->rank) for (int64_t i = 0; i < claims->count; ++i) {
             int64_t axis = claims->axes[i][0];
             int64_t required = claims->axes[i][1];
             int64_t observed = chelis_tensor_shape(value, axis);
@@ -2325,6 +2331,7 @@ static void __chelis_check_host_result_claims(const __chelis_host_result_claim *
             }
         }
     }
+    if (!claims->outer_claims_first) __chelis_check_host_result_claims(claims->next, value, op, trap);
 }
 "#.to_string());
 }
@@ -2578,6 +2585,7 @@ fn emit_function(
             "__chelis_declared_result",
             "__chelis_caller_result_claims",
             Some("__chelis_result_claims"),
+            false,
         )),
         None => emitter.lines.push(format!("{}const __chelis_host_result_claim *__chelis_result_claims = __chelis_caller_result_claims;", emitter.indent)),
     }
@@ -4570,6 +4578,7 @@ impl<'a> HostEmitter<'a> {
                         &frame,
                         parent,
                         None,
+                        plan.outer_claims_first(),
                     ));
                 let previous_claims = self.result_claims.replace(format!("&{frame}"));
                 self.claim_on_spine = true;
@@ -4677,11 +4686,13 @@ impl<'a> HostEmitter<'a> {
                 ty: expr_ty,
             } => {
                 require_same_abi_type(ty, expr_ty, "builtin expression")?;
-                self.assign_builtin(target, name, args, ty, site)?;
+                self.assign_builtin(target, name, args, ty, site, result_claims.as_deref())?;
                 if !matches!(name.as_str(), "tuple-get" | "index") {
                     self.stamp_result_origin(target, ty, name);
                 }
-                self.emit_result_claim_guard(target, ty, result_claims.as_deref());
+                if name != "pad_sequences_to" {
+                    self.emit_result_claim_guard(target, ty, result_claims.as_deref());
+                }
             }
             HostExprKind::AdtConstruct {
                 ctor,
@@ -5125,6 +5136,7 @@ impl<'a> HostEmitter<'a> {
         args: &[HostExpr],
         ty: &HostType,
         site: &ProjectedHostSite<'a>,
+        result_claims: Option<&str>,
     ) -> Result<(), Unsupported> {
         // A checker-stamped float literal is represented as a cast around
         // its lexical f64 image. Materialize that literal directly at the
@@ -5918,6 +5930,16 @@ impl<'a> HostEmitter<'a> {
                 return Ok(());
             }
             "pad_sequences_to" => {
+                if let Some(claims) = result_claims {
+                    let width = &arg_vars[1].0;
+                    let sequences = &arg_vars[0].0;
+                    self.lines.push(format!(
+                        "{}if ({width} < 0) {{ fprintf(stderr, \"Domain: pad_sequences_to requires non-negative width\\n\"); exit(1); }}",
+                        self.indent));
+                    self.lines.push(format!(
+                        "{}__chelis_check_host_result_extent_claims({claims}, 2, (const int64_t[][3]){{ {{0, 0, chelis_list_len({sequences})}}, {{1, 1, {width}}} }}, 2, \"pad_sequences_to\", \"numeric trap: domain in pad_sequences_to at i64\");",
+                        self.indent));
+                }
                 self.lines.push(format!(
                     "{}{target} = chelis_pad_sequences_to({}, {}, {});",
                     self.indent,

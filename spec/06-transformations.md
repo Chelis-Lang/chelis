@@ -40,6 +40,10 @@ The recursive definition is shape-preserving. It never drops a tuple field,
 list element, or ADT field merely because its cotangent is unit, and it never
 uses a backend carrier limitation to reject a language-defined cotangent.
 
+A disconnected differentiable scalar or tensor receives exact zeros with its
+actual argument's dtype and ordered shape, including empty axes and rank zero. See
+[`grad_disconnected.ch`](../examples/grad_disconnected.ch).
+
 Source-level `grad` returns gradients only, not `(value, grad)`.
 For a multi-parameter function, the gradient payload is flattened:
 

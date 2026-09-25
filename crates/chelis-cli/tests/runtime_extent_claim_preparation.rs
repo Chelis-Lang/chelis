@@ -142,7 +142,7 @@ fn cases() -> Vec<Case> {
             if good {
                 Expected::Tensor(vec![4], vec![7.0; 4])
             } else {
-                Expected::Domain("load", &["claimed = 4", "x axis 0 = 5"])
+                Expected::Domain("insert", &["claimed = 4", "insert axis 0 = 5"])
             },
         );
         call_matrix(
@@ -906,7 +906,7 @@ fn literal_extent_example_contract() {
             expected: if good {
                 Expected::Tensor(vec![4], vec![7.0; 4])
             } else {
-                Expected::Domain("load", &["claimed = 4", "x axis 0 = 5"])
+                Expected::Domain("insert", &["claimed = 4", "insert axis 0 = 5"])
             },
         };
         let observation = observe(&case);
@@ -942,7 +942,7 @@ fn literal_claim_transport_survives_nested_and_unused_calls() {
             if good {
                 Expected::Tensor(vec![4], vec![7.0; 4])
             } else {
-                Expected::Domain("load", &["claimed = 4", "x axis 0 = 5"])
+                Expected::Domain("insert", &["claimed = 4", "insert axis 0 = 5"])
             },
         );
         fixtures.push(Case {
@@ -952,7 +952,7 @@ fn literal_claim_transport_survives_nested_and_unused_calls() {
             signature: Some("(tensor[f32], tensor[rows, f32]) -> tensor[4, f32]"),
             exported: None,
             expected: if good { Expected::Tensor(vec![1], vec![9.0]) }
-            else { Expected::Domain("load", &["claimed = 4", "x axis 0 = 5"]) },
+            else { Expected::Domain("insert", &["claimed = 4", "insert axis 0 = 5"]) },
         });
         fixtures.push(Case {
             id: format!("literal.unused_existing.{}", if good { "satisfied" } else { "mismatch" }),
@@ -961,7 +961,7 @@ fn literal_claim_transport_survives_nested_and_unused_calls() {
             signature: Some("(tensor[f32], tensor[rows, f32]) -> tensor[4, f32]"),
             exported: None,
             expected: if good { Expected::Tensor(vec![], vec![7.0]) }
-            else { Expected::Domain("load", &["claimed = 4", "x axis 0 = 5"]) },
+            else { Expected::Domain("insert", &["claimed = 4", "insert axis 0 = 5"]) },
         });
         for (id, bindings, source) in [
             ("literal.tensor_alias", "y = x", "y"),
@@ -980,7 +980,7 @@ fn literal_claim_transport_survives_nested_and_unused_calls() {
                 if good {
                     Expected::Tensor(vec![4], vec![7.0; 4])
                 } else {
-                    Expected::Domain("load", &["claimed = 4", "x axis 0 = 5"])
+                    Expected::Domain("insert", &["claimed = 4", "insert axis 0 = 5"])
                 },
             );
         }
@@ -994,7 +994,7 @@ fn literal_claim_transport_survives_nested_and_unused_calls() {
             if good {
                 Expected::Tensor(vec![4], vec![7.0; 4])
             } else {
-                Expected::Domain("load", &["claimed = 4", "z axis 0 = 5"])
+                Expected::Domain("insert", &["claimed = 4", "insert axis 0 = 5"])
             },
         );
     }
@@ -1145,20 +1145,22 @@ fn trap_context_keeps_source_axis_and_signed_value_together() {
     observed["check"]["signatures"]["f"] = case.signature.unwrap().into();
     assert!(contract_failures(&case, &observed).is_empty());
     for context in [
-        "claimed = 4, x axis 1 = 5",
-        "claimed = 5, x axis 0 = 4",
-        "claimed = 4, x axis 0 = -5",
+        "claimed = 4, insert axis 1 = 5",
+        "claimed = 5, insert axis 0 = 4",
+        "claimed = 4, insert axis 0 = -5",
         "claimed = 4, y axis 0 = 5",
-        "claimed = 4, x axis 0 = 50",
+        "claimed = 4, insert axis 0 = 50",
     ] {
-        observed["c"]["stderr"] = format!("{context}\nnumeric trap: domain in load at i64").into();
+        observed["c"]["stderr"] =
+            format!("{context}\nnumeric trap: domain in insert at i64").into();
         assert_eq!(
             contract_failures(&case, &observed).len(),
             1,
             "wrong context accepted: {context}"
         );
     }
-    observed["c"]["stderr"] = "x axis 0: 5\nclaimed: 4\nnumeric trap: domain in load at i64".into();
+    observed["c"]["stderr"] =
+        "insert axis 0: 5\nclaimed: 4\nnumeric trap: domain in insert at i64".into();
     assert!(
         contract_failures(&case, &observed).is_empty(),
         "context punctuation and record order are not normative"
@@ -1167,6 +1169,8 @@ fn trap_context_keeps_source_axis_and_signed_value_together() {
 
 #[test]
 fn helper_signature_guard_order_contract() {
+    // §4.7: input signature claims remain at entry; declared result claims
+    // belong to the producer and follow result-axis declaration order.
     let mut fixtures = Vec::new();
     let seed = Input {
         dims: vec![],
@@ -1177,17 +1181,17 @@ fn helper_signature_guard_order_contract() {
         (
             5,
             3,
-            Expected::Domain("load", &["claimed = 4", "z axis 0 = 5"]),
+            Expected::Domain("insert", &["claimed = 4", "insert axis 0 = 5"]),
         ),
         (
             5,
             6,
-            Expected::Domain("load", &["claimed = 4", "z axis 0 = 5"]),
+            Expected::Domain("insert", &["claimed = 4", "insert axis 0 = 5"]),
         ),
         (
             4,
             6,
-            Expected::Domain("load", &["claimed = 3", "a axis 0 = 6"]),
+            Expected::Domain("insert", &["claimed = 3", "insert axis 1 = 6"]),
         ),
     ] {
         call_matrix(
@@ -1205,12 +1209,12 @@ fn helper_signature_guard_order_contract() {
         (
             4,
             5,
-            Expected::Domain("load", &["claimed = 4", "x axis 0 = 5"]),
+            Expected::Domain("insert", &["claimed = 4", "insert axis 0 = 5"]),
         ),
         (
             5,
             6,
-            Expected::Domain("load", &["claimed = 4", "x axis 0 = 5"]),
+            Expected::Domain("insert", &["claimed = 4", "insert axis 0 = 5"]),
         ),
     ] {
         call_matrix(
@@ -1227,7 +1231,7 @@ fn helper_signature_guard_order_contract() {
         (4, Expected::Tensor(vec![4], vec![7.0; 4])),
         (
             5,
-            Expected::Domain("load", &["claimed = 4", "x axis 0 = 5"]),
+            Expected::Domain("insert", &["claimed = 4", "insert axis 0 = 5"]),
         ),
     ] {
         call_matrix(
@@ -1246,25 +1250,25 @@ fn helper_signature_guard_order_contract() {
             5,
             6,
             5,
-            Expected::Domain("load", &["claimed = 2", "z axis 0 = 5"]),
+            Expected::Domain("insert", &["claimed = 2", "insert axis 0 = 5"]),
         ),
         (
             2,
             6,
             5,
-            Expected::Domain("load", &["claimed = 3", "a axis 0 = 6"]),
+            Expected::Domain("insert", &["claimed = 3", "insert axis 1 = 6"]),
         ),
         (
             2,
             6,
             2,
-            Expected::Domain("load", &["claimed = 3", "a axis 0 = 6"]),
+            Expected::Domain("insert", &["claimed = 3", "insert axis 1 = 6"]),
         ),
         (
             2,
             3,
             5,
-            Expected::Domain("load", &["claimed = 2", "q axis 0 = 5"]),
+            Expected::Domain("insert", &["claimed = 2", "insert axis 2 = 5"]),
         ),
     ] {
         call_matrix(
@@ -1318,7 +1322,7 @@ fn helper_signature_guard_order_contract() {
         (
             6,
             5,
-            Expected::Domain("load", &["claimed = 3", "a axis 0 = 6"]),
+            Expected::Domain("load", &["z axis 0 = 2", "q axis 0 = 5"]),
         ),
         (
             3,
@@ -1356,7 +1360,7 @@ fn helper_signature_guard_order_contract() {
                     "2.0f32, 3.0f32]))",
                     "2.0f32, 3.0f32, 4.0f32, 5.0f32, 6.0f32]))",
                 ),
-            Expected::Domain("load", &["claimed = 4", "z axis 0 = 5"]),
+            Expected::Domain("insert", &["claimed = 4", "insert axis 0 = 5"]),
         ),
     ] {
         fixtures.push(Case {
@@ -2635,7 +2639,7 @@ fn imported_checked_extent_contract() {
                 if good {
                     Expected::Tensor(vec![4], vec![7.0; 4])
                 } else {
-                    Expected::Domain("load", &["claimed = 4", "x axis 0 = 5"])
+                    Expected::Domain("insert", &["claimed = 4", "insert axis 0 = 5"])
                 },
             ),
         ] {

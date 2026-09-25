@@ -713,20 +713,10 @@ fn an_all_interface_class_is_an_entry_guard() {
     );
 }
 
-/// A folded `shape(...)` read is an INTERFACE value, so a class whose members
-/// are all such reads is an ENTRY guard.
-///
-/// Section 4.7 keys on the guard's operands - "an input tensor's axis, a
-/// scalar parameter, or a literal" - and `spec/05` section 2.4.1 admits
-/// `InputAxis` as an `expand` extent read "directly from that tensor's shape
-/// metadata". So the quantity compared is an input tensor's axis, which is
-/// the first item in that list. An earlier draft of this row asserted
-/// `Local`, confusing "is this axis a `Load`'s own" with "is this operand an
-/// input's axis"; that reading made every folded cross-tensor read a local
-/// guard and would have put chelis#1374's guard at the wrong place under the
-/// wrong `<op>`.
+/// A literal result belongs to its producing operation even when its
+/// size is a folded interface shape read (spec/04 §4.7).
 #[test]
-fn a_class_whose_members_are_folded_input_axis_reads_is_an_entry_guard() {
+fn a_literal_result_over_folded_input_axis_reads_is_a_local_guard() {
     let mut dag = Dag::new();
     let base = f32_load(&mut dag, "b", vec![]);
     let x = f32_load(&mut dag, "x", vec![named("n")]);
@@ -745,7 +735,7 @@ fn a_class_whose_members_are_folded_input_axis_reads_is_an_entry_guard() {
     let classes = derive_runtime_dim_classes(&dag);
     assert_eq!(
         class_for(&classes, DimClaim::Literal(4)).placement(&dag),
-        GuardPlacement::Entry,
+        GuardPlacement::Local,
     );
 }
 
@@ -1619,6 +1609,7 @@ fn a_cast_of_computed_arithmetic_takes_the_arithmetics_placement() {
 /// The guard sites of `dag`, as `(node, axis, claim, op)`.
 fn guard_sites(dag: &Dag) -> Vec<(usize, usize, String, &'static str)> {
     chelis_ir::axis_sources::local_dim_guard_sites(dag)
+        .unwrap()
         .into_iter()
         .map(|((node, axis), claim)| (node, axis, claim.claim, claim.op))
         .collect()
@@ -1750,6 +1741,7 @@ fn an_expand_sized_from_a_computed_tensor_is_a_local_guard_site() {
     // states it in the site, which is the point of the unification. So the
     // assertion reads the site's own read instruction.
     let observed = chelis_ir::axis_sources::local_dim_guard_sites(&dag)
+        .unwrap()
         .into_iter()
         .find(|((node, axis), _)| *node == inserted.0 && *axis == 0)
         .map(|(_, claim)| claim.observed)
@@ -1816,7 +1808,7 @@ fn every_local_class_site_carries_the_carrier_its_source_names() {
         ty(vec![named("n")], Prim::F32),
         None,
     );
-    let sites = chelis_ir::axis_sources::local_dim_guard_sites(&dag);
+    let sites = chelis_ir::axis_sources::local_dim_guard_sites(&dag).unwrap();
     assert!(
         !sites.is_empty(),
         "the fixture must produce sites for the property to say anything",
@@ -1881,7 +1873,7 @@ fn a_resolved_canonical_traps_on_eval_against_its_literal() {
         ty(vec![named("n")], Prim::F32),
         None,
     );
-    let sites = chelis_ir::axis_sources::local_dim_guard_sites(&dag);
+    let sites = chelis_ir::axis_sources::local_dim_guard_sites(&dag).unwrap();
     assert_eq!(
         sites
             .iter()
@@ -1908,10 +1900,10 @@ fn a_resolved_canonical_traps_on_eval_against_its_literal() {
     );
 }
 
-/// Folded shape reads remain interface witnesses. Their introducing operation
-/// order must not reverse the declaring parameters (or axes within one input).
+/// Literal result claims follow producer order, even when their size sources
+/// refer to interface parameters in a different order.
 #[test]
-fn folded_interface_claims_follow_declaring_slots_and_axes() {
+fn folded_literal_result_claims_follow_producer_order() {
     for same_input in [false, true] {
         let mut dag = Dag::new();
         let b = f32_load(&mut dag, "b", vec![]);
@@ -1949,12 +1941,12 @@ fn folded_interface_claims_follow_declaring_slots_and_axes() {
         let classes = derive_runtime_dim_classes(&dag);
         assert_eq!(
             claims(&classes),
-            vec![DimClaim::Literal(4), DimClaim::Literal(3)]
+            vec![DimClaim::Literal(3), DimClaim::Literal(4)]
         );
         assert!(
             classes
                 .iter()
-                .all(|class| class.placement(&dag) == GuardPlacement::Entry)
+                .all(|class| class.placement(&dag) == GuardPlacement::Local)
         );
     }
 }

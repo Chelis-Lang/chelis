@@ -2169,6 +2169,7 @@ fn a_tensor_cast_to_a_key_is_rejected() {
             source.clone(),
             Prim::Key,
             mode,
+            &crate::unify::Subst::new(),
         )
         .expect_err("a key is never a cast target");
         assert!(matches!(
@@ -2181,6 +2182,7 @@ fn a_tensor_cast_to_a_key_is_rejected() {
             source,
             Prim::Int64,
             chelis_deep::CastMode::Checked,
+            &crate::unify::Subst::new(),
         )
         .is_ok()
     );

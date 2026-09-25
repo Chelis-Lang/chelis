@@ -89,6 +89,7 @@ fn two_disagreeing_claims_on_one_axis_emit_two_guards() {
     // The derivation's own view of the collision, so a failure says which half
     // moved.
     let sites: Vec<_> = chelis_ir::axis_sources::local_dim_guard_sites(&dag)
+        .unwrap()
         .into_iter()
         .filter(|((node, axis), _)| *node == reshaped.0 && *axis == 0)
         .map(|(_, claim)| (claim.claim, claim.op))
@@ -162,6 +163,7 @@ fn two_equal_claims_on_one_axis_emit_one_guard() {
         );
     }
     let on_key: Vec<_> = chelis_ir::axis_sources::local_dim_guard_sites(&dag)
+        .unwrap()
         .into_iter()
         .filter(|((node, axis), _)| *node == reshaped.0 && *axis == 0)
         .map(|(_, claim)| claim.claim)

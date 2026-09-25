@@ -322,10 +322,11 @@ distinct `LiteralResultClaim` witness role. Lowering selects that ownership mode
 from the authored declaration identity and its top-level call relationship, not
 from later graph reachability. The same mode is explicit in the ordinary
 private gradient subcontext so zero and unused cotangents retain the forward
-guard; mapped-gradient transport remains separate. Direct and root lowering,
-movement and device paths, and mapped-gradient lowering retain their established
-literal carriers rather than gaining a token because an equal dimension is
-reachable.
+guard; mapped-gradient transport remains separate. Authored direct results
+whose axis originates at a runtime carrier use the same token role, including
+later forwarding of that introduced axis. Pure input-axis forwarding and
+op-computed or mapped-gradient cases retain their existing admission; an equal
+reachable dimension alone does not admit a token.
 
 In the selected mode, lowering allocates one token containing the exact tagged
 requirement before lowering that declaration's body, then attaches it to the
@@ -567,6 +568,16 @@ both name the returned same-shape operation for a result-claim failure. These
 rows have receipt identities independent from the local-ascription leaf below.
 
 ##### Local tensor ascriptions (#2110, split from #1948)
+
+The host initializer path retains the selected checker's literal claims instead
+of forcing a host tensor builder into a tensor helper. The bounded #2374
+matrix covers `pad_sequences_to` on Eval and linked C: exact values, runtime
+agreement and disagreement on either axis, aliases, effect order, and literal
+static rejection. Its batch and width observations come from evaluated
+operands before output allocation. Named local host witnesses remain an
+explicit unsupported residual of #2374; this path does not establish general
+host-builder preallocation coverage.
+
 
 A local tensor ascription is an extent claim under C2.3 even though it is not a
 function result. Lowering records a `LocalAscriptionClaim` at the annotated
@@ -1066,6 +1077,13 @@ fresh extents, including symbolic shrink; literal stride one and zero pad
 retain identity under spec/04 §4.7. Derive sources after each final rewrite,
 never retain stale node ids in a cached class list.
 
+Host tensor-helper extraction derives a permutation's result type from its
+operand's ordered physical axes and the complete permutation. Reusing the
+operand shape as a coarse result type would misapply result positions to
+input dimensions during helper instantiation. #2533 exercises this boundary
+with generic `insert`/`permute`, direct and aliased intermediates, widths two
+and three, exact f64 values, effects, and disagreeing result claims.
+
 Both binding and DECLARATION consumers now read the derivation.
 `symbolic_occurrences`, `bind_symbol_from_any_load` and `symbolic_bindings` are
 deleted; `op_declared_output_axes`, `shape_source_for_axis` and
@@ -1558,6 +1576,18 @@ Phase B records `guard.local.declaration_order.eval_c`. This closes the P2
 multi-axis reshape ordering witness recorded during #1662; it does not claim
 the remaining op-computed guard coverage or call/witness transport.
 
+For `insert`, C collects the new-axis carrier and forwarded input-axis
+observations at the same preallocation hook before consuming that ordered
+claim list. Dispatching forwarded axes separately would reorder simultaneous
+failures. The additional 32-lane matrix covers both insertion positions,
+folded `InputAxis` and computed `Node` sizes, each independent mismatch,
+simultaneous mismatches, and exact agreement:
+
+```sh
+cargo nextest run -p chelis-cli --test issue_2377_producer_guards \
+  -E 'test(result_axes_follow_declaration_order)'
+```
+
 The #1377 exit runs six direct-call cases and 34 nested/discarded/alias
 cases, with declared types and exact outputs or required traps:
 
@@ -1683,6 +1713,26 @@ claim on the input tensor axis itself, whose guard runs at entry. Both lanes
 must consume that same classification, not whichever failure they currently
 report first.
 
+The partial #2377 receipts execute generic and monomorphic mismatching and
+agreeing inserts with scalar-only f64 precision evidence, retained effects on
+both sides of the producer, and independent wrong input-axis claims. The
+two-insert controls cover an earlier axis carried into either result position.
+Literal result token admission requires an extent introduced by a runtime
+carrier, including later forwarding; a pure pass-through from an existing input
+axis does not expand that admission. The shared result-site derivation records
+this provenance separately from the carrier read by the final producer.
+Physical literal classes keep their output-owner classification and coalesce
+an exact token comparison without dropping a different requirement.
+
+Discarded potentially trapping initializers remain an open #2377 obligation
+under #1277. Tensor lowering does not yet retain them as activation-scoped
+observable roots throughout projection and rebuilding. The required earlier
+`neg` outcome above is therefore not an acceptance claim of these receipts.
+C2.4 forbids encoding arbitrary eager values as shape dependencies; the future
+retention repair must follow spec/06 §5.2 and preserve activation selection and
+transformation replacement. These receipts also do not close general movement
+coverage or host-builder ascription admission (#2374).
+
 Both lanes represent a movement failure by its operation, trap kind, dtype,
 axis, bound/observed values and source labels before rendering. Eval must not
 replace spec/05 §2.4.1's `shrink` Domain failure with a private node-id or
@@ -1699,7 +1749,7 @@ negative that would detect loss or conflation of its witness. The required
 lane is Eval plus compiled, linked and executed C unless the issue explicitly
 records a narrower existing boundary. Add the exact cells to the appropriate
 phase-B or issue-owned target manifest before calling an issue closed. Merely
-running `runtime_extent_oracle.py --phase final` against its current 206 rows
+running `runtime_extent_oracle.py --phase final` against already registered rows
 does not enroll a new case.
 
 | Leaf | Structural exit and discriminating control |
@@ -1722,6 +1772,46 @@ the mapped-gradient test rationale must be corrected against the merged
 #1946/#1788, #2143 and #2112/#2144 receipts. It is not an unimplemented
 runtime mechanism. #2407 is closed under the randomness tracker and is not a
 #1277 acceptance row.
+
+#### C6.4 Ordered interface admission (#2530 and #2531)
+
+At a DAG entry, derive one ordered set of distinct `Load` bindings from the
+same first-occurrence order that assigns ABI input slots. A checked function
+has already placed its parameter loads in authored signature order. For each
+selected binding, validate its supplied dtype before reading elements, then
+its declared rank (including zero), then each literal axis in declaration
+order. Freeze a raw host input at its declared dtype once. Eval runs this
+admission before body nodes; direct C emits the same ordered per-slot
+admission. Neither lane may derive a second order by sorting names or walking
+a different set of nodes. Selected-root Eval validates the declaration of the
+Load that resolved each supplied name, retaining that name's original ABI
+slot when an earlier same-named Load is unselected. Missing inputs and
+unrelated unselected roots keep their existing selection rules.
+
+A checked value declaration with a bare tensor signature actualizes a freshly
+lowered direct external `Load` from that declaration before entry admission.
+The lowering default's scalar shape is only a placeholder when the free read
+has no type metadata; it cannot override the checked declaration. An authored
+scalar parameter or scalar value declaration still requires rank zero.
+
+An interface extent claim executes when its later witness is admitted,
+after that witness's dtype and rank have been validated. Keep its independent
+claim token and compare its source values once; do not replace it with a
+physical-shape check or move a producer-owned guard to entry. Every failing
+rank or extent check supplies one context line and exactly one
+`numeric trap: domain in load at i64` line. A supplied dtype mismatch instead
+ends in `numeric trap: domain in load at <declared dtype>`; its context names
+the input and both dtypes. These renderings follow spec/04 §4.7 and
+[04-NUM-9]/[04-NUM-11], and C's failure path remains before any element read.
+
+| Exit | Eval and linked C control |
+|---|---|
+| #2530 | A rank-0 `f32` Load accepts an `f32` scalar and rejects an `f32[4]` binding before computation; rank-1 agreeing and wrong-rank controls retain the same rule. Run whole-DAG and selected-root Eval. |
+| #2531 | With Loads ordered `z`, `a` and both supplied dtypes wrong, each lane names `z` first, even though names sort the other way. Repeat with two wrong literal extents. Check the exact single trap line and the named context; matching inputs execute. |
+
+The bounded exit excludes aggregate-nested tensor admission (#2506), device
+entries (#2510), and randomness-specific key behavior (#2473). Those have
+their own entry surfaces and oracles; this path must not change their rules.
 
 The generic Bool/rank and `where` failures #1760/#1761 have a separate
 [`generic_tensor_actualization.md`](generic_tensor_actualization.md) design

@@ -805,6 +805,13 @@
     },
     {
       "file": "checked.rs",
+      "function": "finish_deferred_shape_checks",
+      "ordinal": 1,
+      "pattern": "Type::Var(var)",
+      "disposition": "not_a_route"
+    },
+    {
+      "file": "checked.rs",
       "function": "record_call_result_contracts",
       "ordinal": 1,
       "pattern": "Type::Var(variable) | Type::Tensor(_ , TensorPrec::Var(variable))",
@@ -925,6 +932,20 @@
     },
     {
       "file": "expr_record.rs",
+      "function": "authored_cast_source_rejection",
+      "ordinal": 1,
+      "pattern": "Type::Tensor(_ , TensorPrec::Var(precision))",
+      "disposition": "not_a_route"
+    },
+    {
+      "file": "expr_record.rs",
+      "function": "authored_cast_source_rejection",
+      "ordinal": 2,
+      "pattern": "Type::Var(variable)",
+      "disposition": "not_a_route"
+    },
+    {
+      "file": "expr_record.rs",
       "function": "cast_result_from_source",
       "ordinal": 1,
       "pattern": "Type::Var(source_var)",
@@ -949,9 +970,9 @@
       "file": "expr_record.rs",
       "function": "infer_cast",
       "ordinal": 2,
-      "pattern": "Type::Var(_) | Type::Error(_)",
-      "disposition": "caught_downstream",
-      "witness": "a_route_whose_arm_admits_a_variable_is_still_rejected_by_a_later_rule"
+      "pattern": "Type::Var(source)",
+      "disposition": "defect(#1512)",
+      "reason": "chelis#2158: a `cast_trunc` source variable carries a `Float` requirement, and a `cast` source whose type is an authored binder at the cast is held to `Numeric`, both checked against the bound by `check_declared_dtype_bounds` when recorded before that check runs (a later narrowing is chelis#2537); a `cast` source that is still an inference variable at the cast is not checked, even when it later resolves to a binder or a `string` ([05-OP-63] also admits `bool`, and no dtype family is the numeric-or-`bool` set), tracked as chelis#2534"
     },
     {
       "file": "expr_record.rs",
@@ -966,6 +987,13 @@
       "ordinal": 1,
       "pattern": "Type::Var(_)",
       "disposition": "gated_on_binding"
+    },
+    {
+      "file": "expr_record.rs",
+      "function": "require_cast_source_family",
+      "ordinal": 1,
+      "pattern": "Type::Var(variable)",
+      "disposition": "not_a_route"
     },
     {
       "file": "expr_transform.rs",

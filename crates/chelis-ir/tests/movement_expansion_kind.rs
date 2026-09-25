@@ -51,7 +51,7 @@ fn expansion_kind_and_local_guard_keep_the_primitive_identity() {
             None,
         );
         assert_eq!(expansion_kind(&dag, result), Some(expected));
-        let guards = local_dim_guard_sites(&dag);
+        let guards = local_dim_guard_sites(&dag).unwrap();
         assert!(
             guards
                 .iter()

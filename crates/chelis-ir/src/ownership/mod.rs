@@ -247,7 +247,7 @@ impl<'a> VerifiedDagView<'a> {
     /// values. The view asks it here rather than handing a backend a raw
     /// [`Dag`], under the same chelis#1538 discipline as
     /// [`Self::member_load_axis`].
-    pub fn local_dim_guard_sites(self) -> Vec<(LocalGuardSite, LocalGuardClaim)> {
+    pub fn local_dim_guard_sites(self) -> Result<Vec<(LocalGuardSite, LocalGuardClaim)>, String> {
         crate::axis_sources::local_dim_guard_sites(self.dag)
     }
 
@@ -283,6 +283,11 @@ impl<'a> VerifiedDagView<'a> {
     /// Individual interface checks, shared with Eval and already scheduled.
     pub fn entry_extent_guards(self) -> Vec<crate::axis_sources::EntryExtentGuard> {
         crate::axis_sources::entry_extent_guards(self.dag)
+    }
+
+    /// The same ordered input admission plan consumed by DAG evaluation.
+    pub fn entry_validation_plan(self) -> Vec<crate::axis_sources::EntryValidationStep> {
+        crate::axis_sources::entry_validation_plan(self.dag)
     }
 
     /// The named witness claims the entry schedule above already compares, so
