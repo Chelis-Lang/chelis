@@ -514,9 +514,22 @@ mod tests {
     fn function() -> HostFunction {
         let ty = tensor("seq");
         let mut dag = Dag::new();
-        let a = dag.add_node(RiscOp::Load { name: "a".into() }, vec![], ty.clone(), None);
-        let b = dag.add_node(RiscOp::Load { name: "b".into() }, vec![], ty.clone(), None);
-        let sum = dag.add_node(RiscOp::Add, vec![a, b], ty.clone(), None);
+        let decl = dag.declare("test");
+        let a = dag.add_node(
+            decl,
+            RiscOp::Load { name: "a".into() },
+            vec![],
+            ty.clone(),
+            None,
+        );
+        let b = dag.add_node(
+            decl,
+            RiscOp::Load { name: "b".into() },
+            vec![],
+            ty.clone(),
+            None,
+        );
+        let sum = dag.add_node(decl, RiscOp::Add, vec![a, b], ty.clone(), None);
         dag.add_root(sum);
         HostFunction {
             helper_result_claim_axes: Vec::new(),

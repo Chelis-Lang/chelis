@@ -104,12 +104,12 @@ impl CachePayload for crate::StdLibContext {
     // change and never shipped.
     // V28 (chelis#2413): the explicit key operations join `RiscOp` and `key`
     // becomes a storage dtype, so bincode variant indices shift again.
-    // V30 (chelis#2413): the counter-stream bridge `RiscOp` variant, the
+    // V31 (chelis#2413): the counter-stream bridge `RiscOp` variant, the
     // `Random` effect and the `random` handler kind are deleted with the
-    // counter stream, so bincode variant indices shift again, and every
-    // lowered DAG node records its top-level declaration (chelis#2476). V29
-    // was an intermediate state of the same change and never shipped.
-    const FORMAT_VERSION: u32 = 30;
+    // counter stream, so bincode variant indices shift again, and every DAG
+    // node carries its declaration as a required field (chelis#2476). V29
+    // and V30 were intermediate states of the same change and never shipped.
+    const FORMAT_VERSION: u32 = 31;
     const KEY_DOMAIN: &'static [u8] = b"chelis_std_typecheck_v";
 }
 

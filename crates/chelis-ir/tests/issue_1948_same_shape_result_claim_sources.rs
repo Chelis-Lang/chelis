@@ -50,10 +50,16 @@ fn vec_i32(len: usize) -> TensorType {
     }
 }
 
-fn interior_claim_token(dag: &mut Dag, claim: InteriorClaim, required: i64) -> Option<NodeId> {
+fn interior_claim_token(
+    dag: &mut Dag,
+    decl: chelis_ir::dag::DeclId,
+    claim: InteriorClaim,
+    required: i64,
+) -> Option<NodeId> {
     match claim {
         InteriorClaim::None => None,
         InteriorClaim::Literal => Some(dag.add_node(
+            decl,
             RiscOp::ExtentWitness {
                 site: ExtentWitnessSite::LiteralResultClaim,
                 parameter: String::new(),
@@ -70,6 +76,7 @@ fn interior_claim_token(dag: &mut Dag, claim: InteriorClaim, required: i64) -> O
         )),
         InteriorClaim::Named => {
             let declared = dag.add_node(
+                decl,
                 RiscOp::Load {
                     name: "declared".into(),
                 },
@@ -81,6 +88,7 @@ fn interior_claim_token(dag: &mut Dag, claim: InteriorClaim, required: i64) -> O
                 None,
             );
             let caller = dag.add_node(
+                decl,
                 RiscOp::ExtentWitness {
                     site: ExtentWitnessSite::Caller,
                     parameter: "declared".into(),
@@ -96,6 +104,7 @@ fn interior_claim_token(dag: &mut Dag, claim: InteriorClaim, required: i64) -> O
                 None,
             );
             let claim = dag.add_node(
+                decl,
                 RiscOp::ExtentWitness {
                     site: ExtentWitnessSite::ResultClaim {
                         claim: "n".into(),
@@ -121,20 +130,24 @@ fn interior_claim_token(dag: &mut Dag, claim: InteriorClaim, required: i64) -> O
 
 fn blas_pattern(claim: InteriorClaim) -> Dag {
     let mut dag = Dag::new();
-    let claim = interior_claim_token(&mut dag, claim, 5);
+    let decl = dag.declare("test");
+    let claim = interior_claim_token(&mut dag, decl, claim, 5);
     let a = dag.add_node(
+        decl,
         RiscOp::Load { name: "a".into() },
         Vec::new(),
         mat_f32(2, 3),
         None,
     );
     let b = dag.add_node(
+        decl,
         RiscOp::Load { name: "b".into() },
         Vec::new(),
         mat_f32(3, 4),
         None,
     );
     let expand_a = dag.add_node(
+        decl,
         RiscOp::Expand {
             axis: 2,
             size: chelis_ir::dag::RtDim::Lit(4),
@@ -144,6 +157,7 @@ fn blas_pattern(claim: InteriorClaim) -> Dag {
         None,
     );
     let expand_b = dag.add_node(
+        decl,
         RiscOp::Expand {
             axis: 0,
             size: chelis_ir::dag::RtDim::Lit(2),
@@ -153,6 +167,7 @@ fn blas_pattern(claim: InteriorClaim) -> Dag {
         None,
     );
     let mul = dag.add_node(
+        decl,
         RiscOp::Mul,
         vec![expand_a, expand_b],
         tensor3_f32(2, 3, 4),
@@ -162,6 +177,7 @@ fn blas_pattern(claim: InteriorClaim) -> Dag {
         dag.add_result_claim_dep(mul, claim);
     }
     let sum = dag.add_node(
+        decl,
         RiscOp::Sum {
             axis: 1,
             accumulator: Prim::F32,
@@ -186,8 +202,10 @@ fn eval_blas_pattern(dag: &Dag, declared: Option<usize>) -> Result<Vec<f64>, Str
 
 fn dense_gather_pattern(claim: InteriorClaim) -> Dag {
     let mut dag = Dag::new();
-    let claim = interior_claim_token(&mut dag, claim, 5);
+    let decl = dag.declare("test");
+    let claim = interior_claim_token(&mut dag, decl, claim, 5);
     let values = dag.add_node(
+        decl,
         RiscOp::Load {
             name: "values".into(),
         },
@@ -196,6 +214,7 @@ fn dense_gather_pattern(claim: InteriorClaim) -> Dag {
         None,
     );
     let indices = dag.add_node(
+        decl,
         RiscOp::Load {
             name: "indices".into(),
         },
@@ -204,12 +223,14 @@ fn dense_gather_pattern(claim: InteriorClaim) -> Dag {
         None,
     );
     let one_hot = dag.add_node(
+        decl,
         RiscOp::OneHot { vocab: 2 },
         vec![indices],
         mat_f32(4, 2),
         None,
     );
     let expand_one_hot = dag.add_node(
+        decl,
         RiscOp::Expand {
             axis: 2,
             size: chelis_ir::dag::RtDim::Lit(3),
@@ -219,6 +240,7 @@ fn dense_gather_pattern(claim: InteriorClaim) -> Dag {
         None,
     );
     let expand_values = dag.add_node(
+        decl,
         RiscOp::Expand {
             axis: 0,
             size: chelis_ir::dag::RtDim::Lit(4),
@@ -228,6 +250,7 @@ fn dense_gather_pattern(claim: InteriorClaim) -> Dag {
         None,
     );
     let mul = dag.add_node(
+        decl,
         RiscOp::Mul,
         vec![expand_one_hot, expand_values],
         tensor3_f32(4, 2, 3),
@@ -237,6 +260,7 @@ fn dense_gather_pattern(claim: InteriorClaim) -> Dag {
         dag.add_result_claim_dep(mul, claim);
     }
     let sum = dag.add_node(
+        decl,
         RiscOp::Sum {
             axis: 1,
             accumulator: Prim::F32,
@@ -395,7 +419,9 @@ fn unclaimed_dense_gather_region_still_specializes_and_executes() {
 
 fn named_claim_fusion_dag(claimed: bool, producer_is_interior: bool) -> (Dag, NodeId) {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let declaration_input = dag.add_node(
+        decl,
         RiscOp::Load {
             name: "declared".into(),
         },
@@ -407,6 +433,7 @@ fn named_claim_fusion_dag(claimed: bool, producer_is_interior: bool) -> (Dag, No
         None,
     );
     let declaration = dag.add_node(
+        decl,
         RiscOp::ExtentWitness {
             site: ExtentWitnessSite::Caller,
             parameter: "declared".into(),
@@ -422,6 +449,7 @@ fn named_claim_fusion_dag(claimed: bool, producer_is_interior: bool) -> (Dag, No
         None,
     );
     let claim = dag.add_node(
+        decl,
         RiscOp::ExtentWitness {
             site: ExtentWitnessSite::ResultClaim {
                 claim: "n".into(),
@@ -441,6 +469,7 @@ fn named_claim_fusion_dag(claimed: bool, producer_is_interior: bool) -> (Dag, No
     );
     dag.add_shape_dep(claim, declaration);
     let left = dag.add_node(
+        decl,
         RiscOp::Load {
             name: "left".into(),
         },
@@ -449,6 +478,7 @@ fn named_claim_fusion_dag(claimed: bool, producer_is_interior: bool) -> (Dag, No
         None,
     );
     let right = dag.add_node(
+        decl,
         RiscOp::Load {
             name: "right".into(),
         },
@@ -457,15 +487,15 @@ fn named_claim_fusion_dag(claimed: bool, producer_is_interior: bool) -> (Dag, No
         None,
     );
     let left = if producer_is_interior {
-        dag.add_node(RiscOp::Exp, vec![left], wildcard_f32(), None)
+        dag.add_node(decl, RiscOp::Exp, vec![left], wildcard_f32(), None)
     } else {
         left
     };
-    let add = dag.add_node(RiscOp::Add, vec![left, right], wildcard_f32(), None);
+    let add = dag.add_node(decl, RiscOp::Add, vec![left, right], wildcard_f32(), None);
     if claimed {
         dag.add_result_claim_dep(add, claim);
     }
-    let neg = dag.add_node(RiscOp::Neg, vec![add], wildcard_f32(), None);
+    let neg = dag.add_node(decl, RiscOp::Neg, vec![add], wildcard_f32(), None);
     dag.add_root(neg);
     (dag, add)
 }
@@ -485,7 +515,9 @@ fn eval_named_claim(dag: &Dag, declared_extent: usize) -> Result<Vec<f64>, Strin
 
 fn named_claim_identity_cast_dag() -> Dag {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let declaration_input = dag.add_node(
+        decl,
         RiscOp::Load {
             name: "declared".into(),
         },
@@ -497,6 +529,7 @@ fn named_claim_identity_cast_dag() -> Dag {
         None,
     );
     let declaration = dag.add_node(
+        decl,
         RiscOp::ExtentWitness {
             site: ExtentWitnessSite::Caller,
             parameter: "declared".into(),
@@ -512,6 +545,7 @@ fn named_claim_identity_cast_dag() -> Dag {
         None,
     );
     let claim = dag.add_node(
+        decl,
         RiscOp::ExtentWitness {
             site: ExtentWitnessSite::ResultClaim {
                 claim: "n".into(),
@@ -531,6 +565,7 @@ fn named_claim_identity_cast_dag() -> Dag {
     );
     dag.add_shape_dep(claim, declaration);
     let value = dag.add_node(
+        decl,
         RiscOp::Load {
             name: "value".into(),
         },
@@ -539,6 +574,7 @@ fn named_claim_identity_cast_dag() -> Dag {
         None,
     );
     let cast = dag.add_node(
+        decl,
         RiscOp::Cast {
             new_precision: Prim::F32,
         },
@@ -700,7 +736,9 @@ fn an_interior_named_result_claim_splits_the_fusion_chain() {
 #[test]
 fn rank_zero_inputs_are_excluded_from_same_shape_result_claim_observation() {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let claim = dag.add_node(
+        decl,
         RiscOp::ExtentWitness {
             site: ExtentWitnessSite::LiteralResultClaim,
             parameter: String::new(),
@@ -716,6 +754,7 @@ fn rank_zero_inputs_are_excluded_from_same_shape_result_claim_observation() {
         None,
     );
     let scalar = dag.add_node(
+        decl,
         RiscOp::Const {
             value: scalar_from_f64("const", Prim::F32, 1.0).unwrap(),
         },
@@ -728,12 +767,13 @@ fn rank_zero_inputs_are_excluded_from_same_shape_result_claim_observation() {
     );
     let tensor_ty = wildcard_f32();
     let tensor = dag.add_node(
+        decl,
         RiscOp::Load { name: "x".into() },
         vec![],
         tensor_ty.clone(),
         None,
     );
-    let add = dag.add_node(RiscOp::Add, vec![scalar, tensor], tensor_ty, None);
+    let add = dag.add_node(decl, RiscOp::Add, vec![scalar, tensor], tensor_ty, None);
     dag.add_result_claim_dep(add, claim);
     dag.add_root(add);
 
@@ -760,24 +800,27 @@ fn rank_zero_inputs_are_excluded_from_same_shape_result_claim_observation() {
 #[test]
 fn identical_members_deduplicate_but_distinct_paths_remain() {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let tensor_ty = TensorType {
         dims: vec![DimInfo::Named("*".into(), None)],
         precision: Prim::F32,
     };
     let x = dag.add_node(
+        decl,
         RiscOp::Load { name: "x".into() },
         vec![],
         tensor_ty.clone(),
         None,
     );
     let y = dag.add_node(
+        decl,
         RiscOp::Load { name: "y".into() },
         vec![],
         tensor_ty.clone(),
         None,
     );
-    let repeated = dag.add_node(RiscOp::Add, vec![x, x], tensor_ty.clone(), None);
-    let distinct = dag.add_node(RiscOp::Add, vec![x, y], tensor_ty, None);
+    let repeated = dag.add_node(decl, RiscOp::Add, vec![x, x], tensor_ty.clone(), None);
+    let distinct = dag.add_node(decl, RiscOp::Add, vec![x, y], tensor_ty, None);
 
     assert_eq!(
         same_shape_result_agreement(&dag, repeated)
@@ -798,6 +841,7 @@ fn identical_members_deduplicate_but_distinct_paths_remain() {
 #[test]
 fn malformed_same_shape_relations_are_verifier_errors() {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let scalar_ty = TensorType {
         dims: vec![],
         precision: Prim::F32,
@@ -807,6 +851,7 @@ fn malformed_same_shape_relations_are_verifier_errors() {
         precision: Prim::F32,
     };
     let left = dag.add_node(
+        decl,
         RiscOp::Const {
             value: scalar_from_f64("const", Prim::F32, 1.0).unwrap(),
         },
@@ -815,6 +860,7 @@ fn malformed_same_shape_relations_are_verifier_errors() {
         None,
     );
     let right = dag.add_node(
+        decl,
         RiscOp::Const {
             value: scalar_from_f64("const", Prim::F32, 2.0).unwrap(),
         },
@@ -823,6 +869,7 @@ fn malformed_same_shape_relations_are_verifier_errors() {
         None,
     );
     let claim = dag.add_node(
+        decl,
         RiscOp::ExtentWitness {
             site: ExtentWitnessSite::LiteralResultClaim,
             parameter: String::new(),
@@ -837,7 +884,7 @@ fn malformed_same_shape_relations_are_verifier_errors() {
         },
         None,
     );
-    let add = dag.add_node(RiscOp::Add, vec![left, right], result_ty, None);
+    let add = dag.add_node(decl, RiscOp::Add, vec![left, right], result_ty, None);
     dag.add_result_claim_dep(add, claim);
     dag.add_root(add);
 

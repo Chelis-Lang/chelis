@@ -25,8 +25,16 @@ fn fixture(
     size: RtDim,
 ) -> (Dag, chelis_ir::dag::NodeId) {
     let mut dag = Dag::new();
-    let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], ty(operand), None);
+    let decl = dag.declare("test");
+    let x = dag.add_node(
+        decl,
+        RiscOp::Load { name: "x".into() },
+        vec![],
+        ty(operand),
+        None,
+    );
     let sizes = dag.add_node(
+        decl,
         RiscOp::Load {
             name: "sizes".into(),
         },
@@ -39,7 +47,13 @@ fn fixture(
     } else {
         vec![x, sizes]
     };
-    let result = dag.add_node(RiscOp::Expand { axis: 1, size }, inputs, ty(result), None);
+    let result = dag.add_node(
+        decl,
+        RiscOp::Expand { axis: 1, size },
+        inputs,
+        ty(result),
+        None,
+    );
     dag.add_root(result);
     (dag, result)
 }
@@ -163,7 +177,9 @@ fn an_unread_named_claim_keeps_its_existing_rejection_path() {
         vec![named("*"), named("claimed"), named("*")],
         source(),
     );
+    let decl = dag.nodes()[0].decl;
     dag.add_node(
+        decl,
         RiscOp::Load {
             name: "expected".into(),
         },

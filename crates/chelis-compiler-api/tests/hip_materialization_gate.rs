@@ -6,11 +6,13 @@ use chelis_types::types::Prim;
 
 fn dag(precision: Prim, materialization: bool) -> Dag {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let ty = TensorType {
         dims: vec![DimInfo::Lit(4)],
         precision,
     };
     let input = dag.add_node(
+        decl,
         RiscOp::Load {
             name: "input".into(),
         },
@@ -23,7 +25,7 @@ fn dag(precision: Prim, materialization: bool) -> Dag {
     } else {
         (RiscOp::Add, vec![input, input])
     };
-    let result = dag.add_node(op, inputs, ty, None);
+    let result = dag.add_node(decl, op, inputs, ty, None);
     dag.add_root(result);
     dag
 }

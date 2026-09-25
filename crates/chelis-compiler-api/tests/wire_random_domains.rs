@@ -142,7 +142,7 @@ fn a_key_is_consumed_once_and_only_by_a_key_consumer() {
     let nodes = foreign["nodes"].as_array_mut().unwrap();
     let id = nodes.len();
     nodes.push(
-        json!({"shape_deps":[],"span_id":null,"merged_spans":[],"id":id,
+        json!({"shape_deps":[],"span_id":null,"merged_spans":[],"declaration":"entry","id":id,
         "op":{"kind":"neg"},"inputs":[dropout_key],
         "output_type":{"dims":[],"precision":"key"}}),
     );
@@ -165,7 +165,7 @@ fn a_key_is_consumed_once_and_only_by_a_key_consumer() {
     let mut derived = dag.clone();
     let id = derived["nodes"].as_array().unwrap().len();
     derived["nodes"].as_array_mut().unwrap().push(
-        json!({"shape_deps":[],"span_id":null,"merged_spans":[],"id":id,
+        json!({"shape_deps":[],"span_id":null,"merged_spans":[],"declaration":"entry","id":id,
         "op":{"kind":"split","branch":"left"},"inputs":[dropout_key],
         "output_type":{"dims":[],"precision":"key"}}),
     );
@@ -287,7 +287,7 @@ fn a_key_may_be_loaded_or_rooted_and_is_never_a_dependency_or_a_constant() {
     let mut loaded = dag.clone();
     let id = loaded["nodes"].as_array().unwrap().len();
     loaded["nodes"].as_array_mut().unwrap().push(
-        json!({"shape_deps":[],"span_id":null,"merged_spans":[],"id":id,
+        json!({"shape_deps":[],"span_id":null,"merged_spans":[],"declaration":"entry","id":id,
         "op":{"kind":"load","name":"unused"},"inputs":[],
         "output_type":{"dims":[],"precision":"key"}}),
     );
@@ -311,7 +311,7 @@ fn a_key_may_be_loaded_or_rooted_and_is_never_a_dependency_or_a_constant() {
     let mut constant = dag.clone();
     let id = constant["nodes"].as_array().unwrap().len();
     constant["nodes"].as_array_mut().unwrap().push(
-        json!({"shape_deps":[],"span_id":null,"merged_spans":[],"id":id,
+        json!({"shape_deps":[],"span_id":null,"merged_spans":[],"declaration":"entry","id":id,
         "op":{"kind":"const","value":{"dtype":"int64","value":7}},"inputs":[],
         "output_type":{"dims":[],"precision":"key"}}),
     );
@@ -320,7 +320,7 @@ fn a_key_may_be_loaded_or_rooted_and_is_never_a_dependency_or_a_constant() {
 }
 
 fn wire_node(id: usize, op: Value, inputs: &[usize], dims: &[u64], precision: &str) -> Value {
-    json!({"shape_deps":[],"span_id":null,"merged_spans":[],"id":id,"op":op,
+    json!({"shape_deps":[],"span_id":null,"merged_spans":[],"declaration":"entry","id":id,"op":op,
         "inputs":inputs,
         "output_type":{"dims":dims.iter().map(|size| json!({"kind":"lit","size":size})).collect::<Vec<_>>(),
         "precision":precision}})
@@ -536,10 +536,9 @@ fn the_codec_admits_the_key_chain_and_rejects_every_malformed_key_form() {
     rooted["roots"].as_array_mut().unwrap().push(json!(6));
     rejects_domain(&rooted, "is a graph root and is also consumed");
     // A parameter is its declaration and its name (chelis#2413 B2): two
-    // declarations' `k` are two keys, one declaration's two `Load`s of `k`
-    // are one, and a `Load` with no declaration is the same key as every
-    // `Load` of its name.
-    let reloaded = |declarations: [Option<&str>; 2]| {
+    // declarations' `k` are two keys, and one declaration's two `Load`s of
+    // `k` are one.
+    let reloaded = |declarations: [&str; 2]| {
         let mut reloaded = key_chain();
         let y = push(
             &mut reloaded,
@@ -557,9 +556,7 @@ fn the_codec_admits_the_key_chain_and_rejects_every_malformed_key_form() {
                 &[],
                 "key",
             );
-            if let Some(declaration) = declaration {
-                reloaded["nodes"][k]["declaration"] = json!(declaration);
-            }
+            reloaded["nodes"][k]["declaration"] = json!(declaration);
             let drawn = push(
                 &mut reloaded,
                 json!({"kind":"dropout"}),
@@ -572,11 +569,15 @@ fn the_codec_admits_the_key_chain_and_rejects_every_malformed_key_form() {
         reloaded["roots"] = json!(roots);
         reloaded
     };
-    rejects_domain(&reloaded([None, None]), "is consumed twice");
-    rejects_domain(&reloaded([Some("a"), Some("a")]), "is consumed twice");
-    rejects_domain(&reloaded([Some("a"), None]), "is consumed twice");
-    rejects_domain(&reloaded([None, Some("b")]), "is consumed twice");
-    accepts(&reloaded([Some("a"), Some("b")]));
+    rejects_domain(&reloaded(["a", "a"]), "is consumed twice");
+    accepts(&reloaded(["a", "b"]));
+    // Every node names its declaration: a node without one is a decode error.
+    let mut undeclared = key_chain();
+    undeclared["nodes"][0]
+        .as_object_mut()
+        .unwrap()
+        .remove("declaration");
+    assert!(WireDag::from_validated_json(&undeclared.to_string()).is_err());
 
     // The same disagreement against a named count axis whose extent is
     // known; the batched draw's data declares that axis too.
@@ -1058,8 +1059,14 @@ fn tensor(axes: &[Axis], precision: Prim) -> TensorType {
     }
 }
 
-fn ir_node(dag: &mut Dag, op: RiscOp, inputs: Vec<NodeId>, ty: TensorType) -> NodeId {
-    dag.add_node(op, inputs, ty, None)
+fn ir_node(
+    dag: &mut Dag,
+    decl: chelis_ir::dag::DeclId,
+    op: RiscOp,
+    inputs: Vec<NodeId>,
+    ty: TensorType,
+) -> NodeId {
+    dag.add_node(decl, op, inputs, ty, None)
 }
 
 /// The wire form of the loads, constants, key operations and draws below.
@@ -1099,7 +1106,7 @@ fn wire_of(dag: &Dag) -> Value {
                     other => panic!("no wire form here for {other:?}"),
                 })
                 .collect::<Vec<_>>();
-            json!({"shape_deps":[],"span_id":null,"merged_spans":[],"id":node.id.0,"op":op,
+            json!({"shape_deps":[],"span_id":null,"merged_spans":[],"declaration":"entry","id":node.id.0,"op":op,
                 "inputs":node.inputs.iter().map(|input| input.0).collect::<Vec<_>>(),
                 "output_type":{"dims":dims,"precision":node.output_type.precision.interchange_name()}})
         })
@@ -1109,18 +1116,26 @@ fn wire_of(dag: &Dag) -> Value {
 }
 
 /// Keys `split_n(key(7), 3)`: nodes 0 to 2.
-fn three_keys(dag: &mut Dag) -> NodeId {
+fn three_keys(dag: &mut Dag, decl: chelis_ir::dag::DeclId) -> NodeId {
     let seed = ir_node(
         dag,
+        decl,
         RiscOp::Const {
             value: scalar_from_i64("test", Prim::Int64, 7).unwrap(),
         },
         vec![],
         tensor(&[], Prim::Int64),
     );
-    let key = ir_node(dag, RiscOp::KeyFromSeed, vec![seed], tensor(&[], Prim::Key));
+    let key = ir_node(
+        dag,
+        decl,
+        RiscOp::KeyFromSeed,
+        vec![seed],
+        tensor(&[], Prim::Key),
+    );
     ir_node(
         dag,
+        decl,
         RiscOp::SplitN {
             count: RtDim::Lit(3),
         },
@@ -1129,9 +1144,10 @@ fn three_keys(dag: &mut Dag) -> NodeId {
     )
 }
 
-fn f32_bound(dag: &mut Dag, value: f64) -> NodeId {
+fn f32_bound(dag: &mut Dag, decl: chelis_ir::dag::DeclId, value: f64) -> NodeId {
     ir_node(
         dag,
+        decl,
         RiscOp::synth_const(Prim::F32, value),
         vec![],
         tensor(&[], Prim::F32),
@@ -1141,17 +1157,20 @@ fn f32_bound(dag: &mut Dag, value: f64) -> NodeId {
 /// Round 3's witness: a `UniformLike` over `t: [3, 4]` declared `[rows, 4]`.
 fn uniform_declaring(rows: usize) -> Dag {
     let mut dag = Dag::new();
-    let keys = three_keys(&mut dag);
+    let decl = dag.declare("test");
+    let keys = three_keys(&mut dag, decl);
     let t = ir_node(
         &mut dag,
+        decl,
         RiscOp::Load { name: "t".into() },
         vec![],
         tensor(&[Axis::Lit(3), Axis::Lit(4)], Prim::F32),
     );
-    let low = f32_bound(&mut dag, 0.0);
-    let high = f32_bound(&mut dag, 1.0);
+    let low = f32_bound(&mut dag, decl, 0.0);
+    let high = f32_bound(&mut dag, decl, 1.0);
     let drawn = ir_node(
         &mut dag,
+        decl,
         RiscOp::UniformLike,
         vec![t, low, high, keys],
         tensor(&[Axis::Lit(rows), Axis::Lit(4)], Prim::F32),
@@ -1163,14 +1182,17 @@ fn uniform_declaring(rows: usize) -> Dag {
 /// A `Split` of `k: [n]` declared `[out]`.
 fn split_declaring(out: &'static str) -> Dag {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let k = ir_node(
         &mut dag,
+        decl,
         RiscOp::Load { name: "k".into() },
         vec![],
         tensor(&[Axis::Named("n")], Prim::Key),
     );
     let split = ir_node(
         &mut dag,
+        decl,
         RiscOp::Split {
             branch: KeyBranch::Left,
         },
@@ -1185,29 +1207,34 @@ fn split_declaring(out: &'static str) -> Dag {
 /// cotangent `g: [3, trailing]`.
 fn adjoint_over(trailing: usize) -> Dag {
     let mut dag = Dag::new();
-    let keys = three_keys(&mut dag);
+    let decl = dag.declare("test");
+    let keys = three_keys(&mut dag, decl);
     let t = ir_node(
         &mut dag,
+        decl,
         RiscOp::Load { name: "t".into() },
         vec![],
         tensor(&[Axis::Lit(3), Axis::Lit(5)], Prim::F32),
     );
-    let low = f32_bound(&mut dag, 0.0);
-    let high = f32_bound(&mut dag, 1.0);
+    let low = f32_bound(&mut dag, decl, 0.0);
+    let high = f32_bound(&mut dag, decl, 1.0);
     let forward = ir_node(
         &mut dag,
+        decl,
         RiscOp::UniformLike,
         vec![t, low, high, keys],
         tensor(&[Axis::Lit(3), Axis::Lit(5)], Prim::F32),
     );
     let g = ir_node(
         &mut dag,
+        decl,
         RiscOp::Load { name: "g".into() },
         vec![],
         tensor(&[Axis::Lit(3), Axis::Lit(trailing)], Prim::F32),
     );
     let adjoint = ir_node(
         &mut dag,
+        decl,
         RiscOp::UniformBoundAdjoint {
             bound: UniformBound::High,
         },

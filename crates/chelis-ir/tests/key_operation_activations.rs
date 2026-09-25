@@ -58,13 +58,21 @@ fn ty(dims: &[usize], prim: Prim) -> TensorType {
     }
 }
 
-fn node(dag: &mut Dag, op: RiscOp, inputs: Vec<NodeId>, dims: &[usize], prim: Prim) -> NodeId {
-    dag.add_node(op, inputs, ty(dims, prim), None)
+fn node(
+    dag: &mut Dag,
+    decl: chelis_ir::dag::DeclId,
+    op: RiscOp,
+    inputs: Vec<NodeId>,
+    dims: &[usize],
+    prim: Prim,
+) -> NodeId {
+    dag.add_node(decl, op, inputs, ty(dims, prim), None)
 }
 
-fn i64_const(dag: &mut Dag, value: i64) -> NodeId {
+fn i64_const(dag: &mut Dag, decl: chelis_ir::dag::DeclId, value: i64) -> NodeId {
     node(
         dag,
+        decl,
         RiscOp::Const {
             value: scalar_from_i64("test", Prim::Int64, value).unwrap(),
         },
@@ -74,9 +82,10 @@ fn i64_const(dag: &mut Dag, value: i64) -> NodeId {
     )
 }
 
-fn bool_const(dag: &mut Dag, value: bool) -> NodeId {
+fn bool_const(dag: &mut Dag, decl: chelis_ir::dag::DeclId, value: bool) -> NodeId {
     node(
         dag,
+        decl,
         RiscOp::Const {
             value: scalar_from_i64("test", Prim::Bool, i64::from(value)).unwrap(),
         },
@@ -86,9 +95,10 @@ fn bool_const(dag: &mut Dag, value: bool) -> NodeId {
     )
 }
 
-fn f32_const(dag: &mut Dag, value: f64) -> NodeId {
+fn f32_const(dag: &mut Dag, decl: chelis_ir::dag::DeclId, value: f64) -> NodeId {
     node(
         dag,
+        decl,
         RiscOp::synth_const(Prim::F32, value),
         vec![],
         &[],
@@ -96,18 +106,32 @@ fn f32_const(dag: &mut Dag, value: f64) -> NodeId {
     )
 }
 
-fn load(dag: &mut Dag, name: &str, dims: &[usize], prim: Prim) -> NodeId {
-    node(dag, RiscOp::Load { name: name.into() }, vec![], dims, prim)
-}
-
-fn key7(dag: &mut Dag) -> NodeId {
-    let seed = i64_const(dag, 7);
-    node(dag, RiscOp::KeyFromSeed, vec![seed], &[], Prim::Key)
-}
-
-fn not(dag: &mut Dag, value: NodeId) -> NodeId {
+fn load(
+    dag: &mut Dag,
+    decl: chelis_ir::dag::DeclId,
+    name: &str,
+    dims: &[usize],
+    prim: Prim,
+) -> NodeId {
     node(
         dag,
+        decl,
+        RiscOp::Load { name: name.into() },
+        vec![],
+        dims,
+        prim,
+    )
+}
+
+fn key7(dag: &mut Dag, decl: chelis_ir::dag::DeclId) -> NodeId {
+    let seed = i64_const(dag, decl, 7);
+    node(dag, decl, RiscOp::KeyFromSeed, vec![seed], &[], Prim::Key)
+}
+
+fn not(dag: &mut Dag, decl: chelis_ir::dag::DeclId, value: NodeId) -> NodeId {
+    node(
+        dag,
+        decl,
         RiscOp::Logical(LogicalKind::Not),
         vec![value],
         &[],
@@ -115,9 +139,10 @@ fn not(dag: &mut Dag, value: NodeId) -> NodeId {
     )
 }
 
-fn and(dag: &mut Dag, left: NodeId, right: NodeId) -> NodeId {
+fn and(dag: &mut Dag, decl: chelis_ir::dag::DeclId, left: NodeId, right: NodeId) -> NodeId {
     node(
         dag,
+        decl,
         RiscOp::Logical(LogicalKind::And),
         vec![left, right],
         &[],
@@ -126,11 +151,17 @@ fn and(dag: &mut Dag, left: NodeId, right: NodeId) -> NodeId {
 }
 
 /// A rank-0 key operation over `key`, with `active` appended when present.
-fn key_op(dag: &mut Dag, op: RiscOp, key: NodeId, active: Option<NodeId>) -> NodeId {
+fn key_op(
+    dag: &mut Dag,
+    decl: chelis_ir::dag::DeclId,
+    op: RiscOp,
+    key: NodeId,
+    active: Option<NodeId>,
+) -> NodeId {
     let mut inputs = vec![key];
     let dims: &[usize] = match &op {
         RiscOp::FoldIn => {
-            inputs.push(i64_const(dag, 3));
+            inputs.push(i64_const(dag, decl, 3));
             &[]
         }
         RiscOp::SplitN {
@@ -142,7 +173,7 @@ fn key_op(dag: &mut Dag, op: RiscOp, key: NodeId, active: Option<NodeId>) -> Nod
         _ => &[],
     };
     inputs.extend(active);
-    node(dag, op, inputs, dims, Prim::Key)
+    node(dag, decl, op, inputs, dims, Prim::Key)
 }
 
 fn left() -> RiscOp {
@@ -165,7 +196,12 @@ fn split_two() -> RiscOp {
 
 /// An f32 uniform draw over a template shaped like `key`'s leading axes plus
 /// two elements, under `active`.
-fn draw(dag: &mut Dag, key: NodeId, active: Option<NodeId>) -> NodeId {
+fn draw(
+    dag: &mut Dag,
+    decl: chelis_ir::dag::DeclId,
+    key: NodeId,
+    active: Option<NodeId>,
+) -> NodeId {
     let mut dims = dag.get(key).unwrap().output_type.dims.clone();
     dims.push(DimInfo::Lit(2));
     let data = TensorType {
@@ -173,6 +209,7 @@ fn draw(dag: &mut Dag, key: NodeId, active: Option<NodeId>) -> NodeId {
         precision: Prim::F32,
     };
     let template = dag.add_node(
+        decl,
         RiscOp::Load {
             name: format!("t{}", data.dims.len()).as_str().into(),
         },
@@ -180,13 +217,13 @@ fn draw(dag: &mut Dag, key: NodeId, active: Option<NodeId>) -> NodeId {
         data.clone(),
         None,
     );
-    let low = f32_const(dag, 0.0);
-    let high = f32_const(dag, 1.0);
+    let low = f32_const(dag, decl, 0.0);
+    let high = f32_const(dag, decl, 1.0);
     let inputs = [template, low, high, key]
         .into_iter()
         .chain(active)
         .collect();
-    dag.add_node(RiscOp::UniformLike, inputs, data, None)
+    dag.add_node(decl, RiscOp::UniformLike, inputs, data, None)
 }
 
 fn assert_accepted(dag: &Dag) {
@@ -271,20 +308,26 @@ enum Kind {
 
 /// A consumer of `key` of `kind` under `active`, and a draw under `active`
 /// of every key it derives; returns the nodes to root.
-fn consume(dag: &mut Dag, kind: Kind, key: NodeId, active: NodeId) -> Vec<NodeId> {
+fn consume(
+    dag: &mut Dag,
+    decl: chelis_ir::dag::DeclId,
+    kind: Kind,
+    key: NodeId,
+    active: NodeId,
+) -> Vec<NodeId> {
     let derived = match kind {
-        Kind::Draw => return vec![draw(dag, key, Some(active))],
+        Kind::Draw => return vec![draw(dag, decl, key, Some(active))],
         Kind::SplitPair => vec![
-            key_op(dag, left(), key, Some(active)),
-            key_op(dag, right(), key, Some(active)),
+            key_op(dag, decl, left(), key, Some(active)),
+            key_op(dag, decl, right(), key, Some(active)),
         ],
-        Kind::Left => vec![key_op(dag, left(), key, Some(active))],
-        Kind::FoldIn => vec![key_op(dag, RiscOp::FoldIn, key, Some(active))],
-        Kind::SplitN => vec![key_op(dag, split_two(), key, Some(active))],
+        Kind::Left => vec![key_op(dag, decl, left(), key, Some(active))],
+        Kind::FoldIn => vec![key_op(dag, decl, RiscOp::FoldIn, key, Some(active))],
+        Kind::SplitN => vec![key_op(dag, decl, split_two(), key, Some(active))],
     };
     derived
         .into_iter()
-        .map(|derived| draw(dag, derived, Some(active)))
+        .map(|derived| draw(dag, decl, derived, Some(active)))
         .collect()
 }
 
@@ -303,14 +346,15 @@ fn exclusive_consumers_of_every_kind_share_one_key() {
     for first in kinds {
         for second in kinds {
             let mut dag = Dag::new();
-            let key = key7(&mut dag);
-            let c = load(&mut dag, "c", &[], Prim::Bool);
-            let parent = load(&mut dag, "p", &[], Prim::Bool);
-            let then_arm = and(&mut dag, parent, c);
-            let not_c = not(&mut dag, c);
-            let else_arm = and(&mut dag, parent, not_c);
-            let mut roots = consume(&mut dag, first, key, then_arm);
-            roots.extend(consume(&mut dag, second, key, else_arm));
+            let decl = dag.declare("test");
+            let key = key7(&mut dag, decl);
+            let c = load(&mut dag, decl, "c", &[], Prim::Bool);
+            let parent = load(&mut dag, decl, "p", &[], Prim::Bool);
+            let then_arm = and(&mut dag, decl, parent, c);
+            let not_c = not(&mut dag, decl, c);
+            let else_arm = and(&mut dag, decl, parent, not_c);
+            let mut roots = consume(&mut dag, decl, first, key, then_arm);
+            roots.extend(consume(&mut dag, decl, second, key, else_arm));
             dag.set_roots(roots);
             assert_eq!(verify(&dag), Vec::<String>::new(), "{first:?} / {second:?}");
         }
@@ -322,11 +366,12 @@ fn exclusive_consumers_of_every_kind_share_one_key() {
 #[test]
 fn a_split_arm_and_a_draw_arm_draw_only_the_selected_arms_bits() {
     let mut dag = Dag::new();
-    let key = key7(&mut dag);
-    let c = load(&mut dag, "c", &[], Prim::Bool);
-    let not_c = not(&mut dag, c);
-    let then_draws = consume(&mut dag, Kind::SplitPair, key, c);
-    let else_draw = draw(&mut dag, key, Some(not_c));
+    let decl = dag.declare("test");
+    let key = key7(&mut dag, decl);
+    let c = load(&mut dag, decl, "c", &[], Prim::Bool);
+    let not_c = not(&mut dag, decl, c);
+    let then_draws = consume(&mut dag, decl, Kind::SplitPair, key, c);
+    let else_draw = draw(&mut dag, decl, key, Some(not_c));
     dag.set_roots(vec![then_draws[0], then_draws[1], else_draw]);
     assert_accepted(&dag);
     for selected in [true, false] {
@@ -351,13 +396,14 @@ fn a_split_arm_and_a_draw_arm_draw_only_the_selected_arms_bits() {
 fn a_split_and_a_draw_of_one_key_without_exclusive_activations_are_rejected() {
     let build = |split_active: bool, draw_active: Option<bool>| {
         let mut dag = Dag::new();
-        let key = key7(&mut dag);
-        let c = load(&mut dag, "c", &[], Prim::Bool);
-        let not_c = not(&mut dag, c);
-        let half = key_op(&mut dag, left(), key, split_active.then_some(c));
-        let drawn_half = draw(&mut dag, half, split_active.then_some(c));
+        let decl = dag.declare("test");
+        let key = key7(&mut dag, decl);
+        let c = load(&mut dag, decl, "c", &[], Prim::Bool);
+        let not_c = not(&mut dag, decl, c);
+        let half = key_op(&mut dag, decl, left(), key, split_active.then_some(c));
+        let drawn_half = draw(&mut dag, decl, half, split_active.then_some(c));
         let active = draw_active.map(|same| if same { c } else { not_c });
-        let drawn = draw(&mut dag, key, active);
+        let drawn = draw(&mut dag, decl, key, active);
         dag.set_roots(vec![drawn_half, drawn]);
         dag
     };
@@ -370,22 +416,24 @@ fn a_split_and_a_draw_of_one_key_without_exclusive_activations_are_rejected() {
     assert_rejected(&build(false, Some(false)), "is consumed twice");
     // Two lefts of one key, one without an activation.
     let mut dag = Dag::new();
-    let key = key7(&mut dag);
-    let c = load(&mut dag, "c", &[], Prim::Bool);
-    let first = key_op(&mut dag, left(), key, Some(c));
-    let second = key_op(&mut dag, left(), key, None);
-    let a = draw(&mut dag, first, Some(c));
-    let b = draw(&mut dag, second, None);
+    let decl = dag.declare("test");
+    let key = key7(&mut dag, decl);
+    let c = load(&mut dag, decl, "c", &[], Prim::Bool);
+    let first = key_op(&mut dag, decl, left(), key, Some(c));
+    let second = key_op(&mut dag, decl, left(), key, None);
+    let a = draw(&mut dag, decl, first, Some(c));
+    let b = draw(&mut dag, decl, second, None);
     dag.set_roots(vec![a, b]);
     assert_rejected(&dag, "is split twice for the Left branch");
     // A fold and a split-n under unrelated conditions.
     let mut dag = Dag::new();
-    let key = key7(&mut dag);
-    let c = load(&mut dag, "c", &[], Prim::Bool);
-    let d = load(&mut dag, "d", &[], Prim::Bool);
-    let not_d = not(&mut dag, d);
-    let mut roots = consume(&mut dag, Kind::FoldIn, key, c);
-    roots.extend(consume(&mut dag, Kind::SplitN, key, not_d));
+    let decl = dag.declare("test");
+    let key = key7(&mut dag, decl);
+    let c = load(&mut dag, decl, "c", &[], Prim::Bool);
+    let d = load(&mut dag, decl, "d", &[], Prim::Bool);
+    let not_d = not(&mut dag, decl, d);
+    let mut roots = consume(&mut dag, decl, Kind::FoldIn, key, c);
+    roots.extend(consume(&mut dag, decl, Kind::SplitN, key, not_d));
     dag.set_roots(roots);
     assert_rejected(&dag, "whose activations are not exclusive");
 }
@@ -394,32 +442,33 @@ fn a_split_and_a_draw_of_one_key_without_exclusive_activations_are_rejected() {
 /// hazard: each half drawn outside its arm draws the same bits.
 fn escaping_lefts(escape: Escape) -> (Dag, [NodeId; 2]) {
     let mut dag = Dag::new();
-    let key = key7(&mut dag);
-    let c = load(&mut dag, "c", &[], Prim::Bool);
-    let not_c = not(&mut dag, c);
-    let first = key_op(&mut dag, left(), key, Some(c));
-    let second = key_op(&mut dag, left(), key, Some(not_c));
-    let kept = draw(&mut dag, second, Some(not_c));
+    let decl = dag.declare("test");
+    let key = key7(&mut dag, decl);
+    let c = load(&mut dag, decl, "c", &[], Prim::Bool);
+    let not_c = not(&mut dag, decl, c);
+    let first = key_op(&mut dag, decl, left(), key, Some(c));
+    let second = key_op(&mut dag, decl, left(), key, Some(not_c));
+    let kept = draw(&mut dag, decl, second, Some(not_c));
     let escaped = match escape {
-        Escape::Unconditional => draw(&mut dag, first, None),
-        Escape::OtherArm => draw(&mut dag, first, Some(not_c)),
+        Escape::Unconditional => draw(&mut dag, decl, first, None),
+        Escape::OtherArm => draw(&mut dag, decl, first, Some(not_c)),
         Escape::ThroughAFold => {
-            let folded = key_op(&mut dag, RiscOp::FoldIn, first, Some(c));
-            draw(&mut dag, folded, None)
+            let folded = key_op(&mut dag, decl, RiscOp::FoldIn, first, Some(c));
+            draw(&mut dag, decl, folded, None)
         }
         Escape::FoldOutside => {
-            let folded = key_op(&mut dag, RiscOp::FoldIn, first, None);
-            draw(&mut dag, folded, Some(c))
+            let folded = key_op(&mut dag, decl, RiscOp::FoldIn, first, None);
+            draw(&mut dag, decl, folded, Some(c))
         }
         Escape::Root => first,
         Escape::Nested => {
-            let y = load(&mut dag, "y", &[], Prim::Bool);
-            let nested = and(&mut dag, c, y);
-            draw(&mut dag, first, Some(nested))
+            let y = load(&mut dag, decl, "y", &[], Prim::Bool);
+            let nested = and(&mut dag, decl, c, y);
+            draw(&mut dag, decl, first, Some(nested))
         }
         Escape::NeverRuns => {
-            let off = bool_const(&mut dag, false);
-            draw(&mut dag, first, Some(off))
+            let off = bool_const(&mut dag, decl, false);
+            draw(&mut dag, decl, first, Some(off))
         }
     };
     dag.set_roots(vec![escaped, kept]);
@@ -471,12 +520,13 @@ fn a_key_derived_under_exclusive_sharing_is_used_only_under_that_activation() {
 #[test]
 fn an_activation_on_an_unshared_key_changes_no_key() {
     let mut dag = Dag::new();
-    let key = key7(&mut dag);
-    let active = load(&mut dag, "c", &[], Prim::Bool);
-    let l = key_op(&mut dag, left(), key, Some(active));
-    let r = key_op(&mut dag, right(), key, Some(active));
-    let folded = key_op(&mut dag, RiscOp::FoldIn, l, Some(active));
-    let rows = key_op(&mut dag, split_two(), r, Some(active));
+    let decl = dag.declare("test");
+    let key = key7(&mut dag, decl);
+    let active = load(&mut dag, decl, "c", &[], Prim::Bool);
+    let l = key_op(&mut dag, decl, left(), key, Some(active));
+    let r = key_op(&mut dag, decl, right(), key, Some(active));
+    let folded = key_op(&mut dag, decl, RiscOp::FoldIn, l, Some(active));
+    let rows = key_op(&mut dag, decl, split_two(), r, Some(active));
     dag.set_roots(vec![folded, rows]);
     assert_accepted(&dag);
     for value in [true, false] {
@@ -486,10 +536,11 @@ fn an_activation_on_an_unshared_key_changes_no_key() {
     }
     // The halves themselves, with the activation false.
     let mut dag = Dag::new();
-    let key = key7(&mut dag);
-    let off = bool_const(&mut dag, false);
-    let l = key_op(&mut dag, left(), key, Some(off));
-    let r = key_op(&mut dag, right(), key, Some(off));
+    let decl = dag.declare("test");
+    let key = key7(&mut dag, decl);
+    let off = bool_const(&mut dag, decl, false);
+    let l = key_op(&mut dag, decl, left(), key, Some(off));
+    let r = key_op(&mut dag, decl, right(), key, Some(off));
     dag.set_roots(vec![l, r]);
     assert_accepted(&dag);
     let out = eval(&dag, &[]).unwrap();
@@ -503,14 +554,22 @@ fn an_activation_on_an_unshared_key_changes_no_key() {
 fn a_key_operation_activation_is_one_bool_shaped_like_its_keys_leading_axes() {
     let reject = |active_dims: &[usize], prim: Prim, extra: bool, needle: &str| {
         let mut dag = Dag::new();
-        let seeds = load(&mut dag, "s", &[2], Prim::Int64);
-        let keys = node(&mut dag, RiscOp::KeyFromSeed, vec![seeds], &[2], Prim::Key);
-        let active = load(&mut dag, "c", active_dims, prim);
+        let decl = dag.declare("test");
+        let seeds = load(&mut dag, decl, "s", &[2], Prim::Int64);
+        let keys = node(
+            &mut dag,
+            decl,
+            RiscOp::KeyFromSeed,
+            vec![seeds],
+            &[2],
+            Prim::Key,
+        );
+        let active = load(&mut dag, decl, "c", active_dims, prim);
         let mut inputs = vec![keys, active];
         if extra {
             inputs.push(active);
         }
-        let half = node(&mut dag, left(), inputs, &[2], Prim::Key);
+        let half = node(&mut dag, decl, left(), inputs, &[2], Prim::Key);
         dag.add_root(half);
         assert_rejected(&dag, needle);
     };
@@ -521,10 +580,12 @@ fn a_key_operation_activation_is_one_bool_shaped_like_its_keys_leading_axes() {
     reject(&[], Prim::Bool, true, "wrong number of inputs");
     // A key from a seed consumes no key and takes no activation.
     let mut dag = Dag::new();
-    let seed = i64_const(&mut dag, 7);
-    let active = load(&mut dag, "c", &[], Prim::Bool);
+    let decl = dag.declare("test");
+    let seed = i64_const(&mut dag, decl, 7);
+    let active = load(&mut dag, decl, "c", &[], Prim::Bool);
     let key = node(
         &mut dag,
+        decl,
         RiscOp::KeyFromSeed,
         vec![seed, active],
         &[],
@@ -535,10 +596,18 @@ fn a_key_operation_activation_is_one_bool_shaped_like_its_keys_leading_axes() {
     // Accepted: rank 0 and the key's own shape.
     for dims in [&[][..], &[2]] {
         let mut dag = Dag::new();
-        let seeds = load(&mut dag, "s", &[2], Prim::Int64);
-        let keys = node(&mut dag, RiscOp::KeyFromSeed, vec![seeds], &[2], Prim::Key);
-        let active = load(&mut dag, "c", dims, Prim::Bool);
-        let half = node(&mut dag, left(), vec![keys, active], &[2], Prim::Key);
+        let decl = dag.declare("test");
+        let seeds = load(&mut dag, decl, "s", &[2], Prim::Int64);
+        let keys = node(
+            &mut dag,
+            decl,
+            RiscOp::KeyFromSeed,
+            vec![seeds],
+            &[2],
+            Prim::Key,
+        );
+        let active = load(&mut dag, decl, "c", dims, Prim::Bool);
+        let half = node(&mut dag, decl, left(), vec![keys, active], &[2], Prim::Key);
         dag.add_root(half);
         assert_accepted(&dag);
     }
@@ -548,19 +617,22 @@ fn a_key_operation_activation_is_one_bool_shaped_like_its_keys_leading_axes() {
 /// its count axis declared `declared`; with `d` binding `n` when `bind`.
 fn gated_split(declared: DimInfo, active_dims: &[usize]) -> (Dag, NodeId) {
     let mut dag = Dag::new();
-    let seeds = load(&mut dag, "s", active_dims, Prim::Int64);
+    let decl = dag.declare("test");
+    let seeds = load(&mut dag, decl, "s", active_dims, Prim::Int64);
     let keys = node(
         &mut dag,
+        decl,
         RiscOp::KeyFromSeed,
         vec![seeds],
         active_dims,
         Prim::Key,
     );
-    let n = load(&mut dag, "n", &[], Prim::Int64);
-    let active = load(&mut dag, "c", active_dims, Prim::Bool);
+    let n = load(&mut dag, decl, "n", &[], Prim::Int64);
+    let active = load(&mut dag, decl, "c", active_dims, Prim::Bool);
     let mut dims = ty(active_dims, Prim::Key).dims;
     dims.push(declared);
     let rows = dag.add_node(
+        decl,
         RiscOp::SplitN {
             count: RtDim::Node(1),
         },
@@ -642,11 +714,12 @@ fn an_inactive_runtime_split_reads_no_count() {
 #[test]
 fn vmap_batches_a_key_operations_activation() {
     let mut dag = Dag::new();
-    let key = load(&mut dag, "k", &[], Prim::Key);
-    let c = load(&mut dag, "c", &[], Prim::Bool);
-    let not_c = not(&mut dag, c);
-    let then_draws = consume(&mut dag, Kind::SplitPair, key, c);
-    let else_draw = draw(&mut dag, key, Some(not_c));
+    let decl = dag.declare("test");
+    let key = load(&mut dag, decl, "k", &[], Prim::Key);
+    let c = load(&mut dag, decl, "c", &[], Prim::Bool);
+    let not_c = not(&mut dag, decl, c);
+    let then_draws = consume(&mut dag, decl, Kind::SplitPair, key, c);
+    let else_draw = draw(&mut dag, decl, key, Some(not_c));
     dag.set_roots(vec![then_draws[0], then_draws[1], else_draw]);
     assert_accepted(&dag);
     let batched = vectorize_axis0(&dag, DimInfo::Lit(2)).unwrap();
@@ -701,33 +774,43 @@ fn vmap_batches_a_key_operations_activation() {
 #[test]
 fn grad_carries_a_key_operations_activation() {
     let mut dag = Dag::new();
-    let seed = i64_const(&mut dag, 1);
-    let key = node(&mut dag, RiscOp::KeyFromSeed, vec![seed], &[], Prim::Key);
-    let x = load(&mut dag, "x", &[2], Prim::F32);
-    let c = load(&mut dag, "c", &[], Prim::Bool);
-    let not_c = not(&mut dag, c);
-    let low = f32_const(&mut dag, 0.0);
-    let high = f32_const(&mut dag, 1.0);
+    let decl = dag.declare("test");
+    let seed = i64_const(&mut dag, decl, 1);
+    let key = node(
+        &mut dag,
+        decl,
+        RiscOp::KeyFromSeed,
+        vec![seed],
+        &[],
+        Prim::Key,
+    );
+    let x = load(&mut dag, decl, "x", &[2], Prim::F32);
+    let c = load(&mut dag, decl, "c", &[], Prim::Bool);
+    let not_c = not(&mut dag, decl, c);
+    let low = f32_const(&mut dag, decl, 0.0);
+    let high = f32_const(&mut dag, decl, 1.0);
     let uniform = |dag: &mut Dag, key: NodeId, active: NodeId| {
         dag.add_node(
+            decl,
             RiscOp::UniformLike,
             vec![x, low, high, key, active],
             ty(&[2], Prim::F32),
             None,
         )
     };
-    let a = key_op(&mut dag, left(), key, Some(c));
-    let b = key_op(&mut dag, right(), key, Some(c));
+    let a = key_op(&mut dag, decl, left(), key, Some(c));
+    let b = key_op(&mut dag, decl, right(), key, Some(c));
     let ua = uniform(&mut dag, a, c);
     let ub = uniform(&mut dag, b, c);
     let u = uniform(&mut dag, key, not_c);
-    let mul = |dag: &mut Dag, u: NodeId| node(dag, RiscOp::Mul, vec![u, x], &[2], Prim::F32);
+    let mul = |dag: &mut Dag, u: NodeId| node(dag, decl, RiscOp::Mul, vec![u, x], &[2], Prim::F32);
     let ma = mul(&mut dag, ua);
     let mb = mul(&mut dag, ub);
-    let then_value = node(&mut dag, RiscOp::Add, vec![ma, mb], &[2], Prim::F32);
+    let then_value = node(&mut dag, decl, RiscOp::Add, vec![ma, mb], &[2], Prim::F32);
     let else_value = mul(&mut dag, u);
     let c2 = node(
         &mut dag,
+        decl,
         RiscOp::Expand {
             axis: 0,
             size: RtDim::Lit(2),
@@ -738,6 +821,7 @@ fn grad_carries_a_key_operations_activation() {
     );
     let selected = node(
         &mut dag,
+        decl,
         RiscOp::Where,
         vec![c2, then_value, else_value],
         &[2],
@@ -745,6 +829,7 @@ fn grad_carries_a_key_operations_activation() {
     );
     let loss = node(
         &mut dag,
+        decl,
         RiscOp::Sum {
             axis: 0,
             accumulator: Prim::F32,

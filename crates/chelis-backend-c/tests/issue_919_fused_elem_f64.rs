@@ -49,10 +49,17 @@ fn mat_ty(rows: usize, cols: usize, precision: Prim) -> TensorType {
 /// fuses the two into one chain, and that chain panicked.
 fn exp_times_x_dag(precision: Prim) -> Dag {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let ty = vec_ty(4, precision);
-    let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], ty.clone(), None);
-    let e = dag.add_node(RiscOp::Exp, vec![x], ty.clone(), None);
-    let m = dag.add_node(RiscOp::Mul, vec![e, x], ty, None);
+    let x = dag.add_node(
+        decl,
+        RiscOp::Load { name: "x".into() },
+        vec![],
+        ty.clone(),
+        None,
+    );
+    let e = dag.add_node(decl, RiscOp::Exp, vec![x], ty.clone(), None);
+    let m = dag.add_node(decl, RiscOp::Mul, vec![e, x], ty, None);
     dag.add_root(m);
     fuse(&dag)
 }
@@ -204,11 +211,24 @@ fn integer_fused_chain_is_a_diagnostic_not_a_panic() {
     // reaches Python as a `PanicException` rather than a diagnostic,
     // which is the failure mode chelis#919 reports.
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let ty = vec_ty(4, Prim::Int32);
-    let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], ty.clone(), None);
-    let y = dag.add_node(RiscOp::Load { name: "y".into() }, vec![], ty.clone(), None);
-    let a = dag.add_node(RiscOp::Add, vec![x, y], ty.clone(), None);
-    let n = dag.add_node(RiscOp::Neg, vec![a], ty, None);
+    let x = dag.add_node(
+        decl,
+        RiscOp::Load { name: "x".into() },
+        vec![],
+        ty.clone(),
+        None,
+    );
+    let y = dag.add_node(
+        decl,
+        RiscOp::Load { name: "y".into() },
+        vec![],
+        ty.clone(),
+        None,
+    );
+    let a = dag.add_node(decl, RiscOp::Add, vec![x, y], ty.clone(), None);
+    let n = dag.add_node(decl, RiscOp::Neg, vec![a], ty, None);
     dag.add_root(n);
     let fused = fuse(&dag);
 
@@ -235,11 +255,19 @@ fn f64_fused_reduce_is_a_diagnostic_not_a_panic() {
     // `sum(exp(x), 0)` at f64 inlines the elementwise node into the
     // reduction, so it must reject rather than panic.
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let ty = mat_ty(3, 4, Prim::F64);
-    let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], ty.clone(), None);
-    let e = dag.add_node(RiscOp::Exp, vec![x], ty.clone(), None);
-    let n = dag.add_node(RiscOp::Neg, vec![e], ty, None);
+    let x = dag.add_node(
+        decl,
+        RiscOp::Load { name: "x".into() },
+        vec![],
+        ty.clone(),
+        None,
+    );
+    let e = dag.add_node(decl, RiscOp::Exp, vec![x], ty.clone(), None);
+    let n = dag.add_node(decl, RiscOp::Neg, vec![e], ty, None);
     let s = dag.add_node(
+        decl,
         RiscOp::Sum {
             axis: 1,
             accumulator: Prim::F64,

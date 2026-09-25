@@ -37,6 +37,7 @@ fn scalar_bits(value: &TensorValue, index: usize) -> serde_json::Value {
 #[test]
 fn tier2_preserves_every_comparison_and_logical_identity() {
     type ComparisonLowerer = fn(
+        chelis_ir::dag::DeclId,
         &mut Dag,
         chelis_ir::dag::NodeId,
         chelis_ir::dag::NodeId,
@@ -54,8 +55,10 @@ fn tier2_preserves_every_comparison_and_logical_identity() {
     ];
     for (kind, lower) in comparisons {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let operand_ty = ty(&[2], Prim::F32);
         let left = dag.add_node(
+            decl,
             RiscOp::Load {
                 name: "left".into(),
             },
@@ -64,6 +67,7 @@ fn tier2_preserves_every_comparison_and_logical_identity() {
             None,
         );
         let right = dag.add_node(
+            decl,
             RiscOp::Load {
                 name: "right".into(),
             },
@@ -71,7 +75,7 @@ fn tier2_preserves_every_comparison_and_logical_identity() {
             operand_ty.clone(),
             None,
         );
-        let result = lower(&mut dag, left, right, &operand_ty, Some("comparison"));
+        let result = lower(decl, &mut dag, left, right, &operand_ty, Some("comparison"));
         assert_eq!(
             dag.get(result).unwrap().op,
             RiscOp::Compare(kind),
@@ -88,8 +92,10 @@ fn tier2_preserves_every_comparison_and_logical_identity() {
         (LogicalKind::Not, 1),
     ] {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let bool_ty = ty(&[2], Prim::Bool);
         let left = dag.add_node(
+            decl,
             RiscOp::Load {
                 name: "left".into(),
             },
@@ -99,6 +105,7 @@ fn tier2_preserves_every_comparison_and_logical_identity() {
         );
         let right = (kind != LogicalKind::Not).then(|| {
             dag.add_node(
+                decl,
                 RiscOp::Load {
                     name: "right".into(),
                 },
@@ -108,9 +115,13 @@ fn tier2_preserves_every_comparison_and_logical_identity() {
             )
         });
         let result = match kind {
-            LogicalKind::And => tier2::lower_and(&mut dag, left, right.unwrap(), &bool_ty, None),
-            LogicalKind::Or => tier2::lower_or(&mut dag, left, right.unwrap(), &bool_ty, None),
-            LogicalKind::Not => tier2::lower_not(&mut dag, left, &bool_ty, None),
+            LogicalKind::And => {
+                tier2::lower_and(decl, &mut dag, left, right.unwrap(), &bool_ty, None)
+            }
+            LogicalKind::Or => {
+                tier2::lower_or(decl, &mut dag, left, right.unwrap(), &bool_ty, None)
+            }
+            LogicalKind::Not => tier2::lower_not(decl, &mut dag, left, &bool_ty, None),
         };
         assert_eq!(dag.get(result).unwrap().op, RiscOp::Logical(kind));
         assert_eq!(dag.get(result).unwrap().inputs.len(), arity);
@@ -132,7 +143,9 @@ fn symbolic_comparison_inherits_proven_operand_shape_without_authored_claims() {
     let inferred_result = symbolic("d44", Prim::Bool);
 
     let mut valid = Dag::new();
+    let valid_decl = valid.declare("test");
     let left = valid.add_node(
+        valid_decl,
         RiscOp::Load {
             name: "left".into(),
         },
@@ -141,6 +154,7 @@ fn symbolic_comparison_inherits_proven_operand_shape_without_authored_claims() {
         None,
     );
     let right = valid.add_node(
+        valid_decl,
         RiscOp::Load {
             name: "right".into(),
         },
@@ -148,7 +162,7 @@ fn symbolic_comparison_inherits_proven_operand_shape_without_authored_claims() {
         symbolic("n", Prim::F32),
         None,
     );
-    let comparison = tier2::lower_lt(&mut valid, left, right, &inferred_result, None);
+    let comparison = tier2::lower_lt(valid_decl, &mut valid, left, right, &inferred_result, None);
     assert_eq!(
         valid.get(comparison).unwrap().output_type,
         symbolic("n", Prim::Bool),
@@ -161,7 +175,9 @@ fn symbolic_comparison_inherits_proven_operand_shape_without_authored_claims() {
     assert!(verify::verify(&valid).is_empty());
 
     let mut witnessed = Dag::new();
+    let witnessed_decl = witnessed.declare("test");
     let left = witnessed.add_node(
+        witnessed_decl,
         RiscOp::Load {
             name: "left".into(),
         },
@@ -170,6 +186,7 @@ fn symbolic_comparison_inherits_proven_operand_shape_without_authored_claims() {
         None,
     );
     let right = witnessed.add_node(
+        witnessed_decl,
         RiscOp::Load {
             name: "right".into(),
         },
@@ -182,6 +199,7 @@ fn symbolic_comparison_inherits_proven_operand_shape_without_authored_claims() {
         precision: Prim::Int64,
     };
     let declaration = witnessed.add_node(
+        witnessed_decl,
         RiscOp::ExtentWitness {
             site: ExtentWitnessSite::Caller,
             parameter: "left".into(),
@@ -194,6 +212,7 @@ fn symbolic_comparison_inherits_proven_operand_shape_without_authored_claims() {
         None,
     );
     let equality = witnessed.add_node(
+        witnessed_decl,
         RiscOp::ExtentWitness {
             site: ExtentWitnessSite::Caller,
             parameter: "right".into(),
@@ -208,7 +227,14 @@ fn symbolic_comparison_inherits_proven_operand_shape_without_authored_claims() {
         witness_ty,
         None,
     );
-    let comparison = tier2::lower_lt(&mut witnessed, left, right, &inferred_result, None);
+    let comparison = tier2::lower_lt(
+        witnessed_decl,
+        &mut witnessed,
+        left,
+        right,
+        &inferred_result,
+        None,
+    );
     witnessed.add_shape_dep(comparison, equality);
     witnessed.add_root(comparison);
     assert!(
@@ -218,7 +244,9 @@ fn symbolic_comparison_inherits_proven_operand_shape_without_authored_claims() {
     );
 
     let mut invalid = Dag::new();
+    let invalid_decl = invalid.declare("test");
     let left = invalid.add_node(
+        invalid_decl,
         RiscOp::Load {
             name: "left".into(),
         },
@@ -227,6 +255,7 @@ fn symbolic_comparison_inherits_proven_operand_shape_without_authored_claims() {
         None,
     );
     let right = invalid.add_node(
+        invalid_decl,
         RiscOp::Load {
             name: "right".into(),
         },
@@ -234,7 +263,14 @@ fn symbolic_comparison_inherits_proven_operand_shape_without_authored_claims() {
         symbolic("m", Prim::F32),
         None,
     );
-    tier2::lower_lt(&mut invalid, left, right, &inferred_result, None);
+    tier2::lower_lt(
+        invalid_decl,
+        &mut invalid,
+        left,
+        right,
+        &inferred_result,
+        None,
+    );
     assert!(
         verify::verify(&invalid)
             .iter()
@@ -266,9 +302,11 @@ fn evaluator_implements_ieee_comparisons_for_every_active_numeric_dtype() {
     ] {
         for kind in kinds {
             let mut dag = Dag::new();
+            let decl = dag.declare("test");
             let operand_ty = ty(&[4], precision);
             let bool_ty = ty(&[4], Prim::Bool);
             let left = dag.add_node(
+                decl,
                 RiscOp::Load {
                     name: "left".into(),
                 },
@@ -277,6 +315,7 @@ fn evaluator_implements_ieee_comparisons_for_every_active_numeric_dtype() {
                 None,
             );
             let right = dag.add_node(
+                decl,
                 RiscOp::Load {
                     name: "right".into(),
                 },
@@ -284,7 +323,13 @@ fn evaluator_implements_ieee_comparisons_for_every_active_numeric_dtype() {
                 operand_ty,
                 None,
             );
-            let result = dag.add_node(RiscOp::Compare(kind), vec![left, right], bool_ty, None);
+            let result = dag.add_node(
+                decl,
+                RiscOp::Compare(kind),
+                vec![left, right],
+                bool_ty,
+                None,
+            );
             dag.add_root(result);
 
             let (lhs, rhs, expected) = if precision.is_float() {
@@ -348,8 +393,10 @@ fn evaluator_logical_truth_tables_are_bool_only_and_non_short_circuiting() {
         (LogicalKind::Or, vec![0, 1, 1, 1]),
     ] {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let bool_ty = ty(&[4], Prim::Bool);
         let left = dag.add_node(
+            decl,
             RiscOp::Load {
                 name: "left".into(),
             },
@@ -358,6 +405,7 @@ fn evaluator_logical_truth_tables_are_bool_only_and_non_short_circuiting() {
             None,
         );
         let right = dag.add_node(
+            decl,
             RiscOp::Load {
                 name: "right".into(),
             },
@@ -365,7 +413,13 @@ fn evaluator_logical_truth_tables_are_bool_only_and_non_short_circuiting() {
             bool_ty.clone(),
             None,
         );
-        let output = dag.add_node(RiscOp::Logical(kind), vec![left, right], bool_ty, None);
+        let output = dag.add_node(
+            decl,
+            RiscOp::Logical(kind),
+            vec![left, right],
+            bool_ty,
+            None,
+        );
         let values = eval_tensor(
             &dag,
             &UnordMap::from([
@@ -381,14 +435,17 @@ fn evaluator_logical_truth_tables_are_bool_only_and_non_short_circuiting() {
     }
 
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let bool_ty = ty(&[2], Prim::Bool);
     let input = dag.add_node(
+        decl,
         RiscOp::Load { name: "x".into() },
         vec![],
         bool_ty.clone(),
         None,
     );
     let output = dag.add_node(
+        decl,
         RiscOp::Logical(LogicalKind::Not),
         vec![input],
         bool_ty,
@@ -408,9 +465,11 @@ fn evaluator_logical_truth_tables_are_bool_only_and_non_short_circuiting() {
 #[test]
 fn where_selects_stored_bits_and_evaluates_both_branches_first() {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let bool_ty = ty(&[2], Prim::Bool);
     let data_ty = ty(&[2], Prim::F64);
     let condition = dag.add_node(
+        decl,
         RiscOp::Load {
             name: "condition".into(),
         },
@@ -419,6 +478,7 @@ fn where_selects_stored_bits_and_evaluates_both_branches_first() {
         None,
     );
     let then_value = dag.add_node(
+        decl,
         RiscOp::Load {
             name: "then".into(),
         },
@@ -427,6 +487,7 @@ fn where_selects_stored_bits_and_evaluates_both_branches_first() {
         None,
     );
     let else_value = dag.add_node(
+        decl,
         RiscOp::Load {
             name: "else".into(),
         },
@@ -435,6 +496,7 @@ fn where_selects_stored_bits_and_evaluates_both_branches_first() {
         None,
     );
     let output = dag.add_node(
+        decl,
         RiscOp::Where,
         vec![condition, then_value, else_value],
         data_ty,
@@ -469,35 +531,46 @@ fn where_selects_stored_bits_and_evaluates_both_branches_first() {
     );
 
     let mut eager = Dag::new();
+    let eager_decl = eager.declare("test");
     let scalar_bool = ty(&[], Prim::Bool);
     let scalar_i32 = ty(&[], Prim::Int32);
     let cond = eager.add_node(
+        eager_decl,
         RiscOp::synth_const(Prim::Bool, 1.0),
         vec![],
         scalar_bool,
         None,
     );
     let selected = eager.add_node(
+        eager_decl,
         RiscOp::synth_const(Prim::Int32, 7.0),
         vec![],
         scalar_i32.clone(),
         None,
     );
     let one = eager.add_node(
+        eager_decl,
         RiscOp::synth_const(Prim::Int32, 1.0),
         vec![],
         scalar_i32.clone(),
         None,
     );
     let zero = eager.add_node(
+        eager_decl,
         RiscOp::synth_const(Prim::Int32, 0.0),
         vec![],
         scalar_i32.clone(),
         None,
     );
-    let trapping_unselected =
-        eager.add_node(RiscOp::TruncDiv, vec![one, zero], scalar_i32.clone(), None);
+    let trapping_unselected = eager.add_node(
+        eager_decl,
+        RiscOp::TruncDiv,
+        vec![one, zero],
+        scalar_i32.clone(),
+        None,
+    );
     eager.add_node(
+        eager_decl,
         RiscOp::Where,
         vec![cond, selected, trapping_unselected],
         scalar_i32,
@@ -598,11 +671,13 @@ fn verifier_rejects_invalid_domains_shapes_outputs_and_arities() {
     ];
     for (op, input_types, output_type, needle) in cases {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let inputs = input_types
             .into_iter()
             .enumerate()
             .map(|(index, input_type)| {
                 dag.add_node(
+                    decl,
                     RiscOp::Load {
                         name: format!("input_{index}").into(),
                     },
@@ -612,7 +687,7 @@ fn verifier_rejects_invalid_domains_shapes_outputs_and_arities() {
                 )
             })
             .collect();
-        dag.add_node(op.clone(), inputs, output_type, None);
+        dag.add_node(decl, op.clone(), inputs, output_type, None);
         let errors = verify::verify(&dag);
         assert!(
             errors.iter().any(|error| error
@@ -629,10 +704,12 @@ fn verifier_rejects_invalid_domains_shapes_outputs_and_arities() {
         (RiscOp::Where, 2),
     ] {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let bool_ty = ty(&[], Prim::Bool);
         let ids = (0..inputs)
             .map(|index| {
                 dag.add_node(
+                    decl,
                     RiscOp::Load {
                         name: format!("input_{index}").into(),
                     },
@@ -642,7 +719,7 @@ fn verifier_rejects_invalid_domains_shapes_outputs_and_arities() {
                 )
             })
             .collect();
-        dag.add_node(op.clone(), ids, bool_ty.clone(), None);
+        dag.add_node(decl, op.clone(), ids, bool_ty.clone(), None);
         let errors = verify::verify(&dag);
         assert!(
             errors.iter().any(|error| error.contains("inputs")),
@@ -671,7 +748,9 @@ fn verifier_compares_resolved_extents_semantically_without_merging_unresolved_sy
     };
 
     let mut compare = Dag::new();
+    let compare_decl = compare.declare("test");
     let left = compare.add_node(
+        compare_decl,
         RiscOp::Load {
             name: "left".into(),
         },
@@ -680,6 +759,7 @@ fn verifier_compares_resolved_extents_semantically_without_merging_unresolved_sy
         None,
     );
     let right = compare.add_node(
+        compare_decl,
         RiscOp::Load {
             name: "right".into(),
         },
@@ -688,6 +768,7 @@ fn verifier_compares_resolved_extents_semantically_without_merging_unresolved_sy
         None,
     );
     let compared = compare.add_node(
+        compare_decl,
         RiscOp::Compare(ComparisonKind::Eq),
         vec![left, right],
         bool_named.clone(),
@@ -701,7 +782,9 @@ fn verifier_compares_resolved_extents_semantically_without_merging_unresolved_sy
     );
 
     let mut logical = Dag::new();
+    let logical_decl = logical.declare("test");
     let left = logical.add_node(
+        logical_decl,
         RiscOp::Load {
             name: "left".into(),
         },
@@ -713,6 +796,7 @@ fn verifier_compares_resolved_extents_semantically_without_merging_unresolved_sy
         None,
     );
     let right = logical.add_node(
+        logical_decl,
         RiscOp::Load {
             name: "right".into(),
         },
@@ -724,6 +808,7 @@ fn verifier_compares_resolved_extents_semantically_without_merging_unresolved_sy
         None,
     );
     let combined = logical.add_node(
+        logical_decl,
         RiscOp::Logical(LogicalKind::And),
         vec![left, right],
         TensorType {
@@ -740,7 +825,9 @@ fn verifier_compares_resolved_extents_semantically_without_merging_unresolved_sy
     );
 
     let mut where_dag = Dag::new();
+    let where_dag_decl = where_dag.declare("test");
     let condition = where_dag.add_node(
+        where_dag_decl,
         RiscOp::Load {
             name: "condition".into(),
         },
@@ -749,6 +836,7 @@ fn verifier_compares_resolved_extents_semantically_without_merging_unresolved_sy
         None,
     );
     let then_value = where_dag.add_node(
+        where_dag_decl,
         RiscOp::Load {
             name: "then".into(),
         },
@@ -757,6 +845,7 @@ fn verifier_compares_resolved_extents_semantically_without_merging_unresolved_sy
         None,
     );
     let else_value = where_dag.add_node(
+        where_dag_decl,
         RiscOp::Load {
             name: "else".into(),
         },
@@ -765,6 +854,7 @@ fn verifier_compares_resolved_extents_semantically_without_merging_unresolved_sy
         None,
     );
     let selected = where_dag.add_node(
+        where_dag_decl,
         RiscOp::Where,
         vec![condition, then_value, else_value],
         named_right,
@@ -778,7 +868,9 @@ fn verifier_compares_resolved_extents_semantically_without_merging_unresolved_sy
     );
 
     let mut runtime_actualized = Dag::new();
+    let runtime_actualized_decl = runtime_actualized.declare("test");
     let source = runtime_actualized.add_node(
+        runtime_actualized_decl,
         RiscOp::Load {
             name: "source".into(),
         },
@@ -787,6 +879,7 @@ fn verifier_compares_resolved_extents_semantically_without_merging_unresolved_sy
         None,
     );
     let extent = runtime_actualized.add_node(
+        runtime_actualized_decl,
         RiscOp::ExtentWitness {
             site: ExtentWitnessSite::Caller,
             parameter: "source".into(),
@@ -802,6 +895,7 @@ fn verifier_compares_resolved_extents_semantically_without_merging_unresolved_sy
         None,
     );
     let reshaped = runtime_actualized.add_node(
+        runtime_actualized_decl,
         RiscOp::Reshape {
             new_shape: vec![chelis_ir::dag::RtDim::Node(1)],
         },
@@ -813,6 +907,7 @@ fn verifier_compares_resolved_extents_semantically_without_merging_unresolved_sy
         None,
     );
     let compared = runtime_actualized.add_node(
+        runtime_actualized_decl,
         RiscOp::Compare(ComparisonKind::Eq),
         vec![source, reshaped],
         TensorType {
@@ -829,7 +924,9 @@ fn verifier_compares_resolved_extents_semantically_without_merging_unresolved_sy
     );
 
     let mut wildcard_where = Dag::new();
+    let wildcard_where_decl = wildcard_where.declare("test");
     let condition = wildcard_where.add_node(
+        wildcard_where_decl,
         RiscOp::Load {
             name: "condition".into(),
         },
@@ -841,6 +938,7 @@ fn verifier_compares_resolved_extents_semantically_without_merging_unresolved_sy
         None,
     );
     let values = wildcard_where.add_node(
+        wildcard_where_decl,
         RiscOp::Load {
             name: "values".into(),
         },
@@ -852,6 +950,7 @@ fn verifier_compares_resolved_extents_semantically_without_merging_unresolved_sy
         None,
     );
     let zero = wildcard_where.add_node(
+        wildcard_where_decl,
         RiscOp::synth_const(Prim::F32, 0.0),
         vec![],
         TensorType {
@@ -861,6 +960,7 @@ fn verifier_compares_resolved_extents_semantically_without_merging_unresolved_sy
         None,
     );
     let selected = wildcard_where.add_node(
+        wildcard_where_decl,
         RiscOp::Where,
         vec![condition, zero, values],
         TensorType {
@@ -886,7 +986,9 @@ fn verifier_compares_resolved_extents_semantically_without_merging_unresolved_sy
         precision: Prim::F32,
     };
     let mut distinct_symbols = Dag::new();
+    let distinct_symbols_decl = distinct_symbols.declare("test");
     let left = distinct_symbols.add_node(
+        distinct_symbols_decl,
         RiscOp::Load {
             name: "left".into(),
         },
@@ -895,6 +997,7 @@ fn verifier_compares_resolved_extents_semantically_without_merging_unresolved_sy
         None,
     );
     let right = distinct_symbols.add_node(
+        distinct_symbols_decl,
         RiscOp::Load {
             name: "right".into(),
         },
@@ -903,6 +1006,7 @@ fn verifier_compares_resolved_extents_semantically_without_merging_unresolved_sy
         None,
     );
     let compared = distinct_symbols.add_node(
+        distinct_symbols_decl,
         RiscOp::Compare(ComparisonKind::Eq),
         vec![left, right],
         TensorType {
@@ -920,7 +1024,9 @@ fn verifier_compares_resolved_extents_semantically_without_merging_unresolved_sy
     );
 
     let mut distinct_logical_symbols = Dag::new();
+    let distinct_logical_symbols_decl = distinct_logical_symbols.declare("test");
     let left = distinct_logical_symbols.add_node(
+        distinct_logical_symbols_decl,
         RiscOp::Load {
             name: "left".into(),
         },
@@ -932,6 +1038,7 @@ fn verifier_compares_resolved_extents_semantically_without_merging_unresolved_sy
         None,
     );
     let right = distinct_logical_symbols.add_node(
+        distinct_logical_symbols_decl,
         RiscOp::Load {
             name: "right".into(),
         },
@@ -943,6 +1050,7 @@ fn verifier_compares_resolved_extents_semantically_without_merging_unresolved_sy
         None,
     );
     distinct_logical_symbols.add_node(
+        distinct_logical_symbols_decl,
         RiscOp::Logical(LogicalKind::And),
         vec![left, right],
         TensorType {
@@ -971,7 +1079,9 @@ fn verifier_rejects_unrelated_shape_authority_and_producerless_anonymous_outputs
     };
 
     let mut compare = Dag::new();
+    let compare_decl = compare.declare("test");
     let decoy = compare.add_node(
+        compare_decl,
         RiscOp::Load {
             name: "decoy".into(),
         },
@@ -980,6 +1090,7 @@ fn verifier_rejects_unrelated_shape_authority_and_producerless_anonymous_outputs
         None,
     );
     let left = compare.add_node(
+        compare_decl,
         RiscOp::Load {
             name: "left".into(),
         },
@@ -988,6 +1099,7 @@ fn verifier_rejects_unrelated_shape_authority_and_producerless_anonymous_outputs
         None,
     );
     let right = compare.add_node(
+        compare_decl,
         RiscOp::synth_const(Prim::F32, 0.0),
         vec![],
         anonymous(Prim::F32),
@@ -995,6 +1107,7 @@ fn verifier_rejects_unrelated_shape_authority_and_producerless_anonymous_outputs
     );
     compare.add_shape_dep(right, decoy);
     compare.add_node(
+        compare_decl,
         RiscOp::Compare(ComparisonKind::Eq),
         vec![left, right],
         named("runtime", Prim::Bool),
@@ -1008,7 +1121,9 @@ fn verifier_rejects_unrelated_shape_authority_and_producerless_anonymous_outputs
     );
 
     let mut logical = Dag::new();
+    let logical_decl = logical.declare("test");
     let decoy = logical.add_node(
+        logical_decl,
         RiscOp::Load {
             name: "decoy".into(),
         },
@@ -1017,6 +1132,7 @@ fn verifier_rejects_unrelated_shape_authority_and_producerless_anonymous_outputs
         None,
     );
     let left = logical.add_node(
+        logical_decl,
         RiscOp::Load {
             name: "left".into(),
         },
@@ -1025,6 +1141,7 @@ fn verifier_rejects_unrelated_shape_authority_and_producerless_anonymous_outputs
         None,
     );
     let right = logical.add_node(
+        logical_decl,
         RiscOp::Load {
             name: "right".into(),
         },
@@ -1034,6 +1151,7 @@ fn verifier_rejects_unrelated_shape_authority_and_producerless_anonymous_outputs
     );
     logical.add_shape_dep(right, decoy);
     logical.add_node(
+        logical_decl,
         RiscOp::Logical(LogicalKind::And),
         vec![left, right],
         named("runtime", Prim::Bool),
@@ -1047,7 +1165,9 @@ fn verifier_rejects_unrelated_shape_authority_and_producerless_anonymous_outputs
     );
 
     let mut where_dag = Dag::new();
+    let where_dag_decl = where_dag.declare("test");
     let decoy = where_dag.add_node(
+        where_dag_decl,
         RiscOp::Load {
             name: "decoy".into(),
         },
@@ -1056,6 +1176,7 @@ fn verifier_rejects_unrelated_shape_authority_and_producerless_anonymous_outputs
         None,
     );
     let condition = where_dag.add_node(
+        where_dag_decl,
         RiscOp::Load {
             name: "condition".into(),
         },
@@ -1064,6 +1185,7 @@ fn verifier_rejects_unrelated_shape_authority_and_producerless_anonymous_outputs
         None,
     );
     let then_value = where_dag.add_node(
+        where_dag_decl,
         RiscOp::Load {
             name: "then".into(),
         },
@@ -1072,6 +1194,7 @@ fn verifier_rejects_unrelated_shape_authority_and_producerless_anonymous_outputs
         None,
     );
     let else_value = where_dag.add_node(
+        where_dag_decl,
         RiscOp::synth_const(Prim::F32, 0.0),
         vec![],
         anonymous(Prim::F32),
@@ -1079,6 +1202,7 @@ fn verifier_rejects_unrelated_shape_authority_and_producerless_anonymous_outputs
     );
     where_dag.add_shape_dep(else_value, decoy);
     where_dag.add_node(
+        where_dag_decl,
         RiscOp::Where,
         vec![condition, then_value, else_value],
         named("runtime", Prim::F32),
@@ -1092,7 +1216,9 @@ fn verifier_rejects_unrelated_shape_authority_and_producerless_anonymous_outputs
     );
 
     let mut anonymous_compare_output = Dag::new();
+    let anonymous_compare_output_decl = anonymous_compare_output.declare("test");
     let left = anonymous_compare_output.add_node(
+        anonymous_compare_output_decl,
         RiscOp::Load {
             name: "left".into(),
         },
@@ -1101,6 +1227,7 @@ fn verifier_rejects_unrelated_shape_authority_and_producerless_anonymous_outputs
         None,
     );
     let right = anonymous_compare_output.add_node(
+        anonymous_compare_output_decl,
         RiscOp::Load {
             name: "right".into(),
         },
@@ -1109,6 +1236,7 @@ fn verifier_rejects_unrelated_shape_authority_and_producerless_anonymous_outputs
         None,
     );
     anonymous_compare_output.add_node(
+        anonymous_compare_output_decl,
         RiscOp::Compare(ComparisonKind::Eq),
         vec![left, right],
         anonymous(Prim::Bool),
@@ -1122,7 +1250,9 @@ fn verifier_rejects_unrelated_shape_authority_and_producerless_anonymous_outputs
     );
 
     let mut anonymous_logical_output = Dag::new();
+    let anonymous_logical_output_decl = anonymous_logical_output.declare("test");
     let left = anonymous_logical_output.add_node(
+        anonymous_logical_output_decl,
         RiscOp::Load {
             name: "left".into(),
         },
@@ -1131,6 +1261,7 @@ fn verifier_rejects_unrelated_shape_authority_and_producerless_anonymous_outputs
         None,
     );
     let right = anonymous_logical_output.add_node(
+        anonymous_logical_output_decl,
         RiscOp::Load {
             name: "right".into(),
         },
@@ -1139,6 +1270,7 @@ fn verifier_rejects_unrelated_shape_authority_and_producerless_anonymous_outputs
         None,
     );
     anonymous_logical_output.add_node(
+        anonymous_logical_output_decl,
         RiscOp::Logical(LogicalKind::And),
         vec![left, right],
         anonymous(Prim::Bool),
@@ -1152,7 +1284,9 @@ fn verifier_rejects_unrelated_shape_authority_and_producerless_anonymous_outputs
     );
 
     let mut unresolved_compare_authority = Dag::new();
+    let unresolved_compare_authority_decl = unresolved_compare_authority.declare("test");
     let left = unresolved_compare_authority.add_node(
+        unresolved_compare_authority_decl,
         RiscOp::Load {
             name: "left".into(),
         },
@@ -1161,6 +1295,7 @@ fn verifier_rejects_unrelated_shape_authority_and_producerless_anonymous_outputs
         None,
     );
     let right = unresolved_compare_authority.add_node(
+        unresolved_compare_authority_decl,
         RiscOp::Load {
             name: "right".into(),
         },
@@ -1169,6 +1304,7 @@ fn verifier_rejects_unrelated_shape_authority_and_producerless_anonymous_outputs
         None,
     );
     let output = unresolved_compare_authority.add_node(
+        unresolved_compare_authority_decl,
         RiscOp::Compare(ComparisonKind::Eq),
         vec![left, right],
         anonymous(Prim::Bool),
@@ -1183,7 +1319,9 @@ fn verifier_rejects_unrelated_shape_authority_and_producerless_anonymous_outputs
     );
 
     let mut unresolved_logical_authority = Dag::new();
+    let unresolved_logical_authority_decl = unresolved_logical_authority.declare("test");
     let left = unresolved_logical_authority.add_node(
+        unresolved_logical_authority_decl,
         RiscOp::Load {
             name: "left".into(),
         },
@@ -1192,6 +1330,7 @@ fn verifier_rejects_unrelated_shape_authority_and_producerless_anonymous_outputs
         None,
     );
     let right = unresolved_logical_authority.add_node(
+        unresolved_logical_authority_decl,
         RiscOp::Load {
             name: "right".into(),
         },
@@ -1200,6 +1339,7 @@ fn verifier_rejects_unrelated_shape_authority_and_producerless_anonymous_outputs
         None,
     );
     let output = unresolved_logical_authority.add_node(
+        unresolved_logical_authority_decl,
         RiscOp::Logical(LogicalKind::And),
         vec![left, right],
         anonymous(Prim::Bool),
@@ -1222,7 +1362,9 @@ fn verifier_rejects_shape_dependencies_that_override_operation_provenance() {
     };
 
     let mut add_dag = Dag::new();
+    let add_dag_decl = add_dag.declare("test");
     let left = add_dag.add_node(
+        add_dag_decl,
         RiscOp::Load {
             name: "left".into(),
         },
@@ -1231,6 +1373,7 @@ fn verifier_rejects_shape_dependencies_that_override_operation_provenance() {
         None,
     );
     let unrelated = add_dag.add_node(
+        add_dag_decl,
         RiscOp::Load {
             name: "unrelated".into(),
         },
@@ -1239,12 +1382,14 @@ fn verifier_rejects_shape_dependencies_that_override_operation_provenance() {
         None,
     );
     let sum = add_dag.add_node(
+        add_dag_decl,
         RiscOp::Add,
         vec![left, unrelated],
         anonymous(Prim::F32),
         None,
     );
     let comparison = add_dag.add_node(
+        add_dag_decl,
         RiscOp::Compare(ComparisonKind::Eq),
         vec![sum, left],
         anonymous(Prim::Bool),
@@ -1259,7 +1404,9 @@ fn verifier_rejects_shape_dependencies_that_override_operation_provenance() {
     );
 
     let mut pad_dag = Dag::new();
+    let pad_dag_decl = pad_dag.declare("test");
     let input = pad_dag.add_node(
+        pad_dag_decl,
         RiscOp::Load {
             name: "input".into(),
         },
@@ -1268,6 +1415,7 @@ fn verifier_rejects_shape_dependencies_that_override_operation_provenance() {
         None,
     );
     let padded = pad_dag.add_node(
+        pad_dag_decl,
         RiscOp::Pad {
             padding: vec![(RtDim::Lit(1), RtDim::Lit(0))],
             fill: chelis_types::scalar_from_f64("pad provenance", Prim::F32, 0.0).unwrap(),
@@ -1278,6 +1426,7 @@ fn verifier_rejects_shape_dependencies_that_override_operation_provenance() {
     );
     pad_dag.add_shape_dep(padded, input);
     let comparison = pad_dag.add_node(
+        pad_dag_decl,
         RiscOp::Compare(ComparisonKind::Eq),
         vec![padded, input],
         anonymous(Prim::Bool),
@@ -1304,9 +1453,11 @@ fn comparisons_have_zero_cotangents_logicals_reject_and_where_routes_g() {
         ComparisonKind::Lte,
     ] {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let scalar_f64 = ty(&[], Prim::F64);
         let scalar_bool = ty(&[], Prim::Bool);
         let left = dag.add_node(
+            decl,
             RiscOp::Load {
                 name: "left".into(),
             },
@@ -1315,6 +1466,7 @@ fn comparisons_have_zero_cotangents_logicals_reject_and_where_routes_g() {
             None,
         );
         let right = dag.add_node(
+            decl,
             RiscOp::Load {
                 name: "right".into(),
             },
@@ -1323,12 +1475,14 @@ fn comparisons_have_zero_cotangents_logicals_reject_and_where_routes_g() {
             None,
         );
         let predicate = dag.add_node(
+            decl,
             RiscOp::Compare(kind),
             vec![left, right],
             scalar_bool.clone(),
             None,
         );
         let then_value = dag.add_node(
+            decl,
             RiscOp::Load {
                 name: "then".into(),
             },
@@ -1337,6 +1491,7 @@ fn comparisons_have_zero_cotangents_logicals_reject_and_where_routes_g() {
             None,
         );
         let else_value = dag.add_node(
+            decl,
             RiscOp::Load {
                 name: "else".into(),
             },
@@ -1345,6 +1500,7 @@ fn comparisons_have_zero_cotangents_logicals_reject_and_where_routes_g() {
             None,
         );
         let output = dag.add_node(
+            decl,
             RiscOp::Where,
             vec![predicate, then_value, else_value],
             scalar_f64,
@@ -1386,9 +1542,11 @@ fn comparisons_have_zero_cotangents_logicals_reject_and_where_routes_g() {
     }
 
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let scalar_bool = ty(&[], Prim::Bool);
     let scalar_f64 = ty(&[], Prim::F64);
     let left = dag.add_node(
+        decl,
         RiscOp::Load {
             name: "left".into(),
         },
@@ -1397,6 +1555,7 @@ fn comparisons_have_zero_cotangents_logicals_reject_and_where_routes_g() {
         None,
     );
     let right = dag.add_node(
+        decl,
         RiscOp::Load {
             name: "right".into(),
         },
@@ -1405,12 +1564,14 @@ fn comparisons_have_zero_cotangents_logicals_reject_and_where_routes_g() {
         None,
     );
     let logical = dag.add_node(
+        decl,
         RiscOp::Logical(LogicalKind::And),
         vec![left, right],
         scalar_bool,
         None,
     );
     let output = dag.add_node(
+        decl,
         RiscOp::Cast {
             new_precision: Prim::F64,
         },
@@ -1434,9 +1595,11 @@ fn comparisons_have_zero_cotangents_logicals_reject_and_where_routes_g() {
 #[test]
 fn logical_random_activation_is_control_only_during_grad() {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let scalar_bool = ty(&[], Prim::Bool);
     let scalar_f64 = ty(&[], Prim::F64);
     let left = dag.add_node(
+        decl,
         RiscOp::Load {
             name: "left".into(),
         },
@@ -1445,6 +1608,7 @@ fn logical_random_activation_is_control_only_during_grad() {
         None,
     );
     let right = dag.add_node(
+        decl,
         RiscOp::Load {
             name: "right".into(),
         },
@@ -1453,12 +1617,14 @@ fn logical_random_activation_is_control_only_during_grad() {
         None,
     );
     let activation = dag.add_node(
+        decl,
         RiscOp::Logical(LogicalKind::And),
         vec![left, right],
         scalar_bool,
         None,
     );
     let template = dag.add_node(
+        decl,
         RiscOp::Load {
             name: "template".into(),
         },
@@ -1471,25 +1637,35 @@ fn logical_random_activation_is_control_only_during_grad() {
         precision,
     };
     let low = dag.add_node(
+        decl,
         RiscOp::synth_const(Prim::F32, -1.0),
         vec![],
         scalar(Prim::F32),
         None,
     );
     let high = dag.add_node(
+        decl,
         RiscOp::synth_const(Prim::F32, 1.0),
         vec![],
         scalar(Prim::F32),
         None,
     );
     let seed = dag.add_node(
+        decl,
         RiscOp::synth_const(Prim::Int64, 17.0),
         vec![],
         scalar(Prim::Int64),
         None,
     );
-    let key = dag.add_node(RiscOp::KeyFromSeed, vec![seed], scalar(Prim::Key), None);
+    let key = dag.add_node(
+        decl,
+        RiscOp::KeyFromSeed,
+        vec![seed],
+        scalar(Prim::Key),
+        None,
+    );
     let output = dag.add_node(
+        decl,
         RiscOp::UniformLike,
         vec![template, low, high, key, activation],
         scalar_f64,
@@ -1516,9 +1692,11 @@ fn logical_random_activation_is_control_only_during_grad() {
 #[test]
 fn comparison_logical_and_where_are_fusion_barriers_and_vmap_shape_preserving() {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let data_ty = ty(&[2], Prim::F32);
     let bool_ty = ty(&[2], Prim::Bool);
     let left = dag.add_node(
+        decl,
         RiscOp::Load {
             name: "left".into(),
         },
@@ -1527,6 +1705,7 @@ fn comparison_logical_and_where_are_fusion_barriers_and_vmap_shape_preserving() 
         None,
     );
     let right = dag.add_node(
+        decl,
         RiscOp::Load {
             name: "right".into(),
         },
@@ -1535,13 +1714,26 @@ fn comparison_logical_and_where_are_fusion_barriers_and_vmap_shape_preserving() 
         None,
     );
     let cmp = dag.add_node(
+        decl,
         RiscOp::Compare(ComparisonKind::Gte),
         vec![left, right],
         bool_ty.clone(),
         None,
     );
-    let logical = dag.add_node(RiscOp::Logical(LogicalKind::Not), vec![cmp], bool_ty, None);
-    let selected = dag.add_node(RiscOp::Where, vec![logical, left, right], data_ty, None);
+    let logical = dag.add_node(
+        decl,
+        RiscOp::Logical(LogicalKind::Not),
+        vec![cmp],
+        bool_ty,
+        None,
+    );
+    let selected = dag.add_node(
+        decl,
+        RiscOp::Where,
+        vec![logical, left, right],
+        data_ty,
+        None,
+    );
     dag.add_root(selected);
     let fused = fuse(&dag);
     assert!(

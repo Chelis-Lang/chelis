@@ -39,7 +39,9 @@ fn scalar(p: Prim) -> TensorType {
 #[test]
 fn issue_189_f32_const_emits_exact_bit_pattern() {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     dag.add_node(
+        decl,
         RiscOp::synth_const(scalar(Prim::F32).precision, 0.000000123456789_f64),
         vec![],
         scalar(Prim::F32),
@@ -69,8 +71,10 @@ fn issue_189_f32_const_emits_exact_bit_pattern() {
 #[test]
 fn issue_189_f64_const_emits_exact_bit_pattern() {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let v: f64 = 1.0e-300;
     dag.add_node(
+        decl,
         RiscOp::synth_const(scalar(Prim::F64).precision, v),
         vec![],
         scalar(Prim::F64),
@@ -107,7 +111,9 @@ fn issue_189_f32_const_does_not_use_lossy_format() {
     ];
     for &v in values {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         dag.add_node(
+            decl,
             RiscOp::synth_const(scalar(Prim::F32).precision, v),
             vec![],
             scalar(Prim::F32),
@@ -133,7 +139,9 @@ fn issue_189_f32_const_does_not_use_lossy_format() {
 fn issue_189_f32_const_smallest_denormal_round_trips() {
     let v = f32::from_bits(0x0000_0001);
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     dag.add_node(
+        decl,
         RiscOp::synth_const(scalar(Prim::F32).precision, v as f64),
         vec![],
         scalar(Prim::F32),
@@ -156,7 +164,9 @@ fn issue_189_f64_const_one_ulp_pair_round_trips() {
     let v2: f64 = f64::from_bits(v1.to_bits() + 1);
     for v in [v1, v2] {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         dag.add_node(
+            decl,
             RiscOp::synth_const(scalar(Prim::F64).precision, v),
             vec![],
             scalar(Prim::F64),
@@ -337,7 +347,9 @@ fn compile_and_run(test_name: &str, c_source: &str, harness: &str) -> Option<Str
 fn issue_189_f32_const_byte_identical_to_eval_under_gcc() {
     let v: f64 = 0.000000123456789;
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     dag.add_node(
+        decl,
         RiscOp::synth_const(
             TensorType {
                 dims: vec![chelis_ir::dag::DimInfo::Lit(1)],
@@ -397,7 +409,9 @@ int main(void) {
 fn issue_189_f64_const_byte_identical_to_eval_under_gcc() {
     let v: f64 = 1.0e-300;
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     dag.add_node(
+        decl,
         RiscOp::synth_const(
             TensorType {
                 dims: vec![chelis_ir::dag::DimInfo::Lit(1)],

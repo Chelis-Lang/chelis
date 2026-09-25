@@ -62,19 +62,23 @@ fn ln(s: &str) -> LoadStoreName {
 #[test]
 fn c_backend_blas_matmul_bf16_routes_through_convert_then_sgemm_post_ws_1() {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let a = dag.add_node(
+        decl,
         RiscOp::Load { name: ln("a") },
         vec![],
         mat_t(2, 3, Prim::Bf16),
         None,
     );
     let b = dag.add_node(
+        decl,
         RiscOp::Load { name: ln("b") },
         vec![],
         mat_t(3, 2, Prim::Bf16),
         None,
     );
     let mm = dag.add_node(
+        decl,
         RiscOp::BlasMatmul {
             batch_dims: vec![],
             m: DimExpr::Concrete(2),
@@ -105,19 +109,23 @@ fn c_backend_blas_matmul_bf16_routes_through_convert_then_sgemm_post_ws_1() {
 #[test]
 fn c_backend_blas_matmul_f16_routes_through_convert_then_sgemm_post_ws_1() {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let a = dag.add_node(
+        decl,
         RiscOp::Load { name: ln("a") },
         vec![],
         mat_t(2, 3, Prim::F16),
         None,
     );
     let b = dag.add_node(
+        decl,
         RiscOp::Load { name: ln("b") },
         vec![],
         mat_t(3, 2, Prim::F16),
         None,
     );
     let mm = dag.add_node(
+        decl,
         RiscOp::BlasMatmul {
             batch_dims: vec![],
             m: DimExpr::Concrete(2),
@@ -154,19 +162,23 @@ fn c_backend_blas_matmul_f16_routes_through_convert_then_sgemm_post_ws_1() {
 #[test]
 fn c_backend_f64_matmul_emits_cblas_dgemm_not_sgemm() {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let a = dag.add_node(
+        decl,
         RiscOp::Load { name: ln("a") },
         vec![],
         mat_t(2, 3, Prim::F64),
         None,
     );
     let b = dag.add_node(
+        decl,
         RiscOp::Load { name: ln("b") },
         vec![],
         mat_t(3, 2, Prim::F64),
         None,
     );
     let mm = dag.add_node(
+        decl,
         RiscOp::BlasMatmul {
             batch_dims: vec![],
             m: DimExpr::Concrete(2),
@@ -209,13 +221,16 @@ fn c_backend_f64_matmul_emits_cblas_dgemm_not_sgemm() {
 #[test]
 fn c_backend_int8_reduce_sum_uses_int32_accumulator_no_silent_overflow() {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let xs = dag.add_node(
+        decl,
         RiscOp::Load { name: ln("xs") },
         vec![],
         vec_t(3, Prim::Int8),
         None,
     );
     let s = dag.add_node(
+        decl,
         RiscOp::Sum {
             axis: 0,
             accumulator: Prim::Int32,
@@ -240,13 +255,16 @@ fn c_backend_int8_reduce_sum_uses_int32_accumulator_no_silent_overflow() {
 #[test]
 fn c_backend_int16_reduce_sum_uses_int32_accumulator() {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let xs = dag.add_node(
+        decl,
         RiscOp::Load { name: ln("xs") },
         vec![],
         vec_t(3, Prim::Int16),
         None,
     );
     let s = dag.add_node(
+        decl,
         RiscOp::Sum {
             axis: 0,
             accumulator: Prim::Int32,
@@ -277,13 +295,16 @@ fn c_backend_int16_reduce_sum_uses_int32_accumulator() {
 #[test]
 fn c_backend_f32_operand_f64_accumulator_reduce_sum_uses_double_acc() {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let xs = dag.add_node(
+        decl,
         RiscOp::Load { name: ln("xs") },
         vec![],
         vec_t(3, Prim::F32),
         None,
     );
     let s = dag.add_node(
+        decl,
         RiscOp::Sum {
             axis: 0,
             accumulator: Prim::F64,
@@ -309,13 +330,16 @@ fn c_backend_f32_operand_f64_accumulator_reduce_sum_uses_double_acc() {
 #[test]
 fn c_backend_int32_reduce_sum_emits_int32_no_silent_float_downgrade() {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let xs = dag.add_node(
+        decl,
         RiscOp::Load { name: ln("xs") },
         vec![],
         vec_t(3, Prim::Int32),
         None,
     );
     let s = dag.add_node(
+        decl,
         RiscOp::Sum {
             axis: 0,
             accumulator: Prim::Int32,
@@ -348,13 +372,16 @@ fn c_backend_int32_reduce_sum_emits_int32_no_silent_float_downgrade() {
 #[test]
 fn c_backend_int64_reduce_sum_emits_int64() {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let xs = dag.add_node(
+        decl,
         RiscOp::Load { name: ln("xs") },
         vec![],
         vec_t(3, Prim::Int64),
         None,
     );
     let s = dag.add_node(
+        decl,
         RiscOp::Sum {
             axis: 0,
             accumulator: Prim::Int64,

@@ -1173,7 +1173,7 @@ def validate_normative_contract(
                 "wire shape-dependency references",
             ),
             (
-                "`shape_deps`, `span_id` (explicitly null when absent), and `merged_spans` are\nmandatory fields",
+                "`shape_deps`, `span_id` (explicitly null when absent), `merged_spans` and\n`declaration` are mandatory fields",
                 "wire mandatory invocation fields",
             ),
             ("WireRiscOp::Count { axes }", "wire count variant"),

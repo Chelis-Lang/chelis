@@ -148,8 +148,15 @@ mod tests {
     #[test]
     fn adapter_preserves_borrowed_and_exact_slot_placements() {
         let mut dag = Dag::new();
-        let input = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_f32(4), None);
-        let output = dag.add_node(RiscOp::Neg, vec![input], vec_f32(4), None);
+        let decl = dag.declare("test");
+        let input = dag.add_node(
+            decl,
+            RiscOp::Load { name: "x".into() },
+            vec![],
+            vec_f32(4),
+            None,
+        );
+        let output = dag.add_node(decl, RiscOp::Neg, vec![input], vec_f32(4), None);
         dag.add_root(output);
         let plan = build(dag);
         assert_eq!(plan.node_kind(input), &NodeMemoryKind::BorrowedLoad);

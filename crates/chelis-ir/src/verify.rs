@@ -995,9 +995,10 @@ pub trait KeyGraph {
     fn roots(&self) -> impl Iterator<Item = usize> + '_;
     /// The parameter a `Load` at `node` reads, or `None` for any other node.
     fn load_name(&self, node: usize) -> Option<&str>;
-    /// The top-level declaration `node` belongs to, or `None` when the graph
-    /// attributes it to none.
-    fn declaration(&self, node: usize) -> Option<&str>;
+    /// The name of the declaration `node` belongs to.
+    fn declaration(&self, node: usize) -> &str;
+    /// Whether two nodes belong to one declaration.
+    fn same_declaration(&self, left: usize, right: usize) -> bool;
     /// The dims `node` produces, or `None` when no node or when its dims
     /// have no IR reading.
     fn dims(&self, node: usize) -> Option<std::borrow::Cow<'_, [DimInfo]>>;
@@ -1066,12 +1067,12 @@ impl KeyGraph for Dag {
         }
     }
 
-    fn declaration(&self, node: usize) -> Option<&str> {
-        let declaration = self.get(NodeId(node))?.declaration?;
-        self.declarations()
-            .get(declaration.0 as usize)
-            .map(|declaration| declaration.name.as_str())
-            .filter(|name| !name.is_empty())
+    fn declaration(&self, node: usize) -> &str {
+        &self.declaration(self.nodes()[node].decl).name
+    }
+
+    fn same_declaration(&self, left: usize, right: usize) -> bool {
+        self.nodes()[left].decl == self.nodes()[right].decl
     }
 
     fn dims(&self, node: usize) -> Option<std::borrow::Cow<'_, [DimInfo]>> {
@@ -1145,15 +1146,13 @@ pub fn verify_key_rules(graph: &impl KeyGraph, errors: &mut Vec<String>) {
     let is_key = |node: usize| graph.dtype(node) == Some(Prim::Key);
     // The key a node's value is: every key `Load` of one parameter is the
     // first such `Load`, and any other key is its own node. A parameter is
-    // its declaration and its name: two declarations' `k` are two keys. A
-    // `Load` attributed to no declaration may be any declaration's, so it is
-    // the same key as every `Load` of its name.
+    // its declaration and its name: two declarations' `k` are two keys.
     let identity = |node: usize| match graph.load_name(node) {
         Some(name) if is_key(node) => (0..node)
             .find(|earlier| {
                 is_key(*earlier)
                     && graph.load_name(*earlier) == Some(name)
-                    && same_declaration(graph.declaration(*earlier), graph.declaration(node))
+                    && graph.same_declaration(*earlier, node)
             })
             .unwrap_or(node),
         _ => node,
@@ -1389,15 +1388,6 @@ fn verify_confinement(
     }
 }
 
-/// Whether two nodes may belong to one declaration: they name the same one,
-/// or either is attributed to none.
-pub fn same_declaration(left: Option<&str>, right: Option<&str>) -> bool {
-    match (left, right) {
-        (Some(left), Some(right)) => left == right,
-        _ => true,
-    }
-}
-
 #[allow(clippy::collapsible_match)]
 fn verify_with_dangling_policy(dag: &Dag, reject_dangling: bool) -> Vec<String> {
     let mut errors = Vec::new();
@@ -1405,7 +1395,7 @@ fn verify_with_dangling_policy(dag: &Dag, reject_dangling: bool) -> Vec<String> 
     // chelis#2413: a `Load` reads its declaration's parameter, so two
     // declarations may each name a parameter `x` with its own type.
     let mut load_types =
-        chelis_unord::UnordMap::<String, Vec<(Option<&str>, &crate::dag::TensorType)>>::new();
+        chelis_unord::UnordMap::<(crate::dag::DeclId, String), &crate::dag::TensorType>::new();
     for node in dag.nodes() {
         for &input_id in &node.inputs {
             if input_id.0 < consumers.len() {
@@ -1428,20 +1418,16 @@ fn verify_with_dangling_policy(dag: &Dag, reject_dangling: bool) -> Vec<String> 
         }
 
         if let RiscOp::Load { name } = &node.op {
-            let declaration = KeyGraph::declaration(dag, node.id.0);
-            let seen = load_types.entry(name.as_str().to_string()).or_default();
-            if let Some((_, prev_ty)) = seen
-                .iter()
-                .find(|(other, _)| same_declaration(*other, declaration))
-                && *prev_ty != &node.output_type
-            {
+            let prev_ty = *load_types
+                .entry((node.decl, name.as_str().to_string()))
+                .or_insert(&node.output_type);
+            if prev_ty != &node.output_type {
                 errors.push(format!(
-                    "load '{}' has inconsistent tensor types: {:?} vs {:?}",
-                    name, prev_ty, node.output_type
+                    "{} has inconsistent tensor types: {:?} vs {:?}",
+                    dag.describe_node(node.id),
+                    prev_ty,
+                    node.output_type
                 ));
-            }
-            if !seen.iter().any(|(other, _)| *other == declaration) {
-                seen.push((declaration, &node.output_type));
             }
         }
     }
@@ -3829,7 +3815,7 @@ fn dims_compatible(a: &DimInfo, b: &DimInfo) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::dag::{ExtentWitnessSite, NodeId, RiscOp, RtAxis, TensorType};
+    use crate::dag::{DeclId, ExtentWitnessSite, NodeId, RiscOp, RtAxis, TensorType};
 
     fn scalar_f32() -> TensorType {
         TensorType::scalar_f32()
@@ -3843,57 +3829,56 @@ mod tests {
     }
 
     /// A graph with one group of nodes per entry, each group built by
-    /// `group` and attributed to the named declaration, or to none.
-    fn declared_groups(declarations: &[Option<&str>], mut group: impl FnMut(&mut Dag)) -> Dag {
+    /// `group` in the named declaration: a repeated name is one declaration.
+    fn declared_groups(declarations: &[&str], mut group: impl FnMut(&mut Dag, DeclId)) -> Dag {
         let mut dag = Dag::new();
-        for declaration in declarations {
-            let first = dag.len();
-            group(&mut dag);
-            if let Some(name) = declaration {
-                let existing = dag
-                    .declarations()
-                    .iter()
-                    .position(|entry| entry.name == *name);
-                let id = match existing {
-                    Some(index) => crate::dag::DeclarationId(index as u32),
-                    None => dag.add_declaration(*name, false),
-                };
-                dag.attribute_nodes_from(first, id);
-            }
+        for name in declarations {
+            let existing = dag
+                .declarations()
+                .iter()
+                .position(|entry| entry.name == *name);
+            let decl = match existing {
+                Some(index) => DeclId(u32::try_from(index).unwrap()),
+                None => dag.declare(*name),
+            };
+            group(&mut dag, decl);
         }
         dag
     }
 
     /// chelis#2413 B2: a parameter is its declaration and its name. Two
-    /// declarations that each read a key parameter `k` hold two keys. One
-    /// declaration's two `Load`s of `k` are one key, and a `Load` of `k`
-    /// attributed to no declaration is the same key as every `Load` of `k`.
+    /// declarations that each read a key parameter `k` hold two keys, and
+    /// one declaration's two `Load`s of `k` are one key.
     ///
     /// Evidentiary status: REGRESSION TEST. At ff8957386 the verifier
     /// identified a key `Load` by its name alone, so the first row failed.
     #[test]
     fn a_key_parameter_is_its_declaration_and_its_name() {
-        let errors = |declarations: &[Option<&str>]| {
-            let dag = declared_groups(declarations, |dag| {
+        let errors = |declarations: &[&str]| {
+            let dag = declared_groups(declarations, |dag, decl| {
                 let k = dag.add_node(
+                    decl,
                     RiscOp::Load { name: "k".into() },
                     vec![],
                     tensor_ty(&[], Prim::Key),
                     None,
                 );
                 let x = dag.add_node(
+                    decl,
                     RiscOp::Load { name: "x".into() },
                     vec![],
                     tensor_ty(&[2], Prim::F32),
                     None,
                 );
                 let rate = dag.add_node(
+                    decl,
                     RiscOp::synth_const(Prim::F32, 0.5),
                     vec![],
                     scalar_f32(),
                     None,
                 );
                 let drawn = dag.add_node(
+                    decl,
                     RiscOp::Dropout,
                     vec![x, rate, k],
                     tensor_ty(&[2], Prim::F32),
@@ -3905,34 +3890,27 @@ mod tests {
             verify_key_rules(&dag, &mut errors);
             errors
         };
-        assert_eq!(errors(&[Some("a"), Some("b")]), Vec::<String>::new());
-        for shared in [
-            [Some("a"), Some("a")],
-            [None, None],
-            [Some("a"), None],
-            [None, Some("b")],
-        ] {
-            assert!(
-                errors(&shared)
-                    .iter()
-                    .any(|error| error.contains("is consumed twice")),
-                "{shared:?}"
-            );
-        }
+        assert_eq!(errors(&["a", "b"]), Vec::<String>::new());
+        assert!(
+            errors(&["a", "a"])
+                .iter()
+                .any(|error| error.contains("is consumed twice"))
+        );
     }
 
     /// A parameter's type is its declaration's: two declarations may each
     /// read an `x` of a different type, and one declaration's two `Load`s of
-    /// `x` must agree, as must two `Load`s attributed to no declaration.
+    /// `x` must agree. The error names the parameter and its declaration.
     ///
     /// Evidentiary status: REGRESSION TEST. At ff8957386 the first row
     /// reported "load 'x' has inconsistent tensor types".
     #[test]
     fn a_parameter_type_is_its_declarations() {
-        let inconsistent = |declarations: &[Option<&str>]| {
+        let errors = |declarations: &[&str]| {
             let mut shapes = [vec![4], vec![2, 2]].into_iter().cycle();
-            let dag = declared_groups(declarations, |dag| {
+            let dag = declared_groups(declarations, |dag, decl| {
                 let x = dag.add_node(
+                    decl,
                     RiscOp::Load { name: "x".into() },
                     vec![],
                     tensor_ty(&shapes.next().unwrap(), Prim::F32),
@@ -3941,13 +3919,17 @@ mod tests {
                 dag.add_root(x);
             });
             verify(&dag)
-                .iter()
-                .any(|error| error.contains("load 'x' has inconsistent tensor types"))
+                .into_iter()
+                .filter(|error| error.contains("inconsistent tensor types"))
+                .collect::<Vec<_>>()
         };
-        assert!(!inconsistent(&[Some("a"), Some("b")]));
-        assert!(inconsistent(&[Some("a"), Some("a")]));
-        assert!(inconsistent(&[None, None]));
-        assert!(inconsistent(&[Some("a"), None]));
+        assert_eq!(errors(&["a", "b"]), Vec::<String>::new());
+        let same = errors(&["keep", "keep"]);
+        assert_eq!(same.len(), 1, "{same:?}");
+        assert!(
+            same[0].starts_with("parameter `x` of `keep` has inconsistent tensor types"),
+            "{same:?}"
+        );
     }
 
     struct MappedFixture {
@@ -3979,19 +3961,23 @@ mod tests {
         /// result type, non-empty message.
         fn well_formed() -> Dag {
             let mut dag = Dag::new();
+            let decl = dag.declare("test");
             let cond = dag.add_node(
+                decl,
                 RiscOp::synth_const(Prim::Bool, 1.0),
                 vec![],
                 bool_scalar(),
                 None,
             );
             let fallback = dag.add_node(
+                decl,
                 RiscOp::synth_const(Prim::F32, 2.0),
                 vec![],
                 scalar_f32(),
                 None,
             );
             dag.add_node(
+                decl,
                 RiscOp::GuardedFail {
                     message: "boom".to_string(),
                     trap_on_true: true,
@@ -4014,19 +4000,23 @@ mod tests {
         #[test]
         fn an_empty_message_is_rejected() {
             let mut dag = Dag::new();
+            let decl = dag.declare("test");
             let cond = dag.add_node(
+                decl,
                 RiscOp::synth_const(Prim::Bool, 1.0),
                 vec![],
                 bool_scalar(),
                 None,
             );
             let fallback = dag.add_node(
+                decl,
                 RiscOp::synth_const(Prim::F32, 2.0),
                 vec![],
                 scalar_f32(),
                 None,
             );
             dag.add_node(
+                decl,
                 RiscOp::GuardedFail {
                     message: String::new(),
                     trap_on_true: true,
@@ -4045,19 +4035,23 @@ mod tests {
         #[test]
         fn a_non_bool_condition_is_rejected() {
             let mut dag = Dag::new();
+            let decl = dag.declare("test");
             let cond = dag.add_node(
+                decl,
                 RiscOp::synth_const(Prim::F32, 1.0),
                 vec![],
                 scalar_f32(),
                 None,
             );
             let fallback = dag.add_node(
+                decl,
                 RiscOp::synth_const(Prim::F32, 2.0),
                 vec![],
                 scalar_f32(),
                 None,
             );
             dag.add_node(
+                decl,
                 RiscOp::GuardedFail {
                     message: "boom".to_string(),
                     trap_on_true: true,
@@ -4078,19 +4072,23 @@ mod tests {
         #[test]
         fn a_condition_above_rank_one_is_rejected() {
             let mut dag = Dag::new();
+            let decl = dag.declare("test");
             let cond = dag.add_node(
+                decl,
                 RiscOp::synth_const(Prim::Bool, 1.0),
                 vec![],
                 tensor_ty(&[2, 2], Prim::Bool),
                 None,
             );
             let fallback = dag.add_node(
+                decl,
                 RiscOp::synth_const(Prim::F32, 2.0),
                 vec![],
                 scalar_f32(),
                 None,
             );
             dag.add_node(
+                decl,
                 RiscOp::GuardedFail {
                     message: "boom".to_string(),
                     trap_on_true: true,
@@ -4111,19 +4109,23 @@ mod tests {
         fn a_batched_rank_one_condition_is_admitted() {
             // The negative above must not over-reject the `vmap` form.
             let mut dag = Dag::new();
+            let decl = dag.declare("test");
             let cond = dag.add_node(
+                decl,
                 RiscOp::synth_const(Prim::Bool, 1.0),
                 vec![],
                 tensor_ty(&[2], Prim::Bool),
                 None,
             );
             let fallback = dag.add_node(
+                decl,
                 RiscOp::synth_const(Prim::F32, 2.0),
                 vec![],
                 tensor_ty(&[2], Prim::F32),
                 None,
             );
             dag.add_node(
+                decl,
                 RiscOp::GuardedFail {
                     message: "boom".to_string(),
                     trap_on_true: true,
@@ -4143,13 +4145,16 @@ mod tests {
         #[test]
         fn a_wrong_arity_is_rejected() {
             let mut dag = Dag::new();
+            let decl = dag.declare("test");
             let cond = dag.add_node(
+                decl,
                 RiscOp::synth_const(Prim::Bool, 1.0),
                 vec![],
                 bool_scalar(),
                 None,
             );
             dag.add_node(
+                decl,
                 RiscOp::GuardedFail {
                     message: "boom".to_string(),
                     trap_on_true: true,
@@ -4168,19 +4173,23 @@ mod tests {
         #[test]
         fn a_result_type_differing_from_the_fallback_is_rejected() {
             let mut dag = Dag::new();
+            let decl = dag.declare("test");
             let cond = dag.add_node(
+                decl,
                 RiscOp::synth_const(Prim::Bool, 1.0),
                 vec![],
                 bool_scalar(),
                 None,
             );
             let fallback = dag.add_node(
+                decl,
                 RiscOp::synth_const(Prim::F32, 2.0),
                 vec![],
                 tensor_ty(&[3], Prim::F32),
                 None,
             );
             dag.add_node(
+                decl,
                 RiscOp::GuardedFail {
                     message: "boom".to_string(),
                     trap_on_true: true,
@@ -4206,13 +4215,16 @@ mod tests {
         let mat22 = tensor_ty(&[2, 2], Prim::F32);
 
         let mut source = Dag::new();
+        let source_decl = source.declare("test");
         let source_load = source.add_node(
+            source_decl,
             RiscOp::Load { name: "x".into() },
             vec![],
             vec2.clone(),
             None,
         );
         let source_witness = source.add_node(
+            source_decl,
             RiscOp::ExtentWitness {
                 site: ExtentWitnessSite::Caller,
                 parameter: "x".into(),
@@ -4225,6 +4237,7 @@ mod tests {
             None,
         );
         let source_forward = source.add_node(
+            source_decl,
             RiscOp::synth_const(Prim::F32, 1.0),
             vec![],
             scalar_f32,
@@ -4234,13 +4247,16 @@ mod tests {
         source.add_root(source_forward);
 
         let mut mapped = Dag::new();
+        let mapped_decl = mapped.declare("test");
         let mapped_load = mapped.add_node(
+            mapped_decl,
             RiscOp::Load { name: "x".into() },
             vec![],
             mat22.clone(),
             None,
         );
         let mapped_witness = mapped.add_node(
+            mapped_decl,
             RiscOp::ExtentWitness {
                 site: ExtentWitnessSite::Caller,
                 parameter: "x".into(),
@@ -4253,6 +4269,7 @@ mod tests {
             None,
         );
         let mapped_forward = mapped.add_node(
+            mapped_decl,
             RiscOp::synth_const_tensor(Prim::F32, vec![1.0, 1.0]),
             vec![],
             vec2,
@@ -4262,7 +4279,9 @@ mod tests {
         mapped.add_root(mapped_forward);
 
         let mut spliced = Dag::new();
+        let spliced_decl = spliced.declare("test");
         let actual = spliced.add_node(
+            spliced_decl,
             RiscOp::Load {
                 name: "actual".into(),
             },
@@ -4271,12 +4290,14 @@ mod tests {
             None,
         );
         let spliced_witness = spliced.add_node(
+            spliced_decl,
             mapped.get(mapped_witness).unwrap().op.clone(),
             vec![actual],
             mapped.get(mapped_witness).unwrap().output_type.clone(),
             None,
         );
         let spliced_forward = spliced.add_node(
+            spliced_decl,
             mapped.get(mapped_forward).unwrap().op.clone(),
             vec![],
             mapped.get(mapped_forward).unwrap().output_type.clone(),
@@ -4284,6 +4305,7 @@ mod tests {
         );
         spliced.add_shape_dep(spliced_forward, spliced_witness);
         let cotangent = spliced.add_node(
+            spliced_decl,
             RiscOp::synth_const_tensor(Prim::F32, vec![0.0; 4]),
             vec![],
             mat22,
@@ -4408,13 +4430,16 @@ mod tests {
     #[test]
     fn shape_read_requires_exact_int64_scalar_output() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let input = dag.add_node(
+            decl,
             RiscOp::Load { name: "x".into() },
             vec![],
             tensor_ty(&[3], Prim::F32),
             None,
         );
         dag.add_node(
+            decl,
             RiscOp::Shape { axis: 0 },
             vec![input],
             TensorType {
@@ -4436,7 +4461,9 @@ mod tests {
     #[test]
     fn same_shape_rank_relation_is_verified_without_a_result_claim() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let vector = dag.add_node(
+            decl,
             RiscOp::Load {
                 name: "vector".into(),
             },
@@ -4445,6 +4472,7 @@ mod tests {
             None,
         );
         let matrix = dag.add_node(
+            decl,
             RiscOp::Load {
                 name: "matrix".into(),
             },
@@ -4453,6 +4481,7 @@ mod tests {
             None,
         );
         let result = dag.add_node(
+            decl,
             RiscOp::Add,
             vec![vector, matrix],
             tensor_ty(&[2, 4], Prim::F32),
@@ -4475,26 +4504,31 @@ mod tests {
     #[test]
     fn valid_dag_no_errors() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let a = dag.add_node(
+            decl,
             RiscOp::synth_const(scalar_f32().precision, 1.0),
             vec![],
             scalar_f32(),
             None,
         );
         let b = dag.add_node(
+            decl,
             RiscOp::synth_const(scalar_f32().precision, 2.0),
             vec![],
             scalar_f32(),
             None,
         );
-        dag.add_node(RiscOp::Add, vec![a, b], scalar_f32(), None);
+        dag.add_node(decl, RiscOp::Add, vec![a, b], scalar_f32(), None);
         assert!(verify(&dag).is_empty());
     }
 
     #[test]
     fn constant_tensor_payload_cardinality_must_match_its_concrete_type() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         dag.add_node(
+            decl,
             RiscOp::synth_const_tensor(Prim::F32, vec![1.0, 2.0, 3.0]),
             vec![],
             tensor_ty(&[2, 3], Prim::F32),
@@ -4516,13 +4550,15 @@ mod tests {
         // Div is binary; a single-input Div node must surface the
         // binary-arity diagnostic alongside Add/Mul/Compare/MaxElem.
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let a = dag.add_node(
+            decl,
             RiscOp::synth_const(scalar_f32().precision, 1.0),
             vec![],
             scalar_f32(),
             None,
         );
-        dag.add_node(RiscOp::Div, vec![a], scalar_f32(), None);
+        dag.add_node(decl, RiscOp::Div, vec![a], scalar_f32(), None);
         let errs = verify(&dag);
         assert!(
             errs.iter()
@@ -4534,25 +4570,29 @@ mod tests {
     #[test]
     fn div_arity_three_rejected() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let a = dag.add_node(
+            decl,
             RiscOp::synth_const(scalar_f32().precision, 1.0),
             vec![],
             scalar_f32(),
             None,
         );
         let b = dag.add_node(
+            decl,
             RiscOp::synth_const(scalar_f32().precision, 2.0),
             vec![],
             scalar_f32(),
             None,
         );
         let c = dag.add_node(
+            decl,
             RiscOp::synth_const(scalar_f32().precision, 3.0),
             vec![],
             scalar_f32(),
             None,
         );
-        dag.add_node(RiscOp::Div, vec![a, b, c], scalar_f32(), None);
+        dag.add_node(decl, RiscOp::Div, vec![a, b, c], scalar_f32(), None);
         let errs = verify(&dag);
         assert!(
             errs.iter()
@@ -4567,19 +4607,22 @@ mod tests {
         // unary-arity diagnostic alongside the other unary elementwise
         // ops.
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let a = dag.add_node(
+            decl,
             RiscOp::synth_const(scalar_f32().precision, 1.0),
             vec![],
             scalar_f32(),
             None,
         );
         let b = dag.add_node(
+            decl,
             RiscOp::synth_const(scalar_f32().precision, 2.0),
             vec![],
             scalar_f32(),
             None,
         );
-        dag.add_node(RiscOp::Recip, vec![a, b], scalar_f32(), None);
+        dag.add_node(decl, RiscOp::Recip, vec![a, b], scalar_f32(), None);
         let errs = verify(&dag);
         assert!(
             errs.iter()
@@ -4591,7 +4634,8 @@ mod tests {
     #[test]
     fn recip_arity_zero_rejected() {
         let mut dag = Dag::new();
-        dag.add_node(RiscOp::Recip, vec![], scalar_f32(), None);
+        let decl = dag.declare("test");
+        dag.add_node(decl, RiscOp::Recip, vec![], scalar_f32(), None);
         let errs = verify(&dag);
         assert!(
             errs.iter()
@@ -4606,20 +4650,23 @@ mod tests {
         // nodes must verify cleanly. Recip feeds Div so the DAG has a
         // single root and no dangling nodes.
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let a = dag.add_node(
+            decl,
             RiscOp::synth_const(scalar_f32().precision, 6.0),
             vec![],
             scalar_f32(),
             None,
         );
         let b = dag.add_node(
+            decl,
             RiscOp::synth_const(scalar_f32().precision, 3.0),
             vec![],
             scalar_f32(),
             None,
         );
-        let recip = dag.add_node(RiscOp::Recip, vec![b], scalar_f32(), None);
-        let div = dag.add_node(RiscOp::Div, vec![a, recip], scalar_f32(), None);
+        let recip = dag.add_node(decl, RiscOp::Recip, vec![b], scalar_f32(), None);
+        let div = dag.add_node(decl, RiscOp::Div, vec![a, recip], scalar_f32(), None);
         dag.add_root(div);
         let errs = verify(&dag);
         assert!(
@@ -4643,7 +4690,9 @@ mod tests {
             Prim::Bool,
         ] {
             let mut dag = Dag::new();
+            let decl = dag.declare("test");
             dag.add_node(
+                decl,
                 RiscOp::Load { name: "x".into() },
                 vec![],
                 tensor_ty(&[4], prec),
@@ -4659,7 +4708,9 @@ mod tests {
     #[test]
     fn metal_validation_rejects_f64_with_spec_diagnostic() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         dag.add_node(
+            decl,
             RiscOp::Load { name: "x".into() },
             vec![],
             tensor_ty(&[4], Prim::F64),
@@ -4684,13 +4735,15 @@ mod tests {
     #[test]
     fn drop_root_is_rejected() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let a = dag.add_node(
+            decl,
             RiscOp::synth_const(scalar_f32().precision, 1.0),
             vec![],
             scalar_f32(),
             None,
         );
-        let drop = dag.add_node(RiscOp::Drop, vec![a], scalar_f32(), None);
+        let drop = dag.add_node(decl, RiscOp::Drop, vec![a], scalar_f32(), None);
         dag.add_root(drop);
         let errs = verify(&dag);
         assert!(
@@ -4702,14 +4755,16 @@ mod tests {
     #[test]
     fn consumed_drop_is_rejected() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let a = dag.add_node(
+            decl,
             RiscOp::synth_const(scalar_f32().precision, 1.0),
             vec![],
             scalar_f32(),
             None,
         );
-        let drop = dag.add_node(RiscOp::Drop, vec![a], scalar_f32(), None);
-        dag.add_node(RiscOp::Neg, vec![drop], scalar_f32(), None);
+        let drop = dag.add_node(decl, RiscOp::Drop, vec![a], scalar_f32(), None);
+        dag.add_node(decl, RiscOp::Neg, vec![drop], scalar_f32(), None);
         let errs = verify(&dag);
         assert!(
             errs.iter().any(|e| e.contains("cannot be consumed")),
@@ -4720,7 +4775,8 @@ mod tests {
     #[test]
     fn copy_and_drop_require_one_input() {
         let mut copy_dag = Dag::new();
-        copy_dag.add_node(RiscOp::Copy, vec![], scalar_f32(), None);
+        let copy_dag_decl = copy_dag.declare("test");
+        copy_dag.add_node(copy_dag_decl, RiscOp::Copy, vec![], scalar_f32(), None);
         let copy_errs = verify(&copy_dag);
         assert!(
             copy_errs.iter().any(|e| e.contains("unary op")),
@@ -4728,7 +4784,8 @@ mod tests {
         );
 
         let mut drop_dag = Dag::new();
-        drop_dag.add_node(RiscOp::Drop, vec![], scalar_f32(), None);
+        let drop_dag_decl = drop_dag.declare("test");
+        drop_dag.add_node(drop_dag_decl, RiscOp::Drop, vec![], scalar_f32(), None);
         let drop_errs = verify(&drop_dag);
         assert!(
             drop_errs.iter().any(|e| e.contains("unary op")),
@@ -4739,16 +4796,18 @@ mod tests {
     #[test]
     fn bad_input_reference() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         // Manually create a node that references a future node (impossible via normal API,
         // but we can test via the replace_node backdoor or by constructing the scenario).
         let a = dag.add_node(
+            decl,
             RiscOp::synth_const(scalar_f32().precision, 1.0),
             vec![],
             scalar_f32(),
             None,
         );
         // Node 1 references itself (not earlier).
-        dag.add_node(RiscOp::Neg, vec![NodeId(1)], scalar_f32(), None);
+        dag.add_node(decl, RiscOp::Neg, vec![NodeId(1)], scalar_f32(), None);
         let errs = verify(&dag);
         assert!(!errs.is_empty());
         assert!(errs.iter().any(|e| e.contains("non-earlier node")));
@@ -4758,14 +4817,16 @@ mod tests {
     #[test]
     fn wrong_arity_binary() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let a = dag.add_node(
+            decl,
             RiscOp::synth_const(scalar_f32().precision, 1.0),
             vec![],
             scalar_f32(),
             None,
         );
         // Add with only 1 input.
-        dag.add_node(RiscOp::Add, vec![a], scalar_f32(), None);
+        dag.add_node(decl, RiscOp::Add, vec![a], scalar_f32(), None);
         let errs = verify(&dag);
         assert!(!errs.is_empty());
         assert!(errs[0].contains("binary op"));
@@ -4774,8 +4835,9 @@ mod tests {
     #[test]
     fn wrong_arity_unary() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         // Neg with 0 inputs.
-        dag.add_node(RiscOp::Neg, vec![], scalar_f32(), None);
+        dag.add_node(decl, RiscOp::Neg, vec![], scalar_f32(), None);
         let errs = verify(&dag);
         assert!(!errs.is_empty());
         assert!(errs[0].contains("unary op"));
@@ -4784,7 +4846,9 @@ mod tests {
     #[test]
     fn wrong_arity_memory() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let a = dag.add_node(
+            decl,
             RiscOp::synth_const(scalar_f32().precision, 1.0),
             vec![],
             scalar_f32(),
@@ -4792,6 +4856,7 @@ mod tests {
         );
         // Const with an input (should have 0).
         dag.add_node(
+            decl,
             RiscOp::synth_const(Prim::F32, 2.0),
             vec![a],
             scalar_f32(),
@@ -4807,7 +4872,9 @@ mod tests {
     #[test]
     fn c1_mismatched_precision_binary_op() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let a = dag.add_node(
+            decl,
             RiscOp::synth_const(scalar_f32().precision, 1.0),
             vec![],
             scalar_f32(),
@@ -4817,8 +4884,14 @@ mod tests {
             dims: vec![],
             precision: Prim::F64,
         };
-        let b = dag.add_node(RiscOp::synth_const(b_ty.precision, 2.0), vec![], b_ty, None);
-        dag.add_node(RiscOp::Add, vec![a, b], scalar_f32(), None);
+        let b = dag.add_node(
+            decl,
+            RiscOp::synth_const(b_ty.precision, 2.0),
+            vec![],
+            b_ty,
+            None,
+        );
+        dag.add_node(decl, RiscOp::Add, vec![a, b], scalar_f32(), None);
         let errs = verify(&dag);
         assert!(!errs.is_empty());
         assert!(errs.iter().any(|e| e.contains("mismatched precisions")));
@@ -4827,19 +4900,22 @@ mod tests {
     #[test]
     fn c1_matching_precision_ok() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let a = dag.add_node(
+            decl,
             RiscOp::synth_const(scalar_f32().precision, 1.0),
             vec![],
             scalar_f32(),
             None,
         );
         let b = dag.add_node(
+            decl,
             RiscOp::synth_const(scalar_f32().precision, 2.0),
             vec![],
             scalar_f32(),
             None,
         );
-        dag.add_node(RiscOp::Mul, vec![a, b], scalar_f32(), None);
+        dag.add_node(decl, RiscOp::Mul, vec![a, b], scalar_f32(), None);
         assert!(verify(&dag).is_empty());
     }
 
@@ -4852,6 +4928,7 @@ mod tests {
     #[test]
     fn ws_a4_i8_plus_i32_add_is_precision_mismatch() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let i8_ty = TensorType {
             dims: vec![DimInfo::Lit(2)],
             precision: Prim::Int8,
@@ -4861,12 +4938,14 @@ mod tests {
             precision: Prim::Int32,
         };
         let a = dag.add_node(
+            decl,
             RiscOp::Load { name: "a".into() },
             vec![],
             i8_ty.clone(),
             None,
         );
         let b = dag.add_node(
+            decl,
             RiscOp::Load { name: "b".into() },
             vec![],
             i32_ty.clone(),
@@ -4874,7 +4953,7 @@ mod tests {
         );
         // The output type doesn't matter — the verifier rejects on the
         // operand mismatch first.
-        dag.add_node(RiscOp::Add, vec![a, b], i32_ty, None);
+        dag.add_node(decl, RiscOp::Add, vec![a, b], i32_ty, None);
         let errs = verify(&dag);
         assert!(
             errs.iter().any(|e| e.contains("mismatched precisions")),
@@ -4888,6 +4967,7 @@ mod tests {
     #[test]
     fn c2_mismatched_dim_count() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let ty1 = TensorType {
             dims: vec![DimInfo::Lit(3)],
             precision: Prim::F32,
@@ -4896,9 +4976,21 @@ mod tests {
             dims: vec![DimInfo::Lit(3), DimInfo::Lit(4)],
             precision: Prim::F32,
         };
-        let a = dag.add_node(RiscOp::synth_const(ty1.precision, 1.0), vec![], ty1, None);
-        let b = dag.add_node(RiscOp::synth_const(ty2.precision, 2.0), vec![], ty2, None);
-        dag.add_node(RiscOp::Add, vec![a, b], scalar_f32(), None);
+        let a = dag.add_node(
+            decl,
+            RiscOp::synth_const(ty1.precision, 1.0),
+            vec![],
+            ty1,
+            None,
+        );
+        let b = dag.add_node(
+            decl,
+            RiscOp::synth_const(ty2.precision, 2.0),
+            vec![],
+            ty2,
+            None,
+        );
+        dag.add_node(decl, RiscOp::Add, vec![a, b], scalar_f32(), None);
         let errs = verify(&dag);
         assert!(
             errs.iter()
@@ -4909,6 +5001,7 @@ mod tests {
     #[test]
     fn c2_mismatched_dim_size() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let ty1 = TensorType {
             dims: vec![DimInfo::Lit(3)],
             precision: Prim::F32,
@@ -4917,9 +5010,21 @@ mod tests {
             dims: vec![DimInfo::Lit(5)],
             precision: Prim::F32,
         };
-        let a = dag.add_node(RiscOp::synth_const(ty1.precision, 1.0), vec![], ty1, None);
-        let b = dag.add_node(RiscOp::synth_const(ty2.precision, 2.0), vec![], ty2, None);
-        dag.add_node(RiscOp::Add, vec![a, b], scalar_f32(), None);
+        let a = dag.add_node(
+            decl,
+            RiscOp::synth_const(ty1.precision, 1.0),
+            vec![],
+            ty1,
+            None,
+        );
+        let b = dag.add_node(
+            decl,
+            RiscOp::synth_const(ty2.precision, 2.0),
+            vec![],
+            ty2,
+            None,
+        );
+        dag.add_node(decl, RiscOp::Add, vec![a, b], scalar_f32(), None);
         let errs = verify(&dag);
         assert!(
             errs.iter()
@@ -4932,17 +5037,20 @@ mod tests {
     #[test]
     fn c3_sum_axis_out_of_bounds() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let ty = TensorType {
             dims: vec![DimInfo::Lit(3)],
             precision: Prim::F32,
         };
         let x = dag.add_node(
+            decl,
             RiscOp::synth_const(ty.precision, 1.0),
             vec![],
             ty.clone(),
             None,
         );
         dag.add_node(
+            decl,
             RiscOp::Sum {
                 axis: 5,
                 accumulator: Prim::F32,
@@ -4958,13 +5066,21 @@ mod tests {
     #[test]
     fn c3_max_reduce_on_scalar() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let x = dag.add_node(
+            decl,
             RiscOp::synth_const(scalar_f32().precision, 1.0),
             vec![],
             scalar_f32(),
             None,
         );
-        dag.add_node(RiscOp::MaxReduce { axis: 0 }, vec![x], scalar_f32(), None);
+        dag.add_node(
+            decl,
+            RiscOp::MaxReduce { axis: 0 },
+            vec![x],
+            scalar_f32(),
+            None,
+        );
         let errs = verify(&dag);
         assert!(
             errs.iter()
@@ -4975,6 +5091,7 @@ mod tests {
     #[test]
     fn c3_sum_valid_axis() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let ty = TensorType {
             dims: vec![DimInfo::Lit(3), DimInfo::Lit(4)],
             precision: Prim::F32,
@@ -4983,8 +5100,15 @@ mod tests {
             dims: vec![DimInfo::Lit(3)],
             precision: Prim::F32,
         };
-        let x = dag.add_node(RiscOp::synth_const(ty.precision, 1.0), vec![], ty, None);
+        let x = dag.add_node(
+            decl,
+            RiscOp::synth_const(ty.precision, 1.0),
+            vec![],
+            ty,
+            None,
+        );
         dag.add_node(
+            decl,
             RiscOp::Sum {
                 axis: 1,
                 accumulator: Prim::F32,
@@ -5001,17 +5125,19 @@ mod tests {
     #[test]
     fn c4_exp_on_int_is_error() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let int_ty = TensorType {
             dims: vec![],
             precision: Prim::Int32,
         };
         let x = dag.add_node(
+            decl,
             RiscOp::synth_const(int_ty.precision, 1.0),
             vec![],
             int_ty.clone(),
             None,
         );
-        dag.add_node(RiscOp::Exp, vec![x], int_ty, None);
+        dag.add_node(decl, RiscOp::Exp, vec![x], int_ty, None);
         let errs = verify(&dag);
         assert!(errs.iter().any(|e| e.contains("transcendental")));
     }
@@ -5019,47 +5145,53 @@ mod tests {
     #[test]
     fn c4_sqrt_on_float_ok() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let x = dag.add_node(
+            decl,
             RiscOp::synth_const(scalar_f32().precision, 4.0),
             vec![],
             scalar_f32(),
             None,
         );
-        dag.add_node(RiscOp::Sqrt, vec![x], scalar_f32(), None);
+        dag.add_node(decl, RiscOp::Sqrt, vec![x], scalar_f32(), None);
         assert!(verify(&dag).is_empty());
     }
 
     #[test]
     fn c4_abs_on_signed_integer_is_valid_exact_ir() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let int_ty = TensorType {
             dims: vec![DimInfo::Lit(1)],
             precision: Prim::Int64,
         };
         let x = dag.add_node(
+            decl,
             RiscOp::synth_const(int_ty.precision, -1.0),
             vec![],
             int_ty.clone(),
             None,
         );
-        dag.add_node(RiscOp::Abs, vec![x], int_ty, None);
+        dag.add_node(decl, RiscOp::Abs, vec![x], int_ty, None);
         assert!(verify(&dag).is_empty());
     }
 
     #[test]
     fn c4_integer_rounding_node_is_rejected_as_noncanonical() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let int_ty = TensorType {
             dims: vec![DimInfo::Lit(1)],
             precision: Prim::Int64,
         };
         let x = dag.add_node(
+            decl,
             RiscOp::synth_const(int_ty.precision, -1.0),
             vec![],
             int_ty.clone(),
             None,
         );
-        dag.add_node(RiscOp::Floor, vec![x], int_ty, None);
+        dag.add_node(decl, RiscOp::Floor, vec![x], int_ty, None);
         let errs = verify(&dag);
         assert!(errs.iter().any(|error| error.contains("requires float")));
     }
@@ -5067,17 +5199,19 @@ mod tests {
     #[test]
     fn c4_abs_on_bool_is_error() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let bool_ty = TensorType {
             dims: vec![DimInfo::Lit(1)],
             precision: Prim::Bool,
         };
         let x = dag.add_node(
+            decl,
             RiscOp::synth_const(bool_ty.precision, 1.0),
             vec![],
             bool_ty.clone(),
             None,
         );
-        dag.add_node(RiscOp::Abs, vec![x], bool_ty, None);
+        dag.add_node(decl, RiscOp::Abs, vec![x], bool_ty, None);
         let errs = verify(&dag);
         assert!(
             errs.iter()
@@ -5090,13 +5224,16 @@ mod tests {
     #[test]
     fn c5_cmplt_non_bool_output_is_error() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let a = dag.add_node(
+            decl,
             RiscOp::synth_const(scalar_f32().precision, 1.0),
             vec![],
             scalar_f32(),
             None,
         );
         let b = dag.add_node(
+            decl,
             RiscOp::synth_const(scalar_f32().precision, 2.0),
             vec![],
             scalar_f32(),
@@ -5104,6 +5241,7 @@ mod tests {
         );
         // Wrong: output is F32 instead of Bool.
         dag.add_node(
+            decl,
             RiscOp::Compare(ComparisonKind::CmpLt),
             vec![a, b],
             scalar_f32(),
@@ -5119,13 +5257,16 @@ mod tests {
     #[test]
     fn c5_cmplt_bool_output_ok() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let a = dag.add_node(
+            decl,
             RiscOp::synth_const(scalar_f32().precision, 1.0),
             vec![],
             scalar_f32(),
             None,
         );
         let b = dag.add_node(
+            decl,
             RiscOp::synth_const(scalar_f32().precision, 2.0),
             vec![],
             scalar_f32(),
@@ -5136,6 +5277,7 @@ mod tests {
             precision: Prim::Bool,
         };
         dag.add_node(
+            decl,
             RiscOp::Compare(ComparisonKind::CmpLt),
             vec![a, b],
             bool_ty,
@@ -5149,12 +5291,20 @@ mod tests {
     #[test]
     fn c10_expand_axis_out_of_bounds_is_error() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let input_ty = TensorType {
             dims: vec![DimInfo::Lit(3)],
             precision: Prim::F32,
         };
-        let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], input_ty, None);
+        let x = dag.add_node(
+            decl,
+            RiscOp::Load { name: "x".into() },
+            vec![],
+            input_ty,
+            None,
+        );
         dag.add_node(
+            decl,
             RiscOp::Expand {
                 axis: 2,
                 size: crate::dag::RtDim::Lit(4),
@@ -5173,12 +5323,20 @@ mod tests {
     #[test]
     fn c10_expand_same_rank_broadcast_ok() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let input_ty = TensorType {
             dims: vec![DimInfo::Lit(1)],
             precision: Prim::F32,
         };
-        let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], input_ty, None);
+        let x = dag.add_node(
+            decl,
+            RiscOp::Load { name: "x".into() },
+            vec![],
+            input_ty,
+            None,
+        );
         dag.add_node(
+            decl,
             RiscOp::Expand {
                 axis: 0,
                 size: crate::dag::RtDim::Lit(4),
@@ -5196,12 +5354,20 @@ mod tests {
     #[test]
     fn c10_expand_same_rank_requires_unit_input_axis() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let input_ty = TensorType {
             dims: vec![DimInfo::Lit(2)],
             precision: Prim::F32,
         };
-        let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], input_ty, None);
+        let x = dag.add_node(
+            decl,
+            RiscOp::Load { name: "x".into() },
+            vec![],
+            input_ty,
+            None,
+        );
         dag.add_node(
+            decl,
             RiscOp::Expand {
                 axis: 0,
                 size: crate::dag::RtDim::Lit(4),
@@ -5223,12 +5389,20 @@ mod tests {
     #[test]
     fn c10_pad_wrong_rank_is_error() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let input_ty = TensorType {
             dims: vec![DimInfo::Lit(3), DimInfo::Lit(4)],
             precision: Prim::F32,
         };
-        let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], input_ty, None);
+        let x = dag.add_node(
+            decl,
+            RiscOp::Load { name: "x".into() },
+            vec![],
+            input_ty,
+            None,
+        );
         dag.add_node(
+            decl,
             RiscOp::zero_pad(Prim::F32, vec![(RtDim::Lit(1), RtDim::Lit(1))]),
             vec![x],
             TensorType {
@@ -5244,13 +5418,21 @@ mod tests {
     #[test]
     fn pad_fill_dtype_mismatch_is_error() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let ty = TensorType {
             dims: vec![DimInfo::Lit(2)],
             precision: Prim::Int64,
         };
-        let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], ty.clone(), None);
+        let x = dag.add_node(
+            decl,
+            RiscOp::Load { name: "x".into() },
+            vec![],
+            ty.clone(),
+            None,
+        );
         let wrong_fill = chelis_types::scalar_from_i64("pad", Prim::Int32, 0).unwrap();
         dag.add_node(
+            decl,
             RiscOp::pad(vec![(RtDim::Lit(1), RtDim::Lit(1))], wrong_fill),
             vec![x],
             TensorType {
@@ -5268,21 +5450,24 @@ mod tests {
 
     /// A key-operand `UniformLike` over `template` keyed by
     /// `key_from_seed(7)` with optional `activation`.
-    fn keyed_uniform(dag: &mut Dag, template: NodeId, activation: Option<NodeId>) {
+    fn keyed_uniform(dag: &mut Dag, decl: DeclId, template: NodeId, activation: Option<NodeId>) {
         let ty = dag.get(template).unwrap().output_type.clone();
         let low = dag.add_node(
+            decl,
             RiscOp::synth_const(Prim::F32, 0.0),
             vec![],
             TensorType::scalar_f32(),
             None,
         );
         let high = dag.add_node(
+            decl,
             RiscOp::synth_const(Prim::F32, 1.0),
             vec![],
             TensorType::scalar_f32(),
             None,
         );
         let seed = dag.add_node(
+            decl,
             RiscOp::synth_const(Prim::Int64, 7.0),
             vec![],
             TensorType {
@@ -5292,6 +5477,7 @@ mod tests {
             None,
         );
         let key = dag.add_node(
+            decl,
             RiscOp::KeyFromSeed,
             vec![seed],
             TensorType {
@@ -5301,6 +5487,7 @@ mod tests {
             None,
         );
         dag.add_node(
+            decl,
             RiscOp::UniformLike,
             [template, low, high, key]
                 .into_iter()
@@ -5314,11 +5501,13 @@ mod tests {
     #[test]
     fn uniform_like_rejects_non_float_template() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let ty = TensorType {
             dims: vec![DimInfo::Lit(2)],
             precision: Prim::Int64,
         };
         let template = dag.add_node(
+            decl,
             RiscOp::Load {
                 name: "template".into(),
             },
@@ -5326,7 +5515,7 @@ mod tests {
             ty,
             None,
         );
-        keyed_uniform(&mut dag, template, None);
+        keyed_uniform(&mut dag, decl, template, None);
         assert!(verify(&dag).iter().any(|error| {
             error.contains("must preserve its float template's exact shape and dtype")
         }));
@@ -5335,11 +5524,13 @@ mod tests {
     #[test]
     fn uniform_like_path_activation_requires_scalar_bool() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let ty = TensorType {
             dims: vec![DimInfo::Lit(2)],
             precision: Prim::F32,
         };
         let template = dag.add_node(
+            decl,
             RiscOp::Load {
                 name: "template".into(),
             },
@@ -5348,6 +5539,7 @@ mod tests {
             None,
         );
         let wrong_activation = dag.add_node(
+            decl,
             RiscOp::Load {
                 name: "activation".into(),
             },
@@ -5355,7 +5547,7 @@ mod tests {
             TensorType::scalar_f32(),
             None,
         );
-        keyed_uniform(&mut dag, template, Some(wrong_activation));
+        keyed_uniform(&mut dag, decl, template, Some(wrong_activation));
         assert!(
             verify(&dag)
                 .iter()
@@ -5366,12 +5558,20 @@ mod tests {
     #[test]
     fn c10_shrink_invalid_bounds_is_error() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let input_ty = TensorType {
             dims: vec![DimInfo::Lit(8)],
             precision: Prim::F32,
         };
-        let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], input_ty, None);
+        let x = dag.add_node(
+            decl,
+            RiscOp::Load { name: "x".into() },
+            vec![],
+            input_ty,
+            None,
+        );
         dag.add_node(
+            decl,
             RiscOp::Shrink {
                 bounds: vec![(RtDim::Lit(6), RtDim::Lit(2))],
             },
@@ -5389,12 +5589,20 @@ mod tests {
     #[test]
     fn c10_stride_zero_step_is_error() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let input_ty = TensorType {
             dims: vec![DimInfo::Lit(8)],
             precision: Prim::F32,
         };
-        let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], input_ty, None);
+        let x = dag.add_node(
+            decl,
+            RiscOp::Load { name: "x".into() },
+            vec![],
+            input_ty,
+            None,
+        );
         dag.add_node(
+            decl,
             RiscOp::Stride {
                 strides: vec![RtDim::Lit(0)],
             },
@@ -5414,13 +5622,16 @@ mod tests {
     #[test]
     fn store_correct_arity() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let x = dag.add_node(
+            decl,
             RiscOp::synth_const(scalar_f32().precision, 1.0),
             vec![],
             scalar_f32(),
             None,
         );
         dag.add_node(
+            decl,
             RiscOp::Store { name: "out".into() },
             vec![x],
             scalar_f32(),
@@ -5432,7 +5643,9 @@ mod tests {
     #[test]
     fn store_wrong_arity_zero_inputs() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         dag.add_node(
+            decl,
             RiscOp::Store { name: "out".into() },
             vec![],
             scalar_f32(),
@@ -5446,19 +5659,23 @@ mod tests {
     #[test]
     fn store_wrong_arity_two_inputs() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let a = dag.add_node(
+            decl,
             RiscOp::synth_const(scalar_f32().precision, 1.0),
             vec![],
             scalar_f32(),
             None,
         );
         let b = dag.add_node(
+            decl,
             RiscOp::synth_const(scalar_f32().precision, 2.0),
             vec![],
             scalar_f32(),
             None,
         );
         dag.add_node(
+            decl,
             RiscOp::Store { name: "out".into() },
             vec![a, b],
             scalar_f32(),
@@ -5472,13 +5689,16 @@ mod tests {
     #[test]
     fn dangling_nonfinal_node_is_error() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         dag.add_node(
+            decl,
             RiscOp::synth_const(scalar_f32().precision, 1.0),
             vec![],
             scalar_f32(),
             None,
         );
         dag.add_node(
+            decl,
             RiscOp::synth_const(scalar_f32().precision, 2.0),
             vec![],
             scalar_f32(),
@@ -5491,13 +5711,16 @@ mod tests {
     #[test]
     fn root_nodes_are_not_dangling() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let a = dag.add_node(
+            decl,
             RiscOp::synth_const(scalar_f32().precision, 1.0),
             vec![],
             scalar_f32(),
             None,
         );
         let b = dag.add_node(
+            decl,
             RiscOp::synth_const(scalar_f32().precision, 2.0),
             vec![],
             scalar_f32(),
@@ -5511,7 +5734,9 @@ mod tests {
     #[test]
     fn load_name_type_mismatch_is_error() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         dag.add_node(
+            decl,
             RiscOp::Load { name: "x".into() },
             vec![],
             TensorType {
@@ -5521,6 +5746,7 @@ mod tests {
             None,
         );
         dag.add_node(
+            decl,
             RiscOp::Load { name: "x".into() },
             vec![],
             TensorType {
@@ -5532,14 +5758,16 @@ mod tests {
         let errs = verify(&dag);
         assert!(
             errs.iter()
-                .any(|e| e.contains("load 'x' has inconsistent tensor types"))
+                .any(|e| e.contains("parameter `x` of `test` has inconsistent tensor types"))
         );
     }
 
     #[test]
     fn gather_requires_integer_indices_and_matching_output_precision() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let values = dag.add_node(
+            decl,
             RiscOp::Load {
                 name: "values".into(),
             },
@@ -5548,12 +5776,14 @@ mod tests {
             None,
         );
         let bad_indices = dag.add_node(
+            decl,
             RiscOp::synth_const(tensor_ty(&[3], Prim::F32).precision, 0.0),
             vec![],
             tensor_ty(&[3], Prim::F32),
             None,
         );
         dag.add_node(
+            decl,
             RiscOp::Gather { axis: 0 },
             vec![values, bad_indices],
             tensor_ty(&[3, 2], Prim::F32),
@@ -5574,7 +5804,9 @@ mod tests {
     #[test]
     fn scatter_add_requires_integer_indices_and_matching_update_precision() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let target = dag.add_node(
+            decl,
             RiscOp::Load {
                 name: "target".into(),
             },
@@ -5583,18 +5815,21 @@ mod tests {
             None,
         );
         let bad_indices = dag.add_node(
+            decl,
             RiscOp::synth_const(tensor_ty(&[3], Prim::F32).precision, 0.0),
             vec![],
             tensor_ty(&[3], Prim::F32),
             None,
         );
         let bad_updates = dag.add_node(
+            decl,
             RiscOp::synth_const(tensor_ty(&[3, 2], Prim::F32).precision, 1.0),
             vec![],
             tensor_ty(&[3, 2], Prim::F32),
             None,
         );
         dag.add_node(
+            decl,
             RiscOp::ScatterAdd { axis: 0 },
             vec![target, bad_indices, bad_updates],
             tensor_ty(&[4, 2], Prim::F64),

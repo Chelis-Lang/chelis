@@ -1539,9 +1539,9 @@ fn two_declarations_key_parameters_of_one_name_are_two_keys() {
         .nodes
         .iter()
         .filter(|node| matches!(&node.op, WireRiscOp::Load { name } if name.as_str() == "k"))
-        .map(|node| node.declaration.as_deref())
+        .map(|node| node.declaration.as_str())
         .collect::<Vec<_>>();
-    assert_eq!(key_loads, [Some("sample"), Some("other")]);
+    assert_eq!(key_loads, ["sample", "other"]);
 }
 
 #[test]

@@ -10439,11 +10439,13 @@ mod expression_dispatch_tests {
     #[test]
     fn host_random_stream_helpers_are_the_standalone_kernel_prelude() {
         let mut dag = chelis_ir::dag::Dag::new();
+        let decl = dag.declare("test");
         let ty = TensorType {
             dims: vec![chelis_ir::dag::DimInfo::Lit(2)],
             precision: Prim::F32,
         };
         let template = dag.add_node(
+            decl,
             chelis_ir::dag::RiscOp::Load {
                 name: "template".into(),
             },
@@ -10457,6 +10459,7 @@ mod expression_dispatch_tests {
         };
         let bound = |dag: &mut chelis_ir::dag::Dag, value| {
             dag.add_node(
+                decl,
                 chelis_ir::dag::RiscOp::synth_const(Prim::F32, value),
                 vec![],
                 rank0(Prim::F32),
@@ -10466,18 +10469,21 @@ mod expression_dispatch_tests {
         let low = bound(&mut dag, 0.0);
         let high = bound(&mut dag, 1.0);
         let seed = dag.add_node(
+            decl,
             chelis_ir::dag::RiscOp::synth_const(Prim::Int64, 7.0),
             vec![],
             rank0(Prim::Int64),
             None,
         );
         let key = dag.add_node(
+            decl,
             chelis_ir::dag::RiscOp::KeyFromSeed,
             vec![seed],
             rank0(Prim::Key),
             None,
         );
         let draw = dag.add_node(
+            decl,
             chelis_ir::dag::RiscOp::UniformLike,
             vec![template, low, high, key],
             ty,

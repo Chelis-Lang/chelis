@@ -65,10 +65,12 @@ fn input(name: &str, ty: TensorType) -> HostTensorInput {
 #[test]
 fn gather_helper_with_load_operands_is_summarized() {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let values_ty = t_f32(vec![1000, 128]);
     let indices_ty = t_i64(vec![64]);
     let output_ty = t_f32(vec![64, 128]);
     let values = dag.add_node(
+        decl,
         RiscOp::Load {
             name: "table".into(),
         },
@@ -77,12 +79,14 @@ fn gather_helper_with_load_operands_is_summarized() {
         None,
     );
     let indices = dag.add_node(
+        decl,
         RiscOp::Load { name: "idx".into() },
         vec![],
         indices_ty.clone(),
         None,
     );
     let root = dag.add_node(
+        decl,
         RiscOp::Gather { axis: 0 },
         vec![values, indices],
         output_ty.clone(),
@@ -112,11 +116,13 @@ fn scatter_add_helper_with_load_operands_is_summarized() {
     // recognizer covers all three sparse RiscOps symmetrically, not
     // just the two with Surf-reachable surface forms.
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let target_ty = t_f32(vec![10, 4]);
     let indices_ty = t_i64(vec![64]);
     let updates_ty = t_f32(vec![64, 4]);
     let output_ty = target_ty.clone();
     let target = dag.add_node(
+        decl,
         RiscOp::Load {
             name: "base".into(),
         },
@@ -125,6 +131,7 @@ fn scatter_add_helper_with_load_operands_is_summarized() {
         None,
     );
     let indices = dag.add_node(
+        decl,
         RiscOp::Load {
             name: "bin_ids".into(),
         },
@@ -133,12 +140,14 @@ fn scatter_add_helper_with_load_operands_is_summarized() {
         None,
     );
     let updates = dag.add_node(
+        decl,
         RiscOp::Load { name: "upd".into() },
         vec![],
         updates_ty.clone(),
         None,
     );
     let root = dag.add_node(
+        decl,
         RiscOp::ScatterAdd { axis: 0 },
         vec![target, indices, updates],
         output_ty.clone(),
@@ -167,11 +176,13 @@ fn scatter_add_helper_with_load_operands_is_summarized() {
 #[test]
 fn scatter_replace_helper_with_load_operands_is_summarized() {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let target_ty = t_f32(vec![3, 2]);
     let indices_ty = t_i32(vec![4]);
     let updates_ty = t_f32(vec![4, 2]);
     let output_ty = target_ty.clone();
     let target = dag.add_node(
+        decl,
         RiscOp::Load {
             name: "table".into(),
         },
@@ -180,18 +191,21 @@ fn scatter_replace_helper_with_load_operands_is_summarized() {
         None,
     );
     let indices = dag.add_node(
+        decl,
         RiscOp::Load { name: "idx".into() },
         vec![],
         indices_ty.clone(),
         None,
     );
     let updates = dag.add_node(
+        decl,
         RiscOp::Load { name: "upd".into() },
         vec![],
         updates_ty.clone(),
         None,
     );
     let root = dag.add_node(
+        decl,
         RiscOp::Scatter { axis: 0 },
         vec![target, indices, updates],
         output_ty.clone(),
@@ -217,10 +231,12 @@ fn scatter_replace_helper_with_load_operands_is_summarized() {
 #[test]
 fn literal_result_claim_owner_copy_preserves_sparse_summary() {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let values_ty = t_f32(vec![1000, 128]);
     let indices_ty = t_i64(vec![64]);
     let output_ty = t_f32(vec![64, 128]);
     let values = dag.add_node(
+        decl,
         RiscOp::Load {
             name: "table".into(),
         },
@@ -229,18 +245,21 @@ fn literal_result_claim_owner_copy_preserves_sparse_summary() {
         None,
     );
     let indices = dag.add_node(
+        decl,
         RiscOp::Load { name: "idx".into() },
         vec![],
         indices_ty.clone(),
         None,
     );
     let gathered = dag.add_node(
+        decl,
         RiscOp::Gather { axis: 0 },
         vec![values, indices],
         output_ty.clone(),
         None,
     );
     let claim = dag.add_node(
+        decl,
         RiscOp::ExtentWitness {
             site: ExtentWitnessSite::LiteralResultClaim,
             parameter: String::new(),
@@ -253,9 +272,9 @@ fn literal_result_claim_owner_copy_preserves_sparse_summary() {
         None,
     );
     dag.add_shape_dep(gathered, claim);
-    let inner = dag.add_node(RiscOp::Copy, vec![gathered], output_ty.clone(), None);
+    let inner = dag.add_node(decl, RiscOp::Copy, vec![gathered], output_ty.clone(), None);
     dag.add_shape_dep(inner, gathered);
-    let root = dag.add_node(RiscOp::Copy, vec![inner], output_ty.clone(), None);
+    let root = dag.add_node(decl, RiscOp::Copy, vec![inner], output_ty.clone(), None);
     dag.add_shape_dep(root, gathered);
     dag.add_shape_dep(root, gathered);
     dag.add_root(root);
@@ -271,10 +290,12 @@ fn literal_result_claim_owner_copy_preserves_sparse_summary() {
 #[test]
 fn ordinary_copy_after_sparse_op_remains_post_processing() {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let values_ty = t_f32(vec![1000, 128]);
     let indices_ty = t_i64(vec![64]);
     let output_ty = t_f32(vec![64, 128]);
     let values = dag.add_node(
+        decl,
         RiscOp::Load {
             name: "table".into(),
         },
@@ -283,18 +304,20 @@ fn ordinary_copy_after_sparse_op_remains_post_processing() {
         None,
     );
     let indices = dag.add_node(
+        decl,
         RiscOp::Load { name: "idx".into() },
         vec![],
         indices_ty.clone(),
         None,
     );
     let gathered = dag.add_node(
+        decl,
         RiscOp::Gather { axis: 0 },
         vec![values, indices],
         output_ty.clone(),
         None,
     );
-    let root = dag.add_node(RiscOp::Copy, vec![gathered], output_ty.clone(), None);
+    let root = dag.add_node(decl, RiscOp::Copy, vec![gathered], output_ty.clone(), None);
     dag.add_root(root);
 
     let inputs = vec![input("table", values_ty), input("idx", indices_ty)];
@@ -322,12 +345,14 @@ fn ordinary_copy_after_sparse_op_remains_post_processing() {
 #[test]
 fn helper_with_post_processing_add_after_scatter_add_is_rejected() {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let target_ty = t_f32(vec![10, 4]);
     let indices_ty = t_i64(vec![64]);
     let updates_ty = t_f32(vec![64, 4]);
     let zero_ty = target_ty.clone();
     let output_ty = target_ty.clone();
     let target = dag.add_node(
+        decl,
         RiscOp::Load {
             name: "base".into(),
         },
@@ -336,6 +361,7 @@ fn helper_with_post_processing_add_after_scatter_add_is_rejected() {
         None,
     );
     let indices = dag.add_node(
+        decl,
         RiscOp::Load {
             name: "bin_ids".into(),
         },
@@ -344,12 +370,14 @@ fn helper_with_post_processing_add_after_scatter_add_is_rejected() {
         None,
     );
     let updates = dag.add_node(
+        decl,
         RiscOp::Load { name: "upd".into() },
         vec![],
         updates_ty.clone(),
         None,
     );
     let zero = dag.add_node(
+        decl,
         RiscOp::Load {
             name: "zero".into(),
         },
@@ -358,12 +386,19 @@ fn helper_with_post_processing_add_after_scatter_add_is_rejected() {
         None,
     );
     let scattered = dag.add_node(
+        decl,
         RiscOp::ScatterAdd { axis: 0 },
         vec![target, indices, updates],
         target_ty.clone(),
         None,
     );
-    let root = dag.add_node(RiscOp::Add, vec![scattered, zero], output_ty.clone(), None);
+    let root = dag.add_node(
+        decl,
+        RiscOp::Add,
+        vec![scattered, zero],
+        output_ty.clone(),
+        None,
+    );
     dag.add_root(root);
 
     let inputs = vec![
@@ -386,11 +421,13 @@ fn helper_with_non_load_operand_for_scatter_add_is_rejected() {
     // each sparse-op operand to be a Load referencing a helper
     // input.
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let target_ty = t_f32(vec![10, 4]);
     let indices_ty = t_i64(vec![64]);
     let updates_ty = t_f32(vec![64, 4]);
     let output_ty = target_ty.clone();
     let target = dag.add_node(
+        decl,
         RiscOp::Load {
             name: "base".into(),
         },
@@ -399,6 +436,7 @@ fn helper_with_non_load_operand_for_scatter_add_is_rejected() {
         None,
     );
     let indices = dag.add_node(
+        decl,
         RiscOp::Load {
             name: "bin_ids".into(),
         },
@@ -407,18 +445,21 @@ fn helper_with_non_load_operand_for_scatter_add_is_rejected() {
         None,
     );
     let updates_in = dag.add_node(
+        decl,
         RiscOp::Load { name: "upd".into() },
         vec![],
         updates_ty.clone(),
         None,
     );
     let doubled = dag.add_node(
+        decl,
         RiscOp::Add,
         vec![updates_in, updates_in],
         updates_ty.clone(),
         None,
     );
     let root = dag.add_node(
+        decl,
         RiscOp::ScatterAdd { axis: 0 },
         vec![target, indices, doubled],
         output_ty.clone(),
@@ -444,10 +485,12 @@ fn helper_with_mismatched_indices_precision_is_rejected() {
     // reject (this is not reachable from a well-typed Surf program,
     // but is locked here against ad-hoc DAG construction).
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let values_ty = t_f32(vec![1000, 128]);
     let bogus_indices_ty = t_f32(vec![64]);
     let output_ty = t_f32(vec![64, 128]);
     let values = dag.add_node(
+        decl,
         RiscOp::Load {
             name: "table".into(),
         },
@@ -456,12 +499,14 @@ fn helper_with_mismatched_indices_precision_is_rejected() {
         None,
     );
     let indices = dag.add_node(
+        decl,
         RiscOp::Load { name: "idx".into() },
         vec![],
         bogus_indices_ty.clone(),
         None,
     );
     let root = dag.add_node(
+        decl,
         RiscOp::Gather { axis: 0 },
         vec![values, indices],
         output_ty.clone(),
@@ -482,6 +527,7 @@ fn helper_with_mismatched_payload_precision_is_rejected() {
     // ScatterAdd's `updates` is f64 but `target` is f32. The
     // summarizer requires all payload precisions to match.
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let target_ty = t_f32(vec![10, 4]);
     let indices_ty = t_i64(vec![64]);
     let bogus_updates_ty = TensorType {
@@ -490,6 +536,7 @@ fn helper_with_mismatched_payload_precision_is_rejected() {
     };
     let output_ty = target_ty.clone();
     let target = dag.add_node(
+        decl,
         RiscOp::Load {
             name: "base".into(),
         },
@@ -498,6 +545,7 @@ fn helper_with_mismatched_payload_precision_is_rejected() {
         None,
     );
     let indices = dag.add_node(
+        decl,
         RiscOp::Load {
             name: "bin_ids".into(),
         },
@@ -506,12 +554,14 @@ fn helper_with_mismatched_payload_precision_is_rejected() {
         None,
     );
     let updates = dag.add_node(
+        decl,
         RiscOp::Load { name: "upd".into() },
         vec![],
         bogus_updates_ty.clone(),
         None,
     );
     let root = dag.add_node(
+        decl,
         RiscOp::ScatterAdd { axis: 0 },
         vec![target, indices, updates],
         output_ty.clone(),
@@ -538,6 +588,7 @@ fn helper_with_wildcard_dim_is_rejected() {
     // string name; the recognizer rejects so contract assertions
     // do not collapse distinct unknown axes onto a single symbol.
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let wildcard_values_ty = TensorType {
         dims: vec![
             DimInfo::Named("*".to_string(), None),
@@ -551,6 +602,7 @@ fn helper_with_wildcard_dim_is_rejected() {
         precision: Prim::F32,
     };
     let values = dag.add_node(
+        decl,
         RiscOp::Load {
             name: "table".into(),
         },
@@ -559,12 +611,14 @@ fn helper_with_wildcard_dim_is_rejected() {
         None,
     );
     let indices = dag.add_node(
+        decl,
         RiscOp::Load { name: "idx".into() },
         vec![],
         indices_ty.clone(),
         None,
     );
     let root = dag.add_node(
+        decl,
         RiscOp::Gather { axis: 0 },
         vec![values, indices],
         output_ty.clone(),
@@ -586,10 +640,12 @@ fn helper_with_multiple_roots_is_rejected() {
     // helper (e.g. compute both gather and a sibling sum) cannot be
     // condensed into a single sparse-op summary.
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let values_ty = t_f32(vec![1000, 128]);
     let indices_ty = t_i64(vec![64]);
     let output_ty = t_f32(vec![64, 128]);
     let values = dag.add_node(
+        decl,
         RiscOp::Load {
             name: "table".into(),
         },
@@ -598,18 +654,21 @@ fn helper_with_multiple_roots_is_rejected() {
         None,
     );
     let indices = dag.add_node(
+        decl,
         RiscOp::Load { name: "idx".into() },
         vec![],
         indices_ty.clone(),
         None,
     );
     let root_a = dag.add_node(
+        decl,
         RiscOp::Gather { axis: 0 },
         vec![values, indices],
         output_ty.clone(),
         None,
     );
     let root_b = dag.add_node(
+        decl,
         RiscOp::Gather { axis: 0 },
         vec![values, indices],
         output_ty.clone(),

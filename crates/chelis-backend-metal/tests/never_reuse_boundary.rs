@@ -29,7 +29,9 @@ fn virtual_matmul_nodes_are_excluded_from_the_physical_plan() {
         precision: Prim::F32,
     };
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let left = dag.add_node(
+        decl,
         RiscOp::Load {
             name: "left".into(),
         },
@@ -38,6 +40,7 @@ fn virtual_matmul_nodes_are_excluded_from_the_physical_plan() {
         None,
     );
     let right = dag.add_node(
+        decl,
         RiscOp::Load {
             name: "right".into(),
         },
@@ -46,6 +49,7 @@ fn virtual_matmul_nodes_are_excluded_from_the_physical_plan() {
         None,
     );
     let expand_left = dag.add_node(
+        decl,
         RiscOp::Expand {
             axis: 2,
             size: RtDim::Lit(4),
@@ -55,6 +59,7 @@ fn virtual_matmul_nodes_are_excluded_from_the_physical_plan() {
         None,
     );
     let expand_right = dag.add_node(
+        decl,
         RiscOp::Expand {
             axis: 0,
             size: RtDim::Lit(2),
@@ -63,8 +68,15 @@ fn virtual_matmul_nodes_are_excluded_from_the_physical_plan() {
         cube.clone(),
         None,
     );
-    let multiply = dag.add_node(RiscOp::Mul, vec![expand_left, expand_right], cube, None);
+    let multiply = dag.add_node(
+        decl,
+        RiscOp::Mul,
+        vec![expand_left, expand_right],
+        cube,
+        None,
+    );
     let output = dag.add_node(
+        decl,
         RiscOp::Sum {
             axis: 1,
             accumulator: Prim::F32,
@@ -92,9 +104,22 @@ fn virtual_matmul_nodes_are_excluded_from_the_physical_plan() {
 #[test]
 fn reusable_hint_still_projects_distinct_metal_allocations() {
     let mut dag = Dag::new();
-    let input = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vector(4), None);
-    let scale = dag.add_node(RiscOp::synth_const(Prim::F32, 2.0), vec![], vector(4), None);
-    let output = dag.add_node(RiscOp::Add, vec![input, scale], vector(4), None);
+    let decl = dag.declare("test");
+    let input = dag.add_node(
+        decl,
+        RiscOp::Load { name: "x".into() },
+        vec![],
+        vector(4),
+        None,
+    );
+    let scale = dag.add_node(
+        decl,
+        RiscOp::synth_const(Prim::F32, 2.0),
+        vec![],
+        vector(4),
+        None,
+    );
+    let output = dag.add_node(decl, RiscOp::Add, vec![input, scale], vector(4), None);
     dag.set_reusable_input(output, input);
     dag.add_root(output);
 
@@ -121,11 +146,13 @@ fn reusable_hint_still_projects_distinct_metal_allocations() {
 #[test]
 fn unsupported_lowering_is_a_typed_error_not_an_abort_artifact() {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let rank_two = TensorType {
         dims: vec![DimInfo::Lit(2), DimInfo::Lit(2)],
         precision: Prim::F32,
     };
     let left = dag.add_node(
+        decl,
         RiscOp::Load {
             name: "left".into(),
         },
@@ -134,6 +161,7 @@ fn unsupported_lowering_is_a_typed_error_not_an_abort_artifact() {
         None,
     );
     let right = dag.add_node(
+        decl,
         RiscOp::Load {
             name: "right".into(),
         },
@@ -141,7 +169,7 @@ fn unsupported_lowering_is_a_typed_error_not_an_abort_artifact() {
         rank_two.clone(),
         None,
     );
-    let output = dag.add_node(RiscOp::Add, vec![left, right], rank_two, None);
+    let output = dag.add_node(decl, RiscOp::Add, vec![left, right], rank_two, None);
     dag.add_root(output);
 
     let error = support::try_codegen_metal(&dag, "rank_two_add").unwrap_err();

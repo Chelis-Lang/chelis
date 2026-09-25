@@ -8313,8 +8313,15 @@ mod tests {
         let ty = tensor_ty(&[1], Prim::Int64);
 
         let mut direct = Dag::new();
-        let x = direct.add_node(RiscOp::Load { name: "x".into() }, vec![], ty.clone(), None);
-        let out = direct.add_node(RiscOp::Abs, vec![x], ty.clone(), None);
+        let direct_decl = direct.declare("test");
+        let x = direct.add_node(
+            direct_decl,
+            RiscOp::Load { name: "x".into() },
+            vec![],
+            ty.clone(),
+            None,
+        );
+        let out = direct.add_node(direct_decl, RiscOp::Abs, vec![x], ty.clone(), None);
         direct.set_roots(vec![out]);
         let c =
             emit_test_dag(&direct, "integer_abs").expect("direct integer abs has a typed C kernel");
@@ -8323,8 +8330,16 @@ mod tests {
         assert!(!c.contains("fabsf(__in_a_"));
 
         let mut fused = Dag::new();
-        let x = fused.add_node(RiscOp::Load { name: "x".into() }, vec![], ty.clone(), None);
+        let fused_decl = fused.declare("test");
+        let x = fused.add_node(
+            fused_decl,
+            RiscOp::Load { name: "x".into() },
+            vec![],
+            ty.clone(),
+            None,
+        );
         let out = fused.add_node(
+            fused_decl,
             RiscOp::FusedElem {
                 ops: vec![FusedStep {
                     op: FusedStepOp::Abs,
@@ -8351,7 +8366,9 @@ mod tests {
     #[test]
     fn const_emits_alloc_and_fill() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         dag.add_node(
+            decl,
             RiscOp::synth_const(scalar_f32().precision, 3.0),
             vec![],
             scalar_f32(),
@@ -8377,9 +8394,17 @@ mod tests {
         let ty = tensor_ty(&[1], Prim::Int64);
         let out_ty = tensor_ty(&[3], Prim::Int64);
         let mut dag = Dag::new();
-        let input = dag.add_node(RiscOp::synth_const(Prim::Int64, 7.0), vec![], ty, None);
+        let decl = dag.declare("test");
+        let input = dag.add_node(
+            decl,
+            RiscOp::synth_const(Prim::Int64, 7.0),
+            vec![],
+            ty,
+            None,
+        );
         let fill = chelis_types::scalar_from_i64("pad", Prim::Int64, exact).unwrap();
         let padded = dag.add_node(
+            decl,
             RiscOp::pad(vec![(RtDim::Lit(1), RtDim::Lit(1))], fill),
             vec![input],
             out_ty,
@@ -8414,7 +8439,9 @@ mod tests {
             (i64::MAX, "INT64_C(9223372036854775807)"),
         ] {
             let mut dag = Dag::new();
+            let decl = dag.declare("test");
             let constant = dag.add_node(
+                decl,
                 RiscOp::Const {
                     value: chelis_types::scalar_from_i64("const", Prim::Int64, value).unwrap(),
                 },
@@ -8442,7 +8469,9 @@ mod tests {
         ] {
             let ty = tensor_ty(&[1], Prim::Int64);
             let mut dag = Dag::new();
+            let decl = dag.declare("test");
             let input = dag.add_node(
+                decl,
                 RiscOp::synth_const(Prim::Int64, 7.0),
                 vec![],
                 ty.clone(),
@@ -8450,6 +8479,7 @@ mod tests {
             );
             let fill = chelis_types::scalar_from_i64("pad", Prim::Int64, value).unwrap();
             let padded = dag.add_node(
+                decl,
                 RiscOp::pad(vec![(RtDim::Lit(1), RtDim::Lit(1))], fill),
                 vec![input],
                 tensor_ty(&[3], Prim::Int64),
@@ -8469,19 +8499,22 @@ mod tests {
     #[test]
     fn add_emits_stride_aware_loop() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let a = dag.add_node(
+            decl,
             RiscOp::synth_const(scalar_f32().precision, 1.0),
             vec![],
             scalar_f32(),
             None,
         );
         let b = dag.add_node(
+            decl,
             RiscOp::synth_const(scalar_f32().precision, 2.0),
             vec![],
             scalar_f32(),
             None,
         );
-        dag.add_node(RiscOp::Add, vec![a, b], scalar_f32(), None);
+        dag.add_node(decl, RiscOp::Add, vec![a, b], scalar_f32(), None);
         let c = emit_test_dag(&dag, "test_fn").unwrap();
         assert!(c.contains("chelis_tensor_elementwise_index_step_for_shape"));
         assert!(c.contains("i * t2_input0_step"));
@@ -8491,13 +8524,15 @@ mod tests {
     #[test]
     fn neg_emits_unary_minus() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let a = dag.add_node(
+            decl,
             RiscOp::synth_const(scalar_f32().precision, 5.0),
             vec![],
             scalar_f32(),
             None,
         );
-        dag.add_node(RiscOp::Neg, vec![a], scalar_f32(), None);
+        dag.add_node(decl, RiscOp::Neg, vec![a], scalar_f32(), None);
         let c = emit_test_dag(&dag, "test_fn").unwrap();
         // The slow (non-contiguous) path emits a typed pointer cast then negates.
         assert!(c.contains("((float*)t0_data)[idx]"));
@@ -8506,13 +8541,15 @@ mod tests {
     #[test]
     fn exp_emits_expf() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let a = dag.add_node(
+            decl,
             RiscOp::synth_const(scalar_f32().precision, 0.0),
             vec![],
             scalar_f32(),
             None,
         );
-        dag.add_node(RiscOp::Exp, vec![a], scalar_f32(), None);
+        dag.add_node(decl, RiscOp::Exp, vec![a], scalar_f32(), None);
         let c = emit_test_dag(&dag, "test_fn").unwrap();
         assert!(c.contains("expf("));
     }
@@ -8520,13 +8557,15 @@ mod tests {
     #[test]
     fn log_emits_logf() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let a = dag.add_node(
+            decl,
             RiscOp::synth_const(scalar_f32().precision, 1.0),
             vec![],
             scalar_f32(),
             None,
         );
-        dag.add_node(RiscOp::Log, vec![a], scalar_f32(), None);
+        dag.add_node(decl, RiscOp::Log, vec![a], scalar_f32(), None);
         let c = emit_test_dag(&dag, "test_fn").unwrap();
         assert!(c.contains("logf("));
     }
@@ -8534,13 +8573,15 @@ mod tests {
     #[test]
     fn sin_emits_sinf() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let a = dag.add_node(
+            decl,
             RiscOp::synth_const(scalar_f32().precision, 0.0),
             vec![],
             scalar_f32(),
             None,
         );
-        dag.add_node(RiscOp::Sin, vec![a], scalar_f32(), None);
+        dag.add_node(decl, RiscOp::Sin, vec![a], scalar_f32(), None);
         let c = emit_test_dag(&dag, "test_fn").unwrap();
         assert!(c.contains("sinf("));
     }
@@ -8548,13 +8589,15 @@ mod tests {
     #[test]
     fn sqrt_emits_sqrtf() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let a = dag.add_node(
+            decl,
             RiscOp::synth_const(scalar_f32().precision, 4.0),
             vec![],
             scalar_f32(),
             None,
         );
-        dag.add_node(RiscOp::Sqrt, vec![a], scalar_f32(), None);
+        dag.add_node(decl, RiscOp::Sqrt, vec![a], scalar_f32(), None);
         let c = emit_test_dag(&dag, "test_fn").unwrap();
         assert!(c.contains("sqrtf("));
     }
@@ -8562,19 +8605,23 @@ mod tests {
     #[test]
     fn cmplt_emits_canonical_bool8() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let a = dag.add_node(
+            decl,
             RiscOp::synth_const(scalar_f32().precision, 1.0),
             vec![],
             scalar_f32(),
             None,
         );
         let b = dag.add_node(
+            decl,
             RiscOp::synth_const(scalar_f32().precision, 2.0),
             vec![],
             scalar_f32(),
             None,
         );
         dag.add_node(
+            decl,
             RiscOp::Compare(ComparisonKind::CmpLt),
             vec![a, b],
             TensorType {
@@ -8592,19 +8639,22 @@ mod tests {
     #[test]
     fn omp_pragma_in_elementwise() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let a = dag.add_node(
+            decl,
             RiscOp::synth_const(scalar_f32().precision, 1.0),
             vec![],
             scalar_f32(),
             None,
         );
         let b = dag.add_node(
+            decl,
             RiscOp::synth_const(scalar_f32().precision, 2.0),
             vec![],
             scalar_f32(),
             None,
         );
-        dag.add_node(RiscOp::Add, vec![a, b], scalar_f32(), None);
+        dag.add_node(decl, RiscOp::Add, vec![a, b], scalar_f32(), None);
         let c = emit_test_dag(&dag, "test_fn").unwrap();
         assert!(c.contains("#pragma omp parallel for"));
     }
@@ -8612,13 +8662,16 @@ mod tests {
     #[test]
     fn sum_emits_reduction_loop() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let a = dag.add_node(
+            decl,
             RiscOp::synth_const(vec_f32(4).precision, 1.0),
             vec![],
             vec_f32(4),
             None,
         );
         dag.add_node(
+            decl,
             RiscOp::Sum {
                 axis: 0,
                 accumulator: chelis_types::types::Prim::F32,
@@ -8636,10 +8689,17 @@ mod tests {
     #[test]
     fn copy_materializes_and_drop_releases_exact_descriptor_once() {
         let mut dag = Dag::new();
-        let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_f32(4), None);
-        let copy = dag.add_node(RiscOp::Copy, vec![x], vec_f32(4), None);
-        let disposable = dag.add_node(RiscOp::Copy, vec![x], vec_f32(4), None);
-        dag.add_node(RiscOp::Drop, vec![disposable], vec_f32(4), None);
+        let decl = dag.declare("test");
+        let x = dag.add_node(
+            decl,
+            RiscOp::Load { name: "x".into() },
+            vec![],
+            vec_f32(4),
+            None,
+        );
+        let copy = dag.add_node(decl, RiscOp::Copy, vec![x], vec_f32(4), None);
+        let disposable = dag.add_node(decl, RiscOp::Copy, vec![x], vec_f32(4), None);
+        dag.add_node(decl, RiscOp::Drop, vec![disposable], vec_f32(4), None);
         dag.add_root(copy);
 
         let c = emit_test_dag(&dag, "test_copy_drop").unwrap();
@@ -8660,15 +8720,18 @@ mod tests {
     #[test]
     fn exact_same_byte_slot_reuse_repurposes_descriptor_metadata() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let first_ty = tensor_ty(&[2, 2], Prim::F32);
         let first = dag.add_node(
+            decl,
             RiscOp::synth_const(Prim::F32, 1.0),
             vec![],
             first_ty.clone(),
             None,
         );
-        dag.add_node(RiscOp::Neg, vec![first], first_ty, None);
+        dag.add_node(decl, RiscOp::Neg, vec![first], first_ty, None);
         let output = dag.add_node(
+            decl,
             RiscOp::synth_const(Prim::F32, 3.0),
             vec![],
             vec_f32(4),
@@ -8688,9 +8751,16 @@ mod tests {
     #[test]
     fn borrowed_drop_is_a_logical_discard_without_a_runtime_release() {
         let mut dag = Dag::new();
-        let borrowed = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_f32(4), None);
-        dag.add_node(RiscOp::Drop, vec![borrowed], vec_f32(4), None);
-        let output = dag.add_node(RiscOp::Copy, vec![borrowed], vec_f32(4), None);
+        let decl = dag.declare("test");
+        let borrowed = dag.add_node(
+            decl,
+            RiscOp::Load { name: "x".into() },
+            vec![],
+            vec_f32(4),
+            None,
+        );
+        dag.add_node(decl, RiscOp::Drop, vec![borrowed], vec_f32(4), None);
+        let output = dag.add_node(decl, RiscOp::Copy, vec![borrowed], vec_f32(4), None);
         dag.add_root(output);
 
         let c = emit_test_dag(&dag, "test_borrowed_drop").unwrap();
@@ -8701,13 +8771,21 @@ mod tests {
     #[test]
     fn max_reduce_emits_nan_propagating_max() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let a = dag.add_node(
+            decl,
             RiscOp::synth_const(vec_f32(4).precision, 1.0),
             vec![],
             vec_f32(4),
             None,
         );
-        dag.add_node(RiscOp::MaxReduce { axis: 0 }, vec![a], scalar_f32(), None);
+        dag.add_node(
+            decl,
+            RiscOp::MaxReduce { axis: 0 },
+            vec![a],
+            scalar_f32(),
+            None,
+        );
         let c = emit_test_dag(&dag, "test_fn").unwrap();
         // [05-OP-12] selects the first NaN, otherwise the first strictly
         // greatest stored value. Source-index selection preserves the exact
@@ -8734,13 +8812,16 @@ mod tests {
             (ReduceWindowKind::Min, "candidate < best_value", "fminf("),
         ] {
             let mut dag = Dag::new();
+            let decl = dag.declare("test");
             let a = dag.add_node(
+                decl,
                 RiscOp::synth_const(vec_f32(4).precision, 1.0),
                 vec![],
                 vec_f32(4),
                 None,
             );
             dag.add_node(
+                decl,
                 RiscOp::ReduceWindow {
                     reducer,
                     window_shape: vec![2],
@@ -8766,19 +8847,22 @@ mod tests {
     #[test]
     fn mul_emits_star_op() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let a = dag.add_node(
+            decl,
             RiscOp::synth_const(scalar_f32().precision, 3.0),
             vec![],
             scalar_f32(),
             None,
         );
         let b = dag.add_node(
+            decl,
             RiscOp::synth_const(scalar_f32().precision, 4.0),
             vec![],
             scalar_f32(),
             None,
         );
-        dag.add_node(RiscOp::Mul, vec![a, b], scalar_f32(), None);
+        dag.add_node(decl, RiscOp::Mul, vec![a, b], scalar_f32(), None);
         let c = emit_test_dag(&dag, "test_fn").unwrap();
         assert!(c.contains("*"));
     }
@@ -8790,19 +8874,22 @@ mod tests {
             (RiscOp::MinElem, "<=", ["fminf(", "fmin("]),
         ] {
             let mut dag = Dag::new();
+            let decl = dag.declare("test");
             let a = dag.add_node(
+                decl,
                 RiscOp::synth_const(scalar_f32().precision, 1.0),
                 vec![],
                 scalar_f32(),
                 None,
             );
             let b = dag.add_node(
+                decl,
                 RiscOp::synth_const(scalar_f32().precision, 2.0),
                 vec![],
                 scalar_f32(),
                 None,
             );
-            dag.add_node(op, vec![a, b], scalar_f32(), None);
+            dag.add_node(decl, op, vec![a, b], scalar_f32(), None);
             let c = emit_test_dag(&dag, "test_fn").unwrap();
             assert!(c.contains("isnan(__in_a_2[i])"), "{c}");
             assert!(c.contains("!isnan(__in_b_2[i])"), "{c}");
@@ -8823,13 +8910,16 @@ mod tests {
     #[test]
     fn reshape_materializes_contiguous_storage() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let a = dag.add_node(
+            decl,
             RiscOp::synth_const(vec_f32(6).precision, 1.0),
             vec![],
             vec_f32(6),
             None,
         );
         dag.add_node(
+            decl,
             RiscOp::Reshape {
                 new_shape: vec![RtDim::Lit(2), RtDim::Lit(3)],
             },
@@ -8845,13 +8935,16 @@ mod tests {
     #[test]
     fn permute_materializes_the_axis_mapping() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let a = dag.add_node(
+            decl,
             RiscOp::synth_const(mat_f32(2, 3).precision, 1.0),
             vec![],
             mat_f32(2, 3),
             None,
         );
         dag.add_node(
+            decl,
             RiscOp::Permute { axes: vec![1, 0] },
             vec![a],
             mat_f32(3, 2),
@@ -8867,13 +8960,16 @@ mod tests {
     #[test]
     fn expand_materializes_broadcast_coordinates() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let a = dag.add_node(
+            decl,
             RiscOp::synth_const(vec_f32(1).precision, 1.0),
             vec![],
             vec_f32(1),
             None,
         );
         dag.add_node(
+            decl,
             RiscOp::Expand {
                 axis: 0,
                 size: chelis_ir::dag::RtDim::Lit(4),
@@ -8892,13 +8988,16 @@ mod tests {
     #[test]
     fn store_is_alias() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let a = dag.add_node(
+            decl,
             RiscOp::synth_const(scalar_f32().precision, 1.0),
             vec![],
             scalar_f32(),
             None,
         );
         dag.add_node(
+            decl,
             RiscOp::Store { name: "out".into() },
             vec![a],
             scalar_f32(),
@@ -8923,7 +9022,9 @@ mod tests {
     fn checked_cast_parallel_loop_reduces_the_lowest_trap_index_while_cast_trunc_is_serial() {
         fn emit(op: RiscOp, precision: Prim) -> String {
             let mut dag = Dag::new();
+            let decl = dag.declare("test");
             let a = dag.add_node(
+                decl,
                 RiscOp::synth_const(scalar_f32().precision, 1.0),
                 vec![],
                 scalar_f32(),
@@ -8933,7 +9034,7 @@ mod tests {
                 dims: vec![],
                 precision,
             };
-            dag.add_node(op, vec![a], dst_ty, None);
+            dag.add_node(decl, op, vec![a], dst_ty, None);
             emit_test_dag(&dag, "test_fn").expect("emit")
         }
 
@@ -9000,8 +9101,10 @@ mod tests {
         for source in active {
             for target in active {
                 let mut dag = Dag::new();
+                let decl = dag.declare("test");
                 let source_ty = tensor_ty(&[2], source);
                 let input = dag.add_node(
+                    decl,
                     RiscOp::Load {
                         name: "input".into(),
                     },
@@ -9010,6 +9113,7 @@ mod tests {
                     None,
                 );
                 let output = dag.add_node(
+                    decl,
                     RiscOp::Cast {
                         new_precision: target,
                     },
@@ -9049,7 +9153,9 @@ mod tests {
         // typed source read and C-level target conversion.
         // See `docs/investigations/cbackend_cast_memcpy_diagnosis.md`.
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let a = dag.add_node(
+            decl,
             RiscOp::synth_const(scalar_f32().precision, 1.0),
             vec![],
             scalar_f32(),
@@ -9060,6 +9166,7 @@ mod tests {
             precision: Prim::F64,
         };
         dag.add_node(
+            decl,
             RiscOp::Cast {
                 new_precision: Prim::F64,
             },
@@ -9085,8 +9192,16 @@ mod tests {
     #[test]
     fn realize_emits_materialization_loop() {
         let mut dag = Dag::new();
-        let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_f32(6), None);
+        let decl = dag.declare("test");
+        let x = dag.add_node(
+            decl,
+            RiscOp::Load { name: "x".into() },
+            vec![],
+            vec_f32(6),
+            None,
+        );
         let s = dag.add_node(
+            decl,
             RiscOp::Stride {
                 strides: vec![RtDim::Lit(2)],
             },
@@ -9094,7 +9209,7 @@ mod tests {
             vec_f32(3),
             None,
         );
-        dag.add_node(RiscOp::Realize, vec![s], vec_f32(3), None);
+        dag.add_node(decl, RiscOp::Realize, vec![s], vec_f32(3), None);
 
         let c = emit_test_dag(&dag, "test_fn").unwrap();
         assert!(c.contains("chelis_tensor *t2 = chelis_alloc("));
@@ -9105,7 +9220,9 @@ mod tests {
     #[test]
     fn load_emits_input_reference() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         dag.add_node(
+            decl,
             RiscOp::Load { name: "x".into() },
             vec![],
             scalar_f32(),
@@ -9118,19 +9235,22 @@ mod tests {
     #[test]
     fn repeated_load_names_share_one_input_slot() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let x0 = dag.add_node(
+            decl,
             RiscOp::Load { name: "x".into() },
             vec![],
             scalar_f32(),
             None,
         );
         let x1 = dag.add_node(
+            decl,
             RiscOp::Load { name: "x".into() },
             vec![],
             scalar_f32(),
             None,
         );
-        dag.add_node(RiscOp::Add, vec![x0, x1], scalar_f32(), None);
+        dag.add_node(decl, RiscOp::Add, vec![x0, x1], scalar_f32(), None);
         let c = emit_test_dag(&dag, "test_fn").unwrap();
         assert!(c.contains("if (n_in != 1)"));
         assert!(c.contains("chelis_tensor *t0 = inputs[0];"));
@@ -9140,19 +9260,23 @@ mod tests {
     #[test]
     fn input_labels_follow_first_load_occurrence() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let b0 = dag.add_node(
+            decl,
             RiscOp::Load { name: "b".into() },
             vec![],
             scalar_f32(),
             None,
         );
         let a = dag.add_node(
+            decl,
             RiscOp::Load { name: "a".into() },
             vec![],
             scalar_f32(),
             None,
         );
         let b1 = dag.add_node(
+            decl,
             RiscOp::Load { name: "b".into() },
             vec![],
             scalar_f32(),
@@ -9167,7 +9291,9 @@ mod tests {
     #[test]
     fn function_signature_correct() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         dag.add_node(
+            decl,
             RiscOp::synth_const(scalar_f32().precision, 1.0),
             vec![],
             scalar_f32(),
@@ -9182,7 +9308,9 @@ mod tests {
     #[test]
     fn includes_runtime_header() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         dag.add_node(
+            decl,
             RiscOp::synth_const(scalar_f32().precision, 1.0),
             vec![],
             scalar_f32(),
@@ -9195,13 +9323,16 @@ mod tests {
     #[test]
     fn pad_emits_fill_and_copy() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let a = dag.add_node(
+            decl,
             RiscOp::synth_const(vec_f32(3).precision, 1.0),
             vec![],
             vec_f32(3),
             None,
         );
         dag.add_node(
+            decl,
             RiscOp::zero_pad(Prim::F32, vec![(RtDim::Lit(1), RtDim::Lit(1))]),
             vec![a],
             vec_f32(5),
@@ -9217,13 +9348,16 @@ mod tests {
     #[test]
     fn shrink_emits_offset_copy() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let a = dag.add_node(
+            decl,
             RiscOp::synth_const(vec_f32(5).precision, 1.0),
             vec![],
             vec_f32(5),
             None,
         );
         dag.add_node(
+            decl,
             RiscOp::Shrink {
                 bounds: vec![(RtDim::Lit(1), RtDim::Lit(4))],
             },
@@ -9244,13 +9378,16 @@ mod tests {
     #[should_panic(expected = "unresolved ToEnd sentinel")]
     fn shrink_to_end_sentinel_rejected_by_c_backend() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let a = dag.add_node(
+            decl,
             RiscOp::synth_const(vec_f32(5).precision, 1.0),
             vec![],
             vec_f32(5),
             None,
         );
         dag.add_node(
+            decl,
             RiscOp::Shrink {
                 bounds: vec![(RtDim::Lit(0), RtDim::ToEnd)],
             },
@@ -9264,13 +9401,16 @@ mod tests {
     #[test]
     fn stride_materializes_stepped_coordinates() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let a = dag.add_node(
+            decl,
             RiscOp::synth_const(vec_f32(4).precision, 1.0),
             vec![],
             vec_f32(4),
             None,
         );
         dag.add_node(
+            decl,
             RiscOp::Stride {
                 strides: vec![RtDim::Lit(2)],
             },
@@ -9286,26 +9426,30 @@ mod tests {
     #[test]
     fn add_then_mul_chains() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let a = dag.add_node(
+            decl,
             RiscOp::synth_const(scalar_f32().precision, 1.0),
             vec![],
             scalar_f32(),
             None,
         );
         let b = dag.add_node(
+            decl,
             RiscOp::synth_const(scalar_f32().precision, 2.0),
             vec![],
             scalar_f32(),
             None,
         );
-        let c = dag.add_node(RiscOp::Add, vec![a, b], scalar_f32(), None);
+        let c = dag.add_node(decl, RiscOp::Add, vec![a, b], scalar_f32(), None);
         let d = dag.add_node(
+            decl,
             RiscOp::synth_const(scalar_f32().precision, 3.0),
             vec![],
             scalar_f32(),
             None,
         );
-        dag.add_node(RiscOp::Mul, vec![c, d], scalar_f32(), None);
+        dag.add_node(decl, RiscOp::Mul, vec![c, d], scalar_f32(), None);
         let code = emit_test_dag(&dag, "test_fn").unwrap();
         // t2 is add result, t4 is mul result
         assert!(code.contains("t2_data"));
@@ -9315,19 +9459,22 @@ mod tests {
     #[test]
     fn vector_add_uses_correct_shape() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let a = dag.add_node(
+            decl,
             RiscOp::synth_const(vec_f32(4).precision, 1.0),
             vec![],
             vec_f32(4),
             None,
         );
         let b = dag.add_node(
+            decl,
             RiscOp::synth_const(vec_f32(4).precision, 2.0),
             vec![],
             vec_f32(4),
             None,
         );
-        dag.add_node(RiscOp::Add, vec![a, b], vec_f32(4), None);
+        dag.add_node(decl, RiscOp::Add, vec![a, b], vec_f32(4), None);
         let c = emit_test_dag(&dag, "test_fn").unwrap();
         assert!(c.contains("(int64_t[]){ 4 }"));
     }
@@ -9335,13 +9482,16 @@ mod tests {
     #[test]
     fn sum_then_neg_chains() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let a = dag.add_node(
+            decl,
             RiscOp::synth_const(vec_f32(3).precision, 2.0),
             vec![],
             vec_f32(3),
             None,
         );
         let s = dag.add_node(
+            decl,
             RiscOp::Sum {
                 axis: 0,
                 accumulator: chelis_types::types::Prim::F32,
@@ -9350,7 +9500,7 @@ mod tests {
             scalar_f32(),
             None,
         );
-        dag.add_node(RiscOp::Neg, vec![s], scalar_f32(), None);
+        dag.add_node(decl, RiscOp::Neg, vec![s], scalar_f32(), None);
         let c = emit_test_dag(&dag, "test_fn").unwrap();
         assert!(c.contains("__sum_level_"));
         assert!(!c.contains("chelis_sum_f32("));
@@ -9361,7 +9511,9 @@ mod tests {
     #[test]
     fn load_is_borrowed_not_freed() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         dag.add_node(
+            decl,
             RiscOp::Load { name: "x".into() },
             vec![],
             scalar_f32(),
@@ -9375,13 +9527,16 @@ mod tests {
     #[test]
     fn roots_are_emitted_as_multiple_outputs() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let a = dag.add_node(
+            decl,
             RiscOp::synth_const(scalar_f32().precision, 1.0),
             vec![],
             scalar_f32(),
             None,
         );
         let b = dag.add_node(
+            decl,
             RiscOp::synth_const(scalar_f32().precision, 2.0),
             vec![],
             scalar_f32(),
@@ -9398,19 +9553,23 @@ mod tests {
     #[test]
     fn bool_outputs_use_bool_dtype() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let a = dag.add_node(
+            decl,
             RiscOp::synth_const(scalar_f32().precision, 1.0),
             vec![],
             scalar_f32(),
             None,
         );
         let b = dag.add_node(
+            decl,
             RiscOp::synth_const(scalar_f32().precision, 2.0),
             vec![],
             scalar_f32(),
             None,
         );
         dag.add_node(
+            decl,
             RiscOp::Compare(ComparisonKind::CmpLt),
             vec![a, b],
             TensorType {
@@ -9426,11 +9585,13 @@ mod tests {
     #[test]
     fn path_sensitive_uniform_reads_uint8_bool() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let rank0 = |precision| TensorType {
             dims: vec![],
             precision,
         };
         let template = dag.add_node(
+            decl,
             RiscOp::Load {
                 name: "template".into(),
             },
@@ -9439,31 +9600,42 @@ mod tests {
             None,
         );
         let activation = dag.add_node(
+            decl,
             RiscOp::synth_const(Prim::Bool, 1.0),
             vec![],
             rank0(Prim::Bool),
             None,
         );
         let seed = dag.add_node(
+            decl,
             RiscOp::synth_const(Prim::Int64, 11.0),
             vec![],
             rank0(Prim::Int64),
             None,
         );
         let low = dag.add_node(
+            decl,
             RiscOp::synth_const(Prim::F32, 0.0),
             vec![],
             rank0(Prim::F32),
             None,
         );
         let high = dag.add_node(
+            decl,
             RiscOp::synth_const(Prim::F32, 1.0),
             vec![],
             rank0(Prim::F32),
             None,
         );
-        let key = dag.add_node(RiscOp::KeyFromSeed, vec![seed], rank0(Prim::Key), None);
+        let key = dag.add_node(
+            decl,
+            RiscOp::KeyFromSeed,
+            vec![seed],
+            rank0(Prim::Key),
+            None,
+        );
         let draw = dag.add_node(
+            decl,
             RiscOp::UniformLike,
             vec![template, low, high, key, activation],
             vec_f32(2),
@@ -9518,7 +9690,9 @@ mod tests {
     fn int64_const_does_not_panic() {
         // Regression: dtype_macro used to panic for i64 tensors.
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         dag.add_node(
+            decl,
             RiscOp::synth_const(
                 TensorType {
                     dims: vec![],
@@ -9553,7 +9727,9 @@ mod tests {
         // emit CHELIS_DTYPE_F64 and chelis_fill_f64 (not chelis_fill_f32, which would
         // silently downcast).
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         dag.add_node(
+            decl,
             RiscOp::synth_const(
                 TensorType {
                     dims: vec![DimInfo::Lit(4)],
@@ -9591,23 +9767,26 @@ mod tests {
         // Regression: binary elementwise over f64 tensors must emit double*
         // typed pointer casts so gcc reads 8 bytes per element.
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let ty = TensorType {
             dims: vec![DimInfo::Lit(4)],
             precision: Prim::F64,
         };
         let a = dag.add_node(
+            decl,
             RiscOp::synth_const(ty.precision, 1.0),
             vec![],
             ty.clone(),
             None,
         );
         let b = dag.add_node(
+            decl,
             RiscOp::synth_const(ty.precision, 2.0),
             vec![],
             ty.clone(),
             None,
         );
-        dag.add_node(RiscOp::Add, vec![a, b], ty, None);
+        dag.add_node(decl, RiscOp::Add, vec![a, b], ty, None);
         let c = emit_test_dag(&dag, "test_fn").unwrap();
         assert!(
             c.contains("CHELIS_DTYPE_F64"),
@@ -9624,17 +9803,19 @@ mod tests {
         // exp(tensor[n, f64]) must route to the double-precision math symbol.
         // Emitting expf() would silently truncate to float and lose precision.
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let ty = TensorType {
             dims: vec![DimInfo::Lit(4)],
             precision: Prim::F64,
         };
         let a = dag.add_node(
+            decl,
             RiscOp::synth_const(ty.precision, 0.0),
             vec![],
             ty.clone(),
             None,
         );
-        dag.add_node(RiscOp::Exp, vec![a], ty, None);
+        dag.add_node(decl, RiscOp::Exp, vec![a], ty, None);
         let verified = crate::testing::verified_dag(&dag, crate::CodegenOptions::default())
             .expect("f64 exp test DAG must verify ownership");
         let c = CEmitter::emit_dag_with_options(
@@ -9660,23 +9841,26 @@ mod tests {
     fn int64_add_does_not_panic() {
         // Regression: binary elementwise over i64 tensors used to panic.
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let ty = TensorType {
             dims: vec![DimInfo::Lit(4)],
             precision: Prim::Int64,
         };
         let a = dag.add_node(
+            decl,
             RiscOp::synth_const(ty.precision, 1.0),
             vec![],
             ty.clone(),
             None,
         );
         let b = dag.add_node(
+            decl,
             RiscOp::synth_const(ty.precision, 2.0),
             vec![],
             ty.clone(),
             None,
         );
-        dag.add_node(RiscOp::Add, vec![a, b], ty, None);
+        dag.add_node(decl, RiscOp::Add, vec![a, b], ty, None);
         let c = emit_test_dag(&dag, "test_fn").unwrap();
         assert!(
             c.contains("CHELIS_DTYPE_I64"),
@@ -9691,19 +9875,23 @@ mod tests {
     #[test]
     fn matmul_pattern_retains_canonical_sum() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let a = dag.add_node(
+            decl,
             RiscOp::synth_const(mat_f32(2, 3).precision, 1.0),
             vec![],
             mat_f32(2, 3),
             None,
         );
         let b = dag.add_node(
+            decl,
             RiscOp::synth_const(mat_f32(3, 4).precision, 1.0),
             vec![],
             mat_f32(3, 4),
             None,
         );
         let ea = dag.add_node(
+            decl,
             RiscOp::Expand {
                 axis: 2,
                 size: chelis_ir::dag::RtDim::Lit(4),
@@ -9716,6 +9904,7 @@ mod tests {
             None,
         );
         let eb = dag.add_node(
+            decl,
             RiscOp::Expand {
                 axis: 0,
                 size: chelis_ir::dag::RtDim::Lit(2),
@@ -9728,6 +9917,7 @@ mod tests {
             None,
         );
         let mul = dag.add_node(
+            decl,
             RiscOp::Mul,
             vec![ea, eb],
             TensorType {
@@ -9737,6 +9927,7 @@ mod tests {
             None,
         );
         dag.add_node(
+            decl,
             RiscOp::Sum {
                 axis: 1,
                 accumulator: chelis_types::types::Prim::F32,
@@ -9759,19 +9950,23 @@ mod tests {
     #[test]
     fn default_codegen_uses_generic_matmul_path() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let a = dag.add_node(
+            decl,
             RiscOp::synth_const(mat_f32(2, 3).precision, 1.0),
             vec![],
             mat_f32(2, 3),
             None,
         );
         let b = dag.add_node(
+            decl,
             RiscOp::synth_const(mat_f32(3, 4).precision, 1.0),
             vec![],
             mat_f32(3, 4),
             None,
         );
         let ea = dag.add_node(
+            decl,
             RiscOp::Expand {
                 axis: 2,
                 size: chelis_ir::dag::RtDim::Lit(4),
@@ -9784,6 +9979,7 @@ mod tests {
             None,
         );
         let eb = dag.add_node(
+            decl,
             RiscOp::Expand {
                 axis: 0,
                 size: chelis_ir::dag::RtDim::Lit(2),
@@ -9796,6 +9992,7 @@ mod tests {
             None,
         );
         let mul = dag.add_node(
+            decl,
             RiscOp::Mul,
             vec![ea, eb],
             TensorType {
@@ -9805,6 +10002,7 @@ mod tests {
             None,
         );
         dag.add_node(
+            decl,
             RiscOp::Sum {
                 axis: 1,
                 accumulator: chelis_types::types::Prim::F32,
@@ -9838,7 +10036,9 @@ mod tests {
         // backend), so the smuggle fixture is a payload-free Load node
         // typed f8e4m3.
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         dag.add_node(
+            decl,
             RiscOp::Load { name: "x".into() },
             vec![],
             TensorType {
@@ -9857,19 +10057,22 @@ mod tests {
     #[test]
     fn binary_add_fast_path_emits_restrict_and_simd() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let a = dag.add_node(
+            decl,
             RiscOp::synth_const(vec_f32(4).precision, 1.0),
             vec![],
             vec_f32(4),
             None,
         );
         let b = dag.add_node(
+            decl,
             RiscOp::synth_const(vec_f32(4).precision, 2.0),
             vec![],
             vec_f32(4),
             None,
         );
-        dag.add_node(RiscOp::Add, vec![a, b], vec_f32(4), None);
+        dag.add_node(decl, RiscOp::Add, vec![a, b], vec_f32(4), None);
         let c = emit_test_dag(&dag, "test_fn").unwrap();
         assert!(
             c.contains("restrict"),
@@ -9889,14 +10092,17 @@ mod tests {
     #[test]
     fn binary_add_with_expanded_input_includes_slow_path() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         // Expand materializes the repeated value into a contiguous [4] tensor.
         let a = dag.add_node(
+            decl,
             RiscOp::synth_const(vec_f32(1).precision, 1.0),
             vec![],
             vec_f32(1),
             None,
         );
         let a_exp = dag.add_node(
+            decl,
             RiscOp::Expand {
                 axis: 0,
                 size: chelis_ir::dag::RtDim::Lit(4),
@@ -9906,12 +10112,13 @@ mod tests {
             None,
         );
         let b = dag.add_node(
+            decl,
             RiscOp::synth_const(vec_f32(4).precision, 2.0),
             vec![],
             vec_f32(4),
             None,
         );
-        dag.add_node(RiscOp::Add, vec![a_exp, b], vec_f32(4), None);
+        dag.add_node(decl, RiscOp::Add, vec![a_exp, b], vec_f32(4), None);
         let c = emit_test_dag(&dag, "test_fn").unwrap();
         // The expanded operand still passes through checked shape validation.
         assert!(
@@ -9929,13 +10136,15 @@ mod tests {
     #[test]
     fn unary_neg_fast_path_emits_restrict_and_simd() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let a = dag.add_node(
+            decl,
             RiscOp::synth_const(vec_f32(4).precision, 5.0),
             vec![],
             vec_f32(4),
             None,
         );
-        dag.add_node(RiscOp::Neg, vec![a], vec_f32(4), None);
+        dag.add_node(decl, RiscOp::Neg, vec![a], vec_f32(4), None);
         let c = emit_test_dag(&dag, "test_fn").unwrap();
         assert!(c.contains("restrict"), "unary fast path must use restrict");
         assert!(
@@ -9953,13 +10162,16 @@ mod tests {
     fn fused_elem_fast_path_emits_restrict_and_simd() {
         use chelis_ir::dag::{FusedInput, FusedStep, FusedStepOp};
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let a = dag.add_node(
+            decl,
             RiscOp::synth_const(vec_f32(4).precision, 1.0),
             vec![],
             vec_f32(4),
             None,
         );
         let b = dag.add_node(
+            decl,
             RiscOp::synth_const(vec_f32(4).precision, 2.0),
             vec![],
             vec_f32(4),
@@ -9970,7 +10182,13 @@ mod tests {
             op: FusedStepOp::Add,
             input_indices: vec![FusedInput::External(0), FusedInput::External(1)],
         }];
-        dag.add_node(RiscOp::FusedElem { ops }, vec![a, b], vec_f32(4), None);
+        dag.add_node(
+            decl,
+            RiscOp::FusedElem { ops },
+            vec![a, b],
+            vec_f32(4),
+            None,
+        );
         let c = emit_test_dag(&dag, "test_fn").unwrap();
         assert!(
             c.contains("restrict"),
@@ -9995,8 +10213,16 @@ mod tests {
     fn fused_elem_without_reusable_input_keeps_non_in_place_restrict_shape() {
         use chelis_ir::dag::{FusedInput, FusedStep, FusedStepOp};
         let mut dag = Dag::new();
-        let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_f32(4), None);
+        let decl = dag.declare("test");
+        let x = dag.add_node(
+            decl,
+            RiscOp::Load { name: "x".into() },
+            vec![],
+            vec_f32(4),
+            None,
+        );
         let scale = dag.add_node(
+            decl,
             RiscOp::synth_const(vec_f32(4).precision, 2.0),
             vec![],
             vec_f32(4),
@@ -10006,7 +10232,13 @@ mod tests {
             op: FusedStepOp::Mul,
             input_indices: vec![FusedInput::External(0), FusedInput::External(1)],
         }];
-        dag.add_node(RiscOp::FusedElem { ops }, vec![x, scale], vec_f32(4), None);
+        dag.add_node(
+            decl,
+            RiscOp::FusedElem { ops },
+            vec![x, scale],
+            vec_f32(4),
+            None,
+        );
 
         let c = emit_test_dag(&dag, "test_fn").unwrap();
 
@@ -10022,7 +10254,9 @@ mod tests {
     #[test]
     fn sparse_gather_uses_typed_indices_and_payload_pointers() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let values = dag.add_node(
+            decl,
             RiscOp::Load {
                 name: "values".into(),
             },
@@ -10031,12 +10265,14 @@ mod tests {
             None,
         );
         let indices = dag.add_node(
+            decl,
             RiscOp::synth_const(tensor_ty(&[3], Prim::Int32).precision, 0.0),
             vec![],
             tensor_ty(&[3], Prim::Int32),
             None,
         );
         dag.add_node(
+            decl,
             RiscOp::Gather { axis: 0 },
             vec![values, indices],
             tensor_ty(&[3, 2], Prim::F64),
@@ -10053,7 +10289,9 @@ mod tests {
     #[test]
     fn sparse_gather_embedding_probe_does_not_allocate_dense_one_hot_product() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let values = dag.add_node(
+            decl,
             RiscOp::Load {
                 name: "values".into(),
             },
@@ -10062,6 +10300,7 @@ mod tests {
             None,
         );
         let indices = dag.add_node(
+            decl,
             RiscOp::Load {
                 name: "indices".into(),
             },
@@ -10070,6 +10309,7 @@ mod tests {
             None,
         );
         dag.add_node(
+            decl,
             RiscOp::Gather { axis: 0 },
             vec![values, indices],
             tensor_ty(&[128, 1024], Prim::F32),
@@ -10093,7 +10333,9 @@ mod tests {
     #[test]
     fn sparse_gather_rejects_float_indices_at_verified_boundary() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let values = dag.add_node(
+            decl,
             RiscOp::Load {
                 name: "values".into(),
             },
@@ -10102,12 +10344,14 @@ mod tests {
             None,
         );
         let indices = dag.add_node(
+            decl,
             RiscOp::synth_const(vec_f32(3).precision, 0.0),
             vec![],
             vec_f32(3),
             None,
         );
         dag.add_node(
+            decl,
             RiscOp::Gather { axis: 0 },
             vec![values, indices],
             tensor_ty(&[3, 2], Prim::F32),
@@ -10124,7 +10368,9 @@ mod tests {
     #[test]
     fn sparse_scatter_add_uses_typed_indices_payload_and_copy_size() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let target = dag.add_node(
+            decl,
             RiscOp::Load {
                 name: "target".into(),
             },
@@ -10133,18 +10379,21 @@ mod tests {
             None,
         );
         let indices = dag.add_node(
+            decl,
             RiscOp::synth_const(tensor_ty(&[3], Prim::Int64).precision, 0.0),
             vec![],
             tensor_ty(&[3], Prim::Int64),
             None,
         );
         let updates = dag.add_node(
+            decl,
             RiscOp::synth_const(tensor_ty(&[3, 2], Prim::F64).precision, 1.0),
             vec![],
             tensor_ty(&[3, 2], Prim::F64),
             None,
         );
         dag.add_node(
+            decl,
             RiscOp::ScatterAdd { axis: 0 },
             vec![target, indices, updates],
             tensor_ty(&[4, 2], Prim::F64),
@@ -10161,7 +10410,9 @@ mod tests {
     #[test]
     fn sparse_scatter_add_rejects_float_indices_at_verified_boundary() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let target = dag.add_node(
+            decl,
             RiscOp::Load {
                 name: "target".into(),
             },
@@ -10170,18 +10421,21 @@ mod tests {
             None,
         );
         let indices = dag.add_node(
+            decl,
             RiscOp::synth_const(vec_f32(3).precision, 0.0),
             vec![],
             vec_f32(3),
             None,
         );
         let updates = dag.add_node(
+            decl,
             RiscOp::synth_const(tensor_ty(&[3, 2], Prim::F32).precision, 1.0),
             vec![],
             tensor_ty(&[3, 2], Prim::F32),
             None,
         );
         dag.add_node(
+            decl,
             RiscOp::ScatterAdd { axis: 0 },
             vec![target, indices, updates],
             tensor_ty(&[4, 2], Prim::F32),
@@ -10201,9 +10455,17 @@ mod tests {
         // provenance/capacity proof consumed by C emission.
         use chelis_ir::dag::{FusedInput, FusedStep, FusedStepOp};
         let mut dag = Dag::new();
-        let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_f32(4), None);
-        let owned = dag.add_node(RiscOp::Copy, vec![x], vec_f32(4), None);
+        let decl = dag.declare("test");
+        let x = dag.add_node(
+            decl,
+            RiscOp::Load { name: "x".into() },
+            vec![],
+            vec_f32(4),
+            None,
+        );
+        let owned = dag.add_node(decl, RiscOp::Copy, vec![x], vec_f32(4), None);
         let scale = dag.add_node(
+            decl,
             RiscOp::synth_const(vec_f32(4).precision, 2.0),
             vec![],
             vec_f32(4),
@@ -10214,6 +10476,7 @@ mod tests {
             input_indices: vec![FusedInput::External(0), FusedInput::External(1)],
         }];
         let fused = dag.add_node(
+            decl,
             RiscOp::FusedElem { ops },
             vec![owned, scale],
             vec_f32(4),
@@ -10248,8 +10511,16 @@ mod tests {
         // the result there overwrites an argument.
         use chelis_ir::dag::{FusedInput, FusedStep, FusedStepOp};
         let mut dag = Dag::new();
-        let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_f32(4), None);
+        let decl = dag.declare("test");
+        let x = dag.add_node(
+            decl,
+            RiscOp::Load { name: "x".into() },
+            vec![],
+            vec_f32(4),
+            None,
+        );
         let scale = dag.add_node(
+            decl,
             RiscOp::synth_const(vec_f32(4).precision, 2.0),
             vec![],
             vec_f32(4),
@@ -10259,7 +10530,13 @@ mod tests {
             op: FusedStepOp::Mul,
             input_indices: vec![FusedInput::External(0), FusedInput::External(1)],
         }];
-        let fused = dag.add_node(RiscOp::FusedElem { ops }, vec![x, scale], vec_f32(4), None);
+        let fused = dag.add_node(
+            decl,
+            RiscOp::FusedElem { ops },
+            vec![x, scale],
+            vec_f32(4),
+            None,
+        );
         dag.set_reusable_input(fused, x);
 
         let c = emit_test_dag(&dag, "test_fn").unwrap();
@@ -10288,13 +10565,16 @@ mod tests {
         // but it must never transfer the caller's descriptor or bytes.
         use chelis_ir::dag::{FusedInput, FusedStep, FusedStepOp};
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let x = dag.add_node(
+            decl,
             RiscOp::Load { name: "x".into() },
             vec![],
             tensor_ty(&[2, 2], Prim::F32),
             None,
         );
         let flat = dag.add_node(
+            decl,
             RiscOp::Reshape {
                 new_shape: vec![RtDim::Lit(4)],
             },
@@ -10303,6 +10583,7 @@ mod tests {
             None,
         );
         let scale = dag.add_node(
+            decl,
             RiscOp::synth_const(vec_f32(4).precision, 2.0),
             vec![],
             vec_f32(4),
@@ -10313,6 +10594,7 @@ mod tests {
             input_indices: vec![FusedInput::External(0), FusedInput::External(1)],
         }];
         let fused = dag.add_node(
+            decl,
             RiscOp::FusedElem { ops },
             vec![flat, scale],
             vec_f32(4),
@@ -10337,8 +10619,16 @@ mod tests {
     fn fused_reusable_input_with_multiple_consumers_does_not_alias() {
         use chelis_ir::dag::{FusedInput, FusedStep, FusedStepOp};
         let mut dag = Dag::new();
-        let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_f32(4), None);
+        let decl = dag.declare("test");
+        let x = dag.add_node(
+            decl,
+            RiscOp::Load { name: "x".into() },
+            vec![],
+            vec_f32(4),
+            None,
+        );
         let scale = dag.add_node(
+            decl,
             RiscOp::synth_const(vec_f32(4).precision, 2.0),
             vec![],
             vec_f32(4),
@@ -10348,9 +10638,15 @@ mod tests {
             op: FusedStepOp::Mul,
             input_indices: vec![FusedInput::External(0), FusedInput::External(1)],
         }];
-        let fused = dag.add_node(RiscOp::FusedElem { ops }, vec![x, scale], vec_f32(4), None);
+        let fused = dag.add_node(
+            decl,
+            RiscOp::FusedElem { ops },
+            vec![x, scale],
+            vec_f32(4),
+            None,
+        );
         dag.set_reusable_input(fused, x);
-        let other = dag.add_node(RiscOp::Neg, vec![x], vec_f32(4), None);
+        let other = dag.add_node(decl, RiscOp::Neg, vec![x], vec_f32(4), None);
         dag.add_root(fused);
         dag.add_root(other);
 
@@ -10370,13 +10666,15 @@ mod tests {
     #[test]
     fn cos_emits_cosf() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let a = dag.add_node(
+            decl,
             RiscOp::synth_const(scalar_f32().precision, 0.0),
             vec![],
             scalar_f32(),
             None,
         );
-        dag.add_node(RiscOp::Cos, vec![a], scalar_f32(), None);
+        dag.add_node(decl, RiscOp::Cos, vec![a], scalar_f32(), None);
         let c = emit_test_dag(&dag, "test_fn").unwrap();
         assert!(c.contains("cosf("), "expected cosf( in:\n{c}");
     }
@@ -10384,13 +10682,15 @@ mod tests {
     #[test]
     fn tan_emits_tanf() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let a = dag.add_node(
+            decl,
             RiscOp::synth_const(scalar_f32().precision, 0.0),
             vec![],
             scalar_f32(),
             None,
         );
-        dag.add_node(RiscOp::Tan, vec![a], scalar_f32(), None);
+        dag.add_node(decl, RiscOp::Tan, vec![a], scalar_f32(), None);
         let c = emit_test_dag(&dag, "test_fn").unwrap();
         assert!(c.contains("tanf("), "expected tanf( in:\n{c}");
     }
@@ -10398,13 +10698,15 @@ mod tests {
     #[test]
     fn atan_emits_atanf() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let a = dag.add_node(
+            decl,
             RiscOp::synth_const(scalar_f32().precision, 1.0),
             vec![],
             scalar_f32(),
             None,
         );
-        dag.add_node(RiscOp::Atan, vec![a], scalar_f32(), None);
+        dag.add_node(decl, RiscOp::Atan, vec![a], scalar_f32(), None);
         let c = emit_test_dag(&dag, "test_fn").unwrap();
         assert!(c.contains("atanf("), "expected atanf( in:\n{c}");
     }
@@ -10412,13 +10714,15 @@ mod tests {
     #[test]
     fn abs_emits_fabsf() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let a = dag.add_node(
+            decl,
             RiscOp::synth_const(scalar_f32().precision, -2.0),
             vec![],
             scalar_f32(),
             None,
         );
-        dag.add_node(RiscOp::Abs, vec![a], scalar_f32(), None);
+        dag.add_node(decl, RiscOp::Abs, vec![a], scalar_f32(), None);
         let c = emit_test_dag(&dag, "test_fn").unwrap();
         assert!(c.contains("fabsf("), "expected fabsf( in:\n{c}");
     }
@@ -10426,13 +10730,15 @@ mod tests {
     #[test]
     fn floor_emits_floorf() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let a = dag.add_node(
+            decl,
             RiscOp::synth_const(scalar_f32().precision, 1.7),
             vec![],
             scalar_f32(),
             None,
         );
-        dag.add_node(RiscOp::Floor, vec![a], scalar_f32(), None);
+        dag.add_node(decl, RiscOp::Floor, vec![a], scalar_f32(), None);
         let c = emit_test_dag(&dag, "test_fn").unwrap();
         assert!(c.contains("floorf("), "expected floorf( in:\n{c}");
     }
@@ -10440,13 +10746,15 @@ mod tests {
     #[test]
     fn ceil_emits_ceilf() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let a = dag.add_node(
+            decl,
             RiscOp::synth_const(scalar_f32().precision, 1.3),
             vec![],
             scalar_f32(),
             None,
         );
-        dag.add_node(RiscOp::Ceil, vec![a], scalar_f32(), None);
+        dag.add_node(decl, RiscOp::Ceil, vec![a], scalar_f32(), None);
         let c = emit_test_dag(&dag, "test_fn").unwrap();
         assert!(c.contains("ceilf("), "expected ceilf( in:\n{c}");
     }
@@ -10456,13 +10764,15 @@ mod tests {
         // `round` lowers to `rintf` (round-to-nearest-ties-to-even under
         // the default rounding mode), NOT `roundf` (ties-away-from-zero).
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let a = dag.add_node(
+            decl,
             RiscOp::synth_const(scalar_f32().precision, 2.5),
             vec![],
             scalar_f32(),
             None,
         );
-        dag.add_node(RiscOp::Round, vec![a], scalar_f32(), None);
+        dag.add_node(decl, RiscOp::Round, vec![a], scalar_f32(), None);
         let c = emit_test_dag(&dag, "test_fn").unwrap();
         assert!(c.contains("rintf("), "expected rintf( in:\n{c}");
         assert!(
@@ -10479,13 +10789,15 @@ mod tests {
     fn cos_numerical_correctness() {
         // cos(π/3) ≈ 0.5 (within 1e-4)
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let x = dag.add_node(
+            decl,
             RiscOp::synth_const(scalar_f32().precision, std::f64::consts::PI / 3.0),
             vec![],
             scalar_f32(),
             None,
         );
-        let out = dag.add_node(RiscOp::Cos, vec![x], scalar_f32(), None);
+        let out = dag.add_node(decl, RiscOp::Cos, vec![x], scalar_f32(), None);
         dag.add_root(out);
         let results = chelis_ir::eval::eval_scalar(&dag, &chelis_unord::UnordMap::new());
         let val = results[&out] as f32;
@@ -10499,13 +10811,15 @@ mod tests {
     fn abs_numerical_correctness() {
         // abs(-2.0) == 2.0
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let x = dag.add_node(
+            decl,
             RiscOp::synth_const(scalar_f32().precision, -2.0),
             vec![],
             scalar_f32(),
             None,
         );
-        let out = dag.add_node(RiscOp::Abs, vec![x], scalar_f32(), None);
+        let out = dag.add_node(decl, RiscOp::Abs, vec![x], scalar_f32(), None);
         dag.add_root(out);
         let results = chelis_ir::eval::eval_scalar(&dag, &chelis_unord::UnordMap::new());
         let val = results[&out] as f32;
@@ -10534,32 +10848,37 @@ mod tests {
         let named = |name: &str| DimInfo::Named(name.into(), None);
 
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let x = dag.add_node(
+            decl,
             RiscOp::Load { name: "x".into() },
             vec![],
             ty(vec![named("seq")]),
             None,
         );
         let y = dag.add_node(
+            decl,
             RiscOp::Load { name: "y".into() },
             vec![],
             ty(vec![named("batch"), named("seq")]),
             None,
         );
         let w = dag.add_node(
+            decl,
             RiscOp::Load { name: "w".into() },
             vec![],
             ty(vec![named("seq__s1")]),
             None,
         );
-        let from_x = dag.add_node(RiscOp::Neg, vec![x], ty(vec![named("seq")]), None);
+        let from_x = dag.add_node(decl, RiscOp::Neg, vec![x], ty(vec![named("seq")]), None);
         let from_y = dag.add_node(
+            decl,
             RiscOp::Neg,
             vec![y],
             ty(vec![named("batch"), named("seq")]),
             None,
         );
-        let from_w = dag.add_node(RiscOp::Neg, vec![w], ty(vec![named("seq__s1")]), None);
+        let from_w = dag.add_node(decl, RiscOp::Neg, vec![w], ty(vec![named("seq__s1")]), None);
         dag.add_root(from_x);
         dag.add_root(from_y);
         dag.add_root(from_w);
@@ -10605,20 +10924,23 @@ mod tests {
         let named = |name: &str| DimInfo::Named(name.into(), None);
 
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let x = dag.add_node(
+            decl,
             RiscOp::Load { name: "x".into() },
             vec![],
             ty(vec![named("seq")]),
             None,
         );
         let y = dag.add_node(
+            decl,
             RiscOp::Load { name: "y".into() },
             vec![],
             ty(vec![named("batch")]),
             None,
         );
-        let from_x = dag.add_node(RiscOp::Neg, vec![x], ty(vec![named("seq")]), None);
-        let from_y = dag.add_node(RiscOp::Neg, vec![y], ty(vec![named("batch")]), None);
+        let from_x = dag.add_node(decl, RiscOp::Neg, vec![x], ty(vec![named("seq")]), None);
+        let from_y = dag.add_node(decl, RiscOp::Neg, vec![y], ty(vec![named("batch")]), None);
         dag.add_root(from_x);
         dag.add_root(from_y);
 

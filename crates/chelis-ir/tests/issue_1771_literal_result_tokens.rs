@@ -4,8 +4,9 @@ use chelis_ir::eval::{TensorValue, eval_tensor_with};
 use chelis_ir::optimize::{common_subexpr_eliminate, dead_code_eliminate};
 use chelis_types::{scalar_from_i64, types::Prim};
 
-fn token(dag: &mut Dag, required: i64) -> NodeId {
+fn token(dag: &mut Dag, decl: chelis_ir::dag::DeclId, required: i64) -> NodeId {
     dag.add_node(
+        decl,
         RiscOp::ExtentWitness {
             site: ExtentWitnessSite::LiteralResultClaim,
             parameter: String::new(),
@@ -24,18 +25,26 @@ fn token(dag: &mut Dag, required: i64) -> NodeId {
 
 fn fixture(outer: i64, inner: i64, cast: bool) -> Dag {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     // An enclosing declaration captures first, but executes after the inner
     // declaration's obligation at their common producing expression.
-    let outer = token(&mut dag, outer);
-    let inner = token(&mut dag, inner);
+    let outer = token(&mut dag, decl, outer);
+    let inner = token(&mut dag, decl, inner);
     let ty = TensorType {
         dims: vec![DimInfo::Named("*".into(), None)],
         precision: Prim::F32,
     };
-    let input = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], ty.clone(), None);
-    let add = dag.add_node(RiscOp::Add, vec![input, input], ty.clone(), None);
+    let input = dag.add_node(
+        decl,
+        RiscOp::Load { name: "x".into() },
+        vec![],
+        ty.clone(),
+        None,
+    );
+    let add = dag.add_node(decl, RiscOp::Add, vec![input, input], ty.clone(), None);
     let producer = if cast {
         dag.add_node(
+            decl,
             RiscOp::Cast {
                 new_precision: Prim::F32,
             },
@@ -116,6 +125,7 @@ fn literal_role_rejects_observations_entry_claims_and_malformed_requirements() {
         "multiple-owners",
     ] {
         let mut dag = fixture(2, 2, false);
+        let decl = dag.nodes()[0].decl;
         match mutation {
             "input" => dag.node_mut(NodeId(1)).unwrap().inputs.push(NodeId(0)),
             "dependency" => dag.add_shape_dep(NodeId(1), NodeId(0)),
@@ -127,7 +137,7 @@ fn literal_role_rejects_observations_entry_claims_and_malformed_requirements() {
                 .retain(|id| *id != NodeId(1)),
             "multiple-owners" => {
                 let ty = dag.get(NodeId(3)).unwrap().output_type.clone();
-                let copy = dag.add_node(RiscOp::Copy, vec![NodeId(3)], ty, None);
+                let copy = dag.add_node(decl, RiscOp::Copy, vec![NodeId(3)], ty, None);
                 dag.add_shape_dep(copy, NodeId(1));
             }
             _ => {
@@ -168,16 +178,23 @@ fn administrative_copies_preserve_literal_producer_through_fusion() {
     for copied in [false, true] {
         for required in [2, 3] {
             let mut dag = Dag::new();
-            let claim = token(&mut dag, required);
+            let decl = dag.declare("test");
+            let claim = token(&mut dag, decl, required);
             let ty = TensorType {
                 dims: vec![DimInfo::Named("*".into(), None)],
                 precision: Prim::F32,
             };
-            let input = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], ty.clone(), None);
-            let add = dag.add_node(RiscOp::Add, vec![input, input], ty.clone(), None);
-            let mul = dag.add_node(RiscOp::Mul, vec![add, input], ty.clone(), None);
+            let input = dag.add_node(
+                decl,
+                RiscOp::Load { name: "x".into() },
+                vec![],
+                ty.clone(),
+                None,
+            );
+            let add = dag.add_node(decl, RiscOp::Add, vec![input, input], ty.clone(), None);
+            let mul = dag.add_node(decl, RiscOp::Mul, vec![add, input], ty.clone(), None);
             let owner = if copied {
-                dag.add_node(RiscOp::Copy, vec![mul], ty, None)
+                dag.add_node(decl, RiscOp::Copy, vec![mul], ty, None)
             } else {
                 mul
             };

@@ -26,7 +26,9 @@ fn lit_ty(dims: &[usize], precision: Prim) -> TensorType {
 
 fn count_dag(input: TensorType, axes: Vec<usize>, output: TensorType) -> Dag {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let input = dag.add_node(
+        decl,
         RiscOp::Load {
             name: "mask".into(),
         },
@@ -34,7 +36,7 @@ fn count_dag(input: TensorType, axes: Vec<usize>, output: TensorType) -> Dag {
         input,
         None,
     );
-    let count = dag.add_node(RiscOp::Count { axes }, vec![input], output, None);
+    let count = dag.add_node(decl, RiscOp::Count { axes }, vec![input], output, None);
     dag.add_root(count);
     dag
 }

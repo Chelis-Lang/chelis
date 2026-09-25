@@ -5080,13 +5080,21 @@ mod tests {
     #[test]
     fn post_bind_reverify_rejects_out_of_bounds_symbolic_shrink() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let sym_ty = TensorType {
             dims: vec![DimInfo::Named("n".to_string(), None)],
             precision: Prim::F32,
         };
-        let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], sym_ty, None);
+        let x = dag.add_node(
+            decl,
+            RiscOp::Load { name: "x".into() },
+            vec![],
+            sym_ty,
+            None,
+        );
         // A shrink whose end (10) exceeds the eventual concrete extent (4).
         let shr = dag.add_node(
+            decl,
             RiscOp::Shrink {
                 bounds: vec![(RtDim::Lit(0), RtDim::Lit(10))],
             },
@@ -5114,12 +5122,20 @@ mod tests {
     #[test]
     fn post_bind_reverify_allows_in_bounds_symbolic_shrink() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let sym_ty = TensorType {
             dims: vec![DimInfo::Named("n".to_string(), None)],
             precision: Prim::F32,
         };
-        let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], sym_ty, None);
+        let x = dag.add_node(
+            decl,
+            RiscOp::Load { name: "x".into() },
+            vec![],
+            sym_ty,
+            None,
+        );
         let shr = dag.add_node(
+            decl,
             RiscOp::Shrink {
                 bounds: vec![(RtDim::Lit(1), RtDim::Lit(3))],
             },
@@ -5297,19 +5313,22 @@ mod tests {
     #[test]
     fn eval_add() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let a = dag.add_node(
+            decl,
             RiscOp::synth_const(scalar_f32().precision, 1.0),
             vec![],
             scalar_f32(),
             None,
         );
         let b = dag.add_node(
+            decl,
             RiscOp::synth_const(scalar_f32().precision, 2.0),
             vec![],
             scalar_f32(),
             None,
         );
-        let c = dag.add_node(RiscOp::Add, vec![a, b], scalar_f32(), None);
+        let c = dag.add_node(decl, RiscOp::Add, vec![a, b], scalar_f32(), None);
         let vals = eval_scalar(&dag, &UnordMap::new());
         assert!((vals[&c] - 3.0).abs() < 1e-10);
     }
@@ -5317,9 +5336,22 @@ mod tests {
     #[test]
     fn eval_vector_add() {
         let mut dag = Dag::new();
-        let a = dag.add_node(RiscOp::Load { name: "a".into() }, vec![], vec3_f32(), None);
-        let b = dag.add_node(RiscOp::Load { name: "b".into() }, vec![], vec3_f32(), None);
-        let c = dag.add_node(RiscOp::Add, vec![a, b], vec3_f32(), None);
+        let decl = dag.declare("test");
+        let a = dag.add_node(
+            decl,
+            RiscOp::Load { name: "a".into() },
+            vec![],
+            vec3_f32(),
+            None,
+        );
+        let b = dag.add_node(
+            decl,
+            RiscOp::Load { name: "b".into() },
+            vec![],
+            vec3_f32(),
+            None,
+        );
+        let c = dag.add_node(decl, RiscOp::Add, vec![a, b], vec3_f32(), None);
         let mut inputs = UnordMap::new();
         inputs.insert(
             "a".into(),
@@ -5389,10 +5421,18 @@ mod tests {
     #[test]
     fn int64_comparison_is_exact_above_binary64_mantissa() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let ty = tensor_ty(&[2], Prim::Int64);
-        let a = dag.add_node(RiscOp::Load { name: "a".into() }, vec![], ty.clone(), None);
-        let b = dag.add_node(RiscOp::Load { name: "b".into() }, vec![], ty, None);
+        let a = dag.add_node(
+            decl,
+            RiscOp::Load { name: "a".into() },
+            vec![],
+            ty.clone(),
+            None,
+        );
+        let b = dag.add_node(decl, RiscOp::Load { name: "b".into() }, vec![], ty, None);
         let out = dag.add_node(
+            decl,
             RiscOp::Compare(ComparisonKind::CmpLt),
             vec![a, b],
             tensor_ty(&[2], Prim::Bool),
@@ -5430,16 +5470,24 @@ mod tests {
     #[test]
     fn fused_int64_arithmetic_is_exact_above_binary64_mantissa() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let ty = tensor_ty(&[1], Prim::Int64);
-        let a = dag.add_node(RiscOp::Load { name: "a".into() }, vec![], ty.clone(), None);
+        let a = dag.add_node(
+            decl,
+            RiscOp::Load { name: "a".into() },
+            vec![],
+            ty.clone(),
+            None,
+        );
         let one = dag.add_node(
+            decl,
             RiscOp::Load { name: "one".into() },
             vec![],
             ty.clone(),
             None,
         );
-        let add = dag.add_node(RiscOp::Add, vec![a, one], ty.clone(), None);
-        let mul = dag.add_node(RiscOp::Mul, vec![add, one], ty, None);
+        let add = dag.add_node(decl, RiscOp::Add, vec![a, one], ty.clone(), None);
+        let mul = dag.add_node(decl, RiscOp::Mul, vec![add, one], ty, None);
         dag.add_root(mul);
         let fused = crate::fuse::fuse(&dag);
         assert!(
@@ -5475,7 +5523,9 @@ mod tests {
     #[test]
     fn eval_sparse_gather_axis1_preserves_outer_and_inner_layout() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let values = dag.add_node(
+            decl,
             RiscOp::Load {
                 name: "values".into(),
             },
@@ -5484,6 +5534,7 @@ mod tests {
             None,
         );
         let indices = dag.add_node(
+            decl,
             RiscOp::Load {
                 name: "indices".into(),
             },
@@ -5492,6 +5543,7 @@ mod tests {
             None,
         );
         let out = dag.add_node(
+            decl,
             RiscOp::Gather { axis: 1 },
             vec![values, indices],
             tensor_ty(&[2, 3, 2], Prim::F32),
@@ -5524,7 +5576,9 @@ mod tests {
     #[test]
     fn eval_sparse_scatter_add_axis1_accumulates_duplicate_indices() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let target = dag.add_node(
+            decl,
             RiscOp::Load {
                 name: "target".into(),
             },
@@ -5533,6 +5587,7 @@ mod tests {
             None,
         );
         let indices = dag.add_node(
+            decl,
             RiscOp::Load {
                 name: "indices".into(),
             },
@@ -5541,6 +5596,7 @@ mod tests {
             None,
         );
         let updates = dag.add_node(
+            decl,
             RiscOp::Load {
                 name: "updates".into(),
             },
@@ -5549,6 +5605,7 @@ mod tests {
             None,
         );
         let out = dag.add_node(
+            decl,
             RiscOp::ScatterAdd { axis: 1 },
             vec![target, indices, updates],
             tensor_ty(&[2, 3, 2], Prim::F32),
@@ -5591,6 +5648,7 @@ mod tests {
     #[test]
     fn eval_same_rank_expand_broadcast() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let in_ty = TensorType {
             dims: vec![DimInfo::Lit(1)],
             precision: Prim::F32,
@@ -5599,8 +5657,9 @@ mod tests {
             dims: vec![DimInfo::Lit(4)],
             precision: Prim::F32,
         };
-        let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], in_ty, None);
+        let x = dag.add_node(decl, RiscOp::Load { name: "x".into() }, vec![], in_ty, None);
         let y = dag.add_node(
+            decl,
             RiscOp::Expand {
                 axis: 0,
                 size: crate::dag::RtDim::Lit(4),
@@ -5621,11 +5680,24 @@ mod tests {
     #[test]
     fn eval_root_scoped_does_not_require_unrelated_inputs() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let ty = vec3_f32();
-        let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], ty.clone(), None);
-        let y = dag.add_node(RiscOp::Load { name: "y".into() }, vec![], ty.clone(), None);
-        let sum = dag.add_node(RiscOp::Add, vec![x, x], ty.clone(), None);
-        let dead = dag.add_node(RiscOp::Add, vec![y, y], ty.clone(), None);
+        let x = dag.add_node(
+            decl,
+            RiscOp::Load { name: "x".into() },
+            vec![],
+            ty.clone(),
+            None,
+        );
+        let y = dag.add_node(
+            decl,
+            RiscOp::Load { name: "y".into() },
+            vec![],
+            ty.clone(),
+            None,
+        );
+        let sum = dag.add_node(decl, RiscOp::Add, vec![x, x], ty.clone(), None);
+        let dead = dag.add_node(decl, RiscOp::Add, vec![y, y], ty.clone(), None);
         dag.add_root(sum);
         dag.add_root(dead);
 
@@ -5648,7 +5720,14 @@ mod tests {
     #[test]
     fn eval_strict_missing_input_is_error() {
         let mut dag = Dag::new();
-        let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec3_f32(), None);
+        let decl = dag.declare("test");
+        let x = dag.add_node(
+            decl,
+            RiscOp::Load { name: "x".into() },
+            vec![],
+            vec3_f32(),
+            None,
+        );
         let err = eval_tensor_with_strict(&dag, |_| None).unwrap_err();
         assert!(err.contains("missing required input `x`"));
         assert_eq!(x, NodeId(0));
@@ -5657,11 +5736,24 @@ mod tests {
     #[test]
     fn eval_root_scoped_strict_only_requires_live_inputs() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let ty = vec3_f32();
-        let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], ty.clone(), None);
-        let y = dag.add_node(RiscOp::Load { name: "y".into() }, vec![], ty.clone(), None);
-        let live = dag.add_node(RiscOp::Add, vec![x, x], ty.clone(), None);
-        let _dead = dag.add_node(RiscOp::Add, vec![y, y], ty, None);
+        let x = dag.add_node(
+            decl,
+            RiscOp::Load { name: "x".into() },
+            vec![],
+            ty.clone(),
+            None,
+        );
+        let y = dag.add_node(
+            decl,
+            RiscOp::Load { name: "y".into() },
+            vec![],
+            ty.clone(),
+            None,
+        );
+        let live = dag.add_node(decl, RiscOp::Add, vec![x, x], ty.clone(), None);
+        let _dead = dag.add_node(decl, RiscOp::Add, vec![y, y], ty, None);
 
         let vals = eval_tensor_roots_with_strict(&dag, &[live], |name| match name {
             "x" => Some(TensorValue::from_vec(vec![3], vec![1.0, 2.0, 3.0])),
@@ -5674,15 +5766,18 @@ mod tests {
         );
     }
 
-    /// The scoping may only ever drop work no selected root needs, so a
-    /// node both roots reach is not owned by the unselected one. Asserted
-    /// on the helper directly: no seed can observe it today, and an
-    /// untested branch is how the rule quietly stops holding.
+    /// Scoping is by declaration: `g`'s nodes are outside a selection of
+    /// `main`, even one `main` reaches, and `main`'s are not. It may only
+    /// ever drop work no selected root needs, so a node of `g` that the
+    /// selected root reaches is still live.
     #[test]
-    fn a_node_the_selection_also_reaches_is_not_owned_by_an_unselected_root() {
+    fn a_node_the_selection_reaches_is_live_whatever_its_declaration() {
         let mut dag = Dag::new();
+        let g_decl = dag.declare("g");
+        let main_decl = dag.declare("main");
         let ty = vec3_f32();
         let shared = dag.add_node(
+            g_decl,
             RiscOp::Load {
                 name: "shared".into(),
             },
@@ -5690,9 +5785,15 @@ mod tests {
             ty.clone(),
             None,
         );
-        let only_g = dag.add_node(RiscOp::Load { name: "z".into() }, vec![], ty.clone(), None);
-        let g = dag.add_node(RiscOp::Add, vec![shared, only_g], ty.clone(), None);
-        let main = dag.add_node(RiscOp::Neg, vec![shared], ty, None);
+        let only_g = dag.add_node(
+            g_decl,
+            RiscOp::Load { name: "z".into() },
+            vec![],
+            ty.clone(),
+            None,
+        );
+        let g = dag.add_node(g_decl, RiscOp::Add, vec![shared, only_g], ty.clone(), None);
+        let main = dag.add_node(main_decl, RiscOp::Neg, vec![shared], ty, None);
         dag.add_root(g);
         dag.add_root(main);
 
@@ -5702,11 +5803,12 @@ mod tests {
             "`g`'s own body is owned by the root nobody selected"
         );
         assert!(owned[only_g.0], "and so is the input only `g` reads");
-        assert!(
-            !owned[shared.0],
-            "but a node the selected root also reaches is never dropped"
-        );
+        assert!(owned[shared.0], "as is every node of `g`'s declaration");
         assert!(!owned[main.0]);
+        assert!(
+            live_mask_for_roots(&dag, &[main])[shared.0],
+            "but a node the selected root reaches is never dropped"
+        );
 
         assert!(
             dag.outside_selection(&[main, g]).iter().all(|owned| !owned),
@@ -5718,42 +5820,44 @@ mod tests {
         );
     }
 
-    /// `reachable_from` must follow every BACKWARD edge `live_mask_from`
-    /// propagates over — `inputs`, `shape_deps` and `result_claim_deps`.
-    /// Walking fewer misfiles a node the SELECTED root reaches only through
-    /// a dependency edge as owned by an unselected root.
-    ///
-    /// That is a coherence defect in the helper rather than a reachable
-    /// behaviour defect: `live_mask_from` starts its walk from `roots` and
-    /// follows those same edges, so anything the selection reaches is live
-    /// whether or not its seed was suppressed. The one asymmetry left is
-    /// deliberate — `live_mask_from` also expands through
-    /// `unlive_scoped_draw_peers`, which `reachable_from` does not, and by
-    /// the same argument that cannot be made observable. Keeping the helper
-    /// honest is cheap; growing it to chase an unobservable case is not.
+    /// Liveness follows every backward edge from the selection, into any
+    /// declaration: an abort of the unselected `g` that the selected root
+    /// reaches only through a `shape_deps` or `result_claim_deps` edge
+    /// still executes, although its seed is scoped out.
     #[test]
     fn ownership_follows_every_edge_liveness_propagates_over() {
         for edge in ["shape_dep", "result_claim_dep"] {
             let mut dag = Dag::new();
+            let g_decl = dag.declare("g");
+            let main_decl = dag.declare("main");
             let ty = vec3_f32();
             let bool_ty = TensorType {
                 dims: vec![DimInfo::Lit(3)],
                 precision: Prim::Bool,
             };
-            let z = dag.add_node(RiscOp::Load { name: "z".into() }, vec![], ty.clone(), None);
+            let z = dag.add_node(
+                g_decl,
+                RiscOp::Load { name: "z".into() },
+                vec![],
+                ty.clone(),
+                None,
+            );
             let cond = dag.add_node(
+                g_decl,
                 RiscOp::Compare(crate::dag::ComparisonKind::Gt),
                 vec![z, z],
                 bool_ty,
                 None,
             );
             let fallback = dag.add_node(
+                g_decl,
                 RiscOp::synth_const(ty.precision, 0.0),
                 vec![],
                 ty.clone(),
                 None,
             );
             let abort = dag.add_node(
+                g_decl,
                 RiscOp::GuardedFail {
                     message: "reached only by a dependency edge".to_string(),
                     trap_on_true: true,
@@ -5766,6 +5870,7 @@ mod tests {
             // input edge, so it is an ancestor of the abort either way. Only
             // the dependency edge below can save the seed.
             let only_unselected = dag.add_node(
+                g_decl,
                 RiscOp::Load {
                     name: "only_g".into(),
                 },
@@ -5773,10 +5878,21 @@ mod tests {
                 ty.clone(),
                 None,
             );
-            let unselected =
-                dag.add_node(RiscOp::Mul, vec![abort, only_unselected], ty.clone(), None);
-            let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], ty.clone(), None);
-            let main = dag.add_node(RiscOp::Add, vec![x, x], ty, None);
+            let unselected = dag.add_node(
+                g_decl,
+                RiscOp::Mul,
+                vec![abort, only_unselected],
+                ty.clone(),
+                None,
+            );
+            let x = dag.add_node(
+                main_decl,
+                RiscOp::Load { name: "x".into() },
+                vec![],
+                ty.clone(),
+                None,
+            );
+            let main = dag.add_node(main_decl, RiscOp::Add, vec![x, x], ty, None);
             // The selected root reaches the abort ONLY through this edge.
             match edge {
                 "shape_dep" => dag.add_shape_dep(main, abort),
@@ -5786,11 +5902,7 @@ mod tests {
             dag.add_root(main);
 
             let owned = dag.outside_selection(&[main]);
-            assert!(
-                !owned[abort.0],
-                "{edge}: the selected root reaches this abort, so it is not owned \
-                 by the unselected root"
-            );
+            assert!(owned[abort.0], "{edge}: the abort is `g`'s");
             assert!(
                 live_mask_for_roots(&dag, &[main])[abort.0],
                 "{edge}: and it must still execute"
@@ -5810,21 +5922,29 @@ mod tests {
     /// would demand that def's parameters, and then trap on behalf of code
     /// the caller excluded.
     ///
-    /// The graph is built directly and carries no declarations, so this
-    /// pins the root-reachability fallback. The precondition assert keeps
-    /// the test honest: a draw that cannot trap is never seeded, and the
-    /// assertions below would then pass vacuously.
+    /// The graph holds one declaration per root it models. The
+    /// precondition assert keeps the test honest: a draw that cannot trap is
+    /// never seeded, and the assertions below would then pass vacuously.
     #[test]
     fn a_trapping_draw_owned_by_an_unselected_root_is_not_this_evaluation_s_concern() {
         let mut dag = Dag::new();
+        let g_decl = dag.declare("g");
+        let main_decl = dag.declare("main");
         let ty = vec3_f32();
         let key_ty = TensorType {
             dims: vec![],
             precision: Prim::Key,
         };
         // `g(z, rate, k)`: an uncalled declaration holding a trapping draw.
-        let z = dag.add_node(RiscOp::Load { name: "z".into() }, vec![], ty.clone(), None);
+        let z = dag.add_node(
+            g_decl,
+            RiscOp::Load { name: "z".into() },
+            vec![],
+            ty.clone(),
+            None,
+        );
         let rate = dag.add_node(
+            g_decl,
             RiscOp::Load {
                 name: "rate".into(),
             },
@@ -5836,10 +5956,22 @@ mod tests {
             None,
         );
         // The draw validates its own runtime rate, so it can trap by itself.
-        let k = dag.add_node(RiscOp::Load { name: "k".into() }, vec![], key_ty, None);
-        let draw = dag.add_node(RiscOp::Dropout, vec![z, rate, k], ty.clone(), None);
-        let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], ty.clone(), None);
-        let main = dag.add_node(RiscOp::Add, vec![x, x], ty, None);
+        let k = dag.add_node(
+            g_decl,
+            RiscOp::Load { name: "k".into() },
+            vec![],
+            key_ty,
+            None,
+        );
+        let draw = dag.add_node(g_decl, RiscOp::Dropout, vec![z, rate, k], ty.clone(), None);
+        let x = dag.add_node(
+            main_decl,
+            RiscOp::Load { name: "x".into() },
+            vec![],
+            ty.clone(),
+            None,
+        );
+        let main = dag.add_node(main_decl, RiscOp::Add, vec![x, x], ty, None);
         dag.add_root(draw);
         dag.add_root(main);
 
@@ -5879,10 +6011,19 @@ mod tests {
     fn an_abort_owned_by_an_unselected_root_is_not_this_evaluation_s_concern() {
         fn program() -> (Dag, NodeId, NodeId) {
             let mut dag = Dag::new();
+            let g_decl = dag.declare("g");
+            let main_decl = dag.declare("main");
             let ty = vec3_f32();
             // `g(z)`: an uncalled declaration whose body aborts.
-            let z = dag.add_node(RiscOp::Load { name: "z".into() }, vec![], ty.clone(), None);
+            let z = dag.add_node(
+                g_decl,
+                RiscOp::Load { name: "z".into() },
+                vec![],
+                ty.clone(),
+                None,
+            );
             let cond = dag.add_node(
+                g_decl,
                 RiscOp::Compare(crate::dag::ComparisonKind::Gt),
                 vec![z, z],
                 TensorType {
@@ -5892,12 +6033,14 @@ mod tests {
                 None,
             );
             let fallback = dag.add_node(
+                g_decl,
                 RiscOp::synth_const(ty.precision, 0.0),
                 vec![],
                 ty.clone(),
                 None,
             );
             let g = dag.add_node(
+                g_decl,
                 RiscOp::GuardedFail {
                     message: "uncalled".to_string(),
                     trap_on_true: true,
@@ -5907,8 +6050,14 @@ mod tests {
                 None,
             );
             // `main(x)`: the root actually being evaluated.
-            let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], ty.clone(), None);
-            let main = dag.add_node(RiscOp::Add, vec![x, x], ty, None);
+            let x = dag.add_node(
+                main_decl,
+                RiscOp::Load { name: "x".into() },
+                vec![],
+                ty.clone(),
+                None,
+            );
+            let main = dag.add_node(main_decl, RiscOp::Add, vec![x, x], ty, None);
             dag.add_root(g);
             dag.add_root(main);
             (dag, g, main)
@@ -5933,23 +6082,25 @@ mod tests {
         );
     }
 
-    /// The scoping may only ever drop work no selected root needs. A
-    /// DISCARDED abort is the case that matters for chelis#2368, and the
-    /// criterion classifies it by what it is an ancestor of: belonging to no
-    /// root, it is owned by no unselected root either, so every selection
-    /// seeds it.
-    ///
-    /// That cuts both ways and the limit is deliberate: a discarded node
-    /// inside a declaration nobody calls is likewise owned by no root, so
-    /// this scoping does not reach it (chelis#2476 residual). Separating
-    /// those two would need per-declaration attribution on `DagNode`, which
-    /// the DAG does not carry.
+    /// A DISCARDED abort is the case that matters for chelis#2368: nothing
+    /// consumes it and it is no root, so reachability never reaches it, and
+    /// its declaration decides. Discarded in the selected `main`, it is
+    /// seeded; the unselected `g`'s own body is not.
     #[test]
     fn an_abort_owned_by_no_root_is_seeded_for_every_selection() {
         let mut dag = Dag::new();
+        let g_decl = dag.declare("g");
+        let main_decl = dag.declare("main");
         let ty = vec3_f32();
-        let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], ty.clone(), None);
+        let x = dag.add_node(
+            main_decl,
+            RiscOp::Load { name: "x".into() },
+            vec![],
+            ty.clone(),
+            None,
+        );
         let cond = dag.add_node(
+            main_decl,
             RiscOp::Compare(crate::dag::ComparisonKind::Gt),
             vec![x, x],
             TensorType {
@@ -5959,6 +6110,7 @@ mod tests {
             None,
         );
         let fallback = dag.add_node(
+            main_decl,
             RiscOp::synth_const(ty.precision, 0.0),
             vec![],
             ty.clone(),
@@ -5966,6 +6118,7 @@ mod tests {
         );
         // Discarded: nothing consumes it and it is not a root.
         let abort = dag.add_node(
+            main_decl,
             RiscOp::GuardedFail {
                 message: "discarded".to_string(),
                 trap_on_true: true,
@@ -5974,16 +6127,22 @@ mod tests {
             ty.clone(),
             None,
         );
-        let other = dag.add_node(RiscOp::Load { name: "z".into() }, vec![], ty.clone(), None);
-        let unselected = dag.add_node(RiscOp::Mul, vec![other, other], ty.clone(), None);
-        let main = dag.add_node(RiscOp::Add, vec![x, x], ty, None);
+        let other = dag.add_node(
+            g_decl,
+            RiscOp::Load { name: "z".into() },
+            vec![],
+            ty.clone(),
+            None,
+        );
+        let unselected = dag.add_node(g_decl, RiscOp::Mul, vec![other, other], ty.clone(), None);
+        let main = dag.add_node(main_decl, RiscOp::Add, vec![x, x], ty, None);
         dag.add_root(unselected);
         dag.add_root(main);
 
         let live = live_mask_for_roots(&dag, &[main]);
         assert!(
             live[abort.0],
-            "a discarded abort belongs to no root, so it is part of every activation"
+            "a discarded abort of the selected declaration is seeded"
         );
         assert!(
             !live[unselected.0],
@@ -5997,12 +6156,20 @@ mod tests {
     #[test]
     fn eval_root_scoped_ignores_unrelated_dead_symbolic_input() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let dead_ty = TensorType {
             dims: vec![DimInfo::Named("k".to_string(), None)],
             precision: Prim::F32,
         };
-        let _dead = dag.add_node(RiscOp::Load { name: "a".into() }, vec![], dead_ty, None);
+        let _dead = dag.add_node(
+            decl,
+            RiscOp::Load { name: "a".into() },
+            vec![],
+            dead_ty,
+            None,
+        );
         let live = dag.add_node(
+            decl,
             RiscOp::synth_const(Prim::F32, 7.0),
             vec![],
             scalar_f32(),
@@ -6017,17 +6184,25 @@ mod tests {
     #[test]
     fn eval_root_scoped_ignores_dead_canonical_source_with_live_same_named_dim() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let symbolic = TensorType {
             dims: vec![DimInfo::Named("k".to_string(), None)],
             precision: Prim::F32,
         };
         let _dead = dag.add_node(
+            decl,
             RiscOp::Load { name: "a".into() },
             vec![],
             symbolic.clone(),
             None,
         );
-        let live = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], symbolic, None);
+        let live = dag.add_node(
+            decl,
+            RiscOp::Load { name: "x".into() },
+            vec![],
+            symbolic,
+            None,
+        );
 
         let values = eval_tensor_roots_with_strict(&dag, &[live], |name| {
             (name == "x").then(|| TensorValue::from_vec(vec![2], vec![3.0, 4.0]))
@@ -6041,23 +6216,27 @@ mod tests {
     #[test]
     fn eval_root_scoped_strict_resolves_shape_only_input_axis() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let sym_ty = TensorType {
             dims: vec![DimInfo::Named("n".to_string(), None)],
             precision: Prim::F32,
         };
         let x = dag.add_node(
+            decl,
             RiscOp::Load { name: "x".into() },
             vec![],
             sym_ty.clone(),
             None,
         );
         let one = dag.add_node(
+            decl,
             RiscOp::synth_const(scalar_f32().precision, 1.0),
             vec![],
             scalar_f32(),
             None,
         );
         let ones = dag.add_node(
+            decl,
             RiscOp::Expand {
                 axis: 0,
                 size: crate::dag::RtDim::InputAxis {
@@ -6087,23 +6266,27 @@ mod tests {
     #[test]
     fn eval_root_scoped_strict_missing_input_axis_witness_is_input_error() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let sym_ty = TensorType {
             dims: vec![DimInfo::Named("n".to_string(), None)],
             precision: Prim::F32,
         };
         let x = dag.add_node(
+            decl,
             RiscOp::Load { name: "x".into() },
             vec![],
             sym_ty.clone(),
             None,
         );
         let one = dag.add_node(
+            decl,
             RiscOp::synth_const(scalar_f32().precision, 1.0),
             vec![],
             scalar_f32(),
             None,
         );
         let ones = dag.add_node(
+            decl,
             RiscOp::Expand {
                 axis: 0,
                 size: crate::dag::RtDim::InputAxis {
@@ -6126,29 +6309,34 @@ mod tests {
     #[test]
     fn eval_root_scoped_input_axis_selects_one_exact_shape_source() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let sym_ty = TensorType {
             dims: vec![DimInfo::Named("k".to_string(), None)],
             precision: Prim::F32,
         };
         let _unrelated = dag.add_node(
+            decl,
             RiscOp::Load { name: "a".into() },
             vec![],
             sym_ty.clone(),
             None,
         );
         let required = dag.add_node(
+            decl,
             RiscOp::Load { name: "x".into() },
             vec![],
             sym_ty.clone(),
             None,
         );
         let one = dag.add_node(
+            decl,
             RiscOp::synth_const(Prim::F32, 1.0),
             vec![],
             scalar_f32(),
             None,
         );
         let ones = dag.add_node(
+            decl,
             RiscOp::Expand {
                 axis: 0,
                 size: crate::dag::RtDim::InputAxis {
@@ -6177,6 +6365,7 @@ mod tests {
     #[test]
     fn eval_root_scoped_accepts_repeated_symbol_axes_from_one_dead_source() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let square_ty = TensorType {
             dims: vec![
                 DimInfo::Named("n".to_string(), None),
@@ -6184,8 +6373,15 @@ mod tests {
             ],
             precision: Prim::F32,
         };
-        let shape_source = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], square_ty, None);
+        let shape_source = dag.add_node(
+            decl,
+            RiscOp::Load { name: "x".into() },
+            vec![],
+            square_ty,
+            None,
+        );
         let one = dag.add_node(
+            decl,
             RiscOp::synth_const(Prim::F32, 1.0),
             vec![],
             scalar_f32(),
@@ -6196,6 +6392,7 @@ mod tests {
             precision: Prim::F32,
         };
         let ones = dag.add_node(
+            decl,
             RiscOp::Expand {
                 axis: 0,
                 size: crate::dag::RtDim::InputAxis {
@@ -6618,7 +6815,9 @@ mod tests {
     ///   [ 3.0, -1.0,  5.0]
     fn build_2x3_with(op: RiscOp) -> (Dag, NodeId) {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let x = dag.add_node(
+            decl,
             RiscOp::Load { name: "x".into() },
             vec![],
             mat_f32(2, 3),
@@ -6637,7 +6836,7 @@ mod tests {
             }
             _ => panic!("unexpected op"),
         };
-        let y = dag.add_node(op, vec![x], out_ty, None);
+        let y = dag.add_node(decl, op, vec![x], out_ty, None);
         (dag, y)
     }
 
@@ -6754,13 +6953,15 @@ mod tests {
             RiscOp::Argmin { axis: 7 },
         ] {
             let mut dag = Dag::new();
+            let decl = dag.declare("test");
             let x = dag.add_node(
+                decl,
                 RiscOp::synth_const(row_f32(3).precision, 1.0),
                 vec![],
                 row_f32(3),
                 None,
             );
-            dag.add_node(op, vec![x], scalar_f32(), None);
+            dag.add_node(decl, op, vec![x], scalar_f32(), None);
             let errs = verify(&dag);
             assert!(
                 errs.iter().any(|e| e.contains("axis 7")),
@@ -6782,19 +6983,22 @@ mod tests {
 
     fn int_div_dag(op: RiscOp, precision: Prim) -> Dag {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let a = dag.add_node(
+            decl,
             RiscOp::Load { name: "a".into() },
             vec![],
             tensor_ty(&[2], precision),
             None,
         );
         let b = dag.add_node(
+            decl,
             RiscOp::Load { name: "b".into() },
             vec![],
             tensor_ty(&[2], precision),
             None,
         );
-        let out = dag.add_node(op, vec![a, b], tensor_ty(&[2], precision), None);
+        let out = dag.add_node(decl, op, vec![a, b], tensor_ty(&[2], precision), None);
         dag.add_root(out);
         dag
     }
@@ -6919,25 +7123,35 @@ mod tests {
         // After `fuse`, the divide-by-zero must still trap through the
         // FusedElem path (the trap is gated on the fused output precision).
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let a = dag.add_node(
+            decl,
             RiscOp::Load { name: "a".into() },
             vec![],
             tensor_ty(&[2], Prim::Int32),
             None,
         );
         let b = dag.add_node(
+            decl,
             RiscOp::Load { name: "b".into() },
             vec![],
             tensor_ty(&[2], Prim::Int32),
             None,
         );
         let d = dag.add_node(
+            decl,
             RiscOp::FloorDiv,
             vec![a, b],
             tensor_ty(&[2], Prim::Int32),
             None,
         );
-        let e = dag.add_node(RiscOp::Add, vec![d, a], tensor_ty(&[2], Prim::Int32), None);
+        let e = dag.add_node(
+            decl,
+            RiscOp::Add,
+            vec![d, a],
+            tensor_ty(&[2], Prim::Int32),
+            None,
+        );
         dag.add_root(e);
         let fused = crate::fuse::fuse(&dag);
         assert!(
@@ -7115,9 +7329,16 @@ mod value_reclamation {
     /// the live working set never exceeds two values however long the chain.
     fn neg_chain(links: usize) -> (Dag, NodeId) {
         let mut dag = Dag::new();
-        let mut last = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec3(), None);
+        let decl = dag.declare("test");
+        let mut last = dag.add_node(
+            decl,
+            RiscOp::Load { name: "x".into() },
+            vec![],
+            vec3(),
+            None,
+        );
         for _ in 0..links {
-            last = dag.add_node(RiscOp::Neg, vec![last], vec3(), None);
+            last = dag.add_node(decl, RiscOp::Neg, vec![last], vec3(), None);
         }
         dag.add_root(last);
         (dag, last)
@@ -7202,11 +7423,18 @@ mod value_reclamation {
     /// freeing it at the right step still leaves the answer exact.
     fn diamond() -> (Dag, [NodeId; 5]) {
         let mut dag = Dag::new();
-        let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec3(), None);
-        let a = dag.add_node(RiscOp::Neg, vec![x], vec3(), None);
-        let b = dag.add_node(RiscOp::Neg, vec![a], vec3(), None);
-        let c = dag.add_node(RiscOp::Neg, vec![b], vec3(), None);
-        let d = dag.add_node(RiscOp::Add, vec![c, x], vec3(), None);
+        let decl = dag.declare("test");
+        let x = dag.add_node(
+            decl,
+            RiscOp::Load { name: "x".into() },
+            vec![],
+            vec3(),
+            None,
+        );
+        let a = dag.add_node(decl, RiscOp::Neg, vec![x], vec3(), None);
+        let b = dag.add_node(decl, RiscOp::Neg, vec![a], vec3(), None);
+        let c = dag.add_node(decl, RiscOp::Neg, vec![b], vec3(), None);
+        let d = dag.add_node(decl, RiscOp::Add, vec![c, x], vec3(), None);
         dag.add_root(d);
         (dag, [x, a, b, c, d])
     }
@@ -7279,10 +7507,17 @@ mod value_reclamation {
     #[test]
     fn overlapping_root_cones_share_one_intermediate() {
         let mut dag = Dag::new();
-        let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec3(), None);
-        let shared = dag.add_node(RiscOp::Neg, vec![x], vec3(), None);
-        let left = dag.add_node(RiscOp::Neg, vec![shared], vec3(), None);
-        let right = dag.add_node(RiscOp::Add, vec![shared, shared], vec3(), None);
+        let decl = dag.declare("test");
+        let x = dag.add_node(
+            decl,
+            RiscOp::Load { name: "x".into() },
+            vec![],
+            vec3(),
+            None,
+        );
+        let shared = dag.add_node(decl, RiscOp::Neg, vec![x], vec3(), None);
+        let left = dag.add_node(decl, RiscOp::Neg, vec![shared], vec3(), None);
+        let right = dag.add_node(decl, RiscOp::Add, vec![shared, shared], vec3(), None);
         dag.add_root(left);
         dag.add_root(right);
         let roots = [left, right];
@@ -7396,15 +7631,23 @@ mod value_reclamation {
             precision: Prim::F32,
         };
         let mut dag = Dag::new();
-        let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec3(), None);
+        let decl = dag.declare("test");
+        let x = dag.add_node(
+            decl,
+            RiscOp::Load { name: "x".into() },
+            vec![],
+            vec3(),
+            None,
+        );
         let sized = dag.add_node(
+            decl,
             RiscOp::synth_const(Prim::F32, 2.0),
             vec![],
             starred.clone(),
             None,
         );
         dag.add_shape_dep(sized, x);
-        let out = dag.add_node(RiscOp::Neg, vec![sized], starred, None);
+        let out = dag.add_node(decl, RiscOp::Neg, vec![sized], starred, None);
         dag.add_root(out);
 
         let live = live_mask_for_roots(&dag, &[out]);
@@ -7460,9 +7703,16 @@ mod value_reclamation {
     /// frees the spectator's source at step 1 and a graph with it does not.
     fn spectator_graph() -> (Dag, NodeId, NodeId, NodeId) {
         let mut dag = Dag::new();
-        let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec3(), None);
-        let a = dag.add_node(RiscOp::Neg, vec![x], vec3(), None);
-        let late = dag.add_node(RiscOp::Neg, vec![a], vec3(), None);
+        let decl = dag.declare("test");
+        let x = dag.add_node(
+            decl,
+            RiscOp::Load { name: "x".into() },
+            vec![],
+            vec3(),
+            None,
+        );
+        let a = dag.add_node(decl, RiscOp::Neg, vec![x], vec3(), None);
+        let late = dag.add_node(decl, RiscOp::Neg, vec![a], vec3(), None);
         dag.add_root(late);
         (dag, x, a, late)
     }
@@ -7573,10 +7823,17 @@ mod value_reclamation {
     /// read `x` through any operand slot.
     fn agreement_graph() -> (Dag, NodeId, NodeId, NodeId) {
         let mut dag = Dag::new();
-        let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec3(), None);
-        let a = dag.add_node(RiscOp::Neg, vec![x], vec3(), None);
-        let mix = dag.add_node(RiscOp::Add, vec![x, a], vec3(), None);
-        let late = dag.add_node(RiscOp::Neg, vec![mix], vec3(), None);
+        let decl = dag.declare("test");
+        let x = dag.add_node(
+            decl,
+            RiscOp::Load { name: "x".into() },
+            vec![],
+            vec3(),
+            None,
+        );
+        let a = dag.add_node(decl, RiscOp::Neg, vec![x], vec3(), None);
+        let mix = dag.add_node(decl, RiscOp::Add, vec![x, a], vec3(), None);
+        let late = dag.add_node(decl, RiscOp::Neg, vec![mix], vec3(), None);
         dag.add_root(late);
         (dag, x, mix, late)
     }
@@ -7624,9 +7881,16 @@ mod value_reclamation {
         // `dead` reads `x` but never executes under the root mask, so it must
         // not hold `x` past the live consumer that finishes with it.
         let mut dag = Dag::new();
-        let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec3(), None);
-        let live_use = dag.add_node(RiscOp::Neg, vec![x], vec3(), None);
-        let dead = dag.add_node(RiscOp::Neg, vec![x], vec3(), None);
+        let decl = dag.declare("test");
+        let x = dag.add_node(
+            decl,
+            RiscOp::Load { name: "x".into() },
+            vec![],
+            vec3(),
+            None,
+        );
+        let live_use = dag.add_node(decl, RiscOp::Neg, vec![x], vec3(), None);
+        let dead = dag.add_node(decl, RiscOp::Neg, vec![x], vec3(), None);
         dag.add_root(live_use);
         dag.add_root(dead);
 

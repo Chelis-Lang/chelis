@@ -987,19 +987,22 @@ fn assert_fused_gpu_matches_unfused_eval(dag: &Dag, func_name: &str, inputs: &[T
 #[ignore = "manual gate: requires HIP-capable GPU and hipcc"]
 fn g1_add_consts_gpu() {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let a = dag.add_node(
+        decl,
         RiscOp::synth_const(scalar_f32().precision, 1.0),
         vec![],
         scalar_f32(),
         None,
     );
     let b = dag.add_node(
+        decl,
         RiscOp::synth_const(scalar_f32().precision, 2.0),
         vec![],
         scalar_f32(),
         None,
     );
-    let c = dag.add_node(RiscOp::Add, vec![a, b], scalar_f32(), None);
+    let c = dag.add_node(decl, RiscOp::Add, vec![a, b], scalar_f32(), None);
     dag.add_root(c);
 
     let actual = compile_and_run_single_output(&dag, "g1_add_consts", &[]);
@@ -1194,12 +1197,19 @@ const PINNED_KEY_SEED: i64 = 0x5072_f63b_9b5f_c46b;
 
 /// `uniform_like(key_from_seed(seed), template, 2.0f32, 5.0f32)`, whose key
 /// the HIP lane computes at emission.
-fn seeded_uniform_like(dag: &mut Dag, template: NodeId, ty: TensorType, seed: i64) -> NodeId {
+fn seeded_uniform_like(
+    dag: &mut Dag,
+    decl: chelis_ir::dag::DeclId,
+    template: NodeId,
+    ty: TensorType,
+    seed: i64,
+) -> NodeId {
     let rank0 = |precision| TensorType {
         dims: vec![],
         precision,
     };
     let seed = dag.add_node(
+        decl,
         RiscOp::Const {
             value: chelis_types::scalar_from_i64("test", Prim::Int64, seed).unwrap(),
         },
@@ -1208,19 +1218,28 @@ fn seeded_uniform_like(dag: &mut Dag, template: NodeId, ty: TensorType, seed: i6
         None,
     );
     let low = dag.add_node(
+        decl,
         RiscOp::synth_const(Prim::F32, 2.0),
         vec![],
         rank0(Prim::F32),
         None,
     );
     let high = dag.add_node(
+        decl,
         RiscOp::synth_const(Prim::F32, 5.0),
         vec![],
         rank0(Prim::F32),
         None,
     );
-    let key = dag.add_node(RiscOp::KeyFromSeed, vec![seed], rank0(Prim::Key), None);
+    let key = dag.add_node(
+        decl,
+        RiscOp::KeyFromSeed,
+        vec![seed],
+        rank0(Prim::Key),
+        None,
+    );
     dag.add_node(
+        decl,
         RiscOp::UniformLike,
         vec![template, low, high, key],
         ty,
@@ -1232,13 +1251,15 @@ fn seeded_uniform_like(dag: &mut Dag, template: NodeId, ty: TensorType, seed: i6
 #[ignore = "manual gate: requires HIP-capable GPU and hipcc"]
 fn uniform_like_fma_gpu_bit_exact_matches_eval_and_c() {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let template = dag.add_node(
+        decl,
         RiscOp::synth_const(vec_f32(8).precision, 0.0),
         vec![],
         vec_f32(8),
         None,
     );
-    let out = seeded_uniform_like(&mut dag, template, vec_f32(8), PINNED_KEY_SEED);
+    let out = seeded_uniform_like(&mut dag, decl, template, vec_f32(8), PINNED_KEY_SEED);
     dag.add_root(out);
 
     let actual = compile_and_run_output_f32_bits(&dag, "uniform_like_fma");
@@ -1260,7 +1281,9 @@ fn uniform_like_fma_gpu_bit_exact_matches_eval_and_c() {
 #[ignore = "manual gate: requires HIP-capable GPU and hipcc"]
 fn issue_937_uniform_like_f64_gpu_bit_exact_matches_shared_sampler() {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let template = dag.add_node(
+        decl,
         RiscOp::synth_const(vec_f64(8).precision, 0.0),
         vec![],
         vec_f64(8),
@@ -1270,7 +1293,7 @@ fn issue_937_uniform_like_f64_gpu_bit_exact_matches_shared_sampler() {
         chelis_types::scalar_from_i64("test", Prim::Int64, PINNED_KEY_SEED).unwrap(),
     )
     .unwrap();
-    let out = seeded_uniform_like(&mut dag, template, vec_f64(8), PINNED_KEY_SEED);
+    let out = seeded_uniform_like(&mut dag, decl, template, vec_f64(8), PINNED_KEY_SEED);
     dag.add_root(out);
 
     let actual = compile_and_run_output_f64_bits(&dag, "uniform_like_f64");
@@ -1293,8 +1316,15 @@ fn issue_937_uniform_like_f64_gpu_bit_exact_matches_shared_sampler() {
 #[ignore = "manual gate: requires HIP-capable GPU and hipcc"]
 fn g2_neg_gpu_matches_cpu() {
     let mut dag = Dag::new();
-    let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_f32(3), None);
-    let out = dag.add_node(RiscOp::Neg, vec![x], vec_f32(3), None);
+    let decl = dag.declare("test");
+    let x = dag.add_node(
+        decl,
+        RiscOp::Load { name: "x".into() },
+        vec![],
+        vec_f32(3),
+        None,
+    );
+    let out = dag.add_node(decl, RiscOp::Neg, vec![x], vec_f32(3), None);
     dag.add_root(out);
     assert_gpu_matches_eval(
         &dag,
@@ -1307,10 +1337,17 @@ fn g2_neg_gpu_matches_cpu() {
 #[ignore = "manual gate: requires HIP-capable GPU and hipcc"]
 fn g2_copy_materializes_and_terminal_drop_matches_cpu() {
     let mut dag = Dag::new();
-    let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_f32(4), None);
-    let copied = dag.add_node(RiscOp::Copy, vec![x], vec_f32(4), None);
-    dag.add_node(RiscOp::Drop, vec![x], vec_f32(4), None);
-    let out = dag.add_node(RiscOp::Neg, vec![copied], vec_f32(4), None);
+    let decl = dag.declare("test");
+    let x = dag.add_node(
+        decl,
+        RiscOp::Load { name: "x".into() },
+        vec![],
+        vec_f32(4),
+        None,
+    );
+    let copied = dag.add_node(decl, RiscOp::Copy, vec![x], vec_f32(4), None);
+    dag.add_node(decl, RiscOp::Drop, vec![x], vec_f32(4), None);
+    let out = dag.add_node(decl, RiscOp::Neg, vec![copied], vec_f32(4), None);
     dag.add_root(out);
 
     assert_gpu_matches_eval(
@@ -1324,8 +1361,15 @@ fn g2_copy_materializes_and_terminal_drop_matches_cpu() {
 #[ignore = "manual gate: requires HIP-capable GPU and hipcc"]
 fn g2_exp_gpu_matches_cpu() {
     let mut dag = Dag::new();
-    let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_f32(3), None);
-    let out = dag.add_node(RiscOp::Exp, vec![x], vec_f32(3), None);
+    let decl = dag.declare("test");
+    let x = dag.add_node(
+        decl,
+        RiscOp::Load { name: "x".into() },
+        vec![],
+        vec_f32(3),
+        None,
+    );
+    let out = dag.add_node(decl, RiscOp::Exp, vec![x], vec_f32(3), None);
     dag.add_root(out);
     assert_gpu_matches_eval(
         &dag,
@@ -1338,8 +1382,15 @@ fn g2_exp_gpu_matches_cpu() {
 #[ignore = "manual gate: requires HIP-capable GPU and hipcc"]
 fn g2_log_gpu_matches_cpu() {
     let mut dag = Dag::new();
-    let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_f32(3), None);
-    let out = dag.add_node(RiscOp::Log, vec![x], vec_f32(3), None);
+    let decl = dag.declare("test");
+    let x = dag.add_node(
+        decl,
+        RiscOp::Load { name: "x".into() },
+        vec![],
+        vec_f32(3),
+        None,
+    );
+    let out = dag.add_node(decl, RiscOp::Log, vec![x], vec_f32(3), None);
     dag.add_root(out);
     assert_gpu_matches_eval(
         &dag,
@@ -1352,8 +1403,15 @@ fn g2_log_gpu_matches_cpu() {
 #[ignore = "manual gate: requires HIP-capable GPU and hipcc"]
 fn g2_sin_gpu_matches_cpu() {
     let mut dag = Dag::new();
-    let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_f32(3), None);
-    let out = dag.add_node(RiscOp::Sin, vec![x], vec_f32(3), None);
+    let decl = dag.declare("test");
+    let x = dag.add_node(
+        decl,
+        RiscOp::Load { name: "x".into() },
+        vec![],
+        vec_f32(3),
+        None,
+    );
+    let out = dag.add_node(decl, RiscOp::Sin, vec![x], vec_f32(3), None);
     dag.add_root(out);
     assert_gpu_matches_eval(
         &dag,
@@ -1370,8 +1428,15 @@ fn g2_sin_gpu_matches_cpu() {
 #[ignore = "manual gate: requires HIP-capable GPU and hipcc"]
 fn g2_sqrt_gpu_matches_cpu() {
     let mut dag = Dag::new();
-    let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_f32(3), None);
-    let out = dag.add_node(RiscOp::Sqrt, vec![x], vec_f32(3), None);
+    let decl = dag.declare("test");
+    let x = dag.add_node(
+        decl,
+        RiscOp::Load { name: "x".into() },
+        vec![],
+        vec_f32(3),
+        None,
+    );
+    let out = dag.add_node(decl, RiscOp::Sqrt, vec![x], vec_f32(3), None);
     dag.add_root(out);
     assert_gpu_matches_eval(
         &dag,
@@ -1388,9 +1453,22 @@ fn g2_sqrt_gpu_matches_cpu() {
 #[ignore = "manual gate: requires HIP-capable GPU and hipcc"]
 fn g3_add_gpu_matches_cpu() {
     let mut dag = Dag::new();
-    let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_f32(3), None);
-    let y = dag.add_node(RiscOp::Load { name: "y".into() }, vec![], vec_f32(3), None);
-    let out = dag.add_node(RiscOp::Add, vec![x, y], vec_f32(3), None);
+    let decl = dag.declare("test");
+    let x = dag.add_node(
+        decl,
+        RiscOp::Load { name: "x".into() },
+        vec![],
+        vec_f32(3),
+        None,
+    );
+    let y = dag.add_node(
+        decl,
+        RiscOp::Load { name: "y".into() },
+        vec![],
+        vec_f32(3),
+        None,
+    );
+    let out = dag.add_node(decl, RiscOp::Add, vec![x, y], vec_f32(3), None);
     dag.add_root(out);
     assert_gpu_matches_eval(
         &dag,
@@ -1406,9 +1484,22 @@ fn g3_add_gpu_matches_cpu() {
 #[ignore = "manual gate: requires HIP-capable GPU and hipcc"]
 fn g3_mul_gpu_matches_cpu() {
     let mut dag = Dag::new();
-    let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_f32(3), None);
-    let y = dag.add_node(RiscOp::Load { name: "y".into() }, vec![], vec_f32(3), None);
-    let out = dag.add_node(RiscOp::Mul, vec![x, y], vec_f32(3), None);
+    let decl = dag.declare("test");
+    let x = dag.add_node(
+        decl,
+        RiscOp::Load { name: "x".into() },
+        vec![],
+        vec_f32(3),
+        None,
+    );
+    let y = dag.add_node(
+        decl,
+        RiscOp::Load { name: "y".into() },
+        vec![],
+        vec_f32(3),
+        None,
+    );
+    let out = dag.add_node(decl, RiscOp::Mul, vec![x, y], vec_f32(3), None);
     dag.add_root(out);
     assert_gpu_matches_eval(
         &dag,
@@ -1424,9 +1515,22 @@ fn g3_mul_gpu_matches_cpu() {
 #[ignore = "manual gate: requires HIP-capable GPU and hipcc"]
 fn g3_max_elem_gpu_matches_cpu() {
     let mut dag = Dag::new();
-    let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_f32(3), None);
-    let y = dag.add_node(RiscOp::Load { name: "y".into() }, vec![], vec_f32(3), None);
-    let out = dag.add_node(RiscOp::MaxElem, vec![x, y], vec_f32(3), None);
+    let decl = dag.declare("test");
+    let x = dag.add_node(
+        decl,
+        RiscOp::Load { name: "x".into() },
+        vec![],
+        vec_f32(3),
+        None,
+    );
+    let y = dag.add_node(
+        decl,
+        RiscOp::Load { name: "y".into() },
+        vec![],
+        vec_f32(3),
+        None,
+    );
+    let out = dag.add_node(decl, RiscOp::MaxElem, vec![x, y], vec_f32(3), None);
     dag.add_root(out);
     assert_gpu_matches_eval(
         &dag,
@@ -1444,11 +1548,30 @@ fn direct_extrema_gpu_bit_case(prim: Prim, lhs: &[u64; 6], rhs: &[u64; 6], gradi
         precision: prim,
     };
     let mut dag = Dag::new();
-    let a = dag.add_node(RiscOp::Load { name: "a".into() }, vec![], ty.clone(), None);
-    let b = dag.add_node(RiscOp::Load { name: "b".into() }, vec![], ty.clone(), None);
-    let g = dag.add_node(RiscOp::Load { name: "g".into() }, vec![], ty.clone(), None);
+    let decl = dag.declare("test");
+    let a = dag.add_node(
+        decl,
+        RiscOp::Load { name: "a".into() },
+        vec![],
+        ty.clone(),
+        None,
+    );
+    let b = dag.add_node(
+        decl,
+        RiscOp::Load { name: "b".into() },
+        vec![],
+        ty.clone(),
+        None,
+    );
+    let g = dag.add_node(
+        decl,
+        RiscOp::Load { name: "g".into() },
+        vec![],
+        ty.clone(),
+        None,
+    );
     for op in [RiscOp::MaxElem, RiscOp::MinElem] {
-        let root = dag.add_node(op, vec![a, b], ty.clone(), None);
+        let root = dag.add_node(decl, op, vec![a, b], ty.clone(), None);
         dag.add_root(root);
     }
     for (kind, operand) in [
@@ -1458,6 +1581,7 @@ fn direct_extrema_gpu_bit_case(prim: Prim, lhs: &[u64; 6], rhs: &[u64; 6], gradi
         (ExtremaKind::Min, ExtremaOperand::Right),
     ] {
         let root = dag.add_node(
+            decl,
             RiscOp::ExtremaAdjoint { kind, operand },
             vec![a, b, g],
             ty.clone(),
@@ -1575,10 +1699,23 @@ fn direct_relu_gpu_bit_case(prim: Prim, x_bits: &[u64; 6], gradient: &[u64; 6]) 
         precision: prim,
     };
     let mut dag = Dag::new();
-    let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], ty.clone(), None);
-    let g = dag.add_node(RiscOp::Load { name: "g".into() }, vec![], ty.clone(), None);
-    let relu = dag.add_node(RiscOp::Relu, vec![x], ty.clone(), None);
-    let adjoint = dag.add_node(RiscOp::ReluAdjoint, vec![x, g], ty, None);
+    let decl = dag.declare("test");
+    let x = dag.add_node(
+        decl,
+        RiscOp::Load { name: "x".into() },
+        vec![],
+        ty.clone(),
+        None,
+    );
+    let g = dag.add_node(
+        decl,
+        RiscOp::Load { name: "g".into() },
+        vec![],
+        ty.clone(),
+        None,
+    );
+    let relu = dag.add_node(decl, RiscOp::Relu, vec![x], ty.clone(), None);
+    let adjoint = dag.add_node(decl, RiscOp::ReluAdjoint, vec![x, g], ty, None);
     dag.add_root(relu);
     dag.add_root(adjoint);
     let expected = vec![
@@ -1722,9 +1859,22 @@ fn direct_sub_gpu_matches_own_width_evaluator() {
             precision: prim,
         };
         let mut dag = Dag::new();
-        let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], ty.clone(), None);
-        let y = dag.add_node(RiscOp::Load { name: "y".into() }, vec![], ty.clone(), None);
-        let out = dag.add_node(RiscOp::Sub, vec![x, y], ty, None);
+        let decl = dag.declare("test");
+        let x = dag.add_node(
+            decl,
+            RiscOp::Load { name: "x".into() },
+            vec![],
+            ty.clone(),
+            None,
+        );
+        let y = dag.add_node(
+            decl,
+            RiscOp::Load { name: "y".into() },
+            vec![],
+            ty.clone(),
+            None,
+        );
+        let out = dag.add_node(decl, RiscOp::Sub, vec![x, y], ty, None);
         dag.add_root(out);
         let actual = compile_and_run_float_output_bits(
             &dag,
@@ -1736,9 +1886,22 @@ fn direct_sub_gpu_matches_own_width_evaluator() {
     }
 
     let mut f32_dag = Dag::new();
-    let x = f32_dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_f32(4), None);
-    let y = f32_dag.add_node(RiscOp::Load { name: "y".into() }, vec![], vec_f32(4), None);
-    let out = f32_dag.add_node(RiscOp::Sub, vec![x, y], vec_f32(4), None);
+    let f32_dag_decl = f32_dag.declare("test");
+    let x = f32_dag.add_node(
+        f32_dag_decl,
+        RiscOp::Load { name: "x".into() },
+        vec![],
+        vec_f32(4),
+        None,
+    );
+    let y = f32_dag.add_node(
+        f32_dag_decl,
+        RiscOp::Load { name: "y".into() },
+        vec![],
+        vec_f32(4),
+        None,
+    );
+    let out = f32_dag.add_node(f32_dag_decl, RiscOp::Sub, vec![x, y], vec_f32(4), None);
     f32_dag.add_root(out);
     assert_gpu_matches_eval(
         &f32_dag,
@@ -1750,9 +1913,22 @@ fn direct_sub_gpu_matches_own_width_evaluator() {
     );
 
     let mut f64_dag = Dag::new();
-    let x = f64_dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_f64(4), None);
-    let y = f64_dag.add_node(RiscOp::Load { name: "y".into() }, vec![], vec_f64(4), None);
-    let out = f64_dag.add_node(RiscOp::Sub, vec![x, y], vec_f64(4), None);
+    let f64_dag_decl = f64_dag.declare("test");
+    let x = f64_dag.add_node(
+        f64_dag_decl,
+        RiscOp::Load { name: "x".into() },
+        vec![],
+        vec_f64(4),
+        None,
+    );
+    let y = f64_dag.add_node(
+        f64_dag_decl,
+        RiscOp::Load { name: "y".into() },
+        vec![],
+        vec_f64(4),
+        None,
+    );
+    let out = f64_dag.add_node(f64_dag_decl, RiscOp::Sub, vec![x, y], vec_f64(4), None);
     f64_dag.add_root(out);
     assert_gpu_matches_eval_f64(
         &f64_dag,
@@ -1773,9 +1949,22 @@ fn direct_checked_signed_sub_reports_exact_device_overflow_trap() {
         precision: Prim::Int8,
     };
     let mut dag = Dag::new();
-    let a = dag.add_node(RiscOp::Load { name: "a".into() }, vec![], ty.clone(), None);
-    let b = dag.add_node(RiscOp::Load { name: "b".into() }, vec![], ty.clone(), None);
-    let out = dag.add_node(RiscOp::Sub, vec![a, b], ty, None);
+    let decl = dag.declare("test");
+    let a = dag.add_node(
+        decl,
+        RiscOp::Load { name: "a".into() },
+        vec![],
+        ty.clone(),
+        None,
+    );
+    let b = dag.add_node(
+        decl,
+        RiscOp::Load { name: "b".into() },
+        vec![],
+        ty.clone(),
+        None,
+    );
+    let out = dag.add_node(decl, RiscOp::Sub, vec![a, b], ty, None);
     dag.add_root(out);
 
     let exact = compile_and_run_single_output_typed_i64(
@@ -1820,9 +2009,23 @@ fn direct_checked_signed_sub_reports_exact_device_overflow_trap() {
 #[ignore = "manual gate: requires HIP-capable GPU and hipcc"]
 fn g3_cmplt_gpu_matches_cpu() {
     let mut dag = Dag::new();
-    let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_f32(4), None);
-    let y = dag.add_node(RiscOp::Load { name: "y".into() }, vec![], vec_f32(4), None);
+    let decl = dag.declare("test");
+    let x = dag.add_node(
+        decl,
+        RiscOp::Load { name: "x".into() },
+        vec![],
+        vec_f32(4),
+        None,
+    );
+    let y = dag.add_node(
+        decl,
+        RiscOp::Load { name: "y".into() },
+        vec![],
+        vec_f32(4),
+        None,
+    );
     let out = dag.add_node(
+        decl,
         RiscOp::Compare(ComparisonKind::CmpLt),
         vec![x, y],
         vec_bool(4),
@@ -1850,13 +2053,16 @@ fn g3_cmplt_gpu_matches_cpu() {
 #[ignore = "manual gate: requires HIP-capable GPU and hipcc"]
 fn g4_sum_reduction_gpu_matches_cpu() {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let x = dag.add_node(
+        decl,
         RiscOp::Load { name: "x".into() },
         vec![],
         mat_f32(2, 3),
         None,
     );
     let out = dag.add_node(
+        decl,
         RiscOp::Sum {
             axis: 0,
             accumulator: chelis_types::types::Prim::F32,
@@ -1881,13 +2087,21 @@ fn g4_sum_reduction_gpu_matches_cpu() {
 #[ignore = "manual gate: requires HIP-capable GPU and hipcc"]
 fn g4_max_reduce_gpu_matches_cpu() {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let x = dag.add_node(
+        decl,
         RiscOp::Load { name: "x".into() },
         vec![],
         mat_f32(2, 3),
         None,
     );
-    let out = dag.add_node(RiscOp::MaxReduce { axis: 1 }, vec![x], vec_f32(2), None);
+    let out = dag.add_node(
+        decl,
+        RiscOp::MaxReduce { axis: 1 },
+        vec![x],
+        vec_f32(2),
+        None,
+    );
     dag.add_root(out);
     assert_gpu_matches_eval(
         &dag,
@@ -1904,6 +2118,7 @@ fn g4_max_reduce_gpu_matches_cpu() {
 #[ignore = "manual gate: requires HIP-capable GPU and hipcc"]
 fn g4_symbolic_row_sum_gpu_matches_cpu() {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let x_ty = TensorType {
         dims: vec![
             DimInfo::Named("batch".into(), None),
@@ -1915,8 +2130,9 @@ fn g4_symbolic_row_sum_gpu_matches_cpu() {
         dims: vec![DimInfo::Named("batch".into(), None)],
         precision: Prim::F32,
     };
-    let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], x_ty, None);
+    let x = dag.add_node(decl, RiscOp::Load { name: "x".into() }, vec![], x_ty, None);
     let out = dag.add_node(
+        decl,
         RiscOp::Sum {
             axis: 1,
             accumulator: chelis_types::types::Prim::F32,
@@ -1941,6 +2157,7 @@ fn g4_symbolic_row_sum_gpu_matches_cpu() {
 #[ignore = "manual gate: requires HIP-capable GPU and hipcc"]
 fn g4_symbolic_softmax_gpu_matches_cpu() {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let x_ty = TensorType {
         dims: vec![
             DimInfo::Named("batch".into(), None),
@@ -1949,12 +2166,13 @@ fn g4_symbolic_softmax_gpu_matches_cpu() {
         precision: Prim::F32,
     };
     let x = dag.add_node(
+        decl,
         RiscOp::Load { name: "x".into() },
         vec![],
         x_ty.clone(),
         None,
     );
-    let out = chelis_ir::tier2::lower_softmax(&mut dag, x, 1, &x_ty, None);
+    let out = chelis_ir::tier2::lower_softmax(decl, &mut dag, x, 1, &x_ty, None);
     dag.add_root(out);
     assert_gpu_matches_eval(
         &dag,
@@ -1971,6 +2189,7 @@ fn g4_symbolic_softmax_gpu_matches_cpu() {
 #[ignore = "manual gate: requires HIP-capable GPU and hipcc"]
 fn g4_symbolic_matmul_gpu_matches_cpu() {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let a_ty = TensorType {
         dims: vec![DimInfo::Named("batch".into(), None), DimInfo::Lit(3)],
         precision: Prim::F32,
@@ -1980,18 +2199,20 @@ fn g4_symbolic_matmul_gpu_matches_cpu() {
         precision: Prim::F32,
     };
     let a = dag.add_node(
+        decl,
         RiscOp::Load { name: "a".into() },
         vec![],
         a_ty.clone(),
         None,
     );
     let b = dag.add_node(
+        decl,
         RiscOp::Load { name: "b".into() },
         vec![],
         b_ty.clone(),
         None,
     );
-    let out = chelis_ir::tier2::lower_matmul(&mut dag, a, b, &a_ty, &b_ty, None);
+    let out = chelis_ir::tier2::lower_matmul(decl, &mut dag, a, b, &a_ty, &b_ty, None);
     dag.add_root(out);
     assert_gpu_matches_eval(
         &dag,
@@ -2007,6 +2228,7 @@ fn g4_symbolic_matmul_gpu_matches_cpu() {
 #[ignore = "manual gate: requires HIP-capable GPU and hipcc"]
 fn g4_symbolic_matmul_gpu_reuses_one_artifact_for_multiple_batch_sizes() {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let a_ty = TensorType {
         dims: vec![DimInfo::Named("batch".into(), None), DimInfo::Lit(3)],
         precision: Prim::F32,
@@ -2016,18 +2238,20 @@ fn g4_symbolic_matmul_gpu_reuses_one_artifact_for_multiple_batch_sizes() {
         precision: Prim::F32,
     };
     let a = dag.add_node(
+        decl,
         RiscOp::Load { name: "a".into() },
         vec![],
         a_ty.clone(),
         None,
     );
     let b = dag.add_node(
+        decl,
         RiscOp::Load { name: "b".into() },
         vec![],
         b_ty.clone(),
         None,
     );
-    let out = chelis_ir::tier2::lower_matmul(&mut dag, a, b, &a_ty, &b_ty, None);
+    let out = chelis_ir::tier2::lower_matmul(decl, &mut dag, a, b, &a_ty, &b_ty, None);
     dag.add_root(out);
 
     let actual = compile_and_run_output_cases(
@@ -2057,8 +2281,16 @@ fn g4_symbolic_matmul_gpu_reuses_one_artifact_for_multiple_batch_sizes() {
 #[ignore = "manual gate: requires HIP-capable GPU and hipcc"]
 fn g5_expand_add_stride_zero() {
     let mut dag = Dag::new();
-    let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_f32(3), None);
+    let decl = dag.declare("test");
+    let x = dag.add_node(
+        decl,
+        RiscOp::Load { name: "x".into() },
+        vec![],
+        vec_f32(3),
+        None,
+    );
     let expanded = dag.add_node(
+        decl,
         RiscOp::Expand {
             axis: 0,
             size: chelis_ir::dag::RtDim::Lit(4),
@@ -2068,12 +2300,13 @@ fn g5_expand_add_stride_zero() {
         None,
     );
     let c = dag.add_node(
+        decl,
         RiscOp::synth_const(mat_f32(4, 3).precision, 2.0),
         vec![],
         mat_f32(4, 3),
         None,
     );
-    let out = dag.add_node(RiscOp::Add, vec![expanded, c], mat_f32(4, 3), None);
+    let out = dag.add_node(decl, RiscOp::Add, vec![expanded, c], mat_f32(4, 3), None);
     dag.add_root(out);
     assert_gpu_matches_eval(
         &dag,
@@ -2086,11 +2319,13 @@ fn g5_expand_add_stride_zero() {
 #[ignore = "manual gate: requires HIP-capable GPU and hipcc"]
 fn g5_input_axis_expand_executes_from_witness_metadata() {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let runtime_vector = TensorType {
         dims: vec![DimInfo::Named("n".into(), None)],
         precision: Prim::F32,
     };
     let value = dag.add_node(
+        decl,
         RiscOp::Load {
             name: "value".into(),
         },
@@ -2099,6 +2334,7 @@ fn g5_input_axis_expand_executes_from_witness_metadata() {
         None,
     );
     let witness = dag.add_node(
+        decl,
         RiscOp::Load {
             name: "witness".into(),
         },
@@ -2107,6 +2343,7 @@ fn g5_input_axis_expand_executes_from_witness_metadata() {
         None,
     );
     let expanded = dag.add_node(
+        decl,
         RiscOp::Expand {
             axis: 0,
             size: RtDim::InputAxis {
@@ -2138,25 +2375,29 @@ fn g5_input_axis_expand_executes_from_witness_metadata() {
 #[ignore = "manual gate: requires HIP-capable GPU and hipcc"]
 fn g6_permute_then_add() {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let x = dag.add_node(
+        decl,
         RiscOp::Load { name: "x".into() },
         vec![],
         mat_f32(2, 3),
         None,
     );
     let perm = dag.add_node(
+        decl,
         RiscOp::Permute { axes: vec![1, 0] },
         vec![x],
         mat_f32(3, 2),
         None,
     );
     let c = dag.add_node(
+        decl,
         RiscOp::synth_const(mat_f32(3, 2).precision, 1.5),
         vec![],
         mat_f32(3, 2),
         None,
     );
-    let out = dag.add_node(RiscOp::Add, vec![perm, c], mat_f32(3, 2), None);
+    let out = dag.add_node(decl, RiscOp::Add, vec![perm, c], mat_f32(3, 2), None);
     dag.add_root(out);
     assert_gpu_matches_eval(
         &dag,
@@ -2177,8 +2418,16 @@ fn g6_permute_then_add() {
 #[ignore = "manual gate: requires HIP-capable GPU and hipcc"]
 fn g7_host_device_roundtrip() {
     let mut dag = Dag::new();
-    let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_f32(4), None);
+    let decl = dag.declare("test");
+    let x = dag.add_node(
+        decl,
+        RiscOp::Load { name: "x".into() },
+        vec![],
+        vec_f32(4),
+        None,
+    );
     let out = dag.add_node(
+        decl,
         RiscOp::Cast {
             new_precision: Prim::F32,
         },
@@ -2202,26 +2451,30 @@ fn g7_host_device_roundtrip() {
 #[ignore = "manual gate: requires HIP-capable GPU and hipcc"]
 fn g8_multi_kernel_chain() {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let a = dag.add_node(
+        decl,
         RiscOp::synth_const(scalar_f32().precision, 2.0),
         vec![],
         scalar_f32(),
         None,
     );
     let b = dag.add_node(
+        decl,
         RiscOp::synth_const(scalar_f32().precision, 3.0),
         vec![],
         scalar_f32(),
         None,
     );
-    let add = dag.add_node(RiscOp::Add, vec![a, b], scalar_f32(), None);
+    let add = dag.add_node(decl, RiscOp::Add, vec![a, b], scalar_f32(), None);
     let c = dag.add_node(
+        decl,
         RiscOp::synth_const(scalar_f32().precision, 4.0),
         vec![],
         scalar_f32(),
         None,
     );
-    let out = dag.add_node(RiscOp::Mul, vec![add, c], scalar_f32(), None);
+    let out = dag.add_node(decl, RiscOp::Mul, vec![add, c], scalar_f32(), None);
     dag.add_root(out);
 
     let actual = compile_and_run_single_output(&dag, "g8_chain", &[]);
@@ -2236,19 +2489,23 @@ fn g8_multi_kernel_chain() {
 #[ignore = "manual gate: requires HIP-capable GPU and hipcc"]
 fn g9_load_mapping() {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let x = dag.add_node(
+        decl,
         RiscOp::Load { name: "x".into() },
         vec![],
         scalar_f32(),
         None,
     );
     let y = dag.add_node(
+        decl,
         RiscOp::Load { name: "y".into() },
         vec![],
         scalar_f32(),
         None,
     );
     let out = dag.add_node(
+        decl,
         RiscOp::Compare(ComparisonKind::CmpLt),
         vec![x, y],
         bool_scalar(),
@@ -2269,8 +2526,16 @@ fn g9_load_mapping() {
 #[ignore = "manual gate: requires HIP-capable GPU and hipcc"]
 fn g10_realize_materializes_view_on_gpu() {
     let mut dag = Dag::new();
-    let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_f32(5), None);
+    let decl = dag.declare("test");
+    let x = dag.add_node(
+        decl,
+        RiscOp::Load { name: "x".into() },
+        vec![],
+        vec_f32(5),
+        None,
+    );
     let s = dag.add_node(
+        decl,
         RiscOp::Stride {
             strides: vec![chelis_ir::dag::RtDim::Lit(2)],
         },
@@ -2278,7 +2543,7 @@ fn g10_realize_materializes_view_on_gpu() {
         vec_f32(3),
         None,
     );
-    let r = dag.add_node(RiscOp::Realize, vec![s], vec_f32(3), None);
+    let r = dag.add_node(decl, RiscOp::Realize, vec![s], vec_f32(3), None);
     dag.add_root(r);
 
     assert_gpu_matches_eval(
@@ -2292,9 +2557,22 @@ fn g10_realize_materializes_view_on_gpu() {
 #[ignore = "manual gate: requires HIP-capable GPU and hipcc"]
 fn g11_repeated_load_alias_matches_cpu() {
     let mut dag = Dag::new();
-    let x0 = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_f32(4), None);
-    let x1 = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_f32(4), None);
-    let out = dag.add_node(RiscOp::Add, vec![x0, x1], vec_f32(4), None);
+    let decl = dag.declare("test");
+    let x0 = dag.add_node(
+        decl,
+        RiscOp::Load { name: "x".into() },
+        vec![],
+        vec_f32(4),
+        None,
+    );
+    let x1 = dag.add_node(
+        decl,
+        RiscOp::Load { name: "x".into() },
+        vec![],
+        vec_f32(4),
+        None,
+    );
+    let out = dag.add_node(decl, RiscOp::Add, vec![x0, x1], vec_f32(4), None);
     dag.add_root(out);
 
     assert_gpu_matches_eval(
@@ -2308,26 +2586,30 @@ fn g11_repeated_load_alias_matches_cpu() {
 #[ignore = "manual gate: requires HIP-capable GPU and hipcc"]
 fn g12_reused_slot_respects_logical_size() {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let a = dag.add_node(
+        decl,
         RiscOp::synth_const(vec_f32(8).precision, 1.0),
         vec![],
         vec_f32(8),
         None,
     );
     let b = dag.add_node(
+        decl,
         RiscOp::synth_const(vec_f32(8).precision, 2.0),
         vec![],
         vec_f32(8),
         None,
     );
-    let _wide = dag.add_node(RiscOp::Add, vec![a, b], vec_f32(8), None);
+    let _wide = dag.add_node(decl, RiscOp::Add, vec![a, b], vec_f32(8), None);
     let small = dag.add_node(
+        decl,
         RiscOp::synth_const(vec_f32(4).precision, 3.0),
         vec![],
         vec_f32(4),
         None,
     );
-    let out = dag.add_node(RiscOp::Neg, vec![small], vec_f32(4), None);
+    let out = dag.add_node(decl, RiscOp::Neg, vec![small], vec_f32(4), None);
     dag.add_root(out);
 
     assert_gpu_matches_eval(&dag, "g12_reused_slot_logical_size", &[]);
@@ -2341,10 +2623,23 @@ fn g12_reused_slot_respects_logical_size() {
 #[ignore = "manual gate: requires HIP-capable GPU and hipcc"]
 fn gf1_fused_add_neg_gpu_matches_cpu() {
     let mut dag = Dag::new();
-    let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_f32(4), None);
-    let y = dag.add_node(RiscOp::Load { name: "y".into() }, vec![], vec_f32(4), None);
-    let add = dag.add_node(RiscOp::Add, vec![x, y], vec_f32(4), None);
-    let out = dag.add_node(RiscOp::Neg, vec![add], vec_f32(4), None);
+    let decl = dag.declare("test");
+    let x = dag.add_node(
+        decl,
+        RiscOp::Load { name: "x".into() },
+        vec![],
+        vec_f32(4),
+        None,
+    );
+    let y = dag.add_node(
+        decl,
+        RiscOp::Load { name: "y".into() },
+        vec![],
+        vec_f32(4),
+        None,
+    );
+    let add = dag.add_node(decl, RiscOp::Add, vec![x, y], vec_f32(4), None);
+    let out = dag.add_node(decl, RiscOp::Neg, vec![add], vec_f32(4), None);
     dag.add_root(out);
 
     assert_fused_gpu_matches_unfused_eval(
@@ -2365,18 +2660,38 @@ fn gf1_fused_add_neg_gpu_matches_cpu() {
 #[ignore = "manual gate: requires HIP-capable GPU and hipcc"]
 fn gf2_fused_three_way_chain_gpu_matches_cpu() {
     let mut dag = Dag::new();
-    let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_f32(4), None);
-    let y = dag.add_node(RiscOp::Load { name: "y".into() }, vec![], vec_f32(4), None);
-    let z = dag.add_node(RiscOp::Load { name: "z".into() }, vec![], vec_f32(4), None);
-    let sum = dag.add_node(RiscOp::Add, vec![x, y], vec_f32(4), None);
+    let decl = dag.declare("test");
+    let x = dag.add_node(
+        decl,
+        RiscOp::Load { name: "x".into() },
+        vec![],
+        vec_f32(4),
+        None,
+    );
+    let y = dag.add_node(
+        decl,
+        RiscOp::Load { name: "y".into() },
+        vec![],
+        vec_f32(4),
+        None,
+    );
+    let z = dag.add_node(
+        decl,
+        RiscOp::Load { name: "z".into() },
+        vec![],
+        vec_f32(4),
+        None,
+    );
+    let sum = dag.add_node(decl, RiscOp::Add, vec![x, y], vec_f32(4), None);
     let zero = dag.add_node(
+        decl,
         RiscOp::synth_const(vec_f32(4).precision, 0.0),
         vec![],
         vec_f32(4),
         None,
     );
-    let relu = dag.add_node(RiscOp::MaxElem, vec![sum, zero], vec_f32(4), None);
-    let out = dag.add_node(RiscOp::Mul, vec![relu, z], vec_f32(4), None);
+    let relu = dag.add_node(decl, RiscOp::MaxElem, vec![sum, zero], vec_f32(4), None);
+    let out = dag.add_node(decl, RiscOp::Mul, vec![relu, z], vec_f32(4), None);
     dag.add_root(out);
 
     assert_fused_gpu_matches_unfused_eval(
@@ -2394,11 +2709,30 @@ fn gf2_fused_three_way_chain_gpu_matches_cpu() {
 #[ignore = "manual gate: requires HIP-capable GPU and hipcc"]
 fn fused_direct_sub_and_min_gpu_match_unfused_evaluator() {
     let mut dag = Dag::new();
-    let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_f32(4), None);
-    let y = dag.add_node(RiscOp::Load { name: "y".into() }, vec![], vec_f32(4), None);
-    let z = dag.add_node(RiscOp::Load { name: "z".into() }, vec![], vec_f32(4), None);
-    let difference = dag.add_node(RiscOp::Sub, vec![x, y], vec_f32(4), None);
-    let out = dag.add_node(RiscOp::MinElem, vec![difference, z], vec_f32(4), None);
+    let decl = dag.declare("test");
+    let x = dag.add_node(
+        decl,
+        RiscOp::Load { name: "x".into() },
+        vec![],
+        vec_f32(4),
+        None,
+    );
+    let y = dag.add_node(
+        decl,
+        RiscOp::Load { name: "y".into() },
+        vec![],
+        vec_f32(4),
+        None,
+    );
+    let z = dag.add_node(
+        decl,
+        RiscOp::Load { name: "z".into() },
+        vec![],
+        vec_f32(4),
+        None,
+    );
+    let difference = dag.add_node(decl, RiscOp::Sub, vec![x, y], vec_f32(4), None);
+    let out = dag.add_node(decl, RiscOp::MinElem, vec![difference, z], vec_f32(4), None);
     dag.add_root(out);
 
     assert_fused_gpu_matches_unfused_eval(
@@ -2425,16 +2759,35 @@ fn fused_direct_sub_and_min_gpu_match_unfused_evaluator() {
 #[ignore = "manual gate: requires HIP-capable GPU and hipcc"]
 fn gf3_program_owned_fused_in_place_fan_in_gpu_matches_cpu() {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     // `(copy(x) + y) * z`, with the program-owned copy marked as the
     // reusable input on the Add step. `fuse` propagates the hint into the
     // new FusedElem node so the shared planner can mint the token.
-    let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_f32(8), None);
-    let owned_x = dag.add_node(RiscOp::Copy, vec![x], vec_f32(8), None);
-    let y = dag.add_node(RiscOp::Load { name: "y".into() }, vec![], vec_f32(8), None);
-    let z = dag.add_node(RiscOp::Load { name: "z".into() }, vec![], vec_f32(8), None);
-    let add = dag.add_node(RiscOp::Add, vec![owned_x, y], vec_f32(8), None);
+    let x = dag.add_node(
+        decl,
+        RiscOp::Load { name: "x".into() },
+        vec![],
+        vec_f32(8),
+        None,
+    );
+    let owned_x = dag.add_node(decl, RiscOp::Copy, vec![x], vec_f32(8), None);
+    let y = dag.add_node(
+        decl,
+        RiscOp::Load { name: "y".into() },
+        vec![],
+        vec_f32(8),
+        None,
+    );
+    let z = dag.add_node(
+        decl,
+        RiscOp::Load { name: "z".into() },
+        vec![],
+        vec_f32(8),
+        None,
+    );
+    let add = dag.add_node(decl, RiscOp::Add, vec![owned_x, y], vec_f32(8), None);
     dag.set_reusable_input(add, owned_x);
-    let out = dag.add_node(RiscOp::Mul, vec![add, z], vec_f32(8), None);
+    let out = dag.add_node(decl, RiscOp::Mul, vec![add, z], vec_f32(8), None);
     dag.add_root(out);
 
     assert_fused_gpu_matches_unfused_eval(
@@ -2454,14 +2807,23 @@ fn gf3_program_owned_fused_in_place_fan_in_gpu_matches_cpu() {
 #[ignore = "manual gate: requires HIP-capable GPU and hipcc"]
 fn compiled_value_ownership_caller_bytes_unchanged() {
     let mut dag = Dag::new();
-    let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_f32(4), None);
+    let decl = dag.declare("test");
+    let x = dag.add_node(
+        decl,
+        RiscOp::Load { name: "x".into() },
+        vec![],
+        vec_f32(4),
+        None,
+    );
     let scale = dag.add_node(
+        decl,
         RiscOp::synth_const(Prim::F32, 2.0),
         vec![],
         vec_f32(4),
         None,
     );
     let fused = dag.add_node(
+        decl,
         RiscOp::FusedElem {
             ops: vec![chelis_ir::dag::FusedStep {
                 op: chelis_ir::dag::FusedStepOp::Mul,
@@ -2504,15 +2866,24 @@ fn compiled_value_ownership_caller_bytes_unchanged() {
 #[ignore = "manual gate: requires HIP-capable GPU and hipcc"]
 fn compiled_value_ownership_program_owned_reuse() {
     let mut dag = Dag::new();
-    let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_f32(4), None);
-    let owned = dag.add_node(RiscOp::Copy, vec![x], vec_f32(4), None);
+    let decl = dag.declare("test");
+    let x = dag.add_node(
+        decl,
+        RiscOp::Load { name: "x".into() },
+        vec![],
+        vec_f32(4),
+        None,
+    );
+    let owned = dag.add_node(decl, RiscOp::Copy, vec![x], vec_f32(4), None);
     let scale = dag.add_node(
+        decl,
         RiscOp::synth_const(Prim::F32, 2.0),
         vec![],
         vec_f32(4),
         None,
     );
     let fused = dag.add_node(
+        decl,
         RiscOp::FusedElem {
             ops: vec![chelis_ir::dag::FusedStep {
                 op: chelis_ir::dag::FusedStepOp::Mul,
@@ -2566,13 +2937,16 @@ fn compiled_value_ownership_program_owned_reuse() {
 #[ignore = "manual gate: requires HIP-capable GPU and hipcc"]
 fn g13_tiny_segmented_sum_matches_eval() {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let x = dag.add_node(
+        decl,
         RiscOp::Load { name: "x".into() },
         vec![],
         mat_f32(3, 8),
         None,
     );
     let out = dag.add_node(
+        decl,
         RiscOp::Sum {
             axis: 1,
             accumulator: chelis_types::types::Prim::F32,
@@ -2601,13 +2975,21 @@ fn g13_tiny_segmented_sum_matches_eval() {
 #[ignore = "manual gate: requires HIP-capable GPU and hipcc"]
 fn g13_small_segmented_max_matches_eval() {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let x = dag.add_node(
+        decl,
         RiscOp::Load { name: "x".into() },
         vec![],
         mat_f32(2, 16),
         None,
     );
-    let out = dag.add_node(RiscOp::MaxReduce { axis: 1 }, vec![x], vec_f32(2), None);
+    let out = dag.add_node(
+        decl,
+        RiscOp::MaxReduce { axis: 1 },
+        vec![x],
+        vec_f32(2),
+        None,
+    );
     dag.add_root(out);
 
     let data: Vec<f32> = (0..32).map(|i| (i as f32) - 10.0).collect();
@@ -2622,13 +3004,16 @@ fn g13_small_segmented_max_matches_eval() {
 #[ignore = "manual gate: requires HIP-capable GPU and hipcc"]
 fn g13_large_segmented_sum_matches_eval() {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let x = dag.add_node(
+        decl,
         RiscOp::Load { name: "x".into() },
         vec![],
         mat_f32(2, 128),
         None,
     );
     let out = dag.add_node(
+        decl,
         RiscOp::Sum {
             axis: 1,
             accumulator: chelis_types::types::Prim::F32,
@@ -2655,13 +3040,16 @@ fn g13_large_segmented_sum_matches_eval() {
 #[ignore = "manual gate: requires HIP-capable GPU and hipcc"]
 fn g14_staged_scalar_sum_matches_eval() {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let x = dag.add_node(
+        decl,
         RiscOp::Load { name: "x".into() },
         vec![],
         vec_f32(1024),
         None,
     );
     let out = dag.add_node(
+        decl,
         RiscOp::Sum {
             axis: 0,
             accumulator: chelis_types::types::Prim::F32,
@@ -2688,19 +3076,23 @@ fn g14_staged_scalar_sum_matches_eval() {
 #[ignore = "manual gate: requires HIP-capable GPU and hipcc"]
 fn g15_hipblas_matmul_matches_eval() {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let a = dag.add_node(
+        decl,
         RiscOp::Load { name: "a".into() },
         vec![],
         mat_f32(2, 3),
         None,
     );
     let b = dag.add_node(
+        decl,
         RiscOp::Load { name: "b".into() },
         vec![],
         mat_f32(3, 4),
         None,
     );
     let ea = dag.add_node(
+        decl,
         RiscOp::Expand {
             axis: 2,
             size: chelis_ir::dag::RtDim::Lit(4),
@@ -2710,6 +3102,7 @@ fn g15_hipblas_matmul_matches_eval() {
         None,
     );
     let eb = dag.add_node(
+        decl,
         RiscOp::Expand {
             axis: 0,
             size: chelis_ir::dag::RtDim::Lit(2),
@@ -2718,8 +3111,9 @@ fn g15_hipblas_matmul_matches_eval() {
         tensor3_f32(2, 3, 4),
         None,
     );
-    let mul = dag.add_node(RiscOp::Mul, vec![ea, eb], tensor3_f32(2, 3, 4), None);
+    let mul = dag.add_node(decl, RiscOp::Mul, vec![ea, eb], tensor3_f32(2, 3, 4), None);
     let out = dag.add_node(
+        decl,
         RiscOp::Sum {
             axis: 1,
             accumulator: chelis_types::types::Prim::F32,
@@ -2748,19 +3142,23 @@ fn g15_hipblas_matmul_matches_eval() {
 #[ignore = "manual gate: requires HIP-capable GPU, hipcc, and hipBLAS"]
 fn g15_hipblas_batched_matmul_matches_eval() {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let a = dag.add_node(
+        decl,
         RiscOp::Load { name: "a".into() },
         vec![],
         tensor4_f32(2, 2, 2, 3),
         None,
     );
     let b = dag.add_node(
+        decl,
         RiscOp::Load { name: "b".into() },
         vec![],
         tensor4_f32(2, 2, 3, 2),
         None,
     );
     let out = dag.add_node(
+        decl,
         RiscOp::BlasMatmul {
             batch_dims: vec![
                 chelis_ir::dag::DimExpr::Concrete(2),
@@ -2805,6 +3203,7 @@ fn g15_hipblas_batched_matmul_matches_eval() {
 #[ignore = "manual gate: requires HIP-capable GPU, hipcc, and hipBLAS"]
 fn g15_hipblas_strided_batched_symbolic_batch_matches_eval() {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let a_ty = TensorType {
         dims: vec![
             DimInfo::Named("batch".into(), None),
@@ -2829,9 +3228,10 @@ fn g15_hipblas_strided_batched_symbolic_batch_matches_eval() {
         ],
         precision: Prim::F32,
     };
-    let a = dag.add_node(RiscOp::Load { name: "a".into() }, vec![], a_ty, None);
-    let b = dag.add_node(RiscOp::Load { name: "b".into() }, vec![], b_ty, None);
+    let a = dag.add_node(decl, RiscOp::Load { name: "a".into() }, vec![], a_ty, None);
+    let b = dag.add_node(decl, RiscOp::Load { name: "b".into() }, vec![], b_ty, None);
     let out = dag.add_node(
+        decl,
         RiscOp::BlasMatmul {
             batch_dims: vec![chelis_ir::dag::DimExpr::Sym("batch".into())],
             m: chelis_ir::dag::DimExpr::Concrete(2),
@@ -2873,7 +3273,9 @@ fn g15_hipblas_strided_batched_symbolic_batch_matches_eval() {
 #[ignore = "manual gate: requires HIP-capable GPU and hipcc"]
 fn g15_noncontiguous_matmul_fallback_matches_eval() {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let base_a = dag.add_node(
+        decl,
         RiscOp::Load {
             name: "base_a".into(),
         },
@@ -2882,18 +3284,21 @@ fn g15_noncontiguous_matmul_fallback_matches_eval() {
         None,
     );
     let a = dag.add_node(
+        decl,
         RiscOp::Permute { axes: vec![1, 0] },
         vec![base_a],
         mat_f32(2, 3),
         None,
     );
     let b = dag.add_node(
+        decl,
         RiscOp::Load { name: "b".into() },
         vec![],
         mat_f32(3, 4),
         None,
     );
     let ea = dag.add_node(
+        decl,
         RiscOp::Expand {
             axis: 2,
             size: chelis_ir::dag::RtDim::Lit(4),
@@ -2903,6 +3308,7 @@ fn g15_noncontiguous_matmul_fallback_matches_eval() {
         None,
     );
     let eb = dag.add_node(
+        decl,
         RiscOp::Expand {
             axis: 0,
             size: chelis_ir::dag::RtDim::Lit(2),
@@ -2911,8 +3317,9 @@ fn g15_noncontiguous_matmul_fallback_matches_eval() {
         tensor3_f32(2, 3, 4),
         None,
     );
-    let mul = dag.add_node(RiscOp::Mul, vec![ea, eb], tensor3_f32(2, 3, 4), None);
+    let mul = dag.add_node(decl, RiscOp::Mul, vec![ea, eb], tensor3_f32(2, 3, 4), None);
     let out = dag.add_node(
+        decl,
         RiscOp::Sum {
             axis: 1,
             accumulator: chelis_types::types::Prim::F32,
@@ -2941,7 +3348,9 @@ fn g15_noncontiguous_matmul_fallback_matches_eval() {
 #[ignore = "manual gate: requires HIP-capable GPU and hipcc"]
 fn g16_sparse_gather_i64_matches_eval() {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let table = dag.add_node(
+        decl,
         RiscOp::Load {
             name: "table".into(),
         },
@@ -2950,6 +3359,7 @@ fn g16_sparse_gather_i64_matches_eval() {
         None,
     );
     let indices = dag.add_node(
+        decl,
         RiscOp::Load {
             name: "indices".into(),
         },
@@ -2958,6 +3368,7 @@ fn g16_sparse_gather_i64_matches_eval() {
         None,
     );
     let out = dag.add_node(
+        decl,
         RiscOp::Gather { axis: 0 },
         vec![table, indices],
         mat_f32(3, 3),
@@ -2985,7 +3396,9 @@ fn g16_sparse_gather_i64_matches_eval() {
 #[ignore = "manual gate: requires HIP-capable GPU and hipcc"]
 fn g16_sparse_scatter_add_i32_matches_eval_with_duplicate_indices() {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let target = dag.add_node(
+        decl,
         RiscOp::Load {
             name: "target".into(),
         },
@@ -2994,6 +3407,7 @@ fn g16_sparse_scatter_add_i32_matches_eval_with_duplicate_indices() {
         None,
     );
     let indices = dag.add_node(
+        decl,
         RiscOp::Load {
             name: "indices".into(),
         },
@@ -3002,6 +3416,7 @@ fn g16_sparse_scatter_add_i32_matches_eval_with_duplicate_indices() {
         None,
     );
     let updates = dag.add_node(
+        decl,
         RiscOp::Load {
             name: "updates".into(),
         },
@@ -3010,6 +3425,7 @@ fn g16_sparse_scatter_add_i32_matches_eval_with_duplicate_indices() {
         None,
     );
     let out = dag.add_node(
+        decl,
         RiscOp::ScatterAdd { axis: 0 },
         vec![target, indices, updates],
         mat_f32(3, 2),
@@ -3036,7 +3452,9 @@ fn g16_sparse_scatter_add_i32_matches_eval_with_duplicate_indices() {
 #[ignore = "manual gate: requires HIP-capable GPU and hipcc"]
 fn g16_sparse_scatter_replace_i64_duplicate_indices_are_last_write_wins() {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let target = dag.add_node(
+        decl,
         RiscOp::Load {
             name: "target".into(),
         },
@@ -3045,6 +3463,7 @@ fn g16_sparse_scatter_replace_i64_duplicate_indices_are_last_write_wins() {
         None,
     );
     let indices = dag.add_node(
+        decl,
         RiscOp::Load {
             name: "indices".into(),
         },
@@ -3053,6 +3472,7 @@ fn g16_sparse_scatter_replace_i64_duplicate_indices_are_last_write_wins() {
         None,
     );
     let updates = dag.add_node(
+        decl,
         RiscOp::Load {
             name: "updates".into(),
         },
@@ -3061,6 +3481,7 @@ fn g16_sparse_scatter_replace_i64_duplicate_indices_are_last_write_wins() {
         None,
     );
     let out = dag.add_node(
+        decl,
         RiscOp::Scatter { axis: 0 },
         vec![target, indices, updates],
         mat_f32(3, 2),
@@ -3364,19 +3785,22 @@ fn assert_gpu_matches_eval_f64(dag: &Dag, func_name: &str, inputs: &[TestInputF6
 #[ignore = "manual gate: requires HIP-capable GPU and hipcc"]
 fn g17_add_consts_f64_gpu() {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let a = dag.add_node(
+        decl,
         RiscOp::synth_const(scalar_f64().precision, 1.0),
         vec![],
         scalar_f64(),
         None,
     );
     let b = dag.add_node(
+        decl,
         RiscOp::synth_const(scalar_f64().precision, 2.0),
         vec![],
         scalar_f64(),
         None,
     );
-    let c = dag.add_node(RiscOp::Add, vec![a, b], scalar_f64(), None);
+    let c = dag.add_node(decl, RiscOp::Add, vec![a, b], scalar_f64(), None);
     dag.add_root(c);
     assert_gpu_matches_eval_f64(&dag, "g17_add_consts_f64", &[], 1e-12);
 }
@@ -3386,8 +3810,15 @@ fn g17_add_consts_f64_gpu() {
 #[ignore = "manual gate: requires HIP-capable GPU and hipcc"]
 fn g18_exp_f64_gpu_matches_cpu() {
     let mut dag = Dag::new();
-    let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_f64(4), None);
-    let y = dag.add_node(RiscOp::Exp, vec![x], vec_f64(4), None);
+    let decl = dag.declare("test");
+    let x = dag.add_node(
+        decl,
+        RiscOp::Load { name: "x".into() },
+        vec![],
+        vec_f64(4),
+        None,
+    );
+    let y = dag.add_node(decl, RiscOp::Exp, vec![x], vec_f64(4), None);
     dag.add_root(y);
     assert_gpu_matches_eval_f64(
         &dag,
@@ -3402,9 +3833,22 @@ fn g18_exp_f64_gpu_matches_cpu() {
 #[ignore = "manual gate: requires HIP-capable GPU and hipcc"]
 fn g19_mul_f64_gpu_matches_cpu() {
     let mut dag = Dag::new();
-    let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_f64(4), None);
-    let y = dag.add_node(RiscOp::Load { name: "y".into() }, vec![], vec_f64(4), None);
-    let z = dag.add_node(RiscOp::Mul, vec![x, y], vec_f64(4), None);
+    let decl = dag.declare("test");
+    let x = dag.add_node(
+        decl,
+        RiscOp::Load { name: "x".into() },
+        vec![],
+        vec_f64(4),
+        None,
+    );
+    let y = dag.add_node(
+        decl,
+        RiscOp::Load { name: "y".into() },
+        vec![],
+        vec_f64(4),
+        None,
+    );
+    let z = dag.add_node(decl, RiscOp::Mul, vec![x, y], vec_f64(4), None);
     dag.add_root(z);
     assert_gpu_matches_eval_f64(
         &dag,
@@ -3423,8 +3867,16 @@ fn g19_mul_f64_gpu_matches_cpu() {
 #[ignore = "manual gate: requires HIP-capable GPU and hipcc"]
 fn g20_sum_reduction_f64_gpu_matches_cpu() {
     let mut dag = Dag::new();
-    let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_f64(8), None);
+    let decl = dag.declare("test");
+    let x = dag.add_node(
+        decl,
+        RiscOp::Load { name: "x".into() },
+        vec![],
+        vec_f64(8),
+        None,
+    );
     let s = dag.add_node(
+        decl,
         RiscOp::sum_default(0, Prim::F64).expect("f64 reduce_sum"),
         vec![x],
         scalar_f64(),
@@ -3448,8 +3900,21 @@ fn g20_sum_reduction_f64_gpu_matches_cpu() {
 #[ignore = "manual gate: requires HIP-capable GPU and hipcc"]
 fn g20b_max_reduce_f64_gpu_matches_cpu() {
     let mut dag = Dag::new();
-    let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_f64(5), None);
-    let m = dag.add_node(RiscOp::MaxReduce { axis: 0 }, vec![x], scalar_f64(), None);
+    let decl = dag.declare("test");
+    let x = dag.add_node(
+        decl,
+        RiscOp::Load { name: "x".into() },
+        vec![],
+        vec_f64(5),
+        None,
+    );
+    let m = dag.add_node(
+        decl,
+        RiscOp::MaxReduce { axis: 0 },
+        vec![x],
+        scalar_f64(),
+        None,
+    );
     dag.add_root(m);
     assert_gpu_matches_eval_f64(
         &dag,
@@ -3465,8 +3930,21 @@ fn g20b_max_reduce_f64_gpu_matches_cpu() {
 #[ignore = "manual gate: requires HIP-capable GPU and hipcc"]
 fn g20c_min_reduce_f64_gpu_matches_cpu() {
     let mut dag = Dag::new();
-    let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_f64(5), None);
-    let m = dag.add_node(RiscOp::MinReduce { axis: 0 }, vec![x], scalar_f64(), None);
+    let decl = dag.declare("test");
+    let x = dag.add_node(
+        decl,
+        RiscOp::Load { name: "x".into() },
+        vec![],
+        vec_f64(5),
+        None,
+    );
+    let m = dag.add_node(
+        decl,
+        RiscOp::MinReduce { axis: 0 },
+        vec![x],
+        scalar_f64(),
+        None,
+    );
     dag.add_root(m);
     assert_gpu_matches_eval_f64(
         &dag,
@@ -3481,8 +3959,21 @@ fn g20c_min_reduce_f64_gpu_matches_cpu() {
 #[ignore = "manual gate: requires HIP-capable GPU and hipcc"]
 fn g20d_prod_reduce_f64_gpu_matches_cpu() {
     let mut dag = Dag::new();
-    let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_f64(4), None);
-    let m = dag.add_node(RiscOp::ProdReduce { axis: 0 }, vec![x], scalar_f64(), None);
+    let decl = dag.declare("test");
+    let x = dag.add_node(
+        decl,
+        RiscOp::Load { name: "x".into() },
+        vec![],
+        vec_f64(4),
+        None,
+    );
+    let m = dag.add_node(
+        decl,
+        RiscOp::ProdReduce { axis: 0 },
+        vec![x],
+        scalar_f64(),
+        None,
+    );
     dag.add_root(m);
     assert_gpu_matches_eval_f64(
         &dag,
@@ -3500,19 +3991,23 @@ fn g21_matmul_f64_gpu_matches_cpu() {
     use chelis_ir::dag::DimExpr;
 
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let a = dag.add_node(
+        decl,
         RiscOp::Load { name: "a".into() },
         vec![],
         mat_f64(2, 3),
         None,
     );
     let b = dag.add_node(
+        decl,
         RiscOp::Load { name: "b".into() },
         vec![],
         mat_f64(3, 4),
         None,
     );
     let mm = dag.add_node(
+        decl,
         RiscOp::matmul_default(
             vec![],
             DimExpr::Concrete(2),
@@ -3557,17 +4052,20 @@ fn g21_matmul_f64_gpu_matches_cpu() {
 fn ws_a2_hip_f1_still_rejects_i8_matmul() {
     use chelis_ir::dag::DimExpr;
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let i8_ty = TensorType {
         dims: vec![DimInfo::Lit(2), DimInfo::Lit(2)],
         precision: Prim::Int8,
     };
     let a = dag.add_node(
+        decl,
         RiscOp::Load { name: "a".into() },
         vec![],
         i8_ty.clone(),
         None,
     );
     let b = dag.add_node(
+        decl,
         RiscOp::Load { name: "b".into() },
         vec![],
         i8_ty.clone(),
@@ -3580,7 +4078,7 @@ fn ws_a2_hip_f1_still_rejects_i8_matmul() {
         k: DimExpr::Concrete(2),
         accumulator: Prim::Int32,
     };
-    let mm = dag.add_node(mm_op, vec![a, b], i8_ty, None);
+    let mm = dag.add_node(decl, mm_op, vec![a, b], i8_ty, None);
     dag.add_root(mm);
 
     let result = std::panic::catch_unwind(|| {
@@ -3610,19 +4108,23 @@ fn ws_a2_hip_f1_still_rejects_i8_matmul() {
 fn ws_a2_hip_f1_admits_f64_matmul_at_codegen() {
     use chelis_ir::dag::DimExpr;
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let a = dag.add_node(
+        decl,
         RiscOp::Load { name: "a".into() },
         vec![],
         mat_f64(2, 3),
         None,
     );
     let b = dag.add_node(
+        decl,
         RiscOp::Load { name: "b".into() },
         vec![],
         mat_f64(3, 4),
         None,
     );
     let mm = dag.add_node(
+        decl,
         RiscOp::matmul_default(
             vec![],
             DimExpr::Concrete(2),
@@ -3657,8 +4159,16 @@ fn ws_a2_hip_f1_admits_f64_matmul_at_codegen() {
 #[test]
 fn ws_a2_hip_reduce_sum_f64_emits_double_accumulator() {
     let mut dag = Dag::new();
-    let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_f64(4), None);
+    let decl = dag.declare("test");
+    let x = dag.add_node(
+        decl,
+        RiscOp::Load { name: "x".into() },
+        vec![],
+        vec_f64(4),
+        None,
+    );
     let s = dag.add_node(
+        decl,
         RiscOp::sum_default(0, Prim::F64).expect("f64 reduce_sum"),
         vec![x],
         scalar_f64(),
@@ -3684,8 +4194,21 @@ fn ws_a2_hip_reduce_sum_f64_emits_double_accumulator() {
 #[test]
 fn ws_a2_hip_min_reduce_f64_kernel_emitted() {
     let mut dag = Dag::new();
-    let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_f64(4), None);
-    let m = dag.add_node(RiscOp::MinReduce { axis: 0 }, vec![x], scalar_f64(), None);
+    let decl = dag.declare("test");
+    let x = dag.add_node(
+        decl,
+        RiscOp::Load { name: "x".into() },
+        vec![],
+        vec_f64(4),
+        None,
+    );
+    let m = dag.add_node(
+        decl,
+        RiscOp::MinReduce { axis: 0 },
+        vec![x],
+        scalar_f64(),
+        None,
+    );
     dag.add_root(m);
     let result = codegen_hip(&dag, "ws_a2_min_reduce_f64").unwrap();
     assert!(
@@ -3701,8 +4224,16 @@ fn ws_a2_hip_min_reduce_f64_kernel_emitted() {
 #[test]
 fn ws_a2_hip_argmax_f64_kernel_emitted() {
     let mut dag = Dag::new();
-    let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_f64(4), None);
+    let decl = dag.declare("test");
+    let x = dag.add_node(
+        decl,
+        RiscOp::Load { name: "x".into() },
+        vec![],
+        vec_f64(4),
+        None,
+    );
     let m = dag.add_node(
+        decl,
         RiscOp::Argmax { axis: 0 },
         vec![x],
         TensorType {
@@ -3864,7 +4395,9 @@ int main(void) {{
 #[ignore = "manual gate: requires HIP-capable GPU and hipcc"]
 fn ws_a4_i8_add_gpu_matches_two_complement_wrap() {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let a = dag.add_node(
+        decl,
         RiscOp::Load { name: "a".into() },
         vec![],
         TensorType {
@@ -3874,6 +4407,7 @@ fn ws_a4_i8_add_gpu_matches_two_complement_wrap() {
         None,
     );
     let b = dag.add_node(
+        decl,
         RiscOp::Load { name: "b".into() },
         vec![],
         TensorType {
@@ -3883,6 +4417,7 @@ fn ws_a4_i8_add_gpu_matches_two_complement_wrap() {
         None,
     );
     let out = dag.add_node(
+        decl,
         RiscOp::Add,
         vec![a, b],
         TensorType {
@@ -3914,7 +4449,9 @@ fn ws_a4_i8_add_gpu_matches_two_complement_wrap() {
 #[ignore = "manual gate: requires HIP-capable GPU and hipcc"]
 fn ws_a4_i16_mul_gpu_matches_two_complement_wrap() {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let a = dag.add_node(
+        decl,
         RiscOp::Load { name: "a".into() },
         vec![],
         TensorType {
@@ -3924,6 +4461,7 @@ fn ws_a4_i16_mul_gpu_matches_two_complement_wrap() {
         None,
     );
     let b = dag.add_node(
+        decl,
         RiscOp::Load { name: "b".into() },
         vec![],
         TensorType {
@@ -3933,6 +4471,7 @@ fn ws_a4_i16_mul_gpu_matches_two_complement_wrap() {
         None,
     );
     let out = dag.add_node(
+        decl,
         RiscOp::Mul,
         vec![a, b],
         TensorType {
@@ -3972,9 +4511,22 @@ fn direct_i32_extrema_gpu_select_exact_signed_operands() {
         ),
     ] {
         let mut dag = Dag::new();
-        let a = dag.add_node(RiscOp::Load { name: "a".into() }, vec![], vec_i32(4), None);
-        let b = dag.add_node(RiscOp::Load { name: "b".into() }, vec![], vec_i32(4), None);
-        let out = dag.add_node(op, vec![a, b], vec_i32(4), None);
+        let decl = dag.declare("test");
+        let a = dag.add_node(
+            decl,
+            RiscOp::Load { name: "a".into() },
+            vec![],
+            vec_i32(4),
+            None,
+        );
+        let b = dag.add_node(
+            decl,
+            RiscOp::Load { name: "b".into() },
+            vec![],
+            vec_i32(4),
+            None,
+        );
+        let out = dag.add_node(decl, op, vec![a, b], vec_i32(4), None);
         dag.add_root(out);
         let actual = compile_and_run_single_output_typed_i64(
             &dag,
@@ -3996,7 +4548,9 @@ fn direct_i32_extrema_gpu_select_exact_signed_operands() {
 #[ignore = "manual gate: requires HIP-capable GPU and hipcc"]
 fn ws_a4_i8_reduce_sum_gpu_promotes_to_i32() {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let a = dag.add_node(
+        decl,
         RiscOp::Load { name: "a".into() },
         vec![],
         TensorType {
@@ -4008,6 +4562,7 @@ fn ws_a4_i8_reduce_sum_gpu_promotes_to_i32() {
     let sum_op =
         chelis_ir::dag::RiscOp::sum_default(0, Prim::Int8).expect("i8 sum_default must succeed");
     let out = dag.add_node(
+        decl,
         sum_op,
         vec![a],
         TensorType {
@@ -4035,7 +4590,9 @@ fn ws_a4_i8_reduce_sum_gpu_promotes_to_i32() {
 #[ignore = "manual gate: requires HIP-capable GPU and hipcc"]
 fn ws_a4_i16_reduce_sum_gpu_promotes_to_i32() {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let a = dag.add_node(
+        decl,
         RiscOp::Load { name: "a".into() },
         vec![],
         TensorType {
@@ -4047,6 +4604,7 @@ fn ws_a4_i16_reduce_sum_gpu_promotes_to_i32() {
     let sum_op =
         chelis_ir::dag::RiscOp::sum_default(0, Prim::Int16).expect("i16 sum_default must succeed");
     let out = dag.add_node(
+        decl,
         sum_op,
         vec![a],
         TensorType {
@@ -4080,9 +4638,22 @@ fn ws_a4_i16_reduce_sum_gpu_promotes_to_i32() {
 #[ignore = "manual gate: requires HIP-capable GPU and hipcc"]
 fn chelis_178_trunc_div_i32_gpu_rounds_toward_zero() {
     let mut dag = Dag::new();
-    let a = dag.add_node(RiscOp::Load { name: "a".into() }, vec![], vec_i32(4), None);
-    let b = dag.add_node(RiscOp::Load { name: "b".into() }, vec![], vec_i32(4), None);
-    let out = dag.add_node(RiscOp::TruncDiv, vec![a, b], vec_i32(4), None);
+    let decl = dag.declare("test");
+    let a = dag.add_node(
+        decl,
+        RiscOp::Load { name: "a".into() },
+        vec![],
+        vec_i32(4),
+        None,
+    );
+    let b = dag.add_node(
+        decl,
+        RiscOp::Load { name: "b".into() },
+        vec![],
+        vec_i32(4),
+        None,
+    );
+    let out = dag.add_node(decl, RiscOp::TruncDiv, vec![a, b], vec_i32(4), None);
     dag.add_root(out);
 
     let actual = compile_and_run_single_output_typed_i64(
@@ -4111,9 +4682,22 @@ fn chelis_178_trunc_div_i32_gpu_rounds_toward_zero() {
 #[ignore = "manual gate: requires HIP-capable GPU and hipcc"]
 fn chelis_178_floor_div_i32_gpu_rounds_toward_neg_inf() {
     let mut dag = Dag::new();
-    let a = dag.add_node(RiscOp::Load { name: "a".into() }, vec![], vec_i32(4), None);
-    let b = dag.add_node(RiscOp::Load { name: "b".into() }, vec![], vec_i32(4), None);
-    let out = dag.add_node(RiscOp::FloorDiv, vec![a, b], vec_i32(4), None);
+    let decl = dag.declare("test");
+    let a = dag.add_node(
+        decl,
+        RiscOp::Load { name: "a".into() },
+        vec![],
+        vec_i32(4),
+        None,
+    );
+    let b = dag.add_node(
+        decl,
+        RiscOp::Load { name: "b".into() },
+        vec![],
+        vec_i32(4),
+        None,
+    );
+    let out = dag.add_node(decl, RiscOp::FloorDiv, vec![a, b], vec_i32(4), None);
     dag.add_root(out);
 
     let actual = compile_and_run_single_output_typed_i64(
@@ -4140,7 +4724,9 @@ fn chelis_178_floor_div_i32_gpu_rounds_toward_neg_inf() {
 #[test]
 fn ws_a4_i8_add_emits_dtype_suffixed_kernel_name() {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let a = dag.add_node(
+        decl,
         RiscOp::Load { name: "a".into() },
         vec![],
         TensorType {
@@ -4150,6 +4736,7 @@ fn ws_a4_i8_add_emits_dtype_suffixed_kernel_name() {
         None,
     );
     let b = dag.add_node(
+        decl,
         RiscOp::Load { name: "b".into() },
         vec![],
         TensorType {
@@ -4159,6 +4746,7 @@ fn ws_a4_i8_add_emits_dtype_suffixed_kernel_name() {
         None,
     );
     let out = dag.add_node(
+        decl,
         RiscOp::Add,
         vec![a, b],
         TensorType {
@@ -4188,7 +4776,9 @@ fn ws_a4_i8_add_emits_dtype_suffixed_kernel_name() {
 #[test]
 fn ws_a4_i8_reduce_sum_emits_promoted_kernel_name() {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let a = dag.add_node(
+        decl,
         RiscOp::Load { name: "a".into() },
         vec![],
         TensorType {
@@ -4200,6 +4790,7 @@ fn ws_a4_i8_reduce_sum_emits_promoted_kernel_name() {
     let sum_op =
         chelis_ir::dag::RiscOp::sum_default(0, Prim::Int8).expect("i8 sum_default must succeed");
     let out = dag.add_node(
+        decl,
         sum_op,
         vec![a],
         TensorType {
@@ -4243,8 +4834,16 @@ fn ws_a4_i8_reduce_sum_emits_promoted_kernel_name() {
 #[ignore = "manual gate: requires HIP-capable GPU and hipcc"]
 fn g16_pad_1d_zero_fill_matches_eval() {
     let mut dag = Dag::new();
-    let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_f32(4), None);
+    let decl = dag.declare("test");
+    let x = dag.add_node(
+        decl,
+        RiscOp::Load { name: "x".into() },
+        vec![],
+        vec_f32(4),
+        None,
+    );
     let p = dag.add_node(
+        decl,
         RiscOp::zero_pad(
             Prim::F32,
             vec![(chelis_ir::dag::RtDim::Lit(1), chelis_ir::dag::RtDim::Lit(1))],
@@ -4265,8 +4864,16 @@ fn g16_pad_1d_zero_fill_matches_eval() {
 #[ignore = "manual gate: requires HIP-capable GPU and hipcc"]
 fn g16_pad_1d_nonzero_fill_matches_eval() {
     let mut dag = Dag::new();
-    let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_f32(3), None);
+    let decl = dag.declare("test");
+    let x = dag.add_node(
+        decl,
+        RiscOp::Load { name: "x".into() },
+        vec![],
+        vec_f32(3),
+        None,
+    );
     let p = dag.add_node(
+        decl,
         RiscOp::pad(
             vec![(chelis_ir::dag::RtDim::Lit(2), chelis_ir::dag::RtDim::Lit(1))],
             chelis_types::scalar_from_f64("pad", Prim::F32, -7.5).unwrap(),
@@ -4287,13 +4894,16 @@ fn g16_pad_1d_nonzero_fill_matches_eval() {
 #[ignore = "manual gate: requires HIP-capable GPU and hipcc"]
 fn g16_pad_2d_asymmetric_matches_eval() {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let x = dag.add_node(
+        decl,
         RiscOp::Load { name: "x".into() },
         vec![],
         mat_f32(2, 3),
         None,
     );
     let p = dag.add_node(
+        decl,
         RiscOp::zero_pad(
             Prim::F32,
             // before/after per axis: row axis (1,0), col axis (0,2) →
@@ -4325,8 +4935,16 @@ fn g16_pad_over_strided_source_matches_eval() {
     // The source is a strided view (every other element), so the pad
     // kernel must read through the source strides, not assume contiguity.
     let mut dag = Dag::new();
-    let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_f32(6), None);
+    let decl = dag.declare("test");
+    let x = dag.add_node(
+        decl,
+        RiscOp::Load { name: "x".into() },
+        vec![],
+        vec_f32(6),
+        None,
+    );
     let s = dag.add_node(
+        decl,
         RiscOp::Stride {
             strides: vec![chelis_ir::dag::RtDim::Lit(2)],
         },
@@ -4335,6 +4953,7 @@ fn g16_pad_over_strided_source_matches_eval() {
         None,
     );
     let p = dag.add_node(
+        decl,
         RiscOp::pad(
             vec![(chelis_ir::dag::RtDim::Lit(1), chelis_ir::dag::RtDim::Lit(1))],
             chelis_types::scalar_from_f64("pad", Prim::F32, 9.0).unwrap(),
@@ -4355,8 +4974,16 @@ fn g16_pad_over_strided_source_matches_eval() {
 #[ignore = "manual gate: requires HIP-capable GPU and hipcc"]
 fn g16_shrink_1d_matches_eval() {
     let mut dag = Dag::new();
-    let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_f32(6), None);
+    let decl = dag.declare("test");
+    let x = dag.add_node(
+        decl,
+        RiscOp::Load { name: "x".into() },
+        vec![],
+        vec_f32(6),
+        None,
+    );
     let s = dag.add_node(
+        decl,
         RiscOp::Shrink {
             bounds: vec![(chelis_ir::dag::RtDim::Lit(1), chelis_ir::dag::RtDim::Lit(5))],
         },
@@ -4376,13 +5003,16 @@ fn g16_shrink_1d_matches_eval() {
 #[ignore = "manual gate: requires HIP-capable GPU and hipcc"]
 fn g16_shrink_2d_matches_eval() {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let x = dag.add_node(
+        decl,
         RiscOp::Load { name: "x".into() },
         vec![],
         mat_f32(3, 4),
         None,
     );
     let s = dag.add_node(
+        decl,
         RiscOp::Shrink {
             // keep rows [1,3) and cols [0,2) → 2x2 interior crop.
             bounds: vec![
@@ -4414,8 +5044,16 @@ fn g16_pad_then_shrink_roundtrip_matches_eval() {
     // pad then shrink the padded margin back off must recover the input;
     // composing the two kernels exercises both launch paths in one DAG.
     let mut dag = Dag::new();
-    let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_f32(4), None);
+    let decl = dag.declare("test");
+    let x = dag.add_node(
+        decl,
+        RiscOp::Load { name: "x".into() },
+        vec![],
+        vec_f32(4),
+        None,
+    );
     let p = dag.add_node(
+        decl,
         RiscOp::zero_pad(
             Prim::F32,
             vec![(chelis_ir::dag::RtDim::Lit(2), chelis_ir::dag::RtDim::Lit(2))],
@@ -4425,6 +5063,7 @@ fn g16_pad_then_shrink_roundtrip_matches_eval() {
         None,
     );
     let s = dag.add_node(
+        decl,
         RiscOp::Shrink {
             bounds: vec![(chelis_ir::dag::RtDim::Lit(2), chelis_ir::dag::RtDim::Lit(6))],
         },
@@ -4453,7 +5092,9 @@ fn g16_pad_then_shrink_roundtrip_matches_eval() {
 
 fn count_dag(input: TensorType, axes: Vec<usize>, output: TensorType) -> Dag {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let mask = dag.add_node(
+        decl,
         RiscOp::Load {
             name: "mask".into(),
         },
@@ -4461,7 +5102,7 @@ fn count_dag(input: TensorType, axes: Vec<usize>, output: TensorType) -> Dag {
         input,
         None,
     );
-    let count = dag.add_node(RiscOp::Count { axes }, vec![mask], output, None);
+    let count = dag.add_node(decl, RiscOp::Count { axes }, vec![mask], output, None);
     dag.add_root(count);
     dag
 }

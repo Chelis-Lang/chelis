@@ -4,8 +4,13 @@ use chelis_ir::eval::{TensorValue, eval_tensor_with};
 use chelis_ir::optimize::dead_code_eliminate;
 use chelis_types::{scalar_from_i64, types::Prim};
 
-fn claimed_witness(dag: &mut Dag, required: &[i64]) -> chelis_ir::dag::NodeId {
+fn claimed_witness(
+    dag: &mut Dag,
+    decl: chelis_ir::dag::DeclId,
+    required: &[i64],
+) -> chelis_ir::dag::NodeId {
     let x = dag.add_node(
+        decl,
         RiscOp::Load {
             name: "actual".into(),
         },
@@ -17,6 +22,7 @@ fn claimed_witness(dag: &mut Dag, required: &[i64]) -> chelis_ir::dag::NodeId {
         None,
     );
     dag.add_node(
+        decl,
         RiscOp::ExtentWitness {
             site: chelis_ir::dag::ExtentWitnessSite::Caller,
             parameter: "x".into(),
@@ -45,7 +51,8 @@ fn call_witness_checks_each_literal_and_returns_the_observed_extent() {
         (vec![4, 5], 5, Some(4)),
     ] {
         let mut dag = Dag::new();
-        let witness = claimed_witness(&mut dag, &required);
+        let decl = dag.declare("test");
+        let witness = claimed_witness(&mut dag, decl, &required);
         dag.add_root(witness);
         let outcome = eval_tensor_with(&dag, |_| {
             Some(TensorValue::from_vec(vec![actual], vec![7.0; actual]))
@@ -74,8 +81,10 @@ fn call_witness_checks_each_literal_and_returns_the_observed_extent() {
 #[test]
 fn discarded_result_keeps_a_potentially_failing_witness() {
     let mut dag = Dag::new();
-    let witness = claimed_witness(&mut dag, &[4]);
+    let decl = dag.declare("test");
+    let witness = claimed_witness(&mut dag, decl, &[4]);
     let result = dag.add_node(
+        decl,
         RiscOp::Const {
             value: scalar_from_i64("load", Prim::Int64, 9).unwrap(),
         },
@@ -97,8 +106,10 @@ fn discarded_result_keeps_a_potentially_failing_witness() {
 #[test]
 fn unrelated_root_does_not_activate_another_invocations_witness() {
     let mut dag = Dag::new();
-    claimed_witness(&mut dag, &[4]);
+    let decl = dag.declare("test");
+    claimed_witness(&mut dag, decl, &[4]);
     let result = dag.add_node(
+        decl,
         RiscOp::Const {
             value: scalar_from_i64("load", Prim::Int64, 9).unwrap(),
         },
@@ -123,7 +134,8 @@ fn unrelated_root_does_not_activate_another_invocations_witness() {
 fn malformed_witnesses_are_rejected() {
     for malformed in 0..4 {
         let mut dag = Dag::new();
-        let witness = claimed_witness(&mut dag, &[4]);
+        let decl = dag.declare("test");
+        let witness = claimed_witness(&mut dag, decl, &[4]);
         dag.add_root(witness);
         assert!(chelis_ir::verify::verify(&dag).is_empty());
         let node = dag.node_mut(witness).unwrap();
@@ -154,9 +166,11 @@ fn graph_rebuilds_preserve_witness_claims_and_call_provenance() {
     use chelis_ir::optimize::{common_subexpr_eliminate, constant_fold};
     for actual in [4, 5] {
         let mut dag = Dag::new();
-        let first = claimed_witness(&mut dag, &[4]);
+        let decl = dag.declare("test");
+        let first = claimed_witness(&mut dag, decl, &[4]);
         let original = dag.get(first).unwrap().clone();
         let second = dag.add_node(
+            decl,
             original.op.clone(),
             original.inputs.clone(),
             original.output_type.clone(),
@@ -188,7 +202,8 @@ fn graph_rebuilds_preserve_witness_claims_and_call_provenance() {
 fn vectorization_shares_witness_and_shifts_its_source_axis() {
     for actual in [4, 5] {
         let mut dag = Dag::new();
-        let witness = claimed_witness(&mut dag, &[4]);
+        let decl = dag.declare("test");
+        let witness = claimed_witness(&mut dag, decl, &[4]);
         dag.add_root(witness);
         let dag = chelis_ir::vmap::vectorize_axis0(&dag, DimInfo::Lit(2)).unwrap();
         let witness = dag
@@ -225,9 +240,11 @@ fn vectorization_shares_witness_and_shifts_its_source_axis() {
 fn gradient_retains_primal_shape_checks() {
     for actual in [4, 5] {
         let mut dag = Dag::new();
-        let witness = claimed_witness(&mut dag, &[4]);
+        let decl = dag.declare("test");
+        let witness = claimed_witness(&mut dag, decl, &[4]);
         let input = dag.get(witness).unwrap().inputs[0];
         let output = dag.add_node(
+            decl,
             RiscOp::Sum {
                 axis: 0,
                 accumulator: Prim::F32,

@@ -41,7 +41,9 @@ fn build_uniform_like_dag(low: f64, high: f64, seed: u64) -> Dag {
 /// `uniform_like(key_from_seed(seed), template, low, high)`.
 fn build_uniform_like_dag_for(precision: Prim, low: f64, high: f64, seed: u64) -> Dag {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let template = dag.add_node(
+        decl,
         RiscOp::synth_const(precision, 0.0),
         vec![],
         tensor(precision, 4),
@@ -52,25 +54,35 @@ fn build_uniform_like_dag_for(precision: Prim, low: f64, high: f64, seed: u64) -
         precision,
     };
     let low = dag.add_node(
+        decl,
         RiscOp::synth_const(Prim::F32, low),
         vec![],
         rank0(Prim::F32),
         None,
     );
     let high = dag.add_node(
+        decl,
         RiscOp::synth_const(Prim::F32, high),
         vec![],
         rank0(Prim::F32),
         None,
     );
     let seed = dag.add_node(
+        decl,
         RiscOp::synth_const(Prim::Int64, seed as f64),
         vec![],
         rank0(Prim::Int64),
         None,
     );
-    let key = dag.add_node(RiscOp::KeyFromSeed, vec![seed], rank0(Prim::Key), None);
+    let key = dag.add_node(
+        decl,
+        RiscOp::KeyFromSeed,
+        vec![seed],
+        rank0(Prim::Key),
+        None,
+    );
     let draw = dag.add_node(
+        decl,
         RiscOp::UniformLike,
         vec![template, low, high, key],
         tensor(precision, 4),

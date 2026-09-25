@@ -25,8 +25,9 @@ fn named(name: &str) -> DimInfo {
     DimInfo::Named(name.to_string(), None)
 }
 
-fn load(dag: &mut Dag, name: &str, dims: Vec<DimInfo>) -> NodeId {
+fn load(dag: &mut Dag, decl: chelis_ir::dag::DeclId, name: &str, dims: Vec<DimInfo>) -> NodeId {
     dag.add_node(
+        decl,
         RiscOp::Load { name: name.into() },
         vec![],
         ty(dims, Prim::F32),
@@ -47,8 +48,10 @@ fn input_axis(input: usize, axis: i32) -> AxisSource {
 #[test]
 fn expand_insert_maps_later_output_axes_to_input_minus_one() {
     let mut dag = Dag::new();
-    let operand = load(&mut dag, "x", vec![DimInfo::Lit(2), DimInfo::Lit(3)]);
+    let decl = dag.declare("test");
+    let operand = load(&mut dag, decl, "x", vec![DimInfo::Lit(2), DimInfo::Lit(3)]);
     let inserted = dag.add_node(
+        decl,
         RiscOp::Expand {
             axis: 1,
             size: RtDim::Lit(4),
@@ -74,6 +77,7 @@ fn expand_insert_maps_later_output_axes_to_input_minus_one() {
     // Negative parity: a same-rank `Expand` replaces one axis and leaves the
     // others on their own input axis, with no shift.
     let replaced = dag.add_node(
+        decl,
         RiscOp::Expand {
             axis: 0,
             size: RtDim::Lit(5),
@@ -93,9 +97,11 @@ fn expand_insert_maps_later_output_axes_to_input_minus_one() {
 #[test]
 fn identity_stride_one_and_zero_pad_pass_the_input_axis_through() {
     let mut dag = Dag::new();
-    let operand = load(&mut dag, "x", vec![DimInfo::Lit(6), DimInfo::Lit(4)]);
+    let decl = dag.declare("test");
+    let operand = load(&mut dag, decl, "x", vec![DimInfo::Lit(6), DimInfo::Lit(4)]);
 
     let identity_stride = dag.add_node(
+        decl,
         RiscOp::Stride {
             strides: vec![RtDim::Lit(1), RtDim::Lit(1)],
         },
@@ -109,6 +115,7 @@ fn identity_stride_one_and_zero_pad_pass_the_input_axis_through() {
     );
 
     let zero_pad = dag.add_node(
+        decl,
         RiscOp::zero_pad(
             Prim::F32,
             vec![
@@ -128,6 +135,7 @@ fn identity_stride_one_and_zero_pad_pass_the_input_axis_through() {
     // Negative parity: a step of two and a nonzero pad are fresh extents,
     // never the input axis's runtime dim.
     let strided = dag.add_node(
+        decl,
         RiscOp::Stride {
             strides: vec![RtDim::Lit(2), RtDim::Lit(1)],
         },
@@ -147,6 +155,7 @@ fn identity_stride_one_and_zero_pad_pass_the_input_axis_through() {
     );
 
     let padded = dag.add_node(
+        decl,
         RiscOp::zero_pad(
             Prim::F32,
             vec![
@@ -176,8 +185,10 @@ fn identity_stride_one_and_zero_pad_pass_the_input_axis_through() {
 #[test]
 fn full_axis_symbolic_shrink_is_op_computed_not_pass_through() {
     let mut dag = Dag::new();
-    let operand = load(&mut dag, "x", vec![named("n")]);
+    let decl = dag.declare("test");
+    let operand = load(&mut dag, decl, "x", vec![named("n")]);
     let full_axis = dag.add_node(
+        decl,
         RiscOp::Shrink {
             bounds: vec![(RtDim::Lit(0), RtDim::ToEnd)],
         },
@@ -212,10 +223,12 @@ fn full_axis_symbolic_shrink_is_op_computed_not_pass_through() {
 #[test]
 fn op_declared_axis_on_an_expand_input_flows_through_the_kept_output_axis() {
     let mut dag = Dag::new();
-    let source = load(&mut dag, "x", vec![named("n")]);
+    let decl = dag.declare("test");
+    let source = load(&mut dag, decl, "x", vec![named("n")]);
     // A strided axis is op-declared: its extent is `ceil(n / 2)`, which no
     // `Load` declares.
     let strided = dag.add_node(
+        decl,
         RiscOp::Stride {
             strides: vec![RtDim::Lit(2)],
         },
@@ -224,6 +237,7 @@ fn op_declared_axis_on_an_expand_input_flows_through_the_kept_output_axis() {
         None,
     );
     let expanded = dag.add_node(
+        decl,
         RiscOp::Expand {
             axis: 0,
             size: RtDim::Lit(3),
@@ -256,12 +270,15 @@ fn op_declared_axis_on_an_expand_input_flows_through_the_kept_output_axis() {
 #[test]
 fn reduction_and_count_shift_kept_output_axes_back_to_their_input_axis() {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let operand = load(
         &mut dag,
+        decl,
         "x",
         vec![DimInfo::Lit(2), DimInfo::Lit(3), DimInfo::Lit(4)],
     );
     let summed = dag.add_node(
+        decl,
         RiscOp::Sum {
             axis: 1,
             accumulator: Prim::F32,
@@ -276,6 +293,7 @@ fn reduction_and_count_shift_kept_output_axes_back_to_their_input_axis() {
     );
 
     let counted = dag.add_node(
+        decl,
         RiscOp::Count { axes: vec![2, 0] },
         vec![operand],
         ty(vec![DimInfo::Lit(3)], Prim::Int64),
@@ -286,6 +304,7 @@ fn reduction_and_count_shift_kept_output_axes_back_to_their_input_axis() {
     // Negative parity: reducing axis 0 keeps axes 1 and 2, so no output axis
     // maps to input axis 0.
     let leading = dag.add_node(
+        decl,
         RiscOp::MaxReduce { axis: 0 },
         vec![operand],
         ty(vec![DimInfo::Lit(3), DimInfo::Lit(4)], Prim::F32),
@@ -307,7 +326,9 @@ fn omitted_or_duplicated_output_axis_source_fails_before_emission() {
     // Omitted: an input-less uniform fill whose only extent is anonymous has
     // nothing that can supply it, so it yields zero sources for rank 1.
     let mut omitted = Dag::new();
+    let omitted_decl = omitted.declare("test");
     let fill = omitted.add_node(
+        omitted_decl,
         RiscOp::synth_const(Prim::F32, 0.0),
         vec![],
         ty(vec![named("*")], Prim::F32),
@@ -327,8 +348,15 @@ fn omitted_or_duplicated_output_axis_source_fails_before_emission() {
     // Duplicated: a `Permute` that names three source axes for a rank 2
     // output declares one source too many.
     let mut duplicated = Dag::new();
-    let operand = load(&mut duplicated, "x", vec![DimInfo::Lit(2), DimInfo::Lit(3)]);
+    let duplicated_decl = duplicated.declare("test");
+    let operand = load(
+        &mut duplicated,
+        duplicated_decl,
+        "x",
+        vec![DimInfo::Lit(2), DimInfo::Lit(3)],
+    );
     let permuted = duplicated.add_node(
+        duplicated_decl,
         RiscOp::Permute {
             axes: vec![0, 1, 0],
         },
@@ -350,8 +378,15 @@ fn omitted_or_duplicated_output_axis_source_fails_before_emission() {
 
     // Positive control: the same permutation over its real rank passes.
     let mut exact = Dag::new();
-    let operand = load(&mut exact, "x", vec![DimInfo::Lit(2), DimInfo::Lit(3)]);
+    let exact_decl = exact.declare("test");
+    let operand = load(
+        &mut exact,
+        exact_decl,
+        "x",
+        vec![DimInfo::Lit(2), DimInfo::Lit(3)],
+    );
     let permuted = exact.add_node(
+        exact_decl,
         RiscOp::Permute { axes: vec![1, 0] },
         vec![operand],
         ty(vec![DimInfo::Lit(3), DimInfo::Lit(2)], Prim::F32),
@@ -366,8 +401,9 @@ fn omitted_or_duplicated_output_axis_source_fails_before_emission() {
 #[test]
 fn external_axis_names_the_exact_load_not_a_string_match() {
     let mut dag = Dag::new();
-    let first = load(&mut dag, "left", vec![named("n")]);
-    let second = load(&mut dag, "right", vec![named("n")]);
+    let decl = dag.declare("test");
+    let first = load(&mut dag, decl, "left", vec![named("n")]);
+    let second = load(&mut dag, decl, "right", vec![named("n")]);
 
     assert_eq!(
         output_axis_sources(&dag, first),
@@ -393,6 +429,7 @@ fn external_axis_names_the_exact_load_not_a_string_match() {
     // Negative parity: a node that is not a `Load` never produces an
     // `ExternalAxis`, so its axis is traced to its operand instead.
     let negated = dag.add_node(
+        decl,
         RiscOp::Neg,
         vec![first],
         ty(vec![named("n")], Prim::F32),
@@ -407,7 +444,9 @@ fn external_axis_names_the_exact_load_not_a_string_match() {
 #[test]
 fn input_axis_and_scalar_input_sources_validate_their_slots() {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let value = dag.add_node(
+        decl,
         RiscOp::Load {
             name: "value".into(),
         },
@@ -415,14 +454,16 @@ fn input_axis_and_scalar_input_sources_validate_their_slots() {
         scalar(Prim::F32),
         None,
     );
-    let witness = load(&mut dag, "witness", vec![named("n")]);
+    let witness = load(&mut dag, decl, "witness", vec![named("n")]);
     let size = dag.add_node(
+        decl,
         RiscOp::Shape { axis: 0 },
         vec![witness],
         scalar(Prim::Int64),
         None,
     );
     let expanded = dag.add_node(
+        decl,
         RiscOp::Expand {
             axis: 0,
             size: RtDim::Node(1),
@@ -440,7 +481,9 @@ fn input_axis_and_scalar_input_sources_validate_their_slots() {
 
     // A folded tensor-axis read validates the tensor slot and its axis.
     let mut folded = Dag::new();
+    let folded_decl = folded.declare("test");
     let value = folded.add_node(
+        folded_decl,
         RiscOp::Load {
             name: "value".into(),
         },
@@ -448,8 +491,9 @@ fn input_axis_and_scalar_input_sources_validate_their_slots() {
         scalar(Prim::F32),
         None,
     );
-    let witness = load(&mut folded, "witness", vec![named("n")]);
+    let witness = load(&mut folded, folded_decl, "witness", vec![named("n")]);
     let expanded = folded.add_node(
+        folded_decl,
         RiscOp::Expand {
             axis: 0,
             size: RtDim::InputAxis {
@@ -470,7 +514,9 @@ fn input_axis_and_scalar_input_sources_validate_their_slots() {
 
     // Negative parity: an extent slot past the node's inputs.
     let mut absent_slot = Dag::new();
+    let absent_slot_decl = absent_slot.declare("test");
     let value = absent_slot.add_node(
+        absent_slot_decl,
         RiscOp::Load {
             name: "value".into(),
         },
@@ -479,6 +525,7 @@ fn input_axis_and_scalar_input_sources_validate_their_slots() {
         None,
     );
     let expanded = absent_slot.add_node(
+        absent_slot_decl,
         RiscOp::Expand {
             axis: 0,
             size: RtDim::Node(4),
@@ -495,7 +542,9 @@ fn input_axis_and_scalar_input_sources_validate_their_slots() {
     // Negative parity: a rank-0 non-i64 scalar is not an admissible
     // extent source under C2.1.
     let mut wrong_dtype = Dag::new();
+    let wrong_dtype_decl = wrong_dtype.declare("test");
     let value = wrong_dtype.add_node(
+        wrong_dtype_decl,
         RiscOp::Load {
             name: "value".into(),
         },
@@ -504,6 +553,7 @@ fn input_axis_and_scalar_input_sources_validate_their_slots() {
         None,
     );
     let int32_size = wrong_dtype.add_node(
+        wrong_dtype_decl,
         RiscOp::Load {
             name: "size".into(),
         },
@@ -512,6 +562,7 @@ fn input_axis_and_scalar_input_sources_validate_their_slots() {
         None,
     );
     let expanded = wrong_dtype.add_node(
+        wrong_dtype_decl,
         RiscOp::Expand {
             axis: 0,
             size: RtDim::Node(1),
@@ -537,8 +588,10 @@ fn unsupported_but_well_typed_mapping_yields_the_registered_receipt_not_an_ice()
     // this shape from ReLU specifically, but sigmoid and sibling composite
     // lowerings still exercise the class.
     let mut dag = Dag::new();
-    let operand = load(&mut dag, "x", vec![named("n")]);
+    let decl = dag.declare("test");
+    let operand = load(&mut dag, decl, "x", vec![named("n")]);
     let shrunk = dag.add_node(
+        decl,
         RiscOp::Shrink {
             bounds: vec![(RtDim::Lit(0), RtDim::Lit(2))],
         },
@@ -547,12 +600,14 @@ fn unsupported_but_well_typed_mapping_yields_the_registered_receipt_not_an_ice()
         None,
     );
     let fill = dag.add_node(
+        decl,
         RiscOp::synth_const(Prim::F32, 0.0),
         vec![],
         ty(vec![named("*")], Prim::F32),
         None,
     );
     let maxed = dag.add_node(
+        decl,
         RiscOp::MaxElem,
         vec![shrunk, fill],
         ty(vec![named("*")], Prim::F32),
@@ -576,14 +631,17 @@ fn unsupported_but_well_typed_mapping_yields_the_registered_receipt_not_an_ice()
     // the check passes, so the receipt is about the missing source and not
     // about `Const` in an elementwise position.
     let mut sized = Dag::new();
-    let operand = load(&mut sized, "x", vec![DimInfo::Lit(2)]);
+    let sized_decl = sized.declare("test");
+    let operand = load(&mut sized, sized_decl, "x", vec![DimInfo::Lit(2)]);
     let fill = sized.add_node(
+        sized_decl,
         RiscOp::synth_const(Prim::F32, 0.0),
         vec![],
         ty(vec![DimInfo::Lit(2)], Prim::F32),
         None,
     );
     let maxed = sized.add_node(
+        sized_decl,
         RiscOp::MaxElem,
         vec![operand, fill],
         ty(vec![DimInfo::Lit(2)], Prim::F32),
@@ -600,14 +658,17 @@ fn unsupported_but_well_typed_mapping_yields_the_registered_receipt_not_an_ice()
     // sourceless axis: a direct max/zero composition over `tensor[n, f32]`
     // builds and must keep building.
     let mut symbolic = Dag::new();
-    let operand = load(&mut symbolic, "x", vec![named("n")]);
+    let symbolic_decl = symbolic.declare("test");
+    let operand = load(&mut symbolic, symbolic_decl, "x", vec![named("n")]);
     let fill = symbolic.add_node(
+        symbolic_decl,
         RiscOp::synth_const(Prim::F32, 0.0),
         vec![],
         ty(vec![named("n")], Prim::F32),
         None,
     );
     let maxed = symbolic.add_node(
+        symbolic_decl,
         RiscOp::MaxElem,
         vec![operand, fill],
         ty(vec![named("n")], Prim::F32),
@@ -714,34 +775,40 @@ fn variant_index(op: &RiscOp) -> usize {
 fn every_risc_op_yields_exactly_one_source_per_output_axis() {
     let f32_23 = || ty(vec![DimInfo::Lit(2), DimInfo::Lit(3)], Prim::F32);
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
 
-    let f = load(&mut dag, "f", vec![DimInfo::Lit(2), DimInfo::Lit(3)]);
-    let g = load(&mut dag, "g", vec![DimInfo::Lit(2), DimInfo::Lit(3)]);
+    let f = load(&mut dag, decl, "f", vec![DimInfo::Lit(2), DimInfo::Lit(3)]);
+    let g = load(&mut dag, decl, "g", vec![DimInfo::Lit(2), DimInfo::Lit(3)]);
     let ints = dag.add_node(
+        decl,
         RiscOp::Load { name: "i".into() },
         vec![],
         ty(vec![DimInfo::Lit(2), DimInfo::Lit(3)], Prim::Int32),
         None,
     );
     let more_ints = dag.add_node(
+        decl,
         RiscOp::Load { name: "j".into() },
         vec![],
         ty(vec![DimInfo::Lit(2), DimInfo::Lit(3)], Prim::Int32),
         None,
     );
     let flags = dag.add_node(
+        decl,
         RiscOp::Load { name: "p".into() },
         vec![],
         ty(vec![DimInfo::Lit(2), DimInfo::Lit(3)], Prim::Bool),
         None,
     );
     let indices = dag.add_node(
+        decl,
         RiscOp::Load { name: "k".into() },
         vec![],
         ty(vec![DimInfo::Lit(4)], Prim::Int64),
         None,
     );
     let cell_indices = dag.add_node(
+        decl,
         RiscOp::Load { name: "c".into() },
         vec![],
         ty(vec![DimInfo::Lit(2), DimInfo::Lit(3)], Prim::Int64),
@@ -749,29 +816,33 @@ fn every_risc_op_yields_exactly_one_source_per_output_axis() {
     );
     let values = load(
         &mut dag,
+        decl,
         "v",
         vec![DimInfo::Lit(2), DimInfo::Lit(5), DimInfo::Lit(7)],
     );
     let updates = load(
         &mut dag,
+        decl,
         "u",
         vec![DimInfo::Lit(2), DimInfo::Lit(4), DimInfo::Lit(7)],
     );
-    let cotangent = load(&mut dag, "w", vec![DimInfo::Lit(2), DimInfo::Lit(2)]);
+    let cotangent = load(&mut dag, decl, "w", vec![DimInfo::Lit(2), DimInfo::Lit(2)]);
     let lhs = load(
         &mut dag,
+        decl,
         "a",
         vec![DimInfo::Lit(2), DimInfo::Lit(4), DimInfo::Lit(3)],
     );
     let rhs = load(
         &mut dag,
+        decl,
         "b",
         vec![DimInfo::Lit(2), DimInfo::Lit(3), DimInfo::Lit(5)],
     );
 
     let mut nodes = vec![f];
     let add = |dag: &mut Dag, op: RiscOp, inputs: Vec<NodeId>, out: TensorType| {
-        dag.add_node(op, inputs, out, None)
+        dag.add_node(decl, op, inputs, out, None)
     };
 
     // Binary elementwise.
@@ -1030,7 +1101,7 @@ fn every_risc_op_yields_exactly_one_source_per_output_axis() {
         f32_23(),
     ));
 
-    let operand = load(&mut dag, "unit", vec![named("unit"), DimInfo::Lit(3)]);
+    let operand = load(&mut dag, decl, "unit", vec![named("unit"), DimInfo::Lit(3)]);
     let witness = add(
         &mut dag,
         RiscOp::ExtentWitness {
@@ -1154,6 +1225,7 @@ fn every_risc_op_yields_exactly_one_source_per_output_axis() {
     // chelis#2413: the key operations are element-wise over their key's
     // shape, except that a key split appends its count axis last.
     let seeds = dag.add_node(
+        decl,
         RiscOp::Load {
             name: "seeds".into(),
         },
@@ -1241,8 +1313,10 @@ fn every_risc_op_yields_exactly_one_source_per_output_axis() {
 fn to_end_shrink_end_requires_a_literal_zero_start() {
     let full_axis = |start: RtDim| {
         let mut dag = Dag::new();
-        let operand = load(&mut dag, "x", vec![named("n")]);
+        let decl = dag.declare("test");
+        let operand = load(&mut dag, decl, "x", vec![named("n")]);
         let sliced = dag.add_node(
+            decl,
             RiscOp::Shrink {
                 bounds: vec![(start, RtDim::ToEnd)],
             },
@@ -1276,14 +1350,22 @@ fn to_end_shrink_end_requires_a_literal_zero_start() {
     // A runtime start is malformed for the same reason: the sentinel means
     // the whole axis, and only a literal zero says so.
     let mut runtime_start = Dag::new();
-    let operand = load(&mut runtime_start, "x", vec![named("n")]);
+    let runtime_start_decl = runtime_start.declare("test");
+    let operand = load(
+        &mut runtime_start,
+        runtime_start_decl,
+        "x",
+        vec![named("n")],
+    );
     let offset = runtime_start.add_node(
+        runtime_start_decl,
         RiscOp::Shape { axis: 0 },
         vec![operand],
         scalar(Prim::Int64),
         None,
     );
     let sliced = runtime_start.add_node(
+        runtime_start_decl,
         RiscOp::Shrink {
             bounds: vec![(RtDim::Node(1), RtDim::ToEnd)],
         },
@@ -1303,8 +1385,15 @@ fn to_end_shrink_end_requires_a_literal_zero_start() {
     // The existing control, unchanged: a `ToEnd` START was already rejected,
     // which is what proved the verifier looks at the carrier at all.
     let mut start_sentinel = Dag::new();
-    let operand = load(&mut start_sentinel, "x", vec![named("n")]);
+    let start_sentinel_decl = start_sentinel.declare("test");
+    let operand = load(
+        &mut start_sentinel,
+        start_sentinel_decl,
+        "x",
+        vec![named("n")],
+    );
     let sliced = start_sentinel.add_node(
+        start_sentinel_decl,
         RiscOp::Shrink {
             bounds: vec![(RtDim::ToEnd, RtDim::Lit(2))],
         },
@@ -1329,8 +1418,10 @@ fn to_end_shrink_end_requires_a_literal_zero_start() {
 fn binding_a_to_end_bound_rejects_a_start_that_is_not_literal_zero() {
     let bound = |start: RtDim| {
         let mut dag = Dag::new();
-        let operand = load(&mut dag, "x", vec![named("n")]);
+        let decl = dag.declare("test");
+        let operand = load(&mut dag, decl, "x", vec![named("n")]);
         let sliced = dag.add_node(
+            decl,
             RiscOp::Shrink {
                 bounds: vec![(start, RtDim::ToEnd)],
             },
@@ -1385,8 +1476,10 @@ fn binding_a_to_end_bound_rejects_a_start_that_is_not_literal_zero() {
 #[test]
 fn a_kept_axis_under_a_second_spelling_resolves_to_the_operation_that_computes_it() {
     let mut dag = Dag::new();
-    let source = load(&mut dag, "x", vec![named("n")]);
+    let decl = dag.declare("test");
+    let source = load(&mut dag, decl, "x", vec![named("n")]);
     let strided = dag.add_node(
+        decl,
         RiscOp::Stride {
             strides: vec![RtDim::Lit(2)],
         },
@@ -1395,6 +1488,7 @@ fn a_kept_axis_under_a_second_spelling_resolves_to_the_operation_that_computes_i
         None,
     );
     let expanded = dag.add_node(
+        decl,
         RiscOp::Expand {
             axis: 0,
             size: RtDim::Lit(3),
@@ -1468,15 +1562,18 @@ fn a_kept_axis_under_a_second_spelling_resolves_to_the_operation_that_computes_i
 #[test]
 fn a_shape_preserving_axis_over_a_literal_operand_resolves_to_the_literal() {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     // The real program's `scalar_to_tensor(1.0f32)`; a rank-0 operand is all
     // the insertion needs, and its own kind is not what this row measures.
     let seed = dag.add_node(
+        decl,
         RiscOp::Load { name: "s".into() },
         vec![],
         scalar(Prim::F32),
         None,
     );
     let filled = dag.add_node(
+        decl,
         RiscOp::Expand {
             axis: 0,
             size: RtDim::Lit(3),
@@ -1487,6 +1584,7 @@ fn a_shape_preserving_axis_over_a_literal_operand_resolves_to_the_literal() {
     );
     let bound = |dag: &mut Dag, value| {
         dag.add_node(
+            decl,
             RiscOp::synth_const(Prim::F32, value),
             vec![],
             scalar(Prim::F32),
@@ -1496,13 +1594,21 @@ fn a_shape_preserving_axis_over_a_literal_operand_resolves_to_the_literal() {
     let low = bound(&mut dag, 0.0);
     let high = bound(&mut dag, 1.0);
     let key_seed = dag.add_node(
+        decl,
         RiscOp::synth_const(Prim::Int64, 42.0),
         vec![],
         scalar(Prim::Int64),
         None,
     );
-    let key = dag.add_node(RiscOp::KeyFromSeed, vec![key_seed], scalar(Prim::Key), None);
+    let key = dag.add_node(
+        decl,
+        RiscOp::KeyFromSeed,
+        vec![key_seed],
+        scalar(Prim::Key),
+        None,
+    );
     let noised = dag.add_node(
+        decl,
         RiscOp::UniformLike,
         vec![filled, low, high, key],
         ty(vec![named("d43")], Prim::F32),
@@ -1532,9 +1638,11 @@ fn a_shape_preserving_axis_over_a_literal_operand_resolves_to_the_literal() {
 #[test]
 fn a_named_axis_with_no_source_resolves_to_no_origin_and_is_reported() {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     // A `Const` fill whose only positive-rank axis is ANONYMOUS has no
     // literal, no operand, no class and no shape dependency to size it.
     let orphan = dag.add_node(
+        decl,
         RiscOp::Const {
             value: chelis_types::scalar_from_f64("test", Prim::F32, 0.0).expect("zero fill"),
         },
@@ -1543,6 +1651,7 @@ fn a_named_axis_with_no_source_resolves_to_no_origin_and_is_reported() {
         None,
     );
     let renamed = dag.add_node(
+        decl,
         RiscOp::Neg,
         vec![orphan],
         ty(vec![named("_anon_dim_1_0")], Prim::F32),
@@ -1584,10 +1693,12 @@ fn the_op_computed_origin_walk_stops_at_same_shape_and_set_axes() {
     // `add` physically forwards one input's axis, but its result claim is
     // owned by `add` and observes both distinct positive-rank operands.
     let mut dag = Dag::new();
-    let x = load(&mut dag, "x", vec![named("r")]);
-    let y = load(&mut dag, "y", vec![named("s")]);
+    let decl = dag.declare("test");
+    let x = load(&mut dag, decl, "x", vec![named("r")]);
+    let y = load(&mut dag, decl, "y", vec![named("s")]);
     let shrink_of = |dag: &mut Dag, operand: NodeId| {
         dag.add_node(
+            decl,
             RiscOp::Shrink {
                 bounds: vec![(RtDim::Lit(1), RtDim::ToEnd)],
             },
@@ -1599,6 +1710,7 @@ fn the_op_computed_origin_walk_stops_at_same_shape_and_set_axes() {
     let left = shrink_of(&mut dag, x);
     let right = shrink_of(&mut dag, y);
     let sum = dag.add_node(
+        decl,
         RiscOp::Add,
         vec![left, right],
         ty(vec![named("*")], Prim::F32),
@@ -1627,10 +1739,12 @@ fn the_op_computed_origin_walk_stops_at_same_shape_and_set_axes() {
     // witness of its own claim, so the walk stops there and reports nothing,
     // even though the value resolver reaches the `shrink` behind it.
     let mut dag = Dag::new();
-    let unit = load(&mut dag, "x", vec![DimInfo::Lit(1)]);
-    let operand = load(&mut dag, "y", vec![named("n")]);
+    let decl = dag.declare("test");
+    let unit = load(&mut dag, decl, "x", vec![DimInfo::Lit(1)]);
+    let operand = load(&mut dag, decl, "y", vec![named("n")]);
     let small = shrink_of(&mut dag, operand);
     let widened = dag.add_node(
+        decl,
         RiscOp::Expand {
             axis: 0,
             size: RtDim::InputAxis {
@@ -1660,8 +1774,10 @@ fn the_op_computed_origin_walk_stops_at_same_shape_and_set_axes() {
 
     // And an axis whose extent is a literal has no op-computed origin at all.
     let mut dag = Dag::new();
-    let fixed = load(&mut dag, "x", vec![DimInfo::Lit(4)]);
+    let decl = dag.declare("test");
+    let fixed = load(&mut dag, decl, "x", vec![DimInfo::Lit(4)]);
     let kept = dag.add_node(
+        decl,
         RiscOp::Relu,
         vec![fixed],
         ty(vec![DimInfo::Lit(4)], Prim::F32),
@@ -1690,8 +1806,10 @@ fn a_static_op_computed_extent_is_told_apart_from_a_runtime_one() {
     // Literal padding over a literal operand: `concat`'s lowered cascade,
     // whose extent the verifier also computes.
     let mut dag = Dag::new();
-    let fixed = load(&mut dag, "x", vec![DimInfo::Lit(4)]);
+    let decl = dag.declare("test");
+    let fixed = load(&mut dag, decl, "x", vec![DimInfo::Lit(4)]);
     let padded = dag.add_node(
+        decl,
         RiscOp::zero_pad(Prim::F32, vec![(RtDim::Lit(0), RtDim::Lit(4))]),
         vec![fixed],
         ty(vec![DimInfo::Lit(8)], Prim::F32),
@@ -1702,8 +1820,10 @@ fn a_static_op_computed_extent_is_told_apart_from_a_runtime_one() {
     // The same padding over a SYMBOLIC operand: a runtime extent, which is
     // the case the guard is for.
     let mut dag = Dag::new();
-    let symbolic = load(&mut dag, "x", vec![named("rows")]);
+    let decl = dag.declare("test");
+    let symbolic = load(&mut dag, decl, "x", vec![named("rows")]);
     let padded = dag.add_node(
+        decl,
         RiscOp::zero_pad(Prim::F32, vec![(RtDim::Lit(1), RtDim::Lit(1))]),
         vec![symbolic],
         ty(vec![named("*")], Prim::F32),
@@ -1715,8 +1835,10 @@ fn a_static_op_computed_extent_is_told_apart_from_a_runtime_one() {
     // over a concrete operand, which is why an inlined root still reaches the
     // guard: chelis#1798's root row depends on this row's answer.
     let mut dag = Dag::new();
-    let concrete = load(&mut dag, "x", vec![DimInfo::Lit(4)]);
+    let decl = dag.declare("test");
+    let concrete = load(&mut dag, decl, "x", vec![DimInfo::Lit(4)]);
     let shrunk = dag.add_node(
+        decl,
         RiscOp::Shrink {
             bounds: vec![(
                 RtDim::Lit(1),
@@ -1735,8 +1857,10 @@ fn a_static_op_computed_extent_is_told_apart_from_a_runtime_one() {
     // And a literal span over a concrete operand IS constant, so the same
     // owner answers both ways depending only on its carriers.
     let mut dag = Dag::new();
-    let concrete = load(&mut dag, "x", vec![DimInfo::Lit(4)]);
+    let decl = dag.declare("test");
+    let concrete = load(&mut dag, decl, "x", vec![DimInfo::Lit(4)]);
     let shrunk = dag.add_node(
+        decl,
         RiscOp::Shrink {
             bounds: vec![(RtDim::Lit(1), RtDim::Lit(3))],
         },
@@ -1751,8 +1875,10 @@ fn a_static_op_computed_extent_is_told_apart_from_a_runtime_one() {
     // Eval and C can perform the same overflow-free ceil division before the
     // stride allocates.
     let mut dag = Dag::new();
-    let concrete = load(&mut dag, "x", vec![DimInfo::Lit(6)]);
+    let decl = dag.declare("test");
+    let concrete = load(&mut dag, decl, "x", vec![DimInfo::Lit(6)]);
     let strided = dag.add_node(
+        decl,
         RiscOp::Stride {
             strides: vec![RtDim::Lit(2)],
         },
@@ -1772,8 +1898,10 @@ fn a_static_op_computed_extent_is_told_apart_from_a_runtime_one() {
     // The ceil division does not form `extent + step - 1`, so the largest
     // representable host extent remains foldable instead of overflowing.
     let mut dag = Dag::new();
-    let concrete = load(&mut dag, "x", vec![DimInfo::Lit(usize::MAX)]);
+    let decl = dag.declare("test");
+    let concrete = load(&mut dag, decl, "x", vec![DimInfo::Lit(usize::MAX)]);
     let strided = dag.add_node(
+        decl,
         RiscOp::Stride {
             strides: vec![RtDim::Lit(2)],
         },
@@ -1788,9 +1916,11 @@ fn a_static_op_computed_extent_is_told_apart_from_a_runtime_one() {
 
     // A runtime positive step is admitted but cannot be folded statically.
     let mut dag = Dag::new();
-    let concrete = load(&mut dag, "x", vec![DimInfo::Lit(6)]);
-    let step = load(&mut dag, "step", vec![]);
+    let decl = dag.declare("test");
+    let concrete = load(&mut dag, decl, "x", vec![DimInfo::Lit(6)]);
+    let step = load(&mut dag, decl, "step", vec![]);
     let strided = dag.add_node(
+        decl,
         RiscOp::Stride {
             strides: vec![RtDim::Node(1)],
         },
@@ -1810,8 +1940,10 @@ fn a_static_op_computed_extent_is_told_apart_from_a_runtime_one() {
     // Step one remains identity-only: no computed site is introduced for an
     // axis whose source is the operand axis itself.
     let mut dag = Dag::new();
-    let concrete = load(&mut dag, "x", vec![DimInfo::Lit(6)]);
+    let decl = dag.declare("test");
+    let concrete = load(&mut dag, decl, "x", vec![DimInfo::Lit(6)]);
     let strided = dag.add_node(
+        decl,
         RiscOp::Stride {
             strides: vec![RtDim::Lit(1)],
         },

@@ -424,7 +424,9 @@ struct Scalarized {
 fn scalarize_root(dag: &Dag, root: NodeId) -> Scalarized {
     use chelis_ir::dag::TensorType;
     let mut out = dag.clone();
+    let out_decl = out.nodes()[0].decl;
     let scalar = out.add_node(
+        out_decl,
         RiscOp::Sum {
             axis: 0,
             accumulator: Prim::F32,

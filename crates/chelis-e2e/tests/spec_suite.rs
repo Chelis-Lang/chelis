@@ -585,19 +585,22 @@ fn spec_generated_c_compiles() {
         return;
     }
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let a = dag.add_node(
+        decl,
         RiscOp::synth_const(scalar_f32().precision, 1.0),
         vec![],
         scalar_f32(),
         None,
     );
     let b = dag.add_node(
+        decl,
         RiscOp::synth_const(scalar_f32().precision, 2.0),
         vec![],
         scalar_f32(),
         None,
     );
-    let c = dag.add_node(RiscOp::Add, vec![a, b], scalar_f32(), None);
+    let c = dag.add_node(decl, RiscOp::Add, vec![a, b], scalar_f32(), None);
     dag.add_root(c);
 
     let selected = chelis_backend_c::prepare_dag_for_codegen(
@@ -624,19 +627,22 @@ fn spec_add_numerical_correctness() {
         return;
     }
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let a = dag.add_node(
+        decl,
         RiscOp::synth_const(scalar_f32().precision, 1.0),
         vec![],
         scalar_f32(),
         None,
     );
     let b = dag.add_node(
+        decl,
         RiscOp::synth_const(scalar_f32().precision, 2.0),
         vec![],
         scalar_f32(),
         None,
     );
-    let c = dag.add_node(RiscOp::Add, vec![a, b], scalar_f32(), None);
+    let c = dag.add_node(decl, RiscOp::Add, vec![a, b], scalar_f32(), None);
     dag.add_root(c);
 
     let out = compile_and_run_dag(&dag, "spec_add");
@@ -656,19 +662,22 @@ fn spec_relu_numerical_correctness() {
     // relu(const(-1)) -> 0.0
     {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let x = dag.add_node(
+            decl,
             RiscOp::synth_const(scalar_f32().precision, -1.0),
             vec![],
             scalar_f32(),
             None,
         );
         let zero = dag.add_node(
+            decl,
             RiscOp::synth_const(scalar_f32().precision, 0.0),
             vec![],
             scalar_f32(),
             None,
         );
-        let r = dag.add_node(RiscOp::MaxElem, vec![x, zero], scalar_f32(), None);
+        let r = dag.add_node(decl, RiscOp::MaxElem, vec![x, zero], scalar_f32(), None);
         dag.add_root(r);
 
         let out = compile_and_run_dag(&dag, "spec_relu_neg");
@@ -678,19 +687,22 @@ fn spec_relu_numerical_correctness() {
     // relu(const(5)) -> 5.0
     {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let x = dag.add_node(
+            decl,
             RiscOp::synth_const(scalar_f32().precision, 5.0),
             vec![],
             scalar_f32(),
             None,
         );
         let zero = dag.add_node(
+            decl,
             RiscOp::synth_const(scalar_f32().precision, 0.0),
             vec![],
             scalar_f32(),
             None,
         );
-        let r = dag.add_node(RiscOp::MaxElem, vec![x, zero], scalar_f32(), None);
+        let r = dag.add_node(decl, RiscOp::MaxElem, vec![x, zero], scalar_f32(), None);
         dag.add_root(r);
 
         let out = compile_and_run_dag(&dag, "spec_relu_pos");
@@ -710,19 +722,22 @@ fn spec_relu_numerical_correctness() {
 fn spec_grad_add_is_one() {
     // f(x,y) = x + y => df/dx = 1, df/dy = 1
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let x = dag.add_node(
+        decl,
         RiscOp::Load { name: "x".into() },
         vec![],
         scalar_f64(),
         None,
     );
     let y = dag.add_node(
+        decl,
         RiscOp::Load { name: "y".into() },
         vec![],
         scalar_f64(),
         None,
     );
-    let out = dag.add_node(RiscOp::Add, vec![x, y], scalar_f64(), None);
+    let out = dag.add_node(decl, RiscOp::Add, vec![x, y], scalar_f64(), None);
     dag.add_root(out);
 
     let grad_result = grad_dag(&dag, out, &[x, y]).expect("grad_dag failed");
@@ -765,19 +780,22 @@ fn spec_grad_add_is_one() {
 fn spec_grad_mul_is_cross() {
     // f(x,y) = x * y => df/dx = y, df/dy = x
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let x = dag.add_node(
+        decl,
         RiscOp::Load { name: "x".into() },
         vec![],
         scalar_f64(),
         None,
     );
     let y = dag.add_node(
+        decl,
         RiscOp::Load { name: "y".into() },
         vec![],
         scalar_f64(),
         None,
     );
-    let out = dag.add_node(RiscOp::Mul, vec![x, y], scalar_f64(), None);
+    let out = dag.add_node(decl, RiscOp::Mul, vec![x, y], scalar_f64(), None);
     dag.add_root(out);
 
     let grad_result = grad_dag(&dag, out, &[x, y]).expect("grad_dag failed");
@@ -818,14 +836,16 @@ fn spec_grad_mul_is_cross() {
 fn spec_grad_composed_chain() {
     // f(x) = exp(neg(x)) = exp(-x), df/dx = -exp(-x)
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let x = dag.add_node(
+        decl,
         RiscOp::Load { name: "x".into() },
         vec![],
         scalar_f64(),
         None,
     );
-    let neg_x = dag.add_node(RiscOp::Neg, vec![x], scalar_f64(), None);
-    let out = dag.add_node(RiscOp::Exp, vec![neg_x], scalar_f64(), None);
+    let neg_x = dag.add_node(decl, RiscOp::Neg, vec![x], scalar_f64(), None);
+    let out = dag.add_node(decl, RiscOp::Exp, vec![neg_x], scalar_f64(), None);
     dag.add_root(out);
 
     let grad_result = grad_dag(&dag, out, &[x]).expect("grad_dag failed");
@@ -883,7 +903,9 @@ def per_example_grad(xs: tensor[batch, features, f32]) -> tensor[batch, features
     let actual = values[&root].clone();
 
     let mut single = Dag::new();
+    let single_decl = single.declare("test");
     let x = single.add_node(
+        single_decl,
         RiscOp::Load { name: "x".into() },
         vec![],
         TensorType {
@@ -893,6 +915,7 @@ def per_example_grad(xs: tensor[batch, features, f32]) -> tensor[batch, features
         None,
     );
     let sq = single.add_node(
+        single_decl,
         RiscOp::Mul,
         vec![x, x],
         TensorType {
@@ -902,6 +925,7 @@ def per_example_grad(xs: tensor[batch, features, f32]) -> tensor[batch, features
         None,
     );
     let loss = single.add_node(
+        single_decl,
         RiscOp::Sum {
             axis: 0,
             accumulator: chelis_types::types::Prim::F32,

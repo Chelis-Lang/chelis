@@ -1211,12 +1211,14 @@ mod tests {
     #[test]
     fn hip_reshape_materializes_independent_storage_while_permute_retains_source() {
         let mut dag = crate::dag::Dag::new();
+        let decl = dag.declare("test");
         let ty = TensorType {
             dims: vec![crate::dag::DimInfo::Lit(2), crate::dag::DimInfo::Lit(3)],
             precision: Prim::F32,
         };
-        let input = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], ty, None);
+        let input = dag.add_node(decl, RiscOp::Load { name: "x".into() }, vec![], ty, None);
         let permute = dag.add_node(
+            decl,
             RiscOp::Permute { axes: vec![1, 0] },
             vec![input],
             TensorType {
@@ -1226,6 +1228,7 @@ mod tests {
             None,
         );
         let reshape = dag.add_node(
+            decl,
             RiscOp::Reshape {
                 new_shape: vec![crate::dag::RtDim::Lit(6)],
             },
@@ -1273,14 +1276,17 @@ mod tests {
 
     fn dropped_then_root(first: TensorType, second: TensorType) -> Dag {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let first_node = dag.add_node(
+            decl,
             RiscOp::synth_const(first.precision, 1.0),
             vec![],
             first.clone(),
             None,
         );
-        dag.add_node(RiscOp::Drop, vec![first_node], first, None);
+        dag.add_node(decl, RiscOp::Drop, vec![first_node], first, None);
         let second_node = dag.add_node(
+            decl,
             RiscOp::synth_const(second.precision, 2.0),
             vec![],
             second,
@@ -1314,7 +1320,9 @@ mod tests {
     fn c_excludes_entry_borrows_while_hip_counts_input_mirrors() {
         fn input_dag() -> Dag {
             let mut dag = Dag::new();
+            let decl = dag.declare("test");
             let input = dag.add_node(
+                decl,
                 RiscOp::Load { name: "x".into() },
                 vec![],
                 vector(4, Prim::F32),
@@ -1332,13 +1340,16 @@ mod tests {
     #[test]
     fn c_materialized_store_has_storage_independent_of_its_source() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let source = dag.add_node(
+            decl,
             RiscOp::synth_const(Prim::F32, 1.0),
             vec![],
             vector(4, Prim::F32),
             None,
         );
         let store = dag.add_node(
+            decl,
             RiscOp::Store { name: "out".into() },
             vec![source],
             vector(4, Prim::F32),
@@ -1361,20 +1372,24 @@ mod tests {
     #[test]
     fn program_owned_fused_reuse_mints_one_take_only_token() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let input = dag.add_node(
+            decl,
             RiscOp::Load { name: "x".into() },
             vec![],
             vector(4, Prim::F32),
             None,
         );
-        let owned = dag.add_node(RiscOp::Copy, vec![input], vector(4, Prim::F32), None);
+        let owned = dag.add_node(decl, RiscOp::Copy, vec![input], vector(4, Prim::F32), None);
         let scale = dag.add_node(
+            decl,
             RiscOp::synth_const(Prim::F32, 2.0),
             vec![],
             vector(4, Prim::F32),
             None,
         );
         let fused = dag.add_node(
+            decl,
             RiscOp::FusedElem {
                 ops: vec![FusedStep {
                     op: FusedStepOp::Mul,

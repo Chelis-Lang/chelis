@@ -78,13 +78,19 @@ fn scalar(prim: Prim) -> TensorType {
     }
 }
 
-fn load(dag: &mut Dag, name: &str, ty: TensorType) -> NodeId {
-    dag.add_node(RiscOp::Load { name: name.into() }, vec![], ty, None)
+fn load(dag: &mut Dag, decl: chelis_ir::dag::DeclId, name: &str, ty: TensorType) -> NodeId {
+    dag.add_node(decl, RiscOp::Load { name: name.into() }, vec![], ty, None)
 }
 
 /// `key_from_seed` of the rank-0 i64 `seed` node.
-fn key(dag: &mut Dag, seed: NodeId) -> NodeId {
-    dag.add_node(RiscOp::KeyFromSeed, vec![seed], scalar(Prim::Key), None)
+fn key(dag: &mut Dag, decl: chelis_ir::dag::DeclId, seed: NodeId) -> NodeId {
+    dag.add_node(
+        decl,
+        RiscOp::KeyFromSeed,
+        vec![seed],
+        scalar(Prim::Key),
+        None,
+    )
 }
 
 fn dtype_tag(prim: Prim) -> (&'static str, usize) {
@@ -210,25 +216,29 @@ fn seeded_runtime_controls_match_the_spec_in_c_and_eval() {
     for prim in [Prim::F16, Prim::Bf16, Prim::F32, Prim::F64] {
         for (seed, len) in [(7_i64, 13_usize), (-1, 1), (42, 0)] {
             let mut dag = Dag::new();
-            let x = load(&mut dag, "x", tensor(prim, len));
-            let rate = load(&mut dag, "rate", scalar(prim));
-            let low = load(&mut dag, "low", scalar(Prim::F32));
-            let high = load(&mut dag, "high", scalar(Prim::F32));
+            let decl = dag.declare("test");
+            let x = load(&mut dag, decl, "x", tensor(prim, len));
+            let rate = load(&mut dag, decl, "rate", scalar(prim));
+            let low = load(&mut dag, decl, "low", scalar(Prim::F32));
+            let high = load(&mut dag, decl, "high", scalar(Prim::F32));
             let seed_node = dag.add_node(
+                decl,
                 RiscOp::synth_const(Prim::Int64, seed as f64),
                 vec![],
                 scalar(Prim::Int64),
                 None,
             );
-            let dropout_key = key(&mut dag, seed_node);
+            let dropout_key = key(&mut dag, decl, seed_node);
             let dropped = dag.add_node(
+                decl,
                 RiscOp::Dropout,
                 vec![x, rate, dropout_key],
                 tensor(prim, len),
                 None,
             );
-            let uniform_key = key(&mut dag, seed_node);
+            let uniform_key = key(&mut dag, decl, seed_node);
             let sampled = dag.add_node(
+                decl,
                 RiscOp::UniformLike,
                 vec![x, low, high, uniform_key],
                 tensor(prim, len),
@@ -277,34 +287,45 @@ fn native_replay_and_bound_adjoints_match_eval() {
     for prim in [Prim::F32, Prim::F64] {
         let len = 9;
         let mut dag = Dag::new();
-        let x = load(&mut dag, "x", tensor(prim, len));
-        let w = load(&mut dag, "w", tensor(prim, len));
-        let rate = load(&mut dag, "rate", scalar(prim));
-        let low = load(&mut dag, "low", scalar(Prim::F32));
-        let high = load(&mut dag, "high", scalar(Prim::F32));
+        let decl = dag.declare("test");
+        let x = load(&mut dag, decl, "x", tensor(prim, len));
+        let w = load(&mut dag, decl, "w", tensor(prim, len));
+        let rate = load(&mut dag, decl, "rate", scalar(prim));
+        let low = load(&mut dag, decl, "low", scalar(Prim::F32));
+        let high = load(&mut dag, decl, "high", scalar(Prim::F32));
         let seed = dag.add_node(
+            decl,
             RiscOp::synth_const(Prim::Int64, 5.0),
             vec![],
             scalar(Prim::Int64),
             None,
         );
-        let dropout_key = key(&mut dag, seed);
+        let dropout_key = key(&mut dag, decl, seed);
         let dropped = dag.add_node(
+            decl,
             RiscOp::Dropout,
             vec![x, rate, dropout_key],
             tensor(prim, len),
             None,
         );
-        let uniform_key = key(&mut dag, seed);
+        let uniform_key = key(&mut dag, decl, seed);
         let sampled = dag.add_node(
+            decl,
             RiscOp::UniformLike,
             vec![x, low, high, uniform_key],
             tensor(prim, len),
             None,
         );
-        let mixed = dag.add_node(RiscOp::Mul, vec![dropped, sampled], tensor(prim, len), None);
-        let weighted = dag.add_node(RiscOp::Mul, vec![mixed, w], tensor(prim, len), None);
+        let mixed = dag.add_node(
+            decl,
+            RiscOp::Mul,
+            vec![dropped, sampled],
+            tensor(prim, len),
+            None,
+        );
+        let weighted = dag.add_node(decl, RiscOp::Mul, vec![mixed, w], tensor(prim, len), None);
         let loss = dag.add_node(
+            decl,
             RiscOp::Sum {
                 axis: 0,
                 accumulator: prim,

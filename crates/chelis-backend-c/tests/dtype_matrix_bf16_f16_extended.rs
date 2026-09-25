@@ -269,13 +269,15 @@ fn run_unary_reduced(
     }
     let n = vals.len();
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let load = dag.add_node(
+        decl,
         RiscOp::Load { name: "x".into() },
         vec![],
         vec_ty(n, prec),
         None,
     );
-    dag.add_node(op, vec![load], vec_ty(n, prec), None);
+    dag.add_node(decl, op, vec![load], vec_ty(n, prec), None);
     let result = codegen(&dag, test_name).unwrap();
     let load_helper = match prec {
         Prim::Bf16 => "bf16_tensor_from_f32",
@@ -355,19 +357,22 @@ fn run_binary_reduced(
     let n = lhs.len();
     assert_eq!(n, rhs.len(), "lhs and rhs must match length");
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let a = dag.add_node(
+        decl,
         RiscOp::Load { name: "a".into() },
         vec![],
         vec_ty(n, prec),
         None,
     );
     let b = dag.add_node(
+        decl,
         RiscOp::Load { name: "b".into() },
         vec![],
         vec_ty(n, prec),
         None,
     );
-    dag.add_node(op, vec![a, b], vec_ty(n, prec), None);
+    dag.add_node(decl, op, vec![a, b], vec_ty(n, prec), None);
     let result = codegen(&dag, test_name).unwrap();
     let load_helper = match prec {
         Prim::Bf16 => "bf16_tensor_from_f32",
@@ -433,20 +438,23 @@ fn bf16_div_agrees_with_evaluator() {
     let lhs = [6.0_f32, 9.0, 1.0, -2.0];
     let rhs = [2.0_f32, 3.0, 4.0, 8.0];
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let n = 4;
     let a = dag.add_node(
+        decl,
         RiscOp::Load { name: "a".into() },
         vec![],
         vec_ty(n, Prim::Bf16),
         None,
     );
     let b = dag.add_node(
+        decl,
         RiscOp::Load { name: "b".into() },
         vec![],
         vec_ty(n, Prim::Bf16),
         None,
     );
-    dag.add_node(RiscOp::Div, vec![a, b], vec_ty(n, Prim::Bf16), None);
+    dag.add_node(decl, RiscOp::Div, vec![a, b], vec_ty(n, Prim::Bf16), None);
     let inputs: UnordMap<String, chelis_ir::eval::TensorValue> = [
         (
             "a".into(),
@@ -484,20 +492,23 @@ fn f16_div_agrees_with_evaluator() {
     let lhs = [6.0_f32, 9.0, 1.0, -2.0];
     let rhs = [2.0_f32, 3.0, 4.0, 8.0];
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let n = 4;
     let a = dag.add_node(
+        decl,
         RiscOp::Load { name: "a".into() },
         vec![],
         vec_ty(n, Prim::F16),
         None,
     );
     let b = dag.add_node(
+        decl,
         RiscOp::Load { name: "b".into() },
         vec![],
         vec_ty(n, Prim::F16),
         None,
     );
-    dag.add_node(RiscOp::Div, vec![a, b], vec_ty(n, Prim::F16), None);
+    dag.add_node(decl, RiscOp::Div, vec![a, b], vec_ty(n, Prim::F16), None);
     let inputs: UnordMap<String, chelis_ir::eval::TensorValue> = [
         (
             "a".into(),
@@ -537,13 +548,15 @@ fn f16_div_agrees_with_evaluator() {
 fn unary_eval(op: RiscOp, prec: Prim, vals: &[f32]) -> Vec<f64> {
     let n = vals.len();
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let load = dag.add_node(
+        decl,
         RiscOp::Load { name: "x".into() },
         vec![],
         vec_ty(n, prec),
         None,
     );
-    dag.add_node(op, vec![load], vec_ty(n, prec), None);
+    dag.add_node(decl, op, vec![load], vec_ty(n, prec), None);
     let inputs: UnordMap<String, chelis_ir::eval::TensorValue> = [(
         "x".into(),
         chelis_ir::eval::TensorValue::from_vec(vec![n], vals.iter().map(|&v| v as f64).collect()),
@@ -810,13 +823,15 @@ fn run_scalar_reduce_reduced(
     }
     let n = vals.len();
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let load = dag.add_node(
+        decl,
         RiscOp::Load { name: "x".into() },
         vec![],
         vec_ty(n, prec),
         None,
     );
-    dag.add_node(op, vec![load], scalar_ty(prec), None);
+    dag.add_node(decl, op, vec![load], scalar_ty(prec), None);
     let result = codegen(&dag, test_name).unwrap();
     let load_helper = match prec {
         Prim::Bf16 => "bf16_tensor_from_f32",
@@ -863,13 +878,15 @@ int main(void) {{
 fn scalar_reduce_eval(op: RiscOp, prec: Prim, vals: &[f32]) -> f64 {
     let n = vals.len();
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let load = dag.add_node(
+        decl,
         RiscOp::Load { name: "x".into() },
         vec![],
         vec_ty(n, prec),
         None,
     );
-    dag.add_node(op, vec![load], scalar_ty(prec), None);
+    dag.add_node(decl, op, vec![load], scalar_ty(prec), None);
     let inputs: UnordMap<String, chelis_ir::eval::TensorValue> = [(
         "x".into(),
         chelis_ir::eval::TensorValue::from_vec(vec![n], vals.iter().map(|&v| v as f64).collect()),
@@ -907,13 +924,16 @@ fn f16_min_reduce_agrees_with_evaluator() {
 #[test]
 fn bf16_prod_reduce_is_structurally_unsupported_today() {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let load = dag.add_node(
+        decl,
         RiscOp::Load { name: "x".into() },
         vec![],
         vec_ty(4, Prim::Bf16),
         None,
     );
     dag.add_node(
+        decl,
         RiscOp::ProdReduce { axis: 0 },
         vec![load],
         scalar_ty(Prim::Bf16),
@@ -934,13 +954,16 @@ fn bf16_prod_reduce_is_structurally_unsupported_today() {
 #[test]
 fn f16_prod_reduce_is_structurally_unsupported_today() {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let load = dag.add_node(
+        decl,
         RiscOp::Load { name: "x".into() },
         vec![],
         vec_ty(4, Prim::F16),
         None,
     );
     dag.add_node(
+        decl,
         RiscOp::ProdReduce { axis: 0 },
         vec![load],
         scalar_ty(Prim::F16),
@@ -972,13 +995,16 @@ fn run_cast_f32_to_reduced(test_name: &str, dst: Prim, value: f32, tol: f64) {
     }
     let n = 4;
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let src = dag.add_node(
+        decl,
         RiscOp::synth_const(vec_ty(n, Prim::F32).precision, value as f64),
         vec![],
         vec_ty(n, Prim::F32),
         None,
     );
     dag.add_node(
+        decl,
         RiscOp::Cast { new_precision: dst },
         vec![src],
         vec_ty(n, dst),
@@ -1034,13 +1060,16 @@ fn run_cast_reduced_to_f32(test_name: &str, src: Prim, value: f32, tol: f64) {
     }
     let n = 4;
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let c = dag.add_node(
+        decl,
         RiscOp::synth_const(vec_ty(n, src).precision, value as f64),
         vec![],
         vec_ty(n, src),
         None,
     );
     dag.add_node(
+        decl,
         RiscOp::Cast {
             new_precision: Prim::F32,
         },
@@ -1084,13 +1113,16 @@ fn run_cast_reduced_to_reduced(test_name: &str, src: Prim, dst: Prim, value: f32
     assert_ne!(src, dst, "same-precision cast tested elsewhere");
     let n = 4;
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let c = dag.add_node(
+        decl,
         RiscOp::synth_const(vec_ty(n, src).precision, value as f64),
         vec![],
         vec_ty(n, src),
         None,
     );
     dag.add_node(
+        decl,
         RiscOp::Cast { new_precision: dst },
         vec![c],
         vec_ty(n, dst),
@@ -1209,7 +1241,9 @@ fn cast_f32_to_f16_sweep_non_round_values() {
 #[test]
 fn eval_last_helper_returns_const_value() {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     dag.add_node(
+        decl,
         RiscOp::synth_const(scalar_ty(Prim::F32).precision, 7.0),
         vec![],
         scalar_ty(Prim::F32),

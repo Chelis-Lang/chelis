@@ -214,6 +214,7 @@ fn rebuild_with_fusion(dag: &Dag, chains: &[Chain]) -> (Dag, UnordMap<NodeId, No
     }
 
     let mut new_dag = Dag::new();
+    new_dag.inherit_declarations(dag);
     let mut id_map: UnordMap<usize, NodeId> = UnordMap::new();
     let claimed_producers = crate::axis_sources::claimed_producers(dag);
 
@@ -253,6 +254,7 @@ fn rebuild_with_fusion(dag: &Dag, chains: &[Chain]) -> (Dag, UnordMap<NodeId, No
             // spans ∪ each contributor's pre-existing merged_spans).
             let first = dag.get(chain.nodes[0]).expect("chain head exists");
             let new_id = new_dag.add_node(
+                dag.get(chain_out).expect("chain output exists").decl,
                 fused_op,
                 remapped_inputs,
                 output_type,
@@ -307,6 +309,7 @@ fn rebuild_with_fusion(dag: &Dag, chains: &[Chain]) -> (Dag, UnordMap<NodeId, No
                 })
                 .collect();
             let new_id = new_dag.add_node(
+                node.decl,
                 node.op.clone(),
                 new_inputs,
                 node.output_type.clone(),
@@ -496,19 +499,22 @@ mod tests {
     #[test]
     fn consumer_counts_basic() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let a = dag.add_node(
+            decl,
             RiscOp::synth_const(scalar_f32().precision, 1.0),
             vec![],
             scalar_f32(),
             None,
         );
         let b = dag.add_node(
+            decl,
             RiscOp::synth_const(scalar_f32().precision, 2.0),
             vec![],
             scalar_f32(),
             None,
         );
-        let c = dag.add_node(RiscOp::Add, vec![a, b], scalar_f32(), None);
+        let c = dag.add_node(decl, RiscOp::Add, vec![a, b], scalar_f32(), None);
         dag.add_root(c);
         let counts = build_consumer_counts(&dag);
         assert_eq!(counts[a.0], 1); // consumed by c
@@ -519,21 +525,24 @@ mod tests {
     #[test]
     fn multi_consumer_blocks_chain() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let a = dag.add_node(
+            decl,
             RiscOp::synth_const(vec_f32(4).precision, 1.0),
             vec![],
             vec_f32(4),
             None,
         );
         let b = dag.add_node(
+            decl,
             RiscOp::synth_const(vec_f32(4).precision, 2.0),
             vec![],
             vec_f32(4),
             None,
         );
-        let shared = dag.add_node(RiscOp::Add, vec![a, b], vec_f32(4), None);
-        let _left = dag.add_node(RiscOp::Neg, vec![shared], vec_f32(4), None);
-        let _right = dag.add_node(RiscOp::Exp, vec![shared], vec_f32(4), None);
+        let shared = dag.add_node(decl, RiscOp::Add, vec![a, b], vec_f32(4), None);
+        let _left = dag.add_node(decl, RiscOp::Neg, vec![shared], vec_f32(4), None);
+        let _right = dag.add_node(decl, RiscOp::Exp, vec![shared], vec_f32(4), None);
 
         let counts = build_consumer_counts(&dag);
         assert_eq!(counts[shared.0], 2); // two consumers
@@ -551,20 +560,23 @@ mod tests {
     #[test]
     fn simple_chain_found() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let a = dag.add_node(
+            decl,
             RiscOp::synth_const(vec_f32(4).precision, 1.0),
             vec![],
             vec_f32(4),
             None,
         );
         let b = dag.add_node(
+            decl,
             RiscOp::synth_const(vec_f32(4).precision, 2.0),
             vec![],
             vec_f32(4),
             None,
         );
-        let c = dag.add_node(RiscOp::Add, vec![a, b], vec_f32(4), None);
-        let d = dag.add_node(RiscOp::Neg, vec![c], vec_f32(4), None);
+        let c = dag.add_node(decl, RiscOp::Add, vec![a, b], vec_f32(4), None);
+        let d = dag.add_node(decl, RiscOp::Neg, vec![c], vec_f32(4), None);
         dag.add_root(d);
 
         let counts = build_consumer_counts(&dag);
@@ -576,15 +588,23 @@ mod tests {
     #[test]
     fn integer_abs_stays_materialized_until_typed_fused_kernels_exist() {
         let mut dag = Dag::new();
-        let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_i64(4), None);
+        let decl = dag.declare("test");
+        let x = dag.add_node(
+            decl,
+            RiscOp::Load { name: "x".into() },
+            vec![],
+            vec_i64(4),
+            None,
+        );
         let one = dag.add_node(
+            decl,
             RiscOp::synth_const(vec_i64(4).precision, 1.0),
             vec![],
             vec_i64(4),
             None,
         );
-        let abs = dag.add_node(RiscOp::Abs, vec![x], vec_i64(4), None);
-        let add = dag.add_node(RiscOp::Add, vec![abs, one], vec_i64(4), None);
+        let abs = dag.add_node(decl, RiscOp::Abs, vec![x], vec_i64(4), None);
+        let add = dag.add_node(decl, RiscOp::Add, vec![abs, one], vec_i64(4), None);
         dag.add_root(add);
 
         let fused = fuse(&dag);
@@ -610,22 +630,31 @@ mod tests {
     #[test]
     fn fusion_preserves_unambiguous_external_reusable_input() {
         let mut dag = Dag::new();
-        let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_f32(4), None);
+        let decl = dag.declare("test");
+        let x = dag.add_node(
+            decl,
+            RiscOp::Load { name: "x".into() },
+            vec![],
+            vec_f32(4),
+            None,
+        );
         let bias = dag.add_node(
+            decl,
             RiscOp::synth_const(vec_f32(4).precision, 1.0),
             vec![],
             vec_f32(4),
             None,
         );
-        let add = dag.add_node(RiscOp::Add, vec![x, bias], vec_f32(4), None);
+        let add = dag.add_node(decl, RiscOp::Add, vec![x, bias], vec_f32(4), None);
         dag.set_reusable_input(add, x);
         let scale = dag.add_node(
+            decl,
             RiscOp::synth_const(vec_f32(4).precision, 2.0),
             vec![],
             vec_f32(4),
             None,
         );
-        let mul = dag.add_node(RiscOp::Mul, vec![add, scale], vec_f32(4), None);
+        let mul = dag.add_node(decl, RiscOp::Mul, vec![add, scale], vec_f32(4), None);
         dag.add_root(mul);
 
         let fused = fuse_with_remap(&dag);
@@ -646,11 +675,24 @@ mod tests {
     #[test]
     fn fusion_drops_ambiguous_reusable_inputs() {
         let mut dag = Dag::new();
-        let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_f32(4), None);
-        let y = dag.add_node(RiscOp::Load { name: "y".into() }, vec![], vec_f32(4), None);
-        let add = dag.add_node(RiscOp::Add, vec![x, y], vec_f32(4), None);
+        let decl = dag.declare("test");
+        let x = dag.add_node(
+            decl,
+            RiscOp::Load { name: "x".into() },
+            vec![],
+            vec_f32(4),
+            None,
+        );
+        let y = dag.add_node(
+            decl,
+            RiscOp::Load { name: "y".into() },
+            vec![],
+            vec_f32(4),
+            None,
+        );
+        let add = dag.add_node(decl, RiscOp::Add, vec![x, y], vec_f32(4), None);
         dag.set_reusable_input(add, x);
-        let mul = dag.add_node(RiscOp::Mul, vec![add, y], vec_f32(4), None);
+        let mul = dag.add_node(decl, RiscOp::Mul, vec![add, y], vec_f32(4), None);
         dag.set_reusable_input(mul, y);
         dag.add_root(mul);
 

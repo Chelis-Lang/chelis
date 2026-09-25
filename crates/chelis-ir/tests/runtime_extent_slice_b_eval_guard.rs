@@ -46,8 +46,9 @@ fn named(name: &str) -> DimInfo {
     DimInfo::Named(name.into(), None)
 }
 
-fn load(dag: &mut Dag, name: &str, dims: Vec<DimInfo>) -> NodeId {
+fn load(dag: &mut Dag, decl: chelis_ir::dag::DeclId, name: &str, dims: Vec<DimInfo>) -> NodeId {
     dag.add_node(
+        decl,
         RiscOp::Load { name: name.into() },
         vec![],
         ty(dims, Prim::F32),
@@ -66,10 +67,12 @@ fn domain_trap_line(op: &str) -> String {
 /// extent 2 and `y` at extent 3 makes the claim false.
 fn cross_tensor_claim_dag() -> (Dag, NodeId) {
     let mut dag = Dag::new();
-    let base = load(&mut dag, "b", vec![]);
-    let x = load(&mut dag, "x", vec![named("n")]);
-    let y = load(&mut dag, "y", vec![named("m")]);
+    let decl = dag.declare("test");
+    let base = load(&mut dag, decl, "b", vec![]);
+    let x = load(&mut dag, decl, "x", vec![named("n")]);
+    let y = load(&mut dag, decl, "y", vec![named("m")]);
     let expanded = dag.add_node(
+        decl,
         RiscOp::Expand {
             axis: 0,
             size: RtDim::InputAxis {
@@ -90,6 +93,7 @@ fn cross_tensor_claim_dag() -> (Dag, NodeId) {
     // node evaluates, so consuming `x` does not let the elementwise operand
     // check preempt it, which the disagreeing rows measure rather than assume.
     let out = dag.add_node(
+        decl,
         RiscOp::Add,
         vec![expanded, x],
         ty(vec![named("n")], Prim::F32),
@@ -227,15 +231,18 @@ fn the_guard_precedes_the_allocation_it_protects() {
 #[test]
 fn two_roots_spelling_one_binder_are_two_claims_not_one_class() {
     let mut dag = Dag::new();
-    let x = load(&mut dag, "x", vec![named("seq")]);
-    let y = load(&mut dag, "y", vec![named("batch"), named("seq")]);
+    let decl = dag.declare("test");
+    let x = load(&mut dag, decl, "x", vec![named("seq")]);
+    let y = load(&mut dag, decl, "y", vec![named("batch"), named("seq")]);
     let from_x = dag.add_node(
+        decl,
         RiscOp::Neg,
         vec![x],
         ty(vec![named("seq")], Prim::F32),
         None,
     );
     let from_y = dag.add_node(
+        decl,
         RiscOp::Neg,
         vec![y],
         ty(vec![named("batch"), named("seq")], Prim::F32),
@@ -271,8 +278,10 @@ fn two_roots_spelling_one_binder_are_two_claims_not_one_class() {
 /// 0 is 1, and nothing in the graph proves it.
 fn unit_extent_claim_dag() -> (Dag, NodeId) {
     let mut dag = Dag::new();
-    let x = load(&mut dag, "x", vec![named("n")]);
+    let decl = dag.declare("test");
+    let x = load(&mut dag, decl, "x", vec![named("n")]);
     let out = dag.add_node(
+        decl,
         RiscOp::Expand {
             axis: 0,
             size: RtDim::Lit(3),
@@ -349,16 +358,19 @@ fn a_unit_operand_extent_satisfies_the_claim_and_broadcasts() {
 /// broadcast of element 0 of a two-element axis.
 fn local_unit_extent_claim_dag(end_slot: usize) -> (Dag, NodeId) {
     let mut dag = Dag::new();
-    let x = load(&mut dag, "x", vec![named("n")]);
+    let decl = dag.declare("test");
+    let x = load(&mut dag, decl, "x", vec![named("n")]);
     // A movement bound source is extent-domain and therefore exactly `i64`
     // ([05-DIM-1]); the f32 helper above is for tensor operands.
     let end = dag.add_node(
+        decl,
         RiscOp::Load { name: "end".into() },
         vec![],
         ty(vec![], Prim::Int64),
         None,
     );
     let shrunk = dag.add_node(
+        decl,
         RiscOp::Shrink {
             bounds: vec![(RtDim::Lit(0), RtDim::Node(end_slot))],
         },
@@ -367,6 +379,7 @@ fn local_unit_extent_claim_dag(end_slot: usize) -> (Dag, NodeId) {
         None,
     );
     let out = dag.add_node(
+        decl,
         RiscOp::Expand {
             axis: 0,
             size: RtDim::Lit(3),
@@ -444,15 +457,18 @@ fn a_locally_placed_unit_claim_that_holds_broadcasts() {
 #[test]
 fn two_signatures_spelling_one_binder_bind_independently_on_eval() {
     let mut dag = Dag::new();
-    let x = load(&mut dag, "x", vec![named("seq")]);
-    let y = load(&mut dag, "y", vec![named("batch"), named("seq")]);
+    let decl = dag.declare("test");
+    let x = load(&mut dag, decl, "x", vec![named("seq")]);
+    let y = load(&mut dag, decl, "y", vec![named("batch"), named("seq")]);
     let from_x = dag.add_node(
+        decl,
         RiscOp::Neg,
         vec![x],
         ty(vec![named("seq")], Prim::F32),
         None,
     );
     let from_y = dag.add_node(
+        decl,
         RiscOp::Neg,
         vec![y],
         ty(vec![named("batch"), named("seq")], Prim::F32),
@@ -491,9 +507,11 @@ fn two_signatures_spelling_one_binder_bind_independently_on_eval() {
 #[test]
 fn one_scope_with_two_disagreeing_witnesses_of_a_binder_still_refuses_on_eval() {
     let mut dag = Dag::new();
-    let x = load(&mut dag, "x", vec![named("seq")]);
-    let y = load(&mut dag, "y", vec![named("seq")]);
+    let decl = dag.declare("test");
+    let x = load(&mut dag, decl, "x", vec![named("seq")]);
+    let y = load(&mut dag, decl, "y", vec![named("seq")]);
     let sum = dag.add_node(
+        decl,
         RiscOp::Add,
         vec![x, y],
         ty(vec![named("seq")], Prim::F32),
@@ -530,9 +548,11 @@ fn one_scope_with_two_disagreeing_witnesses_of_a_binder_still_refuses_on_eval() 
 #[test]
 fn two_disagreeing_scopes_refuse_when_a_live_node_reads_the_binder_by_value() {
     let mut dag = Dag::new();
-    let x = load(&mut dag, "x", vec![named("seq")]);
-    let y = load(&mut dag, "y", vec![named("batch"), named("seq")]);
+    let decl = dag.declare("test");
+    let x = load(&mut dag, decl, "x", vec![named("seq")]);
+    let y = load(&mut dag, decl, "y", vec![named("batch"), named("seq")]);
     let from_x = dag.add_node(
+        decl,
         RiscOp::Neg,
         vec![x],
         ty(vec![named("seq")], Prim::F32),
@@ -542,6 +562,7 @@ fn two_disagreeing_scopes_refuse_when_a_live_node_reads_the_binder_by_value() {
     // extent has to be a value rather than whatever the operand happens to
     // have.
     let from_y = dag.add_node(
+        decl,
         RiscOp::Reshape {
             new_shape: vec![RtDim::Sym("seq".into()), RtDim::Lit(2)],
         },

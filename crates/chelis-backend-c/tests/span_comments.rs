@@ -155,13 +155,21 @@ fn compile_kernel_only(test_name: &str, c_source: &str) -> Result<(), String> {
 #[test]
 fn s4_c_canonical_span_id_emitted_as_comment() {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let a = dag.add_node(
+        decl,
         RiscOp::Load { name: "a".into() },
         vec![],
         vec_f32(4),
         Some("op.load".into()),
     );
-    dag.add_node(RiscOp::Neg, vec![a], vec_f32(4), Some("op.neg".into()));
+    dag.add_node(
+        decl,
+        RiscOp::Neg,
+        vec![a],
+        vec_f32(4),
+        Some("op.neg".into()),
+    );
 
     let result = codegen(&dag, "s4_canonical").unwrap();
     let src = &result.c_source;
@@ -183,8 +191,15 @@ fn s4_c_merged_spans_emitted_lex_sorted_after_canonical() {
     // Hand-craft a node carrying span_id + merged_spans (the typical S3
     // shape after Fusion / CSE / fold merges).
     let mut dag = Dag::new();
-    let a = dag.add_node(RiscOp::Load { name: "a".into() }, vec![], vec_f32(4), None);
-    let neg_id = dag.add_node(RiscOp::Neg, vec![a], vec_f32(4), Some("op.x".into()));
+    let decl = dag.declare("test");
+    let a = dag.add_node(
+        decl,
+        RiscOp::Load { name: "a".into() },
+        vec![],
+        vec_f32(4),
+        None,
+    );
+    let neg_id = dag.add_node(decl, RiscOp::Neg, vec![a], vec_f32(4), Some("op.x".into()));
     {
         let node = dag.node_mut(neg_id).unwrap();
         node.merged_spans = vec!["op.b".into(), "op.a".into(), "op.c".into()];
@@ -218,8 +233,21 @@ fn s4_c_merged_spans_emitted_lex_sorted_after_canonical() {
 #[test]
 fn s4_c_merged_spans_dedup_against_canonical() {
     let mut dag = Dag::new();
-    let a = dag.add_node(RiscOp::Load { name: "a".into() }, vec![], vec_f32(4), None);
-    let neg_id = dag.add_node(RiscOp::Neg, vec![a], vec_f32(4), Some("op.dup".into()));
+    let decl = dag.declare("test");
+    let a = dag.add_node(
+        decl,
+        RiscOp::Load { name: "a".into() },
+        vec![],
+        vec_f32(4),
+        None,
+    );
+    let neg_id = dag.add_node(
+        decl,
+        RiscOp::Neg,
+        vec![a],
+        vec_f32(4),
+        Some("op.dup".into()),
+    );
     {
         // Manually inject a merged span equal to the canonical span_id.
         // span_merge helpers normally prevent this, but the emitter must
@@ -249,8 +277,15 @@ fn s4_c_no_spans_emits_no_comment_block() {
     // Backwards-compat: span-free DAG (the common case for hand-written
     // Chelis) must produce zero `// span:` lines.
     let mut dag = Dag::new();
-    let a = dag.add_node(RiscOp::Load { name: "a".into() }, vec![], vec_f32(4), None);
-    dag.add_node(RiscOp::Neg, vec![a], vec_f32(4), None);
+    let decl = dag.declare("test");
+    let a = dag.add_node(
+        decl,
+        RiscOp::Load { name: "a".into() },
+        vec![],
+        vec_f32(4),
+        None,
+    );
+    dag.add_node(decl, RiscOp::Neg, vec![a], vec_f32(4), None);
 
     let result = codegen(&dag, "s4_nospan").unwrap();
     let src = &result.c_source;
@@ -269,9 +304,11 @@ fn s4_c_oracle_richer_combinations_compile_and_grep() {
     // various combinations of (span_id only, merged_spans only, both, neither).
     // Assert structural grep count >= sum and compile-success.
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
 
     // Node 1: span_id only.
     let n1 = dag.add_node(
+        decl,
         RiscOp::Load { name: "in".into() },
         vec![],
         vec_f32(4),
@@ -280,6 +317,7 @@ fn s4_c_oracle_richer_combinations_compile_and_grep() {
 
     // Node 2: span_id + merged_spans.
     let n2 = dag.add_node(
+        decl,
         RiscOp::Neg,
         vec![n1],
         vec_f32(4),
@@ -292,17 +330,18 @@ fn s4_c_oracle_richer_combinations_compile_and_grep() {
 
     // Node 3: merged_spans only (no canonical). Defensive case per the spec —
     // shouldn't happen via normal pass output but emitter must handle it.
-    let n3 = dag.add_node(RiscOp::Exp, vec![n2], vec_f32(4), None);
+    let n3 = dag.add_node(decl, RiscOp::Exp, vec![n2], vec_f32(4), None);
     {
         let node = dag.node_mut(n3).unwrap();
         node.merged_spans = vec!["n3.m1".into(), "n3.m2".into()];
     }
 
     // Node 4: neither (span-free).
-    let n4 = dag.add_node(RiscOp::Log, vec![n3], vec_f32(4), None);
+    let n4 = dag.add_node(decl, RiscOp::Log, vec![n3], vec_f32(4), None);
 
     // Node 5: span_id only.
     dag.add_node(
+        decl,
         RiscOp::Sin,
         vec![n4],
         vec_f32(4),
@@ -365,13 +404,15 @@ fn s4_c_forbidden_newline_in_span_is_escaped_at_emit() {
     // real top-level declaration. With the sanitizer, the `\n` becomes a
     // literal `\n` two-char sequence inside the comment.
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let a = dag.add_node(
+        decl,
         RiscOp::Load { name: "a".into() },
         vec![],
         vec_f32(4),
         Some("op\nint INJECTED_C_CODE = 42;".into()),
     );
-    dag.add_node(RiscOp::Neg, vec![a], vec_f32(4), None);
+    dag.add_node(decl, RiscOp::Neg, vec![a], vec_f32(4), None);
 
     let result = codegen(&dag, "s4_c_forbidden_newline").unwrap();
     let src = &result.c_source;
@@ -396,8 +437,21 @@ fn s4_c_forbidden_newline_in_merged_spans_is_escaped_at_emit() {
     // Same probe but via `merged_spans` rather than `span_id` — the
     // sanitizer must apply to both code paths in `emit_span_comments`.
     let mut dag = Dag::new();
-    let a = dag.add_node(RiscOp::Load { name: "a".into() }, vec![], vec_f32(4), None);
-    let neg_id = dag.add_node(RiscOp::Neg, vec![a], vec_f32(4), Some("op.clean".into()));
+    let decl = dag.declare("test");
+    let a = dag.add_node(
+        decl,
+        RiscOp::Load { name: "a".into() },
+        vec![],
+        vec_f32(4),
+        None,
+    );
+    let neg_id = dag.add_node(
+        decl,
+        RiscOp::Neg,
+        vec![a],
+        vec_f32(4),
+        Some("op.clean".into()),
+    );
     {
         let node = dag.node_mut(neg_id).unwrap();
         node.merged_spans = vec!["op\nint INJECTED_VIA_MERGED = 1;".into()];
@@ -425,13 +479,16 @@ fn s4_c_clean_span_emitted_verbatim_audit_invariant() {
     // sidecar entry must match the `// span: <id>` text in the .c file
     // verbatim for well-behaved producers.
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let a = dag.add_node(
+        decl,
         RiscOp::Load { name: "a".into() },
         vec![],
         vec_f32(4),
         Some("eq1.σ_body".into()),
     );
     dag.add_node(
+        decl,
         RiscOp::Neg,
         vec![a],
         vec_f32(4),

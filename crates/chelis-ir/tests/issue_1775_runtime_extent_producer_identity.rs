@@ -210,7 +210,9 @@ fn grad_over_a_shared_extent_window_stack_gives_every_axis_one_source() {
 #[test]
 fn an_axis_with_no_extent_source_is_still_refused() {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let sourceless: NodeId = dag.add_node(
+        decl,
         RiscOp::synth_const(Prim::F32, 0.0),
         vec![],
         TensorType {

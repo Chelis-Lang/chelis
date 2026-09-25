@@ -26,8 +26,16 @@ fn lit(extents: &[usize]) -> Vec<DimInfo> {
     extents.iter().map(|extent| DimInfo::Lit(*extent)).collect()
 }
 
-fn add(dag: &mut Dag, op: RiscOp, inputs: Vec<NodeId>, dims: Vec<DimInfo>, prim: Prim) -> NodeId {
+fn add(
+    dag: &mut Dag,
+    decl: chelis_ir::dag::DeclId,
+    op: RiscOp,
+    inputs: Vec<NodeId>,
+    dims: Vec<DimInfo>,
+    prim: Prim,
+) -> NodeId {
     dag.add_node(
+        decl,
         op,
         inputs,
         TensorType {
@@ -38,13 +46,33 @@ fn add(dag: &mut Dag, op: RiscOp, inputs: Vec<NodeId>, dims: Vec<DimInfo>, prim:
     )
 }
 
-fn load(dag: &mut Dag, name: &str, dims: Vec<DimInfo>, prim: Prim) -> NodeId {
-    add(dag, RiscOp::Load { name: name.into() }, vec![], dims, prim)
+fn load(
+    dag: &mut Dag,
+    decl: chelis_ir::dag::DeclId,
+    name: &str,
+    dims: Vec<DimInfo>,
+    prim: Prim,
+) -> NodeId {
+    add(
+        dag,
+        decl,
+        RiscOp::Load { name: name.into() },
+        vec![],
+        dims,
+        prim,
+    )
 }
 
-fn i64_const(dag: &mut Dag, value: i64) -> NodeId {
+fn i64_const(dag: &mut Dag, decl: chelis_ir::dag::DeclId, value: i64) -> NodeId {
     let value = scalar_from_i64("test", Prim::Int64, value).unwrap();
-    add(dag, RiscOp::Const { value }, vec![], vec![], Prim::Int64)
+    add(
+        dag,
+        decl,
+        RiscOp::Const { value },
+        vec![],
+        vec![],
+        Prim::Int64,
+    )
 }
 
 fn floats(prim: Prim, shape: &[usize], data: Vec<f64>) -> TensorValue {
@@ -86,11 +114,20 @@ const ALLOCATION_FAILED: &str = "Domain: chelis_alloc tensor allocation failed";
 /// `split_keys(key(7), n)`, the count read at run time.
 fn runtime_split() -> Dag {
     let mut dag = Dag::new();
-    let seed = i64_const(&mut dag, 7);
-    let key = add(&mut dag, RiscOp::KeyFromSeed, vec![seed], vec![], Prim::Key);
-    let n = load(&mut dag, "n", vec![], Prim::Int64);
+    let decl = dag.declare("test");
+    let seed = i64_const(&mut dag, decl, 7);
+    let key = add(
+        &mut dag,
+        decl,
+        RiscOp::KeyFromSeed,
+        vec![seed],
+        vec![],
+        Prim::Key,
+    );
+    let n = load(&mut dag, decl, "n", vec![], Prim::Int64);
     let rows = add(
         &mut dag,
+        decl,
         RiscOp::SplitN {
             count: RtDim::Node(1),
         },
@@ -118,10 +155,19 @@ fn a_runtime_split_count_past_the_key_byte_domain_traps_overflow() {
 #[test]
 fn a_literal_split_count_past_the_key_byte_domain_traps_overflow() {
     let mut dag = Dag::new();
-    let seed = i64_const(&mut dag, 7);
-    let key = add(&mut dag, RiscOp::KeyFromSeed, vec![seed], vec![], Prim::Key);
+    let decl = dag.declare("test");
+    let seed = i64_const(&mut dag, decl, 7);
+    let key = add(
+        &mut dag,
+        decl,
+        RiscOp::KeyFromSeed,
+        vec![seed],
+        vec![],
+        Prim::Key,
+    );
     let rows = add(
         &mut dag,
+        decl,
         RiscOp::SplitN {
             count: RtDim::Lit(1 << 61),
         },
@@ -139,19 +185,22 @@ fn a_literal_split_count_past_the_key_byte_domain_traps_overflow() {
 /// `split_keys(key_from_seed(s), n)` over a key batch shaped like `s`.
 fn batched_split(batch: Vec<DimInfo>) -> Dag {
     let mut dag = Dag::new();
-    let seeds = load(&mut dag, "s", batch.clone(), Prim::Int64);
+    let decl = dag.declare("test");
+    let seeds = load(&mut dag, decl, "s", batch.clone(), Prim::Int64);
     let keys = add(
         &mut dag,
+        decl,
         RiscOp::KeyFromSeed,
         vec![seeds],
         batch.clone(),
         Prim::Key,
     );
-    let n = load(&mut dag, "n", vec![], Prim::Int64);
+    let n = load(&mut dag, decl, "n", vec![], Prim::Int64);
     let mut dims = batch;
     dims.push(named("keys"));
     let rows = add(
         &mut dag,
+        decl,
         RiscOp::SplitN {
             count: RtDim::Node(1),
         },
@@ -196,10 +245,12 @@ fn an_empty_key_batch_split_past_the_stride_domain_traps_overflow() {
 /// result has one more axis than `x`.
 fn runtime_expand(x_dims: Vec<DimInfo>, out_dims: Vec<DimInfo>, prim: Prim) -> Dag {
     let mut dag = Dag::new();
-    let x = load(&mut dag, "x", x_dims, prim);
-    let n = load(&mut dag, "n", vec![], Prim::Int64);
+    let decl = dag.declare("test");
+    let x = load(&mut dag, decl, "x", x_dims, prim);
+    let n = load(&mut dag, decl, "n", vec![], Prim::Int64);
     let expanded = add(
         &mut dag,
+        decl,
         RiscOp::Expand {
             axis: 0,
             size: RtDim::Node(1),
@@ -268,10 +319,12 @@ fn an_expand_control_still_evaluates() {
 
 fn runtime_pad(before: RtDim, after: RtDim) -> Dag {
     let mut dag = Dag::new();
-    let x = load(&mut dag, "x", lit(&[1]), Prim::F32);
-    let n = load(&mut dag, "n", vec![], Prim::Int64);
+    let decl = dag.declare("test");
+    let x = load(&mut dag, decl, "x", lit(&[1]), Prim::F32);
+    let n = load(&mut dag, decl, "n", vec![], Prim::Int64);
     let padded = add(
         &mut dag,
+        decl,
         RiscOp::zero_pad(Prim::F32, vec![(before, after)]),
         vec![x, n],
         vec![named("m")],
@@ -309,8 +362,15 @@ fn empty_rows(prim: Prim) -> TensorValue {
 
 fn reduction(op: RiscOp, input: Prim, result: Prim) -> Dag {
     let mut dag = Dag::new();
-    let x = load(&mut dag, "x", vec![named("n"), DimInfo::Lit(0)], input);
-    let reduced = add(&mut dag, op, vec![x], vec![named("n")], result);
+    let decl = dag.declare("test");
+    let x = load(
+        &mut dag,
+        decl,
+        "x",
+        vec![named("n"), DimInfo::Lit(0)],
+        input,
+    );
+    let reduced = add(&mut dag, decl, op, vec![x], vec![named("n")], result);
     dag.add_root(reduced);
     dag
 }
@@ -364,8 +424,10 @@ fn a_reduction_of_an_empty_axis_past_the_byte_domain_traps_overflow() {
 fn a_constant_shaped_past_the_byte_domain_traps_overflow() {
     // Shaped by a literal extent.
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let c = add(
         &mut dag,
+        decl,
         RiscOp::synth_const(Prim::F32, 1.0),
         vec![],
         lit(&[HUGE]),
@@ -378,9 +440,17 @@ fn a_constant_shaped_past_the_byte_domain_traps_overflow() {
     );
     // Shaped by an extent bound from an (empty) input.
     let mut dag = Dag::new();
-    let x = load(&mut dag, "x", vec![named("n"), DimInfo::Lit(0)], Prim::F32);
+    let decl = dag.declare("test");
+    let x = load(
+        &mut dag,
+        decl,
+        "x",
+        vec![named("n"), DimInfo::Lit(0)],
+        Prim::F32,
+    );
     let c = add(
         &mut dag,
+        decl,
         RiscOp::synth_const(Prim::F32, 1.0),
         vec![],
         vec![named("n")],
@@ -388,6 +458,7 @@ fn a_constant_shaped_past_the_byte_domain_traps_overflow() {
     );
     let s = add(
         &mut dag,
+        decl,
         RiscOp::Sum {
             axis: 1,
             accumulator: Prim::F32,
@@ -398,6 +469,7 @@ fn a_constant_shaped_past_the_byte_domain_traps_overflow() {
     );
     let total = add(
         &mut dag,
+        decl,
         RiscOp::Add,
         vec![c, s],
         vec![named("n")],
@@ -410,8 +482,10 @@ fn a_constant_shaped_past_the_byte_domain_traps_overflow() {
     );
     // A tensor literal whose declared extents have no representable count.
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let c = add(
         &mut dag,
+        decl,
         RiscOp::synth_const_tensor(Prim::F32, vec![]),
         vec![],
         lit(&[1 << 32, 1 << 32]),
@@ -427,7 +501,8 @@ fn a_constant_shaped_past_the_byte_domain_traps_overflow() {
 #[test]
 fn a_missing_input_defaulted_past_the_byte_domain_traps_overflow() {
     let mut dag = Dag::new();
-    let x = load(&mut dag, "x", lit(&[HUGE]), Prim::F32);
+    let decl = dag.declare("test");
+    let x = load(&mut dag, decl, "x", lit(&[HUGE]), Prim::F32);
     dag.add_root(x);
     assert_eq!(
         run(&dag, vec![], false).unwrap_err(),
@@ -437,13 +512,15 @@ fn a_missing_input_defaulted_past_the_byte_domain_traps_overflow() {
 
 fn runtime_reshape(x: &[usize], target: Vec<RtDim>) -> Dag {
     let mut dag = Dag::new();
-    let x = load(&mut dag, "x", lit(x), Prim::F32);
-    let n = load(&mut dag, "n", vec![], Prim::Int64);
+    let decl = dag.declare("test");
+    let x = load(&mut dag, decl, "x", lit(x), Prim::F32);
+    let n = load(&mut dag, decl, "n", vec![], Prim::Int64);
     let dims = (0..target.len())
         .map(|axis| named(&format!("r{axis}")))
         .collect();
     let reshaped = add(
         &mut dag,
+        decl,
         RiscOp::Reshape { new_shape: target },
         vec![x, n],
         dims,
@@ -487,14 +564,17 @@ fn an_empty_reshape_target_with_huge_extents_evaluates() {
 #[test]
 fn a_permutation_past_the_stride_domain_traps_overflow() {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let x = load(
         &mut dag,
+        decl,
         "x",
         vec![named("a"), named("b"), DimInfo::Lit(0)],
         Prim::F32,
     );
     let permuted = add(
         &mut dag,
+        decl,
         RiscOp::Permute {
             axes: vec![2, 0, 1],
         },
@@ -513,10 +593,18 @@ fn a_permutation_past_the_stride_domain_traps_overflow() {
 #[test]
 fn a_gather_past_the_count_domain_traps_overflow() {
     let mut dag = Dag::new();
-    let values = load(&mut dag, "v", vec![DimInfo::Lit(0), named("w")], Prim::F32);
-    let indices = load(&mut dag, "i", lit(&[3]), Prim::Int64);
+    let decl = dag.declare("test");
+    let values = load(
+        &mut dag,
+        decl,
+        "v",
+        vec![DimInfo::Lit(0), named("w")],
+        Prim::F32,
+    );
+    let indices = load(&mut dag, decl, "i", lit(&[3]), Prim::Int64);
     let gathered = add(
         &mut dag,
+        decl,
         RiscOp::Gather { axis: 0 },
         vec![values, indices],
         vec![DimInfo::Lit(3), named("w")],
@@ -537,6 +625,7 @@ fn a_gather_past_the_count_domain_traps_overflow() {
 /// `n` and `k`.
 fn matmul(
     dag: &mut Dag,
+    decl: chelis_ir::dag::DeclId,
     [lhs, rhs]: [NodeId; 2],
     batch: Vec<DimExpr>,
     [m, n, k]: [DimExpr; 3],
@@ -544,6 +633,7 @@ fn matmul(
 ) -> NodeId {
     add(
         dag,
+        decl,
         RiscOp::BlasMatmul {
             batch_dims: batch,
             m,
@@ -560,8 +650,15 @@ fn matmul(
 #[test]
 fn a_matmul_over_an_empty_inner_axis_past_the_count_domain_traps_overflow() {
     let mut dag = Dag::new();
-    let a = load(&mut dag, "a", vec![named("m"), DimInfo::Lit(0)], Prim::F32);
-    let b = load(&mut dag, "b", lit(&[0, 4]), Prim::F32);
+    let decl = dag.declare("test");
+    let a = load(
+        &mut dag,
+        decl,
+        "a",
+        vec![named("m"), DimInfo::Lit(0)],
+        Prim::F32,
+    );
+    let b = load(&mut dag, decl, "b", lit(&[0, 4]), Prim::F32);
     let extents = [
         DimExpr::Sym("m".into()),
         DimExpr::Concrete(4),
@@ -569,6 +666,7 @@ fn a_matmul_over_an_empty_inner_axis_past_the_count_domain_traps_overflow() {
     ];
     let product = matmul(
         &mut dag,
+        decl,
         [a, b],
         vec![],
         extents,
@@ -590,12 +688,13 @@ fn a_matmul_over_an_empty_inner_axis_past_the_count_domain_traps_overflow() {
 #[test]
 fn an_empty_batched_matmul_with_huge_batch_extents_evaluates() {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let dims = || vec![named("p"), named("q"), DimInfo::Lit(0), DimInfo::Lit(0)];
-    let a = load(&mut dag, "a", dims(), Prim::F32);
-    let b = load(&mut dag, "b", dims(), Prim::F32);
+    let a = load(&mut dag, decl, "a", dims(), Prim::F32);
+    let b = load(&mut dag, decl, "b", dims(), Prim::F32);
     let batch = vec![DimExpr::Sym("p".into()), DimExpr::Sym("q".into())];
     let extents = [0, 0, 0].map(DimExpr::Concrete);
-    let product = matmul(&mut dag, [a, b], batch, extents, dims());
+    let product = matmul(&mut dag, decl, [a, b], batch, extents, dims());
     dag.add_root(product);
     let empty = || floats(Prim::F32, &[HUGE, HUGE, 0, 0], vec![]);
     let out = run(&dag, vec![("a", empty()), ("b", empty())], true).unwrap();
@@ -606,9 +705,11 @@ fn an_empty_batched_matmul_with_huge_batch_extents_evaluates() {
 #[test]
 fn a_one_hot_past_the_count_domain_traps_overflow() {
     let mut dag = Dag::new();
-    let i = load(&mut dag, "i", lit(&[2]), Prim::Int64);
+    let decl = dag.declare("test");
+    let i = load(&mut dag, decl, "i", lit(&[2]), Prim::Int64);
     let hot = add(
         &mut dag,
+        decl,
         RiscOp::OneHot { vocab: HUGE },
         vec![i],
         lit(&[2, HUGE]),
@@ -627,19 +728,22 @@ fn a_one_hot_past_the_count_domain_traps_overflow() {
 #[test]
 fn a_bound_adjoint_over_an_empty_key_batch_traps_overflow() {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let batch = || vec![named("n"), DimInfo::Lit(0)];
-    let seeds = load(&mut dag, "s", batch(), Prim::Int64);
+    let seeds = load(&mut dag, decl, "s", batch(), Prim::Int64);
     let keys = add(
         &mut dag,
+        decl,
         RiscOp::KeyFromSeed,
         vec![seeds],
         batch(),
         Prim::Key,
     );
-    let template = load(&mut dag, "t", batch(), Prim::F32);
-    let g = load(&mut dag, "g", batch(), Prim::F32);
+    let template = load(&mut dag, decl, "t", batch(), Prim::F32);
+    let g = load(&mut dag, decl, "g", batch(), Prim::F32);
     let adjoint = add(
         &mut dag,
+        decl,
         RiscOp::UniformBoundAdjoint {
             bound: UniformBound::Low,
         },
@@ -664,18 +768,21 @@ fn a_bound_adjoint_over_an_empty_key_batch_traps_overflow() {
 #[test]
 fn a_batched_draw_over_empty_rows_with_huge_extents_evaluates() {
     let mut dag = Dag::new();
-    let seeds = load(&mut dag, "s", lit(&[2]), Prim::Int64);
+    let decl = dag.declare("test");
+    let seeds = load(&mut dag, decl, "s", lit(&[2]), Prim::Int64);
     let keys = add(
         &mut dag,
+        decl,
         RiscOp::KeyFromSeed,
         vec![seeds],
         lit(&[2]),
         Prim::Key,
     );
     let dims = || vec![DimInfo::Lit(2), named("p"), named("q"), DimInfo::Lit(0)];
-    let data = load(&mut dag, "d", dims(), Prim::F32);
+    let data = load(&mut dag, decl, "d", dims(), Prim::F32);
     let rate = add(
         &mut dag,
+        decl,
         RiscOp::synth_const(Prim::F32, 0.5),
         vec![],
         vec![],
@@ -683,6 +790,7 @@ fn a_batched_draw_over_empty_rows_with_huge_extents_evaluates() {
     );
     let dropped = add(
         &mut dag,
+        decl,
         RiscOp::Dropout,
         vec![data, rate, keys],
         dims(),

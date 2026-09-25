@@ -50,20 +50,24 @@ fn scalar_prec(p: Prim) -> TensorType {
 
 fn build_add_dag(prec: Prim) -> Dag {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let a = dag.add_node(
+        decl,
         RiscOp::Load { name: "a".into() },
         vec![],
         vec_prec(4, prec),
         None,
     );
     let b = dag.add_node(
+        decl,
         RiscOp::Load { name: "b".into() },
         vec![],
         vec_prec(4, prec),
         None,
     );
-    let s = dag.add_node(RiscOp::Add, vec![a, b], vec_prec(4, prec), None);
+    let s = dag.add_node(decl, RiscOp::Add, vec![a, b], vec_prec(4, prec), None);
     let stored = dag.add_node(
+        decl,
         RiscOp::Store { name: "out".into() },
         vec![s],
         vec_prec(4, prec),
@@ -75,20 +79,24 @@ fn build_add_dag(prec: Prim) -> Dag {
 
 fn build_mul_dag(prec: Prim) -> Dag {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let a = dag.add_node(
+        decl,
         RiscOp::Load { name: "a".into() },
         vec![],
         vec_prec(4, prec),
         None,
     );
     let b = dag.add_node(
+        decl,
         RiscOp::Load { name: "b".into() },
         vec![],
         vec_prec(4, prec),
         None,
     );
-    let s = dag.add_node(RiscOp::Mul, vec![a, b], vec_prec(4, prec), None);
+    let s = dag.add_node(decl, RiscOp::Mul, vec![a, b], vec_prec(4, prec), None);
     let stored = dag.add_node(
+        decl,
         RiscOp::Store { name: "out".into() },
         vec![s],
         vec_prec(4, prec),
@@ -100,20 +108,29 @@ fn build_mul_dag(prec: Prim) -> Dag {
 
 fn build_relu_dag(prec: Prim) -> Dag {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let x = dag.add_node(
+        decl,
         RiscOp::Load { name: "x".into() },
         vec![],
         vec_prec(6, prec),
         None,
     );
     let g = dag.add_node(
+        decl,
         RiscOp::Load { name: "g".into() },
         vec![],
         vec_prec(6, prec),
         None,
     );
-    let relu = dag.add_node(RiscOp::Relu, vec![x], vec_prec(6, prec), None);
-    let adjoint = dag.add_node(RiscOp::ReluAdjoint, vec![x, g], vec_prec(6, prec), None);
+    let relu = dag.add_node(decl, RiscOp::Relu, vec![x], vec_prec(6, prec), None);
+    let adjoint = dag.add_node(
+        decl,
+        RiscOp::ReluAdjoint,
+        vec![x, g],
+        vec_prec(6, prec),
+        None,
+    );
     dag.add_root(relu);
     dag.add_root(adjoint);
     dag
@@ -121,7 +138,9 @@ fn build_relu_dag(prec: Prim) -> Dag {
 
 fn build_reduce_sum_dag(prec: Prim) -> Dag {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let a = dag.add_node(
+        decl,
         RiscOp::Load { name: "a".into() },
         vec![],
         vec_prec(8, prec),
@@ -129,6 +148,7 @@ fn build_reduce_sum_dag(prec: Prim) -> Dag {
     );
     let acc = dtype::sum_accumulator(prec);
     let r = dag.add_node(
+        decl,
         RiscOp::Sum {
             axis: 0,
             accumulator: acc,
@@ -146,6 +166,7 @@ fn build_matmul_dag(prec: Prim) -> Dag {
     let k = 4usize;
     let n = 4usize;
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let mat = |r: usize, c: usize| TensorType {
         dims: vec![DimInfo::Lit(r), DimInfo::Lit(c)],
         precision: prec,
@@ -154,9 +175,22 @@ fn build_matmul_dag(prec: Prim) -> Dag {
         dims: vec![DimInfo::Lit(a), DimInfo::Lit(b), DimInfo::Lit(c)],
         precision: prec,
     };
-    let a = dag.add_node(RiscOp::Load { name: "a".into() }, vec![], mat(m, k), None);
-    let b = dag.add_node(RiscOp::Load { name: "b".into() }, vec![], mat(k, n), None);
+    let a = dag.add_node(
+        decl,
+        RiscOp::Load { name: "a".into() },
+        vec![],
+        mat(m, k),
+        None,
+    );
+    let b = dag.add_node(
+        decl,
+        RiscOp::Load { name: "b".into() },
+        vec![],
+        mat(k, n),
+        None,
+    );
     let ea = dag.add_node(
+        decl,
         RiscOp::Expand {
             axis: 2,
             size: chelis_ir::dag::RtDim::Lit(n),
@@ -166,6 +200,7 @@ fn build_matmul_dag(prec: Prim) -> Dag {
         None,
     );
     let eb = dag.add_node(
+        decl,
         RiscOp::Expand {
             axis: 0,
             size: chelis_ir::dag::RtDim::Lit(m),
@@ -174,9 +209,10 @@ fn build_matmul_dag(prec: Prim) -> Dag {
         cube(m, k, n),
         None,
     );
-    let mul = dag.add_node(RiscOp::Mul, vec![ea, eb], cube(m, k, n), None);
+    let mul = dag.add_node(decl, RiscOp::Mul, vec![ea, eb], cube(m, k, n), None);
     let acc = dtype::sum_accumulator(prec);
     let sum = dag.add_node(
+        decl,
         RiscOp::Sum {
             axis: 1,
             accumulator: acc,
@@ -192,6 +228,7 @@ fn build_matmul_dag(prec: Prim) -> Dag {
         sum
     } else {
         dag.add_node(
+            decl,
             RiscOp::Cast {
                 new_precision: prec,
             },

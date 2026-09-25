@@ -21,26 +21,38 @@ fn ty(dims: &[usize], precision: Prim) -> TensorType {
 
 fn mean_dag() -> Dag {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let input = dag.add_node(
+        decl,
         RiscOp::Load { name: "x".into() },
         vec![],
         ty(&[4], Prim::F32),
         Some("surf:mean".into()),
     );
-    let output = lower_mean(&mut dag, input, 0, &ty(&[4], Prim::F32), Some("surf:mean"));
+    let output = lower_mean(
+        decl,
+        &mut dag,
+        input,
+        0,
+        &ty(&[4], Prim::F32),
+        Some("surf:mean"),
+    );
     dag.add_root(output);
     dag
 }
 
 fn simple_reduction_dag(op: RiscOp, output_precision: Prim) -> Dag {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let input = dag.add_node(
+        decl,
         RiscOp::Load { name: "x".into() },
         vec![],
         ty(&[4], Prim::F32),
         Some("surf:reduction".into()),
     );
     let output = dag.add_node(
+        decl,
         op,
         vec![input],
         ty(&[], output_precision),
@@ -52,13 +64,16 @@ fn simple_reduction_dag(op: RiscOp, output_precision: Prim) -> Dag {
 
 fn window_dag(reducer: ReduceWindowKind) -> Dag {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let input = dag.add_node(
+        decl,
         RiscOp::Load { name: "x".into() },
         vec![],
         ty(&[4], Prim::F32),
         Some("surf:window".into()),
     );
     let output = dag.add_node(
+        decl,
         RiscOp::ReduceWindow {
             reducer,
             window_shape: vec![2],
@@ -74,19 +89,23 @@ fn window_dag(reducer: ReduceWindowKind) -> Dag {
 
 fn window_grad_dag(reducer: ReduceWindowKind) -> Dag {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let input = dag.add_node(
+        decl,
         RiscOp::Load { name: "x".into() },
         vec![],
         ty(&[4], Prim::F32),
         Some("surf:window-grad".into()),
     );
     let cotangent = dag.add_node(
+        decl,
         RiscOp::Load { name: "g".into() },
         vec![],
         ty(&[3], Prim::F32),
         Some("surf:window-grad".into()),
     );
     let output = dag.add_node(
+        decl,
         RiscOp::ReduceWindowGrad {
             reducer,
             window_shape: vec![2],

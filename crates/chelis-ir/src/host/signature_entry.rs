@@ -18,11 +18,15 @@ pub struct SignatureEntryPlan {
 
 impl SignatureEntryPlan {
     pub fn new(inputs: impl IntoIterator<Item = HostTensorInput>) -> Self {
+        // The plan observes one signature's inputs, so its graph is that
+        // signature's only declaration.
         let mut observations = Dag::new();
+        let decl = observations.declare("signature entry");
         let mut guards = Vec::new();
         let mut first: Vec<(String, (NodeId, usize))> = Vec::new();
         for input in inputs {
             let load = observations.add_node(
+                decl,
                 RiscOp::Load {
                     name: input.name.into(),
                 },

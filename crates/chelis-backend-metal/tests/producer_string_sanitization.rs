@@ -53,9 +53,16 @@ fn metal_load_name_with_newline_is_sanitized_in_comment() {
     // sanitizer must escape the newline so the `// node N = Load ...`
     // line cannot terminate prematurely.
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let a_name = dirty_name("a\nINJECTED_METAL_LOAD_LINE");
-    let a = dag.add_node(RiscOp::Load { name: a_name }, vec![], vec_f32(4), None);
-    let n = dag.add_node(RiscOp::Neg, vec![a], vec_f32(4), None);
+    let a = dag.add_node(
+        decl,
+        RiscOp::Load { name: a_name },
+        vec![],
+        vec_f32(4),
+        None,
+    );
+    let n = dag.add_node(decl, RiscOp::Neg, vec![a], vec_f32(4), None);
     dag.add_root(n);
 
     let result = codegen_metal(&dag, "metal_dirty_load");
@@ -76,10 +83,18 @@ fn metal_load_name_with_newline_is_sanitized_in_comment() {
 #[test]
 fn metal_store_name_with_newline_is_sanitized_in_comment() {
     let mut dag = Dag::new();
-    let a = dag.add_node(RiscOp::Load { name: "a".into() }, vec![], vec_f32(4), None);
-    let n = dag.add_node(RiscOp::Neg, vec![a], vec_f32(4), None);
+    let decl = dag.declare("test");
+    let a = dag.add_node(
+        decl,
+        RiscOp::Load { name: "a".into() },
+        vec![],
+        vec_f32(4),
+        None,
+    );
+    let n = dag.add_node(decl, RiscOp::Neg, vec![a], vec_f32(4), None);
     let store_name = dirty_name("out\nINJECTED_METAL_STORE_LINE");
     let s = dag.add_node(
+        decl,
         RiscOp::Store { name: store_name },
         vec![n],
         vec_f32(4),
@@ -107,7 +122,9 @@ fn metal_clean_load_name_emitted_verbatim() {
     // matches the `Cow::Borrowed` zero-copy contract on
     // `sanitize_for_comment` for clean inputs.
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let a = dag.add_node(
+        decl,
         RiscOp::Load {
             name: "my_input".into(),
         },
@@ -115,7 +132,7 @@ fn metal_clean_load_name_emitted_verbatim() {
         vec_f32(4),
         None,
     );
-    let n = dag.add_node(RiscOp::Neg, vec![a], vec_f32(4), None);
+    let n = dag.add_node(decl, RiscOp::Neg, vec![a], vec_f32(4), None);
     dag.add_root(n);
 
     let result = codegen_metal(&dag, "metal_clean_load");
@@ -138,8 +155,15 @@ fn metal_root_label_with_control_byte_is_sanitized_in_comment() {
     // (LoadStoreName) for Store-tagged roots. Confirm the same
     // sanitization path via the deserialize bypass.
     let mut dag = Dag::new();
-    let a = dag.add_node(RiscOp::Load { name: "a".into() }, vec![], vec_f32(4), None);
-    let n = dag.add_node(RiscOp::Neg, vec![a], vec_f32(4), None);
+    let decl = dag.declare("test");
+    let a = dag.add_node(
+        decl,
+        RiscOp::Load { name: "a".into() },
+        vec![],
+        vec_f32(4),
+        None,
+    );
+    let n = dag.add_node(decl, RiscOp::Neg, vec![a], vec_f32(4), None);
     // No Store node — root is the Neg, gets synthesized `root0` label
     // (clean). This branch is just a sanity check that synthesized
     // labels still pass through the sanitizer cleanly (Borrowed path).

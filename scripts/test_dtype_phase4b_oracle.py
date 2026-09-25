@@ -88,7 +88,7 @@ class ContractValidationTests(unittest.TestCase):
             ("spec/10-serialization.md", "A reference is resolved only in its declared owner and namespace.", "wire reference scope"),
             ("spec/10-serialization.md", "Every requirement uses the exact\n`NonnegativeExtent` adapter over a nonnegative `int64`", "wire literal-witness requirement carrier"),
             ("spec/10-serialization.md", "`WireDagNode.shape_deps` contains exact u64 node\nreferences to strictly earlier nodes", "wire shape-dependency references"),
-            ("spec/10-serialization.md", "`shape_deps`, `span_id` (explicitly null when absent), and `merged_spans` are\nmandatory fields", "wire mandatory invocation fields"),
+            ("spec/10-serialization.md", "`shape_deps`, `span_id` (explicitly null when absent), `merged_spans` and\n`declaration` are mandatory fields", "wire mandatory invocation fields"),
             ("spec/10-serialization.md", "Bounds alone never establish transport authority.", "wire report numeric authority"),
             ("spec/04-type-system.md", "untyped_nodes = total_nodes - typed_nodes", "fitness counter consistency"),
             ("spec/11-ffi.md", "Dynamic Python object types do not establish nonnumeric capacity.", "binding dynamic capacity"),

@@ -40,6 +40,7 @@ use chelis_unord::UnordMap;
 /// load nodes (a, b) and the scalar output.
 fn build_blas_matmul_scalar_loss(m: usize, k: usize, n: usize) -> (Dag, NodeId, NodeId, NodeId) {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let a_ty = TensorType {
         dims: vec![DimInfo::Lit(m), DimInfo::Lit(k)],
         precision: Prim::F32,
@@ -48,8 +49,8 @@ fn build_blas_matmul_scalar_loss(m: usize, k: usize, n: usize) -> (Dag, NodeId, 
         dims: vec![DimInfo::Lit(k), DimInfo::Lit(n)],
         precision: Prim::F32,
     };
-    let a = dag.add_node(RiscOp::Load { name: "a".into() }, vec![], a_ty, None);
-    let b = dag.add_node(RiscOp::Load { name: "b".into() }, vec![], b_ty, None);
+    let a = dag.add_node(decl, RiscOp::Load { name: "a".into() }, vec![], a_ty, None);
+    let b = dag.add_node(decl, RiscOp::Load { name: "b".into() }, vec![], b_ty, None);
     let c_ty = TensorType {
         dims: vec![DimInfo::Lit(m), DimInfo::Lit(n)],
         precision: Prim::F32,
@@ -62,12 +63,13 @@ fn build_blas_matmul_scalar_loss(m: usize, k: usize, n: usize) -> (Dag, NodeId, 
         Prim::F32,
     )
     .expect("matmul_default for f32 operands");
-    let c = dag.add_node(mm, vec![a, b], c_ty, None);
+    let c = dag.add_node(decl, mm, vec![a, b], c_ty, None);
     let row_sum_ty = TensorType {
         dims: vec![DimInfo::Lit(m)],
         precision: Prim::F32,
     };
     let s1 = dag.add_node(
+        decl,
         RiscOp::sum_default(1, Prim::F32).expect("sum_default for f32"),
         vec![c],
         row_sum_ty,
@@ -78,6 +80,7 @@ fn build_blas_matmul_scalar_loss(m: usize, k: usize, n: usize) -> (Dag, NodeId, 
         precision: Prim::F32,
     };
     let s2 = dag.add_node(
+        decl,
         RiscOp::sum_default(0, Prim::F32).expect("sum_default for f32"),
         vec![s1],
         scalar_ty,
@@ -246,11 +249,13 @@ fn issue_199_blas_matmul_grad_matches_finite_difference() {
 #[test]
 fn issue_199_grad_with_unrelated_wrt_returns_no_grad_entry() {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let scalar_ty = TensorType {
         dims: vec![],
         precision: Prim::F32,
     };
     let unrelated = dag.add_node(
+        decl,
         RiscOp::Load {
             name: "unrelated".into(),
         },
@@ -262,6 +267,7 @@ fn issue_199_grad_with_unrelated_wrt_returns_no_grad_entry() {
         None,
     );
     let c = dag.add_node(
+        decl,
         RiscOp::synth_const(scalar_ty.precision, 3.0),
         vec![],
         scalar_ty,

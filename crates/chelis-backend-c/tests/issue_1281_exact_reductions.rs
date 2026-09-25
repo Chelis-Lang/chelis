@@ -130,19 +130,33 @@ fn compile_and_run(name: &str, source: &str, harness: &str) -> Output {
 
 fn global_reduction_dag(precision: Prim) -> Dag {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let input_ty = tensor(&[2, 4], precision);
     let value_ty = tensor(&[2], precision);
     let index_ty = tensor(&[2], Prim::Int64);
-    let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], input_ty, None);
+    let x = dag.add_node(
+        decl,
+        RiscOp::Load { name: "x".into() },
+        vec![],
+        input_ty,
+        None,
+    );
     let max = dag.add_node(
+        decl,
         RiscOp::MaxReduce { axis: 1 },
         vec![x],
         value_ty.clone(),
         None,
     );
-    let min = dag.add_node(RiscOp::MinReduce { axis: 1 }, vec![x], value_ty, None);
-    let argmax = dag.add_node(RiscOp::Argmax { axis: 1 }, vec![x], index_ty.clone(), None);
-    let argmin = dag.add_node(RiscOp::Argmin { axis: 1 }, vec![x], index_ty, None);
+    let min = dag.add_node(decl, RiscOp::MinReduce { axis: 1 }, vec![x], value_ty, None);
+    let argmax = dag.add_node(
+        decl,
+        RiscOp::Argmax { axis: 1 },
+        vec![x],
+        index_ty.clone(),
+        None,
+    );
+    let argmin = dag.add_node(decl, RiscOp::Argmin { axis: 1 }, vec![x], index_ty, None);
     for root in [max, min, argmax, argmin] {
         dag.add_root(root);
     }
@@ -380,13 +394,15 @@ int main(void) {{
 
 fn mean_dag(input_ty: TensorType) -> (Dag, chelis_ir::NodeId) {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let x = dag.add_node(
+        decl,
         RiscOp::Load { name: "x".into() },
         vec![],
         input_ty.clone(),
         None,
     );
-    let mean = tier2::lower_mean(&mut dag, x, 0, &input_ty, None);
+    let mean = tier2::lower_mean(decl, &mut dag, x, 0, &input_ty, None);
     dag.add_root(mean);
     (dag, mean)
 }
@@ -470,13 +486,16 @@ fn global_extrema_adjoints_split_infinity_ties_and_route_only_the_first_nan() {
         ),
     ] {
         let mut forward = Dag::new();
+        let forward_decl = forward.declare("test");
         let x = forward.add_node(
+            forward_decl,
             RiscOp::Load { name: "x".into() },
             vec![],
             tensor(&[3], Prim::F32),
             None,
         );
         let reduced = forward.add_node(
+            forward_decl,
             op,
             vec![x],
             TensorType {
@@ -522,13 +541,16 @@ int main(void) {{
 
 fn empty_reduction_dag(op: RiscOp, result: Prim) -> Dag {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let x = dag.add_node(
+        decl,
         RiscOp::Load { name: "x".into() },
         vec![],
         symbolic_vector("runtime_extent", Prim::F32),
         None,
     );
     let out = dag.add_node(
+        decl,
         op,
         vec![x],
         TensorType {
@@ -607,16 +629,19 @@ int main(void) {
 
 fn window_forward_and_grad_dag(reducer: ReduceWindowKind, precision: Prim) -> Dag {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let x_ty = tensor(&[4], precision);
     let g_ty = tensor(&[3], precision);
     let x = dag.add_node(
+        decl,
         RiscOp::Load { name: "x".into() },
         vec![],
         x_ty.clone(),
         None,
     );
-    let g = dag.add_node(RiscOp::Load { name: "g".into() }, vec![], g_ty, None);
+    let g = dag.add_node(decl, RiscOp::Load { name: "g".into() }, vec![], g_ty, None);
     let forward = dag.add_node(
+        decl,
         RiscOp::ReduceWindow {
             reducer,
             window_shape: vec![2],
@@ -627,6 +652,7 @@ fn window_forward_and_grad_dag(reducer: ReduceWindowKind, precision: Prim) -> Da
         None,
     );
     let gradient = dag.add_node(
+        decl,
         RiscOp::ReduceWindowGrad {
             reducer,
             window_shape: vec![2],
@@ -643,11 +669,13 @@ fn window_forward_and_grad_dag(reducer: ReduceWindowKind, precision: Prim) -> Da
 
 fn window_forward_matrix_dag(precision: Prim, include_mean: bool) -> Dag {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let x_ty = tensor(&[4], precision);
     let out_ty = tensor(&[3], precision);
-    let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], x_ty, None);
+    let x = dag.add_node(decl, RiscOp::Load { name: "x".into() }, vec![], x_ty, None);
     for reducer in [ReduceWindowKind::Max, ReduceWindowKind::Min] {
         let out = dag.add_node(
+            decl,
             RiscOp::ReduceWindow {
                 reducer,
                 window_shape: vec![2],
@@ -661,6 +689,7 @@ fn window_forward_matrix_dag(precision: Prim, include_mean: bool) -> Dag {
     }
     if include_mean {
         let mean = dag.add_node(
+            decl,
             RiscOp::ReduceWindow {
                 reducer: ReduceWindowKind::Mean,
                 window_shape: vec![2],
@@ -883,16 +912,19 @@ int main(void) {
 #[test]
 fn overlapping_window_adjoint_combines_contributions_with_balanced_tree_order() {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let x_ty = tensor(&[3, 3], Prim::F32);
     let g_ty = tensor(&[2, 2], Prim::F32);
     let x = dag.add_node(
+        decl,
         RiscOp::Load { name: "x".into() },
         vec![],
         x_ty.clone(),
         None,
     );
-    let g = dag.add_node(RiscOp::Load { name: "g".into() }, vec![], g_ty, None);
+    let g = dag.add_node(decl, RiscOp::Load { name: "g".into() }, vec![], g_ty, None);
     let out = dag.add_node(
+        decl,
         RiscOp::ReduceWindowGrad {
             reducer: ReduceWindowKind::Max,
             window_shape: vec![2, 2],
