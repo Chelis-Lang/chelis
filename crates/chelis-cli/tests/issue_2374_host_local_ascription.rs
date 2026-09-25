@@ -203,3 +203,34 @@ fn tensor_native_copy_keeps_its_named_local_witness() {
         );
     }
 }
+
+#[test]
+fn executable_example_retains_its_local_claim_without_a_literal_result_contract() {
+    let source = include_str!("../../../examples/checked_host_local_ascription.ch");
+    let disagreeing = source.replace("pad_pair(2i64)", "pad_pair(3i64)");
+    assert_ne!(
+        source, disagreeing,
+        "the negative control must change the runtime width"
+    );
+    for native in [false, true] {
+        let (ok, output) = run(source, native);
+        assert!(ok, "{output}");
+        assert!(
+            output.contains("tensor(shape=[1, 2], data=[1, 2])"),
+            "{output}"
+        );
+        let (ok, output) = run(&disagreeing, native);
+        assert!(!ok, "{output}");
+        assert!(
+            output.contains("extent `2`: claimed = 2, pad_sequences_to axis 1 = 3"),
+            "{output}"
+        );
+        assert!(
+            output
+                .lines()
+                .any(|line| line == "numeric trap: domain in pad_sequences_to at i64"),
+            "{output}"
+        );
+        assert!(!output.contains("panicked"), "{output}");
+    }
+}
