@@ -189,7 +189,7 @@ fn unverified_conflicting_live_loads_cannot_reuse_one_admitted_dtype() {
     assert!(
         chelis_ir::verify::verify(&dag)
             .iter()
-            .any(|error| error.contains("load 'x' has inconsistent tensor types"))
+            .any(|error| error.contains("parameter `x` of `test` has inconsistent tensor types"))
     );
 
     for input in [
