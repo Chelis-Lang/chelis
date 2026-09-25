@@ -147,7 +147,14 @@ fn context_native_source_order_saved_mask_and_shapes_survive_decode() {
     let decoded = CompiledContext::decode(&original.encode().unwrap()).unwrap();
     let x = driver_input(4);
     let ones = [1.0; 4];
-    let (k1, k2) = key_reference::two_keys();
+    // Two keys folded from one root, not a destructured `split_key` pair: a
+    // def that destructures a tuple lowers to the host lane, which has no
+    // in-context tensor entry.
+    let root = key_reference::key_from_seed(42);
+    let (k1, k2) = (
+        key_reference::fold_in(root, 1),
+        key_reference::fold_in(root, 2),
+    );
     let add = |left: Vec<f64>, right: Vec<f64>| -> Vec<f64> {
         left.iter().zip(right).map(|(a, b)| a + b).collect()
     };
@@ -165,7 +172,7 @@ fn context_native_source_order_saved_mask_and_shapes_survive_decode() {
             half_dropout(key9(), &x, false),
         ),
         (
-            "(k1, k2) = split_key(key_from_seed(42i64))\n unused = keep(k1, x, 0.0f32)\n _ = drop(unused)\n keep(k2, x, 0.5f32)",
+            "unused = keep(fold_in(key_from_seed(42i64), 1i64), x, 0.0f32)\n _ = drop(unused)\n keep(fold_in(key_from_seed(42i64), 2i64), x, 0.5f32)",
             "4",
             &[4],
             half_dropout(k2, &x, false),
@@ -177,7 +184,7 @@ fn context_native_source_order_saved_mask_and_shapes_survive_decode() {
             x.clone(),
         ),
         (
-            "(k1, k2) = split_key(key_from_seed(42i64))\n g = grad(loss, wrt=x)(k1, x)\n add(g, keep(k2, x, 0.5f32))",
+            "g = grad(loss, wrt=x)(fold_in(key_from_seed(42i64), 1i64), x)\n add(g, keep(fold_in(key_from_seed(42i64), 2i64), x, 0.5f32))",
             "4",
             &[4],
             add(half_dropout(k1, &ones, false), half_dropout(k2, &x, false)),

@@ -535,34 +535,48 @@ fn the_codec_admits_the_key_chain_and_rejects_every_malformed_key_form() {
     let mut rooted = key_chain();
     rooted["roots"].as_array_mut().unwrap().push(json!(6));
     rejects_domain(&rooted, "is a graph root and is also consumed");
-    let mut reloaded = key_chain();
-    let y = push(
-        &mut reloaded,
-        json!({"kind":"load","name":"y"}),
-        &[],
-        &[4],
-        "f32",
-    );
-    let mut roots = vec![json!(9), json!(11)];
-    for _ in 0..2 {
-        let k = push(
+    // A parameter is its declaration and its name (chelis#2413 B2): two
+    // declarations' `k` are two keys, one declaration's two `Load`s of `k`
+    // are one, and a `Load` with no declaration is the same key as every
+    // `Load` of its name.
+    let reloaded = |declarations: [Option<&str>; 2]| {
+        let mut reloaded = key_chain();
+        let y = push(
             &mut reloaded,
-            json!({"kind":"load","name":"k"}),
+            json!({"kind":"load","name":"y"}),
             &[],
-            &[],
-            "key",
-        );
-        let drawn = push(
-            &mut reloaded,
-            json!({"kind":"dropout"}),
-            &[y, 8, k],
             &[4],
             "f32",
         );
-        roots.push(json!(drawn));
-    }
-    reloaded["roots"] = json!(roots);
-    rejects_domain(&reloaded, "is consumed twice");
+        let mut roots = vec![json!(9), json!(11)];
+        for declaration in declarations {
+            let k = push(
+                &mut reloaded,
+                json!({"kind":"load","name":"k"}),
+                &[],
+                &[],
+                "key",
+            );
+            if let Some(declaration) = declaration {
+                reloaded["nodes"][k]["declaration"] = json!(declaration);
+            }
+            let drawn = push(
+                &mut reloaded,
+                json!({"kind":"dropout"}),
+                &[y, 8, k],
+                &[4],
+                "f32",
+            );
+            roots.push(json!(drawn));
+        }
+        reloaded["roots"] = json!(roots);
+        reloaded
+    };
+    rejects_domain(&reloaded([None, None]), "is consumed twice");
+    rejects_domain(&reloaded([Some("a"), Some("a")]), "is consumed twice");
+    rejects_domain(&reloaded([Some("a"), None]), "is consumed twice");
+    rejects_domain(&reloaded([None, Some("b")]), "is consumed twice");
+    accepts(&reloaded([Some("a"), Some("b")]));
 
     // The same disagreement against a named count axis whose extent is
     // known; the batched draw's data declares that axis too.

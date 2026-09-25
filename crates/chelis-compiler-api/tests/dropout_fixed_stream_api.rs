@@ -1512,6 +1512,38 @@ fn dead_draw_input_is_not_required_when_not_data_live_at_the_selected_root() {
     assert!(!entry.required_inputs.iter().any(|name| name == "y"));
 }
 
+/// A parameter is its declaration and its name (chelis#2413 B2): two defs
+/// that each name their key parameter `k` take two keys. (a) Selecting one
+/// root of such a module evaluates it with its own key, and `lower` of the
+/// module keeps the two `k`s apart, each attributed to its declaration on the
+/// wire.
+///
+/// Evidentiary status: REGRESSION TEST for `lower`, which rejected the module
+/// at ff8957386 ("key 0 is consumed twice") because the whole-program graph
+/// identified a key `Load` by its name alone. The `eval_selected` row is a
+/// disposition lock: it already evaluated at ff8957386.
+#[test]
+fn two_declarations_key_parameters_of_one_name_are_two_keys() {
+    use chelis_compiler_api::schema::{LowerRequest, WireRiscOp};
+    let source = "def sample(k: key, v: tensor[32, f32]) -> tensor[32, f32] = dropout(k, v, 0.5f32)\ndef other(k: key, v: tensor[32, f32]) -> tensor[32, f32] = dropout(k, v, 0.25f32)\ndef main(x: tensor[32, f32]) -> tensor[32, f32] = sample(key_from_seed(7i64), x)\n";
+    let result = eval_selected(request(source), &["main".into()]).unwrap();
+    assert_eq!(tensor(&result, "main"), mask(key7()));
+    let lowered = chelis_compiler_api::compiler::lower(LowerRequest {
+        source_kind: SourceKind::Surf,
+        source: source.into(),
+        entry: None,
+    })
+    .unwrap();
+    let key_loads = lowered
+        .dag
+        .nodes
+        .iter()
+        .filter(|node| matches!(&node.op, WireRiscOp::Load { name } if name.as_str() == "k"))
+        .map(|node| node.declaration.as_deref())
+        .collect::<Vec<_>>();
+    assert_eq!(key_loads, [Some("sample"), Some("other")]);
+}
+
 #[test]
 fn nonunit_cotangent_matches_same_key_finite_differences() {
     let weights = std::iter::repeat_n("3.0f32", 32)

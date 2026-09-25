@@ -174,6 +174,7 @@ fn wire_dag_integer_dtype_vocabulary_stays_ecosystem_spelled() {
     let dag = WireDag {
         schema_version: WIRE_DAG_SCHEMA_VERSION,
         nodes: vec![WireDagNode {
+            declaration: None,
             shape_deps: vec![],
             span_id: None,
             merged_spans: vec![],

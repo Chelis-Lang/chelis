@@ -7,6 +7,7 @@ use chelis_types::{scalar_from_i64, types::Prim};
 
 fn bool_input() -> WireDagNode {
     WireDagNode {
+        declaration: None,
         shape_deps: vec![],
         span_id: None,
         merged_spans: vec![],
@@ -38,6 +39,7 @@ fn count_dag(axes: Vec<i32>) -> WireDag {
         nodes: vec![
             bool_input(),
             WireDagNode {
+                declaration: None,
                 shape_deps: vec![],
                 span_id: None,
                 merged_spans: vec![],
@@ -277,6 +279,7 @@ fn current_wire_dag_rejects_pad_fill_dtype_mismatch_on_encode_and_decode() {
     let dag = WireDag {
         schema_version: WIRE_DAG_SCHEMA_VERSION,
         nodes: vec![WireDagNode {
+            declaration: None,
             shape_deps: vec![],
             span_id: None,
             merged_spans: vec![],

@@ -6576,7 +6576,7 @@ fn wire_dag(dag: &Dag) -> WireResult<WireDag> {
         nodes: dag
             .nodes()
             .iter()
-            .map(wire_dag_node)
+            .map(|node| wire_dag_node(dag, node))
             .collect::<WireResult<_>>()?,
         roots: dag
             .roots()
@@ -6589,8 +6589,9 @@ fn wire_dag(dag: &Dag) -> WireResult<WireDag> {
     Ok(wire)
 }
 
-fn wire_dag_node(node: &chelis_ir::dag::DagNode) -> WireResult<WireDagNode> {
+fn wire_dag_node(dag: &Dag, node: &chelis_ir::dag::DagNode) -> WireResult<WireDagNode> {
     Ok(WireDagNode {
+        declaration: chelis_ir::verify::KeyGraph::declaration(dag, node.id.0).map(str::to_string),
         shape_deps: node
             .shape_deps
             .iter()

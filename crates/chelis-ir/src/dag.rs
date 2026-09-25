@@ -15,6 +15,32 @@ use crate::load_store_name::LoadStoreName;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct NodeId(pub usize);
 
+/// Index into a DAG's [`Dag::declarations`]: the top-level declaration whose
+/// lowering created a node.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub struct DeclarationId(pub u32);
+
+/// One top-level declaration of a lowered program (chelis#2476, #2413).
+///
+/// A lowered program holds every declaration's activation in one graph,
+/// whether or not anything calls it, and a function's parameters are `Load`s
+/// built exactly like an entry's inputs. Selecting roots is a scoping
+/// decision, so the graph records which declaration owns each node: a seed (an
+/// abort, or a draw that can trap) runs only when a selected declaration's
+/// activation enters its owner, and a parameter is its declaration and its
+/// name, never its name alone.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Declaration {
+    /// The declaration's name; empty for an unnamed top-level expression.
+    pub name: String,
+    /// A value declaration's activation runs where it is referenced. A
+    /// function's body runs inlined in each caller's own activation, so its
+    /// standalone nodes run only when it is itself selected.
+    pub value: bool,
+    /// The declarations this one's body names, called or not.
+    pub references: Vec<DeclarationId>,
+}
+
 /// Tensor type carried on each DAG node.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TensorType {
@@ -2005,6 +2031,12 @@ pub struct DagNode {
     /// until this producer discharges the obligation.
     #[serde(default)]
     pub result_claim_deps: Vec<NodeId>,
+    /// The top-level declaration whose lowering created this node, an index
+    /// into [`Dag::declarations`]. Lowering sets it on every node it creates
+    /// and every rebuild before entry selection keeps it. It is `None` on
+    /// every node of a graph lowering did not build ([`Dag::is_attributed`]).
+    #[serde(default)]
+    pub declaration: Option<DeclarationId>,
 }
 
 /// The RISC DAG — an append-only, topologically-ordered vector of [`DagNode`]s.
@@ -2012,6 +2044,10 @@ pub struct DagNode {
 pub struct Dag {
     nodes: Vec<DagNode>,
     roots: Vec<NodeId>,
+    /// The top-level declarations lowering attributed this graph's nodes to;
+    /// empty for a graph lowering did not build.
+    #[serde(default)]
+    declarations: Vec<Declaration>,
 }
 
 impl Dag {
@@ -2083,6 +2119,7 @@ impl Dag {
             merged_spans: Vec::new(),
             shape_deps: Vec::new(),
             result_claim_deps: Vec::new(),
+            declaration: None,
         });
         for (target, source) in inferred_where_shape_deps {
             self.add_shape_dep(target, source);
@@ -2281,6 +2318,170 @@ impl Dag {
 
     pub fn is_root(&self, id: NodeId) -> bool {
         self.roots.contains(&id)
+    }
+
+    /// The top-level declarations lowering attributed this graph's nodes to.
+    pub fn declarations(&self) -> &[Declaration] {
+        &self.declarations
+    }
+
+    /// Whether lowering attributed this graph's nodes to declarations. A
+    /// graph built by hand, or rebuilt by a pass after entry selection, is
+    /// not, and scopes its seeds by root reachability alone.
+    pub fn is_attributed(&self) -> bool {
+        !self.declarations.is_empty()
+    }
+
+    /// Record a top-level declaration. Its references are set once every
+    /// declaration is known ([`Self::set_declaration_references`]).
+    pub fn add_declaration(&mut self, name: impl Into<String>, value: bool) -> DeclarationId {
+        let id = u32::try_from(self.declarations.len())
+            .expect("a lowered program has fewer than 2^32 declarations");
+        self.declarations.push(Declaration {
+            name: name.into(),
+            value,
+            references: Vec::new(),
+        });
+        DeclarationId(id)
+    }
+
+    pub fn set_declaration_references(
+        &mut self,
+        declaration: DeclarationId,
+        references: Vec<DeclarationId>,
+    ) {
+        if let Some(entry) = self.declarations.get_mut(declaration.0 as usize) {
+            entry.references = references;
+        }
+    }
+
+    /// Attribute to `declaration` every node from index `first` on that has
+    /// no declaration yet: the nodes one declaration's lowering appended.
+    pub fn attribute_nodes_from(&mut self, first: usize, declaration: DeclarationId) {
+        for node in self.nodes.iter_mut().skip(first) {
+            node.declaration.get_or_insert(declaration);
+        }
+    }
+
+    /// Take `source`'s declarations, for a pass that rebuilds `source` node
+    /// by node and copies each node's `declaration`.
+    pub fn inherit_declarations(&mut self, source: &Dag) {
+        self.declarations.clone_from(&source.declarations);
+    }
+
+    /// The declarations an activation of the `selected` roots enters, as a
+    /// mask over [`Self::declarations`]: each selected root's declaration,
+    /// and every value declaration its body names, directly or through any
+    /// declaration it names in turn. A function's own nodes are entered only
+    /// when it is selected: a call runs the function inlined in the caller's
+    /// own nodes.
+    ///
+    /// `None` when the graph is not attributed, or a selected root has no
+    /// declaration.
+    pub fn entered_declarations(&self, selected: &[NodeId]) -> Option<Vec<bool>> {
+        if !self.is_attributed() {
+            return None;
+        }
+        let mut pending = Vec::with_capacity(selected.len());
+        for root in selected {
+            pending.push((self.get(*root)?.declaration?, true));
+        }
+        let mut entered = vec![false; self.declarations.len()];
+        let mut visited = vec![false; self.declarations.len()];
+        while let Some((declaration, is_selected)) = pending.pop() {
+            let index = declaration.0 as usize;
+            let entry = self.declarations.get(index)?;
+            if is_selected || entry.value {
+                entered[index] = true;
+            }
+            if !visited[index] {
+                visited[index] = true;
+                pending.extend(entry.references.iter().map(|reference| (*reference, false)));
+            }
+        }
+        Some(entered)
+    }
+
+    /// The nodes whose seeds (an abort, or a random node that can trap by
+    /// itself) an evaluation of the `selected` roots does not run
+    /// (chelis#2476).
+    ///
+    /// Selecting roots is a scoping decision, not merely a request for
+    /// certain outputs: a lowered program holds every declaration's
+    /// activation, called or not, and a seed marks nodes the selected roots
+    /// do not reach, which is the whole point of a seed. So a seed runs only
+    /// when its node belongs to a declaration the selection enters
+    /// ([`Self::entered_declarations`]), whether it sits in a root's value
+    /// graph, in a discarded value's terminal, or in a library declaration's
+    /// own body. A node without a declaration is conservatively in scope.
+    ///
+    /// A graph that is not attributed falls back to root reachability: a
+    /// node is out of scope when an unselected root reaches it and no
+    /// selected root does. With nothing selected, or with every root of an
+    /// unattributed graph selected, nothing is out of scope. Reachability
+    /// from the selection makes a node live whatever this says, so scoping
+    /// only ever drops work no selected root needs.
+    pub fn outside_selection(&self, selected: &[NodeId]) -> Vec<bool> {
+        if selected.is_empty() {
+            return vec![false; self.len()];
+        }
+        if let Some(entered) = self.entered_declarations(selected) {
+            return self
+                .nodes
+                .iter()
+                .map(|node| {
+                    node.declaration
+                        .is_some_and(|declaration| !entered[declaration.0 as usize])
+                })
+                .collect();
+        }
+        if self.roots.is_empty() {
+            return vec![false; self.len()];
+        }
+        // Membership by mask, not `Vec::contains`: a program with R declared
+        // roots asks this R times, and the scan made that quadratic in R —
+        // paid even when every root is selected and the answer is "nothing".
+        let mut chosen = vec![false; self.len()];
+        for root in selected {
+            chosen[root.0] = true;
+        }
+        let unselected = self
+            .roots
+            .iter()
+            .copied()
+            .filter(|root| !chosen[root.0])
+            .collect::<Vec<_>>();
+        if unselected.is_empty() {
+            return vec![false; self.len()];
+        }
+        let mut owned = self.reachable_from(unselected);
+        for (id, reached) in self
+            .reachable_from(selected.to_vec())
+            .into_iter()
+            .enumerate()
+        {
+            if reached {
+                owned[id] = false;
+            }
+        }
+        owned
+    }
+
+    /// Plain backward reachability over `inputs` and both dependency edges.
+    fn reachable_from(&self, mut stack: Vec<NodeId>) -> Vec<bool> {
+        let mut seen = vec![false; self.len()];
+        while let Some(id) = stack.pop() {
+            if seen[id.0] {
+                continue;
+            }
+            seen[id.0] = true;
+            if let Some(node) = self.get(id) {
+                stack.extend(node.inputs.iter().copied());
+                stack.extend(node.shape_deps.iter().copied());
+                stack.extend(node.result_claim_deps.iter().copied());
+            }
+        }
+        seen
     }
 
     /// Return nodes in topological order (they already are, since we only append).

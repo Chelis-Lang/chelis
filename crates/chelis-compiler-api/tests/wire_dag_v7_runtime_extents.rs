@@ -19,6 +19,7 @@ fn ty(dims: &[i64], precision: &str) -> WireTensorType {
 
 fn load(id: u64, name: &str, dims: &[i64], precision: &str) -> WireDagNode {
     WireDagNode {
+        declaration: None,
         shape_deps: vec![],
         span_id: None,
         merged_spans: vec![],
@@ -38,6 +39,7 @@ fn expand_dag(size: WireRtDim, bound: WireDagNode) -> WireDag {
             load(0, "value", &[1], "f32"),
             bound,
             WireDagNode {
+                declaration: None,
                 shape_deps: vec![],
                 span_id: None,
                 merged_spans: vec![],
@@ -170,6 +172,7 @@ fn v7_movement_ops_reject_unowned_runtime_extent_inputs() {
             load(1, "extent", &[], "int64"),
             load(2, "unowned", &[], "int64"),
             WireDagNode {
+                declaration: None,
                 shape_deps: vec![],
                 span_id: None,
                 merged_spans: vec![],
@@ -212,6 +215,7 @@ fn v7_input_axis_rejects_negative_or_out_of_range_axes_and_forbidden_owners() {
             load(0, "value", &[4], "f32"),
             load(1, "witness", &[4], "f32"),
             WireDagNode {
+                declaration: None,
                 shape_deps: vec![],
                 span_id: None,
                 merged_spans: vec![],
@@ -277,6 +281,7 @@ fn v7_shrink_rejects_a_to_end_end_over_a_non_zero_start() {
         nodes: vec![
             load(0, "value", &[4], "f32"),
             WireDagNode {
+                declaration: None,
                 shape_deps: vec![],
                 span_id: None,
                 merged_spans: vec![],
@@ -313,6 +318,7 @@ fn v7_shrink_rejects_a_to_end_end_over_a_non_zero_start() {
             nodes: vec![
                 load(0, "value", &[4], "f32"),
                 WireDagNode {
+                    declaration: None,
                     shape_deps: vec![],
                     span_id: None,
                     merged_spans: vec![],

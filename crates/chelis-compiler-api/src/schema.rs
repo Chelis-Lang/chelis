@@ -3625,6 +3625,11 @@ pub struct WireDagNode {
     #[serde(deserialize_with = "require_explicit_span")]
     pub span_id: Option<String>,
     pub merged_spans: Vec<String>,
+    /// The top-level declaration whose lowering created this node, by name;
+    /// omitted for a node its producer attributes to none. A `Load` reads
+    /// its declaration's parameter (spec/10 section 3.2).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub declaration: Option<String>,
     pub id: u64,
     pub op: WireRiscOp,
     pub inputs: Vec<u64>,
@@ -4311,6 +4316,7 @@ mod tests {
         let dag = WireDag {
             schema_version: WIRE_DAG_SCHEMA_VERSION,
             nodes: vec![WireDagNode {
+                declaration: None,
                 shape_deps: vec![],
                 span_id: None,
                 merged_spans: vec![],
@@ -4471,6 +4477,7 @@ mod tests {
             precision: precision.to_string(),
         };
         let load = |id, precision: &str, size| WireDagNode {
+            declaration: None,
             shape_deps: vec![],
             span_id: None,
             merged_spans: vec![],
@@ -4488,6 +4495,7 @@ mod tests {
                     load(0, "f32", 4),
                     load(1, "f32", 4),
                     WireDagNode {
+                        declaration: None,
                         shape_deps: vec![],
                         span_id: None,
                         merged_spans: vec![],

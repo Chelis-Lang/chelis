@@ -2784,79 +2784,8 @@ where
 /// The nodes `roots` need, with every effect node and every random node that
 /// can trap by itself.
 fn live_mask_for_roots(dag: &Dag, roots: &[NodeId]) -> Vec<bool> {
-    let unselected = unselected_root_region(dag, roots);
+    let unselected = dag.outside_selection(roots);
     live_mask_from(dag, roots.to_vec(), &unselected)
-}
-
-/// The nodes that belong to a DAG root this evaluation did not select.
-///
-/// A lowered program makes **every** top-level `def` a DAG root, whether or
-/// not anything calls it, and a def's parameters are `Load` nodes built by
-/// the same code that builds a genuine entry input — `z` in an uncalled
-/// `def g(z)` is indistinguishable from `x` in the `main(x)` being run
-/// (chelis#2476).
-///
-/// Selecting roots is therefore a scoping decision, not merely a request for
-/// certain outputs: `g`'s subgraph is in this DAG because `g` was declared,
-/// not because the selected roots reach it. Value reachability honours that
-/// by construction. A **seed** does not — it marks nodes the roots cannot
-/// reach, which is the whole point of a seed — so without this every seed
-/// would pull another declaration's subgraph into the run, and
-/// `resolve_load_inputs` would then demand that declaration's parameters as
-/// required inputs for a program that never calls it.
-///
-/// A node shared with a selected root is not in this set: reachability from
-/// the selection wins, so scoping can only ever drop work no selected root
-/// needs. With nothing selected, or with every root selected, the set is
-/// empty and this is a no-op.
-///
-/// This scopes [`live_mask_from`]'s seeds: the `[05-OP-68]` abort and a
-/// draw that validates its own controls alike, one class under
-/// `spec/06-transformations.md` §5.2.
-fn unselected_root_region(dag: &Dag, roots: &[NodeId]) -> Vec<bool> {
-    if roots.is_empty() || dag.roots().is_empty() {
-        return vec![false; dag.len()];
-    }
-    // Membership by mask, not `Vec::contains`: a program with R declared
-    // roots asks this R times, and the scan made that quadratic in R — paid
-    // even when every root is selected and the answer is "nothing".
-    let mut selected = vec![false; dag.len()];
-    for root in roots {
-        selected[root.0] = true;
-    }
-    let unselected = dag
-        .roots()
-        .iter()
-        .copied()
-        .filter(|root| !selected[root.0])
-        .collect::<Vec<_>>();
-    if unselected.is_empty() {
-        return vec![false; dag.len()];
-    }
-    let mut owned = reachable_from(dag, unselected);
-    for (id, selected) in reachable_from(dag, roots.to_vec()).into_iter().enumerate() {
-        if selected {
-            owned[id] = false;
-        }
-    }
-    owned
-}
-
-/// Plain backward reachability over `inputs` and both dependency edges.
-fn reachable_from(dag: &Dag, mut stack: Vec<NodeId>) -> Vec<bool> {
-    let mut seen = vec![false; dag.len()];
-    while let Some(id) = stack.pop() {
-        if seen[id.0] {
-            continue;
-        }
-        seen[id.0] = true;
-        if let Some(node) = dag.get(id) {
-            stack.extend(node.inputs.iter().copied());
-            stack.extend(node.shape_deps.iter().copied());
-            stack.extend(node.result_claim_deps.iter().copied());
-        }
-    }
-    seen
 }
 
 fn live_mask_from(dag: &Dag, mut stack: Vec<NodeId>, unselected: &[bool]) -> Vec<bool> {
@@ -2865,12 +2794,13 @@ fn live_mask_from(dag: &Dag, mut stack: Vec<NodeId>, unselected: &[bool]) -> Vec
     // because a value reaches them. chelis#2413: so is a random node that can
     // trap by itself.
     //
-    // chelis#2476 scopes BOTH to the selection. An abort, or a trapping
-    // draw, inside a root this evaluation did not select belongs to a
-    // declaration it is not running, so firing it would abort on behalf of
-    // code the caller excluded. The seed still reaches every abort and
-    // trapping draw the selected roots' own activation contains, including
-    // the discarded ones, which is what [05-OP-68] is about.
+    // chelis#2476 scopes BOTH to the selection ([`Dag::outside_selection`]).
+    // An abort, or a trapping draw, in a declaration this evaluation does not
+    // enter is not its concern, so firing it would abort on behalf of code
+    // the caller excluded, and would demand that declaration's parameters as
+    // inputs. The seed still reaches every abort and trapping draw the
+    // selected roots' own activation contains, including the discarded ones,
+    // which is what [05-OP-68] is about.
     //
     // The two disjuncts are one class — `random_node_may_trap` documents
     // itself as an observable root under the same spec/06 §5.2 rule — so
@@ -5766,7 +5696,7 @@ mod tests {
         dag.add_root(g);
         dag.add_root(main);
 
-        let owned = unselected_root_region(&dag, &[main]);
+        let owned = dag.outside_selection(&[main]);
         assert!(
             owned[g.0],
             "`g`'s own body is owned by the root nobody selected"
@@ -5779,13 +5709,11 @@ mod tests {
         assert!(!owned[main.0]);
 
         assert!(
-            unselected_root_region(&dag, &[main, g])
-                .iter()
-                .all(|owned| !owned),
+            dag.outside_selection(&[main, g]).iter().all(|owned| !owned),
             "selecting every root leaves nothing unselected"
         );
         assert!(
-            unselected_root_region(&dag, &[]).iter().all(|owned| !owned),
+            dag.outside_selection(&[]).iter().all(|owned| !owned),
             "and selecting nothing is a no-op, not an exclusion of everything"
         );
     }
@@ -5857,7 +5785,7 @@ mod tests {
             dag.add_root(unselected);
             dag.add_root(main);
 
-            let owned = unselected_root_region(&dag, &[main]);
+            let owned = dag.outside_selection(&[main]);
             assert!(
                 !owned[abort.0],
                 "{edge}: the selected root reaches this abort, so it is not owned \

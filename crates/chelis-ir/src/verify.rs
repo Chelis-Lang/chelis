@@ -995,6 +995,9 @@ pub trait KeyGraph {
     fn roots(&self) -> impl Iterator<Item = usize> + '_;
     /// The parameter a `Load` at `node` reads, or `None` for any other node.
     fn load_name(&self, node: usize) -> Option<&str>;
+    /// The top-level declaration `node` belongs to, or `None` when the graph
+    /// attributes it to none.
+    fn declaration(&self, node: usize) -> Option<&str>;
     /// The dims `node` produces, or `None` when no node or when its dims
     /// have no IR reading.
     fn dims(&self, node: usize) -> Option<std::borrow::Cow<'_, [DimInfo]>>;
@@ -1061,6 +1064,14 @@ impl KeyGraph for Dag {
             RiscOp::Load { name } => Some(name.as_ref()),
             _ => None,
         }
+    }
+
+    fn declaration(&self, node: usize) -> Option<&str> {
+        let declaration = self.get(NodeId(node))?.declaration?;
+        self.declarations()
+            .get(declaration.0 as usize)
+            .map(|declaration| declaration.name.as_str())
+            .filter(|name| !name.is_empty())
     }
 
     fn dims(&self, node: usize) -> Option<std::borrow::Cow<'_, [DimInfo]>> {
@@ -1133,10 +1144,17 @@ fn activations_exclusive(graph: &impl KeyGraph, left: usize, right: usize) -> bo
 pub fn verify_key_rules(graph: &impl KeyGraph, errors: &mut Vec<String>) {
     let is_key = |node: usize| graph.dtype(node) == Some(Prim::Key);
     // The key a node's value is: every key `Load` of one parameter is the
-    // first such `Load`, and any other key is its own node.
+    // first such `Load`, and any other key is its own node. A parameter is
+    // its declaration and its name: two declarations' `k` are two keys. A
+    // `Load` attributed to no declaration may be any declaration's, so it is
+    // the same key as every `Load` of its name.
     let identity = |node: usize| match graph.load_name(node) {
         Some(name) if is_key(node) => (0..node)
-            .find(|earlier| is_key(*earlier) && graph.load_name(*earlier) == Some(name))
+            .find(|earlier| {
+                is_key(*earlier)
+                    && graph.load_name(*earlier) == Some(name)
+                    && same_declaration(graph.declaration(*earlier), graph.declaration(node))
+            })
             .unwrap_or(node),
         _ => node,
     };
@@ -1371,11 +1389,23 @@ fn verify_confinement(
     }
 }
 
+/// Whether two nodes may belong to one declaration: they name the same one,
+/// or either is attributed to none.
+pub fn same_declaration(left: Option<&str>, right: Option<&str>) -> bool {
+    match (left, right) {
+        (Some(left), Some(right)) => left == right,
+        _ => true,
+    }
+}
+
 #[allow(clippy::collapsible_match)]
 fn verify_with_dangling_policy(dag: &Dag, reject_dangling: bool) -> Vec<String> {
     let mut errors = Vec::new();
     let mut consumers = vec![0usize; dag.len()];
-    let mut load_types = chelis_unord::UnordMap::<String, crate::dag::TensorType>::new();
+    // chelis#2413: a `Load` reads its declaration's parameter, so two
+    // declarations may each name a parameter `x` with its own type.
+    let mut load_types =
+        chelis_unord::UnordMap::<String, Vec<(Option<&str>, &crate::dag::TensorType)>>::new();
     for node in dag.nodes() {
         for &input_id in &node.inputs {
             if input_id.0 < consumers.len() {
@@ -1398,15 +1428,20 @@ fn verify_with_dangling_policy(dag: &Dag, reject_dangling: bool) -> Vec<String> 
         }
 
         if let RiscOp::Load { name } = &node.op {
-            if let Some(prev_ty) = load_types.get(name.as_str()) {
-                if prev_ty != &node.output_type {
-                    errors.push(format!(
-                        "load '{}' has inconsistent tensor types: {:?} vs {:?}",
-                        name, prev_ty, node.output_type
-                    ));
-                }
-            } else {
-                load_types.insert(name.as_str().to_string(), node.output_type.clone());
+            let declaration = KeyGraph::declaration(dag, node.id.0);
+            let seen = load_types.entry(name.as_str().to_string()).or_default();
+            if let Some((_, prev_ty)) = seen
+                .iter()
+                .find(|(other, _)| same_declaration(*other, declaration))
+                && *prev_ty != &node.output_type
+            {
+                errors.push(format!(
+                    "load '{}' has inconsistent tensor types: {:?} vs {:?}",
+                    name, prev_ty, node.output_type
+                ));
+            }
+            if !seen.iter().any(|(other, _)| *other == declaration) {
+                seen.push((declaration, &node.output_type));
             }
         }
     }
@@ -3805,6 +3840,114 @@ mod tests {
             dims: dims.iter().copied().map(DimInfo::Lit).collect(),
             precision,
         }
+    }
+
+    /// A graph with one group of nodes per entry, each group built by
+    /// `group` and attributed to the named declaration, or to none.
+    fn declared_groups(declarations: &[Option<&str>], mut group: impl FnMut(&mut Dag)) -> Dag {
+        let mut dag = Dag::new();
+        for declaration in declarations {
+            let first = dag.len();
+            group(&mut dag);
+            if let Some(name) = declaration {
+                let existing = dag
+                    .declarations()
+                    .iter()
+                    .position(|entry| entry.name == *name);
+                let id = match existing {
+                    Some(index) => crate::dag::DeclarationId(index as u32),
+                    None => dag.add_declaration(*name, false),
+                };
+                dag.attribute_nodes_from(first, id);
+            }
+        }
+        dag
+    }
+
+    /// chelis#2413 B2: a parameter is its declaration and its name. Two
+    /// declarations that each read a key parameter `k` hold two keys. One
+    /// declaration's two `Load`s of `k` are one key, and a `Load` of `k`
+    /// attributed to no declaration is the same key as every `Load` of `k`.
+    ///
+    /// Evidentiary status: REGRESSION TEST. At ff8957386 the verifier
+    /// identified a key `Load` by its name alone, so the first row failed.
+    #[test]
+    fn a_key_parameter_is_its_declaration_and_its_name() {
+        let errors = |declarations: &[Option<&str>]| {
+            let dag = declared_groups(declarations, |dag| {
+                let k = dag.add_node(
+                    RiscOp::Load { name: "k".into() },
+                    vec![],
+                    tensor_ty(&[], Prim::Key),
+                    None,
+                );
+                let x = dag.add_node(
+                    RiscOp::Load { name: "x".into() },
+                    vec![],
+                    tensor_ty(&[2], Prim::F32),
+                    None,
+                );
+                let rate = dag.add_node(
+                    RiscOp::synth_const(Prim::F32, 0.5),
+                    vec![],
+                    scalar_f32(),
+                    None,
+                );
+                let drawn = dag.add_node(
+                    RiscOp::Dropout,
+                    vec![x, rate, k],
+                    tensor_ty(&[2], Prim::F32),
+                    None,
+                );
+                dag.add_root(drawn);
+            });
+            let mut errors = Vec::new();
+            verify_key_rules(&dag, &mut errors);
+            errors
+        };
+        assert_eq!(errors(&[Some("a"), Some("b")]), Vec::<String>::new());
+        for shared in [
+            [Some("a"), Some("a")],
+            [None, None],
+            [Some("a"), None],
+            [None, Some("b")],
+        ] {
+            assert!(
+                errors(&shared)
+                    .iter()
+                    .any(|error| error.contains("is consumed twice")),
+                "{shared:?}"
+            );
+        }
+    }
+
+    /// A parameter's type is its declaration's: two declarations may each
+    /// read an `x` of a different type, and one declaration's two `Load`s of
+    /// `x` must agree, as must two `Load`s attributed to no declaration.
+    ///
+    /// Evidentiary status: REGRESSION TEST. At ff8957386 the first row
+    /// reported "load 'x' has inconsistent tensor types".
+    #[test]
+    fn a_parameter_type_is_its_declarations() {
+        let inconsistent = |declarations: &[Option<&str>]| {
+            let mut shapes = [vec![4], vec![2, 2]].into_iter().cycle();
+            let dag = declared_groups(declarations, |dag| {
+                let x = dag.add_node(
+                    RiscOp::Load { name: "x".into() },
+                    vec![],
+                    tensor_ty(&shapes.next().unwrap(), Prim::F32),
+                    None,
+                );
+                dag.add_root(x);
+            });
+            verify(&dag)
+                .iter()
+                .any(|error| error.contains("load 'x' has inconsistent tensor types"))
+        };
+        assert!(!inconsistent(&[Some("a"), Some("b")]));
+        assert!(inconsistent(&[Some("a"), Some("a")]));
+        assert!(inconsistent(&[None, None]));
+        assert!(inconsistent(&[Some("a"), None]));
     }
 
     struct MappedFixture {

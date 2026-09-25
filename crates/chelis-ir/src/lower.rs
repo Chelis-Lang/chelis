@@ -587,7 +587,8 @@ use chelis_types::{
 use chelis_vocab::EffectKind;
 
 use crate::dag::{
-    ComparisonKind, Dag, DimExpr, DimInfo, LogicalKind, NodeId, RiscOp, RtAxis, RtDim, TensorType,
+    ComparisonKind, Dag, DeclarationId, DimExpr, DimInfo, LogicalKind, NodeId, RiscOp, RtAxis,
+    RtDim, TensorType,
 };
 use crate::grad::grad_dag_checked;
 use crate::tier2;
@@ -902,6 +903,7 @@ fn lower_program_to_library_inner(
             }
         }
     });
+    ctx.resolve_declaration_references();
     log_sub("lower_top_level_loop", &mut sub_t);
 
     // Collect the pre-DCE name -> NodeId mapping from the lowering ctx's
@@ -977,6 +979,7 @@ fn insert_copy_nodes_for_consuming_fanout(dag: &Dag) -> (Dag, UnordMap<NodeId, N
 
     let mut seen_consuming_uses = UnordMap::<NodeId, usize>::new();
     let mut out = Dag::new();
+    out.inherit_declarations(dag);
     let mut id_map = UnordMap::<NodeId, NodeId>::new();
 
     for node in dag.nodes() {
@@ -996,6 +999,10 @@ fn insert_copy_nodes_for_consuming_fanout(dag: &Dag) -> (Dag, UnordMap<NodeId, N
                         .unwrap_or_else(LowerCtx::default_type);
                     let copy =
                         out.add_node(RiscOp::Copy, vec![mapped], input_ty, node.span_id.clone());
+                    // The copy serves this consumer, so it is its declaration's.
+                    if let Some(copy_node) = out.node_mut(copy) {
+                        copy_node.declaration = node.declaration;
+                    }
                     inputs.push(copy);
                     continue;
                 }
@@ -1010,6 +1017,7 @@ fn insert_copy_nodes_for_consuming_fanout(dag: &Dag) -> (Dag, UnordMap<NodeId, N
             node.span_id.clone(),
         );
         if let Some(new_node) = out.node_mut(new_id) {
+            new_node.declaration = node.declaration;
             new_node.reusable_input = node
                 .reusable_input
                 .and_then(|old| id_map.get(&old).copied());
@@ -1080,14 +1088,18 @@ fn insert_drop_nodes_for_unconsumed_values(mut dag: Dag) -> Dag {
                 node.output_type.clone(),
                 node.span_id.clone(),
                 node.merged_spans.clone(),
+                node.declaration,
             )
         })
         .collect::<Vec<_>>();
 
-    for (id, ty, span_id, merged_spans) in values_to_drop {
+    for (id, ty, span_id, merged_spans, declaration) in values_to_drop {
         let drop = dag.add_node(RiscOp::Drop, vec![id], ty, span_id);
         if let Some(node) = dag.node_mut(drop) {
             node.merged_spans = merged_spans;
+            // A discarded value's terminal belongs to the declaration that
+            // discarded it (chelis#2476: an unrooted `Drop` owned by no root).
+            node.declaration = declaration;
         }
     }
 
@@ -1096,6 +1108,7 @@ fn insert_drop_nodes_for_unconsumed_values(mut dag: Dag) -> Dag {
 
 fn strip_drop_nodes(dag: &Dag) -> (Dag, UnordMap<NodeId, NodeId>) {
     let mut out = Dag::new();
+    out.inherit_declarations(dag);
     let mut id_map = UnordMap::<NodeId, NodeId>::new();
 
     for node in dag.nodes() {
@@ -1114,6 +1127,7 @@ fn strip_drop_nodes(dag: &Dag) -> (Dag, UnordMap<NodeId, NodeId>) {
             node.span_id.clone(),
         );
         if let Some(new_node) = out.node_mut(new_id) {
+            new_node.declaration = node.declaration;
             new_node.reusable_input = node
                 .reusable_input
                 .and_then(|old| id_map.get(&old).copied());
@@ -1277,6 +1291,7 @@ fn lower_program_with_context_inner(
             ctx.lower_top_level(expr);
         }
     });
+    ctx.resolve_declaration_references();
 
     // Skip DCE on the composed DAG: the library DAG was already DCE'd by
     // `lower_program_to_library`, and re-DCE'ing here could prune library
@@ -6860,6 +6875,10 @@ struct LowerCtx<'program> {
     /// subtracts these from the declared root names before aligning them
     /// against `dag.roots()`.
     rootless_defs: BTreeSet<String>,
+    /// chelis#2476: each top-level declaration lowered so far with the names
+    /// its body references, resolved to declarations by
+    /// [`LowerCtx::resolve_declaration_references`] once all are known.
+    declaration_references: Vec<(DeclarationId, Vec<String>)>,
     dim_substitutions: UnordMap<String, DimInfo>,
     /// WS-A8: precision-tvar substitutions, keyed by the precision-var
     /// name (e.g. `p`) as it appears in `(t-var {} p)` precision slots
@@ -6974,6 +6993,7 @@ impl<'program> LowerCtx<'program> {
             fn_typed_params: UnordSet::new(),
             callable_dependency_state: CallableDependencyState::default(),
             rootless_defs: BTreeSet::new(),
+            declaration_references: Vec::new(),
             dim_substitutions: UnordMap::new(),
             prec_substitutions: UnordMap::new(),
             rank_substitutions: UnordMap::new(),
@@ -7774,6 +7794,69 @@ impl<'program> LowerCtx<'program> {
             }
         }
 
+        // chelis#2476: every node this declaration's lowering appends is
+        // its own, including the roots and the `Store`s below. A value
+        // declaration runs where it is referenced; a function runs inlined in
+        // each caller, so its standalone nodes are its own activation only.
+        let first = self.dag.len();
+        let declared = stamped_parts(expr).and_then(|(tag, _, kids)| match tag {
+            DeepTag::Def => kids.first().and_then(|expr| match expr {
+                Expr::Atom(Atom::Name(name), _) => Some((
+                    name.as_str(),
+                    !matches!(
+                        kids.get(1).and_then(stamped_parts),
+                        Some((DeepTag::Fn, _, _))
+                    ),
+                )),
+                _ => None,
+            }),
+            _ => None,
+        });
+        let (declaration_name, is_value) = declared.unwrap_or(("", false));
+        let declaration = self.dag.add_declaration(declaration_name, is_value);
+        self.declaration_references.push((
+            declaration,
+            chelis_types::linearity::free_runtime_variables(expr),
+        ));
+        self.lower_top_level_body(expr);
+        self.dag.attribute_nodes_from(first, declaration);
+    }
+
+    /// Resolve every lowered declaration's referenced names to the
+    /// declarations they name: the latest declaration of each name, so new
+    /// code shadows a library declaration it replaces. Names that are not
+    /// declarations (builtins, types) name nothing.
+    fn resolve_declaration_references(&mut self) {
+        let mut by_name = BTreeMap::<&str, DeclarationId>::new();
+        for (index, declaration) in self.dag.declarations().iter().enumerate() {
+            if !declaration.name.is_empty() {
+                by_name.insert(
+                    declaration.name.as_str(),
+                    DeclarationId(u32::try_from(index).expect("declaration index fits u32")),
+                );
+            }
+        }
+        let resolved = self
+            .declaration_references
+            .iter()
+            .map(|(declaration, names)| {
+                let mut references = names
+                    .iter()
+                    .filter_map(|name| by_name.get(name.as_str()).copied())
+                    .filter(|reference| reference != declaration)
+                    .collect::<Vec<_>>();
+                references.sort_unstable();
+                references.dedup();
+                (*declaration, references)
+            })
+            .collect::<Vec<_>>();
+        for (declaration, references) in resolved {
+            self.dag.set_declaration_references(declaration, references);
+        }
+        self.declaration_references.clear();
+    }
+
+    fn lower_top_level_body(&mut self, expr: &Expr) {
         let mut value = self.lower_expr(expr);
         if let Some((DeepTag::Def, _, kids)) = stamped_parts(expr)
             && let Some(name) = kids.first().and_then(|expr| match expr {
@@ -19142,6 +19225,121 @@ impl<'program> LowerCtx<'program> {
             return expanded;
         }
         cond
+    }
+}
+
+#[cfg(test)]
+mod declaration_attribution_tests {
+    //! chelis#2476, #2413: every node a program's lowering creates belongs to
+    //! the top-level declaration that created it, and a selection's seeds are
+    //! those of the declarations its roots enter.
+    use super::*;
+
+    fn lowered(source: &str) -> LoweredLibrary {
+        let declarations = chelis_surf::parser::parse_str(source).unwrap();
+        let checked = chelis_types::check_typed_program(
+            &chelis_surf::desugar::desugar_program(&declarations)
+                .expect("Surf fixture must desugar"),
+        )
+        .unwrap();
+        let checked = chelis_effects::check_program(&checked).unwrap();
+        let checked = chelis_types::check_linearity(&checked).unwrap();
+        try_lower_program_to_library(&checked).unwrap()
+    }
+
+    /// `selected` names `sampled` only in a dead binding and calls `h`,
+    /// whose own body discards a draw. Every draw here can trap.
+    const PROGRAM: &str = "x: tensor[4, f32] = x\nsampled = dropout(key_from_seed(7i64), copy(x), 1.0f32)\ndef h(v: tensor[4, f32]) -> tensor[4, f32] = {\n dead = dropout(key_from_seed(9i64), copy(v), 1.0f32)\n v\n}\nselected = {\n dead = sampled\n a = h(copy(x))\n copy(x)\n}\n";
+
+    fn declaration_name(dag: &Dag, node: &crate::dag::DagNode) -> String {
+        let declaration = node.declaration.expect("every lowered node is attributed");
+        dag.declarations()[declaration.0 as usize].name.clone()
+    }
+
+    /// The draws of `dag`, each as its declaration's name, in node order.
+    fn draws(dag: &Dag) -> Vec<String> {
+        dag.nodes()
+            .iter()
+            .filter(|node| matches!(node.op, RiscOp::Dropout))
+            .map(|node| declaration_name(dag, node))
+            .collect()
+    }
+
+    #[test]
+    fn every_lowered_node_belongs_to_the_declaration_that_created_it() {
+        let library = lowered(PROGRAM);
+        let dag = library.dag();
+        let declared = dag
+            .declarations()
+            .iter()
+            .map(|declaration| (declaration.name.as_str(), declaration.value))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            declared,
+            [
+                ("x", true),
+                ("sampled", true),
+                ("h", false),
+                ("selected", true)
+            ]
+        );
+        assert!(dag.nodes().iter().all(|node| node.declaration.is_some()));
+        let named = |name: &str| {
+            DeclarationId(
+                u32::try_from(declared.iter().position(|(n, _)| *n == name).unwrap()).unwrap(),
+            )
+        };
+        let mut references = dag.declarations()[named("selected").0 as usize]
+            .references
+            .clone();
+        references.sort_unstable();
+        assert_eq!(references, [named("x"), named("sampled"), named("h")]);
+        // `h`'s own draw, and the copy inlined where `selected` calls it.
+        assert_eq!(draws(dag), ["sampled", "h", "selected"]);
+        // A discarded value's `Drop` is its declaration's, not no one's.
+        for node in dag.nodes() {
+            if matches!(node.op, RiscOp::Drop) {
+                let dropped = dag.get(node.inputs[0]).unwrap();
+                assert_eq!(node.declaration, dropped.declaration);
+            }
+        }
+    }
+
+    /// Selecting `selected` enters `sampled` through the dead binding and
+    /// runs `h` only inlined, so `h`'s own draw, and the parameter it reads,
+    /// are not the selection's: the evaluator does not seed that draw, and
+    /// an entry sliced to `selected` keeps neither.
+    ///
+    /// Evidentiary status: REGRESSION TEST for chelis#2486's residual: the
+    /// discarded draw in `h`'s own body sat under an unrooted `Drop`, owned
+    /// by no root, so it kept its seed and `v` became a required input.
+    #[test]
+    fn a_selection_seeds_only_the_declarations_it_enters() {
+        let library = lowered(PROGRAM);
+        let dag = library.dag();
+        let root = |name: &str| library.symbol_table()[name];
+        let outside = dag.outside_selection(&[root("selected")]);
+        let outside_draws = dag
+            .nodes()
+            .iter()
+            .filter(|node| matches!(node.op, RiscOp::Dropout) && outside[node.id.0])
+            .map(|node| declaration_name(dag, node))
+            .collect::<Vec<_>>();
+        assert_eq!(outside_draws, ["h"]);
+        assert!(
+            dag.outside_selection(dag.roots()).iter().all(|out| !out),
+            "selecting every root enters every declaration of this program"
+        );
+
+        let mut sliced = dag.clone();
+        sliced.set_roots(vec![root("selected")]);
+        let sliced = crate::optimize::dead_code_eliminate(&sliced);
+        assert_eq!(draws(&sliced), ["sampled", "selected"]);
+        assert!(!sliced.nodes().iter().any(|node| matches!(
+            &node.op,
+            RiscOp::Load { name } if name.as_str() == "v"
+        )));
+        assert!(sliced.nodes().iter().all(|node| node.declaration.is_some()));
     }
 }
 

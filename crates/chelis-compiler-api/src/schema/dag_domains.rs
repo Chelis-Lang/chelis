@@ -173,6 +173,10 @@ impl KeyGraph for DecodedKeys<'_> {
         }
     }
 
+    fn declaration(&self, node: usize) -> Option<&str> {
+        self.0.nodes.get(node)?.declaration.as_deref()
+    }
+
     /// Each wire dim as the IR dim it decodes to. An extent beyond the
     /// host's `usize` has no IR reading, so its node has no dims and every
     /// rule that reads them rejects it.

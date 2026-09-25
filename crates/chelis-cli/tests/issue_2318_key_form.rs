@@ -394,3 +394,88 @@ int main(void) {
     let printed = stdout_of(&run_driver(&seed_dir, "mk", seed_driver, &[]));
     assert_eq!(printed.trim(), "dtype=9 rank=0 fffffffffffffffd");
 }
+
+/// A parameter is its declaration and its name (chelis#2413 B2): two
+/// declarations that each name their key parameter `k` take two keys. (b) A
+/// module exporting two such defs builds, and each export draws with the key
+/// its caller passes. (c) A `main` calling two such helpers checks, and eval
+/// and compiled C both draw each helper's own key.
+///
+/// Evidentiary status: DISPOSITION LOCK. Both shapes already ran at
+/// ff8957386, where each export is its own host function and the helpers are
+/// inlined into `main`; the whole-program graph they share is the
+/// regression the `lower` and wire tests pin.
+#[test]
+fn two_declarations_key_parameters_of_one_name_are_two_keys() {
+    if !gcc_available() {
+        eprintln!("skipping: no host C compiler");
+        return;
+    }
+    let dir = tempdir().expect("tempdir");
+    let exported = build(
+        dir.path(),
+        "exported",
+        "module Probe.Keys\nexport (draw, unit)\ndef draw(k: key, c: f32) -> tensor[4, f32] = uniform_like(k, to_tensor([c, c, c, c]), 2.0f32, 5.0f32)\ndef unit(k: key, c: f32) -> tensor[4, f32] = uniform_like(k, to_tensor([c, c, c, c]), 0.0f32, 1.0f32)\n",
+    );
+    let header = std::fs::read_to_string(exported.join("exported.h")).unwrap();
+    for declaration in [
+        format!("chelis_tensor* {DRAW_SYMBOL}(chelis_key k, float c);"),
+        "chelis_tensor* chelis_fn_756e6974(chelis_key k, float c);".to_string(),
+    ] {
+        assert!(header.contains(&declaration), "{declaration}:\n{header}");
+    }
+    let driver = format!(
+        "#include <stdio.h>\n#include \"chelis_runtime.h\"\n#include \"exported.h\"\n\
+         static void print(const chelis_tensor *t) {{\n\
+             chelis_read_view v = chelis_tensor_read_view(t);\n\
+             for (int64_t i = 0; i < v.count; i++) printf(\" %08x\", ((const uint32_t *)v.data)[i]);\n\
+             printf(\"\\n\");\n\
+         }}\n\
+         int main(void) {{\n\
+             print({DRAW_SYMBOL}(chelis_key_from_seed(7), 1.0f));\n\
+             print(chelis_fn_756e6974(chelis_key_from_seed(7), 1.0f));\n\
+             return 0;\n\
+         }}\n"
+    );
+    let printed = stdout_of(&run_driver(&exported, "exported", &driver, &[]));
+    assert_eq!(
+        printed.lines().map(str::trim).collect::<Vec<_>>(),
+        [f32_hex(&U25_KEY7), f32_hex(&U01_KEY7)]
+    );
+
+    let source = "def h1(k: key, x: tensor[4, f32]) -> tensor[4, f32] = dropout(k, x, 0.5f32)\ndef h2(k: key, x: tensor[4, f32]) -> tensor[4, f32] = dropout(k, x, 0.25f32)\ndef main() -> tensor[4, f32] = {\n  (k1, k2) = split_key(key_from_seed(42i64))\n  x = to_tensor([1.0f32, 1.0f32, 1.0f32, 1.0f32])\n  add(h1(k1, copy(x)), h2(k2, x))\n}\n";
+    let (k1, k2) = common::key_ref::split(common::key_ref::key_from_seed(42));
+    let expected = common::key_ref::dropout_f32(k1, &[1.0; 4], 0.5)
+        .into_iter()
+        .zip(common::key_ref::dropout_f32(k2, &[1.0; 4], 0.25))
+        .map(|(left, right)| (left + right).to_bits())
+        .collect::<Vec<_>>();
+    // A printed f32 reads back as the nearest f64; its f32 bits are exact.
+    let bits = |stdout: &[u8]| {
+        parse_tensor_data(&String::from_utf8_lossy(stdout), "main")
+            .into_iter()
+            .map(|value| (value as f32).to_bits())
+            .collect::<Vec<_>>()
+    };
+    let path = dir.path().join("helpers.ch");
+    write_file(&path, source);
+    let checked = chelis()
+        .args(["check", path.to_str().unwrap()])
+        .output()
+        .expect("chelis check runs");
+    let report: serde_json::Value = serde_json::from_slice(&checked.stdout).unwrap();
+    assert_eq!(report["errors"], serde_json::json!([]), "{report}");
+    let evaluated = chelis()
+        .args(["eval", "--file", path.to_str().unwrap()])
+        .output()
+        .expect("chelis eval runs");
+    assert!(evaluated.status.success(), "eval failed");
+    assert_eq!(bits(&evaluated.stdout), expected);
+    let out_dir = build(dir.path(), "helpers", source);
+    assert!(common::link_generated(&out_dir, "helpers.c", "helpers").success());
+    let run = StdCommand::new(out_dir.join("helpers"))
+        .output()
+        .expect("compiled program runs");
+    assert!(run.status.success());
+    assert_eq!(bits(&run.stdout), expected);
+}

@@ -297,6 +297,18 @@ fn dead_code_eliminate_impl(
             live[root.0] = true;
         }
     }
+    // chelis#2476: the roots are the selection, so an abort or a trapping
+    // draw in a declaration they do not enter is not this graph's concern,
+    // as it is not the evaluator's ([`Dag::outside_selection`]). Without
+    // this an entry selected from a lowered program keeps every other
+    // declaration's draws, and their parameters become its inputs.
+    let selection = dag
+        .roots()
+        .iter()
+        .chain(retained)
+        .copied()
+        .collect::<Vec<_>>();
+    let outside = dag.outside_selection(&selection);
     for node in dag.nodes() {
         let observed = matches!(node.op, RiscOp::Store { .. });
         // chelis#2368: an unconditional effect is live regardless of
@@ -306,8 +318,8 @@ fn dead_code_eliminate_impl(
         // successful result for a program that aborts. chelis#2413: a random
         // node that can trap by itself is in the same class.
         if (implicit_observations && observed)
-            || node.op.is_unconditional_effect()
-            || dag.random_node_may_trap(node)
+            || ((node.op.is_unconditional_effect() || dag.random_node_may_trap(node))
+                && !outside[node.id.0])
         {
             live[node.id.0] = true;
         }
@@ -380,6 +392,7 @@ fn dead_code_eliminate_impl(
 
     // Rebuild with only live nodes, remapping IDs.
     let mut new_dag = Dag::new();
+    new_dag.inherit_declarations(dag);
     let mut id_map: UnordMap<usize, NodeId> = UnordMap::new();
 
     for (old_id, node) in dag.nodes().iter().enumerate() {
@@ -405,6 +418,9 @@ fn dead_code_eliminate_impl(
                 && let Some(&mapped_input) = id_map.get(&reusable_input.0)
             {
                 new_dag.set_reusable_input(new_id, mapped_input);
+            }
+            if let Some(new_node) = new_dag.node_mut(new_id) {
+                new_node.declaration = node.declaration;
             }
             // Preserve merged_spans across DCE (S3 will populate them but
             // the invariant of pure-copy DCE means they must survive when
