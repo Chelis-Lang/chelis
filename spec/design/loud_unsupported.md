@@ -917,10 +917,10 @@ The effect consumer set is exhaustive for the current tree:
 | `chelis-effects::infer_handle_effects` | exhaustively remove the handled kind; decode failures enter `EffectError` |
 | `chelis-effects::validate_handler_expr` | exhaustive per-kind validation; decode failures are errors |
 | `chelis-effects::validate_build_target_expr` | exhaustive typed target policy |
-| `chelis-ir::lower::lower_handle_effect` | consume `Result`; exhaust `Random`/`Resource`; preserve distinct diagnostic payloads |
+| `chelis-ir::lower::lower_handle_effect` | consume `Result`; exhaust `EffectKind`; preserve distinct diagnostic payloads |
 | `chelis-ir::host::lower_host_expr` | consume `Result`; no empty sentinel or raw comparison |
 | `chelis-compiler-api::runtime::eval::HostEvaluator::eval_expr` | exhaustive typed evaluation; every decode error is `Err` |
-| `chelis-surf::desugar` `WithSeed`/`WithDevice` | emit `EffectKind::symbol()` |
+| `chelis-surf::desugar` `WithDevice` | emit `EffectKind::symbol()` |
 | both `chelis-surf::decompile_handle_effect` implementations | decode once; exhaust known kinds; preserve malformed/unknown Deep only through an explicit observation path |
 
 The added-kind mutation oracle inserts a temporary variant in the single

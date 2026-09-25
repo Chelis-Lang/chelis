@@ -222,8 +222,7 @@ and `-Werror` makes an error. A local run, `gate.py --validation` included, is
 therefore no portability evidence on macOS. Before merge a fixture reaches Linux
 only through the existing selection and nothing wider. An added or directly
 modified fixture target runs in the required change-owned lane with its Cargo
-`required-features` activated, so `chelis-compiler-api::native_random_observer`
-runs every row with `native-random-observer`. A change to a shared fixture
+`required-features` activated. A change to a shared fixture
 helper, such as `crates/chelis-compiler-api/tests/ownership_support/`, reaches
 its dependents only through the package-expansion dispatch that precedes merge.
 Each fixture's own compiler choice and flags decide what fails it; one that must
