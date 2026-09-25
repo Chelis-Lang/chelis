@@ -571,6 +571,7 @@ fn checked_blas_batches_scratch_and_empty_domains_execute_under_sanitizers() {
                 globals: vec![],
                 global_tensor_helpers: vec![],
                 summary_rejections: vec![],
+                adt_layouts: Vec::new(),
                 functions: vec![HostFunction {
                     helper_result_claim_axes: Vec::new(),
                     name: "host_blas".into(),
@@ -944,6 +945,7 @@ int main(void) {{
                     globals: vec![],
                     global_tensor_helpers: vec![],
                     summary_rejections: vec![],
+                    adt_layouts: Vec::new(),
                     functions: vec![HostFunction {
                         helper_result_claim_axes: Vec::new(),
                         name: "host_sparse_add".into(),
@@ -6497,6 +6499,7 @@ fn host_binary_program(builtin: &str, lhs: Vec<usize>, rhs: Vec<usize>) -> HostP
             summary_rejections: Vec::new(),
         }],
         summary_rejections: Vec::new(),
+        adt_layouts: Vec::new(),
     }
 }
 
@@ -7343,6 +7346,7 @@ fn host_scalar_relu_program(ty: HostType) -> HostProgram {
             summary_rejections: Vec::new(),
         }],
         summary_rejections: Vec::new(),
+        adt_layouts: Vec::new(),
     }
 }
 
@@ -9247,6 +9251,7 @@ fn host_diagonal_program(operand: Vec<usize>, declared: usize) -> HostProgram {
             summary_rejections: Vec::new(),
         }],
         summary_rejections: Vec::new(),
+        adt_layouts: Vec::new(),
     }
 }
 

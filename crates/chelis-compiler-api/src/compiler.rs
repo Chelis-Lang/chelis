@@ -1244,6 +1244,7 @@ fn project_host_program_to_entry(
         global_tensor_helpers: Vec::new(),
         functions,
         summary_rejections,
+        adt_layouts: program.adt_layouts.clone(),
     })
 }
 

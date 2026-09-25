@@ -873,6 +873,7 @@ mod tests {
             global_tensor_helpers: vec![],
             functions: vec![func],
             summary_rejections: Vec::new(),
+            adt_layouts: Vec::new(),
         };
 
         let result = codegen_host_program(&program, "my_prog").unwrap();
@@ -978,6 +979,7 @@ mod tests {
             global_tensor_helpers: vec![],
             functions: vec![func],
             summary_rejections: Vec::new(),
+            adt_layouts: Vec::new(),
         };
 
         let result = codegen_host_program(&program, "my_prog").unwrap();
@@ -3916,6 +3918,7 @@ int main(void) {{
             global_tensor_helpers: vec![],
             functions: vec![func],
             summary_rejections: Vec::new(),
+            adt_layouts: Vec::new(),
         };
 
         let result = codegen_host_program(&program, "prog").unwrap();
@@ -3989,6 +3992,7 @@ int main(void) {{
             global_tensor_helpers: vec![],
             functions: vec![func],
             summary_rejections: Vec::new(),
+            adt_layouts: Vec::new(),
         };
 
         let result = codegen_host_program(&program, "lib").unwrap();

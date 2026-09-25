@@ -1304,6 +1304,13 @@ impl<'a> VerifiedHostEmission<'a> {
         &self.payload.program.summary_rejections
     }
 
+    /// The constructor layouts of the ADTs the functions' parameters carry.
+    pub fn adt_layouts(
+        self,
+    ) -> &'a [crate::host::HostAdtLayout<crate::host_type_state::ConcreteHostType>] {
+        &self.payload.program.adt_layouts
+    }
+
     pub fn manifest(self) -> &'a RootManifest {
         &self.payload.manifest
     }
