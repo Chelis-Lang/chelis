@@ -9570,7 +9570,7 @@ fn fixed_control_c_entry_is_independent_of_host_siblings() {
         ("with_host", "def status() -> i64 = 7i64\n", false, false),
         ("deep_entry", "", true, false),
         ("seeded_helper", "", false, false),
-        ("declared_random", "", false, false),
+        ("local_key", "", false, false),
         ("pure_entry", "", false, true),
     ] {
         let surf = dir.path().join(format!("{stem}.ch"));
@@ -9581,9 +9581,9 @@ fn fixed_control_c_entry_is_independent_of_host_siblings() {
                 if pure {
                     "def sample(x: tensor[4, f32]) -> tensor[4, f32] = add(x, x)\n"
                 } else if stem == "seeded_helper" {
-                    "def keep(x: tensor[4, f32]) -> tensor[4, f32] = dropout(x, 0.5f32)\ndef sample(x: tensor[4, f32]) -> tensor[4, f32] = with seed(42i64) { keep(x) }\n"
-                } else if stem == "declared_random" {
-                    "def sample(x: tensor[4, f32]) -> tensor[4, f32] ! { Random } = with seed(42i64) { dropout(x, 0.5f32) }\n"
+                    "def keep(k: key, x: tensor[4, f32]) -> tensor[4, f32] = dropout(k, x, 0.5f32)\ndef sample(x: tensor[4, f32]) -> tensor[4, f32] = keep(key_from_seed(1i64), x)\n"
+                } else if stem == "local_key" {
+                    "def sample(x: tensor[4, f32]) -> tensor[4, f32] = {\n  k = key_from_seed(1i64)\n  dropout(k, x, 0.5f32)\n}\n"
                 } else {
                     include_str!("../../../examples/dropout_entry.ch")
                 }
@@ -9639,7 +9639,8 @@ fn fixed_control_c_entry_is_independent_of_host_siblings() {
         let expected = if pure {
             "0x40000000u, 0x40800000u, 0x40c00000u, 0x41000000u"
         } else {
-            "0u, 0x40800000u, 0u, 0u"
+            // key_from_seed(1) at rate 0.5 drops elements 0 and 3 (key_ref.py).
+            "0u, 0x40800000u, 0x40c00000u, 0u"
         };
         let driver = format!(
             r#"
@@ -9701,7 +9702,7 @@ fn concrete_static_rate_local_helper_executes_eval_and_native_c() {
             .assert()
             .success();
     }
-    let expected = "result.0 = tensor(shape=[4], data=[0.0, 2.0, 0.0, 0.0])\nresult.1 = tensor(shape=[4], data=[2.0, 0.0, 0.0, 0.0])\nresult.2 = tensor(shape=[4], data=[2.0, 2.0, 0.0, 0.0])\nresult.3 = tensor(shape=[4], data=[1.0, 1.0, 1.0, 1.0])\n";
+    let expected = "result.0 = tensor(shape=[4], data=[2.0, 0.0, 0.0, 2.0])\nresult.1 = tensor(shape=[4], data=[2.0, 0.0, 0.0, 0.0])\nresult.2 = tensor(shape=[4], data=[2.0, 2.0, 0.0, 0.0])\nresult.3 = tensor(shape=[4], data=[1.0, 1.0, 1.0, 1.0])\n";
     Command::cargo_bin("chelis")
         .unwrap()
         .args(["eval", "--file"])

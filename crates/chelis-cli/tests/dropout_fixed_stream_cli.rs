@@ -60,7 +60,8 @@ fn staged_size_example_checks_exact_mask_and_rejects_a_false_result_claim() {
                 panic!("{result:?}")
             };
             assert_eq!(value.shape, vec![2, 2]);
-            assert_eq!(value.data.to_f64_lossy_vec(), vec![2.0, 0.0, 0.0, 0.0]);
+            // key_ref.py: the right half of split_key(key_from_seed(42)) at 0.5.
+            assert_eq!(value.data.to_f64_lossy_vec(), vec![2.0, 2.0, 0.0, 0.0]);
         } else {
             assert!(!output.status.success());
             let error = String::from_utf8_lossy(&output.stderr);
@@ -138,13 +139,14 @@ fn executable_example_survives_format_check_and_exact_eval() {
                 _ => None,
             })
             .collect::<Vec<_>>();
-        // Independently computed seed 42 ordinals 0 and 1; the second
-        // differs, so a fresh-mask backward or omitted-forward mutant fails.
+        // Independently computed by key_ref.py from the two halves of
+        // split_key(key_from_seed(42)); they differ, so a fresh-mask backward
+        // or omitted-forward mutant fails.
         assert_eq!(
             roots,
             [
-                ("main.0", vec![0.0, 2.0, 0.0, 0.0]),
-                ("main.1", vec![2.0, 0.0, 0.0, 0.0])
+                ("main.0", vec![2.0, 0.0, 0.0, 2.0]),
+                ("main.1", vec![2.0, 2.0, 0.0, 0.0])
             ]
         );
     }
