@@ -4348,19 +4348,32 @@ impl UncarriableWalk<'_> {
         else {
             return ConcatInputFact::Unknown;
         };
-        if self.bound(name).is_some()
-            || self.defs.contains_key(name)
-            || !matches!(
-                chelis_types::builtin_decl(name).map(|decl| decl.shape_class),
-                Some(chelis_types::ShapeClass::Identity)
-            )
-            || chelis_types::shape_class(name) != chelis_types::ShapeClass::Identity
-        {
+        if self.bound(name).is_some() || self.defs.contains_key(name) {
             return ConcatInputFact::Unknown;
         }
         let Some(HostTypeTerm::Tensor(output)) = expr_type(expr) else {
             return ConcatInputFact::Unknown;
         };
+        // A checked matmul computes its output axes from two tensor operands.
+        // Retain that result only when both producers are already proven:
+        // using the checked result type alone could conceal an earlier fatal
+        // producer lowering (for example, an unsupported insert).
+        if name == "matmul"
+            && chelis_types::builtin_decl(name).is_some()
+            && kids[1..].len() == 2
+            && kids[1..]
+                .iter()
+                .all(|arg| matches!(self.concat_input_fact(arg), ConcatInputFact::Tensor(_)))
+        {
+            return ConcatInputFact::Tensor(output);
+        }
+        if !matches!(
+            chelis_types::builtin_decl(name).map(|decl| decl.shape_class),
+            Some(chelis_types::ShapeClass::Identity)
+        ) || chelis_types::shape_class(name) != chelis_types::ShapeClass::Identity
+        {
+            return ConcatInputFact::Unknown;
+        }
         // Shape-identity is an operation contract, but its source geometry
         // is usable only when every tensor operand already has a proved fact.
         // A checked result type by itself could hide an earlier failing

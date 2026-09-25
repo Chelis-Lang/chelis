@@ -1,0 +1,1 @@
+Computed tensor concat admits checked matrix products in Eval, preserves concrete tensor elements when generated C boxes a wildcard-width list, and reports concat extent overflow before constructing an invalid shape. See [#2514](https://github.com/Chelis-Lang/chelis/issues/2514).

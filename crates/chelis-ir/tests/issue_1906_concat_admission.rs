@@ -151,16 +151,11 @@ fn shape_identity_arithmetic_preserves_dynamic_concat_geometry() {
 }
 
 #[test]
-fn shape_rewriting_producer_does_not_prove_concat_geometry() {
-    let program = checked(
+fn checked_matmul_producer_selects_host_for_runtime_concat_geometry() {
+    decision(
         "def run[s](x: tensor[s, s, f32]) -> tensor[s, *, f32] = {\n z = matmul(x, x)\n softmax(concat([z, z], 1i32), -1)\n}\n",
-    );
-    let error = host_def_kernel(&HostLoweringSession::new(&program), "run")
-        .expect_err("shape rewriting alone does not prove the concat input axes");
-    assert!(
-        error
-            .to_string()
-            .contains("tensor concat cannot be represented by the static tensor DAG")
+        "run",
+        false,
     );
 }
 
