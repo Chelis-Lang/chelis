@@ -8,6 +8,9 @@ was rejected with "already consumed by closure capture" in `chelis eval`,
 is now checked against the ownership state once every top-level initializer has
 run: it reads a value no initializer consumes without consuming it, and a
 declaration that reads a value some initializer consumes is rejected wherever
-the def sits in the source. Consumes inside one declaration body, and by a
-closure an eager value creates, are still rejected.
+the def sits in the source. This rejects programs that earlier releases
+accepted: a declaration that only borrows a value is now rejected when some
+initializer consumes that value, even if every call of the declaration comes
+before the consume. Consumes inside one
+declaration body, and by a closure an eager value creates, are still rejected.
 See [#2549](https://github.com/Chelis-Lang/chelis/issues/2549).
