@@ -8265,11 +8265,16 @@ impl<'program> LowerCtx<'program> {
                     id = self.rebuild_result_claim_owner(id);
                     result = LoweredValue::Node(id);
                 }
+                // A result sized by an explicit runtime carrier owns its
+                // literal obligation even outside generic/helper lowering.
+                // Stamping that literal onto the carrier's input would turn
+                // the body's result claim into a signature requirement.
                 if literal
                     && (self.literal_result_claim_ownership
                         == LiteralResultClaimOwnership::AuthoredTensorHelper
                         || (authored_result_claim
-                            && self.same_shape_result_owner_is_admitted(id, axis)))
+                            && (self.same_shape_result_owner_is_admitted(id, axis)
+                                || self.runtime_carrier_result_owner_is_admitted(id, axis))))
                     && self.literal_result_token_owner_is_admitted(id, axis)
                 {
                     let value = match &self.dag.get(required).expect("literal requirement").op {
@@ -8390,6 +8395,20 @@ impl<'program> LowerCtx<'program> {
             Some(_) => true,
             None => false,
         }
+    }
+
+    /// Admit an axis introduced by a runtime carrier, including later
+    /// forwarding. Reading an existing input axis alone does not introduce
+    /// a carrier; the shared site derivation preserves that distinction.
+    /// Op-computed observations keep their existing admission.
+    fn runtime_carrier_result_owner_is_admitted(&self, id: NodeId, axis: usize) -> bool {
+        crate::axis_sources::result_extent_sites(&self.dag, id)
+            .iter()
+            .any(|site| {
+                let RtAxis::Lit(output_axis) = site.output_axis();
+                usize::try_from(output_axis).ok() == Some(axis)
+                    && site.runtime_carrier_origin().is_some()
+            })
     }
 
     fn same_shape_result_owner_is_admitted(&self, id: NodeId, axis: usize) -> bool {
@@ -21597,6 +21616,109 @@ mod tests {
         assert_eq!(non_drop_len(&dag), 2);
         assert!(verify::verify(&dag).is_empty());
         assert_eq!(root_node(&dag).op, RiscOp::Relu);
+    }
+
+    #[test]
+    fn runtime_result_admission_requires_an_introduced_carrier() {
+        for introduced in [false, true] {
+            let mut ctx = LowerCtx::new(
+                BTreeMap::new(),
+                BTreeMap::new(),
+                BTreeMap::new(),
+                LinearityInfo::default(),
+            );
+            let ty = TensorType {
+                dims: vec![DimInfo::Named("n".into(), None)],
+                precision: Prim::Int64,
+            };
+            let input =
+                ctx.dag
+                    .add_node(RiscOp::Load { name: "x".into() }, vec![], ty.clone(), None);
+            let inner = if introduced {
+                let scalar = ctx.dag.add_node(
+                    RiscOp::Const {
+                        value: chelis_types::scalar_from_i64("const", Prim::Int64, 7).unwrap(),
+                    },
+                    vec![],
+                    TensorType {
+                        dims: vec![],
+                        precision: Prim::Int64,
+                    },
+                    None,
+                );
+                ctx.dag.add_node(
+                    RiscOp::Expand {
+                        axis: 0,
+                        size: RtDim::InputAxis {
+                            tensor: 1,
+                            axis: RtAxis::Lit(0),
+                        },
+                    },
+                    vec![scalar, input],
+                    ty.clone(),
+                    None,
+                )
+            } else {
+                input
+            };
+            let outer = ctx.dag.add_node(
+                RiscOp::Expand {
+                    axis: 0,
+                    size: RtDim::Lit(4),
+                },
+                vec![inner],
+                TensorType {
+                    dims: vec![DimInfo::Lit(4), ty.dims[0].clone()],
+                    precision: Prim::Int64,
+                },
+                None,
+            );
+            assert_eq!(
+                ctx.runtime_carrier_result_owner_is_admitted(outer, 1),
+                introduced
+            );
+            assert!(!ctx.runtime_carrier_result_owner_is_admitted(outer, 0));
+        }
+    }
+
+    #[test]
+    fn discarded_eager_values_are_not_shape_sources() {
+        let exprs = chelis_deep::parser::parse_str(
+            r#"
+            (let {} (bind {} unused
+                (app {} (var {} neg) (lit {type: (t-prim {} i64)} 7)))
+                (lit {type: (t-prim {} i64)} 9))
+        "#,
+        )
+        .unwrap();
+        let mut ctx = LowerCtx::new(
+            BTreeMap::new(),
+            BTreeMap::new(),
+            BTreeMap::new(),
+            LinearityInfo::default(),
+        );
+        ctx.lower_expr(&exprs[0]);
+        assert!(
+            ctx.dag
+                .nodes()
+                .iter()
+                .all(|node| node.shape_deps.is_empty()),
+            "{:?}",
+            ctx.dag.nodes()
+        );
+    }
+
+    #[test]
+    fn unused_literal_initializer_remains_eliminable() {
+        let dag = parse_and_lower(
+            r#"
+            (let {} (bind {} unused (lit {type: (t-prim {} i64)} 1234567))
+                (lit {type: (t-prim {} i64)} 9))
+        "#,
+        );
+        assert_eq!(non_drop_len(&dag), 1);
+        assert!(matches!(root_node(&dag).op, RiscOp::Const { value }
+            if value.as_i64_exact() == Some(9)));
     }
 
     #[test]

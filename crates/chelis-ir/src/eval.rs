@@ -3147,6 +3147,9 @@ fn eval_tensor_internal_with_result_claims<F>(
 where
     F: FnMut(&str) -> Option<TensorValue>,
 {
+    // Reject an incomplete claim/producer relationship before any input
+    // preparation or entry guard can observe runtime state.
+    let declared_local_guard_sites = crate::axis_sources::local_dim_guard_sites(dag)?;
     let live = scope.live();
     let PreparedTensorInputs {
         inputs: mut resolved_inputs,
@@ -3327,7 +3330,7 @@ where
         NodeId,
         Vec<(usize, crate::axis_sources::LocalGuardClaim)>,
     > = UnordMap::new();
-    for ((node, axis), claim) in crate::axis_sources::local_dim_guard_sites(dag) {
+    for ((node, axis), claim) in declared_local_guard_sites {
         local_guard_sites
             .entry(NodeId(node))
             .or_default()

@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "corpus_sha256": "7706f0cf26ab3308aeed1acddacdd5702f719d265b940dd523c881fe896e9c45",
+  "corpus_sha256": "d2d66372ff7de5727aa735f1c8562315cdde4f302bb871bd092ae96f88b9e91d",
   "rows": [
     {
       "id": "claim.literal.identity_root.c",
@@ -1230,7 +1230,7 @@
       "id": "expand.literal_claim.exported_kernel.eval",
       "baseline": "silent_unguarded",
       "phase_b": "executes_exactly",
-      "receipt": "cli_slice_b.a_literal_claim_over_a_runtime_read_traps_at_entry_on_eval"
+      "receipt": "cli_slice_b.a_literal_claim_over_a_runtime_read_traps_at_producer_on_eval"
     },
     {
       "id": "expand.literal_claim.inlined_root.c",
@@ -1711,6 +1711,48 @@
       "baseline": "nonconforming_rejection",
       "phase_b": "executes_exactly",
       "receipt": "cli_slice_b.a_bare_name_pipe_stage_upstream_of_sum_checks_and_runs"
+    },
+    {
+      "id": "producer.input_entry.eval_c",
+      "baseline": "executes_exactly",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_producer_guard_order.input_axis_claim_still_precedes_body_on_both_lanes"
+    },
+    {
+      "id": "producer.insert.claim_effects.c",
+      "baseline": "lane_divergent",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_producer_guard_order.c_insert_result_guard_owns_attribution_and_effect_order"
+    },
+    {
+      "id": "producer.insert.claim_effects.eval",
+      "baseline": "executes_exactly",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_producer_guard_order.eval_insert_result_guard_owns_attribution_and_effect_order"
+    },
+    {
+      "id": "producer.insert.forwarded_axis.c",
+      "baseline": "lane_divergent",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_producer_guard_order.c_forwarded_insert_axis_keeps_result_ownership"
+    },
+    {
+      "id": "producer.insert.forwarded_axis.eval",
+      "baseline": "lane_divergent",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_producer_guard_order.eval_forwarded_insert_axis_keeps_result_ownership"
+    },
+    {
+      "id": "producer.insert.site",
+      "baseline": "lane_divergent",
+      "phase_b": "executes_exactly",
+      "receipt": "ir_producer_guard_sites.interface_sized_insert_has_one_local_result_claim"
+    },
+    {
+      "id": "producer.missing_axis",
+      "baseline": "ice",
+      "phase_b": "rejects_exactly",
+      "receipt": "ir_producer_guard_sites.missing_result_axis_is_a_checked_error"
     },
     {
       "id": "rebuild.classes_after_each_pass",

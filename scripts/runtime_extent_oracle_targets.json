@@ -385,7 +385,7 @@
         "a_lint_fix_of_a_direct_shape_read_still_checks_evaluates_and_builds",
         "a_literal_claim_over_a_cross_tensor_read_traps_on_c",
         "a_literal_claim_over_a_cross_tensor_read_traps_on_eval",
-        "a_literal_claim_over_a_runtime_read_traps_at_entry_on_eval",
+        "a_literal_claim_over_a_runtime_read_traps_at_producer_on_eval",
         "a_literal_claim_over_an_agreeing_runtime_read_executes_on_eval",
         "a_literal_pad_claim_an_inlined_root_refutes_is_rejected_on_both_lanes",
         "a_literal_parameter_extent_keeps_the_checkers_verdict_on_both_lanes",
@@ -452,7 +452,7 @@
         "a_zero_positional_replacement_declares_an_empty_axis_on_c",
         "a_zero_positional_replacement_declares_an_empty_axis_on_eval",
         "aliased_parameter_types_keep_the_entry_binder_guard",
-        "an_abi_promised_entailing_extent_keeps_its_literal_guard",
+        "an_abi_promised_input_keeps_its_named_guard_before_result_claim",
         "an_aggregate_typed_wrt_is_still_lane_divergent",
         "an_earlier_trap_preempts_the_extent_guard_on_eval",
         "an_effect_after_an_op_computed_guard_does_not_run_when_the_guard_traps_on_c",
@@ -1137,7 +1137,7 @@
         "host_emit::entry::tests::dominating_signature_discharges_the_exact_helper_comparison",
         "host_emit::entry::tests::every_helper_call_must_be_dominated_before_a_check_is_removed",
         "host_emit::entry::tests::helper_projection_removes_only_discharged_checks_and_keeps_standalone_entry",
-        "host_emit::entry::tests::lowered_mixed_result_claim_delegates_the_following_rows_guard",
+        "host_emit::entry::tests::lowered_mixed_result_claim_keeps_rows_at_entry_and_literal_local",
         "host_emit::entry::tests::shadowing_a_witness_keeps_the_helper_check",
         "host_emit::entry::tests::unused_canonical_witness_discharges_other_pairs_transitively"
       ],
@@ -1257,6 +1257,44 @@
         "literal_role_rejects_observations_entry_claims_and_malformed_requirements"
       ],
       "note": "Literal declarations retain distinct token identities, inner-before-outer guard order and primitive attribution through rebuilds; malformed role payloads and observing inputs are refused."
+    },
+    {
+      "phase": "b",
+      "id": "cli_producer_guard_order",
+      "package": "chelis-cli",
+      "kind": "test",
+      "file": "crates/chelis-cli/tests/issue_2377_producer_guards.rs",
+      "selector": {
+        "mode": "all"
+      },
+      "expected": [
+        "c_forwarded_insert_axis_keeps_result_ownership",
+        "c_insert_result_guard_owns_attribution_and_effect_order",
+        "c_result_axes_follow_declaration_order",
+        "eval_forwarded_insert_axis_keeps_result_ownership",
+        "eval_insert_result_guard_owns_attribution_and_effect_order",
+        "eval_result_axes_follow_declaration_order",
+        "input_axis_claim_still_precedes_body_on_both_lanes",
+        "mixed_named_entry_and_literal_result_keep_distinct_owners"
+      ],
+      "note": "Partial #2377: generic/monomorphic direct and carried insert result attribution, exact values and order against retained effects; distinct named input guards. Discarded eager traps remain unresolved."
+    },
+    {
+      "phase": "b",
+      "id": "ir_producer_guard_sites",
+      "package": "chelis-ir",
+      "kind": "test",
+      "file": "crates/chelis-ir/tests/producer_guard_sites.rs",
+      "selector": {
+        "mode": "all"
+      },
+      "expected": [
+        "forwarded_axis_observation_and_physical_claim_keep_their_owners",
+        "interface_sized_insert_has_one_local_result_claim",
+        "malformed_administrative_producer_is_a_checked_error",
+        "missing_result_axis_is_a_checked_error"
+      ],
+      "note": "Token-only, physical-only and coalesced producer sites, forwarded-axis observations, independent requirements and malformed-axis rejection."
     },
     {
       "phase": "b",
