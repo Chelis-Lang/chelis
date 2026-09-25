@@ -5,15 +5,14 @@
 //! `Domain` on an invalid rate before any element is drawn. #2463's four
 //! witnesses were written against the retired `with seed` handler; here each
 //! is a keyed draw whose result nothing reads. Every witness must trap with
-//! its typed trap text in `chelis eval` and in compiled C.
-//!
-//! The library witness traps in compiled C only. Evaluated inside its reef
-//! package (the `compile_reef_context` + `eval_in_context` lane) it returns
-//! `[1, 1]` instead of trapping, so that lane is not asserted here; it is
-//! #2463's library-region case, still open.
+//! its typed trap text in `chelis eval` and in compiled C; the library
+//! witness also traps evaluated inside its reef package, the
+//! `compile_reef_context` + `eval_in_context` lane (spec/03 §4.4: a
+//! binding's initializer is evaluated whether or not the binding is read).
 mod common;
 
 use assert_cmd::Command;
+use chelis_compiler_api::{compile_reef_context, eval_in_context};
 use std::path::Path;
 
 const DROPOUT_DOMAIN: &str = "numeric trap: domain in dropout at f32";
@@ -177,8 +176,11 @@ fn write(path: &Path, contents: &str) {
     std::fs::write(path, contents).unwrap();
 }
 
+/// Evidentiary status: REGRESSION TEST for the `eval_in_context` assertion,
+/// which returned `[1, 1]` at 727e74b41; the C assertion is a disposition
+/// lock.
 #[test]
-fn a_dead_reference_to_a_library_draw_value_traps_in_c() {
+fn a_dead_reference_to_a_library_draw_value_traps_in_context_and_c() {
     let directory = tempfile::tempdir().unwrap();
     let root = directory.path().join("app");
     let compiler = env!("CARGO_PKG_VERSION");
@@ -209,5 +211,16 @@ fn a_dead_reference_to_a_library_draw_value_traps_in_c() {
     write(&root.join("src/entry.ch"), LIBRARY_CLIENT);
     assert_canonical(&root, "drawlib/src/draw.ch", LIBRARY_DRAW);
     assert_canonical(&root, "src/entry.ch", LIBRARY_CLIENT);
+    let context = compile_reef_context(Path::new(""), &root).unwrap();
+    let error = eval_in_context(&context, LIBRARY_CLIENT)
+        .map(|result| format!("{:?}", result.roots))
+        .expect_err("eval_in_context did not trap");
+    assert!(
+        error
+            .errors
+            .iter()
+            .any(|error| error.message == DROPOUT_DOMAIN),
+        "{error:?}"
+    );
     assert_c_traps(&root, "src/entry.ch", "entry", DROPOUT_DOMAIN);
 }
