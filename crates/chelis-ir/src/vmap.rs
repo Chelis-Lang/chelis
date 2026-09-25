@@ -46,6 +46,7 @@ pub fn vectorize_axis0_with_node_map_and_captures(
     captured_loads: &UnordSet<String>,
 ) -> Result<(Dag, Vec<NodeId>), String> {
     let mut out = Dag::new();
+    out.inherit_declarations(dag);
     let concrete_batch = match &batch_dim {
         DimInfo::Lit(size) => Some(*size),
         DimInfo::Named(_, Some(size)) => Some(*size),
@@ -248,6 +249,7 @@ pub fn vectorize_axis0_with_node_map_and_captures(
                     }
                 };
                 let expanded = out.add_node(
+                    node.decl,
                     RiscOp::Expand { axis: 0, size },
                     expand_inputs,
                     prepend_batch_type(&dag.get(input).unwrap().output_type, &batch_dim),
@@ -267,6 +269,7 @@ pub fn vectorize_axis0_with_node_map_and_captures(
         // shape operations.
         if !shared && captured_load {
             let raw = out.add_node(
+                node.decl,
                 node.op.clone(),
                 Vec::new(),
                 node.output_type.clone(),
@@ -299,6 +302,7 @@ pub fn vectorize_axis0_with_node_map_and_captures(
                 }
             };
             let new_id = out.add_node(
+                node.decl,
                 RiscOp::Expand { axis: 0, size },
                 expand_inputs,
                 output_type,
@@ -327,6 +331,7 @@ pub fn vectorize_axis0_with_node_map_and_captures(
         // longer matches its declared type (chelis#1932).
         if !shared && matches!(node.op, RiscOp::ConstTensor { .. }) {
             let raw = out.add_node(
+                node.decl,
                 node.op.clone(),
                 Vec::new(),
                 node.output_type.clone(),
@@ -354,6 +359,7 @@ pub fn vectorize_axis0_with_node_map_and_captures(
                 }
             };
             let new_id = out.add_node(
+                node.decl,
                 RiscOp::Expand { axis: 0, size },
                 expand_inputs,
                 output_type,
@@ -378,7 +384,7 @@ pub fn vectorize_axis0_with_node_map_and_captures(
         // shifts) onto a new DAG. Per spec/design/chelis_span_survival.md
         // §2.3 vmap row, span_id and merged_spans are cloned unchanged
         // — every input span survives the pass.
-        let new_id = out.add_node(op, inputs, output_type, node.span_id.clone());
+        let new_id = out.add_node(node.decl, op, inputs, output_type, node.span_id.clone());
         mapped_ids.push(new_id);
         let remapped_shape_deps = remap_shape_deps(node.id, &node.shape_deps, &mapped_ids)?;
         let remapped_result_claims =
@@ -435,6 +441,7 @@ pub fn vectorize_axis0_with_node_map_and_captures(
                 }
             };
             let expanded = out.add_node(
+                dag.get(*root).unwrap().decl,
                 RiscOp::Expand { axis: 0, size },
                 expand_inputs,
                 prepend_batch_type(&dag.get(*root).unwrap().output_type, &batch_dim),
@@ -704,8 +711,15 @@ mod tests {
     #[test]
     fn elementwise_vmap_prepends_batch_axis() {
         let mut dag = Dag::new();
-        let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_f32(3), None);
-        let y = dag.add_node(RiscOp::Neg, vec![x], vec_f32(3), None);
+        let decl = dag.declare("test");
+        let x = dag.add_node(
+            decl,
+            RiscOp::Load { name: "x".into() },
+            vec![],
+            vec_f32(3),
+            None,
+        );
+        let y = dag.add_node(decl, RiscOp::Neg, vec![x], vec_f32(3), None);
         dag.add_root(y);
 
         let vmapped = vectorize_axis0(&dag, DimInfo::Lit(2)).expect("vmap should succeed");
@@ -728,13 +742,16 @@ mod tests {
     #[test]
     fn reduction_vmap_shifts_axis() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let x = dag.add_node(
+            decl,
             RiscOp::Load { name: "x".into() },
             vec![],
             mat_f32(2, 3),
             None,
         );
         let y = dag.add_node(
+            decl,
             RiscOp::Sum {
                 axis: 1,
                 accumulator: chelis_types::types::Prim::F32,
@@ -767,7 +784,14 @@ mod tests {
     #[test]
     fn nested_vmap_adds_two_batch_axes() {
         let mut dag = Dag::new();
-        let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_f32(4), None);
+        let decl = dag.declare("test");
+        let x = dag.add_node(
+            decl,
+            RiscOp::Load { name: "x".into() },
+            vec![],
+            vec_f32(4),
+            None,
+        );
         dag.add_root(x);
 
         let inner = vectorize_axis0(&dag, DimInfo::Lit(3)).expect("inner vmap should succeed");
@@ -786,19 +810,23 @@ mod tests {
     #[test]
     fn batched_matmul_shape_matches_expand_mul_sum_pattern() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let a = dag.add_node(
+            decl,
             RiscOp::Load { name: "a".into() },
             vec![],
             mat_f32(2, 3),
             None,
         );
         let b = dag.add_node(
+            decl,
             RiscOp::Load { name: "b".into() },
             vec![],
             mat_f32(3, 4),
             None,
         );
         let a_exp = dag.add_node(
+            decl,
             RiscOp::Expand {
                 axis: 2,
                 size: RtDim::Lit(4),
@@ -811,6 +839,7 @@ mod tests {
             None,
         );
         let b_exp = dag.add_node(
+            decl,
             RiscOp::Expand {
                 axis: 0,
                 size: RtDim::Lit(2),
@@ -823,6 +852,7 @@ mod tests {
             None,
         );
         let prod = dag.add_node(
+            decl,
             RiscOp::Mul,
             vec![a_exp, b_exp],
             TensorType {
@@ -832,6 +862,7 @@ mod tests {
             None,
         );
         let out = dag.add_node(
+            decl,
             RiscOp::Sum {
                 axis: 1,
                 accumulator: chelis_types::types::Prim::F32,

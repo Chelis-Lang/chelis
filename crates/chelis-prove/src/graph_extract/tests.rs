@@ -285,7 +285,7 @@ fn future_version_wire_dag() -> WireDag {
     WireDag {
         schema_version: WIRE_DAG_SCHEMA_VERSION + 1,
         nodes: vec![WireDagNode {
-            declaration: None,
+            declaration: "entry".to_owned(),
             shape_deps: vec![],
             span_id: None,
             merged_spans: vec![],
@@ -331,7 +331,7 @@ fn exact_v6_wire_dag_passes_the_boundary_and_hashes() {
     let dag = WireDag {
         schema_version: WIRE_DAG_SCHEMA_VERSION,
         nodes: vec![WireDagNode {
-            declaration: None,
+            declaration: "entry".to_owned(),
             shape_deps: vec![],
             span_id: None,
             merged_spans: vec![],
@@ -366,7 +366,7 @@ fn named_output_references_must_select_nodes_in_the_enclosed_dag() {
         schema_version: WIRE_DAG_SCHEMA_VERSION,
         nodes: vec![
             WireDagNode {
-                declaration: None,
+                declaration: "entry".to_owned(),
                 shape_deps: vec![],
                 span_id: None,
                 merged_spans: vec![],
@@ -379,7 +379,7 @@ fn named_output_references_must_select_nodes_in_the_enclosed_dag() {
                 },
             },
             WireDagNode {
-                declaration: None,
+                declaration: "entry".to_owned(),
                 shape_deps: vec![],
                 span_id: None,
                 merged_spans: vec![],
@@ -433,7 +433,7 @@ fn invalid_exact_v6_count_is_rejected_without_panicking() {
         schema_version: WIRE_DAG_SCHEMA_VERSION,
         nodes: vec![
             WireDagNode {
-                declaration: None,
+                declaration: "entry".to_owned(),
                 shape_deps: vec![],
                 span_id: None,
                 merged_spans: vec![],
@@ -450,7 +450,7 @@ fn invalid_exact_v6_count_is_rejected_without_panicking() {
                 },
             },
             WireDagNode {
-                declaration: None,
+                declaration: "entry".to_owned(),
                 shape_deps: vec![],
                 span_id: None,
                 merged_spans: vec![],
@@ -570,7 +570,7 @@ fn single_op_dag(op: WireRiscOp) -> WireDag {
     let mut nodes = Vec::new();
     let inputs = if matches!(op, WireRiscOp::Pad { .. }) {
         nodes.push(WireDagNode {
-            declaration: None,
+            declaration: "entry".to_owned(),
             shape_deps: vec![],
             span_id: None,
             merged_spans: vec![],
@@ -585,7 +585,7 @@ fn single_op_dag(op: WireRiscOp) -> WireDag {
     };
     let root = u64::try_from(nodes.len()).unwrap();
     nodes.push(WireDagNode {
-        declaration: None,
+        declaration: "entry".to_owned(),
         shape_deps: vec![],
         span_id: None,
         merged_spans: vec![],

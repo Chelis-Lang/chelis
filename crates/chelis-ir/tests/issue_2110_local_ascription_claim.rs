@@ -254,12 +254,14 @@ fn rebuild_cse_dce_and_specialization_preserve_the_exact_site() {
 fn fusion_preserves_the_exact_local_site_on_the_rebuilt_initializer() {
     fn fusion_dag(claimed: bool) -> Dag {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let ty = TensorType {
             dims: vec![DimInfo::Named("*".into(), None)],
             precision: Prim::F32,
         };
         let claim = claimed.then(|| {
             dag.add_node(
+                decl,
                 RiscOp::ExtentWitness {
                     site: ExtentWitnessSite::LocalAscriptionClaim {
                         ascription_id: 0,
@@ -283,16 +285,17 @@ fn fusion_preserves_the_exact_local_site_on_the_rebuilt_initializer() {
             )
         });
         let input = dag.add_node(
+            decl,
             RiscOp::Load { name: "x".into() },
             Vec::new(),
             ty.clone(),
             None,
         );
-        let add = dag.add_node(RiscOp::Add, vec![input, input], ty.clone(), None);
+        let add = dag.add_node(decl, RiscOp::Add, vec![input, input], ty.clone(), None);
         if let Some(claim) = claim {
             dag.add_shape_dep(add, claim);
         }
-        let neg = dag.add_node(RiscOp::Neg, vec![add], ty, None);
+        let neg = dag.add_node(decl, RiscOp::Neg, vec![add], ty, None);
         dag.add_root(neg);
         dag
     }
@@ -534,6 +537,7 @@ fn malformed_local_claim_roles_are_rejected_by_the_native_verifier() {
     assert!(chelis_ir::verify::verify(&direct).is_empty());
     for mutation in 0..8 {
         let mut dag = direct.clone();
+        let decl = dag.nodes()[0].decl;
         match mutation {
             0 => {
                 let RiscOp::ExtentWitness {
@@ -599,7 +603,7 @@ fn malformed_local_claim_roles_are_rejected_by_the_native_verifier() {
                     .unwrap()
                     .id;
                 let ty = dag.get(owner).unwrap().output_type.clone();
-                let duplicate = dag.add_node(RiscOp::Copy, vec![owner], ty, None);
+                let duplicate = dag.add_node(decl, RiscOp::Copy, vec![owner], ty, None);
                 dag.add_shape_dep(duplicate, token);
             }
             7 => {
@@ -614,12 +618,14 @@ fn malformed_local_claim_roles_are_rejected_by_the_native_verifier() {
                     precision: Prim::Bool,
                 };
                 let first = dag.add_node(
+                    decl,
                     RiscOp::synth_const(Prim::Bool, 1.0),
                     Vec::new(),
                     bool_ty.clone(),
                     None,
                 );
                 let second = dag.add_node(
+                    decl,
                     RiscOp::synth_const(Prim::Bool, 0.0),
                     Vec::new(),
                     bool_ty,

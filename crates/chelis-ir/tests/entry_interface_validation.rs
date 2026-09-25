@@ -14,8 +14,15 @@ fn typed(shape: Vec<usize>, dtype: Prim) -> TensorValue {
     TensorValue::from_storage(shape, finalize_tensor("load", dtype, raw).unwrap())
 }
 
-fn load(dag: &mut Dag, name: &str, dims: Vec<DimInfo>, dtype: Prim) -> chelis_ir::dag::NodeId {
+fn load(
+    dag: &mut Dag,
+    decl: chelis_ir::dag::DeclId,
+    name: &str,
+    dims: Vec<DimInfo>,
+    dtype: Prim,
+) -> chelis_ir::dag::NodeId {
     dag.add_node(
+        decl,
         RiscOp::Load { name: name.into() },
         vec![],
         TensorType {
@@ -39,7 +46,8 @@ fn assert_one_trap(error: &str, context: &str, dtype: Prim) {
 #[test]
 fn scalar_rank_is_checked_before_load_in_whole_and_selected_eval() {
     let mut dag = Dag::new();
-    let x = load(&mut dag, "x", vec![], Prim::F32);
+    let decl = dag.declare("test");
+    let x = load(&mut dag, decl, "x", vec![], Prim::F32);
     dag.add_root(x);
     for selected in [false, true] {
         let input = || Some(typed(vec![4], Prim::F32));
@@ -63,8 +71,9 @@ fn scalar_rank_is_checked_before_load_in_whole_and_selected_eval() {
 fn first_invalid_input_is_first_abi_slot_for_dtype_and_extent() {
     // Node order intentionally disagrees with lexicographic label order.
     let mut dag = Dag::new();
-    let z = load(&mut dag, "z", vec![DimInfo::Lit(2)], Prim::F32);
-    let a = load(&mut dag, "a", vec![DimInfo::Lit(2)], Prim::F32);
+    let decl = dag.declare("test");
+    let z = load(&mut dag, decl, "z", vec![DimInfo::Lit(2)], Prim::F32);
+    let a = load(&mut dag, decl, "a", vec![DimInfo::Lit(2)], Prim::F32);
     dag.add_root(z);
     dag.add_root(a);
 
@@ -121,8 +130,9 @@ fn first_invalid_input_is_first_abi_slot_for_dtype_and_extent() {
 #[test]
 fn selected_root_uses_its_live_load_declaration_for_a_reused_name() {
     let mut dag = Dag::new();
-    let dead = load(&mut dag, "x", vec![], Prim::F64);
-    let live = load(&mut dag, "x", vec![DimInfo::Lit(2)], Prim::F32);
+    let decl = dag.declare("test");
+    let dead = load(&mut dag, decl, "x", vec![], Prim::F64);
+    let live = load(&mut dag, decl, "x", vec![DimInfo::Lit(2)], Prim::F32);
     dag.add_root(dead);
     dag.add_root(live);
 
@@ -147,9 +157,10 @@ fn selected_root_uses_its_live_load_declaration_for_a_reused_name() {
 #[test]
 fn selected_load_reuses_its_original_abi_slot() {
     let mut dag = Dag::new();
-    let dead_x = load(&mut dag, "x", vec![], Prim::F64);
-    let y = load(&mut dag, "y", vec![DimInfo::Lit(2)], Prim::F32);
-    let live_x = load(&mut dag, "x", vec![DimInfo::Lit(2)], Prim::F32);
+    let decl = dag.declare("test");
+    let dead_x = load(&mut dag, decl, "x", vec![], Prim::F64);
+    let y = load(&mut dag, decl, "y", vec![DimInfo::Lit(2)], Prim::F32);
+    let live_x = load(&mut dag, decl, "x", vec![DimInfo::Lit(2)], Prim::F32);
     dag.add_root(dead_x);
     dag.add_root(y);
     dag.add_root(live_x);
@@ -170,8 +181,9 @@ fn selected_load_reuses_its_original_abi_slot() {
 #[test]
 fn unverified_conflicting_live_loads_cannot_reuse_one_admitted_dtype() {
     let mut dag = Dag::new();
-    let first = load(&mut dag, "x", vec![DimInfo::Lit(2)], Prim::F32);
-    let second = load(&mut dag, "x", vec![DimInfo::Lit(2)], Prim::F64);
+    let decl = dag.declare("test");
+    let first = load(&mut dag, decl, "x", vec![DimInfo::Lit(2)], Prim::F32);
+    let second = load(&mut dag, decl, "x", vec![DimInfo::Lit(2)], Prim::F64);
     dag.add_root(first);
     dag.add_root(second);
     assert!(

@@ -2954,6 +2954,25 @@ fn eval_compiled(
         })
         .collect::<Result<Vec<_>>>()?;
     let active_dag = &compiled.dag;
+    // The evaluator admits exactly the graphs the compiled lanes admit
+    // (spec/10 section 3.2): a lowered program whose keys break the key
+    // rules is rejected here as it is by the wire codec and by ownership
+    // lowering for C, rather than evaluated.
+    let mut key_rule_errors = Vec::new();
+    chelis_ir::verify::verify_random_operands(active_dag, &mut key_rule_errors);
+    if key_rule_errors.is_empty() {
+        chelis_ir::verify::verify_key_rules(active_dag, &mut key_rule_errors);
+    }
+    if !key_rule_errors.is_empty() {
+        return Err(stage_error(
+            "eval",
+            format!(
+                "the lowered program breaks the key rules: {}",
+                key_rule_errors.join("; ")
+            ),
+            GeneralKind::LowerError,
+        ));
+    }
     let tensor_values = if roots.is_empty() {
         UnordMap::new()
     } else {
@@ -5171,13 +5190,16 @@ mod metal_runtime_dim_reject_tests {
 
     fn dag_with_scalar() -> (Dag, NodeId, NodeId) {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let x = dag.add_node(
+            decl,
             RiscOp::Load { name: "x".into() },
             vec![],
             ty(&[4], Prim::F32),
             None,
         );
         let m = dag.add_node(
+            decl,
             RiscOp::Load { name: "m".into() },
             vec![],
             ty(&[], Prim::Int64),
@@ -5189,7 +5211,9 @@ mod metal_runtime_dim_reject_tests {
     #[test]
     fn metal_seam_rejects_node_valued_shrink_bound() {
         let (mut dag, x, m) = dag_with_scalar();
+        let decl = dag.nodes()[0].decl;
         dag.add_node(
+            decl,
             RiscOp::Shrink {
                 bounds: vec![(RtDim::Lit(0), RtDim::Node(1))],
             },
@@ -5207,7 +5231,9 @@ mod metal_runtime_dim_reject_tests {
     #[test]
     fn metal_seam_rejects_node_valued_reshape_target() {
         let (mut dag, x, m) = dag_with_scalar();
+        let decl = dag.nodes()[0].decl;
         dag.add_node(
+            decl,
             RiscOp::Reshape {
                 new_shape: vec![RtDim::Node(1)],
             },
@@ -5225,13 +5251,16 @@ mod metal_runtime_dim_reject_tests {
     #[test]
     fn metal_seam_accepts_literal_movement_and_reshape() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let x = dag.add_node(
+            decl,
             RiscOp::Load { name: "x".into() },
             vec![],
             ty(&[4], Prim::F32),
             None,
         );
         let shrunk = dag.add_node(
+            decl,
             RiscOp::Shrink {
                 bounds: vec![(RtDim::Lit(0), RtDim::Lit(2))],
             },
@@ -5240,6 +5269,7 @@ mod metal_runtime_dim_reject_tests {
             None,
         );
         dag.add_node(
+            decl,
             RiscOp::Reshape {
                 new_shape: vec![RtDim::Lit(2), RtDim::Lit(1)],
             },
@@ -5253,7 +5283,9 @@ mod metal_runtime_dim_reject_tests {
     #[test]
     fn metal_seam_accepts_input_axis_expand_extent() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let value = dag.add_node(
+            decl,
             RiscOp::Load {
                 name: "value".into(),
             },
@@ -5262,6 +5294,7 @@ mod metal_runtime_dim_reject_tests {
             None,
         );
         let witness = dag.add_node(
+            decl,
             RiscOp::Load {
                 name: "witness".into(),
             },
@@ -5270,6 +5303,7 @@ mod metal_runtime_dim_reject_tests {
             None,
         );
         dag.add_node(
+            decl,
             RiscOp::Expand {
                 axis: 0,
                 size: RtDim::InputAxis {
@@ -5289,7 +5323,9 @@ mod metal_runtime_dim_reject_tests {
     #[test]
     fn metal_seam_rejects_node_valued_expand_with_issue_1383_receipt() {
         let (mut dag, x, size) = dag_with_scalar();
+        let decl = dag.nodes()[0].decl;
         dag.add_node(
+            decl,
             RiscOp::Expand {
                 axis: 0,
                 size: RtDim::Node(1),
@@ -5312,13 +5348,16 @@ mod metal_runtime_dim_reject_tests {
     #[test]
     fn metal_seam_accepts_count_for_the_dedicated_tensor_entry_kernel() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let input = dag.add_node(
+            decl,
             RiscOp::Load { name: "x".into() },
             vec![],
             ty(&[2, 3], Prim::Bool),
             None,
         );
         dag.add_node(
+            decl,
             RiscOp::Count { axes: vec![1] },
             vec![input],
             ty(&[2], Prim::Int64),
@@ -5331,19 +5370,23 @@ mod metal_runtime_dim_reject_tests {
 
     fn direct_arithmetic_dag(op: RiscOp) -> Dag {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let lhs = dag.add_node(
+            decl,
             RiscOp::Load { name: "lhs".into() },
             vec![],
             ty(&[4], Prim::F32),
             None,
         );
         let rhs = dag.add_node(
+            decl,
             RiscOp::Load { name: "rhs".into() },
             vec![],
             ty(&[4], Prim::F32),
             None,
         );
         let gradient = dag.add_node(
+            decl,
             RiscOp::Load {
                 name: "gradient".into(),
             },
@@ -5357,7 +5400,7 @@ mod metal_runtime_dim_reject_tests {
             RiscOp::ExtremaAdjoint { .. } => vec![lhs, rhs, gradient],
             _ => vec![lhs, rhs],
         };
-        dag.add_node(op, inputs, ty(&[4], Prim::F32), None);
+        dag.add_node(decl, op, inputs, ty(&[4], Prim::F32), None);
         dag
     }
 
@@ -6591,7 +6634,7 @@ fn wire_dag(dag: &Dag) -> WireResult<WireDag> {
 
 fn wire_dag_node(dag: &Dag, node: &chelis_ir::dag::DagNode) -> WireResult<WireDagNode> {
     Ok(WireDagNode {
-        declaration: chelis_ir::verify::KeyGraph::declaration(dag, node.id.0).map(str::to_string),
+        declaration: dag.declaration(node.decl).name.clone(),
         shape_deps: node
             .shape_deps
             .iter()
@@ -7144,7 +7187,9 @@ mod tests {
     fn native_wire_witness_fixture() -> Dag {
         use chelis_ir::dag::RtAxis;
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let input = dag.add_node(
+            decl,
             RiscOp::Load { name: "x".into() },
             vec![],
             TensorType {
@@ -7158,6 +7203,7 @@ mod tests {
             .map(|value| chelis_types::scalar_from_i64("load", Prim::Int64, value).unwrap())
             .collect();
         let witness = dag.add_node(
+            decl,
             RiscOp::ExtentWitness {
                 site: chelis_ir::dag::ExtentWitnessSite::Caller,
                 parameter: "x".into(),
@@ -7174,6 +7220,7 @@ mod tests {
         );
         dag.node_mut(witness).unwrap().merged_spans = vec!["result-span".into()];
         let root = dag.add_node(
+            decl,
             RiscOp::Const {
                 value: chelis_types::scalar_from_i64("load", Prim::Int64, 9).unwrap(),
             },
@@ -7201,7 +7248,9 @@ mod tests {
             precision,
         };
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let seed = dag.add_node(
+            decl,
             RiscOp::Const {
                 value: chelis_types::scalar_from_i64("test", chelis_types::types::Prim::Int64, -3)
                     .unwrap(),
@@ -7211,12 +7260,14 @@ mod tests {
             None,
         );
         let root = dag.add_node(
+            decl,
             RiscOp::KeyFromSeed,
             vec![seed],
             ty(&[], chelis_types::types::Prim::Key),
             None,
         );
         let left = dag.add_node(
+            decl,
             RiscOp::Split {
                 branch: chelis_ir::dag::KeyBranch::Left,
             },
@@ -7225,6 +7276,7 @@ mod tests {
             None,
         );
         let right = dag.add_node(
+            decl,
             RiscOp::Split {
                 branch: chelis_ir::dag::KeyBranch::Right,
             },
@@ -7233,12 +7285,14 @@ mod tests {
             None,
         );
         let folded = dag.add_node(
+            decl,
             RiscOp::FoldIn,
             vec![left, seed],
             ty(&[], chelis_types::types::Prim::Key),
             None,
         );
         let rows = dag.add_node(
+            decl,
             RiscOp::SplitN {
                 count: chelis_ir::dag::RtDim::Lit(3),
             },
@@ -7306,7 +7360,9 @@ mod tests {
     #[test]
     fn native_wire_projection_preserves_anonymous_where_shape_producers() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let condition = dag.add_node(
+            decl,
             RiscOp::Load {
                 name: "condition".into(),
             },
@@ -7318,6 +7374,7 @@ mod tests {
             None,
         );
         let values = dag.add_node(
+            decl,
             RiscOp::Load {
                 name: "values".into(),
             },
@@ -7329,6 +7386,7 @@ mod tests {
             None,
         );
         let zero = dag.add_node(
+            decl,
             RiscOp::synth_const(Prim::F32, 0.0),
             vec![],
             TensorType {
@@ -7338,6 +7396,7 @@ mod tests {
             None,
         );
         let selected = dag.add_node(
+            decl,
             RiscOp::Where,
             vec![condition, values, zero],
             TensorType {
@@ -7732,19 +7791,23 @@ mod tests {
 
     fn hip_direct_arithmetic_dag(op: RiscOp, precision: chelis_types::types::Prim) -> Dag {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let lhs = dag.add_node(
+            decl,
             RiscOp::Load { name: "lhs".into() },
             vec![],
             tensor_type(vec![4], precision),
             None,
         );
         let rhs = dag.add_node(
+            decl,
             RiscOp::Load { name: "rhs".into() },
             vec![],
             tensor_type(vec![4], precision),
             None,
         );
         let gradient = dag.add_node(
+            decl,
             RiscOp::Load {
                 name: "gradient".into(),
             },
@@ -7758,7 +7821,7 @@ mod tests {
             RiscOp::ExtremaAdjoint { .. } => vec![lhs, rhs, gradient],
             _ => vec![lhs, rhs],
         };
-        let result = dag.add_node(op, inputs, tensor_type(vec![4], precision), None);
+        let result = dag.add_node(decl, op, inputs, tensor_type(vec![4], precision), None);
         dag.add_root(result);
         dag
     }
@@ -7878,7 +7941,9 @@ mod tests {
     #[test]
     fn hip_sparse_gather_is_supported_with_integer_indices() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let values = dag.add_node(
+            decl,
             RiscOp::Load {
                 name: "values".into(),
             },
@@ -7887,6 +7952,7 @@ mod tests {
             None,
         );
         let indices = dag.add_node(
+            decl,
             RiscOp::Load {
                 name: "indices".into(),
             },
@@ -7895,6 +7961,7 @@ mod tests {
             None,
         );
         let gather = dag.add_node(
+            decl,
             RiscOp::Gather { axis: 0 },
             vec![values, indices],
             tensor_type(vec![4, 2], chelis_types::types::Prim::F32),
@@ -7908,13 +7975,16 @@ mod tests {
     #[test]
     fn hip_accepts_count_for_the_dedicated_tensor_entry_kernel() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let input = dag.add_node(
+            decl,
             RiscOp::Load { name: "x".into() },
             vec![],
             tensor_type(vec![2, 3], chelis_types::types::Prim::Bool),
             None,
         );
         dag.add_node(
+            decl,
             RiscOp::Count { axes: vec![1] },
             vec![input],
             tensor_type(vec![2], chelis_types::types::Prim::Int64),
@@ -7928,7 +7998,9 @@ mod tests {
     #[test]
     fn hip_seam_accepts_input_axis_expand_extent() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let value = dag.add_node(
+            decl,
             RiscOp::Load {
                 name: "value".into(),
             },
@@ -7937,6 +8009,7 @@ mod tests {
             None,
         );
         let witness = dag.add_node(
+            decl,
             RiscOp::Load {
                 name: "witness".into(),
             },
@@ -7945,6 +8018,7 @@ mod tests {
             None,
         );
         dag.add_node(
+            decl,
             RiscOp::Expand {
                 axis: 0,
                 size: RtDim::InputAxis {
@@ -7964,7 +8038,9 @@ mod tests {
     #[test]
     fn hip_seam_rejects_node_valued_expand_with_issue_1298_receipt() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let value = dag.add_node(
+            decl,
             RiscOp::Load {
                 name: "value".into(),
             },
@@ -7973,6 +8049,7 @@ mod tests {
             None,
         );
         let size = dag.add_node(
+            decl,
             RiscOp::Load {
                 name: "size".into(),
             },
@@ -7981,6 +8058,7 @@ mod tests {
             None,
         );
         dag.add_node(
+            decl,
             RiscOp::Expand {
                 axis: 0,
                 size: RtDim::Node(1),
@@ -8003,7 +8081,9 @@ mod tests {
     #[test]
     fn hip_sparse_gather_rejects_float_indices_with_deciding_atom() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let values = dag.add_node(
+            decl,
             RiscOp::Load {
                 name: "values".into(),
             },
@@ -8012,6 +8092,7 @@ mod tests {
             None,
         );
         let indices = dag.add_node(
+            decl,
             RiscOp::Load {
                 name: "indices".into(),
             },
@@ -8020,6 +8101,7 @@ mod tests {
             None,
         );
         let gather = dag.add_node(
+            decl,
             RiscOp::Gather { axis: 0 },
             vec![values, indices],
             tensor_type(vec![4, 2], chelis_types::types::Prim::F32),
@@ -8035,7 +8117,9 @@ mod tests {
     #[test]
     fn hip_internal_one_hot_rejection_names_specialization_invariant() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let one_hot = dag.add_node(
+            decl,
             RiscOp::OneHot { vocab: 4 },
             vec![],
             tensor_type(vec![2, 4], chelis_types::types::Prim::F32),
@@ -8051,13 +8135,16 @@ mod tests {
     #[test]
     fn hip_shape_rejection_names_the_target_authority() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let input = dag.add_node(
+            decl,
             RiscOp::Load { name: "x".into() },
             vec![],
             tensor_type(vec![4], chelis_types::types::Prim::F32),
             None,
         );
         let shape = dag.add_node(
+            decl,
             RiscOp::Shape { axis: 0 },
             vec![input],
             tensor_type(vec![], chelis_types::types::Prim::Int32),
@@ -8073,7 +8160,9 @@ mod tests {
     #[test]
     fn hip_sparse_gather_rejects_non_load_integer_index_producer() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let values = dag.add_node(
+            decl,
             RiscOp::Load {
                 name: "values".into(),
             },
@@ -8082,6 +8171,7 @@ mod tests {
             None,
         );
         let indices = dag.add_node(
+            decl,
             RiscOp::synth_const(
                 tensor_type(vec![4], chelis_types::types::Prim::Int64).precision,
                 0.0,
@@ -8091,6 +8181,7 @@ mod tests {
             None,
         );
         let gather = dag.add_node(
+            decl,
             RiscOp::Gather { axis: 0 },
             vec![values, indices],
             tensor_type(vec![4, 2], chelis_types::types::Prim::F32),
@@ -8109,7 +8200,9 @@ mod tests {
     #[test]
     fn hip_sparse_scatter_add_rejects_non_load_integer_index_producer() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let target = dag.add_node(
+            decl,
             RiscOp::Load {
                 name: "target".into(),
             },
@@ -8118,6 +8211,7 @@ mod tests {
             None,
         );
         let indices = dag.add_node(
+            decl,
             RiscOp::synth_const(
                 tensor_type(vec![4], chelis_types::types::Prim::Int32).precision,
                 0.0,
@@ -8127,6 +8221,7 @@ mod tests {
             None,
         );
         let updates = dag.add_node(
+            decl,
             RiscOp::Load {
                 name: "updates".into(),
             },
@@ -8135,6 +8230,7 @@ mod tests {
             None,
         );
         let scatter = dag.add_node(
+            decl,
             RiscOp::ScatterAdd { axis: 0 },
             vec![target, indices, updates],
             tensor_type(vec![3, 2], chelis_types::types::Prim::F32),
@@ -8161,13 +8257,16 @@ mod tests {
     fn reduce_window_node_dag(out_dims: Vec<DimInfo>, window: Vec<usize>) -> Dag {
         use chelis_ir::dag::ReduceWindowKind;
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let input = dag.add_node(
+            decl,
             RiscOp::Load { name: "x".into() },
             vec![],
             tensor_type(vec![2, 8], chelis_types::types::Prim::F32),
             None,
         );
         let rw = dag.add_node(
+            decl,
             RiscOp::ReduceWindow {
                 reducer: ReduceWindowKind::Max,
                 window_shape: window,
@@ -8269,13 +8368,16 @@ windowed = reduce_window_max(padded, [2i64], [1i64])
     fn reduce_window_dag_with_precision(prec: chelis_types::types::Prim) -> Dag {
         use chelis_ir::dag::ReduceWindowKind;
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let input = dag.add_node(
+            decl,
             RiscOp::Load { name: "x".into() },
             vec![],
             tensor_type(vec![1, 1, 4, 4], prec),
             None,
         );
         let rw = dag.add_node(
+            decl,
             RiscOp::ReduceWindow {
                 reducer: ReduceWindowKind::Max,
                 window_shape: vec![2, 2],
@@ -8346,19 +8448,23 @@ windowed = reduce_window_max(padded, [2i64], [1i64])
         use chelis_ir::dag::ReduceWindowKind;
 
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let input = dag.add_node(
+            decl,
             RiscOp::Load { name: "x".into() },
             vec![],
             tensor_type(vec![4], chelis_types::types::Prim::F32),
             None,
         );
         let cotangent = dag.add_node(
+            decl,
             RiscOp::Load { name: "g".into() },
             vec![],
             tensor_type(vec![3], chelis_types::types::Prim::F32),
             None,
         );
         let grad = dag.add_node(
+            decl,
             RiscOp::ReduceWindowGrad {
                 reducer: ReduceWindowKind::Max,
                 window_shape: vec![2],
@@ -8383,7 +8489,9 @@ windowed = reduce_window_max(padded, [2i64], [1i64])
     #[test]
     fn hip_rejects_node_valued_reshape_target_with_clean_message() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let x = dag.add_node(
+            decl,
             RiscOp::Load { name: "x".into() },
             vec![],
             tensor_type(vec![4], chelis_types::types::Prim::F32),
@@ -8392,12 +8500,14 @@ windowed = reduce_window_max(padded, [2i64], [1i64])
         // A rank-0 integer Load, not a `Shape` read: the seam blanket-rejects
         // `RiscOp::Shape` first, and this test must exercise the reshape arm.
         let extent = dag.add_node(
+            decl,
             RiscOp::Load { name: "m".into() },
             vec![],
             tensor_type(vec![], chelis_types::types::Prim::Int32),
             None,
         );
         dag.add_node(
+            decl,
             RiscOp::Reshape {
                 new_shape: vec![RtDim::Node(1)],
             },
@@ -8422,7 +8532,9 @@ windowed = reduce_window_max(padded, [2i64], [1i64])
     #[test]
     fn hip_sparse_scatter_f64_rejection_names_atomic_blocker() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let target = dag.add_node(
+            decl,
             RiscOp::Load {
                 name: "target".into(),
             },
@@ -8431,6 +8543,7 @@ windowed = reduce_window_max(padded, [2i64], [1i64])
             None,
         );
         let indices = dag.add_node(
+            decl,
             RiscOp::Load {
                 name: "indices".into(),
             },
@@ -8439,6 +8552,7 @@ windowed = reduce_window_max(padded, [2i64], [1i64])
             None,
         );
         let updates = dag.add_node(
+            decl,
             RiscOp::Load {
                 name: "updates".into(),
             },
@@ -8447,6 +8561,7 @@ windowed = reduce_window_max(padded, [2i64], [1i64])
             None,
         );
         let scatter = dag.add_node(
+            decl,
             RiscOp::ScatterAdd { axis: 0 },
             vec![target, indices, updates],
             tensor_type(vec![3, 2], chelis_types::types::Prim::F64),

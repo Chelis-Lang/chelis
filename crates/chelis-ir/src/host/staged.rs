@@ -285,6 +285,7 @@ impl Partition<'_> {
                     })
                     .collect::<Result<Vec<_>, _>>()?;
                 let id = dag.add_node(
+                    source.decl,
                     source.op.clone(),
                     inputs,
                     source.output_type.clone(),
@@ -307,6 +308,7 @@ impl Partition<'_> {
                     return Err("an executable staged helper contains an unresolved input".into());
                 }
                 dag.add_node(
+                    source.decl,
                     RiscOp::Load {
                         name: names[&StageValue::Tensor(dependency)].as_str().into(),
                     },
@@ -348,6 +350,7 @@ impl Partition<'_> {
             );
         }
         let mut dag = Dag::new();
+        dag.inherit_declarations(self.logical);
         let mut remap = BTreeMap::new();
         let mut outputs = Vec::new();
         for node in &self.logical.nodes()[start..end] {
@@ -382,6 +385,7 @@ impl Partition<'_> {
                 )?;
             }
             let id = dag.add_node(
+                node.decl,
                 node.op.clone(),
                 node.inputs.iter().map(|i| remap[i]).collect(),
                 node.output_type.clone(),
@@ -426,7 +430,11 @@ impl Partition<'_> {
             })
             .map(|node| node.id)
             .collect();
+        // The completion root retains the segment on behalf of the staged
+        // region, whose declaration is its single root's.
+        let completion_decl = self.logical.nodes()[self.logical.roots()[0].0].decl;
         let completed = dag.add_node(
+            completion_decl,
             RiscOp::Const {
                 value: chelis_types::scalar_from_i64("const", chelis_types::types::Prim::Int64, 0)
                     .expect("exact completion value"),
@@ -615,17 +623,20 @@ mod tests {
         BTreeMap<NodeId, String>,
     ) {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let tensor = TensorType {
             dims: vec![DimInfo::Named("n".into(), None)],
             precision: Prim::F32,
         };
         let x = dag.add_node(
+            decl,
             RiscOp::Load { name: "x".into() },
             vec![],
             tensor.clone(),
             None,
         );
         let required = dag.add_node(
+            decl,
             RiscOp::Const {
                 value: scalar_from_i64("reshape", Prim::Int64, 2).unwrap(),
             },
@@ -634,6 +645,7 @@ mod tests {
             None,
         );
         let actual = dag.add_node(
+            decl,
             RiscOp::Load {
                 name: "host-source".into(),
             },
@@ -642,6 +654,7 @@ mod tests {
             None,
         );
         let checked = dag.add_node(
+            decl,
             RiscOp::CheckedReshapeExtent {
                 claims: vec!["2".into()],
                 axis: RtAxis::Lit(0),
@@ -652,6 +665,7 @@ mod tests {
         );
         let literal_result_claim = with_literal_result_claim.then(|| {
             dag.add_node(
+                decl,
                 RiscOp::ExtentWitness {
                     site: crate::dag::ExtentWitnessSite::LiteralResultClaim,
                     parameter: String::new(),
@@ -665,6 +679,7 @@ mod tests {
             )
         });
         let result = dag.add_node(
+            decl,
             RiscOp::Reshape {
                 new_shape: vec![RtDim::Node(1), RtDim::Lit(2)],
             },
@@ -760,17 +775,20 @@ mod tests {
     #[test]
     fn completion_roots_do_not_take_ownership_of_named_result_claims() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let tensor = TensorType {
             dims: vec![DimInfo::Named("n".into(), None)],
             precision: Prim::F32,
         };
         let x = dag.add_node(
+            decl,
             RiscOp::Load { name: "x".into() },
             Vec::new(),
             tensor.clone(),
             None,
         );
         let declaring = dag.add_node(
+            decl,
             RiscOp::ExtentWitness {
                 site: crate::dag::ExtentWitnessSite::Caller,
                 parameter: "x".into(),
@@ -783,6 +801,7 @@ mod tests {
             None,
         );
         let claim = dag.add_node(
+            decl,
             RiscOp::ExtentWitness {
                 site: crate::dag::ExtentWitnessSite::ResultClaim {
                     claim: "n".into(),
@@ -799,6 +818,7 @@ mod tests {
         );
         dag.add_shape_dep(claim, declaring);
         let actual = dag.add_node(
+            decl,
             RiscOp::Load {
                 name: "host-source".into(),
             },
@@ -806,7 +826,7 @@ mod tests {
             scalar_type(),
             None,
         );
-        let result = dag.add_node(RiscOp::Add, vec![x, x], tensor.clone(), None);
+        let result = dag.add_node(decl, RiscOp::Add, vec![x, x], tensor.clone(), None);
         dag.add_result_claim_dep(result, claim);
         dag.add_root(result);
         let sources = vec![HostSource {
@@ -881,6 +901,7 @@ mod tests {
     #[test]
     fn literal_result_claims_remain_tokens_across_host_source_cuts() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let input_ty = TensorType {
             dims: vec![DimInfo::Named("n".into(), None)],
             precision: Prim::F32,
@@ -890,12 +911,14 @@ mod tests {
             precision: Prim::F32,
         };
         let input = dag.add_node(
+            decl,
             RiscOp::Load { name: "x".into() },
             Vec::new(),
             input_ty.clone(),
             None,
         );
         let claim = dag.add_node(
+            decl,
             RiscOp::ExtentWitness {
                 site: crate::dag::ExtentWitnessSite::LiteralResultClaim,
                 parameter: String::new(),
@@ -908,6 +931,7 @@ mod tests {
             None,
         );
         let required = dag.add_node(
+            decl,
             RiscOp::Const {
                 value: scalar_from_i64("reshape", Prim::Int64, 2).unwrap(),
             },
@@ -916,6 +940,7 @@ mod tests {
             None,
         );
         let actual = dag.add_node(
+            decl,
             RiscOp::Load {
                 name: "host-source".into(),
             },
@@ -924,6 +949,7 @@ mod tests {
             None,
         );
         let checked = dag.add_node(
+            decl,
             RiscOp::CheckedReshapeExtent {
                 claims: vec!["2".into()],
                 axis: RtAxis::Lit(0),
@@ -933,6 +959,7 @@ mod tests {
             None,
         );
         let result = dag.add_node(
+            decl,
             RiscOp::Reshape {
                 new_shape: vec![RtDim::Node(1), RtDim::Lit(2)],
             },
@@ -1002,17 +1029,20 @@ mod tests {
     #[test]
     fn local_ascription_claims_remain_nondata_tokens_across_host_source_cuts() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let input_ty = TensorType {
             dims: vec![DimInfo::Named("n".into(), None)],
             precision: Prim::F32,
         };
         let input = dag.add_node(
+            decl,
             RiscOp::Load { name: "x".into() },
             Vec::new(),
             input_ty.clone(),
             None,
         );
         let claim = dag.add_node(
+            decl,
             RiscOp::ExtentWitness {
                 site: crate::dag::ExtentWitnessSite::LocalAscriptionClaim {
                     ascription_id: 4,
@@ -1030,6 +1060,7 @@ mod tests {
             None,
         );
         let required = dag.add_node(
+            decl,
             RiscOp::Const {
                 value: scalar_from_i64("reshape", Prim::Int64, 2).unwrap(),
             },
@@ -1038,6 +1069,7 @@ mod tests {
             None,
         );
         let actual = dag.add_node(
+            decl,
             RiscOp::Load {
                 name: "host-source".into(),
             },
@@ -1046,6 +1078,7 @@ mod tests {
             None,
         );
         let checked = dag.add_node(
+            decl,
             RiscOp::CheckedReshapeExtent {
                 claims: vec!["2".into()],
                 axis: RtAxis::Lit(0),
@@ -1055,6 +1088,7 @@ mod tests {
             None,
         );
         let result = dag.add_node(
+            decl,
             RiscOp::Reshape {
                 new_shape: vec![RtDim::Node(1)],
             },

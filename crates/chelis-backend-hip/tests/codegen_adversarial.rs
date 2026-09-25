@@ -95,26 +95,31 @@ fn tensor3_f32(a: usize, b: usize, c: usize) -> TensorType {
 #[test]
 fn rt1_load_permute_add_sum_chain() {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let x = dag.add_node(
+        decl,
         RiscOp::Load { name: "x".into() },
         vec![],
         mat_f32(3, 4),
         None,
     );
     let p = dag.add_node(
+        decl,
         RiscOp::Permute { axes: vec![1, 0] },
         vec![x],
         mat_f32(4, 3),
         None,
     );
     let c = dag.add_node(
+        decl,
         RiscOp::synth_const(mat_f32(4, 3).precision, 1.0),
         vec![],
         mat_f32(4, 3),
         None,
     );
-    let a = dag.add_node(RiscOp::Add, vec![p, c], mat_f32(4, 3), None);
+    let a = dag.add_node(decl, RiscOp::Add, vec![p, c], mat_f32(4, 3), None);
     let s = dag.add_node(
+        decl,
         RiscOp::Sum {
             axis: 1,
             accumulator: chelis_types::types::Prim::F32,
@@ -165,10 +170,24 @@ fn rt1_load_permute_add_sum_chain() {
 #[test]
 fn rt2_two_loads_store() {
     let mut dag = Dag::new();
-    let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_f32(4), None);
-    let y = dag.add_node(RiscOp::Load { name: "y".into() }, vec![], vec_f32(4), None);
-    let add = dag.add_node(RiscOp::Add, vec![x, y], vec_f32(4), None);
+    let decl = dag.declare("test");
+    let x = dag.add_node(
+        decl,
+        RiscOp::Load { name: "x".into() },
+        vec![],
+        vec_f32(4),
+        None,
+    );
+    let y = dag.add_node(
+        decl,
+        RiscOp::Load { name: "y".into() },
+        vec![],
+        vec_f32(4),
+        None,
+    );
+    let add = dag.add_node(decl, RiscOp::Add, vec![x, y], vec_f32(4), None);
     let store = dag.add_node(
+        decl,
         RiscOp::Store {
             name: "result".into(),
         },
@@ -208,19 +227,22 @@ fn rt2_two_loads_store() {
 #[test]
 fn rt3_scalar_only_dag() {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let a = dag.add_node(
+        decl,
         RiscOp::synth_const(scalar_f32().precision, 3.125),
         vec![],
         scalar_f32(),
         None,
     );
     let b = dag.add_node(
+        decl,
         RiscOp::synth_const(scalar_f32().precision, 2.0),
         vec![],
         scalar_f32(),
         None,
     );
-    let c = dag.add_node(RiscOp::Mul, vec![a, b], scalar_f32(), None);
+    let c = dag.add_node(decl, RiscOp::Mul, vec![a, b], scalar_f32(), None);
     dag.add_root(c);
     let result = codegen_hip(&dag, "test_scalar").unwrap();
     let src = &result.c_source;
@@ -252,14 +274,16 @@ fn rt3_scalar_only_dag() {
 #[test]
 fn rt4_fanout_same_input_two_ops() {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let x = dag.add_node(
+        decl,
         RiscOp::synth_const(vec_f32(4).precision, 2.0),
         vec![],
         vec_f32(4),
         None,
     );
-    let a = dag.add_node(RiscOp::Add, vec![x, x], vec_f32(4), None);
-    let b = dag.add_node(RiscOp::Mul, vec![x, a], vec_f32(4), None);
+    let a = dag.add_node(decl, RiscOp::Add, vec![x, x], vec_f32(4), None);
+    let b = dag.add_node(decl, RiscOp::Mul, vec![x, a], vec_f32(4), None);
     dag.add_root(b);
     let result = codegen_hip(&dag, "test_fanout").unwrap();
     let src = &result.c_source;
@@ -303,8 +327,16 @@ fn rt4_fanout_same_input_two_ops() {
 #[test]
 fn rt5_stride_op_multiplies_strides() {
     let mut dag = Dag::new();
-    let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_f32(6), None);
+    let decl = dag.declare("test");
+    let x = dag.add_node(
+        decl,
+        RiscOp::Load { name: "x".into() },
+        vec![],
+        vec_f32(6),
+        None,
+    );
     let _s = dag.add_node(
+        decl,
         RiscOp::Stride {
             strides: vec![chelis_ir::dag::RtDim::Lit(2)],
         },
@@ -338,20 +370,24 @@ fn rt5_stride_op_multiplies_strides() {
 #[test]
 fn rt6_multiple_stores() {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let x = dag.add_node(
+        decl,
         RiscOp::synth_const(vec_f32(4).precision, 1.0),
         vec![],
         vec_f32(4),
         None,
     );
     let y = dag.add_node(
+        decl,
         RiscOp::synth_const(vec_f32(4).precision, 2.0),
         vec![],
         vec_f32(4),
         None,
     );
-    let add = dag.add_node(RiscOp::Add, vec![x, y], vec_f32(4), None);
+    let add = dag.add_node(decl, RiscOp::Add, vec![x, y], vec_f32(4), None);
     let store_a = dag.add_node(
+        decl,
         RiscOp::Store {
             name: "out_a".into(),
         },
@@ -359,8 +395,9 @@ fn rt6_multiple_stores() {
         vec_f32(4),
         None,
     );
-    let mul = dag.add_node(RiscOp::Mul, vec![x, y], vec_f32(4), None);
+    let mul = dag.add_node(decl, RiscOp::Mul, vec![x, y], vec_f32(4), None);
     let store_b = dag.add_node(
+        decl,
         RiscOp::Store {
             name: "out_b".into(),
         },
@@ -389,13 +426,16 @@ fn rt6_multiple_stores() {
 #[test]
 fn rt7_different_reductions_different_kernels() {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let x = dag.add_node(
+        decl,
         RiscOp::synth_const(mat_f32(3, 4).precision, 1.0),
         vec![],
         mat_f32(3, 4),
         None,
     );
     let sum_ax0 = dag.add_node(
+        decl,
         RiscOp::Sum {
             axis: 0,
             accumulator: chelis_types::types::Prim::F32,
@@ -405,6 +445,7 @@ fn rt7_different_reductions_different_kernels() {
         None,
     );
     let sum_ax1 = dag.add_node(
+        decl,
         RiscOp::Sum {
             axis: 1,
             accumulator: chelis_types::types::Prim::F32,
@@ -440,15 +481,24 @@ fn rt8_load_as_output_with_store() {
     // The load-root output must use the correct input slot and must be an owned
     // tensor because host callers free every output slot.
     let mut dag = Dag::new();
-    let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_f32(4), None);
+    let decl = dag.declare("test");
+    let x = dag.add_node(
+        decl,
+        RiscOp::Load { name: "x".into() },
+        vec![],
+        vec_f32(4),
+        None,
+    );
     let c = dag.add_node(
+        decl,
         RiscOp::synth_const(vec_f32(4).precision, 1.0),
         vec![],
         vec_f32(4),
         None,
     );
-    let add = dag.add_node(RiscOp::Add, vec![x, c], vec_f32(4), None);
+    let add = dag.add_node(decl, RiscOp::Add, vec![x, c], vec_f32(4), None);
     let store = dag.add_node(
+        decl,
         RiscOp::Store {
             name: "computed".into(),
         },
@@ -487,13 +537,16 @@ fn rt8_load_as_output_with_store() {
 #[test]
 fn rt9_expand_sets_stride_zero() {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let x = dag.add_node(
+        decl,
         RiscOp::synth_const(vec_f32(3).precision, 1.0),
         vec![],
         vec_f32(3),
         None,
     );
     let e = dag.add_node(
+        decl,
         RiscOp::Expand {
             axis: 0,
             size: chelis_ir::dag::RtDim::Lit(4),
@@ -529,13 +582,16 @@ fn rt9_expand_sets_stride_zero() {
 #[test]
 fn rt10_reshape_view_correct() {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let x = dag.add_node(
+        decl,
         RiscOp::synth_const(mat_f32(2, 3).precision, 1.0),
         vec![],
         mat_f32(2, 3),
         None,
     );
     let r = dag.add_node(
+        decl,
         RiscOp::Reshape {
             new_shape: vec![chelis_ir::dag::RtDim::Lit(6)],
         },
@@ -576,20 +632,24 @@ fn rt10_reshape_view_correct() {
 #[test]
 fn rt11_store_no_double_free() {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let x = dag.add_node(
+        decl,
         RiscOp::synth_const(vec_f32(4).precision, 1.0),
         vec![],
         vec_f32(4),
         None,
     );
     let y = dag.add_node(
+        decl,
         RiscOp::synth_const(vec_f32(4).precision, 2.0),
         vec![],
         vec_f32(4),
         None,
     );
-    let add = dag.add_node(RiscOp::Add, vec![x, y], vec_f32(4), None);
+    let add = dag.add_node(decl, RiscOp::Add, vec![x, y], vec_f32(4), None);
     let store = dag.add_node(
+        decl,
         RiscOp::Store { name: "out".into() },
         vec![add],
         vec_f32(4),
@@ -632,13 +692,16 @@ fn rt11_store_no_double_free() {
 #[test]
 fn rt12_cast_emits_kernel() {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let x = dag.add_node(
+        decl,
         RiscOp::synth_const(vec_f32(4).precision, 1.0),
         vec![],
         vec_f32(4),
         None,
     );
     let c = dag.add_node(
+        decl,
         RiscOp::Cast {
             new_precision: Prim::F64,
         },
@@ -667,13 +730,16 @@ fn rt12_cast_emits_kernel() {
 #[test]
 fn rt12b_cast_to_bool_is_rejected_not_emitted_as_f32() {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let x = dag.add_node(
+        decl,
         RiscOp::synth_const(vec_f32(4).precision, 1.0),
         vec![],
         vec_f32(4),
         None,
     );
     let c = dag.add_node(
+        decl,
         RiscOp::Cast {
             new_precision: Prim::Bool,
         },
@@ -694,8 +760,16 @@ fn rt12b_cast_to_bool_is_rejected_not_emitted_as_f32() {
 #[test]
 fn rt12b_cast_from_bool_carries_the_bool_family_authority() {
     let mut dag = Dag::new();
-    let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_bool(4), None);
+    let decl = dag.declare("test");
+    let x = dag.add_node(
+        decl,
+        RiscOp::Load { name: "x".into() },
+        vec![],
+        vec_bool(4),
+        None,
+    );
     let c = dag.add_node(
+        decl,
         RiscOp::Cast {
             new_precision: Prim::F32,
         },
@@ -717,8 +791,15 @@ fn rt12b_cast_from_bool_carries_the_bool_family_authority() {
 #[test]
 fn rt12b_copy_bool_carries_the_bool_family_authority() {
     let mut dag = Dag::new();
-    let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_bool(4), None);
-    let copy = dag.add_node(RiscOp::Copy, vec![x], vec_bool(4), None);
+    let decl = dag.declare("test");
+    let x = dag.add_node(
+        decl,
+        RiscOp::Load { name: "x".into() },
+        vec![],
+        vec_bool(4),
+        None,
+    );
+    let copy = dag.add_node(decl, RiscOp::Copy, vec![x], vec_bool(4), None);
     dag.add_root(copy);
     let error = expect_hip_codegen_rejection(
         codegen_hip(&dag, "test_copy_bool"),
@@ -732,9 +813,16 @@ fn rt12b_copy_bool_carries_the_bool_family_authority() {
 #[test]
 fn rt12b_realize_bool_carries_the_bool_family_authority() {
     let mut dag = Dag::new();
-    let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_bool(4), None);
-    let owned = dag.add_node(RiscOp::Copy, vec![x], vec_bool(4), None);
-    let realize = dag.add_node(RiscOp::Realize, vec![owned], vec_bool(4), None);
+    let decl = dag.declare("test");
+    let x = dag.add_node(
+        decl,
+        RiscOp::Load { name: "x".into() },
+        vec![],
+        vec_bool(4),
+        None,
+    );
+    let owned = dag.add_node(decl, RiscOp::Copy, vec![x], vec_bool(4), None);
+    let realize = dag.add_node(decl, RiscOp::Realize, vec![owned], vec_bool(4), None);
     dag.add_root(realize);
     let error = expect_hip_codegen_rejection(
         codegen_hip(&dag, "test_realize_bool"),
@@ -749,8 +837,15 @@ fn rt12b_realize_bool_carries_the_bool_family_authority() {
 #[test]
 fn rt12b_unrelated_bool_numeric_op_retains_generic_authority() {
     let mut dag = Dag::new();
-    let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_bool(4), None);
-    let neg = dag.add_node(RiscOp::Neg, vec![x], vec_bool(4), None);
+    let decl = dag.declare("test");
+    let x = dag.add_node(
+        decl,
+        RiscOp::Load { name: "x".into() },
+        vec![],
+        vec_bool(4),
+        None,
+    );
+    let neg = dag.add_node(decl, RiscOp::Neg, vec![x], vec_bool(4), None);
     dag.add_root(neg);
     let error = expect_hip_codegen_rejection(
         codegen_hip(&dag, "test_neg_bool"),
@@ -764,9 +859,16 @@ fn rt12b_unrelated_bool_numeric_op_retains_generic_authority() {
 #[test]
 fn rt12b_non_bool_materialization_retains_generic_authority() {
     let mut dag = Dag::new();
-    let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_i64(4), None);
-    let owned = dag.add_node(RiscOp::Copy, vec![x], vec_i64(4), None);
-    let realize = dag.add_node(RiscOp::Realize, vec![owned], vec_i64(4), None);
+    let decl = dag.declare("test");
+    let x = dag.add_node(
+        decl,
+        RiscOp::Load { name: "x".into() },
+        vec![],
+        vec_i64(4),
+        None,
+    );
+    let owned = dag.add_node(decl, RiscOp::Copy, vec![x], vec_i64(4), None);
+    let realize = dag.add_node(decl, RiscOp::Realize, vec![owned], vec_i64(4), None);
     dag.add_root(realize);
     let error = expect_hip_codegen_rejection(
         codegen_hip(&dag, "test_realize_i64"),
@@ -779,19 +881,23 @@ fn rt12b_non_bool_materialization_retains_generic_authority() {
 #[test]
 fn rt12c_cmplt_to_bool_is_not_emitted_at_operand_width() {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let a = dag.add_node(
+        decl,
         RiscOp::synth_const(vec_f32(4).precision, 1.0),
         vec![],
         vec_f32(4),
         None,
     );
     let b = dag.add_node(
+        decl,
         RiscOp::synth_const(vec_f32(4).precision, 2.0),
         vec![],
         vec_f32(4),
         None,
     );
     let c = dag.add_node(
+        decl,
         RiscOp::Compare(ComparisonKind::CmpLt),
         vec![a, b],
         vec_bool(4),
@@ -822,13 +928,16 @@ fn rt13_zero_size_grid() {
 #[test]
 fn rt14_staged_scalar_reduction_allocates_inline_scratch() {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let x = dag.add_node(
+        decl,
         RiscOp::synth_const(vec_f32(1024).precision, 1.0),
         vec![],
         vec_f32(1024),
         None,
     );
     let sum = dag.add_node(
+        decl,
         RiscOp::Sum {
             axis: 0,
             accumulator: chelis_types::types::Prim::F32,
@@ -856,19 +965,23 @@ fn rt14_staged_scalar_reduction_allocates_inline_scratch() {
 #[test]
 fn rt15_matmul_specialization_respects_contiguity() {
     let mut contiguous = Dag::new();
+    let contiguous_decl = contiguous.declare("test");
     let a = contiguous.add_node(
+        contiguous_decl,
         RiscOp::synth_const(mat_f32(2, 3).precision, 1.0),
         vec![],
         mat_f32(2, 3),
         None,
     );
     let b = contiguous.add_node(
+        contiguous_decl,
         RiscOp::synth_const(mat_f32(3, 4).precision, 1.0),
         vec![],
         mat_f32(3, 4),
         None,
     );
     let ea = contiguous.add_node(
+        contiguous_decl,
         RiscOp::Expand {
             axis: 2,
             size: chelis_ir::dag::RtDim::Lit(4),
@@ -878,6 +991,7 @@ fn rt15_matmul_specialization_respects_contiguity() {
         None,
     );
     let eb = contiguous.add_node(
+        contiguous_decl,
         RiscOp::Expand {
             axis: 0,
             size: chelis_ir::dag::RtDim::Lit(2),
@@ -886,8 +1000,15 @@ fn rt15_matmul_specialization_respects_contiguity() {
         tensor3_f32(2, 3, 4),
         None,
     );
-    let mul = contiguous.add_node(RiscOp::Mul, vec![ea, eb], tensor3_f32(2, 3, 4), None);
+    let mul = contiguous.add_node(
+        contiguous_decl,
+        RiscOp::Mul,
+        vec![ea, eb],
+        tensor3_f32(2, 3, 4),
+        None,
+    );
     let sum = contiguous.add_node(
+        contiguous_decl,
         RiscOp::Sum {
             axis: 1,
             accumulator: chelis_types::types::Prim::F32,
@@ -906,25 +1027,30 @@ fn rt15_matmul_specialization_respects_contiguity() {
     );
 
     let mut fallback = Dag::new();
+    let fallback_decl = fallback.declare("test");
     let base_a = fallback.add_node(
+        fallback_decl,
         RiscOp::synth_const(mat_f32(3, 2).precision, 1.0),
         vec![],
         mat_f32(3, 2),
         None,
     );
     let a_perm = fallback.add_node(
+        fallback_decl,
         RiscOp::Permute { axes: vec![1, 0] },
         vec![base_a],
         mat_f32(2, 3),
         None,
     );
     let b = fallback.add_node(
+        fallback_decl,
         RiscOp::synth_const(mat_f32(3, 4).precision, 1.0),
         vec![],
         mat_f32(3, 4),
         None,
     );
     let ea = fallback.add_node(
+        fallback_decl,
         RiscOp::Expand {
             axis: 2,
             size: chelis_ir::dag::RtDim::Lit(4),
@@ -934,6 +1060,7 @@ fn rt15_matmul_specialization_respects_contiguity() {
         None,
     );
     let eb = fallback.add_node(
+        fallback_decl,
         RiscOp::Expand {
             axis: 0,
             size: chelis_ir::dag::RtDim::Lit(2),
@@ -942,8 +1069,15 @@ fn rt15_matmul_specialization_respects_contiguity() {
         tensor3_f32(2, 3, 4),
         None,
     );
-    let mul = fallback.add_node(RiscOp::Mul, vec![ea, eb], tensor3_f32(2, 3, 4), None);
+    let mul = fallback.add_node(
+        fallback_decl,
+        RiscOp::Mul,
+        vec![ea, eb],
+        tensor3_f32(2, 3, 4),
+        None,
+    );
     let sum = fallback.add_node(
+        fallback_decl,
         RiscOp::Sum {
             axis: 1,
             accumulator: chelis_types::types::Prim::F32,

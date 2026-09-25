@@ -12683,13 +12683,16 @@ mod runtime_dim_reject_tests {
     /// exercise the movement/reshape arms).
     fn dag_with_scalar() -> (Dag, chelis_ir::dag::NodeId, chelis_ir::dag::NodeId) {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let x = dag.add_node(
+            decl,
             RiscOp::Load { name: "x".into() },
             vec![],
             ty(lit_dims(&[4]), Prim::F32),
             None,
         );
         let m = dag.add_node(
+            decl,
             RiscOp::Load { name: "m".into() },
             vec![],
             ty(lit_dims(&[]), Prim::Int32),
@@ -12701,7 +12704,9 @@ mod runtime_dim_reject_tests {
     #[test]
     fn hip_seam_rejects_node_valued_reshape_target() {
         let (mut dag, x, m) = dag_with_scalar();
+        let decl = dag.nodes()[0].decl;
         dag.add_node(
+            decl,
             RiscOp::Reshape {
                 new_shape: vec![RtDim::Node(1)],
             },
@@ -12723,13 +12728,16 @@ mod runtime_dim_reject_tests {
     #[test]
     fn hip_seam_accepts_literal_movement_and_reshape() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let x = dag.add_node(
+            decl,
             RiscOp::Load { name: "x".into() },
             vec![],
             ty(lit_dims(&[4]), Prim::F32),
             None,
         );
         let shrunk = dag.add_node(
+            decl,
             RiscOp::Shrink {
                 bounds: vec![(RtDim::Lit(0), RtDim::Lit(2))],
             },
@@ -12738,6 +12746,7 @@ mod runtime_dim_reject_tests {
             None,
         );
         dag.add_node(
+            decl,
             RiscOp::Reshape {
                 new_shape: vec![RtDim::Lit(2), RtDim::Lit(1)],
             },

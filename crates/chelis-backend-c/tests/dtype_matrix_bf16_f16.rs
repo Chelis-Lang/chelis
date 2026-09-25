@@ -306,8 +306,10 @@ fn bf16_const_fill_produces_exact_bit_pattern() {
     ];
     for &(value, expected) in cases {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let n = 4;
         dag.add_node(
+            decl,
             RiscOp::synth_const(vec_ty(n, Prim::Bf16).precision, value as f64),
             vec![],
             vec_ty(n, Prim::Bf16),
@@ -353,8 +355,10 @@ fn f16_const_fill_produces_exact_bit_pattern() {
     ];
     for &(value, expected) in cases {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let n = 4;
         dag.add_node(
+            decl,
             RiscOp::synth_const(vec_ty(n, Prim::F16).precision, value as f64),
             vec![],
             vec_ty(n, Prim::F16),
@@ -407,19 +411,22 @@ fn eval_scalar(dag: &Dag) -> f64 {
 #[test]
 fn bf16_add_agrees_with_evaluator() {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let a = dag.add_node(
+        decl,
         RiscOp::synth_const(scalar_ty(Prim::Bf16).precision, 1.5),
         vec![],
         scalar_ty(Prim::Bf16),
         None,
     );
     let b = dag.add_node(
+        decl,
         RiscOp::synth_const(scalar_ty(Prim::Bf16).precision, 2.5),
         vec![],
         scalar_ty(Prim::Bf16),
         None,
     );
-    dag.add_node(RiscOp::Add, vec![a, b], scalar_ty(Prim::Bf16), None);
+    dag.add_node(decl, RiscOp::Add, vec![a, b], scalar_ty(Prim::Bf16), None);
     let result = codegen(&dag, "bf16_add").unwrap();
     let main_c = format!(
         r#"{HARNESS}
@@ -447,19 +454,22 @@ int main(void) {{
 #[test]
 fn f16_add_agrees_with_evaluator() {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let a = dag.add_node(
+        decl,
         RiscOp::synth_const(scalar_ty(Prim::F16).precision, 1.5),
         vec![],
         scalar_ty(Prim::F16),
         None,
     );
     let b = dag.add_node(
+        decl,
         RiscOp::synth_const(scalar_ty(Prim::F16).precision, 2.5),
         vec![],
         scalar_ty(Prim::F16),
         None,
     );
-    dag.add_node(RiscOp::Add, vec![a, b], scalar_ty(Prim::F16), None);
+    dag.add_node(decl, RiscOp::Add, vec![a, b], scalar_ty(Prim::F16), None);
     let result = codegen(&dag, "f16_add").unwrap();
     let main_c = format!(
         r#"{HARNESS}
@@ -487,19 +497,22 @@ int main(void) {{
 #[test]
 fn bf16_mul_agrees_with_evaluator() {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let a = dag.add_node(
+        decl,
         RiscOp::synth_const(scalar_ty(Prim::Bf16).precision, 3.0),
         vec![],
         scalar_ty(Prim::Bf16),
         None,
     );
     let b = dag.add_node(
+        decl,
         RiscOp::synth_const(scalar_ty(Prim::Bf16).precision, 2.0),
         vec![],
         scalar_ty(Prim::Bf16),
         None,
     );
-    dag.add_node(RiscOp::Mul, vec![a, b], scalar_ty(Prim::Bf16), None);
+    dag.add_node(decl, RiscOp::Mul, vec![a, b], scalar_ty(Prim::Bf16), None);
     let result = codegen(&dag, "bf16_mul").unwrap();
     let main_c = format!(
         r#"{HARNESS}
@@ -526,19 +539,22 @@ int main(void) {{
 #[test]
 fn f16_mul_agrees_with_evaluator() {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let a = dag.add_node(
+        decl,
         RiscOp::synth_const(scalar_ty(Prim::F16).precision, 3.0),
         vec![],
         scalar_ty(Prim::F16),
         None,
     );
     let b = dag.add_node(
+        decl,
         RiscOp::synth_const(scalar_ty(Prim::F16).precision, 2.0),
         vec![],
         scalar_ty(Prim::F16),
         None,
     );
-    dag.add_node(RiscOp::Mul, vec![a, b], scalar_ty(Prim::F16), None);
+    dag.add_node(decl, RiscOp::Mul, vec![a, b], scalar_ty(Prim::F16), None);
     let result = codegen(&dag, "f16_mul").unwrap();
     let main_c = format!(
         r#"{HARNESS}
@@ -575,14 +591,16 @@ int main(void) {{
 fn bf16_reduce_sum_uses_f32_accumulator_per_spec_5_7_1() {
     let n = 1024;
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let load = dag.add_node(
+        decl,
         RiscOp::Load { name: "x".into() },
         vec![],
         vec_ty(n, Prim::Bf16),
         None,
     );
     let sum_op = RiscOp::sum_default(0, Prim::Bf16).expect("sum constructs");
-    dag.add_node(sum_op, vec![load], scalar_ty(Prim::F32), None);
+    dag.add_node(decl, sum_op, vec![load], scalar_ty(Prim::F32), None);
     let result = codegen(&dag, "bf16_sum_1024").unwrap();
     let main_c = format!(
         r#"{HARNESS}
@@ -632,14 +650,16 @@ int main(void) {{
 fn f16_reduce_sum_uses_f32_accumulator_per_spec_5_7_1() {
     let n = 1024;
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let load = dag.add_node(
+        decl,
         RiscOp::Load { name: "x".into() },
         vec![],
         vec_ty(n, Prim::F16),
         None,
     );
     let sum_op = RiscOp::sum_default(0, Prim::F16).expect("sum constructs");
-    dag.add_node(sum_op, vec![load], scalar_ty(Prim::F32), None);
+    dag.add_node(decl, sum_op, vec![load], scalar_ty(Prim::F32), None);
     let result = codegen(&dag, "f16_sum_1024").unwrap();
     let main_c = format!(
         r#"{HARNESS}
@@ -688,13 +708,16 @@ int main(void) {{
 fn bf16_reduce_max_agrees_with_evaluator() {
     let n = 4;
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let load = dag.add_node(
+        decl,
         RiscOp::Load { name: "x".into() },
         vec![],
         vec_ty(n, Prim::Bf16),
         None,
     );
     dag.add_node(
+        decl,
         RiscOp::MaxReduce { axis: 0 },
         vec![load],
         scalar_ty(Prim::Bf16),
@@ -731,13 +754,16 @@ int main(void) {{
 fn f16_reduce_max_agrees_with_evaluator() {
     let n = 4;
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let load = dag.add_node(
+        decl,
         RiscOp::Load { name: "x".into() },
         vec![],
         vec_ty(n, Prim::F16),
         None,
     );
     dag.add_node(
+        decl,
         RiscOp::MaxReduce { axis: 0 },
         vec![load],
         scalar_ty(Prim::F16),
@@ -776,13 +802,16 @@ int main(void) {{
 
 fn build_bf16_matmul_dag() -> Dag {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let a = dag.add_node(
+        decl,
         RiscOp::Load { name: "a".into() },
         vec![],
         mat_ty(2, 3, Prim::Bf16),
         None,
     );
     let b = dag.add_node(
+        decl,
         RiscOp::Load { name: "b".into() },
         vec![],
         mat_ty(3, 4, Prim::Bf16),
@@ -796,19 +825,22 @@ fn build_bf16_matmul_dag() -> Dag {
         Prim::Bf16,
     )
     .expect("bf16 matmul constructs");
-    dag.add_node(mm, vec![a, b], mat_ty(2, 4, Prim::Bf16), None);
+    dag.add_node(decl, mm, vec![a, b], mat_ty(2, 4, Prim::Bf16), None);
     dag
 }
 
 fn build_f16_matmul_dag() -> Dag {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let a = dag.add_node(
+        decl,
         RiscOp::Load { name: "a".into() },
         vec![],
         mat_ty(2, 3, Prim::F16),
         None,
     );
     let b = dag.add_node(
+        decl,
         RiscOp::Load { name: "b".into() },
         vec![],
         mat_ty(3, 4, Prim::F16),
@@ -822,7 +854,7 @@ fn build_f16_matmul_dag() -> Dag {
         Prim::F16,
     )
     .expect("f16 matmul constructs");
-    dag.add_node(mm, vec![a, b], mat_ty(2, 4, Prim::F16), None);
+    dag.add_node(decl, mm, vec![a, b], mat_ty(2, 4, Prim::F16), None);
     dag
 }
 

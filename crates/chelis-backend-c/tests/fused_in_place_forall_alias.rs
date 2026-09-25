@@ -50,32 +50,36 @@ fn fan_in_dag(
     out_ty: TensorType,
 ) -> (Dag, chelis_ir::dag::NodeId, chelis_ir::dag::NodeId) {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     // Sources: Load + Copy stages so each fan-in input is SlotBacked
     // (intermediate), not BorrowedLoad. This mirrors how `copy(x)` arms
     // materialize into distinct backing slots in the real probe.
     let x_a = dag.add_node(
+        decl,
         RiscOp::Load { name: "x_a".into() },
         vec![],
         a_ty.clone(),
         None,
     );
-    let a = dag.add_node(RiscOp::Copy, vec![x_a], a_ty.clone(), None);
+    let a = dag.add_node(decl, RiscOp::Copy, vec![x_a], a_ty.clone(), None);
 
     let x_b = dag.add_node(
+        decl,
         RiscOp::Load { name: "x_b".into() },
         vec![],
         b_ty.clone(),
         None,
     );
-    let b = dag.add_node(RiscOp::Copy, vec![x_b], b_ty.clone(), None);
+    let b = dag.add_node(decl, RiscOp::Copy, vec![x_b], b_ty.clone(), None);
 
     let x_c = dag.add_node(
+        decl,
         RiscOp::Load { name: "x_c".into() },
         vec![],
         c_ty.clone(),
         None,
     );
-    let c = dag.add_node(RiscOp::Copy, vec![x_c], c_ty.clone(), None);
+    let c = dag.add_node(decl, RiscOp::Copy, vec![x_c], c_ty.clone(), None);
 
     // Fused: `v0 = a + b; v1 = v0 * c;` over three external inputs.
     let ops = vec![
@@ -88,7 +92,7 @@ fn fan_in_dag(
             input_indices: vec![FusedInput::PreviousStep(0), FusedInput::External(2)],
         },
     ];
-    let fused = dag.add_node(RiscOp::FusedElem { ops }, vec![a, b, c], out_ty, None);
+    let fused = dag.add_node(decl, RiscOp::FusedElem { ops }, vec![a, b, c], out_ty, None);
     dag.set_reusable_input(fused, a);
     dag.add_root(fused);
     (dag, fused, a)
@@ -246,26 +250,30 @@ fn fan_in_different_precision_does_not_alias() {
 #[test]
 fn fan_in_multi_consumer_reusable_input_does_not_alias() {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let x_a = dag.add_node(
+        decl,
         RiscOp::Load { name: "x_a".into() },
         vec![],
         vec_lit_f32(4),
         None,
     );
-    let a = dag.add_node(RiscOp::Copy, vec![x_a], vec_named_f32("seq", 4), None);
+    let a = dag.add_node(decl, RiscOp::Copy, vec![x_a], vec_named_f32("seq", 4), None);
     let x_b = dag.add_node(
+        decl,
         RiscOp::Load { name: "x_b".into() },
         vec![],
         vec_named_f32("seq", 4),
         None,
     );
-    let b = dag.add_node(RiscOp::Copy, vec![x_b], vec_named_f32("seq", 4), None);
+    let b = dag.add_node(decl, RiscOp::Copy, vec![x_b], vec_named_f32("seq", 4), None);
 
     let ops = vec![FusedStep {
         op: FusedStepOp::Add,
         input_indices: vec![FusedInput::External(0), FusedInput::External(1)],
     }];
     let fused = dag.add_node(
+        decl,
         RiscOp::FusedElem { ops },
         vec![a, b],
         vec_named_f32("seq", 4),
@@ -274,7 +282,7 @@ fn fan_in_multi_consumer_reusable_input_does_not_alias() {
     dag.set_reusable_input(fused, a);
 
     // The second consumer keeps `a` live and forces a fresh fused output.
-    let other = dag.add_node(RiscOp::Neg, vec![a], vec_named_f32("seq", 4), None);
+    let other = dag.add_node(decl, RiscOp::Neg, vec![a], vec_named_f32("seq", 4), None);
     dag.add_root(fused);
     dag.add_root(other);
 

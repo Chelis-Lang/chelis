@@ -587,8 +587,8 @@ use chelis_types::{
 use chelis_vocab::EffectKind;
 
 use crate::dag::{
-    ComparisonKind, Dag, DeclarationId, DimExpr, DimInfo, LogicalKind, NodeId, RiscOp, RtAxis,
-    RtDim, TensorType,
+    ComparisonKind, Dag, DeclId, DimExpr, DimInfo, LogicalKind, NodeId, RiscOp, RtAxis, RtDim,
+    TensorType,
 };
 use crate::grad::grad_dag_checked;
 use crate::tier2;
@@ -997,12 +997,13 @@ fn insert_copy_nodes_for_consuming_fanout(dag: &Dag) -> (Dag, UnordMap<NodeId, N
                         .get(mapped)
                         .map(|n| n.output_type.clone())
                         .unwrap_or_else(LowerCtx::default_type);
-                    let copy =
-                        out.add_node(RiscOp::Copy, vec![mapped], input_ty, node.span_id.clone());
-                    // The copy serves this consumer, so it is its declaration's.
-                    if let Some(copy_node) = out.node_mut(copy) {
-                        copy_node.declaration = node.declaration;
-                    }
+                    let copy = out.add_node(
+                        node.decl,
+                        RiscOp::Copy,
+                        vec![mapped],
+                        input_ty,
+                        node.span_id.clone(),
+                    );
                     inputs.push(copy);
                     continue;
                 }
@@ -1011,13 +1012,13 @@ fn insert_copy_nodes_for_consuming_fanout(dag: &Dag) -> (Dag, UnordMap<NodeId, N
         }
 
         let new_id = out.add_node(
+            node.decl,
             node.op.clone(),
             inputs,
             node.output_type.clone(),
             node.span_id.clone(),
         );
         if let Some(new_node) = out.node_mut(new_id) {
-            new_node.declaration = node.declaration;
             new_node.reusable_input = node
                 .reusable_input
                 .and_then(|old| id_map.get(&old).copied());
@@ -1088,18 +1089,17 @@ fn insert_drop_nodes_for_unconsumed_values(mut dag: Dag) -> Dag {
                 node.output_type.clone(),
                 node.span_id.clone(),
                 node.merged_spans.clone(),
-                node.declaration,
+                node.decl,
             )
         })
         .collect::<Vec<_>>();
 
-    for (id, ty, span_id, merged_spans, declaration) in values_to_drop {
-        let drop = dag.add_node(RiscOp::Drop, vec![id], ty, span_id);
+    // A discarded value's terminal belongs to the declaration of the value
+    // it drops (chelis#2476: an unrooted `Drop` owned by no root).
+    for (id, ty, span_id, merged_spans, decl) in values_to_drop {
+        let drop = dag.add_node(decl, RiscOp::Drop, vec![id], ty, span_id);
         if let Some(node) = dag.node_mut(drop) {
             node.merged_spans = merged_spans;
-            // A discarded value's terminal belongs to the declaration that
-            // discarded it (chelis#2476: an unrooted `Drop` owned by no root).
-            node.declaration = declaration;
         }
     }
 
@@ -1121,13 +1121,13 @@ fn strip_drop_nodes(dag: &Dag) -> (Dag, UnordMap<NodeId, NodeId>) {
             .filter_map(|input| id_map.get(input).copied())
             .collect::<Vec<_>>();
         let new_id = out.add_node(
+            node.decl,
             node.op.clone(),
             inputs,
             node.output_type.clone(),
             node.span_id.clone(),
         );
         if let Some(new_node) = out.node_mut(new_id) {
-            new_node.declaration = node.declaration;
             new_node.reusable_input = node
                 .reusable_input
                 .and_then(|old| id_map.get(&old).copied());
@@ -1994,6 +1994,8 @@ pub(crate) fn try_lower_staged_host_region(
             context.program_signatures.clone(),
             LinearityInfo::default(),
         );
+        // The staged region is this graph's only declaration.
+        ctx.decl = Some(ctx.dag.declare(""));
         ctx.local_tensor_ascriptions = context.local_tensor_ascriptions.clone();
         ctx.prec_substitutions = context
             .tensor_specialization
@@ -2009,6 +2011,7 @@ pub(crate) fn try_lower_staged_host_region(
         for param in params {
             if let Some(ty) = crate::host::tensor_type_from_host_input(&param.ty) {
                 let load = ctx.dag.add_node(
+                    ctx.decl(),
                     RiscOp::Load {
                         name: param.name.as_str().into(),
                     },
@@ -2118,6 +2121,8 @@ fn lower_subexpr_program_inner_impl(
         context.program_signatures.clone(),
         LinearityInfo::default(),
     );
+    // The lowered expression is this graph's only declaration.
+    ctx.decl = Some(ctx.dag.declare(""));
     ctx.local_tensor_ascriptions = context.local_tensor_ascriptions.clone();
     ctx.prec_substitutions = context
         .tensor_specialization
@@ -2137,6 +2142,7 @@ fn lower_subexpr_program_inner_impl(
         scoped_bindings.clone().into_iter().unzip();
     for (name, tensor_ty) in scoped_bindings {
         let load = ctx.dag.add_node(
+            ctx.decl(),
             RiscOp::Load {
                 name: name.as_str().into(),
             },
@@ -2189,6 +2195,7 @@ fn lower_subexpr_program_inner_impl(
                 .map(|node| node.output_type.clone())
                 .unwrap_or_else(LowerCtx::default_type);
             ctx.dag.add_node(
+                ctx.decl(),
                 RiscOp::Copy,
                 vec![id],
                 output_type,
@@ -2234,6 +2241,7 @@ fn lower_subexpr_program_inner_impl(
                     .map(|node| node.output_type.clone())
                     .unwrap_or_else(LowerCtx::default_type);
                 let distinct = ctx.dag.add_node(
+                    ctx.decl(),
                     RiscOp::Copy,
                     vec![value],
                     output_type,
@@ -6878,7 +6886,14 @@ struct LowerCtx<'program> {
     /// chelis#2476: each top-level declaration lowered so far with the names
     /// its body references, resolved to declarations by
     /// [`LowerCtx::resolve_declaration_references`] once all are known.
-    declaration_references: Vec<(DeclarationId, Vec<String>)>,
+    declaration_references: Vec<(DeclId, Vec<String>)>,
+    /// The declaration being lowered: every node this context adds belongs
+    /// to it ([`Self::decl`]). `lower_top_level` registers and sets it for
+    /// each top-level item before lowering its body; a context that lowers a
+    /// single expression registers one at construction; a `grad` or `vmap`
+    /// sub-context carries its parent's. `None` outside any declaration, where
+    /// adding a node is a lowering defect.
+    decl: Option<DeclId>,
     dim_substitutions: UnordMap<String, DimInfo>,
     /// WS-A8: precision-tvar substitutions, keyed by the precision-var
     /// name (e.g. `p`) as it appears in `(t-var {} p)` precision slots
@@ -6939,7 +6954,7 @@ struct LowerCtx<'program> {
     runtime_list_checks: Vec<RuntimeListCheck>,
     /// The span_id of the Deep `Expr` currently being lowered. Threaded
     /// through `lower_expr` (set on entry, restored on exit) so every
-    /// helper that calls `self.dag.add_node(...)` can pass the
+    /// helper that calls `self.dag.add_node(self.decl(), ...)` can pass the
     /// region-corresponding span without plumbing it through every
     /// helper's argument list. See
     /// `spec/design/chelis_span_survival.md` §2.3.
@@ -6994,6 +7009,7 @@ impl<'program> LowerCtx<'program> {
             callable_dependency_state: CallableDependencyState::default(),
             rootless_defs: BTreeSet::new(),
             declaration_references: Vec::new(),
+            decl: None,
             dim_substitutions: UnordMap::new(),
             prec_substitutions: UnordMap::new(),
             rank_substitutions: UnordMap::new(),
@@ -7074,6 +7090,7 @@ impl<'program> LowerCtx<'program> {
                     unreachable!("sum_default returns Sum");
                 };
                 let sum = self.dag.add_node(
+                    self.decl(),
                     op,
                     vec![input],
                     TensorType {
@@ -7086,6 +7103,7 @@ impl<'program> LowerCtx<'program> {
                     sum
                 } else {
                     self.dag.add_node(
+                        self.decl(),
                         RiscOp::Cast {
                             new_precision: output_ty.precision,
                         },
@@ -7098,6 +7116,7 @@ impl<'program> LowerCtx<'program> {
             "mean" => {
                 let parent_span = self.current_span_id.clone();
                 let node = tier2::lower_mean(
+                    self.decl(),
                     &mut self.dag,
                     input,
                     axis,
@@ -7107,18 +7126,21 @@ impl<'program> LowerCtx<'program> {
                 self.attach_reuse_hint(node, app_span, &[input])
             }
             "max_reduce" => self.dag.add_node(
+                self.decl(),
                 RiscOp::MaxReduce { axis },
                 vec![input],
                 output_ty,
                 self.current_span_id.clone(),
             ),
             "min_reduce" => self.dag.add_node(
+                self.decl(),
                 RiscOp::MinReduce { axis },
                 vec![input],
                 output_ty,
                 self.current_span_id.clone(),
             ),
             "prod_reduce" => self.dag.add_node(
+                self.decl(),
                 RiscOp::ProdReduce { axis },
                 vec![input],
                 output_ty,
@@ -7189,7 +7211,7 @@ impl<'program> LowerCtx<'program> {
             .chain(std::iter::once(key))
             .chain(activation)
             .collect();
-        self.dag.add_node(op, inputs, ty, span)
+        self.dag.add_node(self.decl(), op, inputs, ty, span)
     }
 
     /// `[05-OP-70]` `split_key(k)`: two IR nodes, `Split{Left}` and
@@ -7221,7 +7243,7 @@ impl<'program> LowerCtx<'program> {
     fn lower_key_operation(&mut self, op: RiscOp, operands: Vec<NodeId>, ty: TensorType) -> NodeId {
         let span = self.current_span_id.clone();
         let inputs = operands.into_iter().chain(self.draw_activation()).collect();
-        self.dag.add_node(op, inputs, ty, span)
+        self.dag.add_node(self.decl(), op, inputs, ty, span)
     }
 
     /// The type of a lowered key operand: its own shape at dtype `key`.
@@ -7375,6 +7397,7 @@ impl<'program> LowerCtx<'program> {
                 .map(|node| node.output_type.clone())
                 .unwrap_or_else(Self::default_type);
             let load = subctx.dag.add_node(
+                subctx.decl(),
                 RiscOp::Load {
                     name: name.as_str().into(),
                 },
@@ -7794,11 +7817,10 @@ impl<'program> LowerCtx<'program> {
             }
         }
 
-        // chelis#2476: every node this declaration's lowering appends is
-        // its own, including the roots and the `Store`s below. A value
+        // chelis#2476: every node this declaration's lowering adds is its
+        // own, including the roots and the `Store`s below. A value
         // declaration runs where it is referenced; a function runs inlined in
         // each caller, so its standalone nodes are its own activation only.
-        let first = self.dag.len();
         let declared = stamped_parts(expr).and_then(|(tag, _, kids)| match tag {
             DeepTag::Def => kids.first().and_then(|expr| match expr {
                 Expr::Atom(Atom::Name(name), _) => Some((
@@ -7813,13 +7835,37 @@ impl<'program> LowerCtx<'program> {
             _ => None,
         });
         let (declaration_name, is_value) = declared.unwrap_or(("", false));
-        let declaration = self.dag.add_declaration(declaration_name, is_value);
-        self.declaration_references.push((
-            declaration,
-            chelis_types::linearity::free_runtime_variables(expr),
-        ));
+        let decl = if is_value {
+            self.dag.declare_value(declaration_name)
+        } else {
+            self.dag.declare(declaration_name)
+        };
+        self.declaration_references
+            .push((decl, chelis_types::linearity::free_runtime_variables(expr)));
+        let enclosing = self.decl.replace(decl);
         self.lower_top_level_body(expr);
-        self.dag.attribute_nodes_from(first, declaration);
+        self.decl = enclosing;
+    }
+
+    /// A unit test's context: one declaration, `test`, owns every node it
+    /// adds.
+    #[cfg(test)]
+    fn declared_for_test(mut self) -> Self {
+        self.decl = Some(self.dag.declare("test"));
+        self
+    }
+
+    /// The declaration every node this context adds belongs to. Lowering
+    /// outside a declaration is a defect: such a node would belong to no
+    /// top-level item.
+    fn decl(&self) -> DeclId {
+        self.decl.unwrap_or_else(|| {
+            raise_fatal_lowering_error(
+                "lowering added a node outside any declaration",
+                None,
+                self.current_span_id.clone(),
+            )
+        })
     }
 
     /// Resolve every lowered declaration's referenced names to the
@@ -7827,12 +7873,12 @@ impl<'program> LowerCtx<'program> {
     /// code shadows a library declaration it replaces. Names that are not
     /// declarations (builtins, types) name nothing.
     fn resolve_declaration_references(&mut self) {
-        let mut by_name = BTreeMap::<&str, DeclarationId>::new();
+        let mut by_name = BTreeMap::<&str, DeclId>::new();
         for (index, declaration) in self.dag.declarations().iter().enumerate() {
             if !declaration.name.is_empty() {
                 by_name.insert(
                     declaration.name.as_str(),
-                    DeclarationId(u32::try_from(index).expect("declaration index fits u32")),
+                    DeclId(u32::try_from(index).expect("declaration index fits u32")),
                 );
             }
         }
@@ -8146,6 +8192,7 @@ impl<'program> LowerCtx<'program> {
         let (value, lowered) =
             if ty == HostTypeTerm::Scalar(HostPrecisionTerm::Concrete(Prim::Int64)) {
                 let id = self.dag.add_node(
+                    self.decl(),
                     RiscOp::Load {
                         name: format!("__host_source_{}", self.host_sources.len()).into(),
                     },
@@ -8266,6 +8313,7 @@ impl<'program> LowerCtx<'program> {
                         );
                     let result_requirement = if preserved_movement {
                         self.dag.add_node(
+                            self.decl(),
                             RiscOp::ExtentWitness {
                                 site: crate::dag::ExtentWitnessSite::LiteralResultClaim,
                                 parameter: String::new(),
@@ -8299,6 +8347,7 @@ impl<'program> LowerCtx<'program> {
                             .output_type
                             .clone();
                         id = self.dag.add_node(
+                            self.decl(),
                             RiscOp::Copy,
                             vec![id],
                             ty,
@@ -8343,9 +8392,13 @@ impl<'program> LowerCtx<'program> {
     /// data consumer.
     fn rebuild_result_claim_owner(&mut self, id: NodeId) -> NodeId {
         let source = self.dag.get(id).expect("same-shape result owner").clone();
-        let rebuilt =
-            self.dag
-                .add_node(source.op, source.inputs, source.output_type, source.span_id);
+        let rebuilt = self.dag.add_node(
+            source.decl,
+            source.op,
+            source.inputs,
+            source.output_type,
+            source.span_id,
+        );
         let node = self.dag.node_mut(rebuilt).expect("rebuilt result owner");
         node.reusable_input = source.reusable_input;
         node.merged_spans = source.merged_spans;
@@ -8625,6 +8678,7 @@ impl<'program> LowerCtx<'program> {
                     .map(|node| node.output_type.clone())
                     .unwrap_or_else(Self::default_type);
                 let stored = self.dag.add_node(
+                    self.decl(),
                     RiscOp::Store {
                         name: prefix.into(),
                     },
@@ -8673,6 +8727,7 @@ impl<'program> LowerCtx<'program> {
                     cached
                 } else {
                     LoweredValue::Node(self.dag.add_node(
+                        self.decl(),
                         RiscOp::Load {
                             name: name.as_str().into(),
                         },
@@ -8689,18 +8744,21 @@ impl<'program> LowerCtx<'program> {
             // chelis#856 exactness path). Bare atoms keep the default
             // f32 typing they always had; finalize at f32 is total.
             Atom::Int(n) => LoweredValue::Node(self.dag.add_node(
+                self.decl(),
                 RiscOp::synth_const(Self::default_type().precision, *n as f64),
                 vec![],
                 Self::default_type(),
                 self.current_span_id.clone(),
             )),
             Atom::Float(f) => LoweredValue::Node(self.dag.add_node(
+                self.decl(),
                 RiscOp::synth_const(Self::default_type().precision, *f),
                 vec![],
                 Self::default_type(),
                 self.current_span_id.clone(),
             )),
             Atom::Bool(b) => LoweredValue::Node(self.dag.add_node(
+                self.decl(),
                 RiscOp::synth_const(Self::default_type().precision, if *b { 1.0 } else { 0.0 }),
                 vec![],
                 Self::default_type(),
@@ -8763,6 +8821,7 @@ impl<'program> LowerCtx<'program> {
             // program that declares a signature or type alias.
             DeepTag::Defsig | DeepTag::Deftype | DeepTag::Typealias => {
                 LoweredValue::Node(self.dag.add_node(
+                    self.decl(),
                     RiscOp::synth_const(Self::default_type().precision, 0.0),
                     vec![],
                     Self::default_type(),
@@ -8828,6 +8887,7 @@ impl<'program> LowerCtx<'program> {
             );
         }
         let mut last = LoweredValue::Node(self.dag.add_node(
+            self.decl(),
             RiscOp::synth_const(Self::default_type().precision, 0.0),
             vec![],
             Self::default_type(),
@@ -8853,6 +8913,7 @@ impl<'program> LowerCtx<'program> {
             );
         }
         let mut last = LoweredValue::Node(self.dag.add_node(
+            self.decl(),
             RiscOp::synth_const(Self::default_type().precision, 0.0),
             vec![],
             Self::default_type(),
@@ -9072,6 +9133,7 @@ impl<'program> LowerCtx<'program> {
                                         .output_type
                                         .clone();
                                     owner = self.dag.add_node(
+                                        self.decl(),
                                         RiscOp::Copy,
                                         vec![owner],
                                         ty,
@@ -9378,6 +9440,7 @@ impl<'program> LowerCtx<'program> {
                         )
                     });
                 self.dag.add_node(
+                    self.decl(),
                     RiscOp::ExtentWitness {
                         site,
                         parameter: String::new(),
@@ -9415,6 +9478,7 @@ impl<'program> LowerCtx<'program> {
                 let input = original.inputs[0];
                 let output_type = original.output_type.clone();
                 let token = self.dag.add_node(
+                    self.decl(),
                     RiscOp::ExtentWitness {
                         site,
                         parameter: parameter.clone(),
@@ -9532,6 +9596,7 @@ impl<'program> LowerCtx<'program> {
             precision: prim,
         };
         LoweredValue::Node(self.dag.add_node(
+            self.decl(),
             RiscOp::Const { value },
             vec![],
             literal_ty,
@@ -9621,6 +9686,7 @@ impl<'program> LowerCtx<'program> {
                 explicit_ty
             };
             return LoweredValue::Node(self.dag.add_node(
+                self.decl(),
                 RiscOp::Load {
                     name: name.as_str().into(),
                 },
@@ -9844,9 +9910,13 @@ impl<'program> LowerCtx<'program> {
                     .get(input)
                     .map(|node| node.output_type.clone())
                     .unwrap_or_else(Self::default_type);
-                let marker =
-                    self.dag
-                        .add_node(RiscOp::Copy, vec![input], ty, self.current_span_id.clone());
+                let marker = self.dag.add_node(
+                    self.decl(),
+                    RiscOp::Copy,
+                    vec![input],
+                    ty,
+                    self.current_span_id.clone(),
+                );
                 self.callable_dependency_state
                     .record_unresolved_result(marker);
                 LoweredValue::Node(marker)
@@ -10175,6 +10245,11 @@ impl<'program> LowerCtx<'program> {
             self.program_signatures.clone(),
             LinearityInfo::default(),
         );
+        // The body is lowered on this declaration's behalf and spliced back
+        // into it, so its nodes are this declaration's: the sub-graph shares
+        // this graph's declarations and the splice keeps each node's `decl`.
+        subctx.dag.inherit_declarations(&self.dag);
+        subctx.decl = self.decl;
         // This ordinary-grad subcontext lowers called declarations as private
         // pure helpers. Their literal result tokens must survive into zero or
         // unused cotangents; vmap-grad has its own continuation boundary.
@@ -10261,6 +10336,7 @@ impl<'program> LowerCtx<'program> {
                 suffix += 1;
             };
             let load = subctx.dag.add_node(
+                subctx.decl(),
                 RiscOp::Load {
                     name: load_name.as_str().into(),
                 },
@@ -10329,6 +10405,7 @@ impl<'program> LowerCtx<'program> {
                             suffix += 1;
                         };
                         let load = subctx.dag.add_node(
+                            subctx.decl(),
                             RiscOp::Load {
                                 name: load_name.as_str().into(),
                             },
@@ -10372,6 +10449,7 @@ impl<'program> LowerCtx<'program> {
                         subctx.static_size_bindings.insert(name.clone(), value);
                     }
                     let load = subctx.dag.add_node(
+                        subctx.decl(),
                         RiscOp::Load {
                             name: name.as_str().into(),
                         },
@@ -10453,6 +10531,7 @@ impl<'program> LowerCtx<'program> {
                     .map(|node| node.output_type.clone())
                     .unwrap_or_else(Self::default_type);
                 let retained = subctx.dag.add_node(
+                    subctx.decl(),
                     RiscOp::Copy,
                     vec![value],
                     output_type,
@@ -10737,6 +10816,7 @@ impl<'program> LowerCtx<'program> {
     /// (chelis#520 D2/#1102).
     fn zero_tensor_node(&mut self, ty: &TensorType, primal: Option<NodeId>) -> NodeId {
         let mut node = self.dag.add_node(
+            self.decl(),
             RiscOp::synth_const(Self::default_type().precision, 0.0),
             vec![],
             Self::default_type(),
@@ -10744,6 +10824,7 @@ impl<'program> LowerCtx<'program> {
         );
         if ty.precision != Self::default_type().precision {
             node = self.dag.add_node(
+                self.decl(),
                 RiscOp::Cast {
                     new_precision: ty.precision,
                 },
@@ -10789,6 +10870,7 @@ impl<'program> LowerCtx<'program> {
                 }
             };
             node = self.dag.add_node(
+                self.decl(),
                 RiscOp::Expand { axis, size },
                 inputs,
                 TensorType {
@@ -11587,6 +11669,7 @@ impl<'program> LowerCtx<'program> {
                     arg_id
                 } else {
                     self.dag.add_node(
+                        self.decl(),
                         RiscOp::Permute { axes: perm },
                         vec![arg_id],
                         canon_ty.clone(),
@@ -11616,6 +11699,11 @@ impl<'program> LowerCtx<'program> {
             self.program_signatures.clone(),
             LinearityInfo::default(),
         );
+        // The body is lowered on this declaration's behalf and spliced back
+        // into it, so its nodes are this declaration's: the sub-graph shares
+        // this graph's declarations and the splice keeps each node's `decl`.
+        subctx.dag.inherit_declarations(&self.dag);
+        subctx.decl = self.decl;
         #[cfg(feature = "lowering-trace")]
         {
             subctx.trace = self
@@ -11631,6 +11719,7 @@ impl<'program> LowerCtx<'program> {
         subctx.current_span_id = self.current_span_id.clone();
         for (name, param_expr) in param_names.iter().zip(param_types.iter().cloned()) {
             let load = subctx.dag.add_node(
+                subctx.decl(),
                 RiscOp::Load {
                     name: name.as_str().into(),
                 },
@@ -11782,6 +11871,7 @@ impl<'program> LowerCtx<'program> {
                     let perm = front_to_axis_perm(result_ty.dims.len(), axis);
                     let perm_ty = permuted_tensor_type(&result_ty, &perm);
                     *result = self.dag.add_node(
+                        self.decl(),
                         RiscOp::Permute { axes: perm },
                         vec![*result],
                         perm_ty,
@@ -11867,6 +11957,7 @@ impl<'program> LowerCtx<'program> {
                     arg_id
                 } else {
                     self.dag.add_node(
+                        self.decl(),
                         RiscOp::Permute { axes: perm },
                         vec![arg_id],
                         canon_ty.clone(),
@@ -11894,6 +11985,11 @@ impl<'program> LowerCtx<'program> {
             self.program_signatures.clone(),
             LinearityInfo::default(),
         );
+        // The body is lowered on this declaration's behalf and spliced back
+        // into it, so its nodes are this declaration's: the sub-graph shares
+        // this graph's declarations and the splice keeps each node's `decl`.
+        subctx.dag.inherit_declarations(&self.dag);
+        subctx.decl = self.decl;
         #[cfg(feature = "lowering-trace")]
         {
             subctx.trace = self
@@ -11915,6 +12011,7 @@ impl<'program> LowerCtx<'program> {
             .enumerate()
         {
             let load = subctx.dag.add_node(
+                subctx.decl(),
                 RiscOp::Load {
                     name: name.as_str().into(),
                 },
@@ -12104,6 +12201,7 @@ impl<'program> LowerCtx<'program> {
                     let perm = front_to_axis_perm(result_ty.dims.len(), axis);
                     let perm_ty = permuted_tensor_type(&result_ty, &perm);
                     *result = self.dag.add_node(
+                        self.decl(),
                         RiscOp::Permute { axes: perm },
                         vec![*result],
                         perm_ty,
@@ -12173,6 +12271,7 @@ impl<'program> LowerCtx<'program> {
             ),
         };
         self.dag.add_node(
+            self.decl(),
             RiscOp::Expand { axis: 0, size },
             inputs,
             out_ty,
@@ -12203,6 +12302,7 @@ impl<'program> LowerCtx<'program> {
                         // Falling back to the parent ctx's current span
                         // would silently overwrite real provenance.
                         self.dag.add_node(
+                            node.decl,
                             RiscOp::Load { name: name.clone() },
                             vec![],
                             node.output_type.clone(),
@@ -12225,6 +12325,7 @@ impl<'program> LowerCtx<'program> {
                         .collect::<Result<Vec<_>, _>>()?;
                     // Preserve the source DAG node's span_id (see Load arm).
                     let new_id = self.dag.add_node(
+                        node.decl,
                         op.clone(),
                         inputs,
                         node.output_type.clone(),
@@ -12306,6 +12407,7 @@ impl<'program> LowerCtx<'program> {
                 let b = self.lower_expr_node(&args[1], "add rhs");
                 let out_ty = Self::elementwise_out_ty(&self.dag, a, ty, None);
                 let node = self.dag.add_node(
+                    self.decl(),
                     RiscOp::Add,
                     vec![a, b],
                     out_ty,
@@ -12318,6 +12420,7 @@ impl<'program> LowerCtx<'program> {
                 let b = self.lower_expr_node(&args[1], "mul rhs");
                 let out_ty = Self::elementwise_out_ty(&self.dag, a, ty, None);
                 let node = self.dag.add_node(
+                    self.decl(),
                     RiscOp::Mul,
                     vec![a, b],
                     out_ty,
@@ -12329,19 +12432,20 @@ impl<'program> LowerCtx<'program> {
                 let a = self.lower_expr_node(&args[0], "cmplt lhs");
                 let b = self.lower_expr_node(&args[1], "cmplt rhs");
                 let parent_span = self.current_span_id.clone();
-                tier2::lower_cmplt(&mut self.dag, a, b, ty, parent_span.as_deref())
+                tier2::lower_cmplt(self.decl(), &mut self.dag, a, b, ty, parent_span.as_deref())
             }
             "lt" if args.len() == 2 => {
                 let a = self.lower_expr_node(&args[0], "lt lhs");
                 let b = self.lower_expr_node(&args[1], "lt rhs");
                 let parent_span = self.current_span_id.clone();
-                tier2::lower_lt(&mut self.dag, a, b, ty, parent_span.as_deref())
+                tier2::lower_lt(self.decl(), &mut self.dag, a, b, ty, parent_span.as_deref())
             }
             "max_elem" if args.len() == 2 => {
                 let a = self.lower_expr_node(&args[0], "max_elem lhs");
                 let b = self.lower_expr_node(&args[1], "max_elem rhs");
                 let out_ty = Self::elementwise_out_ty(&self.dag, a, ty, None);
                 let node = self.dag.add_node(
+                    self.decl(),
                     RiscOp::MaxElem,
                     vec![a, b],
                     out_ty,
@@ -12367,6 +12471,7 @@ impl<'program> LowerCtx<'program> {
                         .map(|node| node.output_type.clone())
                         .unwrap_or_else(Self::default_type);
                     last = Some(self.dag.add_node(
+                        self.decl(),
                         RiscOp::Drop,
                         vec![leaf],
                         output_type,
@@ -12380,6 +12485,7 @@ impl<'program> LowerCtx<'program> {
                 // (chelis#730 section C1.4).
                 last.unwrap_or_else(|| {
                     self.dag.add_node(
+                        self.decl(),
                         RiscOp::synth_const(Self::default_type().precision, 0.0),
                         vec![],
                         Self::default_type(),
@@ -12394,9 +12500,13 @@ impl<'program> LowerCtx<'program> {
                 // inside a rank-poly inline body; see chelis#346 red-team
                 // F1/F3). Same contract as the Tier-1 binary arms.
                 let out_ty = Self::elementwise_out_ty(&self.dag, x, ty, None);
-                let node =
-                    self.dag
-                        .add_node(RiscOp::Neg, vec![x], out_ty, self.current_span_id.clone());
+                let node = self.dag.add_node(
+                    self.decl(),
+                    RiscOp::Neg,
+                    vec![x],
+                    out_ty,
+                    self.current_span_id.clone(),
+                );
                 self.attach_reuse_hint(node, app_span, &[x])
             }
             // `recip(x)` lowers directly to `RiscOp::Recip`,
@@ -12409,9 +12519,13 @@ impl<'program> LowerCtx<'program> {
                 // inside a rank-poly inline body; see chelis#346 red-team
                 // F1/F3). Same contract as the Tier-1 binary arms.
                 let out_ty = Self::elementwise_out_ty(&self.dag, x, ty, None);
-                let node =
-                    self.dag
-                        .add_node(RiscOp::Recip, vec![x], out_ty, self.current_span_id.clone());
+                let node = self.dag.add_node(
+                    self.decl(),
+                    RiscOp::Recip,
+                    vec![x],
+                    out_ty,
+                    self.current_span_id.clone(),
+                );
                 self.attach_reuse_hint(node, app_span, &[x])
             }
             "exp" if args.len() == 1 => {
@@ -12491,6 +12605,7 @@ impl<'program> LowerCtx<'program> {
                 let seed = self.lower_expr_node(&args[0], "key_from_seed seed");
                 let key_ty = self.key_operand_type(seed);
                 self.dag.add_node(
+                    self.decl(),
                     RiscOp::KeyFromSeed,
                     vec![seed],
                     key_ty,
@@ -12587,7 +12702,14 @@ impl<'program> LowerCtx<'program> {
                 // chelis#346 red-team F1). Matches the Tier-1 binary arms.
                 let out_ty = Self::elementwise_out_ty(&self.dag, a, ty, None);
                 let parent_span = self.current_span_id.clone();
-                let node = tier2::lower_sub(&mut self.dag, a, b, &out_ty, parent_span.as_deref());
+                let node = tier2::lower_sub(
+                    self.decl(),
+                    &mut self.dag,
+                    a,
+                    b,
+                    &out_ty,
+                    parent_span.as_deref(),
+                );
                 self.attach_reuse_hint(node, app_span, &[a, b])
             }
             // Tier 2 decompositions
@@ -12599,7 +12721,13 @@ impl<'program> LowerCtx<'program> {
                 // F1/F3). Same contract as the Tier-1 binary arms.
                 let out_ty = Self::elementwise_out_ty(&self.dag, x, ty, None);
                 let parent_span = self.current_span_id.clone();
-                let node = tier2::lower_relu(&mut self.dag, x, &out_ty, parent_span.as_deref());
+                let node = tier2::lower_relu(
+                    self.decl(),
+                    &mut self.dag,
+                    x,
+                    &out_ty,
+                    parent_span.as_deref(),
+                );
                 self.attach_reuse_hint(node, app_span, &[x])
             }
             "sigmoid" if args.len() == 1 => {
@@ -12610,7 +12738,13 @@ impl<'program> LowerCtx<'program> {
                 // F1/F3). Same contract as the Tier-1 binary arms.
                 let out_ty = Self::elementwise_out_ty(&self.dag, x, ty, None);
                 let parent_span = self.current_span_id.clone();
-                let node = tier2::lower_sigmoid(&mut self.dag, x, &out_ty, parent_span.as_deref());
+                let node = tier2::lower_sigmoid(
+                    self.decl(),
+                    &mut self.dag,
+                    x,
+                    &out_ty,
+                    parent_span.as_deref(),
+                );
                 self.attach_reuse_hint(node, app_span, &[x])
             }
             // Bucket 3: `tanh`, `silu`, `gelu` route through new tier2
@@ -12624,7 +12758,13 @@ impl<'program> LowerCtx<'program> {
                 // F1/F3). Same contract as the Tier-1 binary arms.
                 let out_ty = Self::elementwise_out_ty(&self.dag, x, ty, None);
                 let parent_span = self.current_span_id.clone();
-                let node = tier2::lower_tanh(&mut self.dag, x, &out_ty, parent_span.as_deref());
+                let node = tier2::lower_tanh(
+                    self.decl(),
+                    &mut self.dag,
+                    x,
+                    &out_ty,
+                    parent_span.as_deref(),
+                );
                 self.attach_reuse_hint(node, app_span, &[x])
             }
             "silu" if args.len() == 1 => {
@@ -12635,7 +12775,13 @@ impl<'program> LowerCtx<'program> {
                 // F1/F3). Same contract as the Tier-1 binary arms.
                 let out_ty = Self::elementwise_out_ty(&self.dag, x, ty, None);
                 let parent_span = self.current_span_id.clone();
-                let node = tier2::lower_silu(&mut self.dag, x, &out_ty, parent_span.as_deref());
+                let node = tier2::lower_silu(
+                    self.decl(),
+                    &mut self.dag,
+                    x,
+                    &out_ty,
+                    parent_span.as_deref(),
+                );
                 self.attach_reuse_hint(node, app_span, &[x])
             }
             "gelu" if args.len() == 1 => {
@@ -12646,7 +12792,13 @@ impl<'program> LowerCtx<'program> {
                 // F1/F3). Same contract as the Tier-1 binary arms.
                 let out_ty = Self::elementwise_out_ty(&self.dag, x, ty, None);
                 let parent_span = self.current_span_id.clone();
-                let node = tier2::lower_gelu(&mut self.dag, x, &out_ty, parent_span.as_deref());
+                let node = tier2::lower_gelu(
+                    self.decl(),
+                    &mut self.dag,
+                    x,
+                    &out_ty,
+                    parent_span.as_deref(),
+                );
                 self.attach_reuse_hint(node, app_span, &[x])
             }
             "div" if args.len() == 2 => {
@@ -12657,7 +12809,14 @@ impl<'program> LowerCtx<'program> {
                 // chelis#346 red-team F1). Matches the Tier-1 binary arms.
                 let out_ty = Self::elementwise_out_ty(&self.dag, a, ty, None);
                 let parent_span = self.current_span_id.clone();
-                let node = tier2::lower_div(&mut self.dag, a, b, &out_ty, parent_span.as_deref());
+                let node = tier2::lower_div(
+                    self.decl(),
+                    &mut self.dag,
+                    a,
+                    b,
+                    &out_ty,
+                    parent_span.as_deref(),
+                );
                 self.attach_reuse_hint(node, app_span, &[a, b])
             }
             // chelis#178: integer-division primitives. Same elementwise
@@ -12667,8 +12826,14 @@ impl<'program> LowerCtx<'program> {
                 let b = self.lower_expr_node(&args[1], "floor_div rhs");
                 let out_ty = Self::elementwise_out_ty(&self.dag, a, ty, None);
                 let parent_span = self.current_span_id.clone();
-                let node =
-                    tier2::lower_floor_div(&mut self.dag, a, b, &out_ty, parent_span.as_deref());
+                let node = tier2::lower_floor_div(
+                    self.decl(),
+                    &mut self.dag,
+                    a,
+                    b,
+                    &out_ty,
+                    parent_span.as_deref(),
+                );
                 self.attach_reuse_hint(node, app_span, &[a, b])
             }
             "mod" if args.len() == 2 => {
@@ -12676,6 +12841,7 @@ impl<'program> LowerCtx<'program> {
                 let b = self.lower_expr_node(&args[1], "mod rhs");
                 let out_ty = Self::elementwise_out_ty(&self.dag, a, ty, None);
                 let node = self.dag.add_node(
+                    self.decl(),
                     RiscOp::Mod,
                     vec![a, b],
                     out_ty,
@@ -12688,8 +12854,14 @@ impl<'program> LowerCtx<'program> {
                 let b = self.lower_expr_node(&args[1], "trunc_div rhs");
                 let out_ty = Self::elementwise_out_ty(&self.dag, a, ty, None);
                 let parent_span = self.current_span_id.clone();
-                let node =
-                    tier2::lower_trunc_div(&mut self.dag, a, b, &out_ty, parent_span.as_deref());
+                let node = tier2::lower_trunc_div(
+                    self.decl(),
+                    &mut self.dag,
+                    a,
+                    b,
+                    &out_ty,
+                    parent_span.as_deref(),
+                );
                 self.attach_reuse_hint(node, app_span, &[a, b])
             }
 
@@ -12708,7 +12880,15 @@ impl<'program> LowerCtx<'program> {
                     .map(|n| n.output_type.clone())
                     .unwrap_or_else(|| ty.clone());
                 let parent_span = self.current_span_id.clone();
-                tier2::lower_matmul(&mut self.dag, a, b, &a_ty, &b_ty, parent_span.as_deref())
+                tier2::lower_matmul(
+                    self.decl(),
+                    &mut self.dag,
+                    a,
+                    b,
+                    &a_ty,
+                    &b_ty,
+                    parent_span.as_deref(),
+                )
             }
             "gather" if args.len() == 3 => {
                 let values = self.lower_expr_node(&args[0], "gather values");
@@ -12733,6 +12913,7 @@ impl<'program> LowerCtx<'program> {
                 let out_ty = Self::gather_out_ty_from_inputs(&self.dag, values, indices, axis)
                     .unwrap_or_else(|| ty.clone());
                 self.dag.add_node(
+                    self.decl(),
                     RiscOp::Gather { axis },
                     vec![values, indices],
                     out_ty,
@@ -12759,6 +12940,7 @@ impl<'program> LowerCtx<'program> {
                     .map(|n| n.output_type.clone())
                     .unwrap_or_else(|| ty.clone());
                 self.dag.add_node(
+                    self.decl(),
                     RiscOp::Scatter { axis },
                     vec![base, indices, updates],
                     out_ty,
@@ -12786,6 +12968,7 @@ impl<'program> LowerCtx<'program> {
                     .map(|n| n.output_type.clone())
                     .unwrap_or_else(|| ty.clone());
                 self.dag.add_node(
+                    self.decl(),
                     RiscOp::ScatterElements { axis },
                     vec![data, indices, updates],
                     out_ty,
@@ -12803,8 +12986,14 @@ impl<'program> LowerCtx<'program> {
                 let rank = self.axis_rank(x, ty);
                 let axis = self.normalize_axis(axis_raw, rank, "softmax", &args[1]);
                 let parent_span = self.current_span_id.clone();
-                let node =
-                    tier2::lower_softmax(&mut self.dag, x, axis, &x_ty, parent_span.as_deref());
+                let node = tier2::lower_softmax(
+                    self.decl(),
+                    &mut self.dag,
+                    x,
+                    axis,
+                    &x_ty,
+                    parent_span.as_deref(),
+                );
                 self.attach_reuse_hint(node, app_span, &[x])
             }
             "mean" if args.len() == 2 => {
@@ -12817,7 +13006,14 @@ impl<'program> LowerCtx<'program> {
                 let rank = self.axis_rank(x, ty);
                 let axis = self.resolve_reduce_axis(&args[1], x, rank, "mean");
                 let parent_span = self.current_span_id.clone();
-                let node = tier2::lower_mean(&mut self.dag, x, axis, &x_ty, parent_span.as_deref());
+                let node = tier2::lower_mean(
+                    self.decl(),
+                    &mut self.dag,
+                    x,
+                    axis,
+                    &x_ty,
+                    parent_span.as_deref(),
+                );
                 self.attach_reuse_hint(node, app_span, &[x])
             }
             "layer_norm" if args.len() == 4 => {
@@ -12842,6 +13038,7 @@ impl<'program> LowerCtx<'program> {
                     .unwrap_or_else(|| ty.clone());
                 let parent_span = self.current_span_id.clone();
                 let node = tier2::lower_layer_norm(
+                    self.decl(),
                     &mut self.dag,
                     x,
                     gamma,
@@ -12873,6 +13070,7 @@ impl<'program> LowerCtx<'program> {
                     .clone();
                 let parent_span = self.current_span_id.clone();
                 tier2::lower_conv(
+                    self.decl(),
                     &mut self.dag,
                     input,
                     kernel,
@@ -12890,38 +13088,38 @@ impl<'program> LowerCtx<'program> {
                 let a = self.lower_expr_node(&args[0], "gt lhs");
                 let b = self.lower_expr_node(&args[1], "gt rhs");
                 let parent_span = self.current_span_id.clone();
-                tier2::lower_gt(&mut self.dag, a, b, ty, parent_span.as_deref())
+                tier2::lower_gt(self.decl(), &mut self.dag, a, b, ty, parent_span.as_deref())
             }
             "gte" if args.len() == 2 => {
                 let a = self.lower_expr_node(&args[0], "gte lhs");
                 let b = self.lower_expr_node(&args[1], "gte rhs");
                 let parent_span = self.current_span_id.clone();
-                tier2::lower_gte(&mut self.dag, a, b, ty, parent_span.as_deref())
+                tier2::lower_gte(self.decl(), &mut self.dag, a, b, ty, parent_span.as_deref())
             }
             "lte" if args.len() == 2 => {
                 let a = self.lower_expr_node(&args[0], "lte lhs");
                 let b = self.lower_expr_node(&args[1], "lte rhs");
                 let parent_span = self.current_span_id.clone();
-                tier2::lower_lte(&mut self.dag, a, b, ty, parent_span.as_deref())
+                tier2::lower_lte(self.decl(), &mut self.dag, a, b, ty, parent_span.as_deref())
             }
             "eq" if args.len() == 2 => {
                 let a = self.lower_expr_node(&args[0], "eq lhs");
                 let b = self.lower_expr_node(&args[1], "eq rhs");
                 let parent_span = self.current_span_id.clone();
-                tier2::lower_eq(&mut self.dag, a, b, ty, parent_span.as_deref())
+                tier2::lower_eq(self.decl(), &mut self.dag, a, b, ty, parent_span.as_deref())
             }
             "neq" if args.len() == 2 => {
                 let a = self.lower_expr_node(&args[0], "neq lhs");
                 let b = self.lower_expr_node(&args[1], "neq rhs");
                 let parent_span = self.current_span_id.clone();
-                tier2::lower_neq(&mut self.dag, a, b, ty, parent_span.as_deref())
+                tier2::lower_neq(self.decl(), &mut self.dag, a, b, ty, parent_span.as_deref())
             }
             // Direct Tier-1 minimum selection identity
             "min_elem" if args.len() == 2 => {
                 let a = self.lower_expr_node(&args[0], "min_elem lhs");
                 let b = self.lower_expr_node(&args[1], "min_elem rhs");
                 let parent_span = self.current_span_id.clone();
-                tier2::lower_min_elem(&mut self.dag, a, b, ty, parent_span.as_deref())
+                tier2::lower_min_elem(self.decl(), &mut self.dag, a, b, ty, parent_span.as_deref())
             }
 
             // H2: Boolean operators
@@ -12929,18 +13127,18 @@ impl<'program> LowerCtx<'program> {
                 let a = self.lower_expr_node(&args[0], "and lhs");
                 let b = self.lower_expr_node(&args[1], "and rhs");
                 let parent_span = self.current_span_id.clone();
-                tier2::lower_and(&mut self.dag, a, b, ty, parent_span.as_deref())
+                tier2::lower_and(self.decl(), &mut self.dag, a, b, ty, parent_span.as_deref())
             }
             "or" if args.len() == 2 => {
                 let a = self.lower_expr_node(&args[0], "or lhs");
                 let b = self.lower_expr_node(&args[1], "or rhs");
                 let parent_span = self.current_span_id.clone();
-                tier2::lower_or(&mut self.dag, a, b, ty, parent_span.as_deref())
+                tier2::lower_or(self.decl(), &mut self.dag, a, b, ty, parent_span.as_deref())
             }
             "not" if args.len() == 1 => {
                 let a = self.lower_expr_node(&args[0], "not input");
                 let parent_span = self.current_span_id.clone();
-                tier2::lower_not(&mut self.dag, a, ty, parent_span.as_deref())
+                tier2::lower_not(self.decl(), &mut self.dag, a, ty, parent_span.as_deref())
             }
             "where" if args.len() == 3 => {
                 let condition = self.lower_expr_node(&args[0], "where condition");
@@ -12952,6 +13150,7 @@ impl<'program> LowerCtx<'program> {
                     .map(|node| node.output_type.clone())
                     .unwrap_or_else(|| ty.clone());
                 self.dag.add_node(
+                    self.decl(),
                     RiscOp::Where,
                     vec![condition, then_value, else_value],
                     out_ty,
@@ -13010,6 +13209,7 @@ impl<'program> LowerCtx<'program> {
                     .filter_map(|(axis, dim)| (!axes.contains(&axis)).then_some(dim.clone()))
                     .collect();
                 self.dag.add_node(
+                    self.decl(),
                     RiscOp::Count { axes },
                     vec![x],
                     TensorType {
@@ -13094,9 +13294,13 @@ impl<'program> LowerCtx<'program> {
                     dims: out_dims.clone(),
                     precision: accumulator,
                 };
-                let sum_id =
-                    self.dag
-                        .add_node(sum_op, vec![x], sum_node_ty, self.current_span_id.clone());
+                let sum_id = self.dag.add_node(
+                    self.decl(),
+                    sum_op,
+                    vec![x],
+                    sum_node_ty,
+                    self.current_span_id.clone(),
+                );
                 // If the user-facing result precision differs from the
                 // accumulator (only the bf16/f16 row of the §5.7.1
                 // table), insert an explicit Cast back to the operand
@@ -13112,6 +13316,7 @@ impl<'program> LowerCtx<'program> {
                             precision: result_prec,
                         };
                         return self.dag.add_node(
+                            self.decl(),
                             RiscOp::Cast {
                                 new_precision: result_prec,
                             },
@@ -13130,6 +13335,7 @@ impl<'program> LowerCtx<'program> {
                     // surface changes. Give the view its own identity so both
                     // aliases retain their types when captured by later stages.
                     self.dag.add_node(
+                        self.decl(),
                         RiscOp::Copy,
                         vec![input],
                         self.dag
@@ -13183,6 +13389,7 @@ impl<'program> LowerCtx<'program> {
                     precision: out_precision,
                 };
                 self.dag.add_node(
+                    self.decl(),
                     RiscOp::MaxReduce { axis },
                     vec![x],
                     out_ty,
@@ -13270,6 +13477,7 @@ impl<'program> LowerCtx<'program> {
                 };
                 let out_ty = TensorType { dims, precision };
                 self.dag.add_node(
+                    self.decl(),
                     RiscOp::ReduceWindow {
                         reducer,
                         window_shape,
@@ -13303,8 +13511,13 @@ impl<'program> LowerCtx<'program> {
                     "argmin_reduce" => RiscOp::Argmin { axis },
                     _ => unreachable!(),
                 };
-                self.dag
-                    .add_node(op, vec![x], out_ty, self.current_span_id.clone())
+                self.dag.add_node(
+                    self.decl(),
+                    op,
+                    vec![x],
+                    out_ty,
+                    self.current_span_id.clone(),
+                )
             }
 
             // H3: Movement ops -- extract parameters from Deep AST args where possible.
@@ -13350,6 +13563,7 @@ impl<'program> LowerCtx<'program> {
                     precision: ty.precision,
                 };
                 let reshape_id = self.dag.add_node(
+                    self.decl(),
                     RiscOp::Reshape { new_shape },
                     inputs,
                     out_ty,
@@ -13392,6 +13606,7 @@ impl<'program> LowerCtx<'program> {
                     .map(|input_ty| permuted_tensor_type(&input_ty, &axes))
                     .unwrap_or_else(|| ty.clone());
                 self.dag.add_node(
+                    self.decl(),
                     RiscOp::Permute { axes },
                     vec![x],
                     out_ty,
@@ -13694,6 +13909,7 @@ impl<'program> LowerCtx<'program> {
                         .unwrap_or_else(|| ty.clone())
                 };
                 self.dag.add_node(
+                    self.decl(),
                     RiscOp::Expand { axis, size },
                     inputs,
                     out_ty,
@@ -13721,6 +13937,7 @@ impl<'program> LowerCtx<'program> {
                         .expect("zero is a member of every active pad dtype")
                 };
                 self.dag.add_node(
+                    self.decl(),
                     RiscOp::pad(padding, fill),
                     inputs,
                     ty.clone(),
@@ -13736,6 +13953,7 @@ impl<'program> LowerCtx<'program> {
                     vec![]
                 };
                 self.dag.add_node(
+                    self.decl(),
                     RiscOp::Shrink { bounds },
                     inputs,
                     ty.clone(),
@@ -13751,6 +13969,7 @@ impl<'program> LowerCtx<'program> {
                     vec![]
                 };
                 self.dag.add_node(
+                    self.decl(),
                     RiscOp::Stride { strides },
                     inputs,
                     ty.clone(),
@@ -13767,6 +13986,7 @@ impl<'program> LowerCtx<'program> {
                     self.lower_expr(arg);
                 }
                 self.dag.add_node(
+                    self.decl(),
                     RiscOp::Load {
                         name: func_name.into(),
                     },
@@ -13802,6 +14022,7 @@ impl<'program> LowerCtx<'program> {
                     self.lower_expr(arg);
                 }
                 self.dag.add_node(
+                    self.decl(),
                     RiscOp::Load {
                         name: func_name.into(),
                     },
@@ -13871,6 +14092,7 @@ impl<'program> LowerCtx<'program> {
                 // trusting a stale incoming type, so lowering cannot
                 // narrow a runtime extent.
                 self.dag.add_node(
+                    self.decl(),
                     RiscOp::Shape { axis },
                     vec![x],
                     TensorType {
@@ -14002,6 +14224,7 @@ impl<'program> LowerCtx<'program> {
                     precision: ty.precision,
                 };
                 let fallback = self.dag.add_node(
+                    self.decl(),
                     RiscOp::synth_const(ty.precision, 0.0),
                     vec![],
                     fallback_ty.clone(),
@@ -14024,6 +14247,7 @@ impl<'program> LowerCtx<'program> {
                     return fallback;
                 };
                 let condition = self.dag.add_node(
+                    self.decl(),
                     RiscOp::synth_const(Prim::Bool, 1.0),
                     vec![],
                     TensorType {
@@ -14033,6 +14257,7 @@ impl<'program> LowerCtx<'program> {
                     self.current_span_id.clone(),
                 );
                 self.dag.add_node(
+                    self.decl(),
                     RiscOp::GuardedFail {
                         message,
                         trap_on_true: true,
@@ -14049,6 +14274,7 @@ impl<'program> LowerCtx<'program> {
                     self.lower_expr(arg);
                 }
                 self.dag.add_node(
+                    self.decl(),
                     RiscOp::Load {
                         name: func_name.into(),
                     },
@@ -14151,6 +14377,7 @@ impl<'program> LowerCtx<'program> {
                 Err(trap) => raise_on(trap, self.current_span_id.clone()),
             };
             return self.dag.add_node(
+                self.decl(),
                 RiscOp::Const { value },
                 vec![],
                 tensor_ty,
@@ -14171,6 +14398,7 @@ impl<'program> LowerCtx<'program> {
         }
         let data = chelis_types::tensor_from_scalars(precision, &values);
         self.dag.add_node(
+            self.decl(),
             RiscOp::ConstTensor { data },
             vec![],
             tensor_ty,
@@ -14285,6 +14513,7 @@ impl<'program> LowerCtx<'program> {
             let mut padding = vec![(RtDim::Lit(0), RtDim::Lit(0)); rank];
             padding[axis] = (RtDim::Lit(before), RtDim::Lit(after));
             let padded = self.dag.add_node(
+                self.decl(),
                 RiscOp::zero_pad(out_ty.precision, padding),
                 vec![*node],
                 out_ty.clone(),
@@ -14293,6 +14522,7 @@ impl<'program> LowerCtx<'program> {
             accumulator = Some(match accumulator {
                 None => padded,
                 Some(prev) => self.dag.add_node(
+                    self.decl(),
                     RiscOp::Add,
                     vec![prev, padded],
                     out_ty.clone(),
@@ -14350,6 +14580,7 @@ impl<'program> LowerCtx<'program> {
 
     fn int64_constant(&mut self, value: i64) -> NodeId {
         self.dag.add_node(
+            self.decl(),
             RiscOp::Const {
                 value: scalar_from_i64("List control", Prim::Int64, value)
                     .expect("an i64 is representable as i64"),
@@ -14411,6 +14642,7 @@ impl<'program> LowerCtx<'program> {
                 .iter()
                 .map(|item| {
                     self.dag.add_node(
+                        self.decl(),
                         RiscOp::Cast {
                             new_precision: Prim::Int64,
                         },
@@ -14422,6 +14654,7 @@ impl<'program> LowerCtx<'program> {
                 .collect::<Vec<_>>();
             let selected = self.select_runtime_node(&cast_items, effective_index)?;
             return Some(self.dag.add_node(
+                self.decl(),
                 RiscOp::Cast {
                     new_precision: Prim::Bool,
                 },
@@ -14452,6 +14685,7 @@ impl<'program> LowerCtx<'program> {
             0.0
         };
         let mut table = self.dag.add_node(
+            self.decl(),
             RiscOp::synth_const(out_ty.precision, baseline),
             vec![],
             scalar_ty,
@@ -14473,6 +14707,7 @@ impl<'program> LowerCtx<'program> {
                 ),
             };
             table = self.dag.add_node(
+                self.decl(),
                 RiscOp::Expand { axis, size },
                 inputs,
                 TensorType {
@@ -14485,6 +14720,7 @@ impl<'program> LowerCtx<'program> {
         for (position, item) in items.iter().enumerate() {
             let position = self.int64_constant(i64::try_from(position).ok()?);
             table = self.dag.add_node(
+                self.decl(),
                 RiscOp::ScatterAdd { axis: 0 },
                 vec![table, position, *item],
                 stacked_ty.clone(),
@@ -14492,6 +14728,7 @@ impl<'program> LowerCtx<'program> {
             );
         }
         Some(self.dag.add_node(
+            self.decl(),
             RiscOp::Gather { axis: 0 },
             vec![table, effective_index],
             out_ty,
@@ -14532,6 +14769,7 @@ impl<'program> LowerCtx<'program> {
                 } else {
                     let prefix = self.int64_constant(prefix);
                     self.dag.add_node(
+                        self.decl(),
                         RiscOp::Add,
                         vec![prefix, offset],
                         int_ty.clone(),
@@ -14698,12 +14936,14 @@ impl<'program> LowerCtx<'program> {
             // takes the retained failure branch.
             let zero = self.int64_constant(0);
             let nonnegative_count = self.dag.add_node(
+                self.decl(),
                 RiscOp::MaxElem,
                 vec![count, zero],
                 int_ty.clone(),
                 self.current_span_id.clone(),
             );
             let within_view = tier2::lower_min_elem(
+                self.decl(),
                 &mut self.dag,
                 nonnegative_count,
                 len,
@@ -14711,6 +14951,7 @@ impl<'program> LowerCtx<'program> {
                 self.current_span_id.as_deref(),
             );
             let raw_effective = self.dag.add_node(
+                self.decl(),
                 RiscOp::Add,
                 vec![offset, within_view],
                 int_ty.clone(),
@@ -14718,6 +14959,7 @@ impl<'program> LowerCtx<'program> {
             );
             let last = self.int64_constant(i64::try_from(items.len()).ok()? - 1);
             let effective = tier2::lower_min_elem(
+                self.decl(),
                 &mut self.dag,
                 raw_effective,
                 last,
@@ -14740,12 +14982,14 @@ impl<'program> LowerCtx<'program> {
             // into a successful one.
             let zero = self.int64_constant(0);
             let nonnegative = self.dag.add_node(
+                self.decl(),
                 RiscOp::MaxElem,
                 vec![count, zero],
                 int_ty.clone(),
                 self.current_span_id.clone(),
             );
             tier2::lower_min_elem(
+                self.decl(),
                 &mut self.dag,
                 nonnegative,
                 len,
@@ -14757,18 +15001,21 @@ impl<'program> LowerCtx<'program> {
             "take" => Some(rebuild_runtime_list_view(offset, clamped, items)),
             "skip" => {
                 let new_offset = self.dag.add_node(
+                    self.decl(),
                     RiscOp::Add,
                     vec![offset, clamped],
                     int_ty.clone(),
                     self.current_span_id.clone(),
                 );
                 let neg_clamped = self.dag.add_node(
+                    self.decl(),
                     RiscOp::Neg,
                     vec![clamped],
                     int_ty.clone(),
                     self.current_span_id.clone(),
                 );
                 let new_len = self.dag.add_node(
+                    self.decl(),
                     RiscOp::Add,
                     vec![len, neg_clamped],
                     int_ty,
@@ -14930,6 +15177,7 @@ impl<'program> LowerCtx<'program> {
                 .lower_plain_callable_with_values(&fn_expr, &[LoweredValue::Node(item)])
                 .expect_node("filter predicate");
             let mask_as_value = self.dag.add_node(
+                self.decl(),
                 RiscOp::Cast {
                     new_precision: elem_ty.precision,
                 },
@@ -14938,6 +15186,7 @@ impl<'program> LowerCtx<'program> {
                 self.current_span_id.clone(),
             );
             let selected = self.dag.add_node(
+                self.decl(),
                 RiscOp::Mul,
                 vec![item, mask_as_value],
                 elem_ty.clone(),
@@ -15022,6 +15271,7 @@ impl<'program> LowerCtx<'program> {
             source_node
         } else {
             self.dag.add_node(
+                self.decl(),
                 RiscOp::Reshape {
                     new_shape: vec![RtDim::Lit(len)],
                 },
@@ -15042,6 +15292,7 @@ impl<'program> LowerCtx<'program> {
             precision: elem_ty.precision,
         };
         let sliced = self.dag.add_node(
+            self.decl(),
             RiscOp::Shrink {
                 bounds: vec![(RtDim::Lit(index), RtDim::Lit(index + 1))],
             },
@@ -15050,6 +15301,7 @@ impl<'program> LowerCtx<'program> {
             self.current_span_id.clone(),
         );
         self.dag.add_node(
+            self.decl(),
             RiscOp::Reshape { new_shape: vec![] },
             vec![sliced],
             elem_ty.clone(),
@@ -15078,6 +15330,7 @@ impl<'program> LowerCtx<'program> {
                 return None;
             }
             let unit = self.dag.add_node(
+                self.decl(),
                 RiscOp::Reshape {
                     new_shape: vec![RtDim::Lit(1)],
                 },
@@ -15086,6 +15339,7 @@ impl<'program> LowerCtx<'program> {
                 self.current_span_id.clone(),
             );
             let padded = self.dag.add_node(
+                self.decl(),
                 RiscOp::zero_pad(
                     out_ty.precision,
                     vec![(RtDim::Lit(index), RtDim::Lit(out_len - index - 1))],
@@ -15096,6 +15350,7 @@ impl<'program> LowerCtx<'program> {
             );
             accumulator = Some(match accumulator {
                 Some(prev) => self.dag.add_node(
+                    self.decl(),
                     RiscOp::Add,
                     vec![prev, padded],
                     out_ty.clone(),
@@ -16007,6 +16262,7 @@ impl<'program> LowerCtx<'program> {
             let mut witnesses = Vec::new();
             for axis in 0..rank {
                 let witness = self.dag.add_node(
+                    self.decl(),
                     RiscOp::ExtentWitness {
                         site: crate::dag::ExtentWitnessSite::Caller,
                         parameter: name.clone(),
@@ -16102,6 +16358,7 @@ impl<'program> LowerCtx<'program> {
             Some(witness) => witness,
             None => {
                 let witness = self.dag.add_node(
+                    self.decl(),
                     RiscOp::ExtentWitness {
                         site: if local {
                             crate::dag::ExtentWitnessSite::LocalExpand
@@ -16138,6 +16395,7 @@ impl<'program> LowerCtx<'program> {
         }
         *ty.dims.get_mut(axis).expect("checked expand axis") = DimInfo::Lit(1);
         let checked = self.dag.add_node(
+            self.decl(),
             RiscOp::CheckedUnitAxis { axis: rt_axis },
             vec![input, witness],
             ty,
@@ -16208,6 +16466,7 @@ impl<'program> LowerCtx<'program> {
         match dim {
             DimInfo::Lit(required) => Some(
                 self.dag.add_node(
+                    self.decl(),
                     RiscOp::Const {
                         value: chelis_types::scalar_from_i64(
                             "reshape",
@@ -16254,6 +16513,7 @@ impl<'program> LowerCtx<'program> {
         };
         let input = original.inputs[0];
         let token = self.dag.add_node(
+            self.decl(),
             op,
             vec![input],
             original.output_type.clone(),
@@ -16423,6 +16683,7 @@ impl<'program> LowerCtx<'program> {
                 } else {
                     let actual = self.dag.get(target).expect("target").inputs[0];
                     let checked = self.dag.add_node(
+                        self.decl(),
                         RiscOp::CheckedReshapeExtent {
                             claims: vec![label],
                             axis,
@@ -16757,9 +17018,13 @@ impl<'program> LowerCtx<'program> {
             let source = self.dag.get(id).expect("result");
             let mut output_type = source.output_type.clone();
             output_type.dims[axis] = refined;
-            return self
-                .dag
-                .add_node(RiscOp::Copy, vec![id], output_type, source.span_id.clone());
+            return self.dag.add_node(
+                self.decl(),
+                RiscOp::Copy,
+                vec![id],
+                output_type,
+                source.span_id.clone(),
+            );
         }
 
         self.dag.node_mut(id).expect("result").output_type.dims[axis] = refined;
@@ -17050,9 +17315,13 @@ impl<'program> LowerCtx<'program> {
         // its own carrier after every dependency, without mutating a value
         // that another invocation or root can still reference.
         let ty = self.dag.get(id).expect("result").output_type.clone();
-        let carrier = self
-            .dag
-            .add_node(RiscOp::Copy, vec![id], ty, self.current_span_id.clone());
+        let carrier = self.dag.add_node(
+            self.decl(),
+            RiscOp::Copy,
+            vec![id],
+            ty,
+            self.current_span_id.clone(),
+        );
         self.dag
             .node_mut(carrier)
             .expect("return carrier")
@@ -17312,6 +17581,7 @@ impl<'program> LowerCtx<'program> {
                         );
                     }
                     self.dag.add_node(
+                        self.decl(),
                         RiscOp::Const {
                             value: chelis_types::scalar_from_i64("reshape", Prim::Int64, value)
                                 .expect("exact i64 target"),
@@ -17395,9 +17665,13 @@ impl<'program> LowerCtx<'program> {
             for (axis, slot) in computed_targets {
                 let actual = inputs[slot];
                 let ty = self.dag.get(actual).expect("target").output_type.clone();
-                let target =
-                    self.dag
-                        .add_node(RiscOp::Copy, vec![actual], ty, self.current_span_id.clone());
+                let target = self.dag.add_node(
+                    self.decl(),
+                    RiscOp::Copy,
+                    vec![actual],
+                    ty,
+                    self.current_span_id.clone(),
+                );
                 for &source in &shape_sources {
                     self.dag.add_shape_dep(target, source);
                 }
@@ -17587,8 +17861,13 @@ impl<'program> LowerCtx<'program> {
             ),
         };
         if input_prec.is_float() {
-            self.dag
-                .add_node(op, vec![x], out_ty, self.current_span_id.clone())
+            self.dag.add_node(
+                self.decl(),
+                op,
+                vec![x],
+                out_ty,
+                self.current_span_id.clone(),
+            )
         } else {
             let unsupported = Unsupported::new(
                 UnsupportedKind::Op(format!("{op:?}")),
@@ -17650,16 +17929,23 @@ impl<'program> LowerCtx<'program> {
         };
 
         if input_prec.is_float() {
-            return self
-                .dag
-                .add_node(op, vec![x], out_ty, self.current_span_id.clone());
+            return self.dag.add_node(
+                self.decl(),
+                op,
+                vec![x],
+                out_ty,
+                self.current_span_id.clone(),
+            );
         }
         if input_prec.is_integer() {
             return match op {
-                RiscOp::Abs => {
-                    self.dag
-                        .add_node(RiscOp::Abs, vec![x], out_ty, self.current_span_id.clone())
-                }
+                RiscOp::Abs => self.dag.add_node(
+                    self.decl(),
+                    RiscOp::Abs,
+                    vec![x],
+                    out_ty,
+                    self.current_span_id.clone(),
+                ),
                 RiscOp::Floor | RiscOp::Ceil | RiscOp::Round => x,
                 _ => unreachable!("exact numeric unary helper called with {op:?}"),
             };
@@ -17917,6 +18203,7 @@ impl<'program> LowerCtx<'program> {
             })
             .unwrap_or_else(Self::default_type);
         LoweredValue::Node(self.dag.add_node(
+            self.decl(),
             RiscOp::Load { name: name.into() },
             vec![],
             ty,
@@ -18041,10 +18328,13 @@ impl<'program> LowerCtx<'program> {
             dims: input_ty.dims,
             precision: new_precision,
         };
-        LoweredValue::Node(
-            self.dag
-                .add_node(op, vec![x], ty, self.current_span_id.clone()),
-        )
+        LoweredValue::Node(self.dag.add_node(
+            self.decl(),
+            op,
+            vec![x],
+            ty,
+            self.current_span_id.clone(),
+        ))
     }
 
     /// `(grad {} f)` -- rejected before lowering.
@@ -18115,6 +18405,7 @@ impl<'program> LowerCtx<'program> {
             cond
         } else {
             self.dag.add_node(
+                self.decl(),
                 RiscOp::Logical(LogicalKind::Not),
                 vec![cond],
                 path_ty.clone(),
@@ -18123,6 +18414,7 @@ impl<'program> LowerCtx<'program> {
         };
         self.branch_path_condition = Some(match saved {
             Some(parent) => self.dag.add_node(
+                self.decl(),
                 RiscOp::Logical(LogicalKind::And),
                 vec![parent, predicate],
                 path_ty.clone(),
@@ -18134,6 +18426,7 @@ impl<'program> LowerCtx<'program> {
         // surviving arm is not entered when the `fail` arm is selected.
         if let Some(parent) = saved_random_path {
             self.random_path_condition = Some(self.dag.add_node(
+                self.decl(),
                 RiscOp::Logical(LogicalKind::And),
                 vec![parent, predicate],
                 path_ty,
@@ -18176,6 +18469,7 @@ impl<'program> LowerCtx<'program> {
             cond
         } else {
             self.dag.add_node(
+                self.decl(),
                 RiscOp::Logical(LogicalKind::Not),
                 vec![cond],
                 path_ty.clone(),
@@ -18183,6 +18477,7 @@ impl<'program> LowerCtx<'program> {
             )
         };
         let fires = self.dag.add_node(
+            self.decl(),
             RiscOp::Logical(LogicalKind::And),
             vec![path, branch_predicate],
             path_ty,
@@ -18275,6 +18570,7 @@ impl<'program> LowerCtx<'program> {
             .map(|node| node.output_type.clone())
             .unwrap_or_else(Self::default_type);
         LoweredValue::Node(self.dag.add_node(
+            self.decl(),
             RiscOp::GuardedFail {
                 message: message.to_string(),
                 trap_on_true,
@@ -18493,6 +18789,7 @@ impl<'program> LowerCtx<'program> {
         // after `lower_if` has entered the arm.
         self.branch_path_condition = Some(match saved_branch_path {
             Some(parent_path) => self.dag.add_node(
+                self.decl(),
                 RiscOp::Logical(LogicalKind::And),
                 vec![parent_path, cond],
                 TensorType {
@@ -18510,6 +18807,7 @@ impl<'program> LowerCtx<'program> {
                 precision: Prim::Bool,
             };
             let then_path = self.dag.add_node(
+                self.decl(),
                 RiscOp::Logical(LogicalKind::And),
                 vec![parent_path, cond],
                 path_ty,
@@ -18527,12 +18825,14 @@ impl<'program> LowerCtx<'program> {
                 precision: Prim::Bool,
             };
             let not_cond = self.dag.add_node(
+                self.decl(),
                 RiscOp::Logical(LogicalKind::Not),
                 vec![cond],
                 path_ty.clone(),
                 self.current_span_id.clone(),
             );
             let else_path = self.dag.add_node(
+                self.decl(),
                 RiscOp::Logical(LogicalKind::And),
                 vec![parent_path, not_cond],
                 path_ty,
@@ -18545,6 +18845,7 @@ impl<'program> LowerCtx<'program> {
             precision: Prim::Bool,
         };
         let not_cond = self.dag.add_node(
+            self.decl(),
             RiscOp::Logical(LogicalKind::Not),
             vec![cond],
             path_ty.clone(),
@@ -18552,6 +18853,7 @@ impl<'program> LowerCtx<'program> {
         );
         self.branch_path_condition = Some(match saved_branch_path {
             Some(parent_path) => self.dag.add_node(
+                self.decl(),
                 RiscOp::Logical(LogicalKind::And),
                 vec![parent_path, not_cond],
                 path_ty,
@@ -18580,6 +18882,7 @@ impl<'program> LowerCtx<'program> {
         let else_node = self.conform_branch_placeholder(else_node, &out_ty, then_node);
         let condition = self.lower_if_condition(cond, &out_ty, else_node);
         LoweredValue::Node(self.dag.add_node(
+            self.decl(),
             RiscOp::Where,
             vec![condition, then_node, else_node],
             out_ty,
@@ -18637,6 +18940,7 @@ impl<'program> LowerCtx<'program> {
                                 .map(|node| node.output_type.clone())
                                 .unwrap_or_else(Self::default_type);
                             LoweredValue::Node(self.dag.add_node(
+                                self.decl(),
                                 RiscOp::Realize,
                                 vec![id],
                                 output_type,
@@ -18653,6 +18957,7 @@ impl<'program> LowerCtx<'program> {
                 .map(|node| node.output_type.clone())
                 .unwrap_or_else(Self::default_type);
             LoweredValue::Node(self.dag.add_node(
+                self.decl(),
                 RiscOp::Realize,
                 vec![input],
                 output_type,
@@ -18696,6 +19001,7 @@ impl<'program> LowerCtx<'program> {
                     .map(|node| node.output_type.clone())
                     .unwrap_or_else(Self::default_type);
                 let copy = self.dag.add_node(
+                    self.decl(),
                     RiscOp::Copy,
                     vec![*id],
                     output_type,
@@ -19170,6 +19476,7 @@ impl<'program> LowerCtx<'program> {
                 })
                 .collect();
             let conformed = self.dag.add_node(
+                self.decl(),
                 n.op,
                 Vec::new(),
                 TensorType {
@@ -19209,6 +19516,7 @@ impl<'program> LowerCtx<'program> {
                     },
                 };
                 expanded = self.dag.add_node(
+                    self.decl(),
                     RiscOp::Expand { axis, size },
                     if matches!(dim, DimInfo::Named(_, None)) {
                         vec![expanded, shape_source]
@@ -19252,8 +19560,7 @@ mod declaration_attribution_tests {
     const PROGRAM: &str = "x: tensor[4, f32] = x\nsampled = dropout(key_from_seed(7i64), copy(x), 1.0f32)\ndef h(v: tensor[4, f32]) -> tensor[4, f32] = {\n dead = dropout(key_from_seed(9i64), copy(v), 1.0f32)\n v\n}\nselected = {\n dead = sampled\n a = h(copy(x))\n copy(x)\n}\n";
 
     fn declaration_name(dag: &Dag, node: &crate::dag::DagNode) -> String {
-        let declaration = node.declaration.expect("every lowered node is attributed");
-        dag.declarations()[declaration.0 as usize].name.clone()
+        dag.declaration(node.decl).name.clone()
     }
 
     /// The draws of `dag`, each as its declaration's name, in node order.
@@ -19283,11 +19590,8 @@ mod declaration_attribution_tests {
                 ("selected", true)
             ]
         );
-        assert!(dag.nodes().iter().all(|node| node.declaration.is_some()));
         let named = |name: &str| {
-            DeclarationId(
-                u32::try_from(declared.iter().position(|(n, _)| *n == name).unwrap()).unwrap(),
-            )
+            DeclId(u32::try_from(declared.iter().position(|(n, _)| *n == name).unwrap()).unwrap())
         };
         let mut references = dag.declarations()[named("selected").0 as usize]
             .references
@@ -19300,7 +19604,7 @@ mod declaration_attribution_tests {
         for node in dag.nodes() {
             if matches!(node.op, RiscOp::Drop) {
                 let dropped = dag.get(node.inputs[0]).unwrap();
-                assert_eq!(node.declaration, dropped.declaration);
+                assert_eq!(node.decl, dropped.decl);
             }
         }
     }
@@ -19339,7 +19643,6 @@ mod declaration_attribution_tests {
             &node.op,
             RiscOp::Load { name } if name.as_str() == "v"
         )));
-        assert!(sliced.nodes().iter().all(|node| node.declaration.is_some()));
     }
 }
 
@@ -19391,14 +19694,17 @@ mod fused_zero_tests {
     #[test]
     fn fused_zero_vectorized_root_correspondence_survives_inserted_nodes() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let float = tensor_type(&[], Prim::F32);
         let x = dag.add_node(
+            decl,
             RiscOp::Load { name: "x".into() },
             vec![],
             float.clone(),
             None,
         );
         let y = dag.add_node(
+            decl,
             RiscOp::Load { name: "y".into() },
             vec![],
             float.clone(),
@@ -19407,6 +19713,7 @@ mod fused_zero_tests {
         let mut terms = Vec::new();
         for (input, n) in [(x, 3), (y, 5)] {
             let integer = dag.add_node(
+                decl,
                 RiscOp::Const {
                     value: chelis_types::scalar_from_i64("test", Prim::Int64, n).unwrap(),
                 },
@@ -19415,6 +19722,7 @@ mod fused_zero_tests {
                 None,
             );
             let coefficient = dag.add_node(
+                decl,
                 RiscOp::Cast {
                     new_precision: Prim::F32,
                 },
@@ -19423,6 +19731,7 @@ mod fused_zero_tests {
                 None,
             );
             let extent_use = dag.add_node(
+                decl,
                 RiscOp::Expand {
                     axis: 0,
                     size: crate::dag::RtDim::Node(1),
@@ -19434,9 +19743,15 @@ mod fused_zero_tests {
             // Root this consumer so AD pruning retains the integer's shared
             // extent role; the coefficient's ordinary use then needs an Expand.
             dag.add_root(extent_use);
-            terms.push(dag.add_node(RiscOp::Mul, vec![input, coefficient], float.clone(), None));
+            terms.push(dag.add_node(
+                decl,
+                RiscOp::Mul,
+                vec![input, coefficient],
+                float.clone(),
+                None,
+            ));
         }
-        let forward = dag.add_node(RiscOp::Add, terms, float, None);
+        let forward = dag.add_node(decl, RiscOp::Add, terms, float, None);
         let grad = grad_dag_checked(&dag, forward, &[x, y]).unwrap();
         let vectorized = vmap::vectorize_axis0(&grad.dag, DimInfo::Lit(2)).unwrap();
         assert_eq!(grad.dag.roots().len(), vectorized.roots().len());
@@ -19454,6 +19769,7 @@ mod fused_zero_tests {
             args.insert(
                 name.into(),
                 ctx.dag.add_node(
+                    ctx.decl(),
                     RiscOp::Load { name: name.into() },
                     vec![],
                     tensor_type(&[2], Prim::F32),
@@ -19492,7 +19808,8 @@ mod fused_zero_tests {
             collect_top_level_defs(checked.exprs()),
             collect_top_level_sigs(checked.exprs()),
             LinearityInfo::default(),
-        );
+        )
+        .declared_for_test();
         let CallableExpr::Plain(function) =
             ctx.resolve_callable_expr(&parsed("(var {} loss)")).unwrap()
         else {
@@ -19502,6 +19819,7 @@ mod fused_zero_tests {
             .into_iter()
             .map(|name| {
                 ctx.dag.add_node(
+                    ctx.decl(),
                     RiscOp::Load { name: name.into() },
                     vec![],
                     tensor_type(&[2, 3], Prim::F32),
@@ -19544,6 +19862,7 @@ mod fused_zero_tests {
             BTreeMap::new(),
             LinearityInfo::default(),
         )
+        .declared_for_test()
     }
 
     fn tensor_type(dims: &[usize], precision: Prim) -> TensorType {
@@ -19570,12 +19889,20 @@ mod fused_zero_tests {
     fn fused_zero_unused_first_keeps_live_reuse_identity() {
         let mut ctx = context();
         let ty = tensor_type(&[2], Prim::F32);
-        let a = ctx
-            .dag
-            .add_node(RiscOp::Load { name: "a".into() }, vec![], ty.clone(), None);
-        let b = ctx
-            .dag
-            .add_node(RiscOp::Load { name: "b".into() }, vec![], ty, None);
+        let a = ctx.dag.add_node(
+            ctx.decl(),
+            RiscOp::Load { name: "a".into() },
+            vec![],
+            ty.clone(),
+            None,
+        );
+        let b = ctx.dag.add_node(
+            ctx.decl(),
+            RiscOp::Load { name: "b".into() },
+            vec![],
+            ty,
+            None,
+        );
         ctx.bindings.insert("a".into(), LoweredValue::Node(a));
         ctx.bindings.insert("b".into(), LoweredValue::Node(b));
         let function = "(fn {} (params {} (unused {type: (t-tensor {} (t-prim {} f32))}) (x {type: (t-tensor {} (t-prim {} f32))})) (app {} (var {} mul) (var {} x) (var {} x)))";
@@ -19607,9 +19934,13 @@ mod fused_zero_tests {
         for precision in [Prim::F32, Prim::F64] {
             let mut ctx = context();
             let ty = tensor_type(&[0], precision);
-            let input = ctx
-                .dag
-                .add_node(RiscOp::Load { name: "x".into() }, vec![], ty, None);
+            let input = ctx.dag.add_node(
+                ctx.decl(),
+                RiscOp::Load { name: "x".into() },
+                vec![],
+                ty,
+                None,
+            );
             ctx.bindings.insert("xs".into(), LoweredValue::Node(input));
             let p = precision.name();
             let function = format!(
@@ -19634,12 +19965,14 @@ mod fused_zero_tests {
     fn fused_zero_unbatched_actual_uses_materialized_shape_and_reuse() {
         let mut ctx = context();
         let a = ctx.dag.add_node(
+            ctx.decl(),
             RiscOp::Load { name: "a".into() },
             vec![],
             tensor_type(&[2], Prim::F32),
             None,
         );
         let b = ctx.dag.add_node(
+            ctx.decl(),
             RiscOp::Load { name: "b".into() },
             vec![],
             tensor_type(&[], Prim::F32),
@@ -19689,9 +20022,11 @@ mod fused_zero_tests {
         // root expands after vectorization, and its input retains the witness.
         for observed in [2, 3] {
             let mut dag = Dag::new();
+            let decl = dag.declare("test");
             let int = tensor_type(&[], Prim::Int64);
             let constant = |dag: &mut Dag, n| {
                 dag.add_node(
+                    decl,
                     RiscOp::Const {
                         value: chelis_types::scalar_from_i64("test", Prim::Int64, n).unwrap(),
                     },
@@ -19703,6 +20038,7 @@ mod fused_zero_tests {
             let actual = constant(&mut dag, observed);
             let required = constant(&mut dag, 2);
             let witness = dag.add_node(
+                decl,
                 RiscOp::CheckedReshapeExtent {
                     claims: vec!["rows".into()],
                     axis: crate::dag::RtAxis::Lit(0),
@@ -19712,6 +20048,7 @@ mod fused_zero_tests {
                 Some("fused-witness".into()),
             );
             let forward = dag.add_node(
+                decl,
                 RiscOp::Const {
                     value: chelis_types::scalar_from_i64("test", Prim::Int64, 7).unwrap(),
                 },
@@ -19721,6 +20058,7 @@ mod fused_zero_tests {
             );
             dag.add_shape_dep(forward, witness);
             let operand = dag.add_node(
+                decl,
                 RiscOp::Load {
                     name: "operand".into(),
                 },
@@ -19729,6 +20067,7 @@ mod fused_zero_tests {
                 None,
             );
             dag.add_node(
+                decl,
                 RiscOp::Expand {
                     axis: 0,
                     size: crate::dag::RtDim::Node(1),
@@ -20009,7 +20348,9 @@ mod tests {
     #[test]
     fn vectorized_root_map_checks_the_complete_correspondence() {
         let mut before = Dag::new();
+        let before_decl = before.declare("test");
         let x = before.add_node(
+            before_decl,
             RiscOp::Load { name: "x".into() },
             vec![],
             TensorType {
@@ -20019,6 +20360,7 @@ mod tests {
             None,
         );
         let y = before.add_node(
+            before_decl,
             RiscOp::Neg,
             vec![x],
             before.get(x).unwrap().output_type.clone(),
@@ -20242,6 +20584,7 @@ mod tests {
         let remapped = catch_lowering(|| {
             let mut ctx = empty_lower_ctx();
             let zero = ctx.dag.add_node(
+                ctx.decl(),
                 RiscOp::synth_const(Prim::F32, 0.0),
                 vec![],
                 TensorType {
@@ -20251,6 +20594,7 @@ mod tests {
                 None,
             );
             let bad = ctx.dag.add_node(
+                ctx.decl(),
                 RiscOp::Expand {
                     axis: 0,
                     size: RtDim::InputAxis {
@@ -20282,6 +20626,7 @@ mod tests {
             BTreeMap::new(),
             LinearityInfo::default(),
         )
+        .declared_for_test()
     }
 
     fn pattern_scope_depends_on_bad(pattern: Expr) -> bool {
@@ -20811,7 +21156,8 @@ mod tests {
             BTreeMap::new(),
             BTreeMap::new(),
             LinearityInfo::default(),
-        );
+        )
+        .declared_for_test();
         for expr in &exprs {
             let _ = ctx.lower_expr(expr);
         }
@@ -20825,8 +21171,10 @@ mod tests {
             BTreeMap::new(),
             BTreeMap::new(),
             LinearityInfo::default(),
-        );
+        )
+        .declared_for_test();
         let input = ctx.dag.add_node(
+            ctx.decl(),
             RiscOp::Load { name: "x".into() },
             vec![],
             TensorType {
@@ -20836,6 +21184,7 @@ mod tests {
             None,
         );
         let copied = ctx.dag.add_node(
+            ctx.decl(),
             RiscOp::Copy,
             vec![input],
             TensorType {
@@ -20851,6 +21200,7 @@ mod tests {
             "a wrapper's claimed metadata is not its actual source"
         );
         let actual = ctx.dag.add_node(
+            ctx.decl(),
             RiscOp::Const {
                 value: chelis_types::scalar_from_i64("reshape", Prim::Int64, 2).unwrap(),
             },
@@ -20862,6 +21212,7 @@ mod tests {
             None,
         );
         let reshape = ctx.dag.add_node(
+            ctx.decl(),
             RiscOp::Reshape {
                 new_shape: vec![RtDim::Node(1)],
             },
@@ -20894,7 +21245,8 @@ mod tests {
             BTreeMap::new(),
             BTreeMap::new(),
             LinearityInfo::default(),
-        );
+        )
+        .declared_for_test();
         let out_ty = TensorType {
             dims: vec![DimInfo::Named("result".to_string(), None)],
             precision: Prim::F32,
@@ -20903,6 +21255,7 @@ mod tests {
         // tensor result type, so the initial placeholder can already have
         // the right rank even though its extent remains anonymous.
         let early_placeholder = ctx.dag.add_node(
+            ctx.decl(),
             RiscOp::synth_const(
                 TensorType {
                     dims: vec![DimInfo::Named(String::new(), None)],
@@ -20920,6 +21273,7 @@ mod tests {
         );
         // The sibling is lowered later for `if fail(...) else <body>`.
         let sibling = ctx.dag.add_node(
+            ctx.decl(),
             RiscOp::Load { name: "x".into() },
             vec![],
             out_ty.clone(),
@@ -20954,7 +21308,8 @@ mod tests {
             BTreeMap::new(),
             BTreeMap::new(),
             LinearityInfo::default(),
-        );
+        )
+        .declared_for_test();
         let actual_ty = TensorType {
             dims: vec![
                 DimInfo::Lit(1),
@@ -20965,6 +21320,7 @@ mod tests {
             precision: Prim::F32,
         };
         let then_node = ctx.dag.add_node(
+            ctx.decl(),
             RiscOp::Load {
                 name: "then".into(),
             },
@@ -20973,6 +21329,7 @@ mod tests {
             None,
         );
         let else_node = ctx.dag.add_node(
+            ctx.decl(),
             RiscOp::Load {
                 name: "else".into(),
             },
@@ -21001,8 +21358,10 @@ mod tests {
             BTreeMap::new(),
             BTreeMap::new(),
             LinearityInfo::default(),
-        );
+        )
+        .declared_for_test();
         let placeholder = ctx.dag.add_node(
+            ctx.decl(),
             RiscOp::synth_const(Prim::F32, 0.0),
             vec![],
             TensorType::scalar_f32(),
@@ -21013,6 +21372,7 @@ mod tests {
             precision: Prim::F32,
         };
         let sibling = ctx.dag.add_node(
+            ctx.decl(),
             RiscOp::Load { name: "x".into() },
             vec![],
             actual_ty.clone(),
@@ -21032,8 +21392,10 @@ mod tests {
             BTreeMap::new(),
             BTreeMap::new(),
             LinearityInfo::default(),
-        );
+        )
+        .declared_for_test();
         let then_node = ctx.dag.add_node(
+            ctx.decl(),
             RiscOp::Load {
                 name: "then".into(),
             },
@@ -21045,6 +21407,7 @@ mod tests {
             None,
         );
         let else_node = ctx.dag.add_node(
+            ctx.decl(),
             RiscOp::Load {
                 name: "else".into(),
             },
@@ -21113,10 +21476,15 @@ mod tests {
             BTreeMap::new(),
             BTreeMap::new(),
             LinearityInfo::default(),
+        )
+        .declared_for_test();
+        let x = ctx.dag.add_node(
+            ctx.decl(),
+            RiscOp::Load { name: "x".into() },
+            vec![],
+            x_ty,
+            None,
         );
-        let x = ctx
-            .dag
-            .add_node(RiscOp::Load { name: "x".into() }, vec![], x_ty, None);
         ctx.bindings.insert("x".into(), LoweredValue::Node(x));
         let expr = chelis_deep::parser::parse_str(expr_src).expect("parse expand expr");
         let _ = ctx.lower_expr(&expr[0]);
@@ -21345,10 +21713,15 @@ mod tests {
             BTreeMap::new(),
             BTreeMap::new(),
             LinearityInfo::default(),
+        )
+        .declared_for_test();
+        let x = ctx.dag.add_node(
+            ctx.decl(),
+            RiscOp::Load { name: "x".into() },
+            vec![],
+            x_ty,
+            None,
         );
-        let x = ctx
-            .dag
-            .add_node(RiscOp::Load { name: "x".into() }, vec![], x_ty, None);
         ctx.bindings.insert("x".into(), LoweredValue::Node(x));
         let expr = chelis_deep::parser::parse_str(body_src).expect("parse body");
         let _ = ctx.lower_expr(&expr[0]);
@@ -21689,16 +22062,22 @@ mod tests {
                 BTreeMap::new(),
                 BTreeMap::new(),
                 LinearityInfo::default(),
-            );
+            )
+            .declared_for_test();
             let ty = TensorType {
                 dims: vec![DimInfo::Named("n".into(), None)],
                 precision: Prim::Int64,
             };
-            let input =
-                ctx.dag
-                    .add_node(RiscOp::Load { name: "x".into() }, vec![], ty.clone(), None);
+            let input = ctx.dag.add_node(
+                ctx.decl(),
+                RiscOp::Load { name: "x".into() },
+                vec![],
+                ty.clone(),
+                None,
+            );
             let inner = if introduced {
                 let scalar = ctx.dag.add_node(
+                    ctx.decl(),
                     RiscOp::Const {
                         value: chelis_types::scalar_from_i64("const", Prim::Int64, 7).unwrap(),
                     },
@@ -21710,6 +22089,7 @@ mod tests {
                     None,
                 );
                 ctx.dag.add_node(
+                    ctx.decl(),
                     RiscOp::Expand {
                         axis: 0,
                         size: RtDim::InputAxis {
@@ -21725,6 +22105,7 @@ mod tests {
                 input
             };
             let outer = ctx.dag.add_node(
+                ctx.decl(),
                 RiscOp::Expand {
                     axis: 0,
                     size: RtDim::Lit(4),
@@ -21759,7 +22140,8 @@ mod tests {
             BTreeMap::new(),
             BTreeMap::new(),
             LinearityInfo::default(),
-        );
+        )
+        .declared_for_test();
         ctx.lower_expr(&exprs[0]);
         assert!(
             ctx.dag
@@ -22140,7 +22522,8 @@ mod tests {
             collect_top_level_defs(checked.exprs()),
             collect_top_level_sigs(checked.exprs()),
             LinearityInfo::default(),
-        );
+        )
+        .declared_for_test();
         let out_kids = match out_body {
             Expr::Node(node, _) => node.children_slice(),
             _ => panic!("out body must be app"),
@@ -22247,7 +22630,8 @@ mod tests {
                 program_defs.clone(),
                 collect_top_level_sigs(checked.exprs()),
                 LinearityInfo::default(),
-            );
+            )
+            .declared_for_test();
             ctx.extract_fn_parts(&jac_fn).expect("jac_row fn parts")
         };
         let mut inline_ctx = LowerCtx::new(
@@ -22259,7 +22643,8 @@ mod tests {
             program_defs.clone(),
             collect_top_level_sigs(checked.exprs()),
             LinearityInfo::default(),
-        );
+        )
+        .declared_for_test();
         let app_exprs = chelis_deep::parser::parse_str(
             "(app {} (var {} jac_row) (var {} lm_model) (app {} (var {} to_tensor) (app {} (var {} Cons) (lit {type: (t-prim {} f32)} 1.0) (app {} (var {} Cons) (lit {type: (t-prim {} f32)} 2.0) (var {} Nil)))) (cast {} (lit {type: (t-prim {} f32)} 1.0) (t-prim {} f32)) (cast {} (lit {type: (t-prim {} f32)} 3.0) (t-prim {} f32)))"
         )
@@ -22307,7 +22692,8 @@ mod tests {
             program_defs,
             collect_top_level_sigs(checked.exprs()),
             LinearityInfo::default(),
-        );
+        )
+        .declared_for_test();
         subctx.local_callables = inline_ctx.local_callables.clone();
         let theta_local_ty = extract_param_type(&target_fn, 0).expect("theta_local type");
         let theta_local = subctx.lower_fn_param_binding("theta_local", Some(theta_local_ty));
@@ -22411,7 +22797,8 @@ mod tests {
             BTreeMap::new(),
             BTreeMap::new(),
             LinearityInfo::default(),
-        );
+        )
+        .declared_for_test();
         for expr in &exprs {
             ctx.lower_top_level(expr);
         }
@@ -22440,7 +22827,8 @@ mod tests {
             BTreeMap::new(),
             BTreeMap::new(),
             LinearityInfo::default(),
-        );
+        )
+        .declared_for_test();
         for expr in &exprs {
             ctx.lower_top_level(expr);
         }
@@ -23124,7 +23512,8 @@ mod tests {
                 BTreeMap::new(),
                 BTreeMap::new(),
                 LinearityInfo::default(),
-            );
+            )
+            .declared_for_test();
             let _ = ctx.lower_expr(&expr);
         });
         let Err(diagnostic) = outcome else {
@@ -23157,7 +23546,7 @@ mod tests {
                 )]),
                 BTreeMap::new(),
                 LinearityInfo::default(),
-            );
+            ).declared_for_test();
             let caller = ctx.lower_expr(&parse("(lit {} 2.0)"));
             ctx.bindings.insert("x".into(), caller.clone());
             let result = ctx.lower_expr(&parse("(app {} (var {} first) (lit {} 10.0) (var {} x))"));
@@ -23185,7 +23574,7 @@ mod tests {
             )]),
             BTreeMap::new(),
             LinearityInfo::default(),
-        );
+        ).declared_for_test();
         let caller = ctx.lower_expr(&parse("(cast {} (lit {} 3) i64)"));
         ctx.bindings.insert("n".into(), caller.clone());
         ctx.static_size_bindings.insert("n".into(), 3);
@@ -23219,7 +23608,8 @@ mod tests {
             BTreeMap::new(),
             BTreeMap::new(),
             LinearityInfo::default(),
-        );
+        )
+        .declared_for_test();
         let tensor = parse_type_expr("(t-tensor {} (d-lit {} 2) (t-var {} p))");
         assert_eq!(ctx.resolved_type_precision(&tensor), None);
         ctx.prec_substitutions.insert("p".into(), Prim::F64);
@@ -23502,8 +23892,10 @@ mod tests {
             BTreeMap::new(),
             BTreeMap::new(),
             LinearityInfo::default(),
-        );
+        )
+        .declared_for_test();
         let id = ctx.dag.add_node(
+            ctx.decl(),
             RiscOp::Load {
                 name: "produced".into(),
             },
@@ -23537,12 +23929,14 @@ mod tests {
             BTreeMap::new(),
             BTreeMap::new(),
             LinearityInfo::default(),
-        );
+        )
+        .declared_for_test();
         let exact = TensorType {
             dims: vec![DimInfo::Lit(2)],
             precision: Prim::F32,
         };
         let input = ctx.dag.add_node(
+            ctx.decl(),
             RiscOp::Load { name: "x".into() },
             vec![],
             exact.clone(),
@@ -23550,7 +23944,7 @@ mod tests {
         );
         let relu = ctx
             .dag
-            .add_node(RiscOp::Relu, vec![input], exact.clone(), None);
+            .add_node(ctx.decl(), RiscOp::Relu, vec![input], exact.clone(), None);
 
         let mut invalid = ctx.dag.clone();
         invalid.node_mut(relu).expect("relu").output_type.dims[0] =
@@ -24231,7 +24625,8 @@ mod regression_tests {
             BTreeMap::new(),
             BTreeMap::new(),
             LinearityInfo::default(),
-        );
+        )
+        .declared_for_test();
         for expr in &exprs {
             let _ = ctx.lower_expr(expr);
         }
@@ -24369,7 +24764,8 @@ mod regression_tests {
             BTreeMap::new(),
             BTreeMap::new(),
             LinearityInfo::default(),
-        );
+        )
+        .declared_for_test();
         let _ = ctx.lower_expr(&exprs[0]);
         let load_x = ctx
             .dag
@@ -24834,7 +25230,8 @@ mod regression_tests {
                 BTreeMap::new(),
                 BTreeMap::new(),
                 LinearityInfo::default(),
-            );
+            )
+            .declared_for_test();
             ctx.prec_substitutions.insert("p".to_string(), target);
             let _ = ctx.lower_expr(&expr);
 

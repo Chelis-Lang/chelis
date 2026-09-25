@@ -5305,13 +5305,21 @@ mod tests {
     #[test]
     fn drop_releases_exact_device_descriptor_once() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let source = dag.add_node(
+            decl,
             RiscOp::synth_const(Prim::F32, 1.0),
             vec![],
             TensorType::scalar_f32(),
             None,
         );
-        dag.add_node(RiscOp::Drop, vec![source], TensorType::scalar_f32(), None);
+        dag.add_node(
+            decl,
+            RiscOp::Drop,
+            vec![source],
+            TensorType::scalar_f32(),
+            None,
+        );
 
         let (source, _) = emit_test_dag(&dag, "verified_drop").unwrap();
         assert_eq!(
@@ -5326,14 +5334,28 @@ mod tests {
     #[test]
     fn borrowed_drop_is_a_logical_discard_without_a_device_release() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let borrowed = dag.add_node(
+            decl,
             RiscOp::Load { name: "x".into() },
             vec![],
             TensorType::scalar_f32(),
             None,
         );
-        dag.add_node(RiscOp::Drop, vec![borrowed], TensorType::scalar_f32(), None);
-        let output = dag.add_node(RiscOp::Copy, vec![borrowed], TensorType::scalar_f32(), None);
+        dag.add_node(
+            decl,
+            RiscOp::Drop,
+            vec![borrowed],
+            TensorType::scalar_f32(),
+            None,
+        );
+        let output = dag.add_node(
+            decl,
+            RiscOp::Copy,
+            vec![borrowed],
+            TensorType::scalar_f32(),
+            None,
+        );
         dag.add_root(output);
 
         let (source, _) = emit_test_dag(&dag, "borrowed_drop").unwrap();
@@ -5494,8 +5516,15 @@ mod tests {
         let ty = vec_i64(1);
 
         let mut direct = Dag::new();
-        let x = direct.add_node(RiscOp::Load { name: "x".into() }, vec![], ty.clone(), None);
-        let out = direct.add_node(RiscOp::Abs, vec![x], ty.clone(), None);
+        let direct_decl = direct.declare("test");
+        let x = direct.add_node(
+            direct_decl,
+            RiscOp::Load { name: "x".into() },
+            vec![],
+            ty.clone(),
+            None,
+        );
+        let out = direct.add_node(direct_decl, RiscOp::Abs, vec![x], ty.clone(), None);
         direct.set_roots(vec![out]);
         let err = match emit_test_dag(&direct, "integer_abs") {
             Err(error) => error,
@@ -5504,8 +5533,16 @@ mod tests {
         assert!(err.to_string().contains("unsupported: op `Abs`"));
 
         let mut fused = Dag::new();
-        let x = fused.add_node(RiscOp::Load { name: "x".into() }, vec![], ty.clone(), None);
+        let fused_decl = fused.declare("test");
+        let x = fused.add_node(
+            fused_decl,
+            RiscOp::Load { name: "x".into() },
+            vec![],
+            ty.clone(),
+            None,
+        );
         let out = fused.add_node(
+            fused_decl,
             RiscOp::FusedElem {
                 ops: vec![FusedStep {
                     op: FusedStepOp::Abs,
@@ -5533,27 +5570,16 @@ mod tests {
 
     fn fused_mul_reusable_input_dag() -> Dag {
         let mut dag = Dag::new();
-        let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_f32(4), None);
-        let scale = dag.add_node(
-            RiscOp::synth_const(vec_f32(4).precision, 2.0),
+        let decl = dag.declare("test");
+        let x = dag.add_node(
+            decl,
+            RiscOp::Load { name: "x".into() },
             vec![],
             vec_f32(4),
             None,
         );
-        let ops = vec![FusedStep {
-            op: FusedStepOp::Mul,
-            input_indices: vec![FusedInput::External(0), FusedInput::External(1)],
-        }];
-        let fused = dag.add_node(RiscOp::FusedElem { ops }, vec![x, scale], vec_f32(4), None);
-        dag.set_reusable_input(fused, x);
-        dag
-    }
-
-    fn fused_mul_program_owned_reusable_input_dag() -> Dag {
-        let mut dag = Dag::new();
-        let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_f32(4), None);
-        let owned = dag.add_node(RiscOp::Copy, vec![x], vec_f32(4), None);
         let scale = dag.add_node(
+            decl,
             RiscOp::synth_const(vec_f32(4).precision, 2.0),
             vec![],
             vec_f32(4),
@@ -5564,6 +5590,40 @@ mod tests {
             input_indices: vec![FusedInput::External(0), FusedInput::External(1)],
         }];
         let fused = dag.add_node(
+            decl,
+            RiscOp::FusedElem { ops },
+            vec![x, scale],
+            vec_f32(4),
+            None,
+        );
+        dag.set_reusable_input(fused, x);
+        dag
+    }
+
+    fn fused_mul_program_owned_reusable_input_dag() -> Dag {
+        let mut dag = Dag::new();
+        let decl = dag.declare("test");
+        let x = dag.add_node(
+            decl,
+            RiscOp::Load { name: "x".into() },
+            vec![],
+            vec_f32(4),
+            None,
+        );
+        let owned = dag.add_node(decl, RiscOp::Copy, vec![x], vec_f32(4), None);
+        let scale = dag.add_node(
+            decl,
+            RiscOp::synth_const(vec_f32(4).precision, 2.0),
+            vec![],
+            vec_f32(4),
+            None,
+        );
+        let ops = vec![FusedStep {
+            op: FusedStepOp::Mul,
+            input_indices: vec![FusedInput::External(0), FusedInput::External(1)],
+        }];
+        let fused = dag.add_node(
+            decl,
             RiscOp::FusedElem { ops },
             vec![owned, scale],
             vec_f32(4),
@@ -5577,7 +5637,9 @@ mod tests {
     #[test]
     fn sparse_scatter_add_emits_hip_atomic_kernel() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let target = dag.add_node(
+            decl,
             RiscOp::Load {
                 name: "target".into(),
             },
@@ -5586,6 +5648,7 @@ mod tests {
             None,
         );
         let indices = dag.add_node(
+            decl,
             RiscOp::Load {
                 name: "indices".into(),
             },
@@ -5594,6 +5657,7 @@ mod tests {
             None,
         );
         let updates = dag.add_node(
+            decl,
             RiscOp::Load {
                 name: "updates".into(),
             },
@@ -5602,6 +5666,7 @@ mod tests {
             None,
         );
         let out = dag.add_node(
+            decl,
             RiscOp::ScatterAdd { axis: 0 },
             vec![target, indices, updates],
             mat_f32(3, 2),
@@ -5655,13 +5720,16 @@ mod tests {
     #[test]
     fn fused_in_place_does_not_alias_a_view_of_a_caller_owned_input() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let x = dag.add_node(
+            decl,
             RiscOp::Load { name: "x".into() },
             vec![],
             mat_f32(2, 2),
             None,
         );
         let flat = dag.add_node(
+            decl,
             RiscOp::Reshape {
                 new_shape: vec![RtDim::Lit(4)],
             },
@@ -5670,12 +5738,14 @@ mod tests {
             None,
         );
         let scale = dag.add_node(
+            decl,
             RiscOp::synth_const(Prim::F32, 2.0),
             vec![],
             vec_f32(4),
             None,
         );
         let fused = dag.add_node(
+            decl,
             RiscOp::FusedElem {
                 ops: vec![FusedStep {
                     op: FusedStepOp::Mul,
@@ -5702,8 +5772,16 @@ mod tests {
     #[test]
     fn fused_without_reusable_input_keeps_non_in_place_kernel_shape() {
         let mut dag = Dag::new();
-        let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_f32(4), None);
+        let decl = dag.declare("test");
+        let x = dag.add_node(
+            decl,
+            RiscOp::Load { name: "x".into() },
+            vec![],
+            vec_f32(4),
+            None,
+        );
         let scale = dag.add_node(
+            decl,
             RiscOp::synth_const(vec_f32(4).precision, 2.0),
             vec![],
             vec_f32(4),
@@ -5713,7 +5791,13 @@ mod tests {
             op: FusedStepOp::Mul,
             input_indices: vec![FusedInput::External(0), FusedInput::External(1)],
         }];
-        let fused = dag.add_node(RiscOp::FusedElem { ops }, vec![x, scale], vec_f32(4), None);
+        let fused = dag.add_node(
+            decl,
+            RiscOp::FusedElem { ops },
+            vec![x, scale],
+            vec_f32(4),
+            None,
+        );
         // No set_reusable_input call — the in-place gate must reject.
         dag.add_root(fused);
 
@@ -5740,7 +5824,9 @@ mod tests {
         // reparses to a different (zero) bit pattern.
         let value = 1e-40_f64;
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let c = dag.add_node(
+            decl,
             RiscOp::synth_const(Prim::F32, value),
             vec![],
             vec_f32(4),
@@ -5774,7 +5860,9 @@ mod tests {
         // 1.0 / 3.0 has no exact decimal form; pin the exact f64 bits.
         let value = 1.0_f64 / 3.0_f64;
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let c = dag.add_node(
+            decl,
             RiscOp::synth_const(Prim::F64, value),
             vec![],
             vec_f64(4),
@@ -5796,6 +5884,7 @@ mod tests {
     /// the HIP lane computes at emission.
     fn seeded_uniform(
         dag: &mut Dag,
+        decl: chelis_ir::dag::DeclId,
         template: NodeId,
         ty: TensorType,
         (low, high): (f64, f64),
@@ -5806,25 +5895,35 @@ mod tests {
             precision,
         };
         let low = dag.add_node(
+            decl,
             RiscOp::synth_const(Prim::F32, low),
             vec![],
             rank0(Prim::F32),
             None,
         );
         let high = dag.add_node(
+            decl,
             RiscOp::synth_const(Prim::F32, high),
             vec![],
             rank0(Prim::F32),
             None,
         );
         let seed = dag.add_node(
+            decl,
             RiscOp::synth_const(Prim::Int64, seed as f64),
             vec![],
             rank0(Prim::Int64),
             None,
         );
-        let key = dag.add_node(RiscOp::KeyFromSeed, vec![seed], rank0(Prim::Key), None);
+        let key = dag.add_node(
+            decl,
+            RiscOp::KeyFromSeed,
+            vec![seed],
+            rank0(Prim::Key),
+            None,
+        );
         dag.add_node(
+            decl,
             RiscOp::UniformLike,
             vec![template, low, high, key],
             ty,
@@ -5840,7 +5939,9 @@ mod tests {
         let low = 1e-40_f64; // denormal f32: lost by `%.8`
         let high = 1.0_f64 / 3.0_f64; // off-by-ULP under `%.8`
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let like = dag.add_node(
+            decl,
             RiscOp::Load {
                 name: "like".into(),
             },
@@ -5848,7 +5949,7 @@ mod tests {
             vec_f32(8),
             None,
         );
-        let u = seeded_uniform(&mut dag, like, vec_f32(8), (low, high), 7);
+        let u = seeded_uniform(&mut dag, decl, like, vec_f32(8), (low, high), 7);
         dag.add_root(u);
         let (hip, _) = emit_test_dag(&dag, "test_fn").unwrap();
 
@@ -5912,7 +6013,9 @@ mod tests {
         }
         for ty in [vec_f32(8), vec_f64(8)] {
             let mut dag = Dag::new();
+            let decl = dag.declare("test");
             let like = dag.add_node(
+                decl,
                 RiscOp::Load {
                     name: "like".into(),
                 },
@@ -5920,8 +6023,8 @@ mod tests {
                 ty.clone(),
                 None,
             );
-            let first = seeded_uniform(&mut dag, like, ty.clone(), (0.0, 1.0), 7);
-            let second = seeded_uniform(&mut dag, first, ty.clone(), (-1.0, 1.0), 7);
+            let first = seeded_uniform(&mut dag, decl, like, ty.clone(), (0.0, 1.0), 7);
+            let second = seeded_uniform(&mut dag, decl, first, ty.clone(), (-1.0, 1.0), 7);
             dag.add_root(second);
             let (hip, _) = emit_test_dag(&dag, "test_fn").unwrap();
             let entries = hip.split("extern \"C\" void ").skip(1).collect::<Vec<_>>();
@@ -5947,7 +6050,9 @@ mod tests {
             precision,
         };
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let like = dag.add_node(
+            decl,
             RiscOp::Load {
                 name: "like".into(),
             },
@@ -5956,6 +6061,7 @@ mod tests {
             None,
         );
         let active = dag.add_node(
+            decl,
             RiscOp::Load {
                 name: "active".into(),
             },
@@ -5964,25 +6070,35 @@ mod tests {
             None,
         );
         let low = dag.add_node(
+            decl,
             RiscOp::synth_const(Prim::F32, 0.0),
             vec![],
             rank0(Prim::F32),
             None,
         );
         let high = dag.add_node(
+            decl,
             RiscOp::synth_const(Prim::F32, 1.0),
             vec![],
             rank0(Prim::F32),
             None,
         );
         let seed = dag.add_node(
+            decl,
             RiscOp::synth_const(Prim::Int64, 7.0),
             vec![],
             rank0(Prim::Int64),
             None,
         );
-        let key = dag.add_node(RiscOp::KeyFromSeed, vec![seed], rank0(Prim::Key), None);
+        let key = dag.add_node(
+            decl,
+            RiscOp::KeyFromSeed,
+            vec![seed],
+            rank0(Prim::Key),
+            None,
+        );
         let draw = dag.add_node(
+            decl,
             RiscOp::UniformLike,
             vec![like, low, high, key, active],
             vec_f32(8),
@@ -6001,13 +6117,20 @@ mod tests {
 
     /// `uniform_like(0, 1)` of `ty` keyed by the chain `fold_in(split(
     /// key_from_seed(seed)).1, index)`, every operand a literal.
-    fn derived_uniform(dag: &mut Dag, ty: TensorType, seed: i64, index: i64) -> NodeId {
+    fn derived_uniform(
+        dag: &mut Dag,
+        decl: chelis_ir::dag::DeclId,
+        ty: TensorType,
+        seed: i64,
+        index: i64,
+    ) -> NodeId {
         let rank0 = |precision| TensorType {
             dims: vec![],
             precision,
         };
         let i64_const = |dag: &mut Dag, value: i64| {
             dag.add_node(
+                decl,
                 RiscOp::Const {
                     value: chelis_types::scalar_from_i64("test", Prim::Int64, value).unwrap(),
                 },
@@ -6017,6 +6140,7 @@ mod tests {
             )
         };
         let like = dag.add_node(
+            decl,
             RiscOp::Load {
                 name: "like".into(),
             },
@@ -6025,8 +6149,15 @@ mod tests {
             None,
         );
         let seed = i64_const(dag, seed);
-        let root = dag.add_node(RiscOp::KeyFromSeed, vec![seed], rank0(Prim::Key), None);
+        let root = dag.add_node(
+            decl,
+            RiscOp::KeyFromSeed,
+            vec![seed],
+            rank0(Prim::Key),
+            None,
+        );
         let right = dag.add_node(
+            decl,
             RiscOp::Split {
                 branch: chelis_ir::dag::KeyBranch::Right,
             },
@@ -6035,6 +6166,7 @@ mod tests {
             None,
         );
         let left = dag.add_node(
+            decl,
             RiscOp::Split {
                 branch: chelis_ir::dag::KeyBranch::Left,
             },
@@ -6043,20 +6175,34 @@ mod tests {
             None,
         );
         let index = i64_const(dag, index);
-        let folded = dag.add_node(RiscOp::FoldIn, vec![right, index], rank0(Prim::Key), None);
+        let folded = dag.add_node(
+            decl,
+            RiscOp::FoldIn,
+            vec![right, index],
+            rank0(Prim::Key),
+            None,
+        );
         let low = dag.add_node(
+            decl,
             RiscOp::synth_const(Prim::F32, 0.0),
             vec![],
             rank0(Prim::F32),
             None,
         );
         let high = dag.add_node(
+            decl,
             RiscOp::synth_const(Prim::F32, 1.0),
             vec![],
             rank0(Prim::F32),
             None,
         );
-        let draw = dag.add_node(RiscOp::UniformLike, vec![like, low, high, folded], ty, None);
+        let draw = dag.add_node(
+            decl,
+            RiscOp::UniformLike,
+            vec![like, low, high, folded],
+            ty,
+            None,
+        );
         // The left half is unused: an affine key may be dropped.
         let _ = left;
         draw
@@ -6071,7 +6217,8 @@ mod tests {
         const G_KEY: u64 = 0x2334_cf03_8b09_85b4;
         for ty in [vec_f32(8), vec_f64(8)] {
             let mut dag = Dag::new();
-            let draw = derived_uniform(&mut dag, ty, -3, 9);
+            let decl = dag.declare("test");
+            let draw = derived_uniform(&mut dag, decl, ty, -3, 9);
             dag.add_root(draw);
             let (hip, _) = emit_test_dag(&dag, "test_fn").unwrap();
             // Pruning the unused left half renumbers the draw, so match the
@@ -6092,7 +6239,9 @@ mod tests {
         };
         // A key split produces a key tensor.
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let seed = dag.add_node(
+            decl,
             RiscOp::Const {
                 value: chelis_types::scalar_from_i64("test", Prim::Int64, 7).unwrap(),
             },
@@ -6100,8 +6249,15 @@ mod tests {
             rank0(Prim::Int64),
             None,
         );
-        let root = dag.add_node(RiscOp::KeyFromSeed, vec![seed], rank0(Prim::Key), None);
+        let root = dag.add_node(
+            decl,
+            RiscOp::KeyFromSeed,
+            vec![seed],
+            rank0(Prim::Key),
+            None,
+        );
         let rows = dag.add_node(
+            decl,
             RiscOp::SplitN {
                 count: RtDim::Lit(3),
             },
@@ -6113,6 +6269,7 @@ mod tests {
             None,
         );
         let like = dag.add_node(
+            decl,
             RiscOp::Load {
                 name: "like".into(),
             },
@@ -6124,18 +6281,21 @@ mod tests {
             None,
         );
         let low = dag.add_node(
+            decl,
             RiscOp::synth_const(Prim::F32, 0.0),
             vec![],
             rank0(Prim::F32),
             None,
         );
         let high = dag.add_node(
+            decl,
             RiscOp::synth_const(Prim::F32, 1.0),
             vec![],
             rank0(Prim::F32),
             None,
         );
         let draw = dag.add_node(
+            decl,
             RiscOp::UniformLike,
             vec![like, low, high, rows],
             TensorType {
@@ -6155,7 +6315,9 @@ mod tests {
         );
         // A runtime seed.
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let seed = dag.add_node(
+            decl,
             RiscOp::Load {
                 name: "seed".into(),
             },
@@ -6163,8 +6325,15 @@ mod tests {
             rank0(Prim::Int64),
             None,
         );
-        let root = dag.add_node(RiscOp::KeyFromSeed, vec![seed], rank0(Prim::Key), None);
+        let root = dag.add_node(
+            decl,
+            RiscOp::KeyFromSeed,
+            vec![seed],
+            rank0(Prim::Key),
+            None,
+        );
         let like = dag.add_node(
+            decl,
             RiscOp::Load {
                 name: "like".into(),
             },
@@ -6173,18 +6342,21 @@ mod tests {
             None,
         );
         let low = dag.add_node(
+            decl,
             RiscOp::synth_const(Prim::F32, 0.0),
             vec![],
             rank0(Prim::F32),
             None,
         );
         let high = dag.add_node(
+            decl,
             RiscOp::synth_const(Prim::F32, 1.0),
             vec![],
             rank0(Prim::F32),
             None,
         );
         let draw = dag.add_node(
+            decl,
             RiscOp::UniformLike,
             vec![like, low, high, root],
             vec_f32(8),
@@ -6197,7 +6369,9 @@ mod tests {
         assert!(error.context.contains("with a runtime seed"), "{error}");
         // A key result has no device value.
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let seed = dag.add_node(
+            decl,
             RiscOp::Const {
                 value: chelis_types::scalar_from_i64("test", Prim::Int64, 7).unwrap(),
             },
@@ -6205,7 +6379,13 @@ mod tests {
             rank0(Prim::Int64),
             None,
         );
-        let root = dag.add_node(RiscOp::KeyFromSeed, vec![seed], rank0(Prim::Key), None);
+        let root = dag.add_node(
+            decl,
+            RiscOp::KeyFromSeed,
+            vec![seed],
+            rank0(Prim::Key),
+            None,
+        );
         dag.add_root(root);
         let Err(error) = emit_test_dag(&dag, "test_fn") else {
             panic!("the HIP lane returned a key");
@@ -6213,7 +6393,8 @@ mod tests {
         assert!(error.context.contains("a key result"), "{error}");
         // Bounds that trap under a derived key: the draw validates them.
         let mut dag = Dag::new();
-        let draw = derived_uniform(&mut dag, vec_f32(8), -3, 9);
+        let decl = dag.declare("test");
+        let draw = derived_uniform(&mut dag, decl, vec_f32(8), -3, 9);
         let (low, high) = (
             dag.get(draw).unwrap().inputs[1],
             dag.get(draw).unwrap().inputs[2],
@@ -6236,7 +6417,9 @@ mod tests {
         let low = 0.1_f64;
         let high = 0.9_f64;
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let like = dag.add_node(
+            decl,
             RiscOp::Load {
                 name: "like".into(),
             },
@@ -6244,7 +6427,7 @@ mod tests {
             vec_f64(8),
             None,
         );
-        let u = seeded_uniform(&mut dag, like, vec_f64(8), (low, high), 17);
+        let u = seeded_uniform(&mut dag, decl, like, vec_f64(8), (low, high), 17);
         dag.add_root(u);
         let (hip, _) = emit_test_dag(&dag, "test_fn").unwrap();
 

@@ -20479,7 +20479,9 @@ mod tests {
     fn kernel_builtin_load_rejection_requires_a_typed_lexical_input() {
         for name in ["mean", "fold", "map"] {
             let mut dag = crate::Dag::new();
+            let decl = dag.declare("test");
             dag.add_node(
+                decl,
                 RiscOp::Load { name: name.into() },
                 vec![],
                 TensorType {
@@ -20581,7 +20583,9 @@ mod tests {
             precision: Prim::F32,
         };
         let mut dag = crate::Dag::new();
+        let decl = dag.declare("test");
         let root = dag.add_node(
+            decl,
             RiscOp::Load {
                 name: "index".into(),
             },
@@ -23409,7 +23413,14 @@ def from_column[n, a](column: Column[n, a]) -> Frame[n, a] =
             precision: Prim::F32,
         };
         let mut before = Dag::new();
-        let root = before.add_node(RiscOp::Load { name: "x".into() }, vec![], symbolic, None);
+        let before_decl = before.declare("test");
+        let root = before.add_node(
+            before_decl,
+            RiscOp::Load { name: "x".into() },
+            vec![],
+            symbolic,
+            None,
+        );
         before.add_root(root);
         let mut scope = UnordMap::new();
         scope.insert("x".into(), HostTypeTerm::Tensor(concrete.clone()));
@@ -23507,7 +23518,9 @@ def from_column[n, a](column: Column[n, a]) -> Frame[n, a] =
         let d417 = DimInfo::Named("d417".into(), None);
         let d420 = DimInfo::Named("d420".into(), None);
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let x = dag.add_node(
+            decl,
             RiscOp::Load { name: "x".into() },
             vec![],
             TensorType {
@@ -23517,6 +23530,7 @@ def from_column[n, a](column: Column[n, a]) -> Frame[n, a] =
             None,
         );
         let w = dag.add_node(
+            decl,
             RiscOp::Load { name: "w".into() },
             vec![],
             TensorType {
@@ -23526,6 +23540,7 @@ def from_column[n, a](column: Column[n, a]) -> Frame[n, a] =
             None,
         );
         let expanded_x = dag.add_node(
+            decl,
             RiscOp::Expand {
                 axis: 2,
                 size: RtDim::InputAxis {
@@ -23541,6 +23556,7 @@ def from_column[n, a](column: Column[n, a]) -> Frame[n, a] =
             None,
         );
         let expanded_w = dag.add_node(
+            decl,
             RiscOp::Expand {
                 axis: 0,
                 size: RtDim::InputAxis {
@@ -23556,6 +23572,7 @@ def from_column[n, a](column: Column[n, a]) -> Frame[n, a] =
             None,
         );
         let product = dag.add_node(
+            decl,
             RiscOp::Mul,
             vec![expanded_x, expanded_w],
             TensorType {
@@ -23565,6 +23582,7 @@ def from_column[n, a](column: Column[n, a]) -> Frame[n, a] =
             None,
         );
         let root = dag.add_node(
+            decl,
             RiscOp::Sum {
                 axis: 1,
                 accumulator: chelis_types::types::Prim::F32,
@@ -23615,9 +23633,11 @@ def from_column[n, a](column: Column[n, a]) -> Frame[n, a] =
         let n = DimInfo::Named("n".into(), None);
         let d47 = DimInfo::Named("d47".into(), None);
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         // Load typed with the minted alias; the scope knows the
         // user-facing symbol.
         let x = dag.add_node(
+            decl,
             RiscOp::Load { name: "x".into() },
             vec![],
             TensorType {
@@ -23628,6 +23648,7 @@ def from_column[n, a](column: Column[n, a]) -> Frame[n, a] =
         );
         // Scalar upstream gradient, as the Sum adjoint produces.
         let g = dag.add_node(
+            decl,
             RiscOp::Load { name: "g".into() },
             vec![],
             TensorType {
@@ -23638,6 +23659,7 @@ def from_column[n, a](column: Column[n, a]) -> Frame[n, a] =
         );
         // The Sum adjoint's expand-back reads the original tensor shape.
         let expanded_g = dag.add_node(
+            decl,
             RiscOp::Expand {
                 axis: 0,
                 size: RtDim::InputAxis {
@@ -23653,6 +23675,7 @@ def from_column[n, a](column: Column[n, a]) -> Frame[n, a] =
             None,
         );
         let root = dag.add_node(
+            decl,
             RiscOp::Mul,
             vec![expanded_g, x],
             TensorType {
@@ -23704,7 +23727,9 @@ def from_column[n, a](column: Column[n, a]) -> Frame[n, a] =
 
         let batch = DimInfo::Named("batch".into(), None);
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let g = dag.add_node(
+            decl,
             RiscOp::Load { name: "g".into() },
             vec![],
             TensorType {
@@ -23714,6 +23739,7 @@ def from_column[n, a](column: Column[n, a]) -> Frame[n, a] =
             None,
         );
         let x = dag.add_node(
+            decl,
             RiscOp::Load { name: "x".into() },
             vec![],
             TensorType {
@@ -23723,6 +23749,7 @@ def from_column[n, a](column: Column[n, a]) -> Frame[n, a] =
             None,
         );
         let expanded = dag.add_node(
+            decl,
             RiscOp::Expand {
                 axis: 0,
                 size: RtDim::InputAxis {
@@ -23738,6 +23765,7 @@ def from_column[n, a](column: Column[n, a]) -> Frame[n, a] =
             None,
         );
         let root = dag.add_node(
+            decl,
             RiscOp::Mul,
             vec![expanded, x],
             TensorType {
@@ -23777,7 +23805,9 @@ def from_column[n, a](column: Column[n, a]) -> Frame[n, a] =
         use crate::dag::{Dag, DimInfo, RiscOp, RtDim, TensorType};
 
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let input = dag.add_node(
+            decl,
             RiscOp::Load {
                 name: "expanded".into(),
             },
@@ -23790,6 +23820,7 @@ def from_column[n, a](column: Column[n, a]) -> Frame[n, a] =
             None,
         );
         let shrink = dag.add_node(
+            decl,
             RiscOp::Shrink {
                 bounds: vec![
                     (RtDim::Lit(0), RtDim::Lit(1)),
@@ -23831,7 +23862,9 @@ def from_column[n, a](column: Column[n, a]) -> Frame[n, a] =
 
         let batch = DimInfo::Named("batch".into(), None);
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let input = dag.add_node(
+            decl,
             RiscOp::Load { name: "x".into() },
             vec![],
             TensorType {
@@ -23841,6 +23874,7 @@ def from_column[n, a](column: Column[n, a]) -> Frame[n, a] =
             None,
         );
         let shrink = dag.add_node(
+            decl,
             RiscOp::Shrink {
                 bounds: vec![(RtDim::Lit(0), RtDim::ToEnd)],
             },
@@ -23893,7 +23927,9 @@ def from_column[n, a](column: Column[n, a]) -> Frame[n, a] =
         use crate::dag::{Dag, DimInfo, RiscOp, RtDim, TensorType};
 
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let input = dag.add_node(
+            decl,
             RiscOp::Load { name: "x".into() },
             vec![],
             TensorType {
@@ -23907,6 +23943,7 @@ def from_column[n, a](column: Column[n, a]) -> Frame[n, a] =
             precision: Prim::F32,
         };
         let shrink = dag.add_node(
+            decl,
             RiscOp::Shrink {
                 bounds: vec![(RtDim::Lit(1), RtDim::ToEnd)],
             },
@@ -23944,7 +23981,9 @@ def from_column[n, a](column: Column[n, a]) -> Frame[n, a] =
         use crate::dag::{Dag, DimInfo, RiscOp, RtAxis, RtDim, TensorType};
 
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let input = dag.add_node(
+            decl,
             RiscOp::Load { name: "x".into() },
             vec![],
             TensorType {
@@ -23963,6 +24002,7 @@ def from_column[n, a](column: Column[n, a]) -> Frame[n, a] =
         };
         let malformed = [
             dag.add_node(
+                decl,
                 RiscOp::Shrink {
                     bounds: vec![(input_axis(), RtDim::Lit(2))],
                 },
@@ -23971,6 +24011,7 @@ def from_column[n, a](column: Column[n, a]) -> Frame[n, a] =
                 None,
             ),
             dag.add_node(
+                decl,
                 RiscOp::Shrink {
                     bounds: vec![(RtDim::Lit(0), input_axis())],
                 },
@@ -23979,6 +24020,7 @@ def from_column[n, a](column: Column[n, a]) -> Frame[n, a] =
                 None,
             ),
             dag.add_node(
+                decl,
                 RiscOp::Stride {
                     strides: vec![input_axis()],
                 },
@@ -24018,6 +24060,7 @@ def from_column[n, a](column: Column[n, a]) -> Frame[n, a] =
 
     fn runtime_shrink_bound_nodes(
         dag: &mut crate::dag::Dag,
+        decl: crate::dag::DeclId,
     ) -> (crate::dag::NodeId, crate::dag::NodeId) {
         use crate::dag::{RiscOp, TensorType};
 
@@ -24026,12 +24069,14 @@ def from_column[n, a](column: Column[n, a]) -> Frame[n, a] =
             precision: Prim::Int64,
         };
         let start = dag.add_node(
+            decl,
             RiscOp::synth_const(Prim::Int64, 1.0),
             vec![],
             scalar_i64.clone(),
             None,
         );
         let end = dag.add_node(
+            decl,
             RiscOp::synth_const(Prim::Int64, 3.0),
             vec![],
             scalar_i64,
@@ -24045,7 +24090,9 @@ def from_column[n, a](column: Column[n, a]) -> Frame[n, a] =
         use crate::dag::{Dag, DimInfo, RiscOp, RtDim, TensorType};
 
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let input = dag.add_node(
+            decl,
             RiscOp::Load { name: "x".into() },
             vec![],
             TensorType {
@@ -24054,8 +24101,9 @@ def from_column[n, a](column: Column[n, a]) -> Frame[n, a] =
             },
             None,
         );
-        let (start, end) = runtime_shrink_bound_nodes(&mut dag);
+        let (start, end) = runtime_shrink_bound_nodes(&mut dag, decl);
         let shrink = dag.add_node(
+            decl,
             RiscOp::Shrink {
                 bounds: vec![(RtDim::Node(1), RtDim::Node(2))],
             },
@@ -24106,7 +24154,9 @@ def from_column[n, a](column: Column[n, a]) -> Frame[n, a] =
 
         for internal_before_shrink in [false, true] {
             let mut dag = Dag::new();
+            let decl = dag.declare("test");
             let input = dag.add_node(
+                decl,
                 RiscOp::Load { name: "x".into() },
                 vec![],
                 TensorType {
@@ -24115,12 +24165,13 @@ def from_column[n, a](column: Column[n, a]) -> Frame[n, a] =
                 },
                 None,
             );
-            let (start, end) = runtime_shrink_bound_nodes(&mut dag);
+            let (start, end) = runtime_shrink_bound_nodes(&mut dag, decl);
             let expected_shrink_id = if internal_before_shrink { 4 } else { 3 };
             let base = format!("_rt_shrink_dim_{expected_shrink_id}_0");
             let internal_shape = vec![RtDim::Sym(base.clone()), RtDim::Sym(format!("{base}_1"))];
             let add_internal_carrier = |dag: &mut Dag| {
                 dag.add_node(
+                    decl,
                     RiscOp::Reshape {
                         new_shape: internal_shape.clone(),
                     },
@@ -24136,6 +24187,7 @@ def from_column[n, a](column: Column[n, a]) -> Frame[n, a] =
                 let _ = add_internal_carrier(&mut dag);
             }
             let shrink = dag.add_node(
+                decl,
                 RiscOp::Shrink {
                     bounds: vec![(RtDim::Node(1), RtDim::Node(2))],
                 },
@@ -24177,7 +24229,9 @@ def from_column[n, a](column: Column[n, a]) -> Frame[n, a] =
         use crate::dag::{Dag, DimInfo, RiscOp, RtDim, TensorType};
 
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let input = dag.add_node(
+            decl,
             RiscOp::Load { name: "x".into() },
             vec![],
             TensorType {
@@ -24186,12 +24240,13 @@ def from_column[n, a](column: Column[n, a]) -> Frame[n, a] =
             },
             None,
         );
-        let (start, end) = runtime_shrink_bound_nodes(&mut dag);
+        let (start, end) = runtime_shrink_bound_nodes(&mut dag, decl);
         let wildcard = TensorType {
             dims: vec![DimInfo::Named("*".into(), None)],
             precision: Prim::F32,
         };
         let shrink_a = dag.add_node(
+            decl,
             RiscOp::Shrink {
                 bounds: vec![(RtDim::Node(1), RtDim::Node(2))],
             },
@@ -24200,6 +24255,7 @@ def from_column[n, a](column: Column[n, a]) -> Frame[n, a] =
             None,
         );
         let shrink_b = dag.add_node(
+            decl,
             RiscOp::Shrink {
                 bounds: vec![(RtDim::Node(1), RtDim::Node(2))],
             },
@@ -24213,24 +24269,28 @@ def from_column[n, a](column: Column[n, a]) -> Frame[n, a] =
         };
         let consumers = [
             dag.add_node(
+                decl,
                 RiscOp::Add,
                 vec![shrink_a, shrink_a],
                 synthetic("d701"),
                 None,
             ),
             dag.add_node(
+                decl,
                 RiscOp::Mul,
                 vec![shrink_a, shrink_a],
                 synthetic("d702"),
                 None,
             ),
             dag.add_node(
+                decl,
                 RiscOp::Add,
                 vec![shrink_b, shrink_b],
                 synthetic("d703"),
                 None,
             ),
             dag.add_node(
+                decl,
                 RiscOp::Mul,
                 vec![shrink_b, shrink_b],
                 synthetic("d704"),

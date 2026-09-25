@@ -43,13 +43,16 @@ fn matrix(rows: usize, cols: usize, prec: Prim) -> TensorType {
 #[test]
 fn blas_matmul_f64_validates_cleanly_after_ws_a1_lift() {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let a = dag.add_node(
+        decl,
         RiscOp::synth_const(matrix(2, 3, Prim::F64).precision, 1.0),
         vec![],
         matrix(2, 3, Prim::F64),
         None,
     );
     let b = dag.add_node(
+        decl,
         RiscOp::synth_const(matrix(3, 4, Prim::F64).precision, 1.0),
         vec![],
         matrix(3, 4, Prim::F64),
@@ -63,7 +66,7 @@ fn blas_matmul_f64_validates_cleanly_after_ws_a1_lift() {
         Prim::F64,
     )
     .expect("f64 matmul constructs (per spec §5.7.1 default = f64)");
-    let _ = dag.add_node(matmul_op, vec![a, b], matrix(2, 4, Prim::F64), None);
+    let _ = dag.add_node(decl, matmul_op, vec![a, b], matrix(2, 4, Prim::F64), None);
 
     let errors = verify::verify(&dag);
     assert!(
@@ -91,13 +94,16 @@ fn blas_matmul_f64_validates_cleanly_after_ws_a1_lift() {
 #[test]
 fn blas_matmul_bf16_admitted_after_ws_a3_lift() {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let a = dag.add_node(
+        decl,
         RiscOp::synth_const(matrix(2, 3, Prim::Bf16).precision, 1.0),
         vec![],
         matrix(2, 3, Prim::Bf16),
         None,
     );
     let b = dag.add_node(
+        decl,
         RiscOp::synth_const(matrix(3, 4, Prim::Bf16).precision, 1.0),
         vec![],
         matrix(3, 4, Prim::Bf16),
@@ -111,7 +117,7 @@ fn blas_matmul_bf16_admitted_after_ws_a3_lift() {
         Prim::Bf16,
     )
     .expect("bf16 matmul constructs (per spec §5.7.1 default accumulator = f32)");
-    let _ = dag.add_node(matmul_op, vec![a, b], matrix(2, 4, Prim::Bf16), None);
+    let _ = dag.add_node(decl, matmul_op, vec![a, b], matrix(2, 4, Prim::Bf16), None);
 
     let errors = verify::verify(&dag);
     assert!(
@@ -127,13 +133,16 @@ fn blas_matmul_bf16_admitted_after_ws_a3_lift() {
 #[test]
 fn blas_matmul_f16_admitted_after_ws_a3_lift() {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let a = dag.add_node(
+        decl,
         RiscOp::synth_const(matrix(2, 3, Prim::F16).precision, 1.0),
         vec![],
         matrix(2, 3, Prim::F16),
         None,
     );
     let b = dag.add_node(
+        decl,
         RiscOp::synth_const(matrix(3, 4, Prim::F16).precision, 1.0),
         vec![],
         matrix(3, 4, Prim::F16),
@@ -147,7 +156,7 @@ fn blas_matmul_f16_admitted_after_ws_a3_lift() {
         Prim::F16,
     )
     .expect("f16 matmul constructs (per spec §5.7.1 default accumulator = f32)");
-    let _ = dag.add_node(matmul_op, vec![a, b], matrix(2, 4, Prim::F16), None);
+    let _ = dag.add_node(decl, matmul_op, vec![a, b], matrix(2, 4, Prim::F16), None);
 
     let errors = verify::verify(&dag);
     assert!(
@@ -162,13 +171,16 @@ fn blas_matmul_f16_admitted_after_ws_a3_lift() {
 #[test]
 fn blas_matmul_f32_validates_cleanly_under_f1_guard() {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let a = dag.add_node(
+        decl,
         RiscOp::synth_const(matrix(2, 3, Prim::F32).precision, 1.0),
         vec![],
         matrix(2, 3, Prim::F32),
         None,
     );
     let b = dag.add_node(
+        decl,
         RiscOp::synth_const(matrix(3, 4, Prim::F32).precision, 1.0),
         vec![],
         matrix(3, 4, Prim::F32),
@@ -182,7 +194,7 @@ fn blas_matmul_f32_validates_cleanly_under_f1_guard() {
         Prim::F32,
     )
     .expect("f32 matmul constructs");
-    let _ = dag.add_node(matmul_op, vec![a, b], matrix(2, 4, Prim::F32), None);
+    let _ = dag.add_node(decl, matmul_op, vec![a, b], matrix(2, 4, Prim::F32), None);
 
     let errors = verify::verify(&dag);
     assert!(

@@ -9,7 +9,9 @@ fn expansion_kind_and_local_guard_keep_the_primitive_identity() {
         (vec![3, 1], ExpansionKind::Insert, "insert"),
     ] {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let x = dag.add_node(
+            decl,
             RiscOp::Load { name: "x".into() },
             vec![],
             TensorType {
@@ -19,6 +21,7 @@ fn expansion_kind_and_local_guard_keep_the_primitive_identity() {
             None,
         );
         let size = dag.add_node(
+            decl,
             RiscOp::Load {
                 name: "size".into(),
             },
@@ -30,6 +33,7 @@ fn expansion_kind_and_local_guard_keep_the_primitive_identity() {
             None,
         );
         let bound = dag.add_node(
+            decl,
             RiscOp::Add,
             vec![size, size],
             TensorType {
@@ -39,6 +43,7 @@ fn expansion_kind_and_local_guard_keep_the_primitive_identity() {
             None,
         );
         let result = dag.add_node(
+            decl,
             RiscOp::Expand {
                 axis: 0,
                 size: RtDim::Node(1),
@@ -66,6 +71,7 @@ fn expansion_kind_and_local_guard_keep_the_primitive_identity() {
         );
         assert_eq!(expansion_kind(&dag, x), None);
         let invalid = dag.add_node(
+            decl,
             RiscOp::Expand {
                 axis: 0,
                 size: RtDim::Lit(1),

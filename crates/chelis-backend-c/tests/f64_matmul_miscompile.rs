@@ -19,19 +19,23 @@ fn t(prim: Prim, dims: Vec<usize>) -> TensorType {
 #[test]
 fn f64_matmul_subgraph_stays_off_blas_path_in_c_backend() {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let a = dag.add_node(
+        decl,
         RiscOp::Load { name: "a".into() },
         vec![],
         t(Prim::F64, vec![8, 16]),
         None,
     );
     let b = dag.add_node(
+        decl,
         RiscOp::Load { name: "b".into() },
         vec![],
         t(Prim::F64, vec![16, 4]),
         None,
     );
     let ea = dag.add_node(
+        decl,
         RiscOp::Expand {
             axis: 2,
             size: chelis_ir::dag::RtDim::Lit(4),
@@ -41,6 +45,7 @@ fn f64_matmul_subgraph_stays_off_blas_path_in_c_backend() {
         None,
     );
     let eb = dag.add_node(
+        decl,
         RiscOp::Expand {
             axis: 0,
             size: chelis_ir::dag::RtDim::Lit(8),
@@ -50,12 +55,14 @@ fn f64_matmul_subgraph_stays_off_blas_path_in_c_backend() {
         None,
     );
     let mul = dag.add_node(
+        decl,
         RiscOp::Mul,
         vec![ea, eb],
         t(Prim::F64, vec![8, 16, 4]),
         None,
     );
     let sum = dag.add_node(
+        decl,
         RiscOp::Sum {
             axis: 1,
             accumulator: Prim::F64,
@@ -104,19 +111,23 @@ fn f64_matmul_subgraph_stays_off_blas_path_in_c_backend() {
 #[test]
 fn f32_matmul_subgraph_preserves_canonical_arithmetic_in_c_backend() {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let a = dag.add_node(
+        decl,
         RiscOp::Load { name: "a".into() },
         vec![],
         t(Prim::F32, vec![8, 16]),
         None,
     );
     let b = dag.add_node(
+        decl,
         RiscOp::Load { name: "b".into() },
         vec![],
         t(Prim::F32, vec![16, 4]),
         None,
     );
     let ea = dag.add_node(
+        decl,
         RiscOp::Expand {
             axis: 2,
             size: chelis_ir::dag::RtDim::Lit(4),
@@ -126,6 +137,7 @@ fn f32_matmul_subgraph_preserves_canonical_arithmetic_in_c_backend() {
         None,
     );
     let eb = dag.add_node(
+        decl,
         RiscOp::Expand {
             axis: 0,
             size: chelis_ir::dag::RtDim::Lit(8),
@@ -135,12 +147,14 @@ fn f32_matmul_subgraph_preserves_canonical_arithmetic_in_c_backend() {
         None,
     );
     let mul = dag.add_node(
+        decl,
         RiscOp::Mul,
         vec![ea, eb],
         t(Prim::F32, vec![8, 16, 4]),
         None,
     );
     let sum = dag.add_node(
+        decl,
         RiscOp::Sum {
             axis: 1,
             accumulator: Prim::F32,

@@ -93,13 +93,16 @@ fn expect_not_eligible(attempt: Result<HostBlasMatmulSummary, BlasSummaryAttempt
 #[test]
 fn blas_multiple_roots_one_matmul_near_one_elementwise_emits_structured_rejection() {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let a = dag.add_node(
+        decl,
         RiscOp::Load { name: "a".into() },
         vec![],
         mat(Prim::F32, 8, 16),
         None,
     );
     let b = dag.add_node(
+        decl,
         RiscOp::Load { name: "b".into() },
         vec![],
         mat(Prim::F32, 16, 4),
@@ -107,6 +110,7 @@ fn blas_multiple_roots_one_matmul_near_one_elementwise_emits_structured_rejectio
     );
     // First root: canonical matmul-near (becomes BlasMatmul after specialize)
     let ea = dag.add_node(
+        decl,
         RiscOp::Expand {
             axis: 2,
             size: chelis_ir::dag::RtDim::Lit(4),
@@ -116,6 +120,7 @@ fn blas_multiple_roots_one_matmul_near_one_elementwise_emits_structured_rejectio
         None,
     );
     let eb = dag.add_node(
+        decl,
         RiscOp::Expand {
             axis: 0,
             size: chelis_ir::dag::RtDim::Lit(8),
@@ -124,8 +129,15 @@ fn blas_multiple_roots_one_matmul_near_one_elementwise_emits_structured_rejectio
         t3(Prim::F32, 8, 16, 4),
         None,
     );
-    let mul = dag.add_node(RiscOp::Mul, vec![ea, eb], t3(Prim::F32, 8, 16, 4), None);
+    let mul = dag.add_node(
+        decl,
+        RiscOp::Mul,
+        vec![ea, eb],
+        t3(Prim::F32, 8, 16, 4),
+        None,
+    );
     let sum = dag.add_node(
+        decl,
         RiscOp::Sum {
             axis: 1,
             accumulator: Prim::F32,
@@ -138,18 +150,21 @@ fn blas_multiple_roots_one_matmul_near_one_elementwise_emits_structured_rejectio
     // recognizer's any_matmul_near() check must still see the FIRST
     // root, fire BlasMultipleRoots.
     let other_a = dag.add_node(
+        decl,
         RiscOp::Load { name: "c".into() },
         vec![],
         mat(Prim::F32, 8, 4),
         None,
     );
     let other_b = dag.add_node(
+        decl,
         RiscOp::Load { name: "d".into() },
         vec![],
         mat(Prim::F32, 8, 4),
         None,
     );
     let add_root = dag.add_node(
+        decl,
         RiscOp::Add,
         vec![other_a, other_b],
         mat(Prim::F32, 8, 4),
@@ -193,20 +208,23 @@ fn blas_multiple_roots_one_matmul_near_one_elementwise_emits_structured_rejectio
 #[test]
 fn two_non_matmul_roots_return_not_eligible_not_rejected() {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let a = dag.add_node(
+        decl,
         RiscOp::Load { name: "a".into() },
         vec![],
         mat(Prim::F32, 4, 4),
         None,
     );
     let b = dag.add_node(
+        decl,
         RiscOp::Load { name: "b".into() },
         vec![],
         mat(Prim::F32, 4, 4),
         None,
     );
-    let add1 = dag.add_node(RiscOp::Add, vec![a, b], mat(Prim::F32, 4, 4), None);
-    let mul1 = dag.add_node(RiscOp::Mul, vec![a, b], mat(Prim::F32, 4, 4), None);
+    let add1 = dag.add_node(decl, RiscOp::Add, vec![a, b], mat(Prim::F32, 4, 4), None);
+    let mul1 = dag.add_node(decl, RiscOp::Mul, vec![a, b], mat(Prim::F32, 4, 4), None);
     dag.add_root(add1);
     dag.add_root(mul1);
 
@@ -236,19 +254,23 @@ fn two_non_matmul_roots_return_not_eligible_not_rejected() {
 #[test]
 fn root_reshape_wrapping_matmul_returns_not_eligible() {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let a = dag.add_node(
+        decl,
         RiscOp::Load { name: "a".into() },
         vec![],
         mat(Prim::F32, 8, 16),
         None,
     );
     let b = dag.add_node(
+        decl,
         RiscOp::Load { name: "b".into() },
         vec![],
         mat(Prim::F32, 16, 4),
         None,
     );
     let ea = dag.add_node(
+        decl,
         RiscOp::Expand {
             axis: 2,
             size: chelis_ir::dag::RtDim::Lit(4),
@@ -258,6 +280,7 @@ fn root_reshape_wrapping_matmul_returns_not_eligible() {
         None,
     );
     let eb = dag.add_node(
+        decl,
         RiscOp::Expand {
             axis: 0,
             size: chelis_ir::dag::RtDim::Lit(8),
@@ -266,8 +289,15 @@ fn root_reshape_wrapping_matmul_returns_not_eligible() {
         t3(Prim::F32, 8, 16, 4),
         None,
     );
-    let mul = dag.add_node(RiscOp::Mul, vec![ea, eb], t3(Prim::F32, 8, 16, 4), None);
+    let mul = dag.add_node(
+        decl,
+        RiscOp::Mul,
+        vec![ea, eb],
+        t3(Prim::F32, 8, 16, 4),
+        None,
+    );
     let sum = dag.add_node(
+        decl,
         RiscOp::Sum {
             axis: 1,
             accumulator: Prim::F32,
@@ -278,6 +308,7 @@ fn root_reshape_wrapping_matmul_returns_not_eligible() {
     );
     // Wrap the matmul in a Reshape (flatten 8x4 → 32).
     let reshape = dag.add_node(
+        decl,
         RiscOp::Reshape {
             new_shape: vec![chelis_ir::dag::RtDim::Lit(32)],
         },
@@ -324,15 +355,18 @@ fn root_reshape_wrapping_matmul_returns_not_eligible() {
 #[test]
 fn blas_non_load_operand_cast_wrapping_load_emits_structured_rejection() {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     // LHS is an F64 Load that gets Cast'd to F32 before reaching the
     // matmul. RHS is a direct F32 Load.
     let a_f64 = dag.add_node(
+        decl,
         RiscOp::Load { name: "a".into() },
         vec![],
         mat(Prim::F64, 8, 16),
         None,
     );
     let a_cast = dag.add_node(
+        decl,
         RiscOp::Cast {
             new_precision: Prim::F32,
         },
@@ -341,12 +375,14 @@ fn blas_non_load_operand_cast_wrapping_load_emits_structured_rejection() {
         None,
     );
     let b = dag.add_node(
+        decl,
         RiscOp::Load { name: "b".into() },
         vec![],
         mat(Prim::F32, 16, 4),
         None,
     );
     let blas = dag.add_node(
+        decl,
         RiscOp::BlasMatmul {
             batch_dims: vec![],
             m: DimExpr::Concrete(8),
@@ -392,6 +428,7 @@ fn blas_non_load_operand_cast_wrapping_load_emits_structured_rejection() {
 #[test]
 fn blas_dimension_binding_failure_unbound_batch_emits_structured_rejection() {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     // 3D inputs but the batch dim on the BlasMatmul node uses a Named
     // symbol "unbound_b" that does not appear on either input's
     // declared dim list.
@@ -404,18 +441,21 @@ fn blas_dimension_binding_failure_unbound_batch_emits_structured_rejection() {
         precision: Prim::F32,
     };
     let a = dag.add_node(
+        decl,
         RiscOp::Load { name: "a".into() },
         vec![],
         a_ty.clone(),
         None,
     );
     let b = dag.add_node(
+        decl,
         RiscOp::Load { name: "b".into() },
         vec![],
         b_ty.clone(),
         None,
     );
     let blas = dag.add_node(
+        decl,
         RiscOp::BlasMatmul {
             batch_dims: vec![DimExpr::Sym("unbound_b".into())],
             m: DimExpr::Concrete(8),
@@ -456,7 +496,9 @@ fn blas_dimension_binding_failure_unbound_n_emits_structured_rejection() {
     // Mirror sibling-sweep for the N role (W6 covers M and K; W7 adds N
     // and Batch).
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let a = dag.add_node(
+        decl,
         RiscOp::Load { name: "a".into() },
         vec![],
         TensorType {
@@ -466,6 +508,7 @@ fn blas_dimension_binding_failure_unbound_n_emits_structured_rejection() {
         None,
     );
     let b = dag.add_node(
+        decl,
         RiscOp::Load { name: "b".into() },
         vec![],
         TensorType {
@@ -475,6 +518,7 @@ fn blas_dimension_binding_failure_unbound_n_emits_structured_rejection() {
         None,
     );
     let blas = dag.add_node(
+        decl,
         RiscOp::BlasMatmul {
             batch_dims: vec![],
             m: DimExpr::Concrete(8),
@@ -530,19 +574,23 @@ fn blas_not_matmul_pattern_wrong_sum_axis_emits_structured_rejection_tail_op_sum
     // axis check (`sum_axis != lead_len + 1`), so the root stays as
     // `Sum(Mul(Expand,Expand))` post-specialize.
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let a = dag.add_node(
+        decl,
         RiscOp::Load { name: "a".into() },
         vec![],
         mat(Prim::F32, 8, 16),
         None,
     );
     let b = dag.add_node(
+        decl,
         RiscOp::Load { name: "b".into() },
         vec![],
         mat(Prim::F32, 16, 4),
         None,
     );
     let ea = dag.add_node(
+        decl,
         RiscOp::Expand {
             axis: 2,
             size: chelis_ir::dag::RtDim::Lit(4),
@@ -552,6 +600,7 @@ fn blas_not_matmul_pattern_wrong_sum_axis_emits_structured_rejection_tail_op_sum
         None,
     );
     let eb = dag.add_node(
+        decl,
         RiscOp::Expand {
             axis: 0,
             size: chelis_ir::dag::RtDim::Lit(8),
@@ -560,10 +609,17 @@ fn blas_not_matmul_pattern_wrong_sum_axis_emits_structured_rejection_tail_op_sum
         t3(Prim::F32, 8, 16, 4),
         None,
     );
-    let mul = dag.add_node(RiscOp::Mul, vec![ea, eb], t3(Prim::F32, 8, 16, 4), None);
+    let mul = dag.add_node(
+        decl,
+        RiscOp::Mul,
+        vec![ea, eb],
+        t3(Prim::F32, 8, 16, 4),
+        None,
+    );
     // Wrong axis: sum over axis 0 instead of 1. Output type matches
     // the wrong axis.
     let sum = dag.add_node(
+        decl,
         RiscOp::Sum {
             axis: 0,
             accumulator: Prim::F32,
@@ -612,21 +668,25 @@ fn near_miss_sum_of_mul_of_two_loads_no_expand_returns_not_eligible() {
     // Sum(Mul(Load, Load)) — same precision, same shape, no Expand →
     // not the matmul pattern. is_matmul_near must say false.
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let in_ty = mat(Prim::F32, 4, 4);
     let a = dag.add_node(
+        decl,
         RiscOp::Load { name: "a".into() },
         vec![],
         in_ty.clone(),
         None,
     );
     let b = dag.add_node(
+        decl,
         RiscOp::Load { name: "b".into() },
         vec![],
         in_ty.clone(),
         None,
     );
-    let mul = dag.add_node(RiscOp::Mul, vec![a, b], in_ty.clone(), None);
+    let mul = dag.add_node(decl, RiscOp::Mul, vec![a, b], in_ty.clone(), None);
     let sum = dag.add_node(
+        decl,
         RiscOp::Sum {
             axis: 1,
             accumulator: Prim::F32,
@@ -657,7 +717,9 @@ fn near_miss_sum_of_mul_of_expand_and_load_returns_not_eligible() {
     // One-sided expand: only one of the Mul's operands is wrapped in
     // Expand. is_matmul_near requires BOTH operands to be Expand.
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let a = dag.add_node(
+        decl,
         RiscOp::Load { name: "a".into() },
         vec![],
         mat(Prim::F32, 8, 16),
@@ -665,12 +727,14 @@ fn near_miss_sum_of_mul_of_expand_and_load_returns_not_eligible() {
     );
     // RHS is just a Load matching the post-expand shape.
     let b = dag.add_node(
+        decl,
         RiscOp::Load { name: "b".into() },
         vec![],
         t3(Prim::F32, 8, 16, 4),
         None,
     );
     let ea = dag.add_node(
+        decl,
         RiscOp::Expand {
             axis: 2,
             size: chelis_ir::dag::RtDim::Lit(4),
@@ -679,8 +743,15 @@ fn near_miss_sum_of_mul_of_expand_and_load_returns_not_eligible() {
         t3(Prim::F32, 8, 16, 4),
         None,
     );
-    let mul = dag.add_node(RiscOp::Mul, vec![ea, b], t3(Prim::F32, 8, 16, 4), None);
+    let mul = dag.add_node(
+        decl,
+        RiscOp::Mul,
+        vec![ea, b],
+        t3(Prim::F32, 8, 16, 4),
+        None,
+    );
     let sum = dag.add_node(
+        decl,
         RiscOp::Sum {
             axis: 1,
             accumulator: Prim::F32,
@@ -704,19 +775,23 @@ fn near_miss_sum_of_add_of_expands_returns_not_eligible() {
     // Sum(Add(Expand, Expand)) — wrong inner op. is_matmul_near
     // requires the inner op to be Mul.
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let a = dag.add_node(
+        decl,
         RiscOp::Load { name: "a".into() },
         vec![],
         mat(Prim::F32, 8, 16),
         None,
     );
     let b = dag.add_node(
+        decl,
         RiscOp::Load { name: "b".into() },
         vec![],
         mat(Prim::F32, 16, 4),
         None,
     );
     let ea = dag.add_node(
+        decl,
         RiscOp::Expand {
             axis: 2,
             size: chelis_ir::dag::RtDim::Lit(4),
@@ -726,6 +801,7 @@ fn near_miss_sum_of_add_of_expands_returns_not_eligible() {
         None,
     );
     let eb = dag.add_node(
+        decl,
         RiscOp::Expand {
             axis: 0,
             size: chelis_ir::dag::RtDim::Lit(8),
@@ -734,8 +810,15 @@ fn near_miss_sum_of_add_of_expands_returns_not_eligible() {
         t3(Prim::F32, 8, 16, 4),
         None,
     );
-    let add = dag.add_node(RiscOp::Add, vec![ea, eb], t3(Prim::F32, 8, 16, 4), None);
+    let add = dag.add_node(
+        decl,
+        RiscOp::Add,
+        vec![ea, eb],
+        t3(Prim::F32, 8, 16, 4),
+        None,
+    );
     let sum = dag.add_node(
+        decl,
         RiscOp::Sum {
             axis: 1,
             accumulator: Prim::F32,
@@ -779,19 +862,23 @@ fn near_match_sum_of_mul_of_expand_of_expand_is_blas_near() {
     // The post-specialize root is the Sum(Mul(Expand,Expand)) shape
     // and is_matmul_near must say true so the rejection fires.
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let a = dag.add_node(
+        decl,
         RiscOp::Load { name: "a".into() },
         vec![],
         mat(Prim::F64, 8, 16),
         None,
     );
     let b = dag.add_node(
+        decl,
         RiscOp::Load { name: "b".into() },
         vec![],
         mat(Prim::F64, 16, 4),
         None,
     );
     let ea = dag.add_node(
+        decl,
         RiscOp::Expand {
             axis: 2,
             size: chelis_ir::dag::RtDim::Lit(4),
@@ -801,6 +888,7 @@ fn near_match_sum_of_mul_of_expand_of_expand_is_blas_near() {
         None,
     );
     let eb = dag.add_node(
+        decl,
         RiscOp::Expand {
             axis: 0,
             size: chelis_ir::dag::RtDim::Lit(8),
@@ -809,8 +897,15 @@ fn near_match_sum_of_mul_of_expand_of_expand_is_blas_near() {
         t3(Prim::F64, 8, 16, 4),
         None,
     );
-    let mul = dag.add_node(RiscOp::Mul, vec![ea, eb], t3(Prim::F64, 8, 16, 4), None);
+    let mul = dag.add_node(
+        decl,
+        RiscOp::Mul,
+        vec![ea, eb],
+        t3(Prim::F64, 8, 16, 4),
+        None,
+    );
     let sum = dag.add_node(
+        decl,
         RiscOp::Sum {
             axis: 1,
             accumulator: Prim::F64,
@@ -847,19 +942,23 @@ fn near_match_sum_of_mul_of_expand_of_expand_is_blas_near() {
 #[test]
 fn hand_built_blas_matmul_root_f32_accepts() {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let a = dag.add_node(
+        decl,
         RiscOp::Load { name: "a".into() },
         vec![],
         mat(Prim::F32, 8, 16),
         None,
     );
     let b = dag.add_node(
+        decl,
         RiscOp::Load { name: "b".into() },
         vec![],
         mat(Prim::F32, 16, 4),
         None,
     );
     let blas = dag.add_node(
+        decl,
         RiscOp::BlasMatmul {
             batch_dims: vec![],
             m: DimExpr::Concrete(8),

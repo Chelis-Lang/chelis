@@ -41,12 +41,13 @@ fn f32_tensor(shape: &[usize], data: &[f64]) -> TensorValue {
         .expect("finalize")
 }
 
-fn load(dag: &mut Dag, name: &str, extent: usize) -> NodeId {
-    load_shaped(dag, name, &[extent])
+fn load(dag: &mut Dag, decl: chelis_ir::dag::DeclId, name: &str, extent: usize) -> NodeId {
+    load_shaped(dag, decl, name, &[extent])
 }
 
-fn load_shaped(dag: &mut Dag, name: &str, shape: &[usize]) -> NodeId {
+fn load_shaped(dag: &mut Dag, decl: chelis_ir::dag::DeclId, name: &str, shape: &[usize]) -> NodeId {
     dag.add_node(
+        decl,
         RiscOp::Load { name: name.into() },
         vec![],
         TensorType {
@@ -60,9 +61,11 @@ fn load_shaped(dag: &mut Dag, name: &str, shape: &[usize]) -> NodeId {
 #[test]
 fn an_elementwise_operand_shape_disagreement_is_a_typed_error_not_a_panic() {
     let mut dag = Dag::new();
-    let a = load(&mut dag, "a", 4);
-    let b = load(&mut dag, "b", 3);
+    let decl = dag.declare("test");
+    let a = load(&mut dag, decl, "a", 4);
+    let b = load(&mut dag, decl, "b", 3);
     let sum = dag.add_node(
+        decl,
         RiscOp::Add,
         vec![a, b],
         TensorType {
@@ -87,10 +90,12 @@ fn an_elementwise_operand_shape_disagreement_is_a_typed_error_not_a_panic() {
 #[test]
 fn a_runtime_shrink_that_selects_nothing_is_rejected_not_emptied() {
     let mut dag = Dag::new();
-    let x = load(&mut dag, "x", 4);
+    let decl = dag.declare("test");
+    let x = load(&mut dag, decl, "x", 4);
     // A runtime bound: `end` comes from a rank-0 i64 scalar input, as
     // `k = n - 4` lowers.
     let k = dag.add_node(
+        decl,
         RiscOp::Load { name: "k".into() },
         vec![],
         TensorType {
@@ -100,6 +105,7 @@ fn a_runtime_shrink_that_selects_nothing_is_rejected_not_emptied() {
         None,
     );
     let shrunk = dag.add_node(
+        decl,
         RiscOp::Shrink {
             bounds: vec![(RtDim::Lit(0), RtDim::Node(1))],
         },

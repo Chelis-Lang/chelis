@@ -589,7 +589,9 @@ fn abi_projection_preserves_exact_verified_site_and_nested_dag_cursors() {
         precision: Prim::F32,
     };
     let mut helper_dag = chelis_ir::Dag::new();
+    let helper_dag_decl = helper_dag.declare("test");
     let helper_root = helper_dag.add_node(
+        helper_dag_decl,
         chelis_ir::RiscOp::Load { name: "x".into() },
         Vec::new(),
         helper_ty.clone(),

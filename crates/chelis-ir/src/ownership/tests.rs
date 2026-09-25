@@ -2250,9 +2250,16 @@ fn dag_verification_checks_mutated_directives_and_terminal_completeness() {
         precision: Prim::F32,
     };
     let mut dag = Dag::new();
-    let load = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], ty.clone(), None);
-    let copied = dag.add_node(RiscOp::Copy, vec![load], ty.clone(), None);
-    let dropped = dag.add_node(RiscOp::Drop, vec![copied], ty.clone(), None);
+    let decl = dag.declare("test");
+    let load = dag.add_node(
+        decl,
+        RiscOp::Load { name: "x".into() },
+        vec![],
+        ty.clone(),
+        None,
+    );
+    let copied = dag.add_node(decl, RiscOp::Copy, vec![load], ty.clone(), None);
+    let dropped = dag.add_node(decl, RiscOp::Drop, vec![copied], ty.clone(), None);
     let mut plan = DagOwnershipPlan::lower(&dag).unwrap();
     plan.verify(&dag).unwrap();
     plan.directives[2] = DagDirective::OwnedDrop {
@@ -2265,9 +2272,21 @@ fn dag_verification_checks_mutated_directives_and_terminal_completeness() {
     ));
 
     let mut borrowed_drop = Dag::new();
-    let borrowed =
-        borrowed_drop.add_node(RiscOp::Load { name: "x".into() }, vec![], ty.clone(), None);
-    let dropped = borrowed_drop.add_node(RiscOp::Drop, vec![borrowed], ty.clone(), None);
+    let borrowed_drop_decl = borrowed_drop.declare("test");
+    let borrowed = borrowed_drop.add_node(
+        borrowed_drop_decl,
+        RiscOp::Load { name: "x".into() },
+        vec![],
+        ty.clone(),
+        None,
+    );
+    let dropped = borrowed_drop.add_node(
+        borrowed_drop_decl,
+        RiscOp::Drop,
+        vec![borrowed],
+        ty.clone(),
+        None,
+    );
     let mut plan = DagOwnershipPlan::lower(&borrowed_drop).unwrap();
     assert!(matches!(
         plan.directives[1],
@@ -2283,8 +2302,15 @@ fn dag_verification_checks_mutated_directives_and_terminal_completeness() {
     ));
 
     let mut unterminated = Dag::new();
-    let load = unterminated.add_node(RiscOp::Load { name: "x".into() }, vec![], ty.clone(), None);
-    unterminated.add_node(RiscOp::Neg, vec![load], ty, None);
+    let unterminated_decl = unterminated.declare("test");
+    let load = unterminated.add_node(
+        unterminated_decl,
+        RiscOp::Load { name: "x".into() },
+        vec![],
+        ty.clone(),
+        None,
+    );
+    unterminated.add_node(unterminated_decl, RiscOp::Neg, vec![load], ty, None);
     let mut plan = DagOwnershipPlan::lower(&unterminated).unwrap();
     plan.directives.pop();
     assert!(matches!(
@@ -2293,13 +2319,16 @@ fn dag_verification_checks_mutated_directives_and_terminal_completeness() {
     ));
 
     let mut borrowed_realize = Dag::new();
+    let borrowed_realize_decl = borrowed_realize.declare("test");
     let borrowed = borrowed_realize.add_node(
+        borrowed_realize_decl,
         RiscOp::Load { name: "x".into() },
         vec![],
         TensorType::scalar_f32(),
         None,
     );
     let realized = borrowed_realize.add_node(
+        borrowed_realize_decl,
         RiscOp::Realize,
         vec![borrowed],
         TensorType::scalar_f32(),
@@ -2321,13 +2350,16 @@ fn dag_verification_checks_mutated_directives_and_terminal_completeness() {
     ));
 
     let mut borrowed_store = Dag::new();
+    let borrowed_store_decl = borrowed_store.declare("test");
     let borrowed = borrowed_store.add_node(
+        borrowed_store_decl,
         RiscOp::Load { name: "x".into() },
         vec![],
         TensorType::scalar_f32(),
         None,
     );
     let stored = borrowed_store.add_node(
+        borrowed_store_decl,
         RiscOp::Store { name: "out".into() },
         vec![borrowed],
         TensorType::scalar_f32(),
@@ -2356,9 +2388,17 @@ fn store_terminal_can_be_an_exported_root_but_drop_cannot() {
         precision: Prim::F32,
     };
     let mut stored = Dag::new();
-    let load = stored.add_node(RiscOp::Load { name: "x".into() }, vec![], ty.clone(), None);
-    let copied = stored.add_node(RiscOp::Copy, vec![load], ty.clone(), None);
+    let stored_decl = stored.declare("test");
+    let load = stored.add_node(
+        stored_decl,
+        RiscOp::Load { name: "x".into() },
+        vec![],
+        ty.clone(),
+        None,
+    );
+    let copied = stored.add_node(stored_decl, RiscOp::Copy, vec![load], ty.clone(), None);
     let output = stored.add_node(
+        stored_decl,
         RiscOp::Store { name: "out".into() },
         vec![copied],
         ty.clone(),
@@ -2370,13 +2410,15 @@ fn store_terminal_can_be_an_exported_root_but_drop_cannot() {
     assert!(plan.render().contains("store-root n2"));
 
     let mut dropped = Dag::new();
+    let dropped_decl = dropped.declare("test");
     let value = dropped.add_node(
+        dropped_decl,
         RiscOp::synth_const(Prim::F32, 1.0),
         vec![],
         ty.clone(),
         None,
     );
-    let terminal = dropped.add_node(RiscOp::Drop, vec![value], ty, None);
+    let terminal = dropped.add_node(dropped_decl, RiscOp::Drop, vec![value], ty, None);
     dropped.add_root(terminal);
     let error = DagOwnershipPlan::lower(&dropped).unwrap_err();
     assert!(matches!(error, OwnershipError::LoweringInvariant { .. }));

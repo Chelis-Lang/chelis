@@ -126,6 +126,7 @@ enum Extent {
 /// shape.
 fn build_forward(extent: Extent, source_shape: &[usize]) -> (Dag, NodeId, NodeId) {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let vec_ty = match extent {
         Extent::Literal => vec_lit_f32(2),
         Extent::ShapeDerived => vec_sym_f32("n"),
@@ -137,12 +138,14 @@ fn build_forward(extent: Extent, source_shape: &[usize]) -> (Dag, NodeId, NodeId
 
     // scalar_to_tensor(cast(c_val, f32)) -> f32 constant of `source_ty`.
     let raw = dag.add_node(
+        decl,
         RiscOp::synth_const(source_ty.precision, 3.0),
         vec![],
         source_ty.clone(),
         None,
     );
     let c = dag.add_node(
+        decl,
         RiscOp::Cast {
             new_precision: Prim::F32,
         },
@@ -152,6 +155,7 @@ fn build_forward(extent: Extent, source_shape: &[usize]) -> (Dag, NodeId, NodeId
     );
 
     let x = dag.add_node(
+        decl,
         RiscOp::Load { name: "x".into() },
         vec![],
         vec_ty.clone(),
@@ -170,13 +174,15 @@ fn build_forward(extent: Extent, source_shape: &[usize]) -> (Dag, NodeId, NodeId
         ),
     };
     let k = dag.add_node(
+        decl,
         RiscOp::Expand { axis: 0, size },
         inputs,
         vec_ty.clone(),
         None,
     );
-    let m = dag.add_node(RiscOp::Mul, vec![x, k], vec_ty, None);
+    let m = dag.add_node(decl, RiscOp::Mul, vec![x, k], vec_ty, None);
     let out = dag.add_node(
+        decl,
         RiscOp::sum_default(0, Prim::F32).expect("sum_default for f32"),
         vec![m],
         scalar_f32(),

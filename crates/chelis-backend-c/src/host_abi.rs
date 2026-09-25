@@ -400,7 +400,11 @@ fn helper_metadata(helper: VerifiedHostTensorHelperView<'_>) -> HostTensorHelper
         && node.output_type == *helper.output()
         && helper.inputs().iter().any(|input| input.name == *name)
     {
+        // The metadata graph restates the helper's identity Load, so it
+        // belongs to a declaration of the helper's name.
+        let decl = dag.declare(verified.declaration(node.decl).name.clone());
         let root = dag.add_node(
+            decl,
             chelis_ir::dag::RiscOp::Load { name: name.clone() },
             Vec::new(),
             node.output_type.clone(),

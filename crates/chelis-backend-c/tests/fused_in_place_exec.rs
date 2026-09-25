@@ -22,6 +22,7 @@ fn physical_slot_bound_covers_executed_allocation_lifetimes() {
         (false, true, 20, 16, "2"),
     ] {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let scalar = TensorType::scalar_f32();
         let first_type = if reduce || drop_first {
             vec_f32(4)
@@ -29,22 +30,29 @@ fn physical_slot_bound_covers_executed_allocation_lifetimes() {
             scalar.clone()
         };
         let first = dag.add_node(
+            decl,
             RiscOp::synth_const(Prim::F32, 1.0),
             vec![],
             first_type.clone(),
             None,
         );
         let result = if drop_first {
-            dag.add_node(RiscOp::Drop, vec![first], first_type, None);
-            dag.add_node(RiscOp::synth_const(Prim::F32, 2.0), vec![], scalar, None)
+            dag.add_node(decl, RiscOp::Drop, vec![first], first_type, None);
+            dag.add_node(
+                decl,
+                RiscOp::synth_const(Prim::F32, 2.0),
+                vec![],
+                scalar,
+                None,
+            )
         } else {
             let op = if reduce {
                 RiscOp::MaxReduce { axis: 0 }
             } else {
                 RiscOp::Neg
             };
-            let second = dag.add_node(op, vec![first], scalar.clone(), None);
-            dag.add_node(RiscOp::Neg, vec![second], scalar, None)
+            let second = dag.add_node(decl, op, vec![first], scalar.clone(), None);
+            dag.add_node(decl, RiscOp::Neg, vec![second], scalar, None)
         };
         dag.add_root(result);
         let plan = plan_c_storage(support::verified_dag(&dag, Default::default())).unwrap();
@@ -302,8 +310,16 @@ int main(void) {
 #[test]
 fn fused_in_place_compile_run_preserves_canonical_caller_input() {
     let mut dag = Dag::new();
-    let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_f32(4), None);
+    let decl = dag.declare("test");
+    let x = dag.add_node(
+        decl,
+        RiscOp::Load { name: "x".into() },
+        vec![],
+        vec_f32(4),
+        None,
+    );
     let scale = dag.add_node(
+        decl,
         RiscOp::synth_const(vec_f32(4).precision, 2.0),
         vec![],
         vec_f32(4),
@@ -313,7 +329,13 @@ fn fused_in_place_compile_run_preserves_canonical_caller_input() {
         op: FusedStepOp::Mul,
         input_indices: vec![FusedInput::External(0), FusedInput::External(1)],
     }];
-    let fused = dag.add_node(RiscOp::FusedElem { ops }, vec![x, scale], vec_f32(4), None);
+    let fused = dag.add_node(
+        decl,
+        RiscOp::FusedElem { ops },
+        vec![x, scale],
+        vec_f32(4),
+        None,
+    );
     dag.set_reusable_input(fused, x);
     dag.add_root(fused);
 
@@ -340,9 +362,17 @@ contig_input 1.000000 2.000000 3.000000 4.000000
 #[test]
 fn fused_in_place_compile_run_reuses_program_owned_storage() {
     let mut dag = Dag::new();
-    let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_f32(4), None);
-    let owned = dag.add_node(RiscOp::Copy, vec![x], vec_f32(4), None);
+    let decl = dag.declare("test");
+    let x = dag.add_node(
+        decl,
+        RiscOp::Load { name: "x".into() },
+        vec![],
+        vec_f32(4),
+        None,
+    );
+    let owned = dag.add_node(decl, RiscOp::Copy, vec![x], vec_f32(4), None);
     let scale = dag.add_node(
+        decl,
         RiscOp::synth_const(vec_f32(4).precision, 2.0),
         vec![],
         vec_f32(4),
@@ -353,6 +383,7 @@ fn fused_in_place_compile_run_reuses_program_owned_storage() {
         input_indices: vec![FusedInput::External(0), FusedInput::External(1)],
     }];
     let fused = dag.add_node(
+        decl,
         RiscOp::FusedElem { ops },
         vec![owned, scale],
         vec_f32(4),
@@ -393,10 +424,17 @@ contig_input 1.000000 2.000000 3.000000 4.000000
 #[test]
 fn drop_then_equal_capacity_owner_allocates_a_fresh_descriptor() {
     let mut dag = Dag::new();
-    let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_f32(4), None);
-    let disposable = dag.add_node(RiscOp::Copy, vec![x], vec_f32(4), None);
-    dag.add_node(RiscOp::Drop, vec![disposable], vec_f32(4), None);
-    let output = dag.add_node(RiscOp::Copy, vec![x], vec_f32(4), None);
+    let decl = dag.declare("test");
+    let x = dag.add_node(
+        decl,
+        RiscOp::Load { name: "x".into() },
+        vec![],
+        vec_f32(4),
+        None,
+    );
+    let disposable = dag.add_node(decl, RiscOp::Copy, vec![x], vec_f32(4), None);
+    dag.add_node(decl, RiscOp::Drop, vec![disposable], vec_f32(4), None);
+    let output = dag.add_node(decl, RiscOp::Copy, vec![x], vec_f32(4), None);
     dag.add_root(output);
 
     let result = codegen(&dag, "fused_in_place_probe").unwrap();

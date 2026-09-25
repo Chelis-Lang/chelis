@@ -28,9 +28,16 @@ fn value_with_shape(precision: Prim, shape: Vec<usize>, values: Vec<f64>) -> Ten
 #[test]
 fn relu_lowering_remains_one_identity_until_ad() {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let ty = tensor(Prim::F32, 4);
-    let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], ty.clone(), None);
-    let relu = tier2::lower_relu(&mut dag, x, &ty, Some("relu.expr"));
+    let x = dag.add_node(
+        decl,
+        RiscOp::Load { name: "x".into() },
+        vec![],
+        ty.clone(),
+        None,
+    );
+    let relu = tier2::lower_relu(decl, &mut dag, x, &ty, Some("relu.expr"));
 
     assert_eq!(dag.len(), 2);
     assert_eq!(dag.get(relu).unwrap().op, RiscOp::Relu);
@@ -50,9 +57,17 @@ fn relu_lowering_remains_one_identity_until_ad() {
 fn relu_adjoint_uses_dedicated_identity_and_direct_max_keeps_its_tie_rule() {
     let ty = tensor(Prim::F64, 5);
     let mut relu_dag = Dag::new();
-    let x = relu_dag.add_node(RiscOp::Load { name: "x".into() }, vec![], ty.clone(), None);
-    let relu = relu_dag.add_node(RiscOp::Relu, vec![x], ty.clone(), None);
+    let relu_dag_decl = relu_dag.declare("test");
+    let x = relu_dag.add_node(
+        relu_dag_decl,
+        RiscOp::Load { name: "x".into() },
+        vec![],
+        ty.clone(),
+        None,
+    );
+    let relu = relu_dag.add_node(relu_dag_decl, RiscOp::Relu, vec![x], ty.clone(), None);
     let sum = relu_dag.add_node(
+        relu_dag_decl,
         RiscOp::Sum {
             axis: 0,
             accumulator: Prim::F64,
@@ -94,7 +109,9 @@ fn relu_adjoint_uses_dedicated_identity_and_direct_max_keeps_its_tie_rule() {
     assert!(actual[..4].iter().all(|v| v.to_bits() == 0));
 
     let mut max_dag = Dag::new();
+    let max_dag_decl = max_dag.declare("test");
     let left = max_dag.add_node(
+        max_dag_decl,
         RiscOp::Load {
             name: "left".into(),
         },
@@ -103,6 +120,7 @@ fn relu_adjoint_uses_dedicated_identity_and_direct_max_keeps_its_tie_rule() {
         None,
     );
     let right = max_dag.add_node(
+        max_dag_decl,
         RiscOp::Load {
             name: "right".into(),
         },
@@ -110,8 +128,15 @@ fn relu_adjoint_uses_dedicated_identity_and_direct_max_keeps_its_tie_rule() {
         ty.clone(),
         None,
     );
-    let max = max_dag.add_node(RiscOp::MaxElem, vec![left, right], ty.clone(), None);
+    let max = max_dag.add_node(
+        max_dag_decl,
+        RiscOp::MaxElem,
+        vec![left, right],
+        ty.clone(),
+        None,
+    );
     let sum = max_dag.add_node(
+        max_dag_decl,
         RiscOp::Sum {
             axis: 0,
             accumulator: Prim::F64,
@@ -139,10 +164,24 @@ fn relu_adjoint_uses_dedicated_identity_and_direct_max_keeps_its_tie_rule() {
 fn relu_adjoint_preserves_non_unit_cotangent_bits_and_is_second_order_in_g_only() {
     let ty = tensor(Prim::F64, 4);
     let mut dag = Dag::new();
-    let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], ty.clone(), None);
-    let g = dag.add_node(RiscOp::Load { name: "g".into() }, vec![], ty.clone(), None);
-    let adjoint = dag.add_node(RiscOp::ReluAdjoint, vec![x, g], ty.clone(), None);
+    let decl = dag.declare("test");
+    let x = dag.add_node(
+        decl,
+        RiscOp::Load { name: "x".into() },
+        vec![],
+        ty.clone(),
+        None,
+    );
+    let g = dag.add_node(
+        decl,
+        RiscOp::Load { name: "g".into() },
+        vec![],
+        ty.clone(),
+        None,
+    );
+    let adjoint = dag.add_node(decl, RiscOp::ReluAdjoint, vec![x, g], ty.clone(), None);
     let sum = dag.add_node(
+        decl,
         RiscOp::Sum {
             axis: 0,
             accumulator: Prim::F64,
@@ -208,20 +247,23 @@ fn scalar_relu_matrix_covers_every_float_width_and_boundary_class() {
                 precision,
             };
             let mut dag = Dag::new();
+            let decl = dag.declare("test");
             let x = dag.add_node(
+                decl,
                 RiscOp::Load { name: "x".into() },
                 vec![],
                 scalar_ty.clone(),
                 None,
             );
             let g = dag.add_node(
+                decl,
                 RiscOp::Load { name: "g".into() },
                 vec![],
                 scalar_ty.clone(),
                 None,
             );
-            let relu = dag.add_node(RiscOp::Relu, vec![x], scalar_ty.clone(), None);
-            let adjoint = dag.add_node(RiscOp::ReluAdjoint, vec![x, g], scalar_ty, None);
+            let relu = dag.add_node(decl, RiscOp::Relu, vec![x], scalar_ty.clone(), None);
+            let adjoint = dag.add_node(decl, RiscOp::ReluAdjoint, vec![x, g], scalar_ty, None);
             dag.add_root(relu);
             dag.add_root(adjoint);
             assert!(verify::verify(&dag).is_empty());
@@ -264,9 +306,16 @@ fn scalar_relu_matrix_covers_every_float_width_and_boundary_class() {
 #[test]
 fn verifier_rejects_relu_wrong_arity_and_non_float_domain() {
     let mut wrong_arity = Dag::new();
+    let wrong_arity_decl = wrong_arity.declare("test");
     let ty = tensor(Prim::F32, 1);
-    let x = wrong_arity.add_node(RiscOp::Load { name: "x".into() }, vec![], ty.clone(), None);
-    wrong_arity.add_node(RiscOp::Relu, vec![x, x], ty.clone(), None);
+    let x = wrong_arity.add_node(
+        wrong_arity_decl,
+        RiscOp::Load { name: "x".into() },
+        vec![],
+        ty.clone(),
+        None,
+    );
+    wrong_arity.add_node(wrong_arity_decl, RiscOp::Relu, vec![x, x], ty.clone(), None);
     assert!(
         verify::verify(&wrong_arity)
             .iter()
@@ -274,14 +323,16 @@ fn verifier_rejects_relu_wrong_arity_and_non_float_domain() {
     );
 
     let mut wrong_domain = Dag::new();
+    let wrong_domain_decl = wrong_domain.declare("test");
     let int_ty = tensor(Prim::Int32, 1);
     let x = wrong_domain.add_node(
+        wrong_domain_decl,
         RiscOp::Load { name: "x".into() },
         vec![],
         int_ty.clone(),
         None,
     );
-    wrong_domain.add_node(RiscOp::Relu, vec![x], int_ty, None);
+    wrong_domain.add_node(wrong_domain_decl, RiscOp::Relu, vec![x], int_ty, None);
     assert!(
         verify::verify(&wrong_domain)
             .iter()
@@ -289,8 +340,15 @@ fn verifier_rejects_relu_wrong_arity_and_non_float_domain() {
     );
 
     let mut wrong_adjoint = Dag::new();
-    let x = wrong_adjoint.add_node(RiscOp::Load { name: "x".into() }, vec![], ty.clone(), None);
-    wrong_adjoint.add_node(RiscOp::ReluAdjoint, vec![x], ty, None);
+    let wrong_adjoint_decl = wrong_adjoint.declare("test");
+    let x = wrong_adjoint.add_node(
+        wrong_adjoint_decl,
+        RiscOp::Load { name: "x".into() },
+        vec![],
+        ty.clone(),
+        None,
+    );
+    wrong_adjoint.add_node(wrong_adjoint_decl, RiscOp::ReluAdjoint, vec![x], ty, None);
     assert!(
         verify::verify(&wrong_adjoint)
             .iter()
@@ -298,19 +356,28 @@ fn verifier_rejects_relu_wrong_arity_and_non_float_domain() {
     );
 
     let mut mismatched = Dag::new();
+    let mismatched_decl = mismatched.declare("test");
     let x = mismatched.add_node(
+        mismatched_decl,
         RiscOp::Load { name: "x".into() },
         vec![],
         tensor(Prim::F32, 1),
         None,
     );
     let g = mismatched.add_node(
+        mismatched_decl,
         RiscOp::Load { name: "g".into() },
         vec![],
         tensor(Prim::F64, 2),
         None,
     );
-    mismatched.add_node(RiscOp::ReluAdjoint, vec![x, g], tensor(Prim::F32, 1), None);
+    mismatched.add_node(
+        mismatched_decl,
+        RiscOp::ReluAdjoint,
+        vec![x, g],
+        tensor(Prim::F32, 1),
+        None,
+    );
     assert!(
         verify::verify(&mismatched)
             .iter()

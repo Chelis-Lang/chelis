@@ -12,6 +12,7 @@ fn physical_peak_estimate_matches_retained_slot_formula() {
     for (reduce, drop_first, expected) in [(false, false, 8), (true, false, 24), (false, true, 20)]
     {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let scalar = TensorType::scalar_f32();
         let first_type = if reduce || drop_first {
             TensorType {
@@ -22,14 +23,21 @@ fn physical_peak_estimate_matches_retained_slot_formula() {
             scalar.clone()
         };
         let first = dag.add_node(
+            decl,
             RiscOp::synth_const(Prim::F32, 1.0),
             vec![],
             first_type.clone(),
             None,
         );
         let result = if drop_first {
-            dag.add_node(RiscOp::Drop, vec![first], first_type, None);
-            dag.add_node(RiscOp::synth_const(Prim::F32, 2.0), vec![], scalar, None)
+            dag.add_node(decl, RiscOp::Drop, vec![first], first_type, None);
+            dag.add_node(
+                decl,
+                RiscOp::synth_const(Prim::F32, 2.0),
+                vec![],
+                scalar,
+                None,
+            )
         } else {
             let op = if reduce {
                 RiscOp::Sum {
@@ -39,8 +47,8 @@ fn physical_peak_estimate_matches_retained_slot_formula() {
             } else {
                 RiscOp::Neg
             };
-            let second = dag.add_node(op, vec![first], scalar.clone(), None);
-            dag.add_node(RiscOp::Neg, vec![second], scalar, None)
+            let second = dag.add_node(decl, op, vec![first], scalar.clone(), None);
+            dag.add_node(decl, RiscOp::Neg, vec![second], scalar, None)
         };
         dag.add_root(result);
         // Plan the verified graph directly: the preparation DCE can remove an

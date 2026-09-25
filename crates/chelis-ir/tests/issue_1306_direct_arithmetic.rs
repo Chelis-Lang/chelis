@@ -14,21 +14,24 @@ fn scalar_f32() -> TensorType {
 #[test]
 fn sub_lowers_to_one_direct_identity_without_synthetic_negation() {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let ty = scalar_f32();
     let left = dag.add_node(
+        decl,
         RiscOp::synth_const(ty.precision, -1.0),
         vec![],
         ty.clone(),
         None,
     );
     let right = dag.add_node(
+        decl,
         RiscOp::synth_const(ty.precision, 2.0),
         vec![],
         ty.clone(),
         None,
     );
 
-    let result = tier2::lower_sub(&mut dag, left, right, &ty, Some("sub.expr"));
+    let result = tier2::lower_sub(decl, &mut dag, left, right, &ty, Some("sub.expr"));
 
     assert!(verify::verify(&dag).is_empty());
     assert_eq!(dag.len(), 3, "direct sub adds exactly one node");
@@ -49,21 +52,24 @@ fn sub_lowers_to_one_direct_identity_without_synthetic_negation() {
 #[test]
 fn min_elem_lowers_to_one_direct_selection_without_arithmetic_surrogate() {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let ty = scalar_f32();
     let left = dag.add_node(
+        decl,
         RiscOp::synth_const(ty.precision, -1.0),
         vec![],
         ty.clone(),
         None,
     );
     let right = dag.add_node(
+        decl,
         RiscOp::synth_const(ty.precision, 2.0),
         vec![],
         ty.clone(),
         None,
     );
 
-    let result = tier2::lower_min_elem(&mut dag, left, right, &ty, Some("min.expr"));
+    let result = tier2::lower_min_elem(decl, &mut dag, left, right, &ty, Some("min.expr"));
 
     assert!(verify::verify(&dag).is_empty());
     assert_eq!(dag.len(), 3, "direct min_elem adds exactly one node");
@@ -99,8 +105,10 @@ fn exact_f64(value: f64) -> TensorValue {
 fn extrema_adjoint_routes_ties_and_nan_cotangents_to_the_forward_selected_operand() {
     for op in [RiscOp::MaxElem, RiscOp::MinElem] {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let ty = scalar_at(Prim::F64);
         let left = dag.add_node(
+            decl,
             RiscOp::Load {
                 name: "left".into(),
             },
@@ -109,6 +117,7 @@ fn extrema_adjoint_routes_ties_and_nan_cotangents_to_the_forward_selected_operan
             None,
         );
         let right = dag.add_node(
+            decl,
             RiscOp::Load {
                 name: "right".into(),
             },
@@ -116,7 +125,7 @@ fn extrema_adjoint_routes_ties_and_nan_cotangents_to_the_forward_selected_operan
             ty.clone(),
             None,
         );
-        let output = dag.add_node(op.clone(), vec![left, right], ty, None);
+        let output = dag.add_node(decl, op.clone(), vec![left, right], ty, None);
         let differentiated = grad_dag_checked(&dag, output, &[left, right]).unwrap();
 
         let kind = if matches!(op, RiscOp::MaxElem) {
@@ -178,8 +187,10 @@ fn extrema_adjoint_routes_ties_and_nan_cotangents_to_the_forward_selected_operan
 fn integer_direct_sub_and_extrema_are_forward_only() {
     for op in [RiscOp::Sub, RiscOp::MaxElem, RiscOp::MinElem] {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let int_ty = scalar_at(Prim::Int64);
         let left = dag.add_node(
+            decl,
             RiscOp::Load {
                 name: "left".into(),
             },
@@ -188,6 +199,7 @@ fn integer_direct_sub_and_extrema_are_forward_only() {
             None,
         );
         let right = dag.add_node(
+            decl,
             RiscOp::Load {
                 name: "right".into(),
             },
@@ -195,8 +207,9 @@ fn integer_direct_sub_and_extrema_are_forward_only() {
             int_ty.clone(),
             None,
         );
-        let integer = dag.add_node(op.clone(), vec![left, right], int_ty, None);
+        let integer = dag.add_node(decl, op.clone(), vec![left, right], int_ty, None);
         let output = dag.add_node(
+            decl,
             RiscOp::Cast {
                 new_precision: Prim::F64,
             },
@@ -228,12 +241,14 @@ fn integer_direct_sub_and_extrema_are_forward_only() {
 fn integer_extrema_used_only_as_discrete_indices_do_not_poison_float_ad() {
     for indexed_op in ["gather", "scatter_add"] {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let values_ty = TensorType {
             dims: vec![chelis_ir::dag::DimInfo::Lit(3)],
             precision: Prim::F32,
         };
         let index_ty = scalar_at(Prim::Int64);
         let values = dag.add_node(
+            decl,
             RiscOp::Load {
                 name: "values".into(),
             },
@@ -242,6 +257,7 @@ fn integer_extrema_used_only_as_discrete_indices_do_not_poison_float_ad() {
             None,
         );
         let left = dag.add_node(
+            decl,
             RiscOp::Load {
                 name: "left_index".into(),
             },
@@ -250,6 +266,7 @@ fn integer_extrema_used_only_as_discrete_indices_do_not_poison_float_ad() {
             None,
         );
         let right = dag.add_node(
+            decl,
             RiscOp::Load {
                 name: "right_index".into(),
             },
@@ -257,10 +274,11 @@ fn integer_extrema_used_only_as_discrete_indices_do_not_poison_float_ad() {
             index_ty.clone(),
             None,
         );
-        let index = dag.add_node(RiscOp::MaxElem, vec![left, right], index_ty, None);
+        let index = dag.add_node(decl, RiscOp::MaxElem, vec![left, right], index_ty, None);
 
         let output = if indexed_op == "gather" {
             dag.add_node(
+                decl,
                 RiscOp::Gather { axis: 0 },
                 vec![values, index],
                 scalar_at(Prim::F32),
@@ -268,6 +286,7 @@ fn integer_extrema_used_only_as_discrete_indices_do_not_poison_float_ad() {
             )
         } else {
             let update = dag.add_node(
+                decl,
                 RiscOp::Load {
                     name: "update".into(),
                 },
@@ -276,12 +295,14 @@ fn integer_extrema_used_only_as_discrete_indices_do_not_poison_float_ad() {
                 None,
             );
             let scattered = dag.add_node(
+                decl,
                 RiscOp::ScatterAdd { axis: 0 },
                 vec![values, index, update],
                 values_ty,
                 None,
             );
             dag.add_node(
+                decl,
                 RiscOp::Sum {
                     axis: 0,
                     accumulator: Prim::F32,
@@ -305,9 +326,11 @@ fn integer_extrema_used_only_as_discrete_indices_do_not_poison_float_ad() {
 #[test]
 fn integer_extrema_used_only_to_form_a_predicate_do_not_poison_float_ad() {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let float_ty = scalar_at(Prim::F32);
     let int_ty = scalar_at(Prim::Int64);
     let value = dag.add_node(
+        decl,
         RiscOp::Load {
             name: "value".into(),
         },
@@ -316,6 +339,7 @@ fn integer_extrema_used_only_to_form_a_predicate_do_not_poison_float_ad() {
         None,
     );
     let left = dag.add_node(
+        decl,
         RiscOp::Load {
             name: "left_index".into(),
         },
@@ -324,6 +348,7 @@ fn integer_extrema_used_only_to_form_a_predicate_do_not_poison_float_ad() {
         None,
     );
     let right = dag.add_node(
+        decl,
         RiscOp::Load {
             name: "right_index".into(),
         },
@@ -331,15 +356,29 @@ fn integer_extrema_used_only_to_form_a_predicate_do_not_poison_float_ad() {
         int_ty.clone(),
         None,
     );
-    let maximum = dag.add_node(RiscOp::MaxElem, vec![left, right], int_ty.clone(), None);
-    let zero = dag.add_node(RiscOp::synth_const(Prim::Int64, 0.0), vec![], int_ty, None);
+    let maximum = dag.add_node(
+        decl,
+        RiscOp::MaxElem,
+        vec![left, right],
+        int_ty.clone(),
+        None,
+    );
+    let zero = dag.add_node(
+        decl,
+        RiscOp::synth_const(Prim::Int64, 0.0),
+        vec![],
+        int_ty,
+        None,
+    );
     let predicate = dag.add_node(
+        decl,
         RiscOp::Compare(ComparisonKind::CmpLt),
         vec![maximum, zero],
         scalar_at(Prim::Bool),
         None,
     );
     let mask = dag.add_node(
+        decl,
         RiscOp::Cast {
             new_precision: Prim::F32,
         },
@@ -347,7 +386,7 @@ fn integer_extrema_used_only_to_form_a_predicate_do_not_poison_float_ad() {
         float_ty.clone(),
         None,
     );
-    let output = dag.add_node(RiscOp::Mul, vec![mask, value], float_ty, None);
+    let output = dag.add_node(decl, RiscOp::Mul, vec![mask, value], float_ty, None);
 
     let differentiated = grad_dag_checked(&dag, output, &[value])
         .unwrap_or_else(|error| panic!("predicate control math leaked into float AD: {error}"));
@@ -358,8 +397,10 @@ fn integer_extrema_used_only_to_form_a_predicate_do_not_poison_float_ad() {
 fn signed_integer_extrema_chains_stay_materialized_for_typed_backends() {
     for precision in [Prim::Int8, Prim::Int16, Prim::Int32, Prim::Int64] {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let ty = scalar_at(precision);
         let left = dag.add_node(
+            decl,
             RiscOp::Load {
                 name: "left".into(),
             },
@@ -368,6 +409,7 @@ fn signed_integer_extrema_chains_stay_materialized_for_typed_backends() {
             None,
         );
         let right = dag.add_node(
+            decl,
             RiscOp::Load {
                 name: "right".into(),
             },
@@ -376,13 +418,14 @@ fn signed_integer_extrema_chains_stay_materialized_for_typed_backends() {
             None,
         );
         let cap = dag.add_node(
+            decl,
             RiscOp::Load { name: "cap".into() },
             vec![],
             ty.clone(),
             None,
         );
-        let maximum = dag.add_node(RiscOp::MaxElem, vec![left, right], ty.clone(), None);
-        let minimum = dag.add_node(RiscOp::MinElem, vec![maximum, cap], ty, None);
+        let maximum = dag.add_node(decl, RiscOp::MaxElem, vec![left, right], ty.clone(), None);
+        let minimum = dag.add_node(decl, RiscOp::MinElem, vec![maximum, cap], ty, None);
         dag.add_root(minimum);
 
         let fused = chelis_ir::fuse::fuse(&dag);

@@ -4287,8 +4287,8 @@ impl<'a> EvalContext<'a> {
                 let tensor = expect_tensor_arg(args, 0)?;
                 let axis = expect_int_arg(args, 1)?;
                 let axis = normalize_axis(tensor.value.shape.len(), axis, "mean")?;
-                eval_composed_unary(&tensor, |dag, x, ty| {
-                    tier2::lower_mean(dag, x, axis, ty, None)
+                eval_composed_unary(&tensor, |dag, decl, x, ty| {
+                    tier2::lower_mean(decl, dag, x, axis, ty, None)
                 })
                 .map(RuntimeValue::Tensor)
             }
@@ -4311,20 +4311,27 @@ impl<'a> EvalContext<'a> {
                         );
                     }
                 };
-                eval_composed_triop(&x, &gamma, &beta, |dag, x_id, gamma_id, beta_id, tys| {
-                    let epsilon_id = dag.add_node(
-                        RiscOp::Const { value: epsilon },
-                        vec![],
-                        TensorType {
-                            dims: vec![],
-                            precision: epsilon.prim(),
-                        },
-                        None,
-                    );
-                    tier2::lower_layer_norm(
-                        dag, x_id, gamma_id, beta_id, tys.0, tys.1, tys.2, epsilon_id, None,
-                    )
-                })
+                eval_composed_triop(
+                    &x,
+                    &gamma,
+                    &beta,
+                    |dag, decl, x_id, gamma_id, beta_id, tys| {
+                        let epsilon_id = dag.add_node(
+                            decl,
+                            RiscOp::Const { value: epsilon },
+                            vec![],
+                            TensorType {
+                                dims: vec![],
+                                precision: epsilon.prim(),
+                            },
+                            None,
+                        );
+                        tier2::lower_layer_norm(
+                            decl, dag, x_id, gamma_id, beta_id, tys.0, tys.1, tys.2, epsilon_id,
+                            None,
+                        )
+                    },
+                )
                 .map(RuntimeValue::Tensor)
             }
             "conv" => {

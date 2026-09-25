@@ -173,8 +173,15 @@ impl KeyGraph for DecodedKeys<'_> {
         }
     }
 
-    fn declaration(&self, node: usize) -> Option<&str> {
-        self.0.nodes.get(node)?.declaration.as_deref()
+    fn declaration(&self, node: usize) -> &str {
+        self.0
+            .nodes
+            .get(node)
+            .map_or("", |node| node.declaration.as_str())
+    }
+
+    fn same_declaration(&self, left: usize, right: usize) -> bool {
+        self.declaration(left) == self.declaration(right)
     }
 
     /// Each wire dim as the IR dim it decodes to. An extent beyond the

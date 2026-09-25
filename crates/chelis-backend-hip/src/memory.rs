@@ -224,8 +224,15 @@ mod tests {
     #[test]
     fn adapter_preserves_input_mirror_and_owned_slot_placements() {
         let mut dag = Dag::new();
-        let input = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_f32(4), None);
-        let output = dag.add_node(RiscOp::Neg, vec![input], vec_f32(4), None);
+        let decl = dag.declare("test");
+        let input = dag.add_node(
+            decl,
+            RiscOp::Load { name: "x".into() },
+            vec![],
+            vec_f32(4),
+            None,
+        );
+        let output = dag.add_node(decl, RiscOp::Neg, vec![input], vec_f32(4), None);
         dag.add_root(output);
         let verified = verify_ownership(lower_dag_ownership(dag).unwrap()).unwrap();
         let shared = plan_hip_storage(verified).unwrap();

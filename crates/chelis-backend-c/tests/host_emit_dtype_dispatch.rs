@@ -658,7 +658,9 @@ fn make_tensor_call_with_scalar_arg(scalar_ty: HostType, scalar_val: HostExpr) -
         precision,
     };
     let mut helper_dag = Dag::new();
+    let helper_dag_decl = helper_dag.declare("test");
     let helper_root = helper_dag.add_node(
+        helper_dag_decl,
         RiscOp::Load {
             name: "input".into(),
         },

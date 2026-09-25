@@ -199,6 +199,7 @@ def dag_cases():
                 "shape_deps": [],
                 "span_id": None,
                 "merged_spans": [],
+                "declaration": "entry",
                 "id": 0,
                 "op": {"kind": "const", "value": scalar},
                 "inputs": [],
@@ -221,6 +222,7 @@ def dag_cases():
         "shape_deps": [],
         "span_id": None,
         "merged_spans": [],
+        "declaration": "entry",
         "id": 0,
         "op": {"kind": "load", "name": "x"},
         "inputs": [],
@@ -236,6 +238,7 @@ def dag_cases():
                     "shape_deps": [],
                     "span_id": None,
                     "merged_spans": [],
+                    "declaration": "entry",
                     "id": 1,
                     "op": op,
                     "inputs": [0],
@@ -258,7 +261,7 @@ def dag_cases():
     bad = copy.deepcopy(good)
     bad["roots"] = [2]
     add("root-owner", bad, False)
-    for field in ("shape_deps", "span_id", "merged_spans"):
+    for field in ("shape_deps", "span_id", "merged_spans", "declaration"):
         bad = copy.deepcopy(good)
         del bad["nodes"][1][field]
         add("missing-node-" + field, bad, False, "missing field")
@@ -306,6 +309,7 @@ def dag_cases():
                 "shape_deps": [],
                 "span_id": None,
                 "merged_spans": [],
+                "declaration": "entry",
                 "id": 2,
                 "op": {
                     "kind": "expand",
@@ -408,6 +412,7 @@ def dag_cases():
                 "shape_deps": [],
                 "span_id": "call-f",
                 "merged_spans": ["inlined-g"],
+                "declaration": "entry",
                 "id": 1,
                 "op": {
                     "kind": "extent_witness",
@@ -424,6 +429,7 @@ def dag_cases():
                 "shape_deps": [1],
                 "span_id": None,
                 "merged_spans": [],
+                "declaration": "entry",
                 "id": 2,
                 "op": {
                     "kind": "const",
@@ -657,6 +663,7 @@ def result_reference_cases():
                 "shape_deps": [],
                 "span_id": None,
                 "merged_spans": [],
+                "declaration": "entry",
                 "id": 0,
                 "inputs": [],
                 "op": {"kind": "load", "name": "x"},

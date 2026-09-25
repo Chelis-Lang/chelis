@@ -2,9 +2,9 @@
 
 use chelis_unord::UnordMap;
 
-use crate::dag::{ComparisonKind, Dag, LogicalKind, NodeId, RiscOp};
+use crate::dag::{ComparisonKind, Dag, DeclId, LogicalKind, NodeId, RiscOp};
 
-type CseKey = (String, Vec<NodeId>, Vec<NodeId>, Vec<NodeId>);
+type CseKey = (DeclId, String, Vec<NodeId>, Vec<NodeId>, Vec<NodeId>);
 
 /// Constant folding: if a binary op has two Const inputs, evaluate it.
 ///
@@ -409,6 +409,7 @@ fn dead_code_eliminate_impl(
             // and the audit invariant says input Deep spans must appear
             // on at least one IR node post-pipeline).
             let new_id = new_dag.add_node(
+                node.decl,
                 node.op.clone(),
                 new_inputs,
                 node.output_type.clone(),
@@ -418,9 +419,6 @@ fn dead_code_eliminate_impl(
                 && let Some(&mapped_input) = id_map.get(&reusable_input.0)
             {
                 new_dag.set_reusable_input(new_id, mapped_input);
-            }
-            if let Some(new_node) = new_dag.node_mut(new_id) {
-                new_node.declaration = node.declaration;
             }
             // Preserve merged_spans across DCE (S3 will populate them but
             // the invariant of pure-copy DCE means they must survive when
@@ -488,6 +486,7 @@ fn dead_code_eliminate_impl(
 /// dedup'd by the helper.
 pub fn common_subexpr_eliminate(dag: &Dag) -> Dag {
     let mut new_dag = Dag::new();
+    new_dag.inherit_declarations(dag);
     let mut id_map: UnordMap<usize, NodeId> = UnordMap::new();
     let mut seen: UnordMap<CseKey, NodeId> = UnordMap::new();
     let claimed_producers = crate::axis_sources::claimed_producers(dag);
@@ -518,7 +517,11 @@ pub fn common_subexpr_eliminate(dag: &Dag) -> Dag {
             .collect();
 
         let op_key = format!("{:?}", node.op);
+        // Nodes of two declarations never merge: a parameter is its
+        // declaration and its name, and a node's declaration decides which
+        // selection runs it.
         let cse_key = (
+            node.decl,
             op_key,
             remapped_inputs.clone(),
             remapped_shape_deps.clone(),
@@ -556,6 +559,7 @@ pub fn common_subexpr_eliminate(dag: &Dag) -> Dag {
             // Survivor: clone its own span_id and merged_spans onto the
             // new node so the canonical provenance flows through CSE.
             let new_id = new_dag.add_node(
+                node.decl,
                 node.op.clone(),
                 remapped_inputs,
                 node.output_type.clone(),
@@ -609,8 +613,9 @@ mod tests {
         TensorType::scalar_f32()
     }
 
-    fn named_claim(dag: &mut Dag, input: NodeId) -> NodeId {
+    fn named_claim(dag: &mut Dag, decl: DeclId, input: NodeId) -> NodeId {
         dag.add_node(
+            decl,
             RiscOp::ExtentWitness {
                 site: ExtentWitnessSite::ResultClaim {
                     claim: "n".into(),
@@ -638,34 +643,46 @@ mod tests {
         };
 
         let mut folded = Dag::new();
+        let folded_decl = folded.declare("test");
         let left = folded.add_node(
+            folded_decl,
             RiscOp::synth_const(tensor.precision, 1.0),
             Vec::new(),
             tensor.clone(),
             None,
         );
         let right = folded.add_node(
+            folded_decl,
             RiscOp::synth_const(tensor.precision, 2.0),
             Vec::new(),
             tensor.clone(),
             None,
         );
-        let claim = named_claim(&mut folded, left);
-        let add = folded.add_node(RiscOp::Add, vec![left, right], tensor.clone(), None);
+        let claim = named_claim(&mut folded, folded_decl, left);
+        let add = folded.add_node(
+            folded_decl,
+            RiscOp::Add,
+            vec![left, right],
+            tensor.clone(),
+            None,
+        );
         folded.add_result_claim_dep(add, claim);
         constant_fold(&mut folded);
         assert!(matches!(folded.get(add).unwrap().op, RiscOp::Add));
 
         let mut duplicate = Dag::new();
+        let duplicate_decl = duplicate.declare("test");
         let input = duplicate.add_node(
+            duplicate_decl,
             RiscOp::Load { name: "x".into() },
             Vec::new(),
             tensor.clone(),
             None,
         );
-        let claim = named_claim(&mut duplicate, input);
+        let claim = named_claim(&mut duplicate, duplicate_decl, input);
         for _ in 0..2 {
             let cast = duplicate.add_node(
+                duplicate_decl,
                 RiscOp::Cast {
                     new_precision: chelis_types::types::Prim::F32,
                 },
@@ -688,14 +705,17 @@ mod tests {
         );
 
         let mut dead = Dag::new();
+        let dead_decl = dead.declare("test");
         let input = dead.add_node(
+            dead_decl,
             RiscOp::Load { name: "x".into() },
             Vec::new(),
             tensor.clone(),
             None,
         );
-        let claim = named_claim(&mut dead, input);
+        let claim = named_claim(&mut dead, dead_decl, input);
         let cast = dead.add_node(
+            dead_decl,
             RiscOp::Cast {
                 new_precision: chelis_types::types::Prim::F32,
             },
@@ -705,6 +725,7 @@ mod tests {
         );
         dead.add_result_claim_dep(cast, claim);
         let root = dead.add_node(
+            dead_decl,
             RiscOp::synth_const(chelis_types::types::Prim::F32, 0.0),
             Vec::new(),
             scalar_f32(),
@@ -723,19 +744,22 @@ mod tests {
     #[test]
     fn constant_fold_add() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let a = dag.add_node(
+            decl,
             RiscOp::synth_const(scalar_f32().precision, 1.0),
             vec![],
             scalar_f32(),
             None,
         );
         let b = dag.add_node(
+            decl,
             RiscOp::synth_const(scalar_f32().precision, 2.0),
             vec![],
             scalar_f32(),
             None,
         );
-        dag.add_node(RiscOp::Add, vec![a, b], scalar_f32(), None);
+        dag.add_node(decl, RiscOp::Add, vec![a, b], scalar_f32(), None);
 
         constant_fold(&mut dag);
 
@@ -750,19 +774,22 @@ mod tests {
     #[test]
     fn constant_fold_mul() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let a = dag.add_node(
+            decl,
             RiscOp::synth_const(scalar_f32().precision, 3.0),
             vec![],
             scalar_f32(),
             None,
         );
         let b = dag.add_node(
+            decl,
             RiscOp::synth_const(scalar_f32().precision, 4.0),
             vec![],
             scalar_f32(),
             None,
         );
-        dag.add_node(RiscOp::Mul, vec![a, b], scalar_f32(), None);
+        dag.add_node(decl, RiscOp::Mul, vec![a, b], scalar_f32(), None);
 
         constant_fold(&mut dag);
 
@@ -776,13 +803,15 @@ mod tests {
     #[test]
     fn constant_fold_neg() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let a = dag.add_node(
+            decl,
             RiscOp::synth_const(scalar_f32().precision, 5.0),
             vec![],
             scalar_f32(),
             None,
         );
-        dag.add_node(RiscOp::Neg, vec![a], scalar_f32(), None);
+        dag.add_node(decl, RiscOp::Neg, vec![a], scalar_f32(), None);
 
         constant_fold(&mut dag);
 
@@ -800,7 +829,9 @@ mod tests {
             precision: chelis_types::types::Prim::Int64,
         };
         let mut exact = Dag::new();
+        let exact_decl = exact.declare("test");
         let lhs = exact.add_node(
+            exact_decl,
             RiscOp::Const {
                 value: scalar_from_i64("test", scalar_i64.precision, 9_007_199_254_740_993)
                     .unwrap(),
@@ -810,6 +841,7 @@ mod tests {
             None,
         );
         let rhs = exact.add_node(
+            exact_decl,
             RiscOp::Const {
                 value: scalar_from_i64("test", scalar_i64.precision, 1).unwrap(),
             },
@@ -817,7 +849,13 @@ mod tests {
             scalar_i64.clone(),
             None,
         );
-        exact.add_node(RiscOp::Sub, vec![lhs, rhs], scalar_i64.clone(), None);
+        exact.add_node(
+            exact_decl,
+            RiscOp::Sub,
+            vec![lhs, rhs],
+            scalar_i64.clone(),
+            None,
+        );
         constant_fold(&mut exact);
         match &exact.get(NodeId(2)).unwrap().op {
             RiscOp::Const { value } => {
@@ -827,7 +865,9 @@ mod tests {
         }
 
         let mut overflow = Dag::new();
+        let overflow_decl = overflow.declare("test");
         let lhs = overflow.add_node(
+            overflow_decl,
             RiscOp::Const {
                 value: scalar_from_i64("test", scalar_i64.precision, i64::MAX).unwrap(),
             },
@@ -836,6 +876,7 @@ mod tests {
             None,
         );
         let rhs = overflow.add_node(
+            overflow_decl,
             RiscOp::Const {
                 value: scalar_from_i64("test", scalar_i64.precision, -1).unwrap(),
             },
@@ -843,7 +884,7 @@ mod tests {
             scalar_i64.clone(),
             None,
         );
-        overflow.add_node(RiscOp::Sub, vec![lhs, rhs], scalar_i64, None);
+        overflow.add_node(overflow_decl, RiscOp::Sub, vec![lhs, rhs], scalar_i64, None);
         constant_fold(&mut overflow);
         assert!(matches!(overflow.get(NodeId(2)).unwrap().op, RiscOp::Sub));
     }
@@ -871,7 +912,9 @@ mod tests {
         for op in [RiscOp::MaxElem, RiscOp::MinElem] {
             for (lhs_value, rhs_value, expected_bits) in cases {
                 let mut dag = Dag::new();
+                let decl = dag.declare("test");
                 let lhs = dag.add_node(
+                    decl,
                     RiscOp::Const {
                         value: scalar_from_f64("test", scalar_f64.precision, lhs_value).unwrap(),
                     },
@@ -880,6 +923,7 @@ mod tests {
                     None,
                 );
                 let rhs = dag.add_node(
+                    decl,
                     RiscOp::Const {
                         value: scalar_from_f64("test", scalar_f64.precision, rhs_value).unwrap(),
                     },
@@ -887,7 +931,7 @@ mod tests {
                     scalar_f64.clone(),
                     None,
                 );
-                dag.add_node(op.clone(), vec![lhs, rhs], scalar_f64.clone(), None);
+                dag.add_node(decl, op.clone(), vec![lhs, rhs], scalar_f64.clone(), None);
                 constant_fold(&mut dag);
                 match &dag.get(NodeId(2)).unwrap().op {
                     RiscOp::Const { value } => match value.element_ref() {
@@ -945,7 +989,9 @@ mod tests {
         for (lhs_value, rhs_value, comparisons) in cases {
             for (kind, expected) in comparisons {
                 let mut dag = Dag::new();
+                let decl = dag.declare("test");
                 let lhs = dag.add_node(
+                    decl,
                     RiscOp::Const {
                         value: scalar_from_f64("test", scalar_f64.precision, lhs_value).unwrap(),
                     },
@@ -954,6 +1000,7 @@ mod tests {
                     None,
                 );
                 let rhs = dag.add_node(
+                    decl,
                     RiscOp::Const {
                         value: scalar_from_f64("test", scalar_f64.precision, rhs_value).unwrap(),
                     },
@@ -962,6 +1009,7 @@ mod tests {
                     None,
                 );
                 let comparison = dag.add_node(
+                    decl,
                     RiscOp::Compare(kind),
                     vec![lhs, rhs],
                     scalar_bool.clone(),
@@ -1011,7 +1059,9 @@ mod tests {
         ] {
             for (lhs_value, rhs_value, expected) in truth_table {
                 let mut dag = Dag::new();
+                let decl = dag.declare("test");
                 let lhs = dag.add_node(
+                    decl,
                     RiscOp::Const {
                         value: scalar_from_i64("test", scalar_bool.precision, i64::from(lhs_value))
                             .unwrap(),
@@ -1021,6 +1071,7 @@ mod tests {
                     None,
                 );
                 let rhs = dag.add_node(
+                    decl,
                     RiscOp::Const {
                         value: scalar_from_i64("test", scalar_bool.precision, i64::from(rhs_value))
                             .unwrap(),
@@ -1030,6 +1081,7 @@ mod tests {
                     None,
                 );
                 let logical = dag.add_node(
+                    decl,
                     RiscOp::Logical(kind),
                     vec![lhs, rhs],
                     scalar_bool.clone(),
@@ -1051,7 +1103,9 @@ mod tests {
 
         for (input_value, expected) in [(false, true), (true, false)] {
             let mut dag = Dag::new();
+            let decl = dag.declare("test");
             let input = dag.add_node(
+                decl,
                 RiscOp::Const {
                     value: scalar_from_i64("test", scalar_bool.precision, i64::from(input_value))
                         .unwrap(),
@@ -1061,6 +1115,7 @@ mod tests {
                 None,
             );
             let logical = dag.add_node(
+                decl,
                 RiscOp::Logical(LogicalKind::Not),
                 vec![input],
                 scalar_bool.clone(),
@@ -1093,7 +1148,9 @@ mod tests {
 
         for (condition_value, expected_bits) in [(true, then_bits), (false, else_bits)] {
             let mut dag = Dag::new();
+            let decl = dag.declare("test");
             let condition = dag.add_node(
+                decl,
                 RiscOp::Const {
                     value: scalar_from_i64(
                         "test",
@@ -1107,6 +1164,7 @@ mod tests {
                 None,
             );
             let then_value = dag.add_node(
+                decl,
                 RiscOp::Const {
                     value: scalar_from_f64("test", scalar_f64.precision, f64::from_bits(then_bits))
                         .unwrap(),
@@ -1116,6 +1174,7 @@ mod tests {
                 None,
             );
             let else_value = dag.add_node(
+                decl,
                 RiscOp::Const {
                     value: scalar_from_f64("test", scalar_f64.precision, f64::from_bits(else_bits))
                         .unwrap(),
@@ -1125,6 +1184,7 @@ mod tests {
                 None,
             );
             let selected = dag.add_node(
+                decl,
                 RiscOp::Where,
                 vec![condition, then_value, else_value],
                 scalar_f64.clone(),
@@ -1158,7 +1218,9 @@ mod tests {
         };
 
         let mut mismatched_comparison = Dag::new();
+        let mismatched_comparison_decl = mismatched_comparison.declare("test");
         let lhs = mismatched_comparison.add_node(
+            mismatched_comparison_decl,
             RiscOp::Const {
                 value: scalar_from_f64("test", scalar_f32.precision, 1.0).unwrap(),
             },
@@ -1167,6 +1229,7 @@ mod tests {
             None,
         );
         let rhs = mismatched_comparison.add_node(
+            mismatched_comparison_decl,
             RiscOp::Const {
                 value: scalar_from_f64("test", scalar_f64.precision, 1.0).unwrap(),
             },
@@ -1175,6 +1238,7 @@ mod tests {
             None,
         );
         let comparison = mismatched_comparison.add_node(
+            mismatched_comparison_decl,
             RiscOp::Compare(ComparisonKind::Eq),
             vec![lhs, rhs],
             scalar_bool.clone(),
@@ -1187,19 +1251,23 @@ mod tests {
         ));
 
         let mut invalid_logical = Dag::new();
+        let invalid_logical_decl = invalid_logical.declare("test");
         let lhs = invalid_logical.add_node(
+            invalid_logical_decl,
             RiscOp::synth_const(scalar_f32.precision, 1.0),
             vec![],
             scalar_f32.clone(),
             None,
         );
         let rhs = invalid_logical.add_node(
+            invalid_logical_decl,
             RiscOp::synth_const(scalar_f32.precision, 0.0),
             vec![],
             scalar_f32.clone(),
             None,
         );
         let logical = invalid_logical.add_node(
+            invalid_logical_decl,
             RiscOp::Logical(LogicalKind::And),
             vec![lhs, rhs],
             scalar_bool.clone(),
@@ -1212,7 +1280,9 @@ mod tests {
         ));
 
         let mut nonconstant_logical = Dag::new();
+        let nonconstant_logical_decl = nonconstant_logical.declare("test");
         let lhs = nonconstant_logical.add_node(
+            nonconstant_logical_decl,
             RiscOp::Load {
                 name: "flag".into(),
             },
@@ -1221,12 +1291,14 @@ mod tests {
             None,
         );
         let rhs = nonconstant_logical.add_node(
+            nonconstant_logical_decl,
             RiscOp::synth_const(scalar_bool.precision, 1.0),
             vec![],
             scalar_bool.clone(),
             None,
         );
         let logical = nonconstant_logical.add_node(
+            nonconstant_logical_decl,
             RiscOp::Logical(LogicalKind::Or),
             vec![lhs, rhs],
             scalar_bool.clone(),
@@ -1239,25 +1311,30 @@ mod tests {
         ));
 
         let mut invalid_where = Dag::new();
+        let invalid_where_decl = invalid_where.declare("test");
         let condition = invalid_where.add_node(
+            invalid_where_decl,
             RiscOp::synth_const(scalar_f32.precision, 1.0),
             vec![],
             scalar_f32.clone(),
             None,
         );
         let then_value = invalid_where.add_node(
+            invalid_where_decl,
             RiscOp::synth_const(scalar_f32.precision, 2.0),
             vec![],
             scalar_f32.clone(),
             None,
         );
         let else_value = invalid_where.add_node(
+            invalid_where_decl,
             RiscOp::synth_const(scalar_f32.precision, 3.0),
             vec![],
             scalar_f32.clone(),
             None,
         );
         let selected = invalid_where.add_node(
+            invalid_where_decl,
             RiscOp::Where,
             vec![condition, then_value, else_value],
             scalar_f32.clone(),
@@ -1270,13 +1347,16 @@ mod tests {
         ));
 
         let mut nonconstant_where = Dag::new();
+        let nonconstant_where_decl = nonconstant_where.declare("test");
         let condition = nonconstant_where.add_node(
+            nonconstant_where_decl,
             RiscOp::synth_const(scalar_bool.precision, 1.0),
             vec![],
             scalar_bool,
             None,
         );
         let then_value = nonconstant_where.add_node(
+            nonconstant_where_decl,
             RiscOp::Load {
                 name: "then".into(),
             },
@@ -1285,12 +1365,14 @@ mod tests {
             None,
         );
         let else_value = nonconstant_where.add_node(
+            nonconstant_where_decl,
             RiscOp::synth_const(scalar_f32.precision, 3.0),
             vec![],
             scalar_f32.clone(),
             None,
         );
         let selected = nonconstant_where.add_node(
+            nonconstant_where_decl,
             RiscOp::Where,
             vec![condition, then_value, else_value],
             scalar_f32,
@@ -1306,19 +1388,22 @@ mod tests {
     #[test]
     fn dce_removes_dead_nodes() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let a = dag.add_node(
+            decl,
             RiscOp::synth_const(scalar_f32().precision, 1.0),
             vec![],
             scalar_f32(),
             None,
         );
         let _dead = dag.add_node(
+            decl,
             RiscOp::synth_const(scalar_f32().precision, 99.0),
             vec![],
             scalar_f32(),
             None,
         );
-        let live = dag.add_node(RiscOp::Neg, vec![a], scalar_f32(), None);
+        let live = dag.add_node(decl, RiscOp::Neg, vec![a], scalar_f32(), None);
         dag.add_root(live);
 
         let new_dag = dead_code_eliminate(&dag);
@@ -1329,25 +1414,29 @@ mod tests {
     #[test]
     fn dce_keeps_store_nodes() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let a = dag.add_node(
+            decl,
             RiscOp::synth_const(scalar_f32().precision, 1.0),
             vec![],
             scalar_f32(),
             None,
         );
         dag.add_node(
+            decl,
             RiscOp::Store { name: "out".into() },
             vec![a],
             scalar_f32(),
             None,
         );
         let b = dag.add_node(
+            decl,
             RiscOp::synth_const(scalar_f32().precision, 2.0),
             vec![],
             scalar_f32(),
             None,
         );
-        let live = dag.add_node(RiscOp::Neg, vec![b], scalar_f32(), None);
+        let live = dag.add_node(decl, RiscOp::Neg, vec![b], scalar_f32(), None);
         dag.add_root(live);
 
         let new_dag = dead_code_eliminate(&dag);
@@ -1364,13 +1453,16 @@ mod tests {
         // produce equal values.
         use chelis_types::types::Prim;
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let template = dag.add_node(
+            decl,
             RiscOp::synth_const(Prim::F32, 0.0),
             vec![],
             scalar_f32(),
             None,
         );
         let seed = dag.add_node(
+            decl,
             RiscOp::synth_const(Prim::Int64, 42.0),
             vec![],
             TensorType {
@@ -1380,12 +1472,14 @@ mod tests {
             None,
         );
         let low = dag.add_node(
+            decl,
             RiscOp::synth_const(Prim::F32, 2.0),
             vec![],
             scalar_f32(),
             None,
         );
         let high = dag.add_node(
+            decl,
             RiscOp::synth_const(Prim::F32, 5.0),
             vec![],
             scalar_f32(),
@@ -1393,6 +1487,7 @@ mod tests {
         );
         for _ in 0..2 {
             let key = dag.add_node(
+                decl,
                 RiscOp::KeyFromSeed,
                 vec![seed],
                 TensorType {
@@ -1402,6 +1497,7 @@ mod tests {
                 None,
             );
             let draw = dag.add_node(
+                decl,
                 RiscOp::UniformLike,
                 vec![template, low, high, key],
                 scalar_f32(),
@@ -1430,19 +1526,22 @@ mod tests {
     #[test]
     fn cse_deduplicates_consts() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let a = dag.add_node(
+            decl,
             RiscOp::synth_const(scalar_f32().precision, 1.0),
             vec![],
             scalar_f32(),
             None,
         );
         let b = dag.add_node(
+            decl,
             RiscOp::synth_const(scalar_f32().precision, 1.0),
             vec![],
             scalar_f32(),
             None,
         );
-        let sum = dag.add_node(RiscOp::Add, vec![a, b], scalar_f32(), None);
+        let sum = dag.add_node(decl, RiscOp::Add, vec![a, b], scalar_f32(), None);
         dag.add_root(sum);
 
         let new_dag = common_subexpr_eliminate(&dag);
@@ -1457,13 +1556,16 @@ mod tests {
     #[test]
     fn dce_keeps_all_roots() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let a = dag.add_node(
+            decl,
             RiscOp::synth_const(scalar_f32().precision, 1.0),
             vec![],
             scalar_f32(),
             None,
         );
         let b = dag.add_node(
+            decl,
             RiscOp::synth_const(scalar_f32().precision, 2.0),
             vec![],
             scalar_f32(),

@@ -1,7 +1,7 @@
 use chelis_unord::UnordMap;
 
 use chelis_deep::ast::{Atom, Expr, ExprCarrier};
-use chelis_ir::dag::{Dag, DimInfo, NodeId, RiscOp, TensorType};
+use chelis_ir::dag::{Dag, DeclId, DimInfo, NodeId, RiscOp, TensorType};
 use chelis_ir::eval::{TensorValue as IrTensorValue, eval_tensor_roots_with};
 use chelis_ir::tier2;
 use chelis_types::{
@@ -1426,13 +1426,14 @@ pub(super) fn tensor_matmul_host(
         }
     }
     let mut dag = Dag::new();
+    let decl = dag.declare("matmul");
     let lhs_ty = tensor_type_for(lhs);
     let rhs_ty = tensor_type_for(rhs);
     let lhs_name = format!("{COMPOSED_PLACEHOLDER_PREFIX}0");
     let rhs_name = format!("{COMPOSED_PLACEHOLDER_PREFIX}1");
-    let lhs_id = add_load(&mut dag, lhs_name.clone(), lhs_ty.clone());
-    let rhs_id = add_load(&mut dag, rhs_name.clone(), rhs_ty.clone());
-    let root = tier2::lower_matmul(&mut dag, lhs_id, rhs_id, &lhs_ty, &rhs_ty, None);
+    let lhs_id = add_load(&mut dag, decl, lhs_name.clone(), lhs_ty.clone());
+    let rhs_id = add_load(&mut dag, decl, rhs_name.clone(), rhs_ty.clone());
+    let root = tier2::lower_matmul(decl, &mut dag, lhs_id, rhs_id, &lhs_ty, &rhs_ty, None);
     let mut inputs = UnordMap::new();
     inputs.insert(lhs_name, lhs.value.clone());
     inputs.insert(rhs_name, rhs.value.clone());
@@ -2012,8 +2013,14 @@ fn tensor_type_for(tensor: &RuntimeTensorValue) -> TensorType {
     }
 }
 
-fn add_load(dag: &mut Dag, name: String, ty: TensorType) -> NodeId {
-    dag.add_node(RiscOp::Load { name: name.into() }, Vec::new(), ty, None)
+fn add_load(dag: &mut Dag, decl: DeclId, name: String, ty: TensorType) -> NodeId {
+    dag.add_node(
+        decl,
+        RiscOp::Load { name: name.into() },
+        Vec::new(),
+        ty,
+        None,
+    )
 }
 
 fn extract_root(
@@ -2055,13 +2062,14 @@ pub(super) fn eval_composed_unary<F>(
     build: F,
 ) -> Result<RuntimeTensorValue, String>
 where
-    F: FnOnce(&mut Dag, NodeId, &TensorType) -> NodeId,
+    F: FnOnce(&mut Dag, DeclId, NodeId, &TensorType) -> NodeId,
 {
     let mut dag = Dag::new();
+    let decl = dag.declare("composed unary");
     let ty = tensor_type_for(x);
     let x_name = format!("{COMPOSED_PLACEHOLDER_PREFIX}0");
-    let x_id = add_load(&mut dag, x_name.clone(), ty.clone());
-    let root = build(&mut dag, x_id, &ty);
+    let x_id = add_load(&mut dag, decl, x_name.clone(), ty.clone());
+    let root = build(&mut dag, decl, x_id, &ty);
     let mut inputs = UnordMap::new();
     inputs.insert(x_name, x.value.clone());
     extract_root(&dag, &inputs, root, "composed unary tier2")
@@ -2077,19 +2085,27 @@ pub(super) fn eval_composed_triop<F>(
     build: F,
 ) -> Result<RuntimeTensorValue, String>
 where
-    F: FnOnce(&mut Dag, NodeId, NodeId, NodeId, (&TensorType, &TensorType, &TensorType)) -> NodeId,
+    F: FnOnce(
+        &mut Dag,
+        DeclId,
+        NodeId,
+        NodeId,
+        NodeId,
+        (&TensorType, &TensorType, &TensorType),
+    ) -> NodeId,
 {
     let mut dag = Dag::new();
+    let decl = dag.declare("composed triop");
     let x_ty = tensor_type_for(x);
     let g_ty = tensor_type_for(gamma);
     let b_ty = tensor_type_for(beta);
     let x_name = format!("{COMPOSED_PLACEHOLDER_PREFIX}0");
     let g_name = format!("{COMPOSED_PLACEHOLDER_PREFIX}1");
     let b_name = format!("{COMPOSED_PLACEHOLDER_PREFIX}2");
-    let x_id = add_load(&mut dag, x_name.clone(), x_ty.clone());
-    let g_id = add_load(&mut dag, g_name.clone(), g_ty.clone());
-    let b_id = add_load(&mut dag, b_name.clone(), b_ty.clone());
-    let root = build(&mut dag, x_id, g_id, b_id, (&x_ty, &g_ty, &b_ty));
+    let x_id = add_load(&mut dag, decl, x_name.clone(), x_ty.clone());
+    let g_id = add_load(&mut dag, decl, g_name.clone(), g_ty.clone());
+    let b_id = add_load(&mut dag, decl, b_name.clone(), b_ty.clone());
+    let root = build(&mut dag, decl, x_id, g_id, b_id, (&x_ty, &g_ty, &b_ty));
     let mut inputs = UnordMap::new();
     inputs.insert(x_name, x.value.clone());
     inputs.insert(g_name, gamma.value.clone());
@@ -2148,12 +2164,13 @@ pub(super) fn conv_host(
     let input_ty = tensor_type_for(input);
     let kernel_ty = tensor_type_for(kernel);
     let mut dag = Dag::new();
+    let decl = dag.declare("conv");
     let x_name = format!("{COMPOSED_PLACEHOLDER_PREFIX}0");
     let k_name = format!("{COMPOSED_PLACEHOLDER_PREFIX}1");
-    let x_id = add_load(&mut dag, x_name.clone(), input_ty.clone());
-    let k_id = add_load(&mut dag, k_name.clone(), kernel_ty.clone());
+    let x_id = add_load(&mut dag, decl, x_name.clone(), input_ty.clone());
+    let k_id = add_load(&mut dag, decl, k_name.clone(), kernel_ty.clone());
     let root = tier2::lower_conv(
-        &mut dag, x_id, k_id, &input_ty, &kernel_ty, &output_ty, strides, padding, None,
+        decl, &mut dag, x_id, k_id, &input_ty, &kernel_ty, &output_ty, strides, padding, None,
     );
     let mut inputs = UnordMap::new();
     inputs.insert(x_name, input.value.clone());
@@ -3360,12 +3377,13 @@ mod numeric_trap_forwarding_tests {
             vec![i64::from(i32::MAX), 1],
         )
         .expect("input is representable at i32");
-        let err = eval_composed_unary(&input, |dag, x, ty| {
+        let err = eval_composed_unary(&input, |dag, decl, x, ty| {
             let output_ty = TensorType {
                 dims: Vec::new(),
                 precision: ty.precision,
             };
             dag.add_node(
+                decl,
                 RiscOp::sum_default(0, ty.precision).expect("i8 sum is admitted"),
                 vec![x],
                 output_ty,

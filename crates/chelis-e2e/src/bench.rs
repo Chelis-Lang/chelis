@@ -992,18 +992,25 @@ fn find_load_in_cone(dag: &Dag, root: NodeId, name: &str) -> Option<NodeId> {
 }
 
 fn add_named_store(dag: &mut Dag, name: &str, input: NodeId) {
-    let ty = dag
+    let source = dag
         .get(input)
-        .unwrap_or_else(|| panic!("missing node for store `{name}`"))
-        .output_type
-        .clone();
-    dag.add_node(RiscOp::Store { name: name.into() }, vec![input], ty, None);
+        .unwrap_or_else(|| panic!("missing node for store `{name}`"));
+    let (decl, ty) = (source.decl, source.output_type.clone());
+    dag.add_node(
+        decl,
+        RiscOp::Store { name: name.into() },
+        vec![input],
+        ty,
+        None,
+    );
 }
 
 fn dag_without_roots(dag: &Dag) -> Dag {
     let mut out = Dag::new();
+    out.inherit_declarations(dag);
     for node in dag.nodes() {
         out.add_node(
+            node.decl,
             node.op.clone(),
             node.inputs.clone(),
             node.output_type.clone(),

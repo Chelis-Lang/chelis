@@ -105,13 +105,17 @@ impl BeaconShim {
         {
             return Err("scalar upper-bound entry must have scalar f64 output".into());
         }
+        // The appended bound nodes derive from the root, so they belong to
+        // its declaration.
+        let declaration = node["declaration"].clone();
         let constant = nodes.len();
         let folded = constant + 1;
         // Negating a stored f64 flips only its sign bit, with no decimal conversion.
         let negative_bits = upper.as_f64_lossy().to_bits() ^ (1_u64 << 63);
         let node = |id, op, operands| {
             json!({"id":id,"op":op,"inputs":operands,
-            "output_type":{"dims":[],"precision":"f64"},"shape_deps":[],"span_id":null,"merged_spans":[]})
+            "output_type":{"dims":[],"precision":"f64"},"shape_deps":[],"span_id":null,"merged_spans":[],
+            "declaration":declaration})
         };
         nodes.push(node(
             constant,

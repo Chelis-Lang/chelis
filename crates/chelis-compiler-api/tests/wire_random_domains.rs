@@ -6,7 +6,7 @@
 //! random kernel output.
 use chelis_compiler_api::schema::{
     CheckRequest, GradRequest, LowerRequest, SourceKind, WIRE_DAG_SCHEMA_VERSION, WireDag,
-    WireDagDecodeError, WireDagNode,
+    WireDagDecodeError, WireDagNode, WireRiscOp,
 };
 use chelis_ir::dag::{Dag, DimInfo, KeyBranch, NodeId, RiscOp, RtDim, TensorType, UniformBound};
 use chelis_types::scalar_from_i64;
@@ -142,7 +142,7 @@ fn a_key_is_consumed_once_and_only_by_a_key_consumer() {
     let nodes = foreign["nodes"].as_array_mut().unwrap();
     let id = nodes.len();
     nodes.push(
-        json!({"shape_deps":[],"span_id":null,"merged_spans":[],"id":id,
+        json!({"shape_deps":[],"span_id":null,"merged_spans":[],"declaration":"entry","id":id,
         "op":{"kind":"neg"},"inputs":[dropout_key],
         "output_type":{"dims":[],"precision":"key"}}),
     );
@@ -165,7 +165,7 @@ fn a_key_is_consumed_once_and_only_by_a_key_consumer() {
     let mut derived = dag.clone();
     let id = derived["nodes"].as_array().unwrap().len();
     derived["nodes"].as_array_mut().unwrap().push(
-        json!({"shape_deps":[],"span_id":null,"merged_spans":[],"id":id,
+        json!({"shape_deps":[],"span_id":null,"merged_spans":[],"declaration":"entry","id":id,
         "op":{"kind":"split","branch":"left"},"inputs":[dropout_key],
         "output_type":{"dims":[],"precision":"key"}}),
     );
@@ -287,7 +287,7 @@ fn a_key_may_be_loaded_or_rooted_and_is_never_a_dependency_or_a_constant() {
     let mut loaded = dag.clone();
     let id = loaded["nodes"].as_array().unwrap().len();
     loaded["nodes"].as_array_mut().unwrap().push(
-        json!({"shape_deps":[],"span_id":null,"merged_spans":[],"id":id,
+        json!({"shape_deps":[],"span_id":null,"merged_spans":[],"declaration":"entry","id":id,
         "op":{"kind":"load","name":"unused"},"inputs":[],
         "output_type":{"dims":[],"precision":"key"}}),
     );
@@ -311,7 +311,7 @@ fn a_key_may_be_loaded_or_rooted_and_is_never_a_dependency_or_a_constant() {
     let mut constant = dag.clone();
     let id = constant["nodes"].as_array().unwrap().len();
     constant["nodes"].as_array_mut().unwrap().push(
-        json!({"shape_deps":[],"span_id":null,"merged_spans":[],"id":id,
+        json!({"shape_deps":[],"span_id":null,"merged_spans":[],"declaration":"entry","id":id,
         "op":{"kind":"const","value":{"dtype":"int64","value":7}},"inputs":[],
         "output_type":{"dims":[],"precision":"key"}}),
     );
@@ -320,7 +320,7 @@ fn a_key_may_be_loaded_or_rooted_and_is_never_a_dependency_or_a_constant() {
 }
 
 fn wire_node(id: usize, op: Value, inputs: &[usize], dims: &[u64], precision: &str) -> Value {
-    json!({"shape_deps":[],"span_id":null,"merged_spans":[],"id":id,"op":op,
+    json!({"shape_deps":[],"span_id":null,"merged_spans":[],"declaration":"entry","id":id,"op":op,
         "inputs":inputs,
         "output_type":{"dims":dims.iter().map(|size| json!({"kind":"lit","size":size})).collect::<Vec<_>>(),
         "precision":precision}})
@@ -536,10 +536,9 @@ fn the_codec_admits_the_key_chain_and_rejects_every_malformed_key_form() {
     rooted["roots"].as_array_mut().unwrap().push(json!(6));
     rejects_domain(&rooted, "is a graph root and is also consumed");
     // A parameter is its declaration and its name (chelis#2413 B2): two
-    // declarations' `k` are two keys, one declaration's two `Load`s of `k`
-    // are one, and a `Load` with no declaration is the same key as every
-    // `Load` of its name.
-    let reloaded = |declarations: [Option<&str>; 2]| {
+    // declarations' `k` are two keys, and one declaration's two `Load`s of
+    // `k` are one.
+    let reloaded = |declarations: [&str; 2]| {
         let mut reloaded = key_chain();
         let y = push(
             &mut reloaded,
@@ -557,9 +556,7 @@ fn the_codec_admits_the_key_chain_and_rejects_every_malformed_key_form() {
                 &[],
                 "key",
             );
-            if let Some(declaration) = declaration {
-                reloaded["nodes"][k]["declaration"] = json!(declaration);
-            }
+            reloaded["nodes"][k]["declaration"] = json!(declaration);
             let drawn = push(
                 &mut reloaded,
                 json!({"kind":"dropout"}),
@@ -572,11 +569,15 @@ fn the_codec_admits_the_key_chain_and_rejects_every_malformed_key_form() {
         reloaded["roots"] = json!(roots);
         reloaded
     };
-    rejects_domain(&reloaded([None, None]), "is consumed twice");
-    rejects_domain(&reloaded([Some("a"), Some("a")]), "is consumed twice");
-    rejects_domain(&reloaded([Some("a"), None]), "is consumed twice");
-    rejects_domain(&reloaded([None, Some("b")]), "is consumed twice");
-    accepts(&reloaded([Some("a"), Some("b")]));
+    rejects_domain(&reloaded(["a", "a"]), "is consumed twice");
+    accepts(&reloaded(["a", "b"]));
+    // Every node names its declaration: a node without one is a decode error.
+    let mut undeclared = key_chain();
+    undeclared["nodes"][0]
+        .as_object_mut()
+        .unwrap()
+        .remove("declaration");
+    assert!(WireDag::from_validated_json(&undeclared.to_string()).is_err());
 
     // The same disagreement against a named count axis whose extent is
     // known; the batched draw's data declares that axis too.
@@ -1058,8 +1059,14 @@ fn tensor(axes: &[Axis], precision: Prim) -> TensorType {
     }
 }
 
-fn ir_node(dag: &mut Dag, op: RiscOp, inputs: Vec<NodeId>, ty: TensorType) -> NodeId {
-    dag.add_node(op, inputs, ty, None)
+fn ir_node(
+    dag: &mut Dag,
+    decl: chelis_ir::dag::DeclId,
+    op: RiscOp,
+    inputs: Vec<NodeId>,
+    ty: TensorType,
+) -> NodeId {
+    dag.add_node(decl, op, inputs, ty, None)
 }
 
 /// The wire form of the loads, constants, key operations and draws below.
@@ -1099,7 +1106,7 @@ fn wire_of(dag: &Dag) -> Value {
                     other => panic!("no wire form here for {other:?}"),
                 })
                 .collect::<Vec<_>>();
-            json!({"shape_deps":[],"span_id":null,"merged_spans":[],"id":node.id.0,"op":op,
+            json!({"shape_deps":[],"span_id":null,"merged_spans":[],"declaration":"entry","id":node.id.0,"op":op,
                 "inputs":node.inputs.iter().map(|input| input.0).collect::<Vec<_>>(),
                 "output_type":{"dims":dims,"precision":node.output_type.precision.interchange_name()}})
         })
@@ -1109,18 +1116,26 @@ fn wire_of(dag: &Dag) -> Value {
 }
 
 /// Keys `split_n(key(7), 3)`: nodes 0 to 2.
-fn three_keys(dag: &mut Dag) -> NodeId {
+fn three_keys(dag: &mut Dag, decl: chelis_ir::dag::DeclId) -> NodeId {
     let seed = ir_node(
         dag,
+        decl,
         RiscOp::Const {
             value: scalar_from_i64("test", Prim::Int64, 7).unwrap(),
         },
         vec![],
         tensor(&[], Prim::Int64),
     );
-    let key = ir_node(dag, RiscOp::KeyFromSeed, vec![seed], tensor(&[], Prim::Key));
+    let key = ir_node(
+        dag,
+        decl,
+        RiscOp::KeyFromSeed,
+        vec![seed],
+        tensor(&[], Prim::Key),
+    );
     ir_node(
         dag,
+        decl,
         RiscOp::SplitN {
             count: RtDim::Lit(3),
         },
@@ -1129,9 +1144,10 @@ fn three_keys(dag: &mut Dag) -> NodeId {
     )
 }
 
-fn f32_bound(dag: &mut Dag, value: f64) -> NodeId {
+fn f32_bound(dag: &mut Dag, decl: chelis_ir::dag::DeclId, value: f64) -> NodeId {
     ir_node(
         dag,
+        decl,
         RiscOp::synth_const(Prim::F32, value),
         vec![],
         tensor(&[], Prim::F32),
@@ -1141,17 +1157,20 @@ fn f32_bound(dag: &mut Dag, value: f64) -> NodeId {
 /// Round 3's witness: a `UniformLike` over `t: [3, 4]` declared `[rows, 4]`.
 fn uniform_declaring(rows: usize) -> Dag {
     let mut dag = Dag::new();
-    let keys = three_keys(&mut dag);
+    let decl = dag.declare("test");
+    let keys = three_keys(&mut dag, decl);
     let t = ir_node(
         &mut dag,
+        decl,
         RiscOp::Load { name: "t".into() },
         vec![],
         tensor(&[Axis::Lit(3), Axis::Lit(4)], Prim::F32),
     );
-    let low = f32_bound(&mut dag, 0.0);
-    let high = f32_bound(&mut dag, 1.0);
+    let low = f32_bound(&mut dag, decl, 0.0);
+    let high = f32_bound(&mut dag, decl, 1.0);
     let drawn = ir_node(
         &mut dag,
+        decl,
         RiscOp::UniformLike,
         vec![t, low, high, keys],
         tensor(&[Axis::Lit(rows), Axis::Lit(4)], Prim::F32),
@@ -1163,14 +1182,17 @@ fn uniform_declaring(rows: usize) -> Dag {
 /// A `Split` of `k: [n]` declared `[out]`.
 fn split_declaring(out: &'static str) -> Dag {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let k = ir_node(
         &mut dag,
+        decl,
         RiscOp::Load { name: "k".into() },
         vec![],
         tensor(&[Axis::Named("n")], Prim::Key),
     );
     let split = ir_node(
         &mut dag,
+        decl,
         RiscOp::Split {
             branch: KeyBranch::Left,
         },
@@ -1185,29 +1207,34 @@ fn split_declaring(out: &'static str) -> Dag {
 /// cotangent `g: [3, trailing]`.
 fn adjoint_over(trailing: usize) -> Dag {
     let mut dag = Dag::new();
-    let keys = three_keys(&mut dag);
+    let decl = dag.declare("test");
+    let keys = three_keys(&mut dag, decl);
     let t = ir_node(
         &mut dag,
+        decl,
         RiscOp::Load { name: "t".into() },
         vec![],
         tensor(&[Axis::Lit(3), Axis::Lit(5)], Prim::F32),
     );
-    let low = f32_bound(&mut dag, 0.0);
-    let high = f32_bound(&mut dag, 1.0);
+    let low = f32_bound(&mut dag, decl, 0.0);
+    let high = f32_bound(&mut dag, decl, 1.0);
     let forward = ir_node(
         &mut dag,
+        decl,
         RiscOp::UniformLike,
         vec![t, low, high, keys],
         tensor(&[Axis::Lit(3), Axis::Lit(5)], Prim::F32),
     );
     let g = ir_node(
         &mut dag,
+        decl,
         RiscOp::Load { name: "g".into() },
         vec![],
         tensor(&[Axis::Lit(3), Axis::Lit(trailing)], Prim::F32),
     );
     let adjoint = ir_node(
         &mut dag,
+        decl,
         RiscOp::UniformBoundAdjoint {
             bound: UniformBound::High,
         },
@@ -1252,4 +1279,101 @@ fn the_verifier_and_the_codec_share_one_operand_rule() {
         assert_eq!(chelis_ir::verify::verify(&agreeing), Vec::<String>::new());
         accepts(&wire_of(&agreeing));
     }
+}
+
+/// Rule I under transforms (chelis#2413): `grad` and `vmap` lower their
+/// bodies on behalf of the declaration that applies them, so a key parameter
+/// `k` read through a transform and a sibling declaration's own `k` stay two
+/// keys through `lower`, serialization and decoding. Naming the sibling's
+/// nodes after the transformed declaration merges the two parameters, and the
+/// key rules then reject the shared key.
+///
+/// Evidentiary status: REGRESSION TEST, shown by mutation: with the wire's
+/// key identity by parameter name alone (as at ff8957386), `lower` rejects
+/// the `grad` program with "key 0 is consumed twice".
+#[test]
+fn a_transformed_key_parameter_and_a_siblings_are_two_keys() {
+    for (source, applied) in [
+        (
+            "def loss(k: key, x: tensor[4, f32]) -> f32 = tensor_to_scalar(sum(dropout(k, x, 0.5f32), 0i32))\ndef derivative(k: key, x: tensor[4, f32]) -> tensor[4, f32] = grad(loss, wrt=x)(k, x)\ndef sibling(k: key, v: tensor[4, f32]) -> tensor[4, f32] = dropout(k, v, 0.25f32)\n",
+            "derivative",
+        ),
+        (
+            "def draw(k: key, x: tensor[4, f32]) -> tensor[4, f32] = dropout(k, x, 0.5f32)\ndef batched(k: key, xs: tensor[3, 4, f32]) -> tensor[3, 4, f32] = vmap(draw)(split_keys(k, 3i64), xs)\ndef sibling(k: key, v: tensor[4, f32]) -> tensor[4, f32] = dropout(k, v, 0.25f32)\n",
+            "batched",
+        ),
+    ] {
+        let lowered = chelis_compiler_api::compiler::lower(LowerRequest {
+            source_kind: SourceKind::Surf,
+            source: source.into(),
+            entry: None,
+        })
+        .unwrap_or_else(|error| panic!("{applied}: {error:?}"));
+        let text = serde_json::to_string(&lowered.dag).unwrap();
+        let decoded = WireDag::from_validated_json(&text).unwrap();
+        let key_loads = decoded
+            .nodes
+            .iter()
+            .filter(|node| matches!(&node.op, WireRiscOp::Load { name } if name.as_str() == "k"))
+            .map(|node| node.declaration.as_str())
+            .collect::<Vec<_>>();
+        assert!(key_loads.contains(&applied), "{applied}: {key_loads:?}");
+        assert!(key_loads.contains(&"sibling"), "{applied}: {key_loads:?}");
+
+        let mut merged: Value = serde_json::from_str(&text).unwrap();
+        for node in merged["nodes"].as_array_mut().unwrap() {
+            if node["declaration"] == json!("sibling") {
+                node["declaration"] = json!(applied);
+            }
+        }
+        rejects_domain(&merged, "is consumed twice");
+    }
+}
+
+/// Rule S is unchanged by declaration identity: one declaration's key split
+/// under each of two exclusive activations may not return the halves.
+///
+/// Evidentiary status: disposition lock (rejected at 727e74b41).
+#[test]
+fn exclusive_splits_of_one_key_may_not_return_their_halves() {
+    let mut graph = json!({
+        "schema_version": WIRE_DAG_SCHEMA_VERSION,
+        "nodes": [],
+        "roots": [],
+    });
+    let key = push(
+        &mut graph,
+        json!({"kind":"load","name":"k"}),
+        &[],
+        &[],
+        "key",
+    );
+    let condition = push(
+        &mut graph,
+        json!({"kind":"load","name":"c"}),
+        &[],
+        &[],
+        "bool",
+    );
+    let other = push(
+        &mut graph,
+        json!({"kind":"logical","logical":"not"}),
+        &[condition],
+        &[],
+        "bool",
+    );
+    let mut roots = Vec::new();
+    for activation in [condition, other] {
+        for branch in ["left", "right"] {
+            roots.push(json!(push(
+                &mut graph,
+                json!({"kind":"split","branch":branch}),
+                &[key, activation],
+                &[],
+                "key",
+            )));
+        }
+    }
+    graph["roots"] = json!(roots);
+    rejects_domain(&graph, "is a graph root");
 }

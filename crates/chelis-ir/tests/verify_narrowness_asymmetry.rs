@@ -39,7 +39,9 @@ fn scalar_t(p: Prim) -> TensorType {
 fn ir_verify_accepts_sum_int8_with_int8_accumulator_silent_overflow() {
     // Hand-build a Sum with i8 accumulator (violates §5.7.1).
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let inp = dag.add_node(
+        decl,
         RiscOp::Load {
             name: "xs".to_string().into(),
         },
@@ -48,6 +50,7 @@ fn ir_verify_accepts_sum_int8_with_int8_accumulator_silent_overflow() {
         None,
     );
     let bad = dag.add_node(
+        decl,
         RiscOp::Sum {
             axis: 0,
             accumulator: Prim::Int8,
@@ -78,7 +81,9 @@ fn ir_verify_accepts_sum_int8_with_int8_accumulator_silent_overflow() {
 #[test]
 fn ir_verify_accepts_sum_int16_with_int16_accumulator_silent_overflow() {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let inp = dag.add_node(
+        decl,
         RiscOp::Load {
             name: "xs".to_string().into(),
         },
@@ -87,6 +92,7 @@ fn ir_verify_accepts_sum_int16_with_int16_accumulator_silent_overflow() {
         None,
     );
     let bad = dag.add_node(
+        decl,
         RiscOp::Sum {
             axis: 0,
             accumulator: Prim::Int16,
@@ -107,7 +113,9 @@ fn ir_verify_accepts_sum_int16_with_int16_accumulator_silent_overflow() {
 #[test]
 fn ir_verify_accepts_sum_bf16_with_bf16_accumulator_narrowness_violation() {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let inp = dag.add_node(
+        decl,
         RiscOp::Load {
             name: "xs".to_string().into(),
         },
@@ -116,6 +124,7 @@ fn ir_verify_accepts_sum_bf16_with_bf16_accumulator_narrowness_violation() {
         None,
     );
     let bad = dag.add_node(
+        decl,
         RiscOp::Sum {
             axis: 0,
             accumulator: Prim::Bf16,

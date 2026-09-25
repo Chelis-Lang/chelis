@@ -641,9 +641,18 @@ node and removing its execution preserves every effect and trap occurrence.
 Potentially effectful or trapping nodes are observable roots; purity alone does
 not make a possible trap dead.
 
+Liveness is scoped to the program the evaluation runs. An evaluation of
+selected roots enters each selected root's declaration and every value
+declaration that a declaration it enters names, whether or not the name is
+read. A call is not such a reference: a function runs inlined in its caller,
+so a function's own nodes are entered only when the function is selected. A
+node of a declaration the evaluation does not enter is not part of that
+program, and a node whose activation is false checks nothing ([05-RNG-1]).
+
 **Algorithm:**
-1. Mark every effectful node, every potentially trapping node, every `Store`,
-   and every designated output as **live**.
+1. Mark every effectful and every potentially trapping node of a declaration
+   the evaluation enters, every `Store`, and every designated output as
+   **live**.
 2. Walk backward through the DAG: for each live node, mark all its input nodes as live.
 3. Remove all nodes not marked as live.
 

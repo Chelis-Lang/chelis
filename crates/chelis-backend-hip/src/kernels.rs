@@ -2471,11 +2471,13 @@ mod tests {
     #[test]
     fn random_device_helpers_are_the_c_backend_port() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let ty = TensorType {
             dims: vec![DimInfo::Lit(2)],
             precision: Prim::F32,
         };
         let template = dag.add_node(
+            decl,
             RiscOp::Load {
                 name: "template".into(),
             },
@@ -2488,25 +2490,35 @@ mod tests {
             precision,
         };
         let low = dag.add_node(
+            decl,
             RiscOp::synth_const(Prim::F32, 0.0),
             vec![],
             rank0(Prim::F32),
             None,
         );
         let high = dag.add_node(
+            decl,
             RiscOp::synth_const(Prim::F32, 1.0),
             vec![],
             rank0(Prim::F32),
             None,
         );
         let seed = dag.add_node(
+            decl,
             RiscOp::synth_const(Prim::Int64, 7.0),
             vec![],
             rank0(Prim::Int64),
             None,
         );
-        let key = dag.add_node(RiscOp::KeyFromSeed, vec![seed], rank0(Prim::Key), None);
+        let key = dag.add_node(
+            decl,
+            RiscOp::KeyFromSeed,
+            vec![seed],
+            rank0(Prim::Key),
+            None,
+        );
         let draw = dag.add_node(
+            decl,
             RiscOp::UniformLike,
             vec![template, low, high, key],
             ty,

@@ -35,8 +35,15 @@ fn hip_fprintf_format_string_escapes_percent_in_func_name() {
     // and the device entrypoint emits `fprintf(stderr, "{func_name}_device:
     // ...")`. Both must escape `%` in the producer-supplied func_name.
     let mut dag = Dag::new();
-    let a = dag.add_node(RiscOp::Load { name: "a".into() }, vec![], vec_f32(4), None);
-    let n = dag.add_node(RiscOp::Neg, vec![a], vec_f32(4), None);
+    let decl = dag.declare("test");
+    let a = dag.add_node(
+        decl,
+        RiscOp::Load { name: "a".into() },
+        vec![],
+        vec_f32(4),
+        None,
+    );
+    let n = dag.add_node(decl, RiscOp::Neg, vec![a], vec_f32(4), None);
     dag.add_root(n);
 
     let result = codegen_hip(&dag, "f%spct").unwrap();
@@ -62,9 +69,10 @@ fn hip_fprintf_format_string_escapes_percent_in_func_name() {
 #[test]
 fn hip_fprintf_format_string_escapes_percent_in_load_name() {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let bad = dirty_name("inp%s");
-    let a = dag.add_node(RiscOp::Load { name: bad }, vec![], vec_f32(4), None);
-    let n = dag.add_node(RiscOp::Neg, vec![a], vec_f32(4), None);
+    let a = dag.add_node(decl, RiscOp::Load { name: bad }, vec![], vec_f32(4), None);
+    let n = dag.add_node(decl, RiscOp::Neg, vec![a], vec_f32(4), None);
     dag.add_root(n);
 
     let result = codegen_hip(&dag, "test_load_pct").unwrap();
@@ -84,8 +92,15 @@ fn hip_fprintf_format_string_escapes_percent_in_load_name() {
 #[test]
 fn hip_fprintf_format_string_escapes_newline_in_func_name() {
     let mut dag = Dag::new();
-    let a = dag.add_node(RiscOp::Load { name: "a".into() }, vec![], vec_f32(4), None);
-    let n = dag.add_node(RiscOp::Neg, vec![a], vec_f32(4), None);
+    let decl = dag.declare("test");
+    let a = dag.add_node(
+        decl,
+        RiscOp::Load { name: "a".into() },
+        vec![],
+        vec_f32(4),
+        None,
+    );
+    let n = dag.add_node(decl, RiscOp::Neg, vec![a], vec_f32(4), None);
     dag.add_root(n);
 
     let result = codegen_hip(&dag, "f\nINJECT").unwrap();
@@ -104,8 +119,15 @@ fn hip_fprintf_format_string_escapes_newline_in_func_name() {
 #[test]
 fn hip_clean_func_name_emitted_verbatim() {
     let mut dag = Dag::new();
-    let a = dag.add_node(RiscOp::Load { name: "a".into() }, vec![], vec_f32(4), None);
-    let n = dag.add_node(RiscOp::Neg, vec![a], vec_f32(4), None);
+    let decl = dag.declare("test");
+    let a = dag.add_node(
+        decl,
+        RiscOp::Load { name: "a".into() },
+        vec![],
+        vec_f32(4),
+        None,
+    );
+    let n = dag.add_node(decl, RiscOp::Neg, vec![a], vec_f32(4), None);
     dag.add_root(n);
 
     let result = codegen_hip(&dag, "my_func").unwrap();

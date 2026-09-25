@@ -52,6 +52,7 @@ pub fn specialize_for_exact_arithmetic(dag: &Dag) -> Dag {
 /// identity Cast, identity Reshape, and identity Permute.
 pub fn eliminate_closed_list_noops(dag: &Dag) -> Dag {
     let mut out = Dag::new();
+    out.inherit_declarations(dag);
     let mut id_map: UnordMap<NodeId, NodeId> = UnordMap::new();
     let claimed_producers = crate::axis_sources::claimed_producers(dag);
 
@@ -65,6 +66,7 @@ pub fn eliminate_closed_list_noops(dag: &Dag) -> Dag {
         }
 
         let new_id = out.add_node(
+            node.decl,
             node.op.clone(),
             remapped_inputs,
             node.output_type.clone(),
@@ -141,6 +143,7 @@ fn identity_source(node: &DagNode, dag: &Dag, owns_result_claim: bool) -> Option
 
 fn replace_matmul_patterns(dag: &Dag) -> Dag {
     let mut out = Dag::new();
+    out.inherit_declarations(dag);
     let mut id_map: UnordMap<NodeId, NodeId> = UnordMap::new();
     let claimed_producers = crate::axis_sources::claimed_producers(dag);
 
@@ -165,6 +168,7 @@ fn replace_matmul_patterns(dag: &Dag) -> Dag {
             // accumulator pinned on the source `Sum` node so the WS-A0
             // §5.7.1 default propagates through specialization.
             let new_id = out.add_node(
+                node.decl,
                 RiscOp::BlasMatmul {
                     batch_dims: info.batch_dims.clone(),
                     m: info.m.clone(),
@@ -185,6 +189,7 @@ fn replace_matmul_patterns(dag: &Dag) -> Dag {
 
         let remapped_inputs: Vec<NodeId> = node.inputs.iter().map(|id| id_map[id]).collect();
         let new_id = out.add_node(
+            node.decl,
             node.op.clone(),
             remapped_inputs,
             node.output_type.clone(),
@@ -216,6 +221,7 @@ fn replace_matmul_patterns(dag: &Dag) -> Dag {
 
 fn replace_dense_gather_patterns(dag: &Dag) -> Dag {
     let mut out = Dag::new();
+    out.inherit_declarations(dag);
     let mut id_map: UnordMap<NodeId, NodeId> = UnordMap::new();
     let claimed_producers = crate::axis_sources::claimed_producers(dag);
 
@@ -226,6 +232,7 @@ fn replace_dense_gather_patterns(dag: &Dag) -> Dag {
             let values = id_map[&info.values];
             let indices = id_map[&info.indices];
             let new_id = out.add_node(
+                node.decl,
                 RiscOp::Gather { axis: 0 },
                 vec![values, indices],
                 node.output_type.clone(),
@@ -240,6 +247,7 @@ fn replace_dense_gather_patterns(dag: &Dag) -> Dag {
 
         let remapped_inputs: Vec<NodeId> = node.inputs.iter().map(|id| id_map[id]).collect();
         let new_id = out.add_node(
+            node.decl,
             node.op.clone(),
             remapped_inputs,
             node.output_type.clone(),
@@ -271,6 +279,7 @@ fn replace_dense_gather_patterns(dag: &Dag) -> Dag {
 
 fn lower_unmatched_one_hot(dag: &Dag) -> Dag {
     let mut out = Dag::new();
+    out.inherit_declarations(dag);
     let mut id_map: UnordMap<NodeId, NodeId> = UnordMap::new();
 
     for node in dag.nodes() {
@@ -285,6 +294,7 @@ fn lower_unmatched_one_hot(dag: &Dag) -> Dag {
 
         let remapped_inputs: Vec<NodeId> = node.inputs.iter().map(|id| id_map[id]).collect();
         let new_id = out.add_node(
+            node.decl,
             node.op.clone(),
             remapped_inputs,
             node.output_type.clone(),
@@ -339,18 +349,21 @@ fn lower_one_hot_node(out: &mut Dag, indices: NodeId, source: &DagNode, vocab: u
 
     for class in 0..vocab {
         let class_id = out.add_node(
+            source.decl,
             RiscOp::synth_const(indices_ty.precision, class as f64),
             vec![],
             indices_ty.clone(),
             source.span_id.clone(),
         );
         let eq_bool = out.add_node(
+            source.decl,
             RiscOp::Compare(crate::dag::ComparisonKind::Eq),
             vec![indices, class_id],
             bool_ty.clone(),
             source.span_id.clone(),
         );
         let eq_f32 = out.add_node(
+            source.decl,
             RiscOp::Cast {
                 new_precision: Prim::F32,
             },
@@ -362,6 +375,7 @@ fn lower_one_hot_node(out: &mut Dag, indices: NodeId, source: &DagNode, vocab: u
             source.span_id.clone(),
         );
         let col = out.add_node(
+            source.decl,
             RiscOp::Expand {
                 axis: vocab_axis,
                 size: RtDim::Lit(1),
@@ -371,6 +385,7 @@ fn lower_one_hot_node(out: &mut Dag, indices: NodeId, source: &DagNode, vocab: u
             source.span_id.clone(),
         );
         let padded = out.add_node(
+            source.decl,
             RiscOp::zero_pad(
                 source.output_type.precision,
                 indices_ty
@@ -387,6 +402,7 @@ fn lower_one_hot_node(out: &mut Dag, indices: NodeId, source: &DagNode, vocab: u
         append_node_provenance(out, padded, source);
         accumulated = Some(match accumulated {
             Some(prev) => out.add_node(
+                source.decl,
                 RiscOp::Add,
                 vec![prev, padded],
                 source.output_type.clone(),
@@ -900,7 +916,7 @@ fn append_node_provenance(out: &mut Dag, target: NodeId, source: &DagNode) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::dag::{Dag, DimExpr, DimInfo, TensorType};
+    use crate::dag::{Dag, DeclId, DimExpr, DimInfo, TensorType};
     use chelis_types::types::Prim;
 
     #[test]
@@ -959,8 +975,9 @@ mod tests {
         }
     }
 
-    fn literal_result_claim(dag: &mut Dag, axis: i32, required: i64) -> NodeId {
+    fn literal_result_claim(dag: &mut Dag, decl: DeclId, axis: i32, required: i64) -> NodeId {
         dag.add_node(
+            decl,
             RiscOp::ExtentWitness {
                 site: crate::dag::ExtentWitnessSite::LiteralResultClaim,
                 parameter: String::new(),
@@ -991,17 +1008,20 @@ mod tests {
             RiscOp::Permute { axes: vec![0] },
         ] {
             let mut dag = Dag::new();
+            let decl = dag.declare("test");
             let tensor = TensorType {
                 dims: vec![DimInfo::Named("n".into(), None)],
                 precision: Prim::F32,
             };
             let input = dag.add_node(
+                decl,
                 RiscOp::Load { name: "x".into() },
                 Vec::new(),
                 tensor.clone(),
                 None,
             );
             let claim = dag.add_node(
+                decl,
                 RiscOp::ExtentWitness {
                     site: crate::dag::ExtentWitnessSite::ResultClaim {
                         claim: "n".into(),
@@ -1019,7 +1039,7 @@ mod tests {
                 },
                 None,
             );
-            let producer = dag.add_node(op.clone(), vec![input], tensor, None);
+            let producer = dag.add_node(decl, op.clone(), vec![input], tensor, None);
             dag.add_shape_dep(producer, claim);
             dag.add_root(producer);
 
@@ -1087,19 +1107,23 @@ mod tests {
     #[test]
     fn identity_cast_does_not_hide_matmul() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let a = dag.add_node(
+            decl,
             RiscOp::synth_const(mat(2, 3).precision, 1.0),
             vec![],
             mat(2, 3),
             None,
         );
         let b = dag.add_node(
+            decl,
             RiscOp::synth_const(mat(3, 4).precision, 1.0),
             vec![],
             mat(3, 4),
             None,
         );
         let ea = dag.add_node(
+            decl,
             RiscOp::Expand {
                 axis: 2,
                 size: RtDim::Lit(4),
@@ -1109,6 +1133,7 @@ mod tests {
             None,
         );
         let eb = dag.add_node(
+            decl,
             RiscOp::Expand {
                 axis: 0,
                 size: RtDim::Lit(2),
@@ -1118,6 +1143,7 @@ mod tests {
             None,
         );
         let ca = dag.add_node(
+            decl,
             RiscOp::Cast {
                 new_precision: Prim::F32,
             },
@@ -1126,6 +1152,7 @@ mod tests {
             None,
         );
         let cb = dag.add_node(
+            decl,
             RiscOp::Cast {
                 new_precision: Prim::F32,
             },
@@ -1133,8 +1160,9 @@ mod tests {
             t3(2, 3, 4),
             None,
         );
-        let mul = dag.add_node(RiscOp::Mul, vec![ca, cb], t3(2, 3, 4), None);
+        let mul = dag.add_node(decl, RiscOp::Mul, vec![ca, cb], t3(2, 3, 4), None);
         let sum = dag.add_node(
+            decl,
             RiscOp::Sum {
                 axis: 1,
                 accumulator: chelis_types::types::Prim::F32,
@@ -1171,22 +1199,25 @@ mod tests {
     #[test]
     fn matmul_specialization_preserves_literal_result_claim() {
         let mut dag = Dag::new();
-        let claim = literal_result_claim(&mut dag, 0, 3);
+        let decl = dag.declare("test");
+        let claim = literal_result_claim(&mut dag, decl, 0, 3);
         let a_ty = mat(2, 3);
         let b_ty = mat(3, 4);
         let a = dag.add_node(
+            decl,
             RiscOp::Load { name: "a".into() },
             vec![],
             a_ty.clone(),
             None,
         );
         let b = dag.add_node(
+            decl,
             RiscOp::Load { name: "b".into() },
             vec![],
             b_ty.clone(),
             None,
         );
-        let result = crate::tier2::lower_matmul(&mut dag, a, b, &a_ty, &b_ty, None);
+        let result = crate::tier2::lower_matmul(decl, &mut dag, a, b, &a_ty, &b_ty, None);
         dag.add_shape_dep(result, claim);
         dag.add_root(result);
         assert!(crate::verify::verify(&dag).is_empty());
@@ -1221,19 +1252,23 @@ mod tests {
     #[test]
     fn symbolic_matmul_specializes_to_runtime_dim_blas() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let a = dag.add_node(
+            decl,
             RiscOp::Load { name: "a".into() },
             vec![],
             symbolic_mat("m", "k"),
             None,
         );
         let b = dag.add_node(
+            decl,
             RiscOp::Load { name: "b".into() },
             vec![],
             symbolic_mat("k", "n"),
             None,
         );
         let ea = dag.add_node(
+            decl,
             RiscOp::Expand {
                 axis: 2,
                 size: RtDim::InputAxis {
@@ -1246,6 +1281,7 @@ mod tests {
             None,
         );
         let eb = dag.add_node(
+            decl,
             RiscOp::Expand {
                 axis: 0,
                 size: RtDim::InputAxis {
@@ -1257,8 +1293,15 @@ mod tests {
             symbolic_t3("m", "k", "n"),
             None,
         );
-        let mul = dag.add_node(RiscOp::Mul, vec![ea, eb], symbolic_t3("m", "k", "n"), None);
+        let mul = dag.add_node(
+            decl,
+            RiscOp::Mul,
+            vec![ea, eb],
+            symbolic_t3("m", "k", "n"),
+            None,
+        );
         let sum = dag.add_node(
+            decl,
             RiscOp::Sum {
                 axis: 1,
                 accumulator: chelis_types::types::Prim::F32,
@@ -1296,25 +1339,30 @@ mod tests {
     #[test]
     fn noncontiguous_operand_stays_on_generic_path() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let base_a = dag.add_node(
+            decl,
             RiscOp::synth_const(mat(3, 2).precision, 1.0),
             vec![],
             mat(3, 2),
             None,
         );
         let a = dag.add_node(
+            decl,
             RiscOp::Permute { axes: vec![1, 0] },
             vec![base_a],
             mat(2, 3),
             None,
         );
         let b = dag.add_node(
+            decl,
             RiscOp::synth_const(mat(3, 4).precision, 1.0),
             vec![],
             mat(3, 4),
             None,
         );
         let ea = dag.add_node(
+            decl,
             RiscOp::Expand {
                 axis: 2,
                 size: RtDim::Lit(4),
@@ -1324,6 +1372,7 @@ mod tests {
             None,
         );
         let eb = dag.add_node(
+            decl,
             RiscOp::Expand {
                 axis: 0,
                 size: RtDim::Lit(2),
@@ -1332,8 +1381,9 @@ mod tests {
             t3(2, 3, 4),
             None,
         );
-        let mul = dag.add_node(RiscOp::Mul, vec![ea, eb], t3(2, 3, 4), None);
+        let mul = dag.add_node(decl, RiscOp::Mul, vec![ea, eb], t3(2, 3, 4), None);
         let sum = dag.add_node(
+            decl,
             RiscOp::Sum {
                 axis: 1,
                 accumulator: chelis_types::types::Prim::F32,
@@ -1356,21 +1406,24 @@ mod tests {
     #[test]
     fn rank4_symbolic_batched_matmul_specializes() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let a_ty = symbolic_t4("batch", "heads", "seq", "dim");
         let b_ty = symbolic_t4("batch", "heads", "dim", "seq");
         let a = dag.add_node(
+            decl,
             RiscOp::Load { name: "a".into() },
             vec![],
             a_ty.clone(),
             None,
         );
         let b = dag.add_node(
+            decl,
             RiscOp::Load { name: "b".into() },
             vec![],
             b_ty.clone(),
             None,
         );
-        let out = crate::tier2::lower_matmul(&mut dag, a, b, &a_ty, &b_ty, None);
+        let out = crate::tier2::lower_matmul(decl, &mut dag, a, b, &a_ty, &b_ty, None);
         dag.add_root(out);
 
         let specialized = specialize_for_blas(&dag);
@@ -1401,28 +1454,31 @@ mod tests {
     #[test]
     fn terminal_drop_markers_do_not_block_matmul_specialization() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let a_ty = mat(8, 16);
         let b_ty = mat(16, 4);
         let a = dag.add_node(
+            decl,
             RiscOp::Load { name: "a".into() },
             vec![],
             a_ty.clone(),
             None,
         );
         let b = dag.add_node(
+            decl,
             RiscOp::Load { name: "b".into() },
             vec![],
             b_ty.clone(),
             None,
         );
-        let out = crate::tier2::lower_matmul(&mut dag, a, b, &a_ty, &b_ty, None);
+        let out = crate::tier2::lower_matmul(decl, &mut dag, a, b, &a_ty, &b_ty, None);
         let mul = dag
             .nodes()
             .iter()
             .find(|node| matches!(node.op, RiscOp::Mul))
             .expect("tier2 matmul contains mul")
             .id;
-        dag.add_node(RiscOp::Drop, vec![mul], t3(8, 16, 4), None);
+        dag.add_node(decl, RiscOp::Drop, vec![mul], t3(8, 16, 4), None);
         dag.add_root(out);
 
         let specialized = specialize_for_blas(&dag);
@@ -1440,7 +1496,9 @@ mod tests {
     #[test]
     fn one_hot_dense_gather_specializes_before_matmul() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let values = dag.add_node(
+            decl,
             RiscOp::Load {
                 name: "values".into(),
             },
@@ -1449,6 +1507,7 @@ mod tests {
             None,
         );
         let indices = dag.add_node(
+            decl,
             RiscOp::Load {
                 name: "indices".into(),
             },
@@ -1456,8 +1515,15 @@ mod tests {
             vec_i32(4),
             None,
         );
-        let one_hot = dag.add_node(RiscOp::OneHot { vocab: 2 }, vec![indices], mat(4, 2), None);
+        let one_hot = dag.add_node(
+            decl,
+            RiscOp::OneHot { vocab: 2 },
+            vec![indices],
+            mat(4, 2),
+            None,
+        );
         let one_hot_exp = dag.add_node(
+            decl,
             RiscOp::Expand {
                 axis: 2,
                 size: RtDim::Lit(3),
@@ -1467,6 +1533,7 @@ mod tests {
             None,
         );
         let values_exp = dag.add_node(
+            decl,
             RiscOp::Expand {
                 axis: 0,
                 size: RtDim::Lit(4),
@@ -1476,12 +1543,14 @@ mod tests {
             None,
         );
         let product = dag.add_node(
+            decl,
             RiscOp::Mul,
             vec![one_hot_exp, values_exp],
             t3(4, 2, 3),
             None,
         );
         let gathered = dag.add_node(
+            decl,
             RiscOp::Sum {
                 axis: 1,
                 accumulator: chelis_types::types::Prim::F32,
@@ -1533,7 +1602,9 @@ mod tests {
     #[test]
     fn dense_gather_specialization_preserves_literal_result_claim() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let values = dag.add_node(
+            decl,
             RiscOp::Load {
                 name: "values".into(),
             },
@@ -1542,6 +1613,7 @@ mod tests {
             None,
         );
         let indices = dag.add_node(
+            decl,
             RiscOp::Load {
                 name: "indices".into(),
             },
@@ -1549,8 +1621,15 @@ mod tests {
             vec_i32(4),
             None,
         );
-        let one_hot = dag.add_node(RiscOp::OneHot { vocab: 2 }, vec![indices], mat(4, 2), None);
+        let one_hot = dag.add_node(
+            decl,
+            RiscOp::OneHot { vocab: 2 },
+            vec![indices],
+            mat(4, 2),
+            None,
+        );
         let one_hot_exp = dag.add_node(
+            decl,
             RiscOp::Expand {
                 axis: 2,
                 size: RtDim::Lit(3),
@@ -1560,6 +1639,7 @@ mod tests {
             None,
         );
         let values_exp = dag.add_node(
+            decl,
             RiscOp::Expand {
                 axis: 0,
                 size: RtDim::Lit(4),
@@ -1569,13 +1649,15 @@ mod tests {
             None,
         );
         let product = dag.add_node(
+            decl,
             RiscOp::Mul,
             vec![one_hot_exp, values_exp],
             t3(4, 2, 3),
             None,
         );
-        let claim = literal_result_claim(&mut dag, 0, 5);
+        let claim = literal_result_claim(&mut dag, decl, 0, 5);
         let gathered = dag.add_node(
+            decl,
             RiscOp::Sum {
                 axis: 1,
                 accumulator: Prim::F32,
@@ -1621,7 +1703,9 @@ mod tests {
     #[test]
     fn one_hot_similar_tree_with_wrong_reduction_axis_does_not_false_match_gather() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let values = dag.add_node(
+            decl,
             RiscOp::Load {
                 name: "values".into(),
             },
@@ -1630,6 +1714,7 @@ mod tests {
             None,
         );
         let indices = dag.add_node(
+            decl,
             RiscOp::Load {
                 name: "indices".into(),
             },
@@ -1637,8 +1722,15 @@ mod tests {
             vec_i32(4),
             None,
         );
-        let one_hot = dag.add_node(RiscOp::OneHot { vocab: 2 }, vec![indices], mat(4, 2), None);
+        let one_hot = dag.add_node(
+            decl,
+            RiscOp::OneHot { vocab: 2 },
+            vec![indices],
+            mat(4, 2),
+            None,
+        );
         let one_hot_exp = dag.add_node(
+            decl,
             RiscOp::Expand {
                 axis: 2,
                 size: RtDim::Lit(3),
@@ -1648,6 +1740,7 @@ mod tests {
             None,
         );
         let values_exp = dag.add_node(
+            decl,
             RiscOp::Expand {
                 axis: 0,
                 size: RtDim::Lit(4),
@@ -1657,12 +1750,14 @@ mod tests {
             None,
         );
         let product = dag.add_node(
+            decl,
             RiscOp::Mul,
             vec![one_hot_exp, values_exp],
             t3(4, 2, 3),
             None,
         );
         let not_gather = dag.add_node(
+            decl,
             RiscOp::Sum {
                 axis: 2,
                 accumulator: chelis_types::types::Prim::F32,
@@ -1698,7 +1793,9 @@ mod tests {
     #[test]
     fn unmatched_one_hot_lowers_to_primitive_ir() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let indices = dag.add_node(
+            decl,
             RiscOp::Load {
                 name: "indices".into(),
             },
@@ -1707,6 +1804,7 @@ mod tests {
             None,
         );
         let one_hot = dag.add_node(
+            decl,
             RiscOp::OneHot { vocab: 3 },
             vec![indices],
             TensorType {
@@ -1749,8 +1847,10 @@ mod tests {
     #[test]
     fn unmatched_one_hot_specialization_preserves_literal_result_claim() {
         let mut dag = Dag::new();
-        let claim = literal_result_claim(&mut dag, 0, 4);
+        let decl = dag.declare("test");
+        let claim = literal_result_claim(&mut dag, decl, 0, 4);
         let indices = dag.add_node(
+            decl,
             RiscOp::Load {
                 name: "indices".into(),
             },
@@ -1759,6 +1859,7 @@ mod tests {
             None,
         );
         let one_hot = dag.add_node(
+            decl,
             RiscOp::OneHot { vocab: 3 },
             vec![indices],
             TensorType {

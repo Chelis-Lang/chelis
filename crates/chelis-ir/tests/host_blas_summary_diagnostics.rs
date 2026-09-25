@@ -88,19 +88,23 @@ fn expect_rejected(
 /// shape `blas_summary_silent_rejection_adversarial.rs` builds.
 fn build_matmul_helper(prim: Prim) -> (Dag, Vec<HostTensorInput>, TensorType) {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let a = dag.add_node(
+        decl,
         RiscOp::Load { name: "a".into() },
         vec![],
         mat(prim, 8, 16),
         None,
     );
     let b = dag.add_node(
+        decl,
         RiscOp::Load { name: "b".into() },
         vec![],
         mat(prim, 16, 4),
         None,
     );
     let ea = dag.add_node(
+        decl,
         RiscOp::Expand {
             axis: 2,
             size: chelis_ir::dag::RtDim::Lit(4),
@@ -110,6 +114,7 @@ fn build_matmul_helper(prim: Prim) -> (Dag, Vec<HostTensorInput>, TensorType) {
         None,
     );
     let eb = dag.add_node(
+        decl,
         RiscOp::Expand {
             axis: 0,
             size: chelis_ir::dag::RtDim::Lit(8),
@@ -118,8 +123,9 @@ fn build_matmul_helper(prim: Prim) -> (Dag, Vec<HostTensorInput>, TensorType) {
         t3(prim, 8, 16, 4),
         None,
     );
-    let mul = dag.add_node(RiscOp::Mul, vec![ea, eb], t3(prim, 8, 16, 4), None);
+    let mul = dag.add_node(decl, RiscOp::Mul, vec![ea, eb], t3(prim, 8, 16, 4), None);
     let sum = dag.add_node(
+        decl,
         RiscOp::Sum {
             axis: 1,
             accumulator: Prim::F32,
@@ -219,13 +225,16 @@ fn blas_multiple_roots_synthetic_helper_emits_structured_rejection() {
     // matmul-near roots — either way, the recognizer's multi-root
     // gate fires).
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let a = dag.add_node(
+        decl,
         RiscOp::Load { name: "a".into() },
         vec![],
         mat(Prim::F32, 8, 16),
         None,
     );
     let b = dag.add_node(
+        decl,
         RiscOp::Load { name: "b".into() },
         vec![],
         mat(Prim::F32, 16, 4),
@@ -233,6 +242,7 @@ fn blas_multiple_roots_synthetic_helper_emits_structured_rejection() {
     );
     // First matmul subgraph.
     let ea = dag.add_node(
+        decl,
         RiscOp::Expand {
             axis: 2,
             size: chelis_ir::dag::RtDim::Lit(4),
@@ -242,6 +252,7 @@ fn blas_multiple_roots_synthetic_helper_emits_structured_rejection() {
         None,
     );
     let eb = dag.add_node(
+        decl,
         RiscOp::Expand {
             axis: 0,
             size: chelis_ir::dag::RtDim::Lit(8),
@@ -250,8 +261,15 @@ fn blas_multiple_roots_synthetic_helper_emits_structured_rejection() {
         t3(Prim::F32, 8, 16, 4),
         None,
     );
-    let mul1 = dag.add_node(RiscOp::Mul, vec![ea, eb], t3(Prim::F32, 8, 16, 4), None);
+    let mul1 = dag.add_node(
+        decl,
+        RiscOp::Mul,
+        vec![ea, eb],
+        t3(Prim::F32, 8, 16, 4),
+        None,
+    );
     let sum1 = dag.add_node(
+        decl,
         RiscOp::Sum {
             axis: 1,
             accumulator: Prim::F32,
@@ -263,6 +281,7 @@ fn blas_multiple_roots_synthetic_helper_emits_structured_rejection() {
     // Second matmul subgraph (sibling, identical shape, sharing the
     // same inputs).
     let ea2 = dag.add_node(
+        decl,
         RiscOp::Expand {
             axis: 2,
             size: chelis_ir::dag::RtDim::Lit(4),
@@ -272,6 +291,7 @@ fn blas_multiple_roots_synthetic_helper_emits_structured_rejection() {
         None,
     );
     let eb2 = dag.add_node(
+        decl,
         RiscOp::Expand {
             axis: 0,
             size: chelis_ir::dag::RtDim::Lit(8),
@@ -280,8 +300,15 @@ fn blas_multiple_roots_synthetic_helper_emits_structured_rejection() {
         t3(Prim::F32, 8, 16, 4),
         None,
     );
-    let mul2 = dag.add_node(RiscOp::Mul, vec![ea2, eb2], t3(Prim::F32, 8, 16, 4), None);
+    let mul2 = dag.add_node(
+        decl,
+        RiscOp::Mul,
+        vec![ea2, eb2],
+        t3(Prim::F32, 8, 16, 4),
+        None,
+    );
     let sum2 = dag.add_node(
+        decl,
         RiscOp::Sum {
             axis: 1,
             accumulator: Prim::F32,
@@ -332,13 +359,16 @@ fn blas_not_matmul_pattern_subcase_b_malformed_blas_root_emits_structured_reject
     // Hand-built single-input BlasMatmul root — the recognizer's
     // shape-validation gate fires because inputs.len() != 2.
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let a = dag.add_node(
+        decl,
         RiscOp::Load { name: "a".into() },
         vec![],
         mat(Prim::F32, 8, 16),
         None,
     );
     let bogus = dag.add_node(
+        decl,
         RiscOp::BlasMatmul {
             batch_dims: vec![],
             m: DimExpr::Concrete(8),
@@ -379,20 +409,24 @@ fn blas_non_load_operand_const_lhs_emits_structured_rejection() {
     // LHS operand is `Const`, not a `Load` of a helper input. The
     // recognizer rejects with BlasNonLoadOperand at operand_index = 0.
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     // Inline constant as LHS (8x16).
     let a = dag.add_node(
+        decl,
         RiscOp::synth_const(mat(Prim::F32, 8, 16).precision, 1.0),
         vec![],
         mat(Prim::F32, 8, 16),
         None,
     );
     let b = dag.add_node(
+        decl,
         RiscOp::Load { name: "b".into() },
         vec![],
         mat(Prim::F32, 16, 4),
         None,
     );
     let ea = dag.add_node(
+        decl,
         RiscOp::Expand {
             axis: 2,
             size: chelis_ir::dag::RtDim::Lit(4),
@@ -402,6 +436,7 @@ fn blas_non_load_operand_const_lhs_emits_structured_rejection() {
         None,
     );
     let eb = dag.add_node(
+        decl,
         RiscOp::Expand {
             axis: 0,
             size: chelis_ir::dag::RtDim::Lit(8),
@@ -410,8 +445,15 @@ fn blas_non_load_operand_const_lhs_emits_structured_rejection() {
         t3(Prim::F32, 8, 16, 4),
         None,
     );
-    let mul = dag.add_node(RiscOp::Mul, vec![ea, eb], t3(Prim::F32, 8, 16, 4), None);
+    let mul = dag.add_node(
+        decl,
+        RiscOp::Mul,
+        vec![ea, eb],
+        t3(Prim::F32, 8, 16, 4),
+        None,
+    );
     let sum = dag.add_node(
+        decl,
         RiscOp::Sum {
             axis: 1,
             accumulator: Prim::F32,
@@ -446,19 +488,23 @@ fn blas_non_load_operand_const_rhs_emits_structured_rejection() {
     // Mirror of the lhs case: RHS is Const, recognizer rejects at
     // operand_index = 1. Sibling-sweep coverage.
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let a = dag.add_node(
+        decl,
         RiscOp::Load { name: "a".into() },
         vec![],
         mat(Prim::F32, 8, 16),
         None,
     );
     let b = dag.add_node(
+        decl,
         RiscOp::synth_const(mat(Prim::F32, 16, 4).precision, 2.0),
         vec![],
         mat(Prim::F32, 16, 4),
         None,
     );
     let ea = dag.add_node(
+        decl,
         RiscOp::Expand {
             axis: 2,
             size: chelis_ir::dag::RtDim::Lit(4),
@@ -468,6 +514,7 @@ fn blas_non_load_operand_const_rhs_emits_structured_rejection() {
         None,
     );
     let eb = dag.add_node(
+        decl,
         RiscOp::Expand {
             axis: 0,
             size: chelis_ir::dag::RtDim::Lit(8),
@@ -476,8 +523,15 @@ fn blas_non_load_operand_const_rhs_emits_structured_rejection() {
         t3(Prim::F32, 8, 16, 4),
         None,
     );
-    let mul = dag.add_node(RiscOp::Mul, vec![ea, eb], t3(Prim::F32, 8, 16, 4), None);
+    let mul = dag.add_node(
+        decl,
+        RiscOp::Mul,
+        vec![ea, eb],
+        t3(Prim::F32, 8, 16, 4),
+        None,
+    );
     let sum = dag.add_node(
+        decl,
         RiscOp::Sum {
             axis: 1,
             accumulator: Prim::F32,
@@ -533,22 +587,26 @@ fn build_handcrafted_blas_with_load_prims(
     out_prim: Prim,
 ) -> (Dag, Vec<HostTensorInput>, TensorType) {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let lhs_ty = mat(lhs_prim, 8, 16);
     let rhs_ty = mat(rhs_prim, 16, 4);
     let out_ty = mat(out_prim, 8, 4);
     let a = dag.add_node(
+        decl,
         RiscOp::Load { name: "a".into() },
         vec![],
         lhs_ty.clone(),
         None,
     );
     let b = dag.add_node(
+        decl,
         RiscOp::Load { name: "b".into() },
         vec![],
         rhs_ty.clone(),
         None,
     );
     let blas = dag.add_node(
+        decl,
         RiscOp::BlasMatmul {
             batch_dims: vec![],
             m: DimExpr::Concrete(8),
@@ -640,8 +698,10 @@ fn blas_dimension_binding_failure_unbound_m_emits_structured_rejection() {
     // doesn't appear on any input. Use concrete dims for n/k/batch so
     // the failing role is unambiguously M.
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     // Inputs use Lit dims (so `m=Named("unbound_m", None)` is not on either input).
     let a = dag.add_node(
+        decl,
         RiscOp::Load { name: "a".into() },
         vec![],
         TensorType {
@@ -651,6 +711,7 @@ fn blas_dimension_binding_failure_unbound_m_emits_structured_rejection() {
         None,
     );
     let b = dag.add_node(
+        decl,
         RiscOp::Load { name: "b".into() },
         vec![],
         TensorType {
@@ -660,6 +721,7 @@ fn blas_dimension_binding_failure_unbound_m_emits_structured_rejection() {
         None,
     );
     let blas = dag.add_node(
+        decl,
         RiscOp::BlasMatmul {
             batch_dims: vec![],
             m: DimExpr::Sym("unbound_m".into()),
@@ -700,7 +762,9 @@ fn blas_dimension_binding_failure_unbound_k_emits_structured_rejection() {
     // checks batch first, then M, then N, then K, so K-only-failure
     // exercises the trailing role.
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let a = dag.add_node(
+        decl,
         RiscOp::Load { name: "a".into() },
         vec![],
         TensorType {
@@ -710,6 +774,7 @@ fn blas_dimension_binding_failure_unbound_k_emits_structured_rejection() {
         None,
     );
     let b = dag.add_node(
+        decl,
         RiscOp::Load { name: "b".into() },
         vec![],
         TensorType {
@@ -719,6 +784,7 @@ fn blas_dimension_binding_failure_unbound_k_emits_structured_rejection() {
         None,
     );
     let blas = dag.add_node(
+        decl,
         RiscOp::BlasMatmul {
             batch_dims: vec![],
             m: DimExpr::Concrete(8),
@@ -766,20 +832,23 @@ fn blas_dimension_binding_failure_unbound_k_emits_structured_rejection() {
 fn elementwise_add_helper_returns_not_eligible() {
     // Pure elementwise Add — not matmul-near, not BLAS-near.
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let in_ty = mat(Prim::F32, 4, 4);
     let a = dag.add_node(
+        decl,
         RiscOp::Load { name: "a".into() },
         vec![],
         in_ty.clone(),
         None,
     );
     let b = dag.add_node(
+        decl,
         RiscOp::Load { name: "b".into() },
         vec![],
         in_ty.clone(),
         None,
     );
-    let root = dag.add_node(RiscOp::Add, vec![a, b], in_ty.clone(), None);
+    let root = dag.add_node(decl, RiscOp::Add, vec![a, b], in_ty.clone(), None);
     dag.add_root(root);
 
     let inputs = vec![input("a", in_ty.clone()), input("b", in_ty.clone())];
@@ -800,20 +869,23 @@ fn elementwise_f64_helper_returns_not_eligible_not_rejected() {
     // gate on a matmul-near body. Locks the "BLAS diagnostics
     // ONLY on BLAS-near shapes" invariant.
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let in_ty = mat(Prim::F64, 4, 4);
     let a = dag.add_node(
+        decl,
         RiscOp::Load { name: "a".into() },
         vec![],
         in_ty.clone(),
         None,
     );
     let b = dag.add_node(
+        decl,
         RiscOp::Load { name: "b".into() },
         vec![],
         in_ty.clone(),
         None,
     );
-    let root = dag.add_node(RiscOp::Mul, vec![a, b], in_ty.clone(), None);
+    let root = dag.add_node(decl, RiscOp::Mul, vec![a, b], in_ty.clone(), None);
     dag.add_root(root);
 
     let inputs = vec![input("a", in_ty.clone()), input("b", in_ty.clone())];
@@ -833,12 +905,14 @@ fn sum_without_matmul_shape_returns_not_eligible() {
     // Sum applied to a single-input chain that's NOT Mul(Expand, Expand).
     // The recognizer must NOT report this as BLAS-near.
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let in_ty = mat(Prim::F32, 4, 4);
     let out_ty = TensorType {
         dims: vec![DimInfo::Lit(4)],
         precision: Prim::F32,
     };
     let a = dag.add_node(
+        decl,
         RiscOp::Load { name: "a".into() },
         vec![],
         in_ty.clone(),
@@ -846,6 +920,7 @@ fn sum_without_matmul_shape_returns_not_eligible() {
     );
     // Sum directly over a Load, no Mul(Expand, Expand) underneath.
     let root = dag.add_node(
+        decl,
         RiscOp::Sum {
             axis: 0,
             accumulator: Prim::F32,
@@ -878,13 +953,16 @@ fn blas_rejection_helper_body_span_is_threaded_through_when_present() {
     // Drive a BlasNotMatmulPattern rejection (single-input
     // BlasMatmul) and assert the helper_body_span survives.
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let a = dag.add_node(
+        decl,
         RiscOp::Load { name: "a".into() },
         vec![],
         mat(Prim::F32, 8, 16),
         None,
     );
     let bogus = dag.add_node(
+        decl,
         RiscOp::BlasMatmul {
             batch_dims: vec![],
             m: DimExpr::Concrete(8),

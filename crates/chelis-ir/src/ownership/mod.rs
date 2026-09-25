@@ -142,6 +142,11 @@ pub struct VerifiedDagView<'a> {
 }
 
 impl<'a> VerifiedDagView<'a> {
+    /// The declaration `decl` names in the verified graph.
+    pub fn declaration(self, decl: crate::dag::DeclId) -> &'a crate::dag::Declaration {
+        self.dag.declaration(decl)
+    }
+
     pub fn nodes(self) -> &'a [DagNode] {
         self.dag.nodes()
     }

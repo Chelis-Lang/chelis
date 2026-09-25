@@ -612,6 +612,7 @@ class SchemaCases(unittest.TestCase):
                 "missing-node-shape_deps",
                 "missing-node-span_id",
                 "missing-node-merged_spans",
+                "missing-node-declaration",
             ):
                 self.assertIsNone(cases[prefix + name].expected, name)
 

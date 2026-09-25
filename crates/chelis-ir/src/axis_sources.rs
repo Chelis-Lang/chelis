@@ -3865,15 +3865,18 @@ mod tests {
     #[test]
     fn claimed_producers_cover_named_literal_local_and_the_owned_admin_chain() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let tensor = ty(vec![DimInfo::Lit(4)], Prim::F32);
         let input = dag.add_node(
+            decl,
             RiscOp::Load { name: "x".into() },
             vec![],
             tensor.clone(),
             None,
         );
-        let producer = dag.add_node(RiscOp::Mul, vec![input, input], tensor.clone(), None);
+        let producer = dag.add_node(decl, RiscOp::Mul, vec![input, input], tensor.clone(), None);
         let cast = dag.add_node(
+            decl,
             RiscOp::Cast {
                 new_precision: Prim::F32,
             },
@@ -3882,6 +3885,7 @@ mod tests {
             None,
         );
         let claim = dag.add_node(
+            decl,
             RiscOp::ExtentWitness {
                 site: crate::dag::ExtentWitnessSite::LiteralResultClaim,
                 parameter: String::new(),
@@ -3893,9 +3897,10 @@ mod tests {
             ty(Vec::new(), Prim::Int64),
             None,
         );
-        let owner = dag.add_node(RiscOp::Copy, vec![cast], tensor.clone(), None);
+        let owner = dag.add_node(decl, RiscOp::Copy, vec![cast], tensor.clone(), None);
         dag.add_shape_dep(owner, claim);
         let named_claim = dag.add_node(
+            decl,
             RiscOp::ExtentWitness {
                 site: crate::dag::ExtentWitnessSite::ResultClaim {
                     claim: "n".into(),
@@ -3910,9 +3915,10 @@ mod tests {
             ty(Vec::new(), Prim::Int64),
             None,
         );
-        let named_owner = dag.add_node(RiscOp::Add, vec![input, input], tensor.clone(), None);
+        let named_owner = dag.add_node(decl, RiscOp::Add, vec![input, input], tensor.clone(), None);
         dag.add_result_claim_dep(named_owner, named_claim);
         let local_claim = dag.add_node(
+            decl,
             RiscOp::ExtentWitness {
                 site: crate::dag::ExtentWitnessSite::LocalAscriptionClaim {
                     ascription_id: 0,
@@ -3929,9 +3935,9 @@ mod tests {
             ty(Vec::new(), Prim::Int64),
             None,
         );
-        let local_owner = dag.add_node(RiscOp::Exp, vec![input], tensor.clone(), None);
+        let local_owner = dag.add_node(decl, RiscOp::Exp, vec![input], tensor.clone(), None);
         dag.add_shape_dep(local_owner, local_claim);
-        let unrelated = dag.add_node(RiscOp::Copy, vec![input], tensor, None);
+        let unrelated = dag.add_node(decl, RiscOp::Copy, vec![input], tensor, None);
 
         let protected = claimed_producers(&dag);
         assert!(protected[owner.0]);
@@ -3949,13 +3955,16 @@ mod tests {
     #[test]
     fn a_sym_reshape_target_is_the_operations_own_extent() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let operand = dag.add_node(
+            decl,
             RiscOp::Load { name: "x".into() },
             vec![],
             ty(vec![DimInfo::Named("n".into(), None)], Prim::F32),
             None,
         );
         let reshaped = dag.add_node(
+            decl,
             RiscOp::Reshape {
                 new_shape: vec![RtDim::Sym("n".into())],
             },
@@ -3975,13 +3984,16 @@ mod tests {
     #[test]
     fn a_permute_reads_the_permuted_input_axis_not_the_output_index() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let operand = dag.add_node(
+            decl,
             RiscOp::Load { name: "x".into() },
             vec![],
             ty(vec![DimInfo::Lit(2), DimInfo::Lit(3)], Prim::F32),
             None,
         );
         let permuted = dag.add_node(
+            decl,
             RiscOp::Permute { axes: vec![1, 0] },
             vec![operand],
             ty(vec![DimInfo::Lit(3), DimInfo::Lit(2)], Prim::F32),
@@ -4005,7 +4017,9 @@ mod tests {
     #[test]
     fn a_gather_composes_both_operands_shapes() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let values = dag.add_node(
+            decl,
             RiscOp::Load { name: "v".into() },
             vec![],
             ty(
@@ -4015,12 +4029,14 @@ mod tests {
             None,
         );
         let indices = dag.add_node(
+            decl,
             RiscOp::Load { name: "i".into() },
             vec![],
             ty(vec![DimInfo::Lit(4)], Prim::Int64),
             None,
         );
         let gathered = dag.add_node(
+            decl,
             RiscOp::Gather { axis: 1 },
             vec![values, indices],
             ty(
@@ -4054,7 +4070,9 @@ mod tests {
         use crate::dag::DimExpr;
 
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let lhs = dag.add_node(
+            decl,
             RiscOp::Load { name: "a".into() },
             vec![],
             ty(
@@ -4064,6 +4082,7 @@ mod tests {
             None,
         );
         let rhs = dag.add_node(
+            decl,
             RiscOp::Load { name: "b".into() },
             vec![],
             ty(
@@ -4073,6 +4092,7 @@ mod tests {
             None,
         );
         let product = dag.add_node(
+            decl,
             RiscOp::BlasMatmul {
                 batch_dims: vec![DimExpr::Concrete(2)],
                 m: DimExpr::Concrete(4),
@@ -4109,19 +4129,23 @@ mod tests {
 
         // Negative parity: an unbatched matmul has no pass-through axis.
         let mut flat = Dag::new();
+        let flat_decl = flat.declare("test");
         let lhs = flat.add_node(
+            flat_decl,
             RiscOp::Load { name: "a".into() },
             vec![],
             ty(vec![DimInfo::Lit(4), DimInfo::Lit(3)], Prim::F32),
             None,
         );
         let rhs = flat.add_node(
+            flat_decl,
             RiscOp::Load { name: "b".into() },
             vec![],
             ty(vec![DimInfo::Lit(3), DimInfo::Lit(5)], Prim::F32),
             None,
         );
         let product = flat.add_node(
+            flat_decl,
             RiscOp::BlasMatmul {
                 batch_dims: Vec::new(),
                 m: DimExpr::Concrete(4),
@@ -4151,13 +4175,16 @@ mod tests {
     #[test]
     fn a_shape_dep_sibling_supplies_an_input_less_nodes_wildcard_axis() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let sibling = dag.add_node(
+            decl,
             RiscOp::Load { name: "x".into() },
             vec![],
             ty(vec![DimInfo::Named("n".into(), None)], Prim::F32),
             None,
         );
         let mask = dag.add_node(
+            decl,
             RiscOp::synth_const(Prim::F32, 1.0),
             vec![],
             ty(vec![DimInfo::Named("*".into(), None)], Prim::F32),
@@ -4183,13 +4210,16 @@ mod tests {
     #[test]
     fn a_duplicated_or_misdirected_source_vector_is_rejected() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let operand = dag.add_node(
+            decl,
             RiscOp::Load { name: "x".into() },
             vec![],
             ty(vec![DimInfo::Lit(2)], Prim::F32),
             None,
         );
         let negated = dag.add_node(
+            decl,
             RiscOp::Neg,
             vec![operand],
             ty(vec![DimInfo::Lit(2)], Prim::F32),
@@ -4230,13 +4260,16 @@ mod tests {
     #[test]
     fn an_external_axis_source_must_name_a_real_load_and_a_real_axis() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let source = dag.add_node(
+            decl,
             RiscOp::Load { name: "x".into() },
             vec![],
             ty(vec![DimInfo::Lit(2)], Prim::F32),
             None,
         );
         let negated = dag.add_node(
+            decl,
             RiscOp::Neg,
             vec![source],
             ty(vec![DimInfo::Lit(2)], Prim::F32),
@@ -4285,13 +4318,16 @@ mod tests {
     #[test]
     fn an_input_axis_source_must_be_a_normalized_in_range_axis_of_a_real_slot() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let source = dag.add_node(
+            decl,
             RiscOp::Load { name: "x".into() },
             vec![],
             ty(vec![DimInfo::Lit(2)], Prim::F32),
             None,
         );
         let negated = dag.add_node(
+            decl,
             RiscOp::Neg,
             vec![source],
             ty(vec![DimInfo::Lit(2)], Prim::F32),
@@ -4331,7 +4367,9 @@ mod tests {
     #[test]
     fn a_scalar_input_source_must_be_a_rank_zero_int64_outside_slot_zero() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let value = dag.add_node(
+            decl,
             RiscOp::Load {
                 name: "value".into(),
             },
@@ -4340,6 +4378,7 @@ mod tests {
             None,
         );
         let extent = dag.add_node(
+            decl,
             RiscOp::Load {
                 name: "extent".into(),
             },
@@ -4348,6 +4387,7 @@ mod tests {
             None,
         );
         let tensor = dag.add_node(
+            decl,
             RiscOp::Load {
                 name: "tensor".into(),
             },
@@ -4356,6 +4396,7 @@ mod tests {
             None,
         );
         let expanded = dag.add_node(
+            decl,
             RiscOp::Expand {
                 axis: 0,
                 size: RtDim::Node(1),
@@ -4395,7 +4436,9 @@ mod tests {
     #[test]
     fn a_negative_literal_extent_is_rejected() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let source = dag.add_node(
+            decl,
             RiscOp::Load { name: "x".into() },
             vec![],
             ty(vec![DimInfo::Lit(2)], Prim::F32),
@@ -4424,13 +4467,16 @@ mod tests {
     #[test]
     fn a_reduce_window_passes_leading_axes_and_computes_the_windowed_ones() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let operand = dag.add_node(
+            decl,
             RiscOp::Load { name: "x".into() },
             vec![],
             ty(vec![DimInfo::Lit(2), DimInfo::Lit(3)], Prim::F32),
             None,
         );
         let windowed = dag.add_node(
+            decl,
             RiscOp::ReduceWindow {
                 reducer: crate::dag::ReduceWindowKind::Sum,
                 window_shape: vec![2],
@@ -4460,19 +4506,23 @@ mod tests {
     #[test]
     fn a_reduce_window_grad_restores_the_forward_inputs_shape() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let forward_input = dag.add_node(
+            decl,
             RiscOp::Load { name: "x".into() },
             vec![],
             ty(vec![DimInfo::Lit(2), DimInfo::Lit(3)], Prim::F32),
             None,
         );
         let cotangent = dag.add_node(
+            decl,
             RiscOp::Load { name: "g".into() },
             vec![],
             ty(vec![DimInfo::Lit(2), DimInfo::Lit(2)], Prim::F32),
             None,
         );
         let adjoint = dag.add_node(
+            decl,
             RiscOp::ReduceWindowGrad {
                 reducer: crate::dag::ReduceWindowKind::Sum,
                 window_shape: vec![2],
@@ -4502,13 +4552,16 @@ mod tests {
     #[test]
     fn a_one_hot_appends_the_vocab_literal_to_the_index_axes() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let indices = dag.add_node(
+            decl,
             RiscOp::Load { name: "i".into() },
             vec![],
             ty(vec![DimInfo::Lit(4)], Prim::Int64),
             None,
         );
         let dense = dag.add_node(
+            decl,
             RiscOp::OneHot { vocab: 5 },
             vec![indices],
             ty(vec![DimInfo::Lit(4), DimInfo::Lit(5)], Prim::F32),
@@ -4535,7 +4588,9 @@ mod tests {
             RiscOp::ScatterElements { axis: 1 },
         ] {
             let mut dag = Dag::new();
+            let decl = dag.declare("test");
             let target = dag.add_node(
+                decl,
                 RiscOp::Load { name: "t".into() },
                 vec![],
                 ty(
@@ -4545,12 +4600,14 @@ mod tests {
                 None,
             );
             let indices = dag.add_node(
+                decl,
                 RiscOp::Load { name: "i".into() },
                 vec![],
                 ty(vec![DimInfo::Lit(4)], Prim::Int64),
                 None,
             );
             let updates = dag.add_node(
+                decl,
                 RiscOp::Load { name: "u".into() },
                 vec![],
                 ty(
@@ -4560,6 +4617,7 @@ mod tests {
                 None,
             );
             let scattered = dag.add_node(
+                decl,
                 op.clone(),
                 vec![target, indices, updates],
                 ty(

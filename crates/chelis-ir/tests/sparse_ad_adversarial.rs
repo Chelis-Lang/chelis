@@ -60,6 +60,7 @@ fn t_i32(dims: Vec<usize>) -> TensorType {
 
 fn build_gather_scalar(
     dag: &mut Dag,
+    decl: chelis_ir::dag::DeclId,
     table_dims: Vec<usize>,
     indices_data: Vec<f64>,
     indices_shape: Vec<usize>,
@@ -67,6 +68,7 @@ fn build_gather_scalar(
     out_dims: Vec<usize>,
 ) -> (NodeId, NodeId) {
     let table = dag.add_node(
+        decl,
         RiscOp::Load {
             name: "table".into(),
         },
@@ -75,6 +77,7 @@ fn build_gather_scalar(
         None,
     );
     let indices = dag.add_node(
+        decl,
         RiscOp::Load {
             name: "indices".into(),
         },
@@ -83,6 +86,7 @@ fn build_gather_scalar(
         None,
     );
     let gathered = dag.add_node(
+        decl,
         RiscOp::Gather { axis },
         vec![table, indices],
         t(out_dims.clone()),
@@ -99,6 +103,7 @@ fn build_gather_scalar(
             t(next_shape.clone())
         };
         let next = dag.add_node(
+            decl,
             RiscOp::Sum {
                 axis: 0,
                 accumulator: Prim::F32,
@@ -119,8 +124,10 @@ fn build_gather_scalar(
 #[test]
 fn gather_axis0_distinct_indices_gradient_is_one_per_picked_row() {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let (table, out) = build_gather_scalar(
         &mut dag,
+        decl,
         vec![4, 2],          // table: [vocab=4, dim=2]
         vec![0.0, 2.0, 3.0], // distinct indices
         vec![3],
@@ -161,8 +168,10 @@ fn gather_axis0_distinct_indices_gradient_is_one_per_picked_row() {
 #[test]
 fn gather_axis0_mixed_indices_gradient_matches_per_row_counts() {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let (table, out) = build_gather_scalar(
         &mut dag,
+        decl,
         vec![4, 2],
         vec![0.0, 0.0, 2.0, 0.0],
         vec![4],
@@ -202,7 +211,9 @@ fn gather_axis0_mixed_indices_gradient_matches_per_row_counts() {
 #[test]
 fn gather_axis1_mixed_indices_gradient_matches_per_column_counts() {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let table = dag.add_node(
+        decl,
         RiscOp::Load {
             name: "table".into(),
         },
@@ -211,6 +222,7 @@ fn gather_axis1_mixed_indices_gradient_matches_per_column_counts() {
         None,
     );
     let indices = dag.add_node(
+        decl,
         RiscOp::Load {
             name: "indices".into(),
         },
@@ -219,12 +231,14 @@ fn gather_axis1_mixed_indices_gradient_matches_per_column_counts() {
         None,
     );
     let gathered = dag.add_node(
+        decl,
         RiscOp::Gather { axis: 1 },
         vec![table, indices],
         t(vec![2, 4]),
         None,
     );
     let s1 = dag.add_node(
+        decl,
         RiscOp::Sum {
             axis: 0,
             accumulator: Prim::F32,
@@ -234,6 +248,7 @@ fn gather_axis1_mixed_indices_gradient_matches_per_column_counts() {
         None,
     );
     let s2 = dag.add_node(
+        decl,
         RiscOp::Sum {
             axis: 0,
             accumulator: Prim::F32,
@@ -276,7 +291,9 @@ fn gather_axis1_mixed_indices_gradient_matches_per_column_counts() {
 #[should_panic(expected = "out of bounds")]
 fn gather_eval_out_of_bounds_index_panics_fail_closed() {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let table = dag.add_node(
+        decl,
         RiscOp::Load {
             name: "table".into(),
         },
@@ -285,6 +302,7 @@ fn gather_eval_out_of_bounds_index_panics_fail_closed() {
         None,
     );
     let indices = dag.add_node(
+        decl,
         RiscOp::Load {
             name: "indices".into(),
         },
@@ -293,6 +311,7 @@ fn gather_eval_out_of_bounds_index_panics_fail_closed() {
         None,
     );
     let _gathered = dag.add_node(
+        decl,
         RiscOp::Gather { axis: 0 },
         vec![table, indices],
         t(vec![2, 2]),
@@ -317,7 +336,9 @@ fn gather_eval_out_of_bounds_index_panics_fail_closed() {
 #[should_panic(expected = "out of bounds")]
 fn gather_eval_negative_index_panics_fail_closed() {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let table = dag.add_node(
+        decl,
         RiscOp::Load {
             name: "table".into(),
         },
@@ -326,6 +347,7 @@ fn gather_eval_negative_index_panics_fail_closed() {
         None,
     );
     let indices = dag.add_node(
+        decl,
         RiscOp::Load {
             name: "indices".into(),
         },
@@ -334,6 +356,7 @@ fn gather_eval_negative_index_panics_fail_closed() {
         None,
     );
     let _gathered = dag.add_node(
+        decl,
         RiscOp::Gather { axis: 0 },
         vec![table, indices],
         t(vec![2, 2]),
@@ -356,7 +379,9 @@ fn gather_eval_negative_index_panics_fail_closed() {
 #[should_panic(expected = "out of bounds")]
 fn scatter_add_eval_out_of_bounds_index_panics_fail_closed() {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let target = dag.add_node(
+        decl,
         RiscOp::Load {
             name: "target".into(),
         },
@@ -365,6 +390,7 @@ fn scatter_add_eval_out_of_bounds_index_panics_fail_closed() {
         None,
     );
     let indices = dag.add_node(
+        decl,
         RiscOp::Load {
             name: "indices".into(),
         },
@@ -373,6 +399,7 @@ fn scatter_add_eval_out_of_bounds_index_panics_fail_closed() {
         None,
     );
     let updates = dag.add_node(
+        decl,
         RiscOp::Load {
             name: "updates".into(),
         },
@@ -381,6 +408,7 @@ fn scatter_add_eval_out_of_bounds_index_panics_fail_closed() {
         None,
     );
     let _sa = dag.add_node(
+        decl,
         RiscOp::ScatterAdd { axis: 0 },
         vec![target, indices, updates],
         t(vec![3, 2]),
@@ -407,7 +435,9 @@ fn scatter_add_eval_out_of_bounds_index_panics_fail_closed() {
 #[should_panic(expected = "out of bounds")]
 fn scatter_replace_eval_out_of_bounds_index_panics_fail_closed() {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let target = dag.add_node(
+        decl,
         RiscOp::Load {
             name: "target".into(),
         },
@@ -416,6 +446,7 @@ fn scatter_replace_eval_out_of_bounds_index_panics_fail_closed() {
         None,
     );
     let indices = dag.add_node(
+        decl,
         RiscOp::Load {
             name: "indices".into(),
         },
@@ -424,6 +455,7 @@ fn scatter_replace_eval_out_of_bounds_index_panics_fail_closed() {
         None,
     );
     let updates = dag.add_node(
+        decl,
         RiscOp::Load {
             name: "updates".into(),
         },
@@ -432,6 +464,7 @@ fn scatter_replace_eval_out_of_bounds_index_panics_fail_closed() {
         None,
     );
     let _sr = dag.add_node(
+        decl,
         RiscOp::Scatter { axis: 0 },
         vec![target, indices, updates],
         t(vec![3, 2]),
@@ -461,7 +494,9 @@ fn scatter_replace_eval_out_of_bounds_index_panics_fail_closed() {
 #[test]
 fn scatter_ad_rejects_regardless_of_wrt_subset() {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let target = dag.add_node(
+        decl,
         RiscOp::Load {
             name: "target".into(),
         },
@@ -470,12 +505,14 @@ fn scatter_ad_rejects_regardless_of_wrt_subset() {
         None,
     );
     let indices = dag.add_node(
+        decl,
         RiscOp::synth_const(t_i32(vec![2]).precision, 0.0),
         vec![],
         t_i32(vec![2]),
         None,
     );
     let updates = dag.add_node(
+        decl,
         RiscOp::Load {
             name: "updates".into(),
         },
@@ -484,12 +521,14 @@ fn scatter_ad_rejects_regardless_of_wrt_subset() {
         None,
     );
     let scatter = dag.add_node(
+        decl,
         RiscOp::Scatter { axis: 0 },
         vec![target, indices, updates],
         t(vec![3, 2]),
         None,
     );
     let s1 = dag.add_node(
+        decl,
         RiscOp::Sum {
             axis: 0,
             accumulator: Prim::F32,
@@ -499,6 +538,7 @@ fn scatter_ad_rejects_regardless_of_wrt_subset() {
         None,
     );
     let out = dag.add_node(
+        decl,
         RiscOp::Sum {
             axis: 0,
             accumulator: Prim::F32,
@@ -568,7 +608,9 @@ fn scatter_ad_error_display_contains_canonical_language() {
 #[test]
 fn scatter_add_backward_routes_target_and_updates_but_not_indices() {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let target = dag.add_node(
+        decl,
         RiscOp::Load {
             name: "target".into(),
         },
@@ -577,6 +619,7 @@ fn scatter_add_backward_routes_target_and_updates_but_not_indices() {
         None,
     );
     let indices = dag.add_node(
+        decl,
         RiscOp::Load {
             name: "indices".into(),
         },
@@ -585,6 +628,7 @@ fn scatter_add_backward_routes_target_and_updates_but_not_indices() {
         None,
     );
     let updates = dag.add_node(
+        decl,
         RiscOp::Load {
             name: "updates".into(),
         },
@@ -593,19 +637,22 @@ fn scatter_add_backward_routes_target_and_updates_but_not_indices() {
         None,
     );
     let sa = dag.add_node(
+        decl,
         RiscOp::ScatterAdd { axis: 0 },
         vec![target, indices, updates],
         t(vec![4]),
         None,
     );
     let coefficients = dag.add_node(
+        decl,
         RiscOp::synth_const_tensor(Prim::F32, vec![2.0, 3.0, 5.0, 7.0]),
         vec![],
         t(vec![4]),
         None,
     );
-    let weighted = dag.add_node(RiscOp::Mul, vec![sa, coefficients], t(vec![4]), None);
+    let weighted = dag.add_node(decl, RiscOp::Mul, vec![sa, coefficients], t(vec![4]), None);
     let out = dag.add_node(
+        decl,
         RiscOp::Sum {
             axis: 0,
             accumulator: Prim::F32,

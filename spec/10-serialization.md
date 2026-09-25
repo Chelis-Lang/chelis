@@ -103,10 +103,10 @@ entry with an empty binder, a missing or extra requirement input, and a
 requirement input that is not an earlier rank-zero `int64` `ExtentWitness` are
 each encoding and decoding errors. `WireDagNode.shape_deps` contains exact u64 node
 references to strictly earlier nodes. It does not carry shape numbers.
-`shape_deps`, `span_id` (explicitly null when absent), and `merged_spans` are
-mandatory fields, including when their lists are empty. `WireDagNode.declaration`
-is the name of the top-level declaration whose lowering created the node, and
-is omitted for a node its producer attributes to no declaration.
+`shape_deps`, `span_id` (explicitly null when absent), `merged_spans` and
+`declaration` are mandatory fields, including when their lists are empty.
+`WireDagNode.declaration` is the name of the declaration the node belongs to,
+a string that carries no number.
 
 `WireRiscOp::Mod` preserves the exact signed-remainder identity of [05-OP-64].
 It has exactly two earlier input nodes, each with its output's integer dtype
@@ -299,10 +299,10 @@ reference under §3.4, not another template.
 `key` is a structural precision with no literal or storage carrier in a
 graph, at any rank: no `Const`, `ConstTensor` or `Pad.fill` holds a key. Every
 key is produced by `KeyFromSeed`, `Split`, `FoldIn` or `SplitN`, or enters as
-a key-precision `Load`, and every `Load` of one parameter is one key. A
-`Load`'s parameter is its declaration and its name: `Load`s of one name in two
-declarations read two parameters, and a `Load` with no declaration reads the
-same parameter as every `Load` of its name. A key
+a key-precision `Load`. Every node carries its declaration, and a parameter is
+its declaration and its name: every `Load` of one parameter of one declaration
+is one key, and `Load`s of one name in two declarations read two parameters. A
+key
 has at most one use: one `UniformLike`, `Dropout`, `FoldIn` or `SplitN`, one
 place among the roots, or at most one `Split` of each branch. It is otherwise
 read only by its draw's replays. Two consumers of one key, draws and key

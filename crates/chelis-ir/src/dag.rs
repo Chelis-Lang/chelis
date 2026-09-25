@@ -15,20 +15,25 @@ use crate::load_store_name::LoadStoreName;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct NodeId(pub usize);
 
-/// Index into a DAG's [`Dag::declarations`]: the top-level declaration whose
-/// lowering created a node.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-pub struct DeclarationId(pub u32);
-
-/// One top-level declaration of a lowered program (chelis#2476, #2413).
+/// Index into a DAG's [`Dag::declarations`]: the declaration a node belongs to.
 ///
-/// A lowered program holds every declaration's activation in one graph,
-/// whether or not anything calls it, and a function's parameters are `Load`s
-/// built exactly like an entry's inputs. Selecting roots is a scoping
+/// Every node carries one ([`DagNode::decl`]), supplied at its construction
+/// ([`Dag::add_node`]): there is no default declaration, so a node built
+/// without one does not compile, and a wrong one is visible at its site.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub struct DeclId(pub u32);
+
+/// One declaration of a graph (chelis#2476, #2413).
+///
+/// A lowered program holds every top-level declaration's activation in one
+/// graph, whether or not anything calls it, and a function's parameters are
+/// `Load`s built exactly like an entry's inputs. Selecting roots is a scoping
 /// decision, so the graph records which declaration owns each node: a seed (an
-/// abort, or a draw that can trap) runs only when a selected declaration's
-/// activation enters its owner, and a parameter is its declaration and its
-/// name, never its name alone.
+/// abort, or a draw that can trap) runs only when the selection enters its
+/// declaration ([`Dag::entered_declarations`]), and a parameter is its
+/// declaration and its name, never its name alone. A graph built outside
+/// program lowering (a backend helper kernel, a runtime transform, a test)
+/// registers its own named declaration.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Declaration {
     /// The declaration's name; empty for an unnamed top-level expression.
@@ -38,7 +43,7 @@ pub struct Declaration {
     /// standalone nodes run only when it is itself selected.
     pub value: bool,
     /// The declarations this one's body names, called or not.
-    pub references: Vec<DeclarationId>,
+    pub references: Vec<DeclId>,
 }
 
 /// Tensor type carried on each DAG node.
@@ -2031,12 +2036,11 @@ pub struct DagNode {
     /// until this producer discharges the obligation.
     #[serde(default)]
     pub result_claim_deps: Vec<NodeId>,
-    /// The top-level declaration whose lowering created this node, an index
-    /// into [`Dag::declarations`]. Lowering sets it on every node it creates
-    /// and every rebuild before entry selection keeps it. It is `None` on
-    /// every node of a graph lowering did not build ([`Dag::is_attributed`]).
-    #[serde(default)]
-    pub declaration: Option<DeclarationId>,
+    /// The declaration this node belongs to, an index into
+    /// [`Dag::declarations`]. Required: lowering supplies the declaration it
+    /// is lowering, a rebuilding pass the source node's, and a node a pass
+    /// synthesizes the declaration of the node it derives from.
+    pub decl: DeclId,
 }
 
 /// The RISC DAG — an append-only, topologically-ordered vector of [`DagNode`]s.
@@ -2044,9 +2048,7 @@ pub struct DagNode {
 pub struct Dag {
     nodes: Vec<DagNode>,
     roots: Vec<NodeId>,
-    /// The top-level declarations lowering attributed this graph's nodes to;
-    /// empty for a graph lowering did not build.
-    #[serde(default)]
+    /// The declarations this graph's nodes belong to ([`DagNode::decl`]).
     declarations: Vec<Declaration>,
 }
 
@@ -2063,8 +2065,12 @@ impl Dag {
     /// Pass `None` for nodes synthesized by passes that don't have a
     /// natural source region in S2 — S3 will populate spans on those
     /// per pass-specific rules.
+    ///
+    /// `decl` is required for the same reason: every node belongs to a
+    /// declaration this graph registered ([`Self::declare`]).
     pub fn add_node(
         &mut self,
+        decl: DeclId,
         op: RiscOp,
         inputs: Vec<NodeId>,
         output_type: TensorType,
@@ -2108,6 +2114,11 @@ impl Dag {
         } else {
             Vec::new()
         };
+        assert!(
+            (decl.0 as usize) < self.declarations.len(),
+            "node declaration {decl:?} is not registered in this graph ({} declarations)",
+            self.declarations.len()
+        );
         let id = NodeId(self.nodes.len());
         self.nodes.push(DagNode {
             id,
@@ -2119,7 +2130,7 @@ impl Dag {
             merged_spans: Vec::new(),
             shape_deps: Vec::new(),
             result_claim_deps: Vec::new(),
-            declaration: None,
+            decl,
         });
         for (target, source) in inferred_where_shape_deps {
             self.add_shape_dep(target, source);
@@ -2299,17 +2310,89 @@ impl Dag {
 
     /// chelis#2413: whether a random node can trap by itself, and so is an
     /// observable root for dead-code elimination (`spec/06-transformations.md`
-    /// §5.2, "purity alone does not make a possible trap dead").
+    /// §5.2, "purity alone does not make a possible trap dead"). This one
+    /// predicate is read by the evaluator's seeds, dead-code elimination and
+    /// every other liveness reader.
     ///
-    /// A draw validates its own rate or bounds ([05-OP-37]/[05-OP-8]). A
-    /// `SplitN` traps on a negative runtime count ([05-OP-71]); a literal
-    /// count cannot be negative. The other key operations are total.
+    /// A draw validates its own controls and key batch ([05-OP-37]/[05-OP-8])
+    /// and cannot trap only when every guard is statically satisfied:
+    /// [`Self::draw_controls_are_literal_and_in_range`] and
+    /// [`Self::draw_key_batch_is_literal`]. A `SplitN` traps on a negative
+    /// runtime count ([05-OP-71]); a literal count cannot be negative. The
+    /// other key operations are total.
     pub fn random_node_may_trap(&self, node: &DagNode) -> bool {
         match &node.op {
-            RiscOp::Dropout | RiscOp::UniformLike => true,
+            RiscOp::Dropout | RiscOp::UniformLike => {
+                !(self.draw_controls_are_literal_and_in_range(node)
+                    && self.draw_key_batch_is_literal(node))
+            }
             RiscOp::SplitN { count } => count.as_lit().is_none(),
             _ => false,
         }
+    }
+
+    /// Whether every control of the draw `node` (a dropout rate, a
+    /// `uniform_like` bound pair) is a `Const` its own atom accepts at the
+    /// draw's dtype: the same validation the draw performs before drawing,
+    /// applied to the literal. A runtime control, or a literal out of range,
+    /// may trap.
+    fn draw_controls_are_literal_and_in_range(&self, node: &DagNode) -> bool {
+        let literal = |slot: usize| {
+            node.inputs
+                .get(slot)
+                .and_then(|input| self.get(*input))
+                .and_then(|input| match &input.op {
+                    RiscOp::Const { value } => Some(*value),
+                    _ => None,
+                })
+        };
+        let prim = node.output_type.precision;
+        match &node.op {
+            RiscOp::Dropout => literal(1).is_some_and(|rate| {
+                chelis_types::dtype_semantics::DropoutParameters::new(prim, rate).is_ok()
+            }),
+            RiscOp::UniformLike => literal(1).zip(literal(2)).is_some_and(|(low, high)| {
+                chelis_types::dtype_semantics::UniformLikeParameters::new(prim, low, high).is_ok()
+            }),
+            _ => false,
+        }
+    }
+
+    /// Whether the draw `node`'s key batch statically indexes its operands:
+    /// a rank-0 key, or a key whose dims are all literal and equal to the
+    /// literal leading dims of its data and of every per-row operand (its
+    /// controls and activation), the static form of the evaluator's extent
+    /// check. A symbolic extent on either side may disagree at run time.
+    fn draw_key_batch_is_literal(&self, node: &DagNode) -> bool {
+        let Some(layout) = node.op.draw_batch_layout() else {
+            return false;
+        };
+        let dims_of = |slot: usize| {
+            node.inputs
+                .get(slot)
+                .and_then(|input| self.get(*input))
+                .map(|input| input.output_type.dims.as_slice())
+        };
+        let Some(key) = dims_of(layout.key) else {
+            return false;
+        };
+        if key.is_empty() {
+            return true;
+        }
+        let literal_prefix = |dims: &[DimInfo], axes: usize| {
+            dims.len() >= axes
+                && dims[..axes].iter().zip(key).all(
+                    |(dim, key)| matches!((dim, key), (DimInfo::Lit(a), DimInfo::Lit(b)) if a == b),
+                )
+        };
+        let Some(data) = dims_of(layout.data_input) else {
+            return false;
+        };
+        literal_prefix(data, key.len())
+            && layout.per_row.iter().all(|slot| match dims_of(*slot) {
+                Some(dims) => dims.len() <= key.len() && literal_prefix(dims, dims.len()),
+                None => true,
+            })
     }
 
     pub fn set_roots(&mut self, roots: Vec<NodeId>) {
@@ -2320,53 +2403,81 @@ impl Dag {
         self.roots.contains(&id)
     }
 
-    /// The top-level declarations lowering attributed this graph's nodes to.
+    /// The declarations this graph's nodes belong to.
     pub fn declarations(&self) -> &[Declaration] {
         &self.declarations
     }
 
-    /// Whether lowering attributed this graph's nodes to declarations. A
-    /// graph built by hand, or rebuilt by a pass after entry selection, is
-    /// not, and scopes its seeds by root reachability alone.
-    pub fn is_attributed(&self) -> bool {
-        !self.declarations.is_empty()
+    /// The declaration `decl` names.
+    pub fn declaration(&self, decl: DeclId) -> &Declaration {
+        &self.declarations[decl.0 as usize]
     }
 
-    /// Record a top-level declaration. Its references are set once every
-    /// declaration is known ([`Self::set_declaration_references`]).
-    pub fn add_declaration(&mut self, name: impl Into<String>, value: bool) -> DeclarationId {
+    /// Register a function declaration named `name`: its standalone nodes run
+    /// only when a selected root belongs to it. A graph built outside program
+    /// lowering registers one of these for its nodes.
+    pub fn declare(&mut self, name: impl Into<String>) -> DeclId {
+        self.push_declaration(name.into(), false)
+    }
+
+    /// Register a value declaration named `name`: its nodes run wherever a
+    /// declaration the selection enters references it.
+    pub fn declare_value(&mut self, name: impl Into<String>) -> DeclId {
+        self.push_declaration(name.into(), true)
+    }
+
+    fn push_declaration(&mut self, name: String, value: bool) -> DeclId {
         let id = u32::try_from(self.declarations.len())
-            .expect("a lowered program has fewer than 2^32 declarations");
+            .expect("a graph has fewer than 2^32 declarations");
         self.declarations.push(Declaration {
-            name: name.into(),
+            name,
             value,
             references: Vec::new(),
         });
-        DeclarationId(id)
+        DeclId(id)
     }
 
-    pub fn set_declaration_references(
-        &mut self,
-        declaration: DeclarationId,
-        references: Vec<DeclarationId>,
-    ) {
-        if let Some(entry) = self.declarations.get_mut(declaration.0 as usize) {
-            entry.references = references;
-        }
-    }
-
-    /// Attribute to `declaration` every node from index `first` on that has
-    /// no declaration yet: the nodes one declaration's lowering appended.
-    pub fn attribute_nodes_from(&mut self, first: usize, declaration: DeclarationId) {
-        for node in self.nodes.iter_mut().skip(first) {
-            node.declaration.get_or_insert(declaration);
-        }
+    /// Set the declarations `decl`'s body names, once every declaration is
+    /// known.
+    pub fn set_declaration_references(&mut self, decl: DeclId, references: Vec<DeclId>) {
+        self.declarations[decl.0 as usize].references = references;
     }
 
     /// Take `source`'s declarations, for a pass that rebuilds `source` node
-    /// by node and copies each node's `declaration`.
+    /// by node and supplies each node's `decl`. Call it before the first
+    /// node is added.
     pub fn inherit_declarations(&mut self, source: &Dag) {
+        debug_assert!(
+            self.nodes.is_empty(),
+            "a rebuild inherits its source's declarations before adding nodes"
+        );
         self.declarations.clone_from(&source.declarations);
+    }
+
+    /// A diagnostic name for `id`: its declaration, and for a `Load` the
+    /// parameter it reads, as "parameter `x` of `f`"; otherwise "node N of
+    /// `f`". An unnamed declaration is "the top-level expression".
+    pub fn describe_node(&self, id: NodeId) -> String {
+        let Some(node) = self.get(id) else {
+            return format!("node {}", id.0);
+        };
+        let owner = self.describe_declaration(node.decl);
+        match &node.op {
+            RiscOp::Load { name } => format!("parameter `{}` of {owner}", name.as_str()),
+            _ => format!("node {} of {owner}", id.0),
+        }
+    }
+
+    /// A diagnostic name for `decl`: "`f`", or "the top-level expression"
+    /// for an unnamed one.
+    pub fn describe_declaration(&self, decl: DeclId) -> String {
+        match self.declarations.get(decl.0 as usize) {
+            Some(declaration) if !declaration.name.is_empty() => {
+                format!("`{}`", declaration.name)
+            }
+            Some(_) => "the top-level expression".to_owned(),
+            None => format!("unregistered declaration {}", decl.0),
+        }
     }
 
     /// The declarations an activation of the `selected` roots enters, as a
@@ -2375,22 +2486,16 @@ impl Dag {
     /// declaration it names in turn. A function's own nodes are entered only
     /// when it is selected: a call runs the function inlined in the caller's
     /// own nodes.
-    ///
-    /// `None` when the graph is not attributed, or a selected root has no
-    /// declaration.
-    pub fn entered_declarations(&self, selected: &[NodeId]) -> Option<Vec<bool>> {
-        if !self.is_attributed() {
-            return None;
-        }
-        let mut pending = Vec::with_capacity(selected.len());
-        for root in selected {
-            pending.push((self.get(*root)?.declaration?, true));
-        }
+    pub fn entered_declarations(&self, selected: &[NodeId]) -> Vec<bool> {
+        let mut pending = selected
+            .iter()
+            .map(|root| (self.nodes[root.0].decl, true))
+            .collect::<Vec<_>>();
         let mut entered = vec![false; self.declarations.len()];
         let mut visited = vec![false; self.declarations.len()];
-        while let Some((declaration, is_selected)) = pending.pop() {
-            let index = declaration.0 as usize;
-            let entry = self.declarations.get(index)?;
+        while let Some((decl, is_selected)) = pending.pop() {
+            let index = decl.0 as usize;
+            let entry = &self.declarations[index];
             if is_selected || entry.value {
                 entered[index] = true;
             }
@@ -2399,12 +2504,12 @@ impl Dag {
                 pending.extend(entry.references.iter().map(|reference| (*reference, false)));
             }
         }
-        Some(entered)
+        entered
     }
 
     /// The nodes whose seeds (an abort, or a random node that can trap by
     /// itself) an evaluation of the `selected` roots does not run
-    /// (chelis#2476).
+    /// (chelis#2476, `spec/06-transformations.md` §5.2).
     ///
     /// Selecting roots is a scoping decision, not merely a request for
     /// certain outputs: a lowered program holds every declaration's
@@ -2413,75 +2518,21 @@ impl Dag {
     /// when its node belongs to a declaration the selection enters
     /// ([`Self::entered_declarations`]), whether it sits in a root's value
     /// graph, in a discarded value's terminal, or in a library declaration's
-    /// own body. A node without a declaration is conservatively in scope.
-    ///
-    /// A graph that is not attributed falls back to root reachability: a
-    /// node is out of scope when an unselected root reaches it and no
-    /// selected root does. With nothing selected, or with every root of an
-    /// unattributed graph selected, nothing is out of scope. Reachability
+    /// own body. With nothing selected nothing is out of scope. Reachability
     /// from the selection makes a node live whatever this says, so scoping
     /// only ever drops work no selected root needs.
+    ///
+    /// The evaluator's seeds and dead-code elimination's seeds both read
+    /// this one predicate.
     pub fn outside_selection(&self, selected: &[NodeId]) -> Vec<bool> {
         if selected.is_empty() {
             return vec![false; self.len()];
         }
-        if let Some(entered) = self.entered_declarations(selected) {
-            return self
-                .nodes
-                .iter()
-                .map(|node| {
-                    node.declaration
-                        .is_some_and(|declaration| !entered[declaration.0 as usize])
-                })
-                .collect();
-        }
-        if self.roots.is_empty() {
-            return vec![false; self.len()];
-        }
-        // Membership by mask, not `Vec::contains`: a program with R declared
-        // roots asks this R times, and the scan made that quadratic in R —
-        // paid even when every root is selected and the answer is "nothing".
-        let mut chosen = vec![false; self.len()];
-        for root in selected {
-            chosen[root.0] = true;
-        }
-        let unselected = self
-            .roots
+        let entered = self.entered_declarations(selected);
+        self.nodes
             .iter()
-            .copied()
-            .filter(|root| !chosen[root.0])
-            .collect::<Vec<_>>();
-        if unselected.is_empty() {
-            return vec![false; self.len()];
-        }
-        let mut owned = self.reachable_from(unselected);
-        for (id, reached) in self
-            .reachable_from(selected.to_vec())
-            .into_iter()
-            .enumerate()
-        {
-            if reached {
-                owned[id] = false;
-            }
-        }
-        owned
-    }
-
-    /// Plain backward reachability over `inputs` and both dependency edges.
-    fn reachable_from(&self, mut stack: Vec<NodeId>) -> Vec<bool> {
-        let mut seen = vec![false; self.len()];
-        while let Some(id) = stack.pop() {
-            if seen[id.0] {
-                continue;
-            }
-            seen[id.0] = true;
-            if let Some(node) = self.get(id) {
-                stack.extend(node.inputs.iter().copied());
-                stack.extend(node.shape_deps.iter().copied());
-                stack.extend(node.result_claim_deps.iter().copied());
-            }
-        }
-        seen
+            .map(|node| !entered[node.decl.0 as usize])
+            .collect()
     }
 
     /// Return nodes in topological order (they already are, since we only append).
@@ -3054,10 +3105,12 @@ pub fn bind_symbolic_dims(
         }
     };
     let mut rebound = Dag::new();
+    rebound.inherit_declarations(dag);
     for node in dag.nodes() {
         let (output_type, op) =
             map_node_symbolic_bindings(node, &mut resolve, &mut |message| Err(message.to_owned()))?;
         let new_id = rebound.add_node(
+            node.decl,
             op.unwrap_or_else(|| node.op.clone()),
             node.inputs.clone(),
             output_type,
@@ -3238,6 +3291,185 @@ mod tests {
         TensorType::scalar_f32()
     }
 
+    /// chelis#2413: a draw cannot trap only when every guard is statically
+    /// satisfied ([`Dag::random_node_may_trap`]): its controls are literals
+    /// in range at its dtype, and its key is rank 0 or its literal dims equal
+    /// its data's literal leading dims. One negative per guard.
+    mod draw_trap_guards {
+        use super::*;
+        use chelis_types::types::Prim;
+
+        fn ty(dims: &[DimInfo], precision: Prim) -> TensorType {
+            TensorType {
+                dims: dims.to_vec(),
+                precision,
+            }
+        }
+
+        fn lit(dims: &[usize]) -> Vec<DimInfo> {
+            dims.iter().copied().map(DimInfo::Lit).collect()
+        }
+
+        /// A key of `key_dims` (`None` for `key_from_seed(7)`), data of
+        /// `data_dims`, and the draw `op` over them with `controls`, each a
+        /// literal or, for `None`, a runtime `Load`.
+        fn draw(
+            op: RiscOp,
+            controls: &[Option<f64>],
+            key_dims: Option<Vec<DimInfo>>,
+            data_dims: Vec<DimInfo>,
+        ) -> (Dag, NodeId) {
+            let mut dag = Dag::new();
+            let decl = dag.declare("test");
+            let data = dag.add_node(
+                decl,
+                RiscOp::Load { name: "x".into() },
+                vec![],
+                ty(&data_dims, Prim::F32),
+                None,
+            );
+            let mut inputs = vec![data];
+            for (slot, control) in controls.iter().enumerate() {
+                let op = match control {
+                    Some(value) => RiscOp::synth_const(Prim::F32, *value),
+                    None => RiscOp::Load {
+                        name: format!("control{slot}").as_str().into(),
+                    },
+                };
+                inputs.push(dag.add_node(decl, op, vec![], scalar_f32(), None));
+            }
+            let key = match key_dims {
+                None => {
+                    let seed = dag.add_node(
+                        decl,
+                        RiscOp::Const {
+                            value: chelis_types::scalar_from_i64("test", Prim::Int64, 7).unwrap(),
+                        },
+                        vec![],
+                        ty(&[], Prim::Int64),
+                        None,
+                    );
+                    dag.add_node(
+                        decl,
+                        RiscOp::KeyFromSeed,
+                        vec![seed],
+                        ty(&[], Prim::Key),
+                        None,
+                    )
+                }
+                Some(dims) => dag.add_node(
+                    decl,
+                    RiscOp::Load { name: "k".into() },
+                    vec![],
+                    ty(&dims, Prim::Key),
+                    None,
+                ),
+            };
+            inputs.push(key);
+            let drawn = dag.add_node(decl, op, inputs, ty(&data_dims, Prim::F32), None);
+            (dag, drawn)
+        }
+
+        fn may_trap((dag, drawn): &(Dag, NodeId)) -> bool {
+            dag.random_node_may_trap(dag.get(*drawn).unwrap())
+        }
+
+        /// Evidentiary status: REGRESSION TEST. At 727e74b41 every draw was
+        /// a seed, so a discarded draw with an in-range literal rate kept its
+        /// data live (`dead_draw_input_is_not_required_when_not_data_live_at_the_selected_root`).
+        #[test]
+        fn a_draw_whose_guards_all_hold_statically_cannot_trap() {
+            for graph in [
+                draw(RiscOp::Dropout, &[Some(0.0)], None, lit(&[4])),
+                draw(RiscOp::Dropout, &[Some(0.5)], Some(lit(&[2])), lit(&[2, 4])),
+                draw(
+                    RiscOp::UniformLike,
+                    &[Some(-1.0), Some(1.0)],
+                    None,
+                    lit(&[4]),
+                ),
+            ] {
+                assert!(!may_trap(&graph));
+                // Dead, it is eliminated with its data.
+                let (mut dag, _) = graph;
+                let root = dag.add_node(
+                    DeclId(0),
+                    RiscOp::synth_const(Prim::F32, 1.0),
+                    vec![],
+                    scalar_f32(),
+                    None,
+                );
+                dag.add_root(root);
+                let pruned = crate::optimize::dead_code_eliminate(&dag);
+                assert_eq!(pruned.len(), 1, "{:?}", pruned.nodes());
+            }
+        }
+
+        /// Evidentiary status: disposition lock (every draw was a seed at
+        /// 727e74b41).
+        #[test]
+        fn an_out_of_range_literal_control_may_trap() {
+            assert!(may_trap(&draw(
+                RiscOp::Dropout,
+                &[Some(1.0)],
+                None,
+                lit(&[4])
+            )));
+            assert!(may_trap(&draw(
+                RiscOp::Dropout,
+                &[Some(-0.5)],
+                None,
+                lit(&[4])
+            )));
+            assert!(may_trap(&draw(
+                RiscOp::UniformLike,
+                &[Some(1.0), Some(-1.0)],
+                None,
+                lit(&[4])
+            )));
+        }
+
+        /// Evidentiary status: disposition lock (every draw was a seed at
+        /// 727e74b41).
+        #[test]
+        fn a_symbolic_key_extent_against_a_literal_one_may_trap() {
+            let symbolic = vec![DimInfo::Named("n".into(), None)];
+            assert!(may_trap(&draw(
+                RiscOp::Dropout,
+                &[Some(0.5)],
+                Some(symbolic.clone()),
+                lit(&[2, 4])
+            )));
+            let mut data = symbolic;
+            data.push(DimInfo::Lit(4));
+            assert!(may_trap(&draw(
+                RiscOp::Dropout,
+                &[Some(0.5)],
+                Some(lit(&[2])),
+                data
+            )));
+            assert!(may_trap(&draw(
+                RiscOp::Dropout,
+                &[Some(0.5)],
+                Some(lit(&[3])),
+                lit(&[2, 4])
+            )));
+        }
+
+        /// Evidentiary status: disposition lock (every draw was a seed at
+        /// 727e74b41).
+        #[test]
+        fn a_runtime_control_may_trap() {
+            assert!(may_trap(&draw(RiscOp::Dropout, &[None], None, lit(&[4]))));
+            assert!(may_trap(&draw(
+                RiscOp::UniformLike,
+                &[Some(0.0), None],
+                None,
+                lit(&[4])
+            )));
+        }
+    }
+
     #[test]
     fn empty_dag() {
         let dag = Dag::new();
@@ -3249,7 +3481,9 @@ mod tests {
     #[test]
     fn add_const_node() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let id = dag.add_node(
+            decl,
             RiscOp::synth_const(scalar_f32().precision, 42.0),
             vec![],
             scalar_f32(),
@@ -3265,19 +3499,22 @@ mod tests {
     #[test]
     fn add_binary_op() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let a = dag.add_node(
+            decl,
             RiscOp::synth_const(scalar_f32().precision, 1.0),
             vec![],
             scalar_f32(),
             None,
         );
         let b = dag.add_node(
+            decl,
             RiscOp::synth_const(scalar_f32().precision, 2.0),
             vec![],
             scalar_f32(),
             None,
         );
-        let c = dag.add_node(RiscOp::Add, vec![a, b], scalar_f32(), None);
+        let c = dag.add_node(decl, RiscOp::Add, vec![a, b], scalar_f32(), None);
         assert_eq!(dag.len(), 3);
         let node = dag.get(c).unwrap();
         assert_eq!(node.inputs, vec![NodeId(0), NodeId(1)]);
@@ -3286,17 +3523,21 @@ mod tests {
     #[test]
     fn strict_shape_dependency_remap_rejects_missing_correspondence() {
         let mut source = Dag::new();
+        let source_decl = source.declare("test");
         let dep = source.add_node(
+            source_decl,
             RiscOp::synth_const(Prim::F32, 1.0),
             vec![],
             scalar_f32(),
             None,
         );
-        let owner = source.add_node(RiscOp::Neg, vec![dep], scalar_f32(), None);
+        let owner = source.add_node(source_decl, RiscOp::Neg, vec![dep], scalar_f32(), None);
         source.add_shape_dep(owner, dep);
 
         let mut rebuilt = Dag::new();
+        let rebuilt_decl = rebuilt.declare("test");
         let rebuilt_owner = rebuilt.add_node(
+            rebuilt_decl,
             RiscOp::synth_const(Prim::F32, 0.0),
             vec![],
             scalar_f32(),
@@ -3319,13 +3560,15 @@ mod tests {
     #[test]
     fn topological_order() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let a = dag.add_node(
+            decl,
             RiscOp::synth_const(scalar_f32().precision, 1.0),
             vec![],
             scalar_f32(),
             None,
         );
-        let b = dag.add_node(RiscOp::Neg, vec![a], scalar_f32(), None);
+        let b = dag.add_node(decl, RiscOp::Neg, vec![a], scalar_f32(), None);
         let order = dag.topological_order();
         assert_eq!(order, vec![a, b]);
     }
@@ -3339,7 +3582,9 @@ mod tests {
     #[test]
     fn roots_can_be_registered() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let id = dag.add_node(
+            decl,
             RiscOp::synth_const(scalar_f32().precision, 1.0),
             vec![],
             scalar_f32(),
@@ -3369,8 +3614,9 @@ mod tests {
             precision: Prim::F32,
         };
         let mut dag = Dag::new();
-        dag.add_node(RiscOp::Load { name: "x".into() }, vec![], ty_x, None);
-        dag.add_node(RiscOp::Load { name: "y".into() }, vec![], ty_y, None);
+        let decl = dag.declare("test");
+        dag.add_node(decl, RiscOp::Load { name: "x".into() }, vec![], ty_x, None);
+        dag.add_node(decl, RiscOp::Load { name: "y".into() }, vec![], ty_y, None);
 
         assert_eq!(symbolic_params(&dag), vec!["batch"]);
 
@@ -3404,13 +3650,16 @@ mod tests {
             precision: Prim::F32,
         };
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let x = dag.add_node(
+            decl,
             RiscOp::Load { name: "x".into() },
             vec![],
             ty(vec![DimInfo::Named("batch".into(), None), DimInfo::Lit(4)]),
             None,
         );
         dag.add_node(
+            decl,
             RiscOp::Load { name: "y".into() },
             vec![],
             ty(vec![DimInfo::Named("batch".into(), None), DimInfo::Lit(2)]),
@@ -3430,7 +3679,9 @@ mod tests {
     #[test]
     fn bind_symbolic_dims_rewrites_output_types_and_preserves_input_axis_sizes() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let x = dag.add_node(
+            decl,
             RiscOp::Load { name: "x".into() },
             vec![],
             TensorType {
@@ -3440,6 +3691,7 @@ mod tests {
             None,
         );
         let h = dag.add_node(
+            decl,
             RiscOp::Load { name: "h".into() },
             vec![],
             TensorType {
@@ -3449,6 +3701,7 @@ mod tests {
             None,
         );
         let y = dag.add_node(
+            decl,
             RiscOp::Expand {
                 axis: 1,
                 size: RtDim::InputAxis {
@@ -3505,7 +3758,9 @@ mod tests {
     #[test]
     fn bind_symbolic_dims_resolves_shrink_to_end_sentinel() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let g = dag.add_node(
+            decl,
             RiscOp::Load { name: "g".into() },
             vec![],
             TensorType {
@@ -3518,6 +3773,7 @@ mod tests {
         // left axis 1 (`m`, symbolic) unpadded: `(1, 2)` on axis 0 (concrete),
         // `(0, SHRINK_TO_END)` full-axis identity on axis 1.
         let shrunk = dag.add_node(
+            decl,
             RiscOp::Shrink {
                 bounds: vec![
                     (RtDim::Lit(1), RtDim::Lit(2)),
@@ -3560,7 +3816,9 @@ mod tests {
     #[test]
     fn bind_symbolic_dims_rejects_unbound_shrink_to_end() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let g = dag.add_node(
+            decl,
             RiscOp::Load { name: "g".into() },
             vec![],
             TensorType {
@@ -3570,6 +3828,7 @@ mod tests {
             None,
         );
         let shrunk = dag.add_node(
+            decl,
             RiscOp::Shrink {
                 bounds: vec![(RtDim::Lit(0), RtDim::ToEnd)],
             },
@@ -3606,13 +3865,16 @@ mod tests {
             precision: Prim::F32,
         };
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let x = dag.add_node(
+            decl,
             RiscOp::Load { name: "x".into() },
             vec![],
             ty(vec![DimInfo::Named("seq".into(), None)]),
             None,
         );
         let y = dag.add_node(
+            decl,
             RiscOp::Load { name: "y".into() },
             vec![],
             ty(vec![
@@ -3622,12 +3884,14 @@ mod tests {
             None,
         );
         let from_x = dag.add_node(
+            decl,
             RiscOp::Neg,
             vec![x],
             ty(vec![DimInfo::Named("seq".into(), None)]),
             None,
         );
         let from_y = dag.add_node(
+            decl,
             RiscOp::Neg,
             vec![y],
             ty(vec![
@@ -3661,7 +3925,9 @@ mod tests {
     #[test]
     fn a_deliberately_unbound_name_is_tolerated_in_a_type() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let x = dag.add_node(
+            decl,
             RiscOp::Load { name: "x".into() },
             vec![],
             TensorType {
@@ -3684,7 +3950,9 @@ mod tests {
         // The tolerance stops at a by-value read: a `Reshape` target that
         // SPELLS the name needs a number and there is none to give it.
         let mut reading = Dag::new();
+        let reading_decl = reading.declare("test");
         let y = reading.add_node(
+            reading_decl,
             RiscOp::Load { name: "y".into() },
             vec![],
             TensorType {
@@ -3694,6 +3962,7 @@ mod tests {
             None,
         );
         let reshaped = reading.add_node(
+            reading_decl,
             RiscOp::Reshape {
                 new_shape: vec![RtDim::Sym("seq".into())],
             },
@@ -3728,7 +3997,9 @@ mod tests {
     #[test]
     fn verifier_rejects_expand_size_sym_without_consulting_the_symbol_walk() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let x = dag.add_node(
+            decl,
             RiscOp::Load { name: "x".into() },
             vec![],
             TensorType {
@@ -3738,6 +4009,7 @@ mod tests {
             None,
         );
         dag.add_node(
+            decl,
             RiscOp::Expand {
                 axis: 1,
                 size: RtDim::Sym("d7".into()),

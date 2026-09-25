@@ -356,9 +356,22 @@ fn assert_close(actual: &[f32], expected: &[f32], abs_tol: f32, rel_tol: f32, la
 #[ignore]
 fn m6_elementwise_add_matches_evaluator() {
     let mut dag = Dag::new();
-    let a = dag.add_node(RiscOp::Load { name: "a".into() }, vec![], vec_f32(8), None);
-    let b = dag.add_node(RiscOp::Load { name: "b".into() }, vec![], vec_f32(8), None);
-    let s = dag.add_node(RiscOp::Add, vec![a, b], vec_f32(8), None);
+    let decl = dag.declare("test");
+    let a = dag.add_node(
+        decl,
+        RiscOp::Load { name: "a".into() },
+        vec![],
+        vec_f32(8),
+        None,
+    );
+    let b = dag.add_node(
+        decl,
+        RiscOp::Load { name: "b".into() },
+        vec![],
+        vec_f32(8),
+        None,
+    );
+    let s = dag.add_node(decl, RiscOp::Add, vec![a, b], vec_f32(8), None);
     dag.add_root(s);
 
     let inputs = vec![
@@ -374,9 +387,22 @@ fn m6_elementwise_add_matches_evaluator() {
 #[ignore]
 fn m6_elementwise_mul_matches_evaluator() {
     let mut dag = Dag::new();
-    let a = dag.add_node(RiscOp::Load { name: "a".into() }, vec![], vec_f32(8), None);
-    let b = dag.add_node(RiscOp::Load { name: "b".into() }, vec![], vec_f32(8), None);
-    let s = dag.add_node(RiscOp::Mul, vec![a, b], vec_f32(8), None);
+    let decl = dag.declare("test");
+    let a = dag.add_node(
+        decl,
+        RiscOp::Load { name: "a".into() },
+        vec![],
+        vec_f32(8),
+        None,
+    );
+    let b = dag.add_node(
+        decl,
+        RiscOp::Load { name: "b".into() },
+        vec![],
+        vec_f32(8),
+        None,
+    );
+    let s = dag.add_node(decl, RiscOp::Mul, vec![a, b], vec_f32(8), None);
     dag.add_root(s);
 
     let inputs = vec![
@@ -392,8 +418,15 @@ fn m6_elementwise_mul_matches_evaluator() {
 #[ignore]
 fn m6_unary_neg_matches_evaluator() {
     let mut dag = Dag::new();
-    let a = dag.add_node(RiscOp::Load { name: "a".into() }, vec![], vec_f32(4), None);
-    let n = dag.add_node(RiscOp::Neg, vec![a], vec_f32(4), None);
+    let decl = dag.declare("test");
+    let a = dag.add_node(
+        decl,
+        RiscOp::Load { name: "a".into() },
+        vec![],
+        vec_f32(4),
+        None,
+    );
+    let n = dag.add_node(decl, RiscOp::Neg, vec![a], vec_f32(4), None);
     dag.add_root(n);
 
     let inputs = vec![TestInput::new("a", &[4], &[1.5, -2.5, 0.0, 3.25])];
@@ -406,8 +439,15 @@ fn m6_unary_neg_matches_evaluator() {
 #[ignore]
 fn m6_unary_exp_matches_evaluator_with_fastmath_tolerance() {
     let mut dag = Dag::new();
-    let a = dag.add_node(RiscOp::Load { name: "a".into() }, vec![], vec_f32(4), None);
-    let e = dag.add_node(RiscOp::Exp, vec![a], vec_f32(4), None);
+    let decl = dag.declare("test");
+    let a = dag.add_node(
+        decl,
+        RiscOp::Load { name: "a".into() },
+        vec![],
+        vec_f32(4),
+        None,
+    );
+    let e = dag.add_node(decl, RiscOp::Exp, vec![a], vec_f32(4), None);
     dag.add_root(e);
 
     let inputs = vec![TestInput::new("a", &[4], &[0.0, 0.5, 1.0, 1.5])];
@@ -421,8 +461,15 @@ fn m6_unary_exp_matches_evaluator_with_fastmath_tolerance() {
 #[ignore]
 fn m6_unary_sqrt_matches_evaluator() {
     let mut dag = Dag::new();
-    let a = dag.add_node(RiscOp::Load { name: "a".into() }, vec![], vec_f32(4), None);
-    let s = dag.add_node(RiscOp::Sqrt, vec![a], vec_f32(4), None);
+    let decl = dag.declare("test");
+    let a = dag.add_node(
+        decl,
+        RiscOp::Load { name: "a".into() },
+        vec![],
+        vec_f32(4),
+        None,
+    );
+    let s = dag.add_node(decl, RiscOp::Sqrt, vec![a], vec_f32(4), None);
     dag.add_root(s);
 
     let inputs = vec![TestInput::new("a", &[4], &[1.0, 4.0, 9.0, 16.0])];
@@ -436,12 +483,31 @@ fn m6_unary_sqrt_matches_evaluator() {
 fn m6_chained_elementwise_matches_evaluator() {
     // exp(add(mul(a, b), c)) — three kernels, single output.
     let mut dag = Dag::new();
-    let a = dag.add_node(RiscOp::Load { name: "a".into() }, vec![], vec_f32(8), None);
-    let b = dag.add_node(RiscOp::Load { name: "b".into() }, vec![], vec_f32(8), None);
-    let c = dag.add_node(RiscOp::Load { name: "c".into() }, vec![], vec_f32(8), None);
-    let m = dag.add_node(RiscOp::Mul, vec![a, b], vec_f32(8), None);
-    let s = dag.add_node(RiscOp::Add, vec![m, c], vec_f32(8), None);
-    let e = dag.add_node(RiscOp::Exp, vec![s], vec_f32(8), None);
+    let decl = dag.declare("test");
+    let a = dag.add_node(
+        decl,
+        RiscOp::Load { name: "a".into() },
+        vec![],
+        vec_f32(8),
+        None,
+    );
+    let b = dag.add_node(
+        decl,
+        RiscOp::Load { name: "b".into() },
+        vec![],
+        vec_f32(8),
+        None,
+    );
+    let c = dag.add_node(
+        decl,
+        RiscOp::Load { name: "c".into() },
+        vec![],
+        vec_f32(8),
+        None,
+    );
+    let m = dag.add_node(decl, RiscOp::Mul, vec![a, b], vec_f32(8), None);
+    let s = dag.add_node(decl, RiscOp::Add, vec![m, c], vec_f32(8), None);
+    let e = dag.add_node(decl, RiscOp::Exp, vec![s], vec_f32(8), None);
     dag.add_root(e);
 
     let inputs = vec![
@@ -459,8 +525,16 @@ fn m6_chained_elementwise_matches_evaluator() {
 #[ignore]
 fn m6_full_axis_sum_reduction_matches_evaluator() {
     let mut dag = Dag::new();
-    let a = dag.add_node(RiscOp::Load { name: "a".into() }, vec![], vec_f32(64), None);
+    let decl = dag.declare("test");
+    let a = dag.add_node(
+        decl,
+        RiscOp::Load { name: "a".into() },
+        vec![],
+        vec_f32(64),
+        None,
+    );
     let s = dag.add_node(
+        decl,
         RiscOp::Sum {
             axis: 0,
             accumulator: chelis_types::types::Prim::F32,
@@ -491,8 +565,16 @@ fn m6_full_axis_sum_reduction_non_power_of_two_matches_evaluator() {
     // n=50 returned 32, n=100 returned 64, n=200 returned 128.
     for &n in &[33usize, 50, 100, 200, 333, 1000] {
         let mut dag = Dag::new();
-        let a = dag.add_node(RiscOp::Load { name: "a".into() }, vec![], vec_f32(n), None);
+        let decl = dag.declare("test");
+        let a = dag.add_node(
+            decl,
+            RiscOp::Load { name: "a".into() },
+            vec![],
+            vec_f32(n),
+            None,
+        );
         let s = dag.add_node(
+            decl,
             RiscOp::Sum {
                 axis: 0,
                 accumulator: chelis_types::types::Prim::F32,
@@ -522,8 +604,16 @@ fn m6_full_axis_sum_reduction_non_power_of_two_matches_evaluator() {
 #[ignore]
 fn m6_full_axis_max_reduction_matches_evaluator() {
     let mut dag = Dag::new();
-    let a = dag.add_node(RiscOp::Load { name: "a".into() }, vec![], vec_f32(64), None);
+    let decl = dag.declare("test");
+    let a = dag.add_node(
+        decl,
+        RiscOp::Load { name: "a".into() },
+        vec![],
+        vec_f32(64),
+        None,
+    );
     let m = dag.add_node(
+        decl,
         RiscOp::MaxReduce { axis: 0 },
         vec![a],
         TensorType::scalar_f32(),
@@ -545,8 +635,16 @@ fn m6_full_axis_max_reduction_matches_evaluator() {
 #[ignore]
 fn m6_full_axis_min_reduction_matches_evaluator() {
     let mut dag = Dag::new();
-    let a = dag.add_node(RiscOp::Load { name: "a".into() }, vec![], vec_f32(64), None);
+    let decl = dag.declare("test");
+    let a = dag.add_node(
+        decl,
+        RiscOp::Load { name: "a".into() },
+        vec![],
+        vec_f32(64),
+        None,
+    );
     let m = dag.add_node(
+        decl,
         RiscOp::MinReduce { axis: 0 },
         vec![a],
         TensorType::scalar_f32(),
@@ -585,19 +683,23 @@ fn m6_tiled_matmul_matches_evaluator() {
     let k = 16usize;
     let n = 16usize;
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let a = dag.add_node(
+        decl,
         RiscOp::Load { name: "a".into() },
         vec![],
         mat_f32(m, k),
         None,
     );
     let b = dag.add_node(
+        decl,
         RiscOp::Load { name: "b".into() },
         vec![],
         mat_f32(k, n),
         None,
     );
     let ea = dag.add_node(
+        decl,
         RiscOp::Expand {
             axis: 2,
             size: chelis_ir::dag::RtDim::Lit(n),
@@ -607,6 +709,7 @@ fn m6_tiled_matmul_matches_evaluator() {
         None,
     );
     let eb = dag.add_node(
+        decl,
         RiscOp::Expand {
             axis: 0,
             size: chelis_ir::dag::RtDim::Lit(m),
@@ -615,8 +718,9 @@ fn m6_tiled_matmul_matches_evaluator() {
         tensor3_f32(m, k, n),
         None,
     );
-    let mul = dag.add_node(RiscOp::Mul, vec![ea, eb], tensor3_f32(m, k, n), None);
+    let mul = dag.add_node(decl, RiscOp::Mul, vec![ea, eb], tensor3_f32(m, k, n), None);
     let sum = dag.add_node(
+        decl,
         RiscOp::Sum {
             axis: 1,
             accumulator: chelis_types::types::Prim::F32,
@@ -673,18 +777,26 @@ fn m6_span_attributed_program_compiles_and_matches_evaluator() {
     // S4 oracle, but with shapes/ops that all hit the M2/M4 supported
     // surface so compile-success is meaningful.
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let a = dag.add_node(
+        decl,
         RiscOp::Load { name: "a".into() },
         vec![],
         vec_f32(8),
         Some("op.load_a".into()),
     );
-    let neg = dag.add_node(RiscOp::Neg, vec![a], vec_f32(8), Some("op.neg".into()));
+    let neg = dag.add_node(
+        decl,
+        RiscOp::Neg,
+        vec![a],
+        vec_f32(8),
+        Some("op.neg".into()),
+    );
     {
         let node = dag.node_mut(neg).unwrap();
         node.merged_spans = vec!["op.merged_b".into(), "op.merged_a".into()];
     }
-    let exp = dag.add_node(RiscOp::Exp, vec![neg], vec_f32(8), None);
+    let exp = dag.add_node(decl, RiscOp::Exp, vec![neg], vec_f32(8), None);
     {
         // merged_spans only (no canonical) — the defensive case the
         // emitter must still handle correctly.
@@ -878,13 +990,16 @@ int main(void) {{
     const N: usize = 4;
     for (prec, value, expected_bits, func_name) in cases {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let c = dag.add_node(
+            decl,
             RiscOp::synth_const(prec, value),
             vec![],
             vec_prec(N, prec),
             None,
         );
         let stored = dag.add_node(
+            decl,
             RiscOp::Store { name: "out".into() },
             vec![c],
             vec_prec(N, prec),
@@ -928,8 +1043,16 @@ fn mat_f32(r: usize, c: usize) -> TensorType {
 #[ignore]
 fn m6_pad_1d_zero_fill_matches_evaluator() {
     let mut dag = Dag::new();
-    let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_f32(4), None);
+    let decl = dag.declare("test");
+    let x = dag.add_node(
+        decl,
+        RiscOp::Load { name: "x".into() },
+        vec![],
+        vec_f32(4),
+        None,
+    );
     let p = dag.add_node(
+        decl,
         RiscOp::zero_pad(
             Prim::F32,
             vec![(chelis_ir::dag::RtDim::Lit(1), chelis_ir::dag::RtDim::Lit(1))],
@@ -949,8 +1072,16 @@ fn m6_pad_1d_zero_fill_matches_evaluator() {
 #[ignore]
 fn m6_pad_1d_nonzero_fill_matches_evaluator() {
     let mut dag = Dag::new();
-    let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_f32(3), None);
+    let decl = dag.declare("test");
+    let x = dag.add_node(
+        decl,
+        RiscOp::Load { name: "x".into() },
+        vec![],
+        vec_f32(3),
+        None,
+    );
     let p = dag.add_node(
+        decl,
         RiscOp::pad(
             vec![(chelis_ir::dag::RtDim::Lit(2), chelis_ir::dag::RtDim::Lit(1))],
             chelis_types::scalar_from_f64("pad", Prim::F32, -7.5).unwrap(),
@@ -970,13 +1101,16 @@ fn m6_pad_1d_nonzero_fill_matches_evaluator() {
 #[ignore]
 fn m6_pad_2d_asymmetric_matches_evaluator() {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let x = dag.add_node(
+        decl,
         RiscOp::Load { name: "x".into() },
         vec![],
         mat_f32(2, 3),
         None,
     );
     let p = dag.add_node(
+        decl,
         RiscOp::zero_pad(
             Prim::F32,
             vec![
@@ -1003,8 +1137,16 @@ fn m6_pad_2d_asymmetric_matches_evaluator() {
 #[ignore]
 fn m6_shrink_1d_matches_evaluator() {
     let mut dag = Dag::new();
-    let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_f32(6), None);
+    let decl = dag.declare("test");
+    let x = dag.add_node(
+        decl,
+        RiscOp::Load { name: "x".into() },
+        vec![],
+        vec_f32(6),
+        None,
+    );
     let s = dag.add_node(
+        decl,
         RiscOp::Shrink {
             bounds: vec![(chelis_ir::dag::RtDim::Lit(1), chelis_ir::dag::RtDim::Lit(5))],
         },
@@ -1023,13 +1165,16 @@ fn m6_shrink_1d_matches_evaluator() {
 #[ignore]
 fn m6_shrink_2d_matches_evaluator() {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let x = dag.add_node(
+        decl,
         RiscOp::Load { name: "x".into() },
         vec![],
         mat_f32(3, 4),
         None,
     );
     let s = dag.add_node(
+        decl,
         RiscOp::Shrink {
             bounds: vec![
                 (chelis_ir::dag::RtDim::Lit(1), chelis_ir::dag::RtDim::Lit(3)),
@@ -1057,8 +1202,16 @@ fn m6_shrink_2d_matches_evaluator() {
 #[ignore]
 fn m6_pad_then_shrink_roundtrip_matches_evaluator() {
     let mut dag = Dag::new();
-    let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_f32(4), None);
+    let decl = dag.declare("test");
+    let x = dag.add_node(
+        decl,
+        RiscOp::Load { name: "x".into() },
+        vec![],
+        vec_f32(4),
+        None,
+    );
     let p = dag.add_node(
+        decl,
         RiscOp::zero_pad(
             Prim::F32,
             vec![(chelis_ir::dag::RtDim::Lit(2), chelis_ir::dag::RtDim::Lit(2))],
@@ -1068,6 +1221,7 @@ fn m6_pad_then_shrink_roundtrip_matches_evaluator() {
         None,
     );
     let s = dag.add_node(
+        decl,
         RiscOp::Shrink {
             bounds: vec![(chelis_ir::dag::RtDim::Lit(2), chelis_ir::dag::RtDim::Lit(6))],
         },
@@ -1101,7 +1255,9 @@ fn m6_pad_then_shrink_roundtrip_matches_evaluator() {
 
 fn count_dag(input: TensorType, axes: Vec<usize>, output: TensorType) -> Dag {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let mask = dag.add_node(
+        decl,
         RiscOp::Load {
             name: "mask".into(),
         },
@@ -1109,7 +1265,7 @@ fn count_dag(input: TensorType, axes: Vec<usize>, output: TensorType) -> Dag {
         input,
         None,
     );
-    let count = dag.add_node(RiscOp::Count { axes }, vec![mask], output, None);
+    let count = dag.add_node(decl, RiscOp::Count { axes }, vec![mask], output, None);
     dag.add_root(count);
     dag
 }
