@@ -2057,7 +2057,7 @@ impl DagNode {
     /// Integer arithmetic overflows, integer division and remainder divide by
     /// zero, and a cast into an integer or bool width can be out of domain.
     /// Float arithmetic never traps — it produces infinities and NaN.
-    fn may_trap(&self) -> bool {
+    pub(crate) fn may_trap(&self) -> bool {
         let precision = self.output_type.precision;
         match &self.op {
             // Overflow at the dtype's range.

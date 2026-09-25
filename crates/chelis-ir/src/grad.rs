@@ -829,9 +829,17 @@ fn prune_to_requested_outputs(
         // `integer_extrema_used_only_to_form_a_predicate_do_not_poison_float_ad`
         // pins, and it caught this. chelis#2413's seed keeps its own
         // unconditional form: a random node is never a synthesized adjoint.
+        //
+        // The guard applies to the TRAP half only. An abort is live because
+        // it is an effect, and [05-OP-68] says it may not be removed; nothing
+        // synthesizes one into the backward pass today, but narrowing that
+        // seed is the defect class three earlier rounds of this change were
+        // lost to, so the predicate says which half it narrows rather than
+        // relying on the absence of an instance.
         let synthesized = node.span_id.as_deref() == Some(GRAD_SYNTH_MARKER);
         if matches!(node.op, RiscOp::Store { .. } | RiscOp::DrawKey { .. })
-            || (!synthesized && node.is_observable_root())
+            || node.op.is_unconditional_effect()
+            || (!synthesized && node.may_trap())
             || dag.random_node_may_trap(node)
         {
             live[node.id.0] = true;
