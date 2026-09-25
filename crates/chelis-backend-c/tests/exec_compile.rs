@@ -9819,12 +9819,6 @@ fn issue_1788_two_scopes_in_one_function_share_one_declaration() {
         1,
         "exactly one declaration per scope, not a redeclaration: {emitted}"
     );
-    assert!(
-        !emitted.contains("numeric trap: domain in load at i64"),
-        "two independent signatures are not one class, so no entry guard pairs \
-         their axes: {emitted}"
-    );
-
     let harness = format!(
         r#"{HARNESS_HEADER}
 static chelis_tensor *make_view_2d(float* data, int64_t rows, int64_t cols) {{
@@ -9860,5 +9854,25 @@ int main() {{
     assert!(
         out.contains("RAN -1.0 -2.0 -3.0 | -1.0 -2.0 -3.0 -4.0"),
         "and both roots produce their exact negated inputs: {out}"
+    );
+
+    // The same unequal extents must fail if an entry guard accidentally pairs
+    // the scopes. Keep this mutation control alongside the successful execution
+    // so the runtime oracle cannot silently stop detecting that regression.
+    let second_scope_declaration = "int64_t seq__s1 = chelis_tensor_shape(inputs[1], 1);";
+    let paired_emitted = emitted.replacen(
+        second_scope_declaration,
+        &format!(
+            "{second_scope_declaration}\n    if (seq != seq__s1) {{ \
+             chelis_numeric_trap(\"numeric trap: domain in load at i64\"); }}"
+        ),
+        1,
+    );
+    assert_ne!(paired_emitted, *emitted, "the pair guard was inserted");
+    let (paired_ok, paired_out) =
+        compile_and_run_kernel_capturing("two_scopes_paired", &paired_emitted, &harness);
+    assert!(
+        !paired_ok && paired_out.contains("numeric trap: domain in load at i64"),
+        "an erroneous cross-scope entry comparison must reject this input: {paired_out}"
     );
 }
