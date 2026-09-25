@@ -262,7 +262,7 @@ fn a_call_every_instantiation_admits_stays_accepted() {
         "def ok[p: Int](k: p) -> p = add(k, k)",
         "def ok[p: Numeric](k: p) -> bool = lt(k, k)",
         "def ok[p: Float](k: p) -> p = div(exp(k), k)",
-        "def ok[p: Float](x: tensor[4, p], r: p) -> tensor[4, p] ! {Random} = dropout(x, r)",
+        "def ok[p: Float](k: key, x: tensor[4, p], r: p) -> tensor[4, p] = dropout(k, x, r)",
         "def ok[p: Float](k: tensor[3, p]) -> i64 = numel(k)",
         "def ok[p: Float](k: tensor[3, p]) -> i64 = (fn (y) -> numel(y))(k)",
     ] {
