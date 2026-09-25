@@ -2179,13 +2179,15 @@ mod tests {
 
     #[test]
     fn scalar_grad_effectful_target_reports_specific_boundary() {
+        // chelis#2413 retired the `Random` effect; `Resource` is the effect
+        // that remains, and the boundary is about any declared effect.
         assert_eq!(
             parsed_grad_error(
-                "def random_loss(x: f32) -> f32 ! { Random } = x * x\n",
-                "random_loss",
+                "def device_loss(x: f32) -> f32 ! { Resource(\"gpu:0\") } = x * x\n",
+                "device_loss",
                 &["x"],
             ),
-            "scalar grad SMT lowering does not support effectful function `random_loss`"
+            "scalar grad SMT lowering does not support effectful function `device_loss`"
         );
     }
 
