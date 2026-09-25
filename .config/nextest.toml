@@ -195,6 +195,17 @@ slow-timeout = { period = "60s", terminate-after = 50 }
 # changing their selection contract.
 path = "junit.xml"
 
+# chelis#2394: a hosted candidate dispatch builds the capacity census targets
+# cold under observed Cargo, since those targets are cached per checkout path.
+# In Linux Extended Validation run 36090959279 the Dtype oracle's wire census
+# passed in 2634 s and the binding census was killed at this profile's 3000 s
+# backstop, after the other 872 selected tests had passed. The two census
+# owners keep a backstop, sized like the producer scenarios' below, so a stuck
+# census still reports inside the Dtype job's 360-minute limit.
+[[profile.ci-full.overrides]]
+filter = '''(binary_id(/^chelis-compiler-api::capacity_census_wire$/) & test(/^wire_schema_numeric_fields_match_the_reviewed_baseline$/)) + (binary_id(/^chelis-python::capacity_census_bindings$/) & test(/^registered_pyfunctions_match_the_reviewed_rustdoc_signatures$/))'''
+slow-timeout = { period = "60s", terminate-after = 150 }
+
 # The #1294 oracle runs inside integration support. Its nested nextest must
 # not overwrite the workspace shard's ci/ci-full execution receipts.
 [profile.builtin-atom-closure]
