@@ -25,15 +25,15 @@
 //!   (which carries no cotangent to suppress), or for a discrete cast
 //!   that is off the gradient path entirely.
 //!
-//! Lane scope: the eval lane only, which is the lane the issue measured.
-//! `chelis build --target c` declines this program shape for an
+//! Lane scope: BOTH lanes. The issue recorded that
+//! `chelis build --target c` declined this program shape for an
 //! unrelated reason (`body applies/binds grad in a position the host
-//! lane can't resolve`), so there is no compiled-lane row to compare
-//! against. The rejection itself is lane-independent: it is raised by
-//! `chelis_ir::grad::grad_dag_checked`, which every `grad` entry point
-//! in the workspace routes through, and `chelis-ir`'s own unit tests
-//! (`grad_cast_float_to_integer_rejects` and siblings) pin it at that
-//! layer.
+//! lane can't resolve`), and an earlier revision of this file repeated
+//! that as "there is no compiled-lane row to compare against". That was
+//! true of the base and is no longer true here: the rejection is raised
+//! in `grad_dag_checked`, which runs BEFORE the host-lane resolution
+//! check, so the C lane now reports the same structural rejection. It is
+//! pinned below by `the_compiled_c_lane_reports_the_same_rejection`.
 
 #![allow(clippy::uninlined_format_args)]
 
@@ -70,9 +70,17 @@ fn eval_program(program: &str) -> Result<String, String> {
 
 /// `grad(f)(seed)` where `f` round-trips its argument through `target`.
 fn grad_through_cast_program(target: &str, seed: &str) -> String {
+    grad_through_cast_program_from("f32", target, seed)
+}
+
+/// The same, with an explicit float SOURCE dtype. [04-NUM-14] scopes the
+/// rejection by the source being a float, not by it being `f32`, and
+/// `is_piecewise_constant_cast` keys on `Prim::is_float()` -- so the
+/// narrow dtypes belong in the matrix too.
+fn grad_through_cast_program_from(source: &str, target: &str, seed: &str) -> String {
     format!(
         "module M.Main\n\
-         def f(x: f32) -> f32 = cast(cast(x, {target}), f32)\n\
+         def f(x: {source}) -> {source} = cast(cast(x, {target}), {source})\n\
          out = print(grad(f)({seed}))\n"
     )
 }
@@ -195,23 +203,92 @@ fn grad_over_an_integer_source_cast_is_accepted() {
 }
 
 /// The rejection is scoped to the GRADIENT PATH by `grad_dag_checked`'s
-/// live-node scan. A float-to-integer cast that the differentiated
-/// output does not reach is not on that path and must not reject --
-/// otherwise the fix would turn unrelated discrete arithmetic in the
-/// same function body into a grad failure.
+/// live-node scan, which treats an indexed operation's INDEX input as a
+/// stop-gradient boundary: index math is not data and carries no
+/// cotangent. A float-to-integer cast feeding `gather`'s indices is
+/// therefore not on the gradient path and must not reject -- otherwise
+/// this fix would break every embedding-style lookup whose indices are
+/// computed from float data.
+///
+/// This replaces an earlier dead-binding version of this test, which was
+/// vacuous: an unused `let` never reaches the lowered DAG at all, so it
+/// could not distinguish liveness from anything else -- a dead
+/// `cast_trunc`, which always rejects when live, did not reject there
+/// either. The cast below IS in the lowered program.
 #[test]
-fn a_float_to_integer_cast_off_the_gradient_path_does_not_reject() {
+fn a_float_to_integer_cast_on_an_index_edge_does_not_reject() {
     let program = "module M.Main\n\
-                   def f(x: f32) -> f32 = {\n\
-                     unused = cast(4.0, i64)\n\
-                     mul(x, x)\n\
-                   }\n\
-                   out = print(grad(f)(3.0))\n";
+                   def f(table: tensor[4, f32], raw: tensor[2, f32]) -> f32 = \
+                   tensor_to_scalar(sum(gather(table, cast(raw, i64), 0i32), 0i32))\n\
+                   out = print(grad(f, wrt=table)(to_tensor([1.0f32, 2.0f32, 3.0f32, 4.0f32]), \
+                   to_tensor([1.0f32, 3.0f32])))\n";
     let line =
-        eval_program(program).expect("a discrete cast off the gradient path must not reject grad");
+        eval_program(program).expect("a discrete cast on an index edge must not reject grad");
     assert_eq!(
-        line, "6.0",
-        "d(x*x)/dx at x=3 must be 6.0 with a dead discrete cast present; got {line}"
+        line, "tensor(shape=[4], data=[0.0, 1.0, 0.0, 1.0])",
+        "gather's adjoint must still scatter the cotangent to the gathered rows; got {line}"
+    );
+}
+
+/// [04-NUM-14] scopes the rejection by the source being a FLOAT, not by
+/// it being `f32`. Every active float dtype is therefore a source, and
+/// the narrow ones are where a silent zero would do the most damage.
+/// `is_piecewise_constant_cast` keys on `Prim::is_float()`, whose
+/// membership is itself pinned to §1.1's active set by `chelis-types`,
+/// so this loop and that predicate close the dimension together.
+#[test]
+fn every_active_float_source_rejects_not_just_f32() {
+    for source in ["f16", "bf16", "f32", "f64"] {
+        let program = grad_through_cast_program_from(source, "i32", &format!("2.0{source}"));
+        let stderr = eval_program(&program).unwrap_or_else(|e| e).to_string();
+        assert!(
+            !stderr.is_empty(),
+            "[04-NUM-14]: {source} -> i32 under grad must not produce a value at all"
+        );
+        assert_piecewise_constant_rejection(&stderr, source);
+    }
+}
+
+/// The compiled lane reports the SAME structural rejection.
+///
+/// The issue recorded that `chelis build --target c` declined this shape
+/// for an unrelated reason, and an earlier revision of this file claimed
+/// there was therefore no compiled-lane row to be had. That was true of
+/// the base: the host lane's "can't resolve `grad` in this position"
+/// check fired first. It is not true here, because `grad_dag_checked`
+/// runs BEFORE that check, so the rejection now reaches the C lane. The
+/// build must fail for the RIGHT reason, not the incidental one.
+#[test]
+fn the_compiled_c_lane_reports_the_same_rejection() {
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("m.ch");
+    write_file(
+        &path,
+        "module M.Main\n\
+         def f(x: f32) -> f32 = cast(cast(x, i64), f32)\n\
+         def d(y: f32) -> f32 = grad(f)(y)\n\
+         out = d(2.0f32)\n",
+    );
+    let out = Command::cargo_bin("chelis")
+        .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .args([
+            "build",
+            path.to_str().unwrap(),
+            "--target",
+            "c",
+            "--output",
+            dir.path().join("out").to_str().unwrap(),
+        ])
+        .output()
+        .expect("chelis build should run");
+    assert!(!out.status.success(), "the C lane must reject this program");
+    let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+    assert_piecewise_constant_rejection(&stderr, "c-lane");
+    assert!(
+        !stderr.contains("can't lower these defs"),
+        "the C lane must fail on the AD rejection, not the incidental host-lane \
+         resolution error that masked it on the base: {stderr}"
     );
 }
 

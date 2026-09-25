@@ -2117,16 +2117,34 @@ fn compute_adjoints(
                 // chelis#2178 / [04-NUM-14]: a float source cast to an
                 // integer or bool target is piecewise constant and
                 // "never contributes a silent zero". There is no
-                // adjoint; `grad_dag_checked`'s live-node scan already
-                // rejected it with the structured `AdError`, and this
-                // arm keeps the unchecked entry point from inventing
-                // one -- the same treatment `CastTrunc` gets below.
+                // adjoint, so this arm refuses to invent one -- the
+                // same treatment `CastTrunc` gets below.
+                //
+                // Usually `grad_dag_checked`'s live-node scan has
+                // already rejected this node with the structured
+                // `AdError`. It does NOT always: the scan treats
+                // `RiscOp::Compare(_)` as a stop-gradient boundary and
+                // marks its operands dead, while `compute_adjoints`'
+                // `Compare` arm still seeds zeros into them, so the
+                // backward walk can reach a cast the scan never saw.
+                // That path surfaces here as an unstructured
+                // `AdRejectionReason::Other`, which `spec/06` §7.5
+                // forbids -- it requires the atom's exact reason. The
+                // two sites disagreeing is a pre-existing defect that
+                // `CastTrunc` shares (chelis#197's residue, tracked
+                // under chelis#730); rejecting is still correct here,
+                // only the reason is wrong.
                 None
             } else {
-                // A non-float source (integer or bool) carries no
-                // cotangent at all, so the zero seeded here is the
-                // absence of a gradient variable rather than a
-                // suppressed one.
+                // Every remaining pair. In practice that is a discrete
+                // SOURCE -- [04-NUM-14]: "a bool or integer source is a
+                // discrete forward-only value and carries no cotangent,
+                // irrespective of target" -- so the zero seeded here is
+                // the absence of a gradient variable, not a suppressed
+                // one. The arm is also the structural fallthrough for
+                // pairs no admitted program reaches (a float source at a
+                // deferred `f8e4m3` or non-numeric target); those are
+                // rejected long before AD.
                 let zero = dag.add_node(
                     RiscOp::synth_const(input_ty.precision, 0.0),
                     vec![],
@@ -2138,9 +2156,11 @@ fn compute_adjoints(
         }
         // [05-OP-6] carries the `no_grad` rule: there is NO adjoint, and
         // emitting a zero here would be exactly the silent masking the
-        // atom forbids. `grad_dag_checked`'s live-node scan already
-        // rejected it with the structured `AdError`; this arm keeps the
-        // unchecked entry point from inventing one.
+        // atom forbids; this arm keeps the unchecked entry point from
+        // inventing one. `grad_dag_checked`'s live-node scan has usually
+        // rejected it already with the structured `AdError`, but not on
+        // the comparison-operand path -- see the `Cast` arm above for
+        // why, and for the tracker.
         RiscOp::CastTrunc { .. } => None,
         RiscOp::FusedElem { .. } => {
             // Fused nodes should be un-fused before AD; gradient through fusion

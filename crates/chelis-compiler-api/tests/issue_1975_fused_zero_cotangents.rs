@@ -80,28 +80,49 @@ fn fused_named_batch_zero_retains_caller_shape() {
     );
 }
 
+/// chelis#2178 moved this probe's constant cast from a float source to an
+/// integer one, and both halves needed it.
+///
+/// [04-NUM-14] makes a float source cast to an integer target a structural
+/// `grad` rejection, so neither half survives with `{literal}f64`: the
+/// overflow half never reaches the trap, and the in-range control half was
+/// itself asserting the silent zero the atom forbids.
+///
+/// An integer source still lowers under `grad` -- the same atom says a
+/// discrete source "carries no cotangent, irrespective of target" -- while an
+/// integer-to-integer cast still "traps `Overflow` when it is out of range".
+/// So `{literal}i64` keeps the same op, the same
+/// `overflow in cast at i32` trap, the same zero-cotangent control, and the
+/// same program shape, and it is the shape where the chelis#1975 /
+/// chelis#1986 regression stays OBSERVABLE rather than being pre-empted by a
+/// rejection.
 #[test]
 fn fused_constant_primal_range_trap_is_not_erased_by_zero() {
     let source = |literal| {
         format!(
-            "def loss(x: tensor[f32]) -> f32 = cast(cast({literal}f64, i32), f32)\nout = vmap(grad(loss))(to_tensor([2.0f32, 7.0f32]))\n"
+            "def loss(x: tensor[f32]) -> f32 = cast(cast({literal}i64, i32), f32)\nout = vmap(grad(loss))(to_tensor([2.0f32, 7.0f32]))\n"
         )
     };
     // Check the negative first: no-roots is not an overflow diagnostic.
-    let error = eval(request(&source("2147483648.0"))).unwrap_err();
+    let error = eval(request(&source("2147483648"))).unwrap_err();
     assert!(
         format!("{error:?}").contains("numeric trap: overflow in cast at i32"),
         "{error:?}"
     );
-    roots(&source("7.0"), "f32", &[2], &[vec![0.0; 2]]);
+    roots(&source("7"), "f32", &[2], &[vec![0.0; 2]]);
 }
 
+/// chelis#2178: the `grad(loss)` arm's constant cast moves to an integer
+/// source for the reason above. The `loss` arm differentiates nothing, so a
+/// float source is still admissible there and is KEPT -- the literal is
+/// parameterised per arm rather than shared, so this probe does not quietly
+/// lose its float-source-in-an-empty-batch coverage.
 #[test]
 fn fused_empty_batch_does_not_execute_constant_primal_cast() {
-    for transform in ["loss", "grad(loss)"] {
+    for (transform, literal) in [("loss", "2147483648.0f64"), ("grad(loss)", "2147483648i64")] {
         roots(
             &format!(
-                "def loss(x: tensor[f32]) -> f32 = cast(cast(2147483648.0f64, i32), f32)\nout = {{ empty: tensor[0, f32] = to_tensor([])\n vmap({transform})(empty) }}\n"
+                "def loss(x: tensor[f32]) -> f32 = cast(cast({literal}, i32), f32)\nout = {{ empty: tensor[0, f32] = to_tensor([])\n vmap({transform})(empty) }}\n"
             ),
             "f32",
             &[0],
