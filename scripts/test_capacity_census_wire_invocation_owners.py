@@ -233,6 +233,79 @@ class CodecSpecializations(unittest.TestCase):
                 self.owner(current, templates, trait, definitions)
 
 
+class SerializeWithHelpers(unittest.TestCase):
+    """A serde `with` field helper is owned by its exact enclosing derive."""
+
+    PARENT = "::schema::execution::_#2::{impl#0}::serialize"
+    OWNER = "chelis_compiler_api::schema::execution::TensorWire"
+
+    def rows(self):
+        def definition(path, name, hash_):
+            return {"crate": "chelis_compiler_api", "path": path, "item_name": name,
+                    "def_path_hash": hash_}
+
+        derive = {
+            "caller": {
+                "definition": definition(self.PARENT, "serialize", "parent"),
+                "implementation": {"self_type": {"nominal": definition(
+                    "::schema::execution::TensorWire", "TensorWire", "owner")}},
+                "ancestors": [],
+            },
+            "callee": {"crate": "serde_core", "path": "::ser::SerializeStruct::serialize_field"},
+            "payloads": [{"text": "schema::execution::_::<impl Serialize for TensorWire>::serialize::__SerializeWith<'_>"}],
+        }
+        helper = {
+            "caller": {
+                "definition": definition(self.PARENT + "::{impl#0}::serialize", "serialize", "helper-fn"),
+                "implementation": {"self_type": {"nominal": definition(
+                    self.PARENT + "::__SerializeWith", "__SerializeWith", "helper")}},
+                "ancestors": [definition(self.PARENT, "serialize", "parent")],
+            },
+            "callee": {"crate": "chelis_types",
+                       "path": "::dtype_semantics::wire_codec::execution_storage::serialize"},
+            "payloads": [],
+        }
+        return derive, helper
+
+    def test_the_helper_is_owned_by_its_exact_derive(self):
+        from capacity_census_wire_invocation_owners import serialize_with_helper_owner
+
+        derive, helper = self.rows()
+        self.assertEqual(
+            serialize_with_helper_owner(helper, [derive, helper], {self.OWNER: 0}),
+            self.OWNER,
+        )
+
+    def test_another_codec_parent_or_owner_is_rejected(self):
+        from capacity_census_wire_invocation_owners import serialize_with_helper_owner
+
+        for change in ("codec", "parent", "absent-owner", "no-payload", "two-owners"):
+            derive, helper = self.rows()
+            calls = [derive, helper]
+            definitions = {self.OWNER: 0}
+            if change == "codec":
+                helper["callee"]["path"] = "::dtype_semantics::wire_codec::other::serialize"
+            elif change == "parent":
+                helper["caller"]["ancestors"][0]["def_path_hash"] = "elsewhere"
+            elif change == "absent-owner":
+                definitions = {}
+            elif change == "no-payload":
+                derive["payloads"] = []
+            else:
+                other = copy.deepcopy(derive)
+                other["caller"]["implementation"]["self_type"]["nominal"]["path"] = "::schema::Other"
+                calls.append(other)
+                definitions["chelis_compiler_api::schema::Other"] = 0
+            with self.subTest(change=change), self.assertRaises(GraphError):
+                serialize_with_helper_owner(helper, calls, definitions)
+
+    def test_an_ordinary_owner_is_not_a_helper(self):
+        from capacity_census_wire_invocation_owners import serialize_with_helper_owner
+
+        derive, _ = self.rows()
+        self.assertIsNone(serialize_with_helper_owner(derive, [derive], {self.OWNER: 0}))
+
+
 class InvocationOwnership(unittest.TestCase):
     def test_check_report_call_replays_exact_compiler_publisher_and_payload(self):
         from capacity_census_wire_invocation_owners import (
