@@ -407,8 +407,7 @@ mod artifact_outcome_tests {
         let clean = check("def identity[n](x: tensor[n, f32]) -> tensor[n, f32] = x\n");
         assert!(matches!(clean, LayeredCheck::Clean { .. }));
 
-        let effect =
-            check("def noisy(x: tensor[4, f32]) -> tensor[4, f32] ! { } = dropout(x, 0.5)\n");
+        let effect = check("def noisy() -> unit ! { } = test_assert(true, \"leak\")\n");
         assert!(matches!(
             effect,
             LayeredCheck::EffectRejected { effect_errors, .. } if !effect_errors.is_empty()
