@@ -572,8 +572,16 @@ fn the_codec_admits_the_key_chain_and_rejects_every_malformed_key_form() {
         reloaded["roots"] = json!(roots);
         reloaded
     };
-    rejects_domain(&reloaded([None, None]), "is consumed twice");
-    rejects_domain(&reloaded([Some("a"), Some("a")]), "is consumed twice");
+    // Each report names the key by its parameter and declaration, and each
+    // consumer by its operation and node (chelis#2413, decision 7).
+    rejects_domain(
+        &reloaded([None, None]),
+        "key `k` is consumed twice, by the `dropout` at node 14 and the `dropout` at node 16",
+    );
+    rejects_domain(
+        &reloaded([Some("a"), Some("a")]),
+        "key `k` of `a` is consumed twice, by the `dropout` at node 14 and the `dropout` at node 16",
+    );
     rejects_domain(&reloaded([Some("a"), None]), "is consumed twice");
     rejects_domain(&reloaded([None, Some("b")]), "is consumed twice");
     accepts(&reloaded([Some("a"), Some("b")]));
@@ -764,7 +772,10 @@ fn the_codec_admits_a_join_of_two_arms_and_rejects_overlapping_ones() {
         &join_chain(Join::Overlapping),
         "joins keys under activations that are not the two arms of one branch",
     );
-    rejects_domain(&join_chain(Join::RootedTwice), "is a graph root twice");
+    rejects_domain(
+        &join_chain(Join::RootedTwice),
+        "the `if` join key at node 16 is a graph root twice",
+    );
 }
 
 /// Rule V3 on the wire after constant folding: an activation that is the
