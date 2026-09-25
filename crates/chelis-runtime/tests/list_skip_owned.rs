@@ -26,7 +26,7 @@ use std::process::Command;
 use chelis_runtime::{
     chelis_list_append_owned, chelis_list_borrow_value, chelis_list_concat_owned, chelis_list_drop,
     chelis_list_drop_owned, chelis_list_empty, chelis_list_index, chelis_list_len,
-    chelis_list_push, chelis_list_release, chelis_list_retain, chelis_scalar_from_bits,
+    chelis_list_push_moved, chelis_list_release, chelis_list_retain, chelis_scalar_from_bits,
     chelis_value, chelis_value_box_scalar, chelis_value_release, chelis_value_take_list,
     chelis_value_unbox_scalar, CHELIS_DTYPE_I64,
 };
@@ -56,9 +56,7 @@ unsafe fn contents(list: *const chelis_runtime::chelis_list) -> Vec<i64> {
 unsafe fn list_of(values: &[i64]) -> *mut chelis_runtime::chelis_list {
     let list = chelis_list_empty();
     for &value in values {
-        let boxed = int_value(value);
-        chelis_list_push(list, boxed);
-        chelis_value_release(boxed);
+        chelis_list_push_moved(list, int_value(value));
     }
     list
 }
@@ -222,7 +220,7 @@ fn a_skipped_heap_element_leaves_the_list_without_a_second_release() {
         // The probe's own owner, beside the one the outer list takes.
         chelis_list_retain(inner);
         let outer = chelis_list_empty();
-        chelis_list_push(outer, chelis_value_take_list(inner));
+        chelis_list_push_moved(outer, chelis_value_take_list(inner));
 
         let skipped = chelis_list_drop_owned(outer, 1);
         assert_eq!(chelis_list_len(skipped), 0);
@@ -331,8 +329,7 @@ fn skip_owned_ledger_child() {
         let seed = chelis_list_empty();
         for value in 0..WALK {
             let inner = list_of(&[value]);
-            chelis_list_push(seed, chelis_value_take_list(inner));
-            chelis_list_release(inner);
+            chelis_list_push_moved(seed, chelis_value_take_list(inner));
         }
         match mode.as_str() {
             "owned" => {
@@ -368,9 +365,7 @@ fn skip_owned_ledger_child() {
                 // matters is the list's own buffer.
                 let big = chelis_list_empty();
                 for value in 0..LARGE {
-                    let boxed = int_value(value);
-                    chelis_list_push(big, boxed);
-                    chelis_value_release(boxed);
+                    chelis_list_push_moved(big, int_value(value));
                 }
                 let tail = chelis_list_drop_owned(big, LARGE - 1);
                 assert_eq!(chelis_list_len(tail), 1);

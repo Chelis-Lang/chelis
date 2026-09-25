@@ -4820,32 +4820,40 @@ pub unsafe extern "C" fn chelis_list_with_capacity(capacity: i64) -> *mut chelis
     new_list(Vec::with_capacity(capacity), "chelis_list_with_capacity")
 }
 
+/// In-place amortized push for accumulator lists the emitted code
+/// exclusively owns (chelis#943), consuming `value` (chelis#2508).
+///
+/// The ownership verifier moves every loop step's item into its accumulator,
+/// so the one push the emitter can call takes the caller's owner of `value`
+/// instead of retaining a second one. A cloning push realized that move as a
+/// copy and left the moved owner live. Exclusivity is a hard contract:
+/// pushing into a shared list would mutate every other owner's view.
 #[no_mangle]
-pub unsafe extern "C" fn chelis_list_push(list: *mut chelis_list, value: chelis_value) {
-    // In-place amortized push for accumulator lists the emitted code
-    // exclusively owns (chelis#943). Exclusivity is a hard contract:
-    // pushing into a shared list would mutate every other owner's view.
+pub unsafe extern "C" fn chelis_list_push_moved(list: *mut chelis_list, value: chelis_value) {
     if list.is_null() {
-        runtime_fail!("chelis_list_push on a null list");
+        runtime_fail!("chelis_list_push_moved on a null list");
     }
     if (*list).header.strong.load(Ordering::Relaxed) != 1 {
-        runtime_fail!("chelis_list_push requires exclusive ownership (refcount 1)");
+        runtime_fail!("chelis_list_push_moved requires exclusive ownership (refcount 1)");
     }
-    (*list).push(chelis_value_clone(value));
-    resize_list_ledger(list, "chelis_list_push");
+    validate_value(value, "chelis_list_push_moved");
+    (*list).push(value);
+    resize_list_ledger(list, "chelis_list_push_moved");
 }
 
+/// In-place concat counterpart of `chelis_list_push_moved` (chelis#943),
+/// consuming `src` (chelis#2508): every item is retained into `list` and the
+/// caller's owner of `src` is released.
 #[no_mangle]
-pub unsafe extern "C" fn chelis_list_extend(list: *mut chelis_list, src: *const chelis_list) {
-    // In-place concat counterpart of chelis_list_push (chelis#943).
+pub unsafe extern "C" fn chelis_list_extend_moved(list: *mut chelis_list, src: *mut chelis_list) {
     if list.is_null() {
-        runtime_fail!("chelis_list_extend on a null list");
+        runtime_fail!("chelis_list_extend_moved on a null list");
     }
-    if std::ptr::eq(list as *const chelis_list, src) {
-        runtime_fail!("chelis_list_extend source aliases destination");
+    if std::ptr::eq(list, src) {
+        runtime_fail!("chelis_list_extend_moved source aliases destination");
     }
     if (*list).header.strong.load(Ordering::Relaxed) != 1 {
-        runtime_fail!("chelis_list_extend requires exclusive ownership (refcount 1)");
+        runtime_fail!("chelis_list_extend_moved requires exclusive ownership (refcount 1)");
     }
     if src.is_null() {
         return;
@@ -4853,7 +4861,8 @@ pub unsafe extern "C" fn chelis_list_extend(list: *mut chelis_list, src: *const 
     for &value in (*src).live() {
         (*list).push(chelis_value_clone(value));
     }
-    resize_list_ledger(list, "chelis_list_extend");
+    resize_list_ledger(list, "chelis_list_extend_moved");
+    release_list_ptr(src);
 }
 
 /// Consuming append (chelis#2205). Takes ownership of `list`: when this is
@@ -7572,9 +7581,9 @@ mod tests {
         unsafe {
             let list = chelis_list_with_capacity(2);
             assert!((*list).buffer_capacity() >= 2);
-            chelis_list_push(list, internal_value_from_i64(1));
-            chelis_list_push(list, internal_value_from_i64(2));
-            chelis_list_push(list, internal_value_from_i64(3));
+            chelis_list_push_moved(list, internal_value_from_i64(1));
+            chelis_list_push_moved(list, internal_value_from_i64(2));
+            chelis_list_push_moved(list, internal_value_from_i64(3));
             assert_eq!(chelis_list_len(list), 3);
             assert!((*list).buffer_capacity() >= 3);
             let item = chelis_list_index(list, 2);
@@ -7585,12 +7594,12 @@ mod tests {
     }
 
     #[test]
-    fn list_push_retains_heap_values_like_append() {
+    fn list_push_moved_takes_the_callers_owner() {
         unsafe {
             let list = chelis_list_with_capacity(1);
             let value = internal_value_from_string(runtime_str("owned"));
-            chelis_list_push(list, value);
-            chelis_value_release(value);
+            // The list now holds the only owner; no release is owed here.
+            chelis_list_push_moved(list, value);
             let item = chelis_list_index(list, 0);
             assert_eq!(string_text(chelis_string_borrow_value(item)), "owned");
             chelis_value_release(item);
@@ -7602,14 +7611,14 @@ mod tests {
     fn list_extend_appends_all_source_items() {
         unsafe {
             let dst = chelis_list_with_capacity(0);
-            chelis_list_push(dst, internal_value_from_i64(1));
+            chelis_list_push_moved(dst, internal_value_from_i64(1));
             let value = internal_value_from_string(runtime_str("retained"));
             let items = [internal_value_from_i64(7), value];
             let src = chelis_list_from_values(items.as_ptr(), 2);
             chelis_value_release(value);
-            chelis_list_extend(dst, src);
+            // `src` is consumed: its owner is released by the extend.
+            chelis_list_extend_moved(dst, src);
             assert_eq!(chelis_list_len(dst), 3);
-            chelis_list_release(src);
             let last = chelis_list_index(dst, 2);
             assert_eq!(string_text(chelis_string_borrow_value(last)), "retained");
             chelis_value_release(last);
@@ -7839,7 +7848,7 @@ mod tests {
     /// must not become an in-place push.
     ///
     /// `chelis_list_append` takes `*const chelis_list` precisely because
-    /// `List[T]` is immutable, and `chelis_list_push` (chelis#943) is the
+    /// `List[T]` is immutable, and `chelis_list_push_moved` (chelis#943) is the
     /// separate in-place mutator that is only sound at `refcount == 1`.
     /// A reservation that grew the *source* buffer instead of a fresh one
     /// would still satisfy every length assertion above while silently
@@ -7848,8 +7857,8 @@ mod tests {
     fn append_leaves_the_source_list_untouched() {
         unsafe {
             let source = chelis_list_empty();
-            chelis_list_push(source, internal_value_from_i64(10));
-            chelis_list_push(source, internal_value_from_i64(20));
+            chelis_list_push_moved(source, internal_value_from_i64(10));
+            chelis_list_push_moved(source, internal_value_from_i64(20));
             let source_len_before = chelis_list_len(source);
             let source_buffer_before = (*source).live().as_ptr();
 
@@ -7891,7 +7900,7 @@ mod tests {
     fn append_retains_elements_and_release_balances() {
         unsafe {
             let element = chelis_list_empty();
-            chelis_list_push(element, internal_value_from_i64(7));
+            chelis_list_push_moved(element, internal_value_from_i64(7));
             assert_eq!(
                 (*element).header.strong.load(Ordering::Relaxed),
                 1,

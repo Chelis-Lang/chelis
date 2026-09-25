@@ -564,8 +564,12 @@ pub(crate) fn emit_host_abi_program(
         // whose refcount-1 exclusivity this emitter proves). The symbols are
         // exported by libchelis_runtime; only the declarations are private.
         "chelis_list *chelis_list_with_capacity(int64_t capacity);".to_string(),
-        "void chelis_list_push(chelis_list *list, chelis_value value);".to_string(),
-        "void chelis_list_extend(chelis_list *list, const chelis_list *src);".to_string(),
+        // chelis#2508: both accumulator steps consume their operand, because
+        // the ownership verifier moves every loop step's item into its
+        // accumulator. No cloning push is declared, so a verified move
+        // cannot be realized as a copy that leaves the moved owner live.
+        "void chelis_list_push_moved(chelis_list *list, chelis_value value);".to_string(),
+        "void chelis_list_extend_moved(chelis_list *list, chelis_list *src);".to_string(),
         // chelis#2205: the consuming counterparts of the container builtins
         // that may take a same-kind operand the ownership verifier moved at
         // its scheduled last use. Each mutates in place only at strong-owner
@@ -898,8 +902,7 @@ fn append_json_canonical_object_helpers(out: &mut Vec<String>) {
         "    chelis_list *result = chelis_list_with_capacity(len);",
         "    for (int64_t index = 0; index < len; ++index) {",
         "        chelis_value entry = chelis_list_index(source, order[index]);",
-        "        chelis_list_push(result, entry);",
-        "        chelis_value_release(entry);",
+        "        chelis_list_push_moved(result, entry);",
         "    }",
         "    chelis_tensor_end_write(order_guard);",
         "    chelis_tensor_release(order_storage);",
@@ -3747,10 +3750,17 @@ impl<'a> HostEmitter<'a> {
         target: &str,
         ty: &HostType,
     ) -> Result<(), Unsupported> {
+        self.declare_local(target, ty)?;
+        self.assign_expr(target, expr, ty)?;
+        Ok(())
+    }
+
+    /// Declare a local that an expression will be assigned to, with the
+    /// result origin every assignment writes alongside the value.
+    fn declare_local(&mut self, target: &str, ty: &HostType) -> Result<(), Unsupported> {
         self.lines
             .push(format!("{}{};", self.indent, c_decl(ty, target)?));
         self.declare_result_origin(target, ty, None);
-        self.assign_expr(target, expr, ty)?;
         Ok(())
     }
 
@@ -8546,13 +8556,7 @@ impl<'a> HostEmitter<'a> {
             self.indent, item_value, list_var
         ));
         let result_var = self.next_temp("map_result");
-        self.lines.push(format!(
-            "{}{} {};",
-            self.indent,
-            c_type(&callback.ret_ty)?,
-            result_var
-        ));
-        self.declare_result_origin(&result_var, &callback.ret_ty, None);
+        self.declare_local(&result_var, &callback.ret_ty)?;
         let param = callback_param(callback, 0);
         let arg_var = self.next_temp("map_item");
         self.lines.push(format!(
@@ -8566,7 +8570,7 @@ impl<'a> HostEmitter<'a> {
         self.bind_loop_item(site, &arg_var)?;
         self.emit_callback_assign(callback, std::slice::from_ref(&arg_var), &result_var)?;
         self.lines.push(format!(
-            "{}chelis_list_push({target}, {});",
+            "{}chelis_list_push_moved({target}, {});",
             self.indent,
             self.box_value_expr(&result_var, &callback.ret_ty)?
         ));
@@ -8611,8 +8615,7 @@ impl<'a> HostEmitter<'a> {
             self.indent, item_value, list_var
         ));
         let keep_var = self.next_temp("filter_keep");
-        self.lines
-            .push(format!("{}bool {};", self.indent, keep_var));
+        self.declare_local(&keep_var, &callback.ret_ty)?;
         let param = callback_param(callback, 0);
         let arg_var = self.next_temp("filter_item");
         self.lines.push(format!(
@@ -8627,13 +8630,20 @@ impl<'a> HostEmitter<'a> {
         self.emit_callback_assign(callback, std::slice::from_ref(&arg_var), &keep_var)?;
         self.lines
             .push(format!("{}if ({}) {{", self.indent, keep_var));
+        // `filter_step` moves the item: a kept item moves into the result
+        // and a rejected one is released here.
         let nested_indent = format!("{}    ", self.indent);
         let nested_previous = std::mem::replace(&mut self.indent, nested_indent);
         self.lines.push(format!(
-            "{}chelis_list_push({target}, {});",
+            "{}chelis_list_push_moved({target}, {});",
             self.indent, item_value
         ));
         self.indent = nested_previous;
+        self.lines.push(format!("{}}} else {{", self.indent));
+        self.lines.push(format!(
+            "{}    chelis_value_release({});",
+            self.indent, item_value
+        ));
         self.lines.push(format!("{}}}", self.indent));
         self.emit_expression_block_actions(site, body_block, target)?;
         self.indent = previous;
@@ -8715,12 +8725,12 @@ impl<'a> HostEmitter<'a> {
             )
         });
         self.emit_edge_terminals(site.id, &body_edge)?;
-        if body_acc_dropped {
+        if body_acc_dropped && let Some(released) = params[0].ty.c_released_value() {
             // An inline callback still has a physical parameter even when the
             // verified program proves that parameter dead on entry.  Do not
-            // propagate a released pointer into that non-semantic C alias.
+            // propagate a released handle into that non-semantic C alias.
             self.lines
-                .push(format!("{}{} = NULL;", self.indent, acc_arg));
+                .push(format!("{}{} = {released};", self.indent, acc_arg));
         }
         let item_value = self.next_temp("fold_item_value");
         self.lines.push(format!(
@@ -8844,7 +8854,7 @@ impl<'a> HostEmitter<'a> {
         self.bind_loop_item(site, &item_arg)?;
         self.emit_callback_assign(callback, &[acc_arg, item_arg], &acc_var)?;
         self.lines.push(format!(
-            "{}chelis_list_push({target}, {});",
+            "{}chelis_list_push_moved({target}, {});",
             self.indent,
             self.box_value_expr(&acc_var, &acc_ty)?
         ));
@@ -8930,8 +8940,7 @@ impl<'a> HostEmitter<'a> {
             self.indent, item_value, list_var
         ));
         let keep_var = self.next_temp("partition_keep");
-        self.lines
-            .push(format!("{}bool {};", self.indent, keep_var));
+        self.declare_local(&keep_var, &callback.ret_ty)?;
         let param = callback_param(callback, 0);
         let arg_var = self.next_temp("partition_item");
         self.lines.push(format!(
@@ -8949,7 +8958,7 @@ impl<'a> HostEmitter<'a> {
         let then_indent = format!("{}    ", self.indent);
         let then_previous = std::mem::replace(&mut self.indent, then_indent);
         self.lines.push(format!(
-            "{}chelis_list_push({}, {});",
+            "{}chelis_list_push_moved({}, {});",
             self.indent, pass_var, item_value
         ));
         self.indent = then_previous;
@@ -8957,7 +8966,7 @@ impl<'a> HostEmitter<'a> {
         let else_indent = format!("{}    ", self.indent);
         let else_previous = std::mem::replace(&mut self.indent, else_indent);
         self.lines.push(format!(
-            "{}chelis_list_push({}, {});",
+            "{}chelis_list_push_moved({}, {});",
             self.indent, fail_var, item_value
         ));
         self.indent = else_previous;
@@ -8981,6 +8990,14 @@ impl<'a> HostEmitter<'a> {
             "{}{target} = chelis_tuple_from_values({}, 2);",
             self.indent, tuple_values
         ));
+        // `chelis_tuple_from_values` retains its items, as for a tuple
+        // literal, so the two moved lists are released here.
+        for index in 0..2 {
+            self.lines.push(format!(
+                "{}chelis_value_release({tuple_values}[{index}]);",
+                self.indent
+            ));
+        }
         Ok(())
     }
 
@@ -9018,13 +9035,7 @@ impl<'a> HostEmitter<'a> {
             self.indent, item_value, list_var
         ));
         let result_var = self.next_temp("flat_map_result");
-        self.lines.push(format!(
-            "{}{} {};",
-            self.indent,
-            c_type(&callback.ret_ty)?,
-            result_var
-        ));
-        self.declare_result_origin(&result_var, &callback.ret_ty, None);
+        self.declare_local(&result_var, &callback.ret_ty)?;
         let param = callback_param(callback, 0);
         let arg_var = self.next_temp("flat_map_item");
         self.lines.push(format!(
@@ -9038,7 +9049,7 @@ impl<'a> HostEmitter<'a> {
         self.bind_loop_item(site, &arg_var)?;
         self.emit_callback_assign(callback, std::slice::from_ref(&arg_var), &result_var)?;
         self.lines.push(format!(
-            "{}chelis_list_extend({target}, {});",
+            "{}chelis_list_extend_moved({target}, {});",
             self.indent, result_var
         ));
         self.emit_expression_block_actions(site, body_block, target)?;
@@ -9089,7 +9100,16 @@ impl<'a> HostEmitter<'a> {
                         param.name,
                         arg_var
                     ));
-                    self.declare_result_origin(&param.name, &param.ty, Some("load"));
+                    // The parameter aliases the argument, so it carries the
+                    // argument's origin. Rescanning would walk the value on
+                    // every iteration, and would dereference a dead
+                    // accumulator the fold has already cleared.
+                    self.lines.push(format!(
+                        "{}const __chelis_host_result_origin *{} = {};",
+                        self.indent,
+                        result_origin_name(&param.name),
+                        result_origin_name(arg_var)
+                    ));
                     if self.interface_reload_names.remove(&param.name) {
                         shadowed_interface_globals.push(param.name.clone());
                     }
