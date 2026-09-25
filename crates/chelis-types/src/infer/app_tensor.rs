@@ -1397,8 +1397,12 @@ pub(super) fn check_named_expand_signature(
 pub(super) enum ToTensorPeel<'a> {
     /// Successfully peeled `rank` `List` layers down to a `Prim`.
     Ok { rank: usize, precision: Prim },
-    /// Some inner type is still a `Var(_)` or `Error`; the typer should
-    /// defer to the explicit result type rather than emit a diagnostic.
+    /// Peeled `rank` `List` layers down to a type variable. The caller
+    /// decides whether that variable's restriction already makes it a scalar
+    /// leaf dtype ([05-OP-57]); otherwise the leaf is still pending.
+    VarLeaf { rank: usize, variable: TypeVar },
+    /// Some inner type is still `Error`; the typer should defer to the
+    /// explicit result type rather than emit a diagnostic.
     Pending,
     /// Reached a non-`List`, non-prim leaf — the innermost element is
     /// not numeric or bool, so emit a typed diagnostic.
@@ -1422,7 +1426,13 @@ pub(super) fn peel_to_tensor_argument(ty: &Type) -> ToTensorPeel<'_> {
                     precision: *precision,
                 };
             }
-            Type::Var(_) | Type::Error(_) => {
+            Type::Var(variable) => {
+                return ToTensorPeel::VarLeaf {
+                    rank,
+                    variable: *variable,
+                };
+            }
+            Type::Error(_) => {
                 return ToTensorPeel::Pending;
             }
             other => {

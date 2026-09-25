@@ -800,7 +800,7 @@
       "file": "app_tensor.rs",
       "function": "peel_to_tensor_argument",
       "ordinal": 1,
-      "pattern": "Type::Var(_) | Type::Error(_)",
+      "pattern": "Type::Var(variable)",
       "disposition": "not_a_route"
     },
     {

@@ -2536,7 +2536,33 @@ pub(super) fn finish_unified_app(
                                 .unwrap_or_else(|| vec![Dim::Wildcard; rank]);
                             return Type::Tensor(dims, TensorPrec::Concrete(precision));
                         }
-                        ToTensorPeel::Pending => return result_ty,
+                        // [05-OP-57]: the leaf of `to_tensor`'s List is one
+                        // scalar tensor-element dtype. A leaf variable restricted
+                        // to the `Float`, `Int` or `Numeric` family can only be
+                        // such a scalar, so the nesting depth already fixes the
+                        // rank and the variable is the result precision, exactly
+                        // as `to_list` maps `tensor[n, p]` to `List[p]`. Returning
+                        // the scheme's opaque result here left every consumer of
+                        // a generic `to_tensor` (a `reshape`, say) suspended past
+                        // its declaration boundary.
+                        ToTensorPeel::VarLeaf { rank, variable }
+                            if rank > 0
+                                && matches!(
+                                    subst.tvar_restriction(variable),
+                                    Some(
+                                        TypeVarRestriction::ActiveFloat
+                                            | TypeVarRestriction::ActiveInt
+                                            | TypeVarRestriction::ActiveNumeric
+                                    )
+                                ) =>
+                        {
+                            let dims = kids
+                                .get(1)
+                                .and_then(|arg| static_to_tensor_shape(arg, rank))
+                                .unwrap_or_else(|| vec![Dim::Wildcard; rank]);
+                            return Type::Tensor(dims, TensorPrec::Var(variable));
+                        }
+                        ToTensorPeel::VarLeaf { .. } | ToTensorPeel::Pending => return result_ty,
                         ToTensorPeel::BadInner(inner) => {
                             return report(
                                 errors,
