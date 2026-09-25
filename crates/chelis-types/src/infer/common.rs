@@ -1965,6 +1965,7 @@ fn is_exact_op35_wrapper(name: &str) -> bool {
         name,
         "pkg__chelis__std__Std__Init__Kaiming__kaiming_normal"
             | "pkg__chelis__std__Std__Init__Kaiming__kaiming_uniform"
+            | "pkg__chelis__std__Std__Init__Kaiming__kaiming_uniform_given"
             | "pkg__chelis__std__Std__Init__Kaiming__tensor_shape"
             | "pkg__chelis__std__Std__Init__Random__normal_like"
             | "pkg__chelis__std__Std__Init__Random__tensor_shape"
@@ -1972,6 +1973,7 @@ fn is_exact_op35_wrapper(name: &str) -> bool {
             | "pkg__chelis__std__Std__Init__XavierExt__tensor_shape"
             | "pkg__chelis__std__Std__Init__XavierExt__xavier_normal"
             | "pkg__chelis__std__Std__Init__XavierExt__xavier_uniform"
+            | "pkg__chelis__std__Std__Init__XavierExt__xavier_uniform_given"
             | "pkg__chelis__std__Std__Sort__sort"
             | "pkg__chelis__std__Std__Tensor__Construct__arange"
             | "pkg__chelis__std__Std__Tensor__Construct__arange_values"
