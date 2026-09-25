@@ -52,7 +52,7 @@ Status legend:
 
 | Phase | Oracle command | Owning spec doc | Status |
 |---|---|---|---|
-| 2a | `cargo test -p chelis-effects` + `cargo test -p chelis-types --test linearity` + `cargo test -p chelis-cli --test cli check_reports_unhandled_random_effect` + `cargo test -p chelis-compiler-api --test resource_target_admission` + `cargo test -p chelis-cli --test issue_735_device_fence` | `spec/design/chelis_phase2_plan.md` §2a Acceptance Gate | default gate |
+| 2a | `cargo test -p chelis-effects` + `cargo test -p chelis-types --test linearity` + `cargo test -p chelis-cli --test cli check_reports_a_keyless_dropout_as_an_arity_error` + `cargo test -p chelis-compiler-api --test resource_target_admission` + `cargo test -p chelis-cli --test issue_735_device_fence` | `spec/design/chelis_phase2_plan.md` §2a Acceptance Gate | default gate |
 | 2b | `cargo test -p chelis-types --test linearity` | `spec/design/chelis_phase2_plan.md` §2b Acceptance Gate | default gate |
 | 2c | `cargo test -p chelis-macros --test expansion` | `spec/design/chelis_phase2_plan.md` §2c Acceptance Gate | default gate |
 | 2d | `cargo test -p chelis-ir --test vmap` + `cargo test -p chelis-e2e --test spec_suite` + `cargo test -p chelis-e2e --test pipeline` | `spec/design/chelis_phase2_plan.md` §2d Acceptance Gate | default gate |

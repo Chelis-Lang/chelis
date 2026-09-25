@@ -252,7 +252,7 @@ Current shipped-subset oracle:
 ```sh
 cargo test -p chelis-effects
 cargo test -p chelis-types --test linearity
-cargo test -p chelis-cli --test cli check_reports_unhandled_random_effect
+cargo test -p chelis-cli --test cli check_reports_a_keyless_dropout_as_an_arity_error
 cargo test -p chelis-compiler-api --test resource_target_admission
 cargo test -p chelis-cli --test issue_735_device_fence
 ```
