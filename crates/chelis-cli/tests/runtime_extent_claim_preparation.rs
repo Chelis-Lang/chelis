@@ -1906,6 +1906,61 @@ fn staged_sources_preserve_keyed_draws() {
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
+/// [05-OP-8]: a draw has its data operand's type. A key projected from a
+/// `split_key` result is a rank-zero key tensor, so a staged host source that
+/// captures the draw, directly or through a tuple, must still see the draw's
+/// `f32` tensor rather than its key.
+#[test]
+fn staged_sources_type_draws_keyed_by_split_projections() {
+    assert!(gcc_available(), "C toolchain required; no lane may skip");
+    let mut cases = Vec::new();
+    for n in [2, 3] {
+        for (kind, bindings) in [
+            (
+                "direct_capture",
+                "  size = if eq(numel(first), 4i64) then 2i64 else 3i64\n",
+            ),
+            (
+                "tuple_capture",
+                "  sizes = (first, numel(source))\n  size = if eq(numel(sizes.0), 4i64) then 2i64 else 3i64\n",
+            ),
+        ] {
+            let expected = if n == 2 {
+                // `second`'s key is `split_key(k).1` for `k = key_from_seed(7)`.
+                let (_, second) = common::key_ref::split(common::key_ref::key_from_seed(7));
+                Expected::TensorF32Bits(
+                    vec![2, 2],
+                    common::key_ref::uniform_f32(second, 4, 2.0, 5.0)
+                        .into_iter()
+                        .map(f32::to_bits)
+                        .collect(),
+                )
+            } else {
+                Expected::Domain("reshape", &["claimed = 2", "reshape axis 0 = 3"])
+            };
+            call_matrix(
+                &mut cases,
+                &format!("staged_source.split_projection.{kind}.x{n}"),
+                1686,
+                &format!(
+                    "def g[m, n](k: key, source: tensor[m, f32], x: tensor[n, f32]) -> tensor[2, 2, f32] = {{\n  (k_first, k_second) = split_key(k)\n  first = uniform_like(k_first, x, 2.0f32, 5.0f32)\n{bindings}  second = uniform_like(k_second, x, 2.0f32, 5.0f32)\n  reshape(second, [size, 2i64])\n}}\ndef f[m, n](source: tensor[m, f32], x: tensor[n, f32]) -> tensor[2, 2, f32] = g(key_from_seed(7i64), source, x)"
+                ),
+                "(tensor[d0, f32], tensor[d1, f32]) -> tensor[2, 2, f32]",
+                vec![vector(n), vector(n * 2)],
+                expected,
+            );
+        }
+    }
+    assert_eq!(cases.len(), 12);
+    let mut failures = Vec::new();
+    for case in cases {
+        let observed = observe(&case);
+        println!("{}: {}", case.id, observed);
+        failures.extend(contract_failures(&case, &observed));
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
 #[test]
 fn remainder_claims_preserve_hip_host_cli_and_api_execution() {
     assert!(gcc_available(), "C toolchain required; no lane may skip");
