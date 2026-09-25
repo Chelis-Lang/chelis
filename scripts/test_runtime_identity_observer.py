@@ -55,6 +55,44 @@ class ObservationFailureTests(unittest.TestCase):
         with self.assertRaisesRegex(observer.ObservationError, "changed compiler output: .*cargo clean -p dep"):
             observer.check_receipt(receipt)
 
+    def shared_toolchain_library(self):
+        """A managed Cargo session and a two-file compiler library directory."""
+        os.environ.update({"CHELIS_IDENTITY_BACKEND": "cargo", "CHELIS_IDENTITY_SESSION": "session"})
+        library = self.root / "sysroot" / "lib"
+        library.mkdir(parents=True)
+        (library / "libcore.rlib").write_bytes(b"core")
+        (library / "libstd.rlib").write_bytes(b"std")
+
+        def capture(operation, files):
+            self.assertEqual(operation, "core-capture")
+            return [{"logical_path": item["logical_path"], "digest": observer.digest(Path(item["physical"]).read_bytes())}
+                    for item in files]
+        helper = patch.object(observer, "helper", side_effect=capture)
+        helper.start()
+        self.addCleanup(helper.stop)
+        return library
+
+    def test_reused_toolchain_capture_rejects_changed_library_bytes(self):
+        library = self.shared_toolchain_library()
+        first = observer.session_toolchain_capture(library, observer.enumerate_files(library))
+        self.assertEqual(observer.session_toolchain_capture(library, observer.enumerate_files(library)), first)
+        observer.verify_toolchain_captures(self.root / "state", "session")
+        (library / "libstd.rlib").write_bytes(b"replaced std")
+        with self.assertRaisesRegex(observer.ObservationError, "compiler target library changed"):
+            observer.verify_toolchain_captures(self.root / "state", "session")
+
+    def test_shared_toolchain_capture_rejects_a_changed_listing(self):
+        library = self.shared_toolchain_library()
+        observer.session_toolchain_capture(library, observer.enumerate_files(library))
+        (library / "libextra.rlib").write_bytes(b"extra")
+        with self.assertRaisesRegex(observer.ObservationError, "compiler target library changed"):
+            observer.session_toolchain_capture(library, observer.enumerate_files(library))
+        (library / "libextra.rlib").unlink()
+        observer.session_toolchain_capture(library, observer.enumerate_files(library))
+        (library / "libcore.rlib").unlink()
+        with self.assertRaisesRegex(observer.ObservationError, "compiler target library changed"):
+            observer.verify_toolchain_captures(self.root / "state", "session")
+
     def test_managed_builds_resolve_the_target_directory(self):
         # Cargo keeps `..` in every path it derives from its target directory,
         # such as OUT_DIR, and identity path mappings reject such paths.

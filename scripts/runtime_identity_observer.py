@@ -266,6 +266,86 @@ def capture(roots, captured_by_path=None):
                      for item in planned]
 
 
+def publish_once(path, value):
+    """Publish a complete JSON value unless another process already did."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, temporary = tempfile.mkstemp(prefix=".identity-", dir=path.parent)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as stream:
+            json.dump(value, stream, sort_keys=True)
+        os.link(temporary, path)
+    except FileExistsError:
+        pass
+    finally:
+        os.unlink(temporary)
+
+
+def toolchain_capture_path(library_dir):
+    """Name one managed Cargo build's shared capture of a library directory."""
+    session = os.environ.get("CHELIS_IDENTITY_SESSION")
+    if os.environ.get("CHELIS_IDENTITY_BACKEND") != "cargo" or not session:
+        return None
+    return state() / "toolchain-captures" / session / (key(library_dir) + ".json")
+
+
+def toolchain_changed(library_dir):
+    return ObservationError(f"compiler target library changed during the managed build: {library_dir}")
+
+
+def session_toolchain_capture(library_dir, libraries):
+    """Return the build's one byte observation of a compiler library directory.
+
+    Every unit of a managed Cargo build reads the same target library
+    directory, and hashing it again for each unit dominated observation cost
+    (chelis#2394). The first unit publishes its capture once. A later unit
+    reuses it only while the directory lists the same files, and marks it
+    reused so the driver captures the directory again when Cargo exits and
+    rejects the build if a byte changed. Outside a managed Cargo build each
+    unit captures its own bytes.
+    """
+    path = toolchain_capture_path(library_dir)
+    if path is None:
+        return None
+    files = [str(Path(library_dir) / name) for name in libraries]
+    mine = None
+    if not path.exists():
+        captured = helper("core-capture", [{"logical_path": name, "physical": physical}
+                                           for name, physical in zip(libraries, files)])
+        mine = {"library_dir": str(library_dir), "captured": dict(zip(files, captured, strict=True))}
+        publish_once(path, mine)
+    shared = load(path)
+    if (mine is not None and shared != mine) or shared["library_dir"] != str(library_dir) \
+            or sorted(shared["captured"]) != sorted(files):
+        raise toolchain_changed(library_dir)
+    if mine is None:
+        path.with_suffix(".reused").touch()
+    return dict(shared["captured"])
+
+
+def verify_toolchain_captures(state_directory, session):
+    """Reject a managed build whose shared compiler library bytes changed.
+
+    The driver calls this after Cargo exits. A capture no later unit reused
+    was taken just before its only compilation, as without sharing. A reused
+    one must still describe the directory, so every receipt that reused it
+    names bytes still present when the build finished.
+    """
+    for path in sorted(Path(state_directory, "toolchain-captures", session).glob("*.json")):
+        if not path.with_suffix(".reused").exists():
+            continue
+        shared = load(path)
+        library_dir = Path(shared["library_dir"])
+        names = enumerate_files(library_dir)
+        files = [str(library_dir / name) for name in names]
+        if sorted(files) != sorted(shared["captured"]):
+            raise toolchain_changed(library_dir)
+        current = helper("core-capture", [{"logical_path": name, "physical": physical}
+                                          for name, physical in zip(names, files)])
+        if any(entry["digest"] != shared["captured"][physical]["digest"]
+               for physical, entry in zip(files, current, strict=True)):
+            raise toolchain_changed(library_dir)
+
+
 def cargo_event(category, artifact):
     path = state() / category / os.environ["CHELIS_IDENTITY_SESSION"] / (key(artifact) + ".json")
     deadline = time.monotonic() + 60
@@ -760,7 +840,7 @@ def collect_unit(
     normalized = normalize_values([item["value"] for item in observations], mappings)
     for item, value in zip(observations, normalized):
         item["value"] = value
-    planned, captured = capture(roots)
+    planned, captured = capture(roots, session_toolchain_capture(library_dir, libraries))
     unit["inputs"] = [entry["logical_path"] for entry in planned]
     if kind != "build_script" and manifest["package"].get("build", (manifest_dir / "build.rs").exists()) and execution is None:
         raise ObservationError("CHELIS_IDENTITY_MISSING_OBSERVATION: build-script execution receipt is missing; rebuild in a clean managed target")
@@ -1348,6 +1428,9 @@ def main(arguments=None):
             raise ObservationError("missing observer command")
         if args[0] == "validate-observation" and len(args) == 2:
             return validate_observation(args[1])
+        if args[0] == "verify-toolchain-captures" and len(args) == 2:
+            verify_toolchain_captures(state(), args[1])
+            return 0
         if args[0] == "observe-build-script":
             return build_execution(args[1], args[2:])
         if args[0] == "receipt-for" and len(args) == 2:

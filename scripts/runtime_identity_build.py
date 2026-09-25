@@ -482,8 +482,15 @@ def run(cargo, arguments):
             except (OSError, ValueError, KeyError, observer.ObservationError) as error:
                 failures.append(str(error))
         code = proc.wait()
+        # Units of this build may have reused one capture of a compiler library
+        # directory; it must still describe those bytes now that Cargo exited.
+        toolchain = None
+        if (state / "toolchain-captures" / environment["CHELIS_IDENTITY_SESSION"]).is_dir():
+            toolchain = subprocess.run([str(helper), "verify-toolchain-captures", environment["CHELIS_IDENTITY_SESSION"]], env=environment, check=False)
         if code:
             return code
+        if toolchain is not None and toolchain.returncode:
+            failures.append("compiler target library changed during the managed build")
         # Validate complete native producer graphs after draining the event
         # stream. Cached dependencies need no synthetic Cargo event: each
         # current rustc invocation already binds their exact observed bytes.
@@ -499,8 +506,9 @@ def run(cargo, arguments):
             proc.terminate(); proc.wait()
         os.unlink(metadata_path)
         os.unlink(environment_path)
-        # Launchers and Cargo events serve only this invocation's processes.
-        for category in ("launchers", "events", "build-events"):
+        # Launchers, Cargo events and shared toolchain captures serve only this
+        # invocation's processes.
+        for category in ("launchers", "events", "build-events", "toolchain-captures"):
             shutil.rmtree(state / category / environment["CHELIS_IDENTITY_SESSION"], ignore_errors=True)
 
 
