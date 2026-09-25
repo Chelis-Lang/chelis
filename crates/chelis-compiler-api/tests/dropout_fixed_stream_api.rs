@@ -1670,7 +1670,7 @@ const SAMPLED: &str = "sampled = dropout(key_from_seed(9i64), scalar_to_tensor(1
 
 /// [`SAMPLED`] and `f`, a function whose body names `sampled` in a dead
 /// binding.
-const NAMES_SAMPLED: &str = "sampled = dropout(key_from_seed(9i64), scalar_to_tensor(1.0f32), 1.0f32)\ndef f(v: tensor[32, f32]) -> tensor[32, f32] = {\n dead = sampled\n v\n}\n";
+const NAMES_SAMPLED: &str = "sampled = dropout(key_from_seed(9i64), scalar_to_tensor(1.0f32), 1.0f32)\ndef f(v: tensor[32, f32]) -> tensor[32, f32] = {\n  dead = sampled\n  v\n}\n";
 
 /// A selected root that binds `g` to `f`: unapplied, or applied to a copy of
 /// `argument` when `applied`.
@@ -1701,7 +1701,7 @@ fn dag_evaluator_rows() -> Vec<(&'static str, String, bool)> {
                 "value root, f unapplied"
             },
             format!(
-                "{input}{NAMES_SAMPLED}selected = {{\n {}\n copy(x)\n}}\n",
+                "{input}{NAMES_SAMPLED}selected = {{\n  {}\n  copy(x)\n}}\n",
                 binds_f(applied, "x")
             ),
             applied,
@@ -1713,7 +1713,7 @@ fn dag_evaluator_rows() -> Vec<(&'static str, String, bool)> {
                 "function root, f unapplied"
             },
             format!(
-                "{NAMES_SAMPLED}def selected(x: tensor[32, f32]) -> tensor[32, f32] = {{\n {}\n x\n}}\n",
+                "{NAMES_SAMPLED}def selected(x: tensor[32, f32]) -> tensor[32, f32] = {{\n  {}\n  x\n}}\n",
                 binds_f(applied, "x")
             ),
             applied,
@@ -1723,28 +1723,28 @@ fn dag_evaluator_rows() -> Vec<(&'static str, String, bool)> {
         (
             "named inside a differentiated body",
             format!(
-                "{input}{SAMPLED}def loss(v: tensor[32, f32]) -> tensor[f32] = {{\n dead = sampled\n sum(v, 0i32)\n}}\nselected = grad(loss)(copy(x))\n"
+                "{input}{SAMPLED}def loss(v: tensor[32, f32]) -> tensor[f32] = {{\n  dead = sampled\n  sum(v, 0i32)\n}}\nselected = grad(loss)(copy(x))\n"
             ),
             true,
         ),
         (
             "named inside a mapped body",
             format!(
-                "{input}{SAMPLED}def row(v: tensor[f32]) -> tensor[f32] = {{\n dead = sampled\n v\n}}\nselected = vmap(row)(copy(x))\n"
+                "{input}{SAMPLED}def row(v: tensor[f32]) -> tensor[f32] = {{\n  dead = sampled\n  v\n}}\nselected = vmap(row)(copy(x))\n"
             ),
             true,
         ),
         (
             "a value whose value is another's",
             format!(
-                "{input}kept = dropout(key_from_seed(1i64), scalar_to_tensor(1.0f32), 0.0f32)\nalias = {{\n dead = dropout(key_from_seed(8i64), scalar_to_tensor(1.0f32), 1.0f32)\n kept\n}}\nselected = {{\n dead = alias\n copy(x)\n}}\n"
+                "{input}kept = dropout(key_from_seed(1i64), scalar_to_tensor(1.0f32), 0.0f32)\nalias = {{\n  dead = dropout(key_from_seed(8i64), scalar_to_tensor(1.0f32), 1.0f32)\n  kept\n}}\nselected = {{\n  dead = alias\n  copy(x)\n}}\n"
             ),
             true,
         ),
         (
             "a local binding shadowing the value's name",
             format!(
-                "{input}{SAMPLED}selected = {{\n sampled = copy(x)\n dead = sampled\n copy(x)\n}}\n"
+                "{input}{SAMPLED}selected = {{\n  sampled = copy(x)\n  dead = sampled\n  copy(x)\n}}\n"
             ),
             false,
         ),
@@ -1857,7 +1857,7 @@ fn a_function_named_as_a_value_and_not_applied_runs_nothing_in_any_lane() {
             EvalRequest {
                 source_kind: SourceKind::Surf,
                 source: format!(
-                    "{NAMES_SAMPLED}def main() -> tensor[32, f32] = {{\n t = to_tensor([{ones}])\n {}\n t\n}}\n",
+                    "{NAMES_SAMPLED}def main() -> tensor[32, f32] = {{\n  t = to_tensor([{ones}])\n  {}\n  t\n}}\n",
                     binds_f(applied, "t")
                 ),
                 bindings: BTreeMap::new(),
@@ -1873,7 +1873,7 @@ fn a_function_named_as_a_value_and_not_applied_runs_nothing_in_any_lane() {
     for context in &function_library_contexts() {
         let client = |applied: bool| {
             format!(
-                "module Fnlib.Client\nimport Fnlib.Draw (f)\ndef main(x: tensor[32, f32]) -> tensor[32, f32] = {{\n {}\n x\n}}\n",
+                "module Fnlib.Client\nimport Fnlib.Draw (f)\ndef main(x: tensor[32, f32]) -> tensor[32, f32] = {{\n  {}\n  x\n}}\n",
                 binds_f(applied, "x")
             )
         };
