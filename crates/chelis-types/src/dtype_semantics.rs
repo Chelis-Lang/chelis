@@ -4006,6 +4006,7 @@ fn assert_float_trunc_source(op: &'static str, src: Prim) {
 // Stored-value serialization is a checked bit transport, separate from arithmetic
 // finalization. The private child module retains access to the sealed carriers.
 mod wire_codec;
+pub use wire_codec::{KeyBits, execution_storage};
 
 /// Bulk finalize: one monomorphized loop per dtype, never per-element
 /// dynamic dispatch (the section C5 performance contract). Traps on the

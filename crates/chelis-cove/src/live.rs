@@ -176,6 +176,7 @@ fn render_execution_value(value: &ExecutionValue) -> String {
             chelis_types::format_element(scalar.prim(), scalar.element_ref())
         }
         ExecutionValue::Bool { value } => value.to_string(),
+        ExecutionValue::Key { bits } => chelis_types::format_key(bits.key()),
         ExecutionValue::String { value } => value.clone(),
         ExecutionValue::List { value: items } => format!(
             "[{}]",

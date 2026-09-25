@@ -166,3 +166,48 @@ class ExecutionWireTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class KeyExecutionValueTests(unittest.TestCase):
+    """chelis#2413: keys cross the facade only as spec/10 §3.2 execution values."""
+
+    ROWS = ["25ea33e61c10576f", "707124fbecd5f054", "823936153a565205"]
+
+    def test_scalar_key_and_key_tensor_round_trip(self):
+        key = chelis._execution_value({"type": "key", "bits": "0000000000000007"})
+        self.assertEqual(key, chelis.Key("0000000000000007"))
+        wire = {"shape": [3], "data": {"dtype": "key", "bits": self.ROWS}}
+        tensor = chelis._execution_value({"type": "tensor", "value": wire})
+        self.assertEqual(tensor.dtype, "key")
+        self.assertEqual(tensor.data, tuple(chelis.Key(bits) for bits in self.ROWS))
+        # Printed, then fed back: the binding payload is the printed storage.
+        self.assertEqual(chelis._tensor_value_payload(tensor), wire)
+
+    def test_key_decoders_are_strict(self):
+        for bits in ("000000000000007", "00000000000000007", "00000000000000AB", 7):
+            with self.assertRaises(ValueError):
+                chelis._execution_value({"type": "key", "bits": bits})
+            with self.assertRaises(ValueError):
+                chelis._tensor_value({"shape": [1], "data": {"dtype": "key", "bits": [bits]}})
+        for payload in (
+            {"type": "key", "bits": "0000000000000007", "extra": 1},
+            {"type": "key", "value": "0000000000000007"},
+            {"type": "scalar", "value": {"dtype": "key", "bits": "0000000000000007"}},
+        ):
+            with self.assertRaises(ValueError):
+                chelis._execution_value(payload)
+        for storage in (
+            {"dtype": "key", "values": [7]},
+            {"dtype": "key", "bits": ["0000000000000007"], "values": [7]},
+        ):
+            with self.assertRaises(ValueError):
+                chelis._tensor_value({"shape": [1], "data": storage})
+
+    def test_a_key_is_never_a_numpy_value(self):
+        with self.assertRaises(ValueError):
+            chelis.Key(7)
+        with self.assertRaises(ChelisErrorOrValueError):
+            chelis._tensor_value_payload(np.array([7], dtype=np.uint64))
+
+
+ChelisErrorOrValueError = (ValueError, chelis.ChelisError)

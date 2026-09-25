@@ -70,6 +70,9 @@ impl JsonSchema for NumericScalar {
 #[serde(deny_unknown_fields)]
 struct TensorWire {
     shape: Vec<i64>,
+    /// The execution storage grammar: a key tensor's storage object is
+    /// admitted here and nowhere in a graph.
+    #[serde(with = "chelis_types::dtype_semantics::execution_storage")]
     data: TensorStorage,
 }
 

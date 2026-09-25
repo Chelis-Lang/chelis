@@ -176,6 +176,7 @@ fn structural_decode(
         ExecutionValue::Adt { ctor, fields } => decode_adt(ctor, fields, field_types),
         ExecutionValue::Scalar { value } => Ok(RuntimeValue::from_scalar_value(value.get())),
         ExecutionValue::Bool { value } => Ok(RuntimeValue::Bool(*value)),
+        ExecutionValue::Key { bits } => Ok(RuntimeValue::Key(bits.key())),
         ExecutionValue::String { value } => Ok(RuntimeValue::String(value.clone())),
         ExecutionValue::Unit => Ok(RuntimeValue::Unit),
         // The wire payload carries its dtype (execution wire v2); decode it
@@ -293,6 +294,12 @@ fn decode_scalar_field(
             other => Err(mismatch(&describe_payload(other))),
         };
     }
+    if prim == Prim::Key {
+        return match payload {
+            ExecutionValue::Key { bits } => Ok(RuntimeValue::Key(bits.key())),
+            other => Err(mismatch(&describe_payload(other))),
+        };
+    }
 
     match payload {
         ExecutionValue::Scalar { value } if value.get().prim() == prim => {
@@ -333,6 +340,7 @@ fn describe_payload(payload: &ExecutionValue) -> String {
         ExecutionValue::Tensor { .. } => "a tensor".to_string(),
         ExecutionValue::Scalar { value } => format!("a {}", value.get().prim().name()),
         ExecutionValue::Bool { .. } => "a bool".to_string(),
+        ExecutionValue::Key { .. } => "a key".to_string(),
         ExecutionValue::String { .. } => "a string".to_string(),
         ExecutionValue::List { .. } => "a list".to_string(),
         ExecutionValue::Dict { .. } => "a dict".to_string(),

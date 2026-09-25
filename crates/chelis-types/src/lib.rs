@@ -63,7 +63,7 @@ pub use context::{LibraryProofId, TypeEnv};
 pub use deep_type::is_checker_native_nominal;
 pub use dtype_semantics::{
     ArgReduceOp, CheckedCastKind, CheckedCastPlan, CheckedCastPlanError, CompareOp, FloatBinOp,
-    FloatUnOp, IndexedTrapCandidate, IntBinOp, IntUnOp, NUMERIC_TRAP_DIV_ZERO_KIND,
+    FloatUnOp, IndexedTrapCandidate, IntBinOp, IntUnOp, KeyBits, NUMERIC_TRAP_DIV_ZERO_KIND,
     NUMERIC_TRAP_DOMAIN_KIND, NUMERIC_TRAP_DTYPE_SEPARATOR, NUMERIC_TRAP_OPERATION_SEPARATOR,
     NUMERIC_TRAP_OVERFLOW_KIND, NUMERIC_TRAP_PREFIX, NumericFamily, NumericKernelError,
     NumericTrap, PreparedDropout, PreparedUniformLike, RandomKey, RawScalar, RawTensor,

@@ -923,22 +923,10 @@ pub(crate) fn runtime_value_to_schema(value: &RuntimeValue) -> Result<ExecutionV
         RuntimeValue::Scalar(payload) => ExecutionValue::Scalar {
             value: payload.value().try_into()?,
         },
-        // spec/10 section 3.1's scalar key execution value is not carried
-        // yet; refuse loudly rather than print a key as a number.
-        RuntimeValue::Key(_) => {
-            return Err(chelis_types::unsupported::Unsupported::new(
-                chelis_types::unsupported::UnsupportedKind::Construct(
-                    "a scalar key execution value".to_string(),
-                ),
-                "the execution-value schema",
-                chelis_types::unsupported::Stage::Runtime,
-                chelis_types::unimplemented_rejection!(
-                    2413,
-                    "the key execution value carrier lands with the public-entry key carrier"
-                ),
-            )
-            .to_string());
-        }
+        // spec/10 section 3.2: a scalar key is `{"type":"key","bits":h}`.
+        RuntimeValue::Key(key) => ExecutionValue::Key {
+            bits: chelis_types::KeyBits::new(*key),
+        },
         RuntimeValue::Bool(value) => ExecutionValue::Bool { value: *value },
         RuntimeValue::String(value) => ExecutionValue::String {
             value: value.clone(),

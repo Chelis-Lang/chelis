@@ -794,6 +794,7 @@ pub type TensorElements = chelis_types::TensorStorage;
 pub struct TensorValue {
     #[schemars(schema_with = "execution::shape_schema")]
     pub shape: Vec<i64>,
+    #[schemars(schema_with = "chelis_types::dtype_semantics::execution_storage::json_schema")]
     pub data: TensorElements,
 }
 
@@ -816,6 +817,11 @@ pub enum ExecutionValue {
     },
     Bool {
         value: bool,
+    },
+    /// spec/10 section 3.2's scalar key, `{"type":"key","bits":h}`: a key is
+    /// not a number, so it has its own variant and never a scalar carrier.
+    Key {
+        bits: chelis_types::KeyBits,
     },
     String {
         value: String,

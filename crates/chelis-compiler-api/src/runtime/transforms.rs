@@ -1412,6 +1412,7 @@ pub(super) fn prim_from_name(name: &str) -> Option<Prim> {
         "i64" => Prim::Int64,
         "bool" => Prim::Bool,
         "string" => Prim::String,
+        "key" => Prim::Key,
         _ => return None,
     })
 }
