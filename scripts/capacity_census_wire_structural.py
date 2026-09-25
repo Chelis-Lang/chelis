@@ -234,7 +234,8 @@ def structural_evidence():
                 "version-15",
                 "version-16",
                 "version-17",
-                "version-19",
+                "version-18",
+                "version-20",
             ),
         ),
         "earlier-shape-dependency": pairs(

@@ -100,6 +100,9 @@ fn number<T: FixedNumber>(request: &Request) -> Result<Value, String> {
 #[serde(deny_unknown_fields)]
 struct TensorInput {
     shape: Vec<i64>,
+    // The execution storage grammar, so a constructed key tensor is admitted
+    // exactly as the tensor execution value's own decoder admits it.
+    #[serde(with = "chelis_types::dtype_semantics::execution_storage")]
     data: TensorStorage,
 }
 fn tensor(request: &Request) -> Result<Value, String> {
@@ -114,9 +117,16 @@ fn tensor(request: &Request) -> Result<Value, String> {
     } else {
         decode(request)?
     };
-    let elements: Vec<_> = (0..value.data.len())
-        .map(|i| element(value.data.element_ref(i)))
-        .collect();
+    // A key has no numeric observation form; its elements are its 16 digits.
+    let elements: Vec<_> = match value.data.keys() {
+        Some(keys) => keys
+            .iter()
+            .map(|key| json!(format!("{:016x}", key.bits())))
+            .collect(),
+        None => (0..value.data.len())
+            .map(|i| element(value.data.element_ref(i)))
+            .collect(),
+    };
     Ok(
         json!({"dtype": value.data.prim().interchange_name(), "elements": elements, "shape": value.shape,
         "json": serde_json::to_value(&value).expect("encode observed tensor"),

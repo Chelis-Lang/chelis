@@ -466,9 +466,11 @@ class SchemaCases(unittest.TestCase):
             self.assertTrue(any(case.expected is not None for case in selected))
             self.assertTrue(any(case.expected is None for case in selected))
 
-    def test_a_key_tensor_has_no_execution_value_spelling(self):
-        # spec/10 section 3.2: the stored `key` dtype gets only rejected
-        # TensorValue spellings, and adds nothing to the numeric subset.
+    def test_a_key_tensor_execution_value_has_exactly_the_digit_spelling(self):
+        # spec/10 section 3.2: a key tensor's storage object is
+        # `{"dtype":"key","bits":[h,...]}`. It is admitted as a TensorValue in
+        # every codec, every other spelling is rejected, and the key adds
+        # nothing to the numeric subset or to a carried dtype's cases.
         from capacity_census_wire_schema import schema_cases
 
         keyed = VOCABULARY + [{"name": "key", "width": 8, "kind": "key"}]
@@ -477,19 +479,88 @@ class SchemaCases(unittest.TestCase):
         keys = [case for case in cases if case.dtype == "key"]
         self.assertEqual([case for case in cases if case.dtype != "key"], plain)
         self.assertEqual({case.carrier for case in keys}, {"TensorValue"})
-        self.assertEqual({case.codec for case in keys}, {"json", "construct"})
-        self.assertEqual(len(keys), 4)
-        self.assertTrue(all(case.expected is None for case in keys))
+        self.assertEqual({case.codec for case in keys}, {"json", "binary", "construct"})
+        admitted = {case.identity: case for case in keys if case.expected is not None}
+        self.assertEqual(
+            set(admitted),
+            {
+                f"TensorValue/{codec}/key/{label}"
+                for codec in ("json", "binary", "construct")
+                for label in ("scalar", "one", "matrix", "empty", "late-zero")
+            },
+        )
+        one = admitted["TensorValue/binary/key/one"]
+        self.assertEqual(
+            one.expected["json"],
+            {"shape": [1], "data": {"dtype": "key", "bits": ["8fd06b2e7bad8630"]}},
+        )
+        # Independent bincode: rank, extent, the ordinal after every carried
+        # dtype, one element, then the 16 digits as a length-prefixed string.
+        self.assertEqual(
+            bytes.fromhex(one.input),
+            (1).to_bytes(8, "little")
+            + (1).to_bytes(8, "little")
+            + len(ORDER).to_bytes(4, "little")
+            + (1).to_bytes(8, "little")
+            + (16).to_bytes(8, "little")
+            + b"8fd06b2e7bad8630",
+        )
+        rejected = {case.identity for case in keys if case.expected is None}
+        for label in (
+            "values-member",
+            "fifteen-digits",
+            "seventeen-digits",
+            "uppercase",
+            "prefixed",
+            "json-number",
+        ):
+            for codec in ("json", "construct"):
+                self.assertIn(f"TensorValue/{codec}/key/{label}", rejected)
+
+    def test_a_malformed_key_tensor_observation_fails_the_executed_check(self):
+        from capacity_census_wire_adapters import check_observations
+        from capacity_census_wire_schema import schema_cases
+
+        keyed = VOCABULARY + [{"name": "key", "width": 8, "kind": "key"}]
+        selected = {
+            case.identity: case
+            for case in schema_cases(keyed, ORDER)
+            if case.identity
+            in {"TensorValue/json/key/one", "TensorValue/json/key/uppercase"}
+        }
+        one = selected["TensorValue/json/key/one"]
+        cases = list(selected.values())
+        admitted = {"id": one.identity, "observation": one.expected}
+        refused = {
+            "id": "TensorValue/json/key/uppercase",
+            "observation": None,
+            "decode_error": "a key's bits require exactly 16 lowercase hexadecimal digits",
+        }
+        self.assertEqual(len(check_observations(cases, [admitted, refused])), 2)
+        # An admitted uppercase spelling, or a key read back as a signed
+        # integer, is a wrong observation, not a pass.
+        signed = {
+            "id": one.identity,
+            "observation": {
+                **one.expected,
+                "elements": [int("8fd06b2e7bad8630", 16) - (1 << 64)],
+            },
+        }
+        uppercase = {"id": refused["id"], "observation": one.expected}
+        for rows in ([signed, refused], [admitted, uppercase]):
+            with self.subTest(rows=rows), self.assertRaises(GraphError):
+                check_observations(cases, rows)
 
     def test_runtime_reference_owner_matrix_covers_all_admission_entry_points(self):
         from capacity_census_wire_envelopes import dag_cases
 
         cases = {c.identity: c for c in dag_cases()}
         current = cases["WireDag/json/empty"]
-        self.assertEqual(current.expected["schema_version"], 18)
+        self.assertEqual(current.expected["schema_version"], 19)
         self.assertIsNone(cases["WireDag/json/version-16"].expected)
         self.assertIsNone(cases["WireDag/json/version-17"].expected)
-        self.assertIsNone(cases["WireDag/json/version-19"].expected)
+        self.assertIsNone(cases["WireDag/json/version-18"].expected)
+        self.assertIsNone(cases["WireDag/json/version-20"].expected)
         for codec in ("json", "construct", "admit"):
             for owner in ("expand", "reshape", "pad", "shrink", "stride"):
                 prefix = f"WireDag/{codec}/owner-{owner}-"
@@ -919,6 +990,8 @@ class ActualSchemaCodec(unittest.TestCase):
             "wrong-artifact-version-vocabulary",
             "missing-artifact-version-header",
             "wrong-artifact-metadata-mirror",
+            "tensor-data-codec",
+            "key-bits-word",
         ):
             with self.subTest(mutation=mutation):
                 documents = copy.deepcopy(self.documents)
@@ -1026,6 +1099,30 @@ class ActualSchemaCodec(unittest.TestCase):
                         if i.get("name") == "ReportWire"
                     )
                     del api["index"][str(mirror["id"])]
+                elif mutation == "tensor-data-codec":
+                    # The execution storage codec relocated to another module.
+                    tensor = next(
+                        i
+                        for i in api["index"].values()
+                        if i.get("name") == "TensorWire"
+                    )
+                    data = api["index"][
+                        str(tensor["inner"]["struct"]["kind"]["plain"]["fields"][1])
+                    ]
+                    data["attrs"] = [
+                        {"other": '#[serde(with = "chelis_types::arbitrary_storage")]'}
+                    ]
+                elif mutation == "key-bits-word":
+                    # The scalar key carrier's opaque key replaced by a bare word.
+                    types = documents[0]
+                    carrier = next(
+                        i
+                        for i in types["index"].values()
+                        if i.get("name") == "KeyBits" and "struct" in i["inner"]
+                    )
+                    types["index"][str(carrier["inner"]["struct"]["kind"]["tuple"][0])][
+                        "inner"
+                    ]["struct_field"] = {"primitive": "u64"}
                 elif mutation == "public-field":
                     field["visibility"] = "public"
                 elif mutation == "bare-f64":

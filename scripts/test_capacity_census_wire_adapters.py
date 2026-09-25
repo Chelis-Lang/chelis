@@ -325,9 +325,11 @@ class CanonicalCodecControls(unittest.TestCase):
         return [{"name": n, "width": w, "kind": k} for n, w, k in rows]
 
     def test_a_stored_key_gets_only_rejected_literal_spellings(self):
-        # spec/10 section 3.2: `key` is a runtime dtype with no literal or
-        # storage carrier. Every key case is an executed rejection, in both
-        # codecs and both carriers, and the key shifts no carried ordinal.
+        # spec/10 section 3.2: `key` is a runtime dtype with no scalar object
+        # and no graph literal. Every key case is an executed rejection, in
+        # both codecs and both carriers, and the key shifts no carried ordinal.
+        # The storage mirrors hold the key storage object for execution values
+        # only, so the graph codec refuses a well-formed one by name.
         from capacity_census_wire_adapters import codec_cases
 
         plain = codec_cases(self.vocabulary(self.NUMERIC))
@@ -347,12 +349,36 @@ class CanonicalCodecControls(unittest.TestCase):
             ),
         )
         self.assertTrue(all(c.expected is None and c.rejection_contains for c in keys))
-        # The bincode control uses the first ordinal past the carried variants,
-        # the one an appended key variant would take.
+        reasons = {c.identity: c.rejection_contains for c in keys}
+        refusal = "a random key has no literal carrier"
+        self.assertEqual(
+            reasons,
+            {
+                "scalar/json/key/no-literal-bits": "unknown variant",
+                "scalar/json/key/no-literal-value": "unknown variant",
+                "scalar/binary/key/no-literal-ordinal": "variant index",
+                "storage/json/key/no-literal-bits": refusal,
+                "storage/json/key/no-literal-value": "unknown field",
+                "storage/binary/key/no-literal-ordinal": refusal,
+            },
+        )
+        # The bincode control uses the first ordinal past the carried variants:
+        # absent from the scalar mirrors, the appended key storage variant.
         for case in keys:
             if case.codec == "binary":
                 ordinal = int.from_bytes(bytes.fromhex(case.input)[:4], "little")
                 self.assertEqual(ordinal, len(self.NUMERIC))
+        storage = bytes.fromhex(
+            next(
+                c.input
+                for c in keys
+                if c.identity == "storage/binary/key/no-literal-ordinal"
+            )
+        )
+        self.assertEqual(
+            storage[4:],
+            (1).to_bytes(8, "little") + (16).to_bytes(8, "little") + b"0" * 16,
+        )
 
     def test_a_numeric_payload_cannot_be_declared_a_key(self):
         # Negative controls: the key kind admits exactly the one 64-bit `key`
@@ -526,8 +552,9 @@ class ActualCanonicalCodec(unittest.TestCase):
 
     def test_the_actual_codec_stores_keys_with_no_literal_carrier(self):
         # The executed runtime vocabulary holds the key dtype, the actual
-        # codec rejected every key spelling, and the opaque key payload added
-        # no numeric leaf (the leaf set above is the eight numeric dtypes).
+        # scalar and graph codecs rejected every key spelling, and neither the
+        # opaque key payload nor the key storage object's KeyHex digits added
+        # a numeric leaf (the leaf set above is the eight numeric dtypes).
         vocabulary = json.loads(self.receipt.vocabulary)
         self.assertIn({"name": "key", "width": 8, "kind": "key"}, vocabulary)
         executed = {row.identity: row for row in self.receipt.outcomes}
@@ -545,11 +572,46 @@ class ActualCanonicalCodec(unittest.TestCase):
         for change, message in (
             ("mirror-variant", "a random key has no wire literal carrier"),
             ("bare-word", "native dtype/width vocabulary differs"),
+            ("storage-word", "key storage payload must be KeyHex digits"),
+            ("storage-first", "the key storage variant must follow every carried dtype"),
+            ("digit-word", "KeyHex payload must be an exact String"),
         ):
             with self.subTest(change=change):
                 document = copy.deepcopy(self.document)
                 items = document["index"]
-                if change == "mirror-variant":
+
+                def storage_key_field():
+                    mirror = next(
+                        i for i in items.values() if i.get("name") == "StorageWire"
+                    )
+                    variant = next(
+                        items[str(v)]
+                        for v in mirror["inner"]["enum"]["variants"]
+                        if items[str(v)]["name"] == "Key"
+                    )
+                    return mirror, variant, items[
+                        str(variant["inner"]["variant"]["kind"]["struct"]["fields"][0])
+                    ]
+
+                if change == "storage-word":
+                    # The key storage object's digits replaced by bare words.
+                    _, _, field = storage_key_field()
+                    field["inner"]["struct_field"]["resolved_path"]["args"][
+                        "angle_bracketed"
+                    ]["args"][0] = {"type": {"primitive": "u64"}}
+                elif change == "storage-first":
+                    mirror, variant, _ = storage_key_field()
+                    variants = mirror["inner"]["enum"]["variants"]
+                    variants.remove(variant["id"])
+                    variants.insert(0, variant["id"])
+                elif change == "digit-word":
+                    digits = next(
+                        i for i in items.values() if i.get("name") == "KeyHex"
+                    )
+                    items[str(digits["inner"]["struct"]["kind"]["tuple"][0])]["inner"][
+                        "struct_field"
+                    ] = {"primitive": "u64"}
+                elif change == "mirror-variant":
                     mirror = next(
                         i for i in items.values() if i.get("name") == "ScalarWire"
                     )

@@ -186,7 +186,7 @@ def dag_cases():
 
     empty = {"schema_version": 19, "nodes": [], "roots": []}
     add("empty", empty, True)
-    for version in (None, 10, 11, 12, 13, 14, 15, 16, 17, 19):
+    for version in (None, 10, 11, 12, 13, 14, 15, 16, 17, 18, 20):
         value = {**empty, "schema_version": version}
         if version is None:
             del value["schema_version"]
@@ -705,7 +705,7 @@ def result_reference_cases():
                             "outside the owning DAG",
                         )
                     )
-        for version in (10, 11, 12, 13, 14, 15, 16, 17, 19):
+        for version in (10, 11, 12, 13, 14, 15, 16, 17, 18, 20):
             bad = copy.deepcopy(good)
             bad["dag"]["schema_version"] = version
             cases.append(

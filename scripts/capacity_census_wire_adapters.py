@@ -100,7 +100,8 @@ def _binary(index: int, dtype: dict, elements: list, storage: bool) -> bytes:
     if storage:
         result += len(elements).to_bytes(8, "little")
     for element in elements:
-        if dtype["kind"] == "float":
+        # Float bits and key digits are both length-prefixed strings.
+        if dtype["kind"] in {"float", "key"}:
             text = element.encode("ascii")
             result += len(text).to_bytes(8, "little") + text
         elif dtype["kind"] == "integer":
@@ -111,9 +112,19 @@ def _binary(index: int, dtype: dict, elements: list, storage: bool) -> bytes:
 
 
 def _carried(vocabulary: list[dict]) -> tuple[str, ...]:
-    """The runtime dtypes the codec carries: every one but the random key,
-    which spec/10 section 3.2 gives no literal or storage carrier."""
+    """The runtime dtypes a scalar or graph literal carries: every one but the
+    random key, which spec/10 section 3.2 gives no scalar object and no graph
+    literal."""
     return tuple(d["name"] for d in vocabulary if d["kind"] != "key")
+
+
+def _stored(vocabulary: list[dict]) -> tuple[str, ...]:
+    """The storage mirrors' variants: the carried dtypes, then the key storage
+    object that only a tensor execution value admits (spec/10 section 3.2).
+    The key is appended last so every carried dtype keeps the scalar ordinal."""
+    return _carried(vocabulary) + tuple(
+        d["name"] for d in vocabulary if d["kind"] == "key"
+    )
 
 
 def codec_cases(
@@ -135,17 +146,22 @@ def codec_cases(
         name, width, kind = dtype["name"], dtype["width"], dtype["kind"]
         if kind == "key":
             # A key is stored (runtime dtype `key`, one 64-bit word) but has no
-            # codec spelling at all: every attempted literal is rejected, in
-            # JSON by its tag and in bincode at the ordinal an appended key
-            # variant would take.
+            # scalar object and no graph literal (spec/10 section 3.2). The
+            # scalar mirrors have no key variant, so a key spelling is rejected
+            # by its JSON tag and at the first bincode ordinal past the carried
+            # variants. The storage mirrors do hold the key storage object,
+            # appended at that same ordinal, for tensor execution values only;
+            # the graph codec `TensorStorage` decodes it and then refuses it.
             if name != "key" or width != 8:
                 raise GraphError("unsupported random key runtime dtype")
             word = (7).to_bytes(8, "little")
+            digits = "0" * 16
+            refusal = "a random key has no literal carrier"
             for carrier in ("scalar", "storage"):
                 storage = carrier == "storage"
                 field = "values" if storage else "value"
                 for label, payload in (
-                    ("no-literal-bits", "0" * 16),
+                    ("no-literal-bits", digits),
                     ("no-literal-value", 7),
                 ):
                     member = "bits" if label == "no-literal-bits" else field
@@ -158,21 +174,31 @@ def codec_cases(
                             "json",
                             canonical(bad),
                             None,
-                            "unknown variant",
+                            "unknown variant"
+                            if not storage
+                            else refusal
+                            if member == "bits"
+                            else "unknown field",
                         )
                     )
                 binary = len(order).to_bytes(4, "little")
                 if storage:
+                    # A well-formed key storage object, so the refusal is the
+                    # graph codec's own and not a malformed payload.
+                    text = digits.encode("ascii")
                     binary += (1).to_bytes(8, "little")
+                    binary += len(text).to_bytes(8, "little") + text
+                else:
+                    binary += word
                 cases.append(
                     CodecCase(
                         f"{carrier}/binary/{name}/no-literal-ordinal",
                         name,
                         carrier,
                         "binary",
-                        (binary + word).hex(),
+                        binary.hex(),
                         None,
-                        "variant index",
+                        refusal if storage else "variant index",
                     )
                 )
             continue
@@ -400,6 +426,11 @@ from capacity_census_graph import (
 _TYPES = "chelis_types::dtype_semantics::"
 _WIRE = _TYPES + "wire_codec::"
 _HEX = _WIRE + "HexBits"
+# spec/10 section 3.2's key digits `h` and the scalar key carrier. Neither is a
+# number: the digits are a private String, and the carrier's native payload is
+# the opaque `RandomKey`, so both add no numeric leaf.
+_KEY_HEX = _WIRE + "KeyHex"
+_KEY_BITS = _WIRE + "KeyBits"
 _MIRRORS = tuple(
     _WIRE + name
     for name in ("ScalarWire", "BinaryScalarWire", "StorageWire", "BinaryStorageWire")
@@ -587,9 +618,92 @@ class _CodecShapeGraph(RustdocGraph):
     def _definition(self, crate, item_id, identity):
         if identity in self.definitions:
             return
-        if identity not in _CARRIERS and identity != _HEX and identity not in _MIRRORS:
+        if (
+            identity not in _CARRIERS
+            and identity not in {_HEX, _KEY_HEX, _KEY_BITS}
+            and identity not in _MIRRORS
+        ):
             return super()._definition(crate, item_id, identity)
         item = self._item(crate, item_id)
+        if identity == _KEY_HEX:
+            # Transparent over a private String with a strict custom decoder,
+            # like HexBits but with no width parameter: the width is the key's.
+            body = item["inner"].get("struct")
+            _require(
+                body is not None and not self._parameters(body),
+                "KeyHex must be an exact nongeneric struct",
+            )
+            self._private(item, "::dtype_semantics::wire_codec")
+            _require(
+                [a for a in _attributes(item) if a.startswith("#[serde")]
+                == ["#[serde(transparent)]"],
+                "KeyHex transparency changed",
+            )
+            ids = body["kind"].get("tuple")
+            _require(
+                isinstance(ids, list) and len(ids) == 1,
+                "KeyHex payload layout changed",
+            )
+            field = self._item(crate, ids[0])
+            self._private(field, "::dtype_semantics::wire_codec")
+            _require(not _serde(field), "KeyHex payload gained serde options")
+            ty = self._type(crate, field["inner"]["struct_field"], {})
+            _require(
+                ty == ("atomic", "alloc::string::String"),
+                "KeyHex payload must be an exact String",
+            )
+            codec = self._serde_implementations(crate, body, {"Deserialize"})
+            self.definitions[identity] = Definition(
+                identity,
+                "struct",
+                (),
+                (("transparent", True),),
+                (("private-string",),),
+                (Edge(identity + ".$0", ty, ()),),
+                "custom-shape:" + codec,
+            )
+            return
+        if identity == _KEY_BITS:
+            # The scalar key carrier of `{"type":"key","bits":h}`: its native
+            # payload is the opaque key and both directions of its codec are
+            # the KeyHex digits, never an integer or IEEE bits.
+            body = item["inner"].get("struct")
+            _require(
+                body is not None and not self._parameters(body) and not _serde(item),
+                "KeyBits carrier layout changed",
+            )
+            ids = body["kind"].get("tuple")
+            _require(
+                isinstance(ids, list) and len(ids) == 1,
+                "KeyBits must have one private key payload",
+            )
+            field = self._item(crate, ids[0])
+            self._private(field, "::dtype_semantics::wire_codec")
+            _require(not _serde(field), "KeyBits payload gained serde options")
+            nominal, args = self._nominal(crate, field["inner"]["struct_field"])
+            _require(
+                nominal == _TYPES + "RandomKey" and args is None,
+                "KeyBits native payload must be the opaque RandomKey",
+            )
+            codec = self._serde_implementations(
+                crate, body, {"Serialize", "Deserialize"}
+            )
+            _require(_KEY_HEX in self.locations, "missing private key digit codec")
+            target_crate, target_id = self.locations[_KEY_HEX]
+            self.definitions[identity] = None
+            ty = self._type(
+                target_crate, {"resolved_path": {"id": target_id, "args": None}}, {}
+            )
+            self.definitions[identity] = Definition(
+                identity,
+                "struct",
+                (),
+                (),
+                (("private-native", nominal),),
+                (Edge(identity + ".$bits", ty, ()),),
+                "custom-shape:" + codec,
+            )
+            return
         if identity == _HEX:
             body = item["inner"].get("struct")
             _require(
@@ -710,13 +824,40 @@ class _CodecShapeGraph(RustdocGraph):
                 name in self.vocabulary, "wire variant lacks executed runtime dtype"
             )
             dtype = self.vocabulary[name]
+            # A scalar key is its own execution value, never a scalar object.
             _require(
-                dtype["kind"] != "key", "a random key has no wire literal carrier"
+                storage or dtype["kind"] != "key",
+                "a random key has no wire literal carrier",
             )
             _require(
                 attrs == (() if binary else (("rename", name),)),
                 "wire variant dtype name changed",
             )
+            if dtype["kind"] == "key":
+                # The key storage object `{"dtype":"key","bits":[h,...]}`: its
+                # payload is KeyHex digits, which carry no numeric authority.
+                _require(
+                    layout == ("struct", (("bits", ()),)),
+                    "key storage payload fields changed",
+                )
+                edge = next(
+                    (
+                        e
+                        for e in definition.edges
+                        if e.path == identity + "::" + variant + ".bits"
+                    ),
+                    None,
+                )
+                _require(
+                    edge is not None
+                    and not edge.serde
+                    and edge.type
+                    == ("container", "alloc::vec::Vec", (("reference", _KEY_HEX, ()),)),
+                    "key storage payload must be KeyHex digits",
+                )
+                edges.append(edge)
+                order.append(name)
+                continue
             field = (
                 "bits" if dtype["kind"] == "float" else "values" if storage else "value"
             )
@@ -754,10 +895,15 @@ class _CodecShapeGraph(RustdocGraph):
                 else edge
             )
             order.append(name)
-        carried = _carried(list(self.vocabulary.values()))
+        vocabulary = list(self.vocabulary.values())
+        carried = _stored(vocabulary) if storage else _carried(vocabulary)
         _require(
             len(order) == len(carried) and set(order) == set(carried),
             "wire mirror dtype vocabulary is incomplete",
+        )
+        _require(
+            order[len(_carried(vocabulary)) :] == list(carried[len(_carried(vocabulary)) :]),
+            "the key storage variant must follow every carried dtype",
         )
         self.orders[identity] = tuple(order)
         self.definitions[identity] = replace(
@@ -780,9 +926,18 @@ class _CodecShapeGraph(RustdocGraph):
                 (crate, identity, {"resolved_path": {"id": item_id, "args": None}})
             )
         result = self._discover(roots)
-        orders = list(self.orders.values())
+        scalar = [self.orders.get(_WIRE + n) for n in ("ScalarWire", "BinaryScalarWire")]
+        storage = [
+            self.orders.get(_WIRE + n) for n in ("StorageWire", "BinaryStorageWire")
+        ]
+        keys = tuple(
+            d["name"] for d in self.vocabulary.values() if d["kind"] == "key"
+        )
         _require(
-            len(orders) == 4 and all(order == orders[0] for order in orders),
+            len(self.orders) == 4
+            and scalar[0] is not None
+            and all(order == scalar[0] for order in scalar)
+            and all(order == scalar[0] + keys for order in storage),
             "JSON/positional dtype orders disagree",
         )
         return result
