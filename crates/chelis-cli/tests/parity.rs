@@ -457,6 +457,16 @@ fn parity_grad_wrt_order() {
 }
 
 #[test]
+fn parity_grad_disconnected() {
+    let path = examples_root().join("grad_disconnected.ch");
+    drive_parity(&path, true);
+    assert_eq!(
+        run_eval(&path),
+        b"out = tensor(shape=[2, 3], data=[0.0, 0.0, 0.0, 0.0, 0.0, 0.0])\n"
+    );
+}
+
+#[test]
 fn parity_grad_extent_claim() {
     let path = examples_root().join("grad_extent_claim.ch");
     drive_parity(&path, true);

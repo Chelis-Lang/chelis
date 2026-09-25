@@ -9736,3 +9736,213 @@ int main() {{
         "and both roots produce their exact negated inputs: {out}"
     );
 }
+
+// #1767: retain checked top-level input contracts and derive disconnected
+// cotangents from each actual's physical axes, including cached composition.
+fn gradient_geometry_checked(source: &str) -> chelis_types::CheckedProgram {
+    let deep = chelis_surf::desugar::desugar_program(
+        &chelis_surf::parser::parse_str(source).expect("gradient fixture parses"),
+    )
+    .unwrap();
+    let checked = chelis_types::check_typed_program(&deep).expect("gradient fixture checks");
+    let checked = chelis_effects::check_program(&checked).unwrap();
+    chelis_types::check_linearity(&checked).unwrap()
+}
+
+fn assert_zero_geometry_both_lanes(
+    mut dag: Dag,
+    inputs: &[(&str, &[usize])],
+    expected: &[&[usize]],
+    reject_input: bool,
+) {
+    use chelis_ir::eval::eval_tensor_roots_with_strict;
+    let evaluated = eval_tensor_roots_with_strict(&dag, dag.roots(), |name| {
+        inputs
+            .iter()
+            .find(|(label, _)| *label == name)
+            .map(|(_, shape)| {
+                TensorValue::from_storage(
+                    shape.to_vec(),
+                    chelis_types::finalize_tensor(
+                        "test",
+                        Prim::F32,
+                        chelis_types::RawTensor::Float(vec![1.0; shape.iter().product()]),
+                    )
+                    .unwrap(),
+                )
+            })
+    });
+    if reject_input {
+        let error = evaluated.expect_err("disconnected input claim must still execute");
+        assert!(
+            error.contains("numeric trap: domain in load at i64"),
+            "{error}"
+        );
+    } else {
+        let evaluated = evaluated.unwrap();
+        assert_eq!(dag.roots().len(), expected.len());
+        for (root, shape) in dag.roots().iter().zip(expected) {
+            assert_eq!(dag.get(*root).unwrap().output_type.dims.len(), shape.len());
+            let value = &evaluated[root];
+            assert_eq!(value.shape, *shape);
+            assert_eq!(value.prim(), Prim::F32);
+            assert_eq!(value.to_f64_lossy_vec(), vec![0.0; shape.iter().product()]);
+        }
+    }
+    // Restrict the native entry to the same roots the evaluator executed.
+    dag = chelis_ir::optimize::dead_code_eliminate(&dag);
+    let generated = codegen_with_options(
+        &dag,
+        "gradient_geometry",
+        CodegenOptions {
+            use_blas: false,
+            math_lib_override: Some(MathLib::None),
+            static_entry: false,
+        },
+    )
+    .expect("gradient C is publishable");
+    let mut harness = String::from(
+        "#include \"chelis_runtime.h\"\n#include <stdio.h>\nvoid gradient_geometry(chelis_tensor **, int, chelis_tensor **, int);\nint main(void) {\n",
+    );
+    let spell = |shape: &[usize]| {
+        if shape.is_empty() {
+            "0".into()
+        } else {
+            shape
+                .iter()
+                .map(usize::to_string)
+                .collect::<Vec<_>>()
+                .join(",")
+        }
+    };
+    for (i, name) in generated.input_labels.iter().enumerate() {
+        let shape = inputs
+            .iter()
+            .find(|(label, _)| *label == name.as_str())
+            .unwrap_or_else(|| panic!("unexpected input {name}"))
+            .1;
+        let rank = shape.len();
+        let count = shape.iter().product::<usize>();
+        harness.push_str(&format!("int64_t shape_{i}[] = {{{}}};\nfloat data_{i}[{}] = {{0}};\nchelis_tensor *input_{i} = chelis_tensor_entry_borrow({rank}, shape_{i}, CHELIS_DTYPE_F32, data_{i}, {count} * sizeof(float));\n", spell(shape), count.max(1)));
+    }
+    let input_names = (0..generated.input_labels.len())
+        .map(|i| format!("input_{i}"))
+        .collect::<Vec<_>>()
+        .join(",");
+    let input_names = if input_names.is_empty() {
+        "NULL".into()
+    } else {
+        input_names
+    };
+    harness.push_str(&format!("chelis_tensor *inputs[] = {{{input_names}}}, *outputs[{}] = {{NULL}};\ngradient_geometry(inputs, {}, outputs, {});\n", expected.len(), generated.input_labels.len(), expected.len()));
+    for (i, shape) in expected.iter().enumerate() {
+        let rank = shape.len();
+        let count = shape.iter().product::<usize>();
+        harness.push_str(&format!("int64_t expected_{i}[] = {{{}}};\nchelis_read_view result_{i} = chelis_tensor_read_view(outputs[{i}]);\nif (result_{i}.dtype != CHELIS_DTYPE_F32 || result_{i}.count != {count} || chelis_tensor_rank(outputs[{i}]) != {rank}) return 10;\nfor (int a=0; a<{rank}; ++a) if (chelis_tensor_shape(outputs[{i}],a) != expected_{i}[a]) return 11;\nfor (int a=0; a<{count}; ++a) if (((const float*)result_{i}.data)[a] != 0.0f) return 12;\nchelis_tensor_release(outputs[{i}]);\n", spell(shape)));
+    }
+    for i in 0..generated.input_labels.len() {
+        harness.push_str(&format!("chelis_tensor_release(input_{i});\n"));
+    }
+    harness.push_str("puts(\"GRADIENT GEOMETRY PASS\"); return 0; }\n");
+    let (ok, out) =
+        compile_and_run_kernel_capturing("gradient_geometry", &generated.c_source, &harness);
+    assert_eq!(ok, !reject_input, "{out}");
+    if reject_input {
+        // The direct kernel ABI validates static input contracts in its
+        // preamble; an extent witness can instead own the same check.
+        assert!(
+            out.contains("numeric trap: domain in load at i64")
+                || (out.contains("input `") && out.contains("expected")),
+            "{out}"
+        );
+    } else {
+        assert_eq!(out, "GRADIENT GEOMETRY PASS\n");
+    }
+}
+
+#[test]
+fn issue_1767_disconnected_actual_geometry_executes_on_eval_and_c() {
+    for shape in [vec![3], vec![], vec![2, 0, 3], vec![2, 3]] {
+        let dimensions = shape.iter().map(|n| format!("{n}, ")).collect::<String>();
+        let source = format!(
+            "x: tensor[{dimensions}f32] = x\ndef loss(z: tensor[{dimensions}f32]) -> f32 = 1.0f32\nderivative = grad(loss)(x)\n"
+        );
+        let checked = gradient_geometry_checked(&source);
+        let library = chelis_ir::lower::try_lower_program_to_library(&checked).unwrap();
+        assert_eq!(
+            library.program_types()["derivative"].dims,
+            shape.iter().copied().map(DimInfo::Lit).collect::<Vec<_>>()
+        );
+        let mut dag = library.dag().clone();
+        dag.set_roots(vec![library.symbol_table()["derivative"]]);
+        assert_zero_geometry_both_lanes(dag.clone(), &[("x", &shape)], &[&shape], false);
+        let mut wrong_shape = shape.clone();
+        if !wrong_shape.is_empty() {
+            wrong_shape[0] += 1;
+            assert_zero_geometry_both_lanes(dag, &[("x", &wrong_shape)], &[&shape], true);
+        }
+    }
+}
+
+#[test]
+fn issue_1767_symbolic_actual_axes_are_read_for_each_execution() {
+    let source = "x: tensor[*, *, f32] = x\ndef loss[rows, cols](z: tensor[rows, cols, f32]) -> f32 = 1.0f32\nderivative = grad(loss)(x)\n";
+    let library =
+        chelis_ir::lower::try_lower_program_to_library(&gradient_geometry_checked(source)).unwrap();
+    let mut dag = library.dag().clone();
+    dag.set_roots(vec![library.symbol_table()["derivative"]]);
+    for shape in [vec![2, 3], vec![3, 2], vec![0, 4], vec![4, 0]] {
+        assert_zero_geometry_both_lanes(dag.clone(), &[("x", &shape)], &[&shape], false);
+    }
+}
+
+#[test]
+fn issue_1767_parameter_and_ordered_multiple_actuals_execute_on_eval_and_c() {
+    let source = "def loss[rows, cols, other, extra](x: tensor[rows, cols, f32], y: tensor[other, extra, f32]) -> f32 = 1.0f32\n\
+        def derivative(theta: tensor[2, 3, f32], eta: tensor[2, 3, f32]) = grad(loss, wrt=(y, x, y))(permute(theta, 1i32, 0i32), eta)\n";
+    let library =
+        chelis_ir::lower::try_lower_program_to_library(&gradient_geometry_checked(source)).unwrap();
+    let mut dag = library.dag().clone();
+    dag.set_roots(dag.roots()[dag.roots().len() - 3..].to_vec());
+    assert_zero_geometry_both_lanes(
+        dag.clone(),
+        &[("theta", &[2, 3]), ("eta", &[2, 3])],
+        &[&[2, 3], &[3, 2], &[2, 3]],
+        false,
+    );
+    assert_zero_geometry_both_lanes(
+        dag,
+        &[("theta", &[3, 2]), ("eta", &[2, 3])],
+        &[&[2, 3], &[3, 2], &[2, 3]],
+        true,
+    );
+}
+
+#[test]
+fn issue_1767_live_and_decoded_helper_contexts_execute_on_eval_and_c() {
+    let source = "x: tensor[2, 3, f32] = x\ndef loss[rows, cols](z: tensor[rows, cols, f32]) -> f32 = 1.0f32\ndef helper[rows, cols](theta: tensor[rows, cols, f32]) = grad(loss)(theta)\n";
+    let checked = gradient_geometry_checked(source);
+    let library = chelis_ir::lower::try_lower_program_to_library(&checked).unwrap();
+    let decoded =
+        serde_json::from_slice::<chelis_ir::LoweredLibrary>(&serde_json::to_vec(&library).unwrap())
+            .unwrap();
+    let library_deep =
+        chelis_surf::desugar::desugar_program(&chelis_surf::parser::parse_str(source).unwrap())
+            .unwrap();
+    let env = chelis_types::build_type_env_from_library(&library_deep).unwrap();
+    let new = chelis_surf::desugar::desugar_program(
+        &chelis_surf::parser::parse_str("derivative = helper(copy(x))\n").unwrap(),
+    )
+    .unwrap();
+    let new = chelis_types::check_ir_with_context(&env, &new).unwrap();
+    let new = chelis_effects::check_program(&new).unwrap();
+    let new = chelis_types::check_linearity(&new).unwrap();
+    for context in [&library, &decoded] {
+        let mut dag = chelis_ir::lower::try_lower_program_with_context(context, &new)
+            .unwrap()
+            .dag;
+        dag.set_roots(vec![*dag.roots().last().unwrap()]);
+        assert_zero_geometry_both_lanes(dag.clone(), &[("x", &[2, 3])], &[&[2, 3]], false);
+        assert_zero_geometry_both_lanes(dag, &[("x", &[3, 2])], &[&[2, 3]], true);
+    }
+}
