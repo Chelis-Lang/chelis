@@ -1,51 +1,53 @@
-//! Invocation-local legacy C Random state, including actual reentrant and
-//! interleaved calls. These are transport tests, not fixed-control Dropout tests.
+//! Native keyed draws hold no invocation state: repeated, reentrant and
+//! concurrent public calls each produce their own keys' bits. (The legacy C
+//! Random frame these tests once guarded is gone with the counter stream.)
 mod ownership_support;
 use ownership_support::{GeneratedProgram, balanced, emit, run, run_with_peers};
 
 const SOURCE: &str = r#"
-def draw(x: tensor[2, f32]) -> tensor[2, f32] ! { Random } = uniform_like(x, 0.0f32, 1.0f32)
-def seeded(x: tensor[2, f32]) -> tensor[2, f32] = with seed(42i64) { draw(x) }
-def other(x: tensor[2, f32]) -> tensor[2, f32] = with seed(4294967295i64) { draw(x) }
+def draw(k: key, x: tensor[2, f32]) -> tensor[2, f32] = uniform_like(k, x, 0.0f32, 1.0f32)
+def seeded(x: tensor[2, f32]) -> tensor[2, f32] = draw(key_from_seed(42i64), x)
+def other(x: tensor[2, f32]) -> tensor[2, f32] = draw(key_from_seed(4294967295i64), x)
 "#;
 
-// [05-RNG-1] and [05-OP-8] transcribed from the spec text. Over [0, 1) the
-// fused multiply-add stores the unit value rounded to the element dtype.
-fn bits(seed: u64, ordinal: u64) -> String {
-    stored_bits("f32", seed, ordinal)
+// [05-OP-8] over [0, 1) at f32: the f32 rounding of key_ref.py's
+// `unit(key_from_seed(SEED), i)`, i = 0, 1.
+const SEED_42: &str = "0x3efa06feULL, 0x3e762d86ULL";
+const SEED_4294967295: &str = "0x3eaff421ULL, 0x3f32529fULL";
+
+/// key_ref.py's `unit` rounded to each dtype for the keys of
+/// `(a, rest) = split_key(key_from_seed(42))` and `(b, c) = split_key(rest)`.
+fn split_tree_bits(dtype: &str) -> [&'static str; 3] {
+    match dtype {
+        "f32" => [
+            "0x3f639647ULL, 0x3e97c256ULL",
+            "0x3f7304c5ULL, 0x3e9e91b1ULL",
+            "0x3f2e46bcULL, 0x3f1127beULL",
+        ],
+        "f64" => [
+            "0x3fec72c8d31fea46ULL, 0x3fd2f84ab85b9602ULL",
+            "0x3fee60989e164c96ULL, 0x3fd3d2362d1750c2ULL",
+            "0x3fe5c8d785138824ULL, 0x3fe224f7cdae1695ULL",
+        ],
+        "f16" => [
+            "0x3b1dULL, 0x34beULL",
+            "0x3b98ULL, 0x34f5ULL",
+            "0x3972ULL, 0x3889ULL",
+        ],
+        "bf16" => [
+            "0x3f64ULL, 0x3e98ULL",
+            "0x3f73ULL, 0x3e9fULL",
+            "0x3f2eULL, 0x3f11ULL",
+        ],
+        _ => unreachable!(),
+    }
 }
 
-fn splitmix64(mut word: u64) -> u64 {
-    word = word.wrapping_add(0x9E3779B97F4A7C15);
-    word = (word ^ (word >> 30)).wrapping_mul(0xBF58476D1CE4E5B9);
-    word = (word ^ (word >> 27)).wrapping_mul(0x94D049BB133111EB);
-    word ^ (word >> 31)
-}
-
-fn stored_bits(dtype: &str, seed: u64, ordinal: u64) -> String {
-    (0..2_u64)
-        .map(|index| {
-            let word = splitmix64(
-                seed ^ splitmix64(ordinal).rotate_left(17) ^ splitmix64(index).rotate_left(41),
-            );
-            let unit = (word >> 11) as f64 / (1_u64 << 53) as f64;
-            let raw = match dtype {
-                "f64" => unit.to_bits(),
-                "f32" => (unit as f32).to_bits() as u64,
-                "f16" => half::f16::from_f32(unit as f32).to_bits() as u64,
-                "bf16" => half::bf16::from_f32(unit as f32).to_bits() as u64,
-                _ => unreachable!(),
-            };
-            format!("0x{raw:x}ULL")
-        })
-        .collect::<Vec<_>>()
-        .join(", ")
-}
-
+/// Every float dtype: three draws on the leaves of a split tree, repeated
+/// in one process, give the reference bits each time; a call leaves no
+/// state behind for the next one.
 #[test]
-fn nested_seed_restore_and_next_draw_preserve_all_legacy_dtype_bits() {
-    // The existing Uniform checker/lowerer admits f32 bounds for every
-    // template dtype. This transport repair does not change that surface.
+fn split_tree_draws_repeat_their_reference_bits_at_every_float_dtype() {
     for (dtype, ctype, tag) in [
         ("f32", "uint32_t", "CHELIS_DTYPE_F32"),
         ("f64", "uint64_t", "CHELIS_DTYPE_F64"),
@@ -54,25 +56,23 @@ fn nested_seed_restore_and_next_draw_preserve_all_legacy_dtype_bits() {
     ] {
         let source = format!(
             r#"
-def sample(x: tensor[2, {dtype}]) -> tensor[2, {dtype}] ! {{ Random }} = uniform_like(x, 0.0f32, 1.0f32)
-def nested(x: tensor[2, {dtype}]) -> (tensor[2, {dtype}], tensor[2, {dtype}], tensor[2, {dtype}]) = with seed(42i64) {{
-    a = sample(x)
-    b = with seed(4294967295i64) {{ sample(x) }}
-    c = sample(x)
-    (a, b, c)
+def sample(k: key, x: &tensor[2, {dtype}]) -> tensor[2, {dtype}] = uniform_like(k, x, 0.0f32, 1.0f32)
+def nested(x: tensor[2, {dtype}]) -> (tensor[2, {dtype}], tensor[2, {dtype}], tensor[2, {dtype}]) = {{
+  (a, rest) = split_key(key_from_seed(42i64))
+  (b, c) = split_key(rest)
+  (sample(a, &x), sample(b, &x), sample(c, &x))
 }}
 "#
         );
         let c = emit(&source, "nested");
         let nested = c.symbol("nested").to_string();
+        let [first, second, third] = split_tree_bits(dtype);
         let driver = format!(
             r#"
 int main(void) {{
     int64_t n = 2;
     chelis_tensor *x = chelis_alloc(1, &n, {tag});
-    const {ctype} expected[3][2] = {{{{{first}}}, {{{inner}}}, {{{next}}}}};
-    assert(memcmp(expected[0], expected[2], sizeof(expected[0])) != 0);
-    assert(memcmp(expected[0], expected[1], sizeof(expected[0])) != 0);
+    const {ctype} expected[3][2] = {{{{{first}}}, {{{second}}}, {{{third}}}}};
     for (int repeat = 0; repeat < 8; ++repeat) {{
         chelis_tuple *result = {nested}(x);
         assert(chelis_tuple_len(result) == 3);
@@ -88,39 +88,10 @@ int main(void) {{
     chelis_tensor_release(x);
     return 0;
 }}
-"#,
-            first = stored_bits(dtype, 42, 0),
-            inner = stored_bits(dtype, 4294967295, 0),
-            next = stored_bits(dtype, 42, 1)
+"#
         );
         balanced(&run(&c, &driver));
     }
-}
-
-#[test]
-fn named_map_callback_inherits_the_invocation_stream() {
-    let c = emit(
-        r#"
-def sample_scalar(x: f32) -> f32 ! { Random } = tensor_to_scalar(uniform_like(scalar_to_tensor(x), 0.0f32, 1.0f32))
-def mapped(x: f32) -> tensor[2, f32] = with seed(42i64) { to_tensor(map(sample_scalar, [x, x])) }
-"#,
-        "mapped",
-    );
-    let first = bits(42, 0).split(',').next().unwrap().to_string();
-    let next = bits(42, 1).split(',').next().unwrap().to_string();
-    let mapped = c.symbol("mapped").to_string();
-    let driver = format!(
-        r#"
-{CHECK}
-int main(void) {{
-    const uint32_t expected[] = {{{first}, {next}}};
-    assert(expected[0] != expected[1]);
-    for (int i = 0; i < 8; ++i) check_bits({mapped}(0.0f), expected);
-    return 0;
-}}
-"#
-    );
-    balanced(&run(&c, &driver));
 }
 
 #[test]
@@ -128,9 +99,9 @@ fn random_callback_parameters_retain_the_existing_unsupported_boundary() {
     use chelis_compiler_api::compiler::compile;
     use chelis_compiler_api::schema::{CompileRequest, CompileTarget, SourceKind};
     let source = r#"
-def apply(f: f32 -> f32, x: f32) -> f32 ! { Random } = f(x)
-def sample_scalar(x: f32) -> f32 ! { Random } = tensor_to_scalar(uniform_like(scalar_to_tensor(x), 0.0f32, 1.0f32))
-def applied(x: f32) -> f32 = with seed(42i64) { apply(sample_scalar, x) }
+def apply(f: key -> f32 -> f32, k: key, x: f32) -> f32 = f(k, x)
+def sample_scalar(k: key, x: f32) -> f32 = tensor_to_scalar(uniform_like(k, scalar_to_tensor(x), 0.0f32, 1.0f32))
+def applied(x: f32) -> f32 = apply(sample_scalar, key_from_seed(42i64), x)
 "#;
     let error = compile(CompileRequest {
         source_kind: SourceKind::Surf,
@@ -146,51 +117,6 @@ def applied(x: f32) -> f32 = with seed(42i64) { apply(sample_scalar, x) }
             .contains("verified user-function call site has no direct-call authority")),
         "{error:?}"
     );
-}
-
-#[test]
-fn recursive_random_calls_inherit_the_same_ordinal() {
-    let source = format!(
-        r#"
-{SOURCE}
-def recur(x: tensor[2, f32], n: i64) -> tensor[2, f32] ! {{ Random }} = if eq(n, 0i64) then draw(x) else {{
-    ignored = draw(x)
-    recur(x, sub(n, 1i64))
-}}
-def recursive_entry(x: tensor[2, f32]) -> tensor[2, f32] = with seed(42i64) {{ recur(x, 3i64) }}
-def ping(x: tensor[2, f32], n: i64) -> tensor[2, f32] ! {{ Random }} = if eq(n, 0i64) then draw(x) else {{
-    ignored = draw(x)
-    pong(x, sub(n, 1i64))
-}}
-def pong(x: tensor[2, f32], n: i64) -> tensor[2, f32] ! {{ Random }} = if eq(n, 0i64) then draw(x) else {{
-    ignored = draw(x)
-    ping(x, sub(n, 1i64))
-}}
-def mutual_entry(x: tensor[2, f32]) -> tensor[2, f32] = with seed(42i64) {{ ping(x, 3i64) }}
-"#
-    );
-    let c = emit(&source, "recursive_entry");
-    let expected = bits(42, 3);
-    let recursive_entry = c.symbol("recursive_entry").to_string();
-    let mutual_entry = c.symbol("mutual_entry").to_string();
-    balanced(&run(
-        &c,
-        &format!(
-            r#"
-{CHECK}
-int main(void) {{
-    chelis_tensor *x = input(2);
-    const uint32_t expected[] = {{{expected}}};
-    for (int repeat = 0; repeat < 8; ++repeat) {{
-        check_bits({recursive_entry}(x), expected);
-        check_bits({mutual_entry}(x), expected);
-    }}
-    chelis_tensor_release(x);
-    return 0;
-}}
-"#
-        ),
-    ));
 }
 
 #[test]
@@ -291,8 +217,7 @@ fn hooked(c: &GeneratedProgram) -> GeneratedProgram {
 
 #[test]
 fn reentrant_public_entry_starts_its_own_context() {
-    // The reentrant call is itself handled: an unhandled public draw has no
-    // stream to draw from and aborts rather than draw at seed zero.
+    // A draw reentered from inside another call's write sees only its own key.
     let c = emit(SOURCE, "seeded");
     let draw = c.symbol("other").to_string();
     let seeded = c.symbol("seeded").to_string();
@@ -323,14 +248,14 @@ int main(void) {{
     return 0;
 }}
 "#,
-        zero = bits(4294967295, 0),
-        expected = bits(42, 0)
+        zero = SEED_4294967295,
+        expected = SEED_42
     );
     balanced(&run(&hooked(&c), &driver));
 }
 
 #[test]
-fn concurrent_public_entries_keep_independent_seed_frames() {
+fn concurrent_public_entries_draw_independently() {
     let c = emit(SOURCE, "seeded");
     let seeded = c.symbol("seeded").to_string();
     let other = c.symbol("other").to_string();
@@ -396,8 +321,8 @@ int main(void) {{
     return 0;
 }}
 "#,
-        a = bits(42, 0),
-        b = bits(4294967295, 0)
+        a = SEED_42,
+        b = SEED_4294967295
     );
     balanced(&run(&hooked(&c), &driver));
 }
