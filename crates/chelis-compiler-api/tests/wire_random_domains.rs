@@ -6,7 +6,7 @@
 //! random kernel output.
 use chelis_compiler_api::schema::{
     CheckRequest, GradRequest, LowerRequest, SourceKind, WIRE_DAG_SCHEMA_VERSION, WireDag,
-    WireDagDecodeError, WireDagNode,
+    WireDagDecodeError, WireDagNode, WireRiscOp,
 };
 use chelis_ir::dag::{Dag, DimInfo, KeyBranch, NodeId, RiscOp, RtDim, TensorType, UniformBound};
 use chelis_types::scalar_from_i64;
@@ -1279,4 +1279,101 @@ fn the_verifier_and_the_codec_share_one_operand_rule() {
         assert_eq!(chelis_ir::verify::verify(&agreeing), Vec::<String>::new());
         accepts(&wire_of(&agreeing));
     }
+}
+
+/// Rule I under transforms (chelis#2413): `grad` and `vmap` lower their
+/// bodies on behalf of the declaration that applies them, so a key parameter
+/// `k` read through a transform and a sibling declaration's own `k` stay two
+/// keys through `lower`, serialization and decoding. Naming the sibling's
+/// nodes after the transformed declaration merges the two parameters, and the
+/// key rules then reject the shared key.
+///
+/// Evidentiary status: REGRESSION TEST, shown by mutation: with the wire's
+/// key identity by parameter name alone (as at ff8957386), `lower` rejects
+/// the `grad` program with "key 0 is consumed twice".
+#[test]
+fn a_transformed_key_parameter_and_a_siblings_are_two_keys() {
+    for (source, applied) in [
+        (
+            "def loss(k: key, x: tensor[4, f32]) -> f32 = tensor_to_scalar(sum(dropout(k, x, 0.5f32), 0i32))\ndef derivative(k: key, x: tensor[4, f32]) -> tensor[4, f32] = grad(loss, wrt=x)(k, x)\ndef sibling(k: key, v: tensor[4, f32]) -> tensor[4, f32] = dropout(k, v, 0.25f32)\n",
+            "derivative",
+        ),
+        (
+            "def draw(k: key, x: tensor[4, f32]) -> tensor[4, f32] = dropout(k, x, 0.5f32)\ndef batched(k: key, xs: tensor[3, 4, f32]) -> tensor[3, 4, f32] = vmap(draw)(split_keys(k, 3i64), xs)\ndef sibling(k: key, v: tensor[4, f32]) -> tensor[4, f32] = dropout(k, v, 0.25f32)\n",
+            "batched",
+        ),
+    ] {
+        let lowered = chelis_compiler_api::compiler::lower(LowerRequest {
+            source_kind: SourceKind::Surf,
+            source: source.into(),
+            entry: None,
+        })
+        .unwrap_or_else(|error| panic!("{applied}: {error:?}"));
+        let text = serde_json::to_string(&lowered.dag).unwrap();
+        let decoded = WireDag::from_validated_json(&text).unwrap();
+        let key_loads = decoded
+            .nodes
+            .iter()
+            .filter(|node| matches!(&node.op, WireRiscOp::Load { name } if name.as_str() == "k"))
+            .map(|node| node.declaration.as_str())
+            .collect::<Vec<_>>();
+        assert!(key_loads.contains(&applied), "{applied}: {key_loads:?}");
+        assert!(key_loads.contains(&"sibling"), "{applied}: {key_loads:?}");
+
+        let mut merged: Value = serde_json::from_str(&text).unwrap();
+        for node in merged["nodes"].as_array_mut().unwrap() {
+            if node["declaration"] == json!("sibling") {
+                node["declaration"] = json!(applied);
+            }
+        }
+        rejects_domain(&merged, "is consumed twice");
+    }
+}
+
+/// Rule S is unchanged by declaration identity: one declaration's key split
+/// under each of two exclusive activations may not return the halves.
+///
+/// Evidentiary status: disposition lock (rejected at 727e74b41).
+#[test]
+fn exclusive_splits_of_one_key_may_not_return_their_halves() {
+    let mut graph = json!({
+        "schema_version": WIRE_DAG_SCHEMA_VERSION,
+        "nodes": [],
+        "roots": [],
+    });
+    let key = push(
+        &mut graph,
+        json!({"kind":"load","name":"k"}),
+        &[],
+        &[],
+        "key",
+    );
+    let condition = push(
+        &mut graph,
+        json!({"kind":"load","name":"c"}),
+        &[],
+        &[],
+        "bool",
+    );
+    let other = push(
+        &mut graph,
+        json!({"kind":"logical","logical":"not"}),
+        &[condition],
+        &[],
+        "bool",
+    );
+    let mut roots = Vec::new();
+    for activation in [condition, other] {
+        for branch in ["left", "right"] {
+            roots.push(json!(push(
+                &mut graph,
+                json!({"kind":"split","branch":branch}),
+                &[key, activation],
+                &[],
+                "key",
+            )));
+        }
+    }
+    graph["roots"] = json!(roots);
+    rejects_domain(&graph, "is a graph root");
 }
