@@ -579,6 +579,29 @@ impl<'a> EvalContext<'a> {
         // inputs requested by the same selection authority as execution.
         // A provider error is an entered initializer's error, not an evaluator
         // missing-input diagnostic; preserve it without the legacy prefix.
+        // spec/03 §4.4: the target's body runs here, after its actuals, so
+        // the value declarations it reaches initialize here even when the
+        // lowered DAG never demands them. A direct declaration's names are
+        // declaration scope; an inline `fn`'s free names may be the caller's.
+        match fn_expr {
+            Some(target)
+                if var_name(target).is_some_and(|name| {
+                    !captured_env.contains_key(name) && self.lookup_top_level_def(name).is_some()
+                }) =>
+            {
+                let reached = self
+                    .program
+                    .reached_by_call(var_name(target).unwrap_or_default());
+                self.initialize_reached_values(&reached)?;
+            }
+            Some(target) if target.tag() == Some(DeepTag::Fn) => {
+                let reached = self
+                    .program
+                    .reached_by_applying(target, &|name| captured_env.contains_key(name));
+                self.initialize_reached_values(&reached)?;
+            }
+            _ => {}
+        }
         let mut provider_failed = false;
         let prepare_input = |name: &str, demand: TensorInputDemand| {
             // eval_compiled supplies manifested Tensor-lane root values in

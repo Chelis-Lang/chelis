@@ -642,6 +642,15 @@ pub(crate) fn evaluate_host_program_with_library_and_types(
         cancel: chelis_types::current_cancel_token(),
     };
 
+    for name in top_level_order {
+        if let Err(message) = ctx.resolve_top_level(&name) {
+            return Err(RuntimeFailure {
+                message,
+                transcript: ctx.transcript,
+            });
+        }
+    }
+
     // Surface host-lane selected callable roots. The arrow-form
     // `def priced() -> T = body` desugars to `(def priced (fn () body))`,
     // a nullary thunk of type `() -> T`. `register_top_level_defs`'
@@ -663,7 +672,8 @@ pub(crate) fn evaluate_host_program_with_library_and_types(
     // Tensor-lane callable surfaces through the DAG/`tensor_bindings` path.
     // Failures stay attached to the root and become [05-UNS-1]; no partial
     // root is fabricated.
-    let mut callable_roots = Vec::new();
+    let mut host_root_values = UnordMap::new();
+    let mut host_root_errors = UnordMap::new();
     for expr in top_level_items(program.exprs()) {
         let Some((DeepTag::Def, kids)) = tagged_expr_children(expr) else {
             continue;
@@ -715,59 +725,6 @@ pub(crate) fn evaluate_host_program_with_library_and_types(
         if !selected {
             continue;
         }
-        callable_roots.push(name);
-    }
-
-    // spec/03 §4.4: a binding's initializer is evaluated whether or not the
-    // binding is read, so its traps are preserved. The declarations this
-    // evaluation runs are the eager values above and the callable roots
-    // below; every value declaration they name, directly or through another
-    // declaration they name, is initialized here, read or not, exactly as a
-    // read would initialize it. Its body may run as a host kernel or a
-    // transform DAG that never demands a dead reference, so the entry, not
-    // the read, is what runs it. The DAG evaluator enters the same
-    // declarations through `Dag::outside_selection`. A value initializes in
-    // declaration order, library first, as the selection's module init;
-    // a value no run declaration names is not initialized.
-    let entered = ctx.program.entered_value_declarations(
-        top_level_order
-            .iter()
-            .map(String::as_str)
-            .chain(callable_roots.iter().copied()),
-    );
-    let eager = top_level_order.iter().cloned().collect::<UnordSet<_>>();
-    let declared_names = |exprs| {
-        top_level_items(exprs).into_iter().filter_map(|expr| {
-            let (DeepTag::Def, kids) = tagged_expr_children(expr)? else {
-                return None;
-            };
-            kids.first().and_then(symbol_name)
-        })
-    };
-    // New code shadows a library declaration of the same name, so that name
-    // initializes at its new-code position, never at the library's.
-    let new_code = declared_names(program.exprs()).collect::<UnordSet<_>>();
-    let mut initialized = UnordSet::new();
-    for name in declared_names(library_exprs)
-        .filter(|name| !new_code.contains(name))
-        .chain(declared_names(program.exprs()))
-    {
-        let owed = eager.contains(name)
-            || (entered.contains(name) && !ctx.tensor_bindings.contains_key(name));
-        if !owed || !initialized.insert(name) {
-            continue;
-        }
-        if let Err(message) = ctx.resolve_top_level(name) {
-            return Err(RuntimeFailure {
-                message,
-                transcript: ctx.transcript,
-            });
-        }
-    }
-
-    let mut host_root_values = UnordMap::new();
-    let mut host_root_errors = UnordMap::new();
-    for name in callable_roots {
         // Apply the selected callable. A missing authored parameter can only
         // be dead here: live tensor parameters were part of the manifest's
         // required-input set, and the compiler would not have selected this

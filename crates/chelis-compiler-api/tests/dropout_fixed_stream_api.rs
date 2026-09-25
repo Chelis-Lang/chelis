@@ -1713,12 +1713,12 @@ fn assert_domain_trap(outcome: Result<EvalResult, CompilerError>, row: &str) {
 /// in `eval_selected`: the value named from a function reached only through
 /// `grad` (#2463's witness 3, which C and `chelis eval --file` trap on in
 /// `issue_2463_key_dead_draw_traps`), from a plain call of that function,
-/// from a body the host runs as one kernel, and from a function the root
-/// names without applying it. Each row's valid-rate twin returns the root's
-/// value from the Host lane, so the trap is the only difference.
+/// from a body the host runs as one kernel, and from a helper that kernel
+/// body calls. Each row's valid-rate twin returns the root's value from the
+/// Host lane, so the trap is the only difference.
 ///
 /// Evidentiary status: REGRESSION TEST for the `grad`, kernel-body and
-/// unapplied-function rows, each of which returned the root's value at
+/// kernel-helper rows, each of which returned the root's value at
 /// 727e74b41. The plain-call row is a disposition lock: the host interpreter
 /// already walked its dead binding there.
 #[test]
@@ -1740,8 +1740,8 @@ fn a_dead_reference_to_a_value_declaration_initializes_it_in_the_host_lane() {
             vec![1.0; 2],
         ),
         (
-            "function named, not applied",
-            "def f(v: tensor[2, f32]) -> tensor[2, f32] = {\n  dead = sampled\n  v\n}\ndef main() -> tensor[2, f32] = {\n  g = f\n  to_tensor([1.0f32, 1.0f32])\n}\n",
+            "helper of a kernel body",
+            "def h(v: tensor[2, f32]) -> tensor[2, f32] = {\n  dead = sampled\n  v\n}\ndef main() -> tensor[2, f32] = h(to_tensor([1.0f32, 1.0f32]))\n",
             vec![1.0; 2],
         ),
     ];
