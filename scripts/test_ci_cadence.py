@@ -23,6 +23,18 @@ MOVED = {
     "runtime-representation-phase0-oracle": "chelis-gate runtime-representation",
     "generalize-sweep-oracle-shard": "cargo nextest run --workspace --profile ci-full --ignore-default-filter --features chelis-types/generalize-sweep-oracle",
 }
+# chelis#2543: the nightly shares this two-runner pool with every other warm
+# job, and GitHub Actions has no job priority.
+WARM_LABEL = "chelis-ci-warm-x64"
+MAIN_REF = "refs/heads/main"
+# The one expression shape a nightly `runs-on` or lane group may take: the ref
+# predicate selects the first operand, every other ref the second.
+REF_SWITCH = re.compile(
+    r"\$\{\{ github\.ref == '(?P<ref>[^']+)' && '(?P<then>[^']+)' \|\| "
+    r"(?:'(?P<otherwise>[^']+)'"
+    r"|format\('(?P<format>[^']+)', github\.run_id(?:, matrix\.(?P<axis>\w+))?\))"
+    r" \}\}"
+)
 
 
 def assert_complete_hash_partition(test, job, command):
@@ -214,6 +226,72 @@ def assert_extended(test, pr, nightly):
     )
     test.assertIn("always()", report["if"])
     test.assertEqual(report["steps"][0]["env"]["RESULTS"], "${{ toJSON(needs) }}")
+
+
+def matrix_legs(job):
+    """Every leg a job's list-valued matrix expands to; one for no matrix."""
+    legs = [{}]
+    for axis, values in job.get("strategy", {}).get("matrix", {}).items():
+        legs = [{**leg, axis: value} for leg in legs for value in values]
+    return legs
+
+
+def resolve_ref_switch(test: unittest.TestCase, value, ref, leg):
+    """Evaluate a literal or a `REF_SWITCH` expression for one ref and leg."""
+    text = str(value)
+    if "${{" not in text:
+        return text
+    switch = REF_SWITCH.fullmatch(text)
+    if switch is None:
+        test.fail(f"unreviewed runner or lane expression: {text}")
+    if ref == switch["ref"]:
+        return switch["then"]
+    if switch["otherwise"] is not None:
+        return switch["otherwise"]
+    axis = switch["axis"]
+    return switch["format"].format("<run_id>", *([leg[axis]] if axis else []))
+
+
+def assert_one_warm_lane(test, nightly):
+    """chelis#2543: the nightly holds at most one warm runner at a time.
+
+    Every job routed to the warm pool on main waits in one concurrency group,
+    so at most one of them holds a runner and the other stays free for the
+    pool's other jobs. `queue: max` keeps the lane's waiting jobs pending; the
+    default queue cancels all but one of them. Off main the jobs run hosted,
+    where a group per job keeps candidate validation parallel. Returns the
+    lane.
+    """
+    lanes = {}
+    hosted = {}
+    for name, job in nightly["jobs"].items():
+        if WARM_LABEL not in str(job["runs-on"]):
+            continue
+        concurrency = job.get("concurrency") or {}
+        test.assertEqual(
+            concurrency.get("queue"),
+            "max",
+            f"{name} can reach the warm pool outside the queued nightly lane",
+        )
+        for leg in matrix_legs(job):
+            instance = name + "".join(f" {axis}={value}" for axis, value in leg.items())
+            for ref in (MAIN_REF, "refs/heads/candidate"):
+                runner = resolve_ref_switch(test, job["runs-on"], ref, leg)
+                group = resolve_ref_switch(test, concurrency.get("group"), ref, leg)
+                if runner == WARM_LABEL:
+                    lanes.setdefault(group, []).append(f"{instance} on {ref}")
+                    continue
+                test.assertNotIn(
+                    group,
+                    hosted,
+                    f"{instance} would wait behind {hosted.get(group)} on {ref}",
+                )
+                hosted[group] = instance
+    test.assertEqual(
+        len(lanes), 1, f"the nightly may hold one warm runner at a time: {lanes}"
+    )
+    (lane,) = lanes
+    return lane
 
 
 def unattended_nextest_profiles():
@@ -415,6 +493,49 @@ class ExtendedCadenceTests(unittest.TestCase):
                 step["run"] = step["run"].split(" -E ")[0]
         with self.assertRaises(AssertionError):
             assert_extended(self, self.pr, nightly)
+
+
+class WarmLaneTests(unittest.TestCase):
+    """chelis#2543: the nightly leaves the second warm runner free."""
+
+    def setUp(self):
+        self.nightly = yaml.safe_load((ROOT / ".github/workflows/heavy-e2e.yml").read_text())
+
+    def test_nightly_holds_at_most_one_warm_runner(self):
+        assert_one_warm_lane(self, self.nightly)
+
+    def test_no_other_workflow_waits_in_the_nightly_lane(self):
+        # Concurrency groups are repository-wide: a pull-request job in this
+        # group would wait for the whole nightly, not for one of its jobs.
+        lane = assert_one_warm_lane(self, self.nightly)
+        for path in sorted((ROOT / ".github/workflows").glob("*.yml")):
+            if path.name != "heavy-e2e.yml":
+                with self.subTest(workflow=path.name):
+                    self.assertNotIn(lane, path.read_text())
+
+    def test_a_second_warm_runner_or_a_serialized_candidate_is_rejected(self):
+        lane = assert_one_warm_lane(self, self.nightly)
+        for mutation in ("outside", "single", "second-lane", "constant", "every-ref"):
+            nightly = copy.deepcopy(self.nightly)
+            job = nightly["jobs"]["dtype-phase3-oracle"]
+            if mutation == "outside":
+                del job["concurrency"]
+            elif mutation == "single":
+                job["concurrency"]["queue"] = "single"
+            elif mutation == "second-lane":
+                job["concurrency"]["group"] = job["concurrency"]["group"].replace(
+                    f"'{lane}'", f"'{lane}-second'"
+                )
+            elif mutation == "constant":
+                # One group on every ref: hosted candidate jobs run one by one.
+                for other in nightly["jobs"].values():
+                    if "concurrency" in other:
+                        other["concurrency"]["group"] = lane
+            else:
+                # Warm on every ref while the lane still covers main only.
+                job["runs-on"] = WARM_LABEL
+            with self.subTest(mutation=mutation), self.assertRaises(AssertionError):
+                assert_one_warm_lane(self, nightly)
 
 
 class UnattendedBackstopTests(unittest.TestCase):

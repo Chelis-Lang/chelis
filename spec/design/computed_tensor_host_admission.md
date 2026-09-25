@@ -4,7 +4,7 @@ Tracking class: [#2514](https://github.com/Chelis-Lang/chelis/issues/2514).
 Initial leaves: [#1906](https://github.com/Chelis-Lang/chelis/issues/1906)
 (directly forwarded concat inputs, closed) and
 [#2373](https://github.com/Chelis-Lang/chelis/issues/2373) (computed inputs,
-open).
+closed by #2528). The remaining class work is tracked in #2514.
 
 `spec/04-type-system.md` §4.5.4 decides the result shape of `concat` and
 §4.7 requires admitted runtime extents to execute with the specified guards.

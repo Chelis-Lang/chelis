@@ -59,6 +59,64 @@ fn direct_copy_and_arithmetic_linked_c_values() {
 }
 
 #[test]
+fn shape_changing_matmul_producer_keeps_eval_c_values() {
+    assert!(gcc_available(), "this oracle requires a linked C binary");
+    let source = "def join[s](x: tensor[s, s, f32]) -> tensor[s, *, f32] = {\n  product = matmul(x, x)\n  concat([product, product], 1i32)\n}\noutput = join(to_tensor([[1.0f32, 2.0f32], [3.0f32, 4.0f32]]))\n";
+    let stdout = build_and_run(source, "computed_concat_matmul");
+    assert_eq!(
+        parse_tensor_data(&stdout, "output"),
+        vec![7.0, 10.0, 7.0, 10.0, 15.0, 22.0, 15.0, 22.0]
+    );
+}
+
+#[test]
+fn non_axis_mismatch_reaches_concat_in_both_lanes() {
+    assert!(gcc_available(), "this oracle requires a linked C binary");
+    let source =
+        "output = concat([to_tensor([[1.0f32], [2.0f32]]), to_tensor([[3.0f32]])], 1i32)\n";
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("non_axis_mismatch.ch");
+    let out_dir = dir.path().join("non_axis_mismatch-out");
+    write_file(&path, source);
+    let eval = Command::cargo_bin("chelis")
+        .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .args(["eval", "--file", path.to_str().unwrap()])
+        .output()
+        .expect("eval");
+    assert!(!eval.status.success());
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .args([
+            "build",
+            path.to_str().unwrap(),
+            "--target",
+            "c",
+            "--output",
+            out_dir.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+    assert!(link_generated(&out_dir, "non_axis_mismatch.c", "non_axis_mismatch").success());
+    let c = StdCommand::new(out_dir.join("non_axis_mismatch"))
+        .output()
+        .expect("linked C run");
+    assert!(!c.status.success());
+    for (lane, output) in [("Eval", eval), ("C", c)] {
+        let text = format!(
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(
+            text.contains("numeric trap: domain in concat at i64"),
+            "{lane}: {text}"
+        );
+    }
+}
+
+#[test]
 fn copied_extent_keeps_result_claim_on_eval_and_linked_c() {
     assert!(gcc_available(), "this oracle requires a linked C binary");
     let dir = tempdir().expect("tempdir");

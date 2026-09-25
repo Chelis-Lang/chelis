@@ -2214,13 +2214,27 @@ pub(super) fn tensor_concat_value(
         for dim in 0..tensor.value.shape.len() {
             if dim != axis && tensor.value.shape[dim] != first.value.shape[dim] {
                 return Err(format!(
-                    "concat expects matching non-concatenated axes; axis {dim} differed"
+                    "numeric trap: domain in concat at i64\nconcat expects matching non-concatenated axes; axis {dim} differed"
                 ));
             }
         }
     }
     let mut out_shape = first.value.shape.clone();
-    out_shape[axis] = tensors.iter().map(|tensor| tensor.value.shape[axis]).sum();
+    out_shape[axis] = tensors.iter().try_fold(0_i64, |sum, tensor| {
+        let extent = i64::try_from(tensor.value.shape[axis])
+            .map_err(|_| "numeric trap: overflow in concat at i64".to_string())?;
+        sum.checked_add(extent)
+            .ok_or_else(|| "numeric trap: overflow in concat at i64".to_string())
+    })? as usize;
+    // A zero element count does not waive canonical stride representability:
+    // [0, large, large] still needs the suffix product for axis 0.
+    out_shape.iter().rev().try_fold(1_i64, |stride, extent| {
+        let extent = i64::try_from(*extent)
+            .map_err(|_| "numeric trap: overflow in concat at i64".to_string())?;
+        stride
+            .checked_mul(extent)
+            .ok_or_else(|| "numeric trap: overflow in concat at i64".to_string())
+    })?;
     // reuse_* contract: concat moves existing elements only (section C3,
     // element-preserving). Seed a zero-filled buffer at the shared dtype,
     // then overwrite every slot from its owning part.
@@ -2248,6 +2262,41 @@ pub(super) fn tensor_concat_value(
         axis_offset += tensor.value.shape[axis];
     }
     Ok(RuntimeValue::Tensor(RuntimeTensorValue::new(out)))
+}
+
+#[cfg(test)]
+mod concat_extent_tests {
+    use super::*;
+
+    #[test]
+    fn zero_element_inputs_still_check_the_i64_concat_extent_sum() {
+        let width = 1usize << 62;
+        let empty = RuntimeTensorValue::from_wide("test", Prim::F32, vec![0, width], vec![])
+            .expect("zero elements need no large allocation");
+        let parts = [
+            RuntimeValue::Tensor(empty.clone()),
+            RuntimeValue::Tensor(empty),
+        ];
+        assert_eq!(
+            tensor_concat_value(&parts, 1).expect_err("the axis sum exceeds i64"),
+            "numeric trap: overflow in concat at i64"
+        );
+    }
+
+    #[test]
+    fn zero_element_inputs_still_check_the_output_canonical_stride() {
+        let width = 1usize << 61;
+        let empty = RuntimeTensorValue::from_wide("test", Prim::F32, vec![0, width, 2], vec![])
+            .expect("each input's canonical stride fits i64");
+        let parts = [
+            RuntimeValue::Tensor(empty.clone()),
+            RuntimeValue::Tensor(empty),
+        ];
+        assert_eq!(
+            tensor_concat_value(&parts, 1).expect_err("the output stride exceeds i64"),
+            "numeric trap: overflow in concat at i64"
+        );
+    }
 }
 
 pub(super) fn tensor_reshape_value(

@@ -186,6 +186,18 @@ fn run_case(case: &str) -> ! {
                     0,
                 );
             }
+            "concat-output-stride-at-i64-ceiling" => {
+                let first = tensor(&[0, 1 << 61, 2], CHELIS_DTYPE_F32);
+                let second = tensor(&[0, 1 << 61, 2], CHELIS_DTYPE_F32);
+                let parts = [
+                    chelis_value_take_tensor(first),
+                    chelis_value_take_tensor(second),
+                ];
+                chelis_tensor_concat(
+                    chelis_list_from_values(parts.as_ptr(), parts.len() as i64),
+                    1,
+                );
+            }
             // A zero extent does not make an unrepresentable canonical stride
             // legal: axis 0's stride is the exact product of the following
             // extents, and i64::MAX * i64::MAX is not an i64.
@@ -235,7 +247,11 @@ const NEGATIVE_MATRIX: &[(&str, &str)] = &[
     ),
     (
         "concat-output-extent-at-i64-ceiling",
-        "Overflow: concat output extent exceeds i64",
+        "numeric trap: overflow in concat at i64",
+    ),
+    (
+        "concat-output-stride-at-i64-ceiling",
+        "numeric trap: overflow in concat at i64",
     ),
     (
         "alloc-unrepresentable-canonical-stride",
