@@ -719,3 +719,97 @@ fn abi_projection_preserves_exact_verified_site_and_nested_dag_cursors() {
         .expect("aggregate tensor fixture retains its verified nested helper");
     assert!(!helper.dag().is_empty());
 }
+
+/// chelis#2477: an enclosing owner consumed on one branch arm and not the
+/// other reached the join live on one path only, because `moved` is a single
+/// per-unit set and the sibling arm's consume marked it moved everywhere. The
+/// enclosing scope exit then emitted no release for the arm that did not
+/// consume it, and host ownership verification rejected the join.
+///
+/// Both fixtures are the same program at different dtypes. Before the fix the
+/// generic one failed with `inconsistent live owners` naming `result`, while
+/// the concrete one -- byte-identical but for the binder -- verified. The
+/// concrete case is kept as the control so a regression cannot be mistaken for
+/// an environment difference.
+const GENERIC_BRANCH_ARM_RELEASE: &str = "\
+def basis2[prec: Float](k: i64, s: prec) -> tensor[2, prec] = to_tensor(map(fn (i: i64) -> if eq(i, k) then s else cast(0.0, prec), range(cast(0, i64), cast(2, i64))))\n\
+def eye2[prec: Float](s: prec) -> tensor[2, 2, prec] = {\n  \
+  e1 = cast(0, i64) |> basis2(s)\n  \
+  e1b = cast(0, i64) |> basis2(cast(1.0, prec))\n  \
+  o1 = einsum(\"i,j->ij\", e1, e1b)\n  \
+  add(o1, o1)\n\
+}\n\
+def scale[prec: Float](s: prec, m: &tensor[2, 2, prec]) -> tensor[2, 2, prec] = {\n  \
+  diag_s = eye2(s)\n  \
+  matmul(diag_s, m)\n\
+}\n\
+def inv[prec: Float](a: &tensor[2, 2, prec], det: prec) -> tensor[2, 2, prec] = {\n  \
+  one_f = cast(1.0, prec)\n  \
+  bad = lt(det, cast(1e-30, prec))\n  \
+  nan_v = cast(0.0, prec) |> div(cast(0.0, prec))\n  \
+  det_safe = if bad then one_f else det\n  \
+  inv_det = div(one_f, det_safe)\n  \
+  result = scale(inv_det, a)\n  \
+  if bad then eye2(nan_v) else result\n\
+}\n\
+def entry32(a: &tensor[2, 2, f32], d: f32) -> tensor[2, 2, f32] = inv(a, d)\n";
+
+#[test]
+fn issue_2477_generic_branch_arm_releases_the_owner_its_sibling_consumed() {
+    // Fails before the fix with:
+    //   block bN in `entry32` is reached with inconsistent live owners:
+    //   live only on this path: %NNN[result]
+    let verified = verified_host_from_source(GENERIC_BRANCH_ARM_RELEASE);
+    // Assert the release lands, not merely that lowering did not panic: a
+    // change that balances the join some other way must not pass unnoticed.
+    let render = verified.render();
+    assert!(
+        render.contains("drop %"),
+        "the arm that did not consume `result` must carry its drop:\n{render}"
+    );
+}
+
+#[test]
+fn issue_2477_concrete_control_still_verifies() {
+    let concrete = GENERIC_BRANCH_ARM_RELEASE
+        .replace("[prec: Float]", "")
+        .replace("prec", "f32");
+    let _ = verified_host_from_source(&concrete);
+}
+
+/// chelis#2477, second defect, found by review of the first fix: an arm that
+/// itself contains control flow ends in a different block than the one it
+/// started in, because `lower_join_arm` sets the terminator on `self.current`.
+/// Emitting the owed release into the arm's *entry* block put it before that
+/// block's own terminator, so the nested arm's borrow read a released owner
+/// and Phase-2 verification rejected IR the compiler had just built.
+///
+/// The `then` arm consumes `result`; the `else` arm is the one that branches
+/// and borrows it, so this witnesses the `else` call site specifically.
+/// Reverting the `else` call site's argument to the arm's entry block
+/// reproduces `owner %N in \`pick\` bM is not live`; reverting only the `then`
+/// site does not, because for this program the `then` arm has no nested
+/// control flow and its end block IS its entry block.
+///
+/// `result` must be bound from a BLOCK EXPRESSION: that is what keeps
+/// `owner_depth` at the inner block's depth while `resolve_out` projects it as
+/// `Value::Fresh`, which makes `consume` move rather than copy it in the arm.
+/// A plain `result = mk(...)` copies, so nothing is ever owed and the shape
+/// does not reproduce. Concrete `i64` throughout: the class is not about dtype
+/// genericity, which is only how it first reached user code.
+const NESTED_ARM_RELEASE: &str = "\
+def mk(k: i64, s: i64) -> tensor[2, i64] = to_tensor(map(fn (i: i64) -> if eq(i, k) then s else cast(0, i64), range(cast(0, i64), cast(2, i64))))\n\
+def twice(m: &tensor[2, i64]) -> tensor[2, i64] = add(m, m)\n\
+def pick(s: i64, bad: bool, worse: bool) -> tensor[2, i64] = {\n  \
+  result = {\n    \
+    d = mk(cast(0, i64), s)\n    \
+    add(d, d)\n  \
+  }\n  \
+  if bad then result else (if worse then twice(&result) else mk(cast(1, i64), cast(1, i64)))\n\
+}\n\
+def entry(s: i64, b: bool, w: bool) -> tensor[2, i64] = pick(s, b, w)\n";
+
+#[test]
+fn issue_2477_nested_arm_release_lands_on_the_block_that_jumps_to_the_join() {
+    let _ = verified_host_from_source(NESTED_ARM_RELEASE);
+}
