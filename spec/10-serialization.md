@@ -104,9 +104,12 @@ requirement input that is not an earlier rank-zero `int64` `ExtentWitness` are
 each encoding and decoding errors. `WireDagNode.shape_deps` contains exact u64 node
 references to strictly earlier nodes. It does not carry shape numbers.
 `shape_deps`, `span_id` (explicitly null when absent), `merged_spans` and
-`declaration` are mandatory fields, including when their lists are empty.
-`WireDagNode.declaration` is the name of the declaration the node belongs to,
-a string that carries no number.
+`declaration` are mandatory fields, including when their lists are empty, and
+so is `WireDag.declarations`. `WireDag.declarations` is the graph's declaration
+table: one row per declaration, holding its name. `WireDagNode.declaration` is
+the row of the declaration the node belongs to (§3.4). Two rows may hold one
+name, so a name never identifies a declaration. Every row is the declaration of
+at least one node; a row that no node names is an encoding and decoding error.
 
 `WireRiscOp::Mod` preserves the exact signed-remainder identity of [05-OP-64].
 It has exactly two earlier input nodes, each with its output's integer dtype
@@ -299,9 +302,10 @@ reference under §3.4, not another template.
 `key` is a structural precision with no literal or storage carrier in a
 graph, at any rank: no `Const`, `ConstTensor` or `Pad.fill` holds a key. Every
 key is produced by `KeyFromSeed`, `Split`, `FoldIn`, `SplitN` or `KeySelect`,
-or enters as a key-precision `Load`. Every node carries its declaration, and a parameter is
-its declaration and its name: every `Load` of one parameter of one declaration
-is one key, and `Load`s of one name in two declarations read two parameters. A
+or enters as a key-precision `Load`. Every node carries its declaration's row, and a
+parameter is its declaration's row and its name: every `Load` of one name in one
+row is one key, and `Load`s of one name in two rows read two parameters, even
+when the two rows hold one name. A
 key
 has at most one use: one `UniformLike`, `Dropout`, `FoldIn` or `SplitN`, one
 key input of one `KeySelect`, one place among the roots, or at most one
@@ -391,6 +395,7 @@ specifies u32. A decoder never narrows a reference to fit a host index.
 | fields | scope and admission |
 |---|---|
 | `WireDagNode.id`, `WireDagNode.inputs`, `WireDagNode.shape_deps`, `WireDag.roots` | Node IDs are unique zero-based positions in the owning ordered DAG; inputs and shape dependencies refer to earlier nodes and roots to existing nodes. Zero is an ordinary node ID. Shape dependencies identify nodes, not extents. |
+| `WireDagNode.declaration` | Zero-based row of the owning DAG's `declarations` table. The row, not the name it holds, is the declaration's identity; every row is some node's declaration. |
 | `LowerResult.named_roots`, `GradResult.output_node`, `GradResult.grad_nodes_by_name`, `GradResult.forward_nodes_by_name` | IDs select nodes in that result's DAG; a name never changes the owning DAG. |
 | `EvaluatedRoot.node_id` | Identity in the evaluated graph associated with that result; without that graph it remains an opaque result identity and cannot be dereferenced. |
 | `WireFusedInput.External.index` | Zero-based slot in the owning fused node's external inputs. |

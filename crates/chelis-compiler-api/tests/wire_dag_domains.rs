@@ -3,10 +3,10 @@ use chelis_compiler_api::schema::{WIRE_DAG_SCHEMA_VERSION, WireDag};
 use serde_json::{Value, json};
 
 fn load() -> Value {
-    json!({"shape_deps":[],"span_id":null,"merged_spans":[],"declaration":"entry","id":0,"op":{"kind":"load","name":"x"},"inputs":[],"output_type":{"dims":[{"kind":"lit","size":2}],"precision":"f32"}})
+    json!({"shape_deps":[],"span_id":null,"merged_spans":[],"declaration":0,"id":0,"op":{"kind":"load","name":"x"},"inputs":[],"output_type":{"dims":[{"kind":"lit","size":2}],"precision":"f32"}})
 }
 fn graph(op: Value) -> Value {
-    let mut value = json!({"schema_version":WIRE_DAG_SCHEMA_VERSION,"nodes":[load(),{"shape_deps":[],"span_id":null,"merged_spans":[],"declaration":"entry","id":1,"op":op,"inputs":[0],"output_type":{"dims":[{"kind":"lit","size":2}],"precision":"f32"}}],"roots":[1]});
+    let mut value = json!({"schema_version":WIRE_DAG_SCHEMA_VERSION,"declarations":["entry"],"nodes":[load(),{"shape_deps":[],"span_id":null,"merged_spans":[],"declaration":0,"id":1,"op":op,"inputs":[0],"output_type":{"dims":[{"kind":"lit","size":2}],"precision":"f32"}}],"roots":[1]});
     if value["nodes"][1]["op"]["kind"] == "shape" {
         value["nodes"][1]["output_type"] = json!({"dims":[],"precision":"int64"});
     }
@@ -106,7 +106,7 @@ fn typed_load(id: u64, name: &str, sizes: &[i64], dtype: &str) -> Value {
         .iter()
         .map(|size| json!({"kind":"lit","size":size}))
         .collect::<Vec<_>>();
-    json!({"shape_deps":[],"span_id":null,"merged_spans":[],"declaration":"entry",
+    json!({"shape_deps":[],"span_id":null,"merged_spans":[],"declaration":0,
         "id":id,"op":{"kind":"load","name":name},"inputs":[],
         "output_type":{"dims":dims,"precision":dtype}})
 }
@@ -165,7 +165,7 @@ fn axis_graph(kind: &str) -> Value {
     output["op"] = op;
     output["inputs"] = json!((0..id).collect::<Vec<_>>());
     nodes.push(output);
-    json!({"schema_version":WIRE_DAG_SCHEMA_VERSION,"nodes":nodes,"roots":[id]})
+    json!({"schema_version":WIRE_DAG_SCHEMA_VERSION,"declarations":["entry"],"nodes":nodes,"roots":[id]})
 }
 
 #[test]
@@ -252,8 +252,7 @@ fn forward_and_adjoint_window_fields_reject_bad_domains_at_both_edges() {
             output["inputs"] = json!((0..id).collect::<Vec<_>>());
             output["op"] = json!({"kind":kind,"reducer":reducer,"window_shape":[2],"strides":[1]});
             nodes.push(output);
-            let value =
-                json!({"schema_version":WIRE_DAG_SCHEMA_VERSION,"nodes":nodes,"roots":[id]});
+            let value = json!({"schema_version":WIRE_DAG_SCHEMA_VERSION,"declarations":["entry"],"nodes":nodes,"roots":[id]});
             let decoded = WireDag::from_validated_json(&value.to_string()).unwrap();
             assert_eq!(serde_json::to_value(&decoded).unwrap(), value);
             let last = decoded.nodes.len() - 1;

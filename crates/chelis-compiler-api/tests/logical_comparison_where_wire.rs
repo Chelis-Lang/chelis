@@ -8,12 +8,12 @@ fn payload(op: serde_json::Value, inputs: Vec<u64>, precision: &str) -> String {
     let mut nodes = vec![
         serde_json::json!({
             "id": 0, "op": {"kind": "load", "name": "a"}, "inputs": [],
-            "shape_deps": [], "span_id": null, "merged_spans": [], "declaration": "entry",
+            "shape_deps": [], "span_id": null, "merged_spans": [], "declaration": 0,
             "output_type": {"dims": [{"kind": "lit", "size": 2}], "precision": precision}
         }),
         serde_json::json!({
             "id": 1, "op": {"kind": "load", "name": "b"}, "inputs": [],
-            "shape_deps": [], "span_id": null, "merged_spans": [], "declaration": "entry",
+            "shape_deps": [], "span_id": null, "merged_spans": [], "declaration": 0,
             "output_type": {"dims": [{"kind": "lit", "size": 2}], "precision": precision}
         }),
     ];
@@ -22,7 +22,7 @@ fn payload(op: serde_json::Value, inputs: Vec<u64>, precision: &str) -> String {
             0,
             serde_json::json!({
                 "id": 0, "op": {"kind": "load", "name": "condition"}, "inputs": [],
-                "shape_deps": [], "span_id": null, "merged_spans": [], "declaration": "entry",
+                "shape_deps": [], "span_id": null, "merged_spans": [], "declaration": 0,
                 "output_type": {"dims": [{"kind": "lit", "size": 2}], "precision": "bool"}
             }),
         );
@@ -32,7 +32,7 @@ fn payload(op: serde_json::Value, inputs: Vec<u64>, precision: &str) -> String {
     let id = nodes.len() as u64;
     nodes.push(serde_json::json!({
         "id": id, "op": op, "inputs": inputs,
-        "shape_deps": [], "span_id": null, "merged_spans": [], "declaration": "entry",
+        "shape_deps": [], "span_id": null, "merged_spans": [], "declaration": 0,
         "output_type": {
             "dims": [{"kind": "lit", "size": 2}],
             "precision": if precision == "bool" || inputs.len() == 3 { precision } else { "bool" }
@@ -40,6 +40,7 @@ fn payload(op: serde_json::Value, inputs: Vec<u64>, precision: &str) -> String {
     }));
     serde_json::json!({
         "schema_version": WIRE_DAG_SCHEMA_VERSION,
+        "declarations": ["entry"],
         "nodes": nodes,
         "roots": [id]
     })
@@ -82,7 +83,7 @@ fn wire_node(
         "inputs": [],
         "shape_deps": shape_deps,
         "span_id": null,
-        "merged_spans": [], "declaration": "entry",
+        "merged_spans": [], "declaration": 0,
         "output_type": {"dims": dims, "precision": precision}
     })
 }
@@ -100,7 +101,7 @@ fn wire_operation_node(
         "inputs": inputs,
         "shape_deps": [],
         "span_id": null,
-        "merged_spans": [], "declaration": "entry",
+        "merged_spans": [], "declaration": 0,
         "output_type": {"dims": dims, "precision": precision}
     })
 }
@@ -108,6 +109,7 @@ fn wire_operation_node(
 fn wire_dag_payload(nodes: Vec<serde_json::Value>, root: u64) -> serde_json::Value {
     serde_json::json!({
         "schema_version": WIRE_DAG_SCHEMA_VERSION,
+        "declarations": ["entry"],
         "nodes": nodes,
         "roots": [root]
     })
@@ -519,7 +521,7 @@ fn wire_v15_rejects_operation_provenance_laundering() {
                 "inputs": [2, 0],
                 "shape_deps": [0],
                 "span_id": null,
-                "merged_spans": [], "declaration": "entry",
+                "merged_spans": [], "declaration": 0,
                 "output_type": {"dims": named_dims("", None), "precision": "bool"}
             }),
         ],
@@ -547,7 +549,7 @@ fn wire_v15_rejects_operation_provenance_laundering() {
                 "inputs": [0],
                 "shape_deps": [0],
                 "span_id": null,
-                "merged_spans": [], "declaration": "entry",
+                "merged_spans": [], "declaration": 0,
                 "output_type": {"dims": named_dims("", None), "precision": "f32"}
             }),
             serde_json::json!({
@@ -556,7 +558,7 @@ fn wire_v15_rejects_operation_provenance_laundering() {
                 "inputs": [1, 0],
                 "shape_deps": [0],
                 "span_id": null,
-                "merged_spans": [], "declaration": "entry",
+                "merged_spans": [], "declaration": 0,
                 "output_type": {"dims": named_dims("", None), "precision": "bool"}
             }),
         ],

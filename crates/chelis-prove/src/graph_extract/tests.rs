@@ -284,8 +284,9 @@ fn lowering_is_deterministic_within_run() {
 fn future_version_wire_dag() -> WireDag {
     WireDag {
         schema_version: WIRE_DAG_SCHEMA_VERSION + 1,
+        declarations: vec!["entry".to_owned()],
         nodes: vec![WireDagNode {
-            declaration: "entry".to_owned(),
+            declaration: 0,
             shape_deps: vec![],
             span_id: None,
             merged_spans: vec![],
@@ -330,8 +331,9 @@ fn exact_v6_wire_dag_passes_the_boundary_and_hashes() {
     named_roots.insert("out".to_string(), 0_u64);
     let dag = WireDag {
         schema_version: WIRE_DAG_SCHEMA_VERSION,
+        declarations: vec!["entry".to_owned()],
         nodes: vec![WireDagNode {
-            declaration: "entry".to_owned(),
+            declaration: 0,
             shape_deps: vec![],
             span_id: None,
             merged_spans: vec![],
@@ -364,9 +366,10 @@ fn exact_v6_wire_dag_passes_the_boundary_and_hashes() {
 fn named_output_references_must_select_nodes_in_the_enclosed_dag() {
     let dag = WireDag {
         schema_version: WIRE_DAG_SCHEMA_VERSION,
+        declarations: vec!["entry".to_owned()],
         nodes: vec![
             WireDagNode {
-                declaration: "entry".to_owned(),
+                declaration: 0,
                 shape_deps: vec![],
                 span_id: None,
                 merged_spans: vec![],
@@ -379,7 +382,7 @@ fn named_output_references_must_select_nodes_in_the_enclosed_dag() {
                 },
             },
             WireDagNode {
-                declaration: "entry".to_owned(),
+                declaration: 0,
                 shape_deps: vec![],
                 span_id: None,
                 merged_spans: vec![],
@@ -431,9 +434,10 @@ fn invalid_exact_v6_count_is_rejected_without_panicking() {
     named_roots.insert("out".to_string(), 1_u64);
     let dag = WireDag {
         schema_version: WIRE_DAG_SCHEMA_VERSION,
+        declarations: vec!["entry".to_owned()],
         nodes: vec![
             WireDagNode {
-                declaration: "entry".to_owned(),
+                declaration: 0,
                 shape_deps: vec![],
                 span_id: None,
                 merged_spans: vec![],
@@ -450,7 +454,7 @@ fn invalid_exact_v6_count_is_rejected_without_panicking() {
                 },
             },
             WireDagNode {
-                declaration: "entry".to_owned(),
+                declaration: 0,
                 shape_deps: vec![],
                 span_id: None,
                 merged_spans: vec![],
@@ -570,7 +574,7 @@ fn single_op_dag(op: WireRiscOp) -> WireDag {
     let mut nodes = Vec::new();
     let inputs = if matches!(op, WireRiscOp::Pad { .. }) {
         nodes.push(WireDagNode {
-            declaration: "entry".to_owned(),
+            declaration: 0,
             shape_deps: vec![],
             span_id: None,
             merged_spans: vec![],
@@ -585,7 +589,7 @@ fn single_op_dag(op: WireRiscOp) -> WireDag {
     };
     let root = u64::try_from(nodes.len()).unwrap();
     nodes.push(WireDagNode {
-        declaration: "entry".to_owned(),
+        declaration: 0,
         shape_deps: vec![],
         span_id: None,
         merged_spans: vec![],
@@ -596,6 +600,7 @@ fn single_op_dag(op: WireRiscOp) -> WireDag {
     });
     WireDag {
         schema_version: WIRE_DAG_SCHEMA_VERSION,
+        declarations: vec!["entry".to_owned()],
         nodes,
         roots: vec![root],
     }

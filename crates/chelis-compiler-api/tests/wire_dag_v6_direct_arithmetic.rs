@@ -4,26 +4,27 @@ use chelis_compiler_api::schema::{
 
 fn direct_sub_payload(version: Option<u32>) -> String {
     let mut payload = serde_json::json!({
+        "declarations": ["entry"],
         "nodes": [
             {
                 "id": 0,
                 "op": {"kind": "load", "name": "left"},
                 "inputs": [],
-                "shape_deps": [], "span_id": null, "merged_spans": [], "declaration": "entry",
+                "shape_deps": [], "span_id": null, "merged_spans": [], "declaration": 0,
                 "output_type": {"dims": [], "precision": "f32"}
             },
             {
                 "id": 1,
                 "op": {"kind": "load", "name": "right"},
                 "inputs": [],
-                "shape_deps": [], "span_id": null, "merged_spans": [], "declaration": "entry",
+                "shape_deps": [], "span_id": null, "merged_spans": [], "declaration": 0,
                 "output_type": {"dims": [], "precision": "f32"}
             },
             {
                 "id": 2,
                 "op": {"kind": "sub"},
                 "inputs": [0, 1],
-                "shape_deps": [], "span_id": null, "merged_spans": [], "declaration": "entry",
+                "shape_deps": [], "span_id": null, "merged_spans": [], "declaration": 0,
                 "output_type": {"dims": [], "precision": "f32"}
             }
         ],
@@ -38,12 +39,13 @@ fn direct_sub_payload(version: Option<u32>) -> String {
 fn count_payload(axes: &[i32]) -> String {
     serde_json::json!({
         "schema_version": WIRE_DAG_SCHEMA_VERSION,
+        "declarations": ["entry"],
         "nodes": [
             {
                 "id": 0,
                 "op": {"kind": "load", "name": "mask"},
                 "inputs": [],
-                "shape_deps": [], "span_id": null, "merged_spans": [], "declaration": "entry",
+                "shape_deps": [], "span_id": null, "merged_spans": [], "declaration": 0,
                 "output_type": {
                     "dims": [
                         {"kind": "lit", "size": 2},
@@ -57,7 +59,7 @@ fn count_payload(axes: &[i32]) -> String {
                 "id": 1,
                 "op": {"kind": "count", "axes": axes},
                 "inputs": [0],
-                "shape_deps": [], "span_id": null, "merged_spans": [], "declaration": "entry",
+                "shape_deps": [], "span_id": null, "merged_spans": [], "declaration": 0,
                 "output_type": {
                     "dims": [{"kind": "lit", "size": 3}],
                     "precision": "int64"

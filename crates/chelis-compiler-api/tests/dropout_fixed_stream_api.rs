@@ -14,11 +14,14 @@
 mod wire_values;
 
 mod key_reference;
+mod ownership_support;
 
-use chelis_compiler_api::compiler::{CompilerError, eval_in_context, eval_selected, prepare_eval};
+use chelis_compiler_api::compiler::{
+    CompilerError, compile_for_execution_in_context, eval_in_context, eval_selected, prepare_eval,
+};
 use chelis_compiler_api::context::CompiledContext;
 use chelis_compiler_api::schema::{
-    EvalRequest, EvalResult, ExecutionValue, SourceKind, TensorValue,
+    CompileTarget, EvalRequest, EvalResult, ExecutionValue, SourceKind, TensorValue,
 };
 use chelis_compiler_api::{COMPILER_VERSION, compile_reef_context};
 use chelis_types::types::Lane;
@@ -1542,7 +1545,7 @@ fn two_declarations_key_parameters_of_one_name_are_two_keys() {
         .nodes
         .iter()
         .filter(|node| matches!(&node.op, WireRiscOp::Load { name } if name.as_str() == "k"))
-        .map(|node| node.declaration.as_str())
+        .map(|node| lowered.dag.declarations[usize::try_from(node.declaration).unwrap()].as_str())
         .collect::<Vec<_>>();
     assert_eq!(key_loads, ["sample", "other"]);
 }
@@ -1660,6 +1663,224 @@ fn an_unselected_declarations_invalid_draw_does_not_run() {
     );
     let result = eval_selected(request(&source), &["selected".into()]).unwrap();
     assert_eq!(tensor(&result, "selected"), mask(two_keys().1));
+}
+
+/// `sampled`, a value declaration whose draw has an invalid rate.
+const SAMPLED: &str = "sampled = dropout(key_from_seed(9i64), scalar_to_tensor(1.0f32), 1.0f32)\n";
+
+/// [`SAMPLED`] and `f`, a function whose body names `sampled` in a dead
+/// binding.
+const NAMES_SAMPLED: &str = "sampled = dropout(key_from_seed(9i64), scalar_to_tensor(1.0f32), 1.0f32)\ndef f(v: tensor[32, f32]) -> tensor[32, f32] = {\n  dead = sampled\n  v\n}\n";
+
+/// A selected root that binds `g` to `f`: unapplied, or applied to a copy of
+/// `argument` when `applied`.
+fn binds_f(applied: bool, argument: &str) -> String {
+    if applied {
+        format!("g = f(copy({argument}))")
+    } else {
+        "g = f".to_string()
+    }
+}
+
+/// The DAG evaluator's rows (spec/03 §4.4, spec/06 §5.2 with [05-OP-37]):
+/// each program selects `selected`, and traps exactly when `traps`. The
+/// first four are the `dead = f` row and its applied twin, as a value root
+/// and as a function root. The rest pin how the references are recorded: a
+/// value named inside a `grad` or `vmap` body belongs to the declaration the
+/// body is spliced into; a value declaration whose value is another's still
+/// runs its own initializer when named; and a local binding that shadows a
+/// value declaration's name names only itself.
+fn dag_evaluator_rows() -> Vec<(&'static str, String, bool)> {
+    let input = "x: tensor[32, f32] = x\n";
+    let mut rows = Vec::new();
+    for applied in [false, true] {
+        rows.push((
+            if applied {
+                "value root, f applied"
+            } else {
+                "value root, f unapplied"
+            },
+            format!(
+                "{input}{NAMES_SAMPLED}selected = {{\n  {}\n  copy(x)\n}}\n",
+                binds_f(applied, "x")
+            ),
+            applied,
+        ));
+        rows.push((
+            if applied {
+                "function root, f applied"
+            } else {
+                "function root, f unapplied"
+            },
+            format!(
+                "{NAMES_SAMPLED}def selected(x: tensor[32, f32]) -> tensor[32, f32] = {{\n  {}\n  x\n}}\n",
+                binds_f(applied, "x")
+            ),
+            applied,
+        ));
+    }
+    rows.extend([
+        (
+            "named inside a differentiated body",
+            format!(
+                "{input}{SAMPLED}def loss(v: tensor[32, f32]) -> tensor[f32] = {{\n  dead = sampled\n  sum(v, 0i32)\n}}\nselected = grad(loss)(copy(x))\n"
+            ),
+            true,
+        ),
+        (
+            "named inside a mapped body",
+            format!(
+                "{input}{SAMPLED}def row(v: tensor[f32]) -> tensor[f32] = {{\n  dead = sampled\n  v\n}}\nselected = vmap(row)(copy(x))\n"
+            ),
+            true,
+        ),
+        (
+            "a value whose value is another's",
+            format!(
+                "{input}kept = dropout(key_from_seed(1i64), scalar_to_tensor(1.0f32), 0.0f32)\nalias = {{\n  dead = dropout(key_from_seed(8i64), scalar_to_tensor(1.0f32), 1.0f32)\n  kept\n}}\nselected = {{\n  dead = alias\n  copy(x)\n}}\n"
+            ),
+            true,
+        ),
+        (
+            "a local binding shadowing the value's name",
+            format!(
+                "{input}{SAMPLED}selected = {{\n  sampled = copy(x)\n  dead = sampled\n  copy(x)\n}}\n"
+            ),
+            false,
+        ),
+    ]);
+    rows
+}
+
+/// A compiled context whose library module exports `f` (its `sampled` is
+/// private), with its decoded copy.
+fn function_library_contexts() -> [CompiledContext; 2] {
+    let directory = tempfile::tempdir().unwrap();
+    std::fs::create_dir(directory.path().join("src")).unwrap();
+    std::fs::write(
+        directory.path().join("reef.toml"),
+        format!("[package]\nname = \"fnlib\"\nversion = \"0.1.0\"\ncompiler = \"={COMPILER_VERSION}\"\nmodule_prefix = \"Fnlib\"\n"),
+    )
+    .unwrap();
+    std::fs::write(
+        directory.path().join("src/draw.ch"),
+        format!("module Fnlib.Draw\nexport (f)\n{NAMES_SAMPLED}"),
+    )
+    .unwrap();
+    let context = compile_reef_context(directory.path(), directory.path()).unwrap();
+    let decoded = CompiledContext::decode(&context.encode().unwrap()).unwrap();
+    [context, decoded]
+}
+
+/// Compile `client`'s `main(x: tensor[32, f32])` in `context` as a C entry
+/// and run it on the driver's `input(32)`, returning `Ok(())` when it
+/// returns `x` and the trap text when it aborts.
+fn run_in_context_c(context: &CompiledContext, client: &str) -> Result<(), String> {
+    let artifact = compile_for_execution_in_context(context, client, CompileTarget::C, None)
+        .unwrap_or_else(|error| panic!("{client}: {error:?}"));
+    assert_eq!(
+        artifact
+            .inputs
+            .iter()
+            .map(|input| input.name.as_str())
+            .collect::<Vec<_>>(),
+        ["x"]
+    );
+    let file = |path: &str| {
+        artifact
+            .compile_result
+            .files
+            .iter()
+            .find(|file| file.path == path)
+            .unwrap_or_else(|| panic!("no generated `{path}`"))
+            .contents
+            .clone()
+    };
+    let program =
+        ownership_support::GeneratedProgram::new(file("chelis_main.c"), file("chelis_main.h"));
+    let driver = "int main(void) {\n    chelis_tensor *x = input(32);\n    chelis_tensor *inputs[] = {x};\n    chelis_tensor *outputs[] = {NULL};\n    chelis_main(inputs, 1, outputs, 1);\n    float expected[32];\n    for (int i = 0; i < 32; ++i) expected[i] = (float)(2*i-3);\n    tensor_bits(outputs[0], 32, expected);\n    chelis_tensor_release(outputs[0]);\n    chelis_tensor_release(x);\n    return 0;\n}\n";
+    let traps =
+        std::panic::catch_unwind(|| ownership_support::run_failure_stderr(&program, driver));
+    match traps {
+        Ok(stderr) => Err(stderr),
+        Err(_) => {
+            ownership_support::balanced(&ownership_support::run(&program, driver));
+            Ok(())
+        }
+    }
+}
+
+/// `g = f`, a function named as a value and not applied, evaluates to the
+/// function and runs nothing: neither `f`'s body nor the value declaration
+/// `sampled` that `f` names, so `sampled`'s invalid rate does not trap.
+/// Applying `f` inlines its body, which names `sampled`, so the applied twin
+/// traps (spec/03 §4.4). Both hold in the DAG evaluator (`eval_selected` of
+/// a Tensor-lane root), the host interpreter (a Host-lane `main`), and
+/// compiled C (the in-context C entry, run natively, with `f` a library
+/// function).
+///
+/// Evidentiary status: REGRESSION TEST for the unapplied rows in the DAG
+/// evaluator and in C, each of which trapped at 441e5c8b2, because the
+/// declarations a selection entered were closed over every name a body
+/// mentions, applied or not. The host-lane rows, every applied twin, and the
+/// `dag_evaluator_rows` after the first four are disposition locks: each
+/// held at 441e5c8b2 too. They pin the recording: a mutation that records
+/// the declaration of the node a name resolves to fails the alias row and
+/// the `grad` and `vmap` rows, one that drops what a sub-context recorded
+/// fails the `grad` and `vmap` rows, and one that ignores a shadowing local
+/// fails the shadow row.
+#[test]
+fn a_function_named_as_a_value_and_not_applied_runs_nothing_in_any_lane() {
+    for (row, source, traps) in dag_evaluator_rows() {
+        let outcome = eval_selected(request(&source), &["selected".into()]);
+        if traps {
+            assert_domain_trap(outcome, row);
+            continue;
+        }
+        let result = outcome.unwrap_or_else(|error| panic!("{row}: {error:?}"));
+        assert_eq!(tensor(&result, "selected"), vec![1.0; 32], "{row}");
+        if let Some(entry) = result
+            .manifest
+            .entries
+            .iter()
+            .find(|entry| entry.name == "selected")
+        {
+            assert_eq!(entry.lane, Lane::Tensor, "{row}");
+        }
+    }
+
+    let ones = std::iter::repeat_n("1.0f32", 32)
+        .collect::<Vec<_>>()
+        .join(", ");
+    let host = |applied: bool| {
+        eval_selected(
+            EvalRequest {
+                source_kind: SourceKind::Surf,
+                source: format!(
+                    "{NAMES_SAMPLED}def main() -> tensor[32, f32] = {{\n  t = to_tensor([{ones}])\n  {}\n  t\n}}\n",
+                    binds_f(applied, "t")
+                ),
+                bindings: BTreeMap::new(),
+            },
+            &["main".into()],
+        )
+    };
+    let result = host(false).unwrap_or_else(|error| panic!("host lane: {error:?}"));
+    assert_eq!(lane_of(&result, "main"), Lane::Host);
+    assert_eq!(tensor(&result, "main"), vec![1.0; 32]);
+    assert_domain_trap(host(true), "host lane, f applied");
+
+    for context in &function_library_contexts() {
+        let client = |applied: bool| {
+            format!(
+                "module Fnlib.Client\nimport Fnlib.Draw (f)\ndef main(x: tensor[32, f32]) -> tensor[32, f32] = {{\n  {}\n  x\n}}\n",
+                binds_f(applied, "x")
+            )
+        };
+        assert_eq!(run_in_context_c(context, &client(false)), Ok(()));
+        let stderr = run_in_context_c(context, &client(true)).expect_err("C, f applied");
+        assert!(stderr.contains(DOMAIN_TRAP), "{stderr}");
+    }
 }
 
 const DOMAIN_TRAP: &str = "numeric trap: domain in dropout at f32";

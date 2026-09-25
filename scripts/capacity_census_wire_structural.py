@@ -49,6 +49,7 @@ def structural_contracts():
         add(field, "source-byte-coordinate")
     add("EvaluatedRoot.node_id", "opaque-evaluated-node")
     add("WireDagNode.id", "dag-position")
+    add("WireDagNode.declaration", "declaration-row")
     add("WireDagNode.inputs", "earlier-dag-node", vector)
     add("WireDagNode.shape_deps", "earlier-shape-dependency", vector)
     add(
@@ -217,6 +218,17 @@ def structural_evidence():
             "EvaluatedRoot", "opaque-18446744073709551615", ("opaque--1",), ("json",)
         ),
         "dag-position": pairs("WireDag", "owned-reference", ("id-position",)),
+        "declaration-row": pairs(
+            "WireDag",
+            "shared-declaration-name",
+            (
+                "declaration-row-outside",
+                "declaration-row-unused",
+                "declaration-row-large",
+                "declaration-row-negative",
+                "declaration-row-float",
+            ),
+        ),
         "earlier-dag-node": pairs(
             "WireDag", "owned-reference", ("self-input", "large-input")
         ),

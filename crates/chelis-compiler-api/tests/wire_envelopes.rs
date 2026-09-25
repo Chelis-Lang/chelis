@@ -25,7 +25,9 @@ fn execution_version_is_checked_before_values_in_either_field_order() {
 #[test]
 fn current_envelopes_accept_reordered_fields_and_reject_duplicate_versions() {
     let eval = format!("{{\"roots\":[],\"schema_version\":{EXECUTION_VALUE_SCHEMA_VERSION}}}");
-    let dag = format!("{{\"roots\":[],\"nodes\":[],\"schema_version\":{WIRE_DAG_SCHEMA_VERSION}}}");
+    let dag = format!(
+        "{{\"roots\":[],\"nodes\":[],\"declarations\":[],\"schema_version\":{WIRE_DAG_SCHEMA_VERSION}}}"
+    );
     assert!(serde_json::from_str::<EvalResult>(&eval).is_ok());
     assert!(serde_json::from_str::<WireDag>(&dag).is_ok());
     assert!(WireDag::from_validated_json(&dag).is_ok());
@@ -48,7 +50,7 @@ fn current_envelopes_accept_reordered_fields_and_reject_duplicate_versions() {
 fn dag_envelope_preserves_duplicate_payload_fields_for_rejection() {
     let payload = |value: &str| {
         format!(
-            r#"{{"schema_version":{WIRE_DAG_SCHEMA_VERSION},"nodes":[{{"shape_deps":[],"span_id":null,"merged_spans":[],"declaration":"entry","id":0,"op":{{"kind":"const","value":{value}}},"inputs":[],"output_type":{{"dims":[],"precision":"f64"}}}}],"roots":[0]}}"#
+            r#"{{"schema_version":{WIRE_DAG_SCHEMA_VERSION},"declarations":["entry"],"nodes":[{{"shape_deps":[],"span_id":null,"merged_spans":[],"declaration":0,"id":0,"op":{{"kind":"const","value":{value}}},"inputs":[],"output_type":{{"dims":[],"precision":"f64"}}}}],"roots":[0]}}"#
         )
     };
     let valid = payload(r#"{"dtype":"f64","bits":"8000000000000000"}"#);

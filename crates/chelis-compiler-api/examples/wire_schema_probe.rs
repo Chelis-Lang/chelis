@@ -232,6 +232,7 @@ fn batch(request: &Request) -> Result<Value, String> {
 #[derive(Deserialize)]
 struct DagInput {
     schema_version: u32,
+    declarations: Vec<String>,
     nodes: Vec<WireDagNode>,
     roots: Vec<u64>,
 }
@@ -242,6 +243,7 @@ fn dag(request: &Request) -> Result<Value, String> {
         let input: DagInput = serde_json::from_str(&request.input).map_err(|e| e.to_string())?;
         WireDag {
             schema_version: input.schema_version,
+            declarations: input.declarations,
             nodes: input.nodes,
             roots: input.roots,
         }

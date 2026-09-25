@@ -16,6 +16,7 @@ use serde_json::{Value, json};
 fn construct(value: &Value) -> WireDag {
     WireDag {
         schema_version: WIRE_DAG_SCHEMA_VERSION,
+        declarations: serde_json::from_value(value["declarations"].clone()).unwrap(),
         nodes: serde_json::from_value::<Vec<WireDagNode>>(value["nodes"].clone()).unwrap(),
         roots: serde_json::from_value(value["roots"].clone()).unwrap(),
     }
@@ -142,7 +143,7 @@ fn a_key_is_consumed_once_and_only_by_a_key_consumer() {
     let nodes = foreign["nodes"].as_array_mut().unwrap();
     let id = nodes.len();
     nodes.push(
-        json!({"shape_deps":[],"span_id":null,"merged_spans":[],"declaration":"entry","id":id,
+        json!({"shape_deps":[],"span_id":null,"merged_spans":[],"declaration":0,"id":id,
         "op":{"kind":"neg"},"inputs":[dropout_key],
         "output_type":{"dims":[],"precision":"key"}}),
     );
@@ -165,7 +166,7 @@ fn a_key_is_consumed_once_and_only_by_a_key_consumer() {
     let mut derived = dag.clone();
     let id = derived["nodes"].as_array().unwrap().len();
     derived["nodes"].as_array_mut().unwrap().push(
-        json!({"shape_deps":[],"span_id":null,"merged_spans":[],"declaration":"entry","id":id,
+        json!({"shape_deps":[],"span_id":null,"merged_spans":[],"declaration":0,"id":id,
         "op":{"kind":"split","branch":"left"},"inputs":[dropout_key],
         "output_type":{"dims":[],"precision":"key"}}),
     );
@@ -287,7 +288,7 @@ fn a_key_may_be_loaded_or_rooted_and_is_never_a_dependency_or_a_constant() {
     let mut loaded = dag.clone();
     let id = loaded["nodes"].as_array().unwrap().len();
     loaded["nodes"].as_array_mut().unwrap().push(
-        json!({"shape_deps":[],"span_id":null,"merged_spans":[],"declaration":"entry","id":id,
+        json!({"shape_deps":[],"span_id":null,"merged_spans":[],"declaration":0,"id":id,
         "op":{"kind":"load","name":"unused"},"inputs":[],
         "output_type":{"dims":[],"precision":"key"}}),
     );
@@ -311,7 +312,7 @@ fn a_key_may_be_loaded_or_rooted_and_is_never_a_dependency_or_a_constant() {
     let mut constant = dag.clone();
     let id = constant["nodes"].as_array().unwrap().len();
     constant["nodes"].as_array_mut().unwrap().push(
-        json!({"shape_deps":[],"span_id":null,"merged_spans":[],"declaration":"entry","id":id,
+        json!({"shape_deps":[],"span_id":null,"merged_spans":[],"declaration":0,"id":id,
         "op":{"kind":"const","value":{"dtype":"int64","value":7}},"inputs":[],
         "output_type":{"dims":[],"precision":"key"}}),
     );
@@ -320,7 +321,7 @@ fn a_key_may_be_loaded_or_rooted_and_is_never_a_dependency_or_a_constant() {
 }
 
 fn wire_node(id: usize, op: Value, inputs: &[usize], dims: &[u64], precision: &str) -> Value {
-    json!({"shape_deps":[],"span_id":null,"merged_spans":[],"declaration":"entry","id":id,"op":op,
+    json!({"shape_deps":[],"span_id":null,"merged_spans":[],"declaration":0,"id":id,"op":op,
         "inputs":inputs,
         "output_type":{"dims":dims.iter().map(|size| json!({"kind":"lit","size":size})).collect::<Vec<_>>(),
         "precision":precision}})
@@ -379,7 +380,7 @@ fn key_chain() -> Value {
         ),
         wire_node(11, json!({"kind":"fold_in"}), &[3, 10], &[], "key"),
     ];
-    json!({"schema_version": WIRE_DAG_SCHEMA_VERSION, "nodes": nodes, "roots": [9, 11]})
+    json!({"schema_version": WIRE_DAG_SCHEMA_VERSION, "declarations": ["entry"], "nodes": nodes, "roots": [9, 11]})
 }
 
 /// Insert an input-free node as node 0, renumbering every later reference,
@@ -538,10 +539,14 @@ fn the_codec_admits_the_key_chain_and_rejects_every_malformed_key_form() {
     rooted["roots"].as_array_mut().unwrap().push(json!(6));
     rejects_domain(&rooted, "is a graph root and is also consumed");
     // A parameter is its declaration and its name (chelis#2413 B2): two
-    // declarations' `k` are two keys, and one declaration's two `Load`s of
-    // `k` are one.
-    let reloaded = |declarations: [&str; 2]| {
+    // declarations' `k` are two keys, even when the two declarations share a
+    // name, and one declaration's two `Load`s of `k` are one. `table` is the
+    // declaration table after `entry`, and `rows` the two `Load`s' rows.
+    let reloaded = |table: &[&str], rows: [u64; 2]| {
         let mut reloaded = key_chain();
+        let mut declarations = vec!["entry"];
+        declarations.extend(table);
+        reloaded["declarations"] = json!(declarations);
         let y = push(
             &mut reloaded,
             json!({"kind":"load","name":"y"}),
@@ -550,7 +555,7 @@ fn the_codec_admits_the_key_chain_and_rejects_every_malformed_key_form() {
             "f32",
         );
         let mut roots = vec![json!(9), json!(11)];
-        for declaration in declarations {
+        for declaration in rows {
             let k = push(
                 &mut reloaded,
                 json!({"kind":"load","name":"k"}),
@@ -574,10 +579,21 @@ fn the_codec_admits_the_key_chain_and_rejects_every_malformed_key_form() {
     // The report names the key by its parameter and declaration, and each
     // consumer by its operation and node (chelis#2413, decision 7).
     rejects_domain(
-        &reloaded(["a", "a"]),
+        &reloaded(&["a"], [1, 1]),
         "key `k` of `a` is consumed twice, by the `dropout` at node 14 of `entry` and the `dropout` at node 16 of `entry`",
     );
-    accepts(&reloaded(["a", "b"]));
+    accepts(&reloaded(&["a", "b"], [1, 2]));
+    accepts(&reloaded(&["a", "a"], [1, 2]));
+    // A node's declaration is a row of the table, and every row is some
+    // node's declaration.
+    rejects_domain(
+        &reloaded(&["a"], [1, 2]),
+        "a node's declaration must be a row of the owning DAG's declaration table",
+    );
+    rejects_domain(
+        &reloaded(&["a", "b"], [1, 1]),
+        "every row of the declaration table must be the declaration of some node",
+    );
     // Every node names its declaration: a node without one is a decode error.
     let mut undeclared = key_chain();
     undeclared["nodes"][0]
@@ -1146,6 +1162,21 @@ fn ir_node(
 
 /// The wire form of the loads, constants, key operations and draws below.
 fn wire_of(dag: &Dag) -> Value {
+    // One row per declaration a node belongs to, in declaration order.
+    let used = dag
+        .nodes()
+        .iter()
+        .map(|node| node.decl)
+        .collect::<std::collections::BTreeSet<_>>();
+    let row_of = used
+        .iter()
+        .enumerate()
+        .map(|(row, decl)| (*decl, row))
+        .collect::<std::collections::BTreeMap<_, _>>();
+    let declarations = used
+        .iter()
+        .map(|decl| dag.declaration(*decl).name.clone())
+        .collect::<Vec<_>>();
     let nodes = dag
         .nodes()
         .iter()
@@ -1181,14 +1212,14 @@ fn wire_of(dag: &Dag) -> Value {
                     other => panic!("no wire form here for {other:?}"),
                 })
                 .collect::<Vec<_>>();
-            let declaration = chelis_ir::verify::KeyGraph::declaration(dag, node.id.0);
+            let declaration = row_of[&node.decl];
             json!({"shape_deps":[],"span_id":null,"merged_spans":[],"declaration":declaration,"id":node.id.0,"op":op,
                 "inputs":node.inputs.iter().map(|input| input.0).collect::<Vec<_>>(),
                 "output_type":{"dims":dims,"precision":node.output_type.precision.interchange_name()}})
         })
         .collect::<Vec<_>>();
     let roots = dag.roots().iter().map(|root| root.0).collect::<Vec<_>>();
-    json!({"schema_version": WIRE_DAG_SCHEMA_VERSION, "nodes": nodes, "roots": roots})
+    json!({"schema_version": WIRE_DAG_SCHEMA_VERSION, "declarations": declarations, "nodes": nodes, "roots": roots})
 }
 
 /// Keys `split_n(key(7), 3)`: nodes 0 to 2.
@@ -1387,19 +1418,31 @@ fn a_transformed_key_parameter_and_a_siblings_are_two_keys() {
         .unwrap_or_else(|error| panic!("{applied}: {error:?}"));
         let text = serde_json::to_string(&lowered.dag).unwrap();
         let decoded = WireDag::from_validated_json(&text).unwrap();
+        let row = |name: &str| {
+            decoded
+                .declarations
+                .iter()
+                .position(|declaration| declaration == name)
+                .unwrap_or_else(|| panic!("{applied}: no row `{name}`"))
+        };
         let key_loads = decoded
             .nodes
             .iter()
             .filter(|node| matches!(&node.op, WireRiscOp::Load { name } if name.as_str() == "k"))
-            .map(|node| node.declaration.as_str())
+            .map(|node| decoded.declarations[usize::try_from(node.declaration).unwrap()].as_str())
             .collect::<Vec<_>>();
         assert!(key_loads.contains(&applied), "{applied}: {key_loads:?}");
         assert!(key_loads.contains(&"sibling"), "{applied}: {key_loads:?}");
 
+        // Moving the sibling's `k` into the transformed declaration's row
+        // makes the two parameters one.
+        let (sibling, applied_row) = (row("sibling"), row(applied));
         let mut merged: Value = serde_json::from_str(&text).unwrap();
         for node in merged["nodes"].as_array_mut().unwrap() {
-            if node["declaration"] == json!("sibling") {
-                node["declaration"] = json!(applied);
+            if node["declaration"] == json!(sibling)
+                && node["op"] == json!({"kind":"load","name":"k"})
+            {
+                node["declaration"] = json!(applied_row);
             }
         }
         rejects_domain(&merged, "is consumed twice");
@@ -1414,6 +1457,7 @@ fn a_transformed_key_parameter_and_a_siblings_are_two_keys() {
 fn exclusive_splits_of_one_key_may_not_return_their_halves() {
     let mut graph = json!({
         "schema_version": WIRE_DAG_SCHEMA_VERSION,
+        "declarations": ["entry"],
         "nodes": [],
         "roots": [],
     });
