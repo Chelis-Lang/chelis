@@ -1107,10 +1107,10 @@ pub trait KeyGraph {
     /// declaration, "the `fold_in` key at node 7 of `f`". Both sides of the
     /// codec word it here, so their diagnostics agree.
     fn describe_key(&self, node: usize) -> String {
-        let of = self
-            .declaration(node)
-            .map(|declaration| format!(" of `{declaration}`"))
-            .unwrap_or_default();
+        let of = match self.declaration(node) {
+            Some(declaration) => format!(" of `{declaration}`"),
+            None => String::new(),
+        };
         match (self.load_name(node), self.role(node).operation()) {
             (Some(name), _) => format!("key `{name}`{of}"),
             (None, Some(operation)) => format!("the {operation} key at node {node}{of}"),
@@ -1122,10 +1122,10 @@ pub trait KeyGraph {
     /// key: its operation, its node and its declaration, "the `dropout` at
     /// node 9 of `f`".
     fn describe_node(&self, node: usize) -> String {
-        let of = self
-            .declaration(node)
-            .map(|declaration| format!(" of `{declaration}`"))
-            .unwrap_or_default();
+        let of = match self.declaration(node) {
+            Some(declaration) => format!(" of `{declaration}`"),
+            None => String::new(),
+        };
         match self.role(node).operation() {
             Some(operation) => format!("the {operation} at node {node}{of}"),
             None => format!("node {node}{of}"),
@@ -1594,8 +1594,7 @@ fn verify_confinement(
             .input(node, slot)
             .map(&identity)
             .and_then(|parent| required.get(parent))
-            .cloned()
-            .unwrap_or_default()
+            .map_or_else(Vec::new, Clone::clone)
     };
     for node in 0..graph.node_count() {
         let role = graph.role(node);
