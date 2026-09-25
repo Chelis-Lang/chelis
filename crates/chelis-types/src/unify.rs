@@ -88,10 +88,40 @@ pub enum TypeErrorKind {
     /// A checked family restriction failed, including before its operand
     /// acquired a concrete type. Rendered publicly as PrecisionMismatch.
     DtypeFamilyMismatch,
+    /// [04-LIN-10]: a function's type parameter was instantiated at a
+    /// key-carrying type. Rendered publicly as KeyReuse, the key-affinity
+    /// diagnostic.
+    KeyInstantiation,
     DimensionMismatch,
     ArityMismatch,
     OccursCheck,
     NotAFunction,
+}
+
+/// [04-LIN-10]: the generic a key-free type variable stands for a parameter
+/// of, so the diagnostic names it. Both parts are optional: a variable
+/// generalized before its binding is named has no generic yet, and a
+/// parameter the program never spelled has no binder name, and neither is
+/// invented ([04-FIT-10]).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GenericParameter {
+    /// The definition or `let` binding whose scheme quantified the variable.
+    pub generic: Option<String>,
+    /// The authored binder the variable instantiates, when there is one.
+    pub binder: Option<String>,
+}
+
+impl GenericParameter {
+    fn describe(&self) -> String {
+        match (&self.generic, &self.binder) {
+            (Some(generic), Some(binder)) => {
+                format!("type parameter `{binder}` of generic `{generic}`")
+            }
+            (Some(generic), None) => format!("an inferred type parameter of generic `{generic}`"),
+            (None, Some(binder)) => format!("type parameter `{binder}` of a generic function"),
+            (None, None) => "a type parameter of a generic function".to_string(),
+        }
+    }
 }
 
 /// A derived observation, never a replacement dimension for propagation.
@@ -162,6 +192,25 @@ pub struct Subst {
     /// value must not become unconstrained after a cache round trip.
     #[serde(default)]
     tvar_restrictions: Mutex<UnordMap<TypeVar, TypeVarRestriction>>,
+    /// [04-LIN-10]: the type variables that stand for a function's type
+    /// parameter, each with the generic it belongs to, so a violation names
+    /// it. Generalization marks every variable it quantifies, instantiation
+    /// copies the mark to the fresh variable, and binding a marked variable
+    /// refuses a key-carrying type and marks every variable left inside the
+    /// type it is bound to.
+    ///
+    /// Kept apart from [`Self::tvar_restrictions`] on purpose: those are dtype
+    /// families that many sites read as "this variable is a dtype", which a
+    /// variable that may still become a tuple, a list or a function is not.
+    /// Serialized, so a library's generics keep the rule across a context
+    /// round trip.
+    #[serde(default)]
+    key_free_tvars: Mutex<UnordMap<TypeVar, GenericParameter>>,
+    /// Spec/04 section 8.4.1: the data types of this check whose fields carry
+    /// a key, installed once every `type` declaration is registered and read
+    /// when a [`Self::key_free_tvars`] variable is bound to a data type.
+    #[serde(default)]
+    key_carrying_adts: UnordSet<String>,
     dims: Mutex<UnordMap<DimVar, Dim>>,
     /// Named-axis view of a checker dimension identity, plus reserved
     /// compiler-owned annotations on synthetic dimension identities. Schemes
@@ -863,6 +912,13 @@ impl Clone for Subst {
                     .expect("subst.tvar_restrictions poisoned")
                     .clone(),
             ),
+            key_free_tvars: Mutex::new(
+                self.key_free_tvars
+                    .lock()
+                    .expect("subst.key_free_tvars poisoned")
+                    .clone(),
+            ),
+            key_carrying_adts: self.key_carrying_adts.clone(),
             dims: Mutex::new(self.dims.lock().expect("subst.dims poisoned").clone()),
             dimension_labels: Mutex::new(
                 self.dimension_labels
@@ -1204,6 +1260,71 @@ impl Subst {
             .lock()
             .expect("subst.tvar_restrictions poisoned")
             .remove(&v);
+    }
+
+    /// [04-LIN-10]: mark `v` as standing for a function's type parameter. A
+    /// variable already marked keeps its generic, so a violation names the
+    /// first generic the variable was found to belong to.
+    pub(crate) fn forbid_key_instantiation(&self, v: TypeVar, origin: GenericParameter) {
+        self.key_free_tvars
+            .lock()
+            .expect("subst.key_free_tvars poisoned")
+            .entry(v)
+            .or_insert(origin);
+    }
+
+    /// The generic `v` stands for a type parameter of, when it is marked.
+    pub(crate) fn key_free_origin(&self, v: TypeVar) -> Option<GenericParameter> {
+        self.key_free_tvars
+            .lock()
+            .expect("subst.key_free_tvars poisoned")
+            .get(&v)
+            .cloned()
+    }
+
+    /// Name the generic that a binding's scheme belongs to on each of its
+    /// quantified variables, with the authored binder each one instantiates
+    /// when `binders` records it. An authored binder of this binding always
+    /// names the variable. A variable this binding did not spell keeps the
+    /// name of a generic it came from, so `t = (dup, 1)` then `(t.0)(k)` names
+    /// `dup`'s parameter rather than the tuple.
+    pub(crate) fn name_generic_parameters(
+        &self,
+        scheme: &Scheme,
+        generic: &str,
+        binders: &UnordMap<TypeVar, String>,
+    ) {
+        let binders = binders.to_sorted();
+        let mut marks = self
+            .key_free_tvars
+            .lock()
+            .expect("subst.key_free_tvars poisoned");
+        for tv in &scheme.tvars {
+            let binder = binders
+                .iter()
+                .find(|(declared, _)| {
+                    **declared == *tv || self.apply(&Type::Var(**declared)) == Type::Var(*tv)
+                })
+                .map(|(_, name)| (*name).clone());
+            let named_elsewhere = marks
+                .get(tv)
+                .is_some_and(|existing| existing.generic.is_some());
+            if binder.is_none() && named_elsewhere {
+                continue;
+            }
+            marks.insert(
+                *tv,
+                GenericParameter {
+                    generic: Some(generic.to_string()),
+                    binder,
+                },
+            );
+        }
+    }
+
+    /// Install spec/04 section 8.4.1's key-carrying data types for this check.
+    pub(crate) fn set_key_carrying_adts(&mut self, adts: UnordSet<String>) {
+        self.key_carrying_adts = adts;
     }
 
     /// Record a new dim-variable binding.
@@ -2635,6 +2756,32 @@ impl Subst {
             }
         }
 
+        // [04-LIN-10]: both operands' key-free marks hold in the composed
+        // graph, so each is re-checked against what its variable now resolves
+        // to, exactly like a dtype family above.
+        let incoming_marks = other
+            .key_free_tvars
+            .lock()
+            .expect("subst.key_free_tvars poisoned")
+            .clone()
+            .into_sorted();
+        for (source, origin) in incoming_marks {
+            trial.forbid_key_instantiation(source, origin);
+        }
+        let marks = trial
+            .key_free_tvars
+            .lock()
+            .expect("subst.key_free_tvars poisoned")
+            .clone()
+            .into_sorted();
+        for (source, origin) in marks {
+            let resolved = trial.resolve_tvar(source);
+            ensure_key_free(&origin, &resolved, &resolved, &trial)?;
+        }
+        trial
+            .key_carrying_adts
+            .merge(other.key_carrying_adts.clone());
+
         *self = trial;
         Ok(())
     }
@@ -3298,6 +3445,9 @@ fn bind_tvar_inner(v: TypeVar, ty: &Type, subst: &mut Subst) -> Result<(), TypeE
     if let Some(restriction) = source_restriction {
         ensure_tvar_restriction(restriction, ty, subst)?;
     }
+    if let Some(origin) = subst.key_free_origin(v) {
+        ensure_key_free(&origin, ty, ty, subst)?;
+    }
 
     // An older variable that becomes bound to a younger composite makes all
     // reachable variables part of the older scope.
@@ -3309,6 +3459,71 @@ fn bind_tvar_inner(v: TypeVar, ty: &Type, subst: &mut Subst) -> Result<(), TypeE
         subst.narrow_tvar_restriction(*target, restriction)?;
     }
     Ok(())
+}
+
+/// [04-LIN-10]: check that a function's type parameter is not instantiated at
+/// a key-carrying type (spec/04 section 8.4.1), and carry the rule onto every
+/// variable left inside `ty`, which the parameter's instantiation now
+/// includes. `whole` is the complete type the parameter is bound to, for the
+/// diagnostic.
+///
+/// Function types carry no key, so a function-typed instantiation passes and
+/// its parameter and result variables stay unmarked: the function's own
+/// scheme, not this parameter, decides whether a key may reach them.
+fn ensure_key_free(
+    origin: &GenericParameter,
+    ty: &Type,
+    whole: &Type,
+    subst: &Subst,
+) -> Result<(), TypeError> {
+    let refuse = || TypeError {
+        kind: TypeErrorKind::KeyInstantiation,
+        message: format!(
+            "{} cannot be instantiated at the key-carrying type `{}`: a function's type \
+             parameter never stands for a key or a value that carries one, because a generic \
+             body may use its value more than once (spec/04-type-system.md [04-LIN-10])",
+            origin.describe(),
+            subst.apply(whole)
+        ),
+    };
+    match ty {
+        Type::Var(var) => match subst.apply(&Type::Var(*var)) {
+            Type::Var(root) => {
+                subst.forbid_key_instantiation(root, origin.clone());
+                Ok(())
+            }
+            resolved => ensure_key_free(origin, &resolved, whole, subst),
+        },
+        Type::Prim(Prim::Key) => Err(refuse()),
+        Type::Prim(_) | Type::Unit | Type::Fn(_, _) | Type::Error(_) => Ok(()),
+        Type::Tensor(_, TensorPrec::Concrete(prim)) => {
+            ensure_key_free(origin, &Type::Prim(*prim), whole, subst)
+        }
+        Type::Tensor(_, TensorPrec::Var(var)) => {
+            ensure_key_free(origin, &Type::Var(*var), whole, subst)
+        }
+        Type::Ref(inner) => ensure_key_free(origin, inner, whole, subst),
+        Type::Tuple(elements) => elements
+            .iter()
+            .try_for_each(|element| ensure_key_free(origin, element, whole, subst)),
+        Type::Adt(name, arguments) => {
+            if subst.key_carrying_adts.contains(name) {
+                return Err(refuse());
+            }
+            arguments
+                .iter()
+                .try_for_each(|argument| ensure_key_free(origin, argument, whole, subst))
+        }
+        Type::KindedAdt(name, arguments) => {
+            if subst.key_carrying_adts.contains(name) {
+                return Err(refuse());
+            }
+            arguments.iter().try_for_each(|argument| match argument {
+                NominalArg::Type(argument) => ensure_key_free(origin, argument, whole, subst),
+                NominalArg::Dimension(_) => Ok(()),
+            })
+        }
+    }
 }
 
 /// Check one instantiation of a bounded type variable ([04-DTYPE-2]).

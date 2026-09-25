@@ -1,6 +1,6 @@
 # Explicit single-use random keys (option C)
 
-Tracker: chelis#2413. Status: **decided 2026-09-23 (Robert); names, key tensors, closures and branch arms decided 2026-09-24.** Chelis moves from the counter stream of [05-RNG-1] to explicit keys, after the phases shared by both designs (`archive/randomness_counter_stream.md` phases 1 to 3).
+Tracker: chelis#2413. Status: **decided 2026-09-23 (Robert); names, key tensors, closures and branch arms decided 2026-09-24; generic functions decided 2026-09-24 and confirmed 2026-09-25.** Chelis moves from the counter stream of [05-RNG-1] to explicit keys, after the phases shared by both designs (`archive/randomness_counter_stream.md` phases 1 to 3).
 
 The numbered chapters now specify keys, amended with the switch (#2413).
 
@@ -40,6 +40,12 @@ The names avoid `split(x, axis, sizes)` ([05-OP-53]) and the `key` dtype name, s
 Backward-pass replay reads are the only exception. Reuse is therefore a type error, and dropping an unused key is allowed.
 
 **A closure may not capture a key or a key holder.** Function types record no captures, and a closure that consumed a captured key would use it once per call. Capturing one is a type error; keys are passed as parameters. Affine closures would be a separate feature.
+
+**A generic function never takes a key through a type parameter** (Robert, 2026-09-24, confirmed 2026-09-25). A function's type parameter is never instantiated at a key-carrying type ([04-LIN-10]): a definition's authored binder, the standard library's included, an element-dtype binder with or without a family bound (every family already excludes `key`), and every variable a `let` binding generalizes. Keys pass through concrete `key` or `tensor[n, key]` parameters. Data-type parameters stay open (`List[key]`, `Option[key]`, a data type with a key field), and so do the builtin operations, whose key operands [04-LIN-9] governs call by call.
+
+Three designs were weighed: forbidding key binders, inferring which binders a body treats affinely, and an explicit affine bound; a general usage-mode design was weighed too, and the key-specific `key_carrying` predicate stands. Forbidding replaced a first implementation of the inference, which summarized generic bodies and missed the generics it could not see being called: `map(dup, keys)`, and a generic stored in a tuple or returned from a function and then applied (#2541). The rule holds however a generic is reached because the checker enforces it where it instantiates a scheme, not by reading bodies: generalization marks every variable it quantifies, instantiation copies the mark to the fresh variable, and binding a marked variable to a key-carrying type, or to a data type whose fields carry a key, is a type error that names the generic and, when the program spells one, its parameter.
+
+The rule covers a `let` value that is not a function, because a tuple or data value can hold a closure over the variable, so `e = Nil` followed by `Cons(k, e)` is refused; `Cons(k, Nil)` or an annotated `e: List[key] = Nil` is the repair. It can be relaxed additively later, by an explicit affine bound, or by inference once the checker records which types each generic is instantiated at.
 
 **Keys under a where-lowered `if` or `match` (rule V3).** Inside a kernel both arms of a runtime branch are lowered, each draw carrying its arm's activation. Consumption is counted per selected arm: two consumers may share a key only when their activations are structurally exclusive, `And(P, X)` against `And(P, Not X)` or any conjunct chain containing such a pair, or a chain containing the constant `false`. The last case is what constant folding leaves of such a pair when `X` is a constant, so folding preserves the rule. Refusing keys inside arms instead would fence ordinary programs such as `if c then dropout(k, x, r) else x`.
 
@@ -87,7 +93,7 @@ The bridge exists to give the IR rewrite a bit-identical oracle. Phase 3 states 
 - **spec/04:**
   - §1.1 gains `key`;
   - §7.1 and [04-EFF-1] remove `Random`, `with seed` and the unhandled-`Random` error;
-  - the linearity rules make keys affine;
+  - the linearity rules make keys affine, and [04-LIN-10] keeps key-carrying types out of every function's type parameters;
   - the seed-literal note goes.
 - **spec/05:**
   - [05-RNG-1] is recast over keys;
@@ -104,7 +110,7 @@ The bridge exists to give the IR rewrite a bit-identical oracle. Phase 3 states 
 
 **Implementation, after phase 3.** Each step lands with the numbered-spec text it implements.
 1. **Additive key operations.** The `key` dtype (spec/04 §1.1) and new atoms for `derive`, `key_from_seed`, `split_key`, `split_keys` and `fold_in` (spec/05). The runtime dtype (a freeze move, §3). The IR operations, verifier, evaluators and C and HIP emission for them, and the `vmap` lifting over key rows. The next wire version, with spec/10 amended in the same step, including relaxing its "every key is the output of a `DrawKey`" sentence, since key `Load`s and roots become legal.
-2. **The checker.** Affine linearity for keys and key tensors (spec/04's linearity rules) through the `key_carrying` predicate, the closure refusal, consumed transform-call arguments, the `vmap` key-formal rule, and key-typed signatures.
+2. **The checker.** Affine linearity for keys and key tensors (spec/04's linearity rules) through the `key_carrying` predicate, the closure refusal, consumed transform-call arguments, the `vmap` key-formal rule, key-typed signatures, and [04-LIN-10]'s refusal of a key-carrying instantiation of a generic's type parameter.
 3. **The switch, in one change set.** It lands together:
    - removal of phase 3's `vmap` fence (#2409), now that `vmap` over key rows is defined;
    - the surface;

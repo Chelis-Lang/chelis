@@ -242,6 +242,10 @@ pub enum CheckErrorKind {
     /// second time, borrowed, copied, captured by a closure, or read by an
     /// operation that leaves it live. Keys are affine; the repair derives
     /// fresh keys with `split_key` or `split_keys`, never `copy`.
+    ///
+    /// [04-LIN-10]: also a function's type parameter instantiated at a
+    /// key-carrying type, which would let a generic body use the key more than
+    /// once; the repair passes the key through a concrete parameter.
     KeyReuse,
     CycleDetected,
     /// A tensor type uses a precision the Phase 0f backend cannot represent
@@ -481,6 +485,13 @@ impl CheckError {
     }
 }
 
+/// [04-LIN-10]: the repair every generic-instantiation key diagnostic carries.
+/// It names a concrete key parameter, never `copy`, because a key is never
+/// copied.
+pub(crate) const KEY_PARAMETER_SUGGESTION: &str = "Pass keys through a concrete `key` or \
+     `tensor[n, key]` parameter rather than a type parameter; derive fresh keys with \
+     `split_key(k)` or `split_keys(k, n)` where more than one is needed";
+
 impl From<TypeError> for CheckError {
     fn from(te: TypeError) -> Self {
         let kind = match te.kind {
@@ -488,12 +499,14 @@ impl From<TypeError> for CheckError {
             TypeErrorKind::PrecisionMismatch | TypeErrorKind::DtypeFamilyMismatch => {
                 CheckErrorKind::PrecisionMismatch
             }
+            TypeErrorKind::KeyInstantiation => CheckErrorKind::KeyReuse,
             TypeErrorKind::DimensionMismatch => CheckErrorKind::DimensionMismatch,
             TypeErrorKind::ArityMismatch => CheckErrorKind::ArityMismatch,
             TypeErrorKind::OccursCheck => CheckErrorKind::OccursCheck,
             TypeErrorKind::NotAFunction => CheckErrorKind::NotAFunction,
         };
         let severity = match &kind {
+            CheckErrorKind::KeyReuse => 0.9,
             CheckErrorKind::PrecisionMismatch | CheckErrorKind::DimensionMismatch => 0.8,
             CheckErrorKind::ArityMismatch => 0.7,
             CheckErrorKind::UnboundVariable { .. } => 0.6,
@@ -501,6 +514,7 @@ impl From<TypeError> for CheckError {
         };
         let mut suggestions = match &kind {
             CheckErrorKind::PrecisionMismatch => vec!["Insert explicit cast".to_string()],
+            CheckErrorKind::KeyReuse => vec![KEY_PARAMETER_SUGGESTION.to_string()],
             _ => vec![],
         };
         // Enrich TypeMismatch with opaque/option hints.

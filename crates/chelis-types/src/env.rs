@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::session::DeclarationDiagnosticOwner;
 use crate::types::*;
-use crate::unify::Subst;
+use crate::unify::{GenericParameter, Subst};
 
 #[cfg(feature = "generalize-sweep-oracle")]
 thread_local! {
@@ -791,6 +791,15 @@ impl Env {
                     .narrow_tvar_restriction(fresh_var, *restriction)
                     .expect("a fresh instantiation variable carries no prior dtype bound");
             }
+            // [04-LIN-10]: a generic's type parameter stays key-free at every
+            // instantiation. The mark lives on the quantified variable, which
+            // generalization marked, so a builtin or constructor scheme, never
+            // generalized, carries none.
+            if let Type::Var(fresh_var) = fresh
+                && let Some(origin) = inference_subst.key_free_origin(tv)
+            {
+                inference_subst.forbid_key_instantiation(fresh_var, origin);
+            }
             tvar_mapping.push((tv, fresh));
         }
         // chelis#1654: renaming the quantifiers is exactly what turns a
@@ -961,6 +970,18 @@ impl Env {
         // contract, which belongs to a different value.
         if !ledger_removals.is_empty() {
             subst.take_collection_contracts(&ledger_removals);
+        }
+        // [04-LIN-10]: every variable a definition or `let` binding quantifies
+        // is a generic's type parameter and is never instantiated at a
+        // key-carrying type. Marking here, in the one generalization
+        // mechanism, rather than at each binding site means no binding route
+        // can publish a generic without the rule; the binding sites only add
+        // the generic's name for the diagnostic
+        // ([`Subst::name_generic_parameters`]). A variable that already
+        // carries a mark keeps it, so a generic stored in a tuple or a data
+        // value and then generalized still names the generic it came from.
+        for tv in &level_scheme.tvars {
+            subst.forbid_key_instantiation(*tv, GenericParameter::default());
         }
         level_scheme
     }

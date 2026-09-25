@@ -306,6 +306,7 @@ pub(super) fn check_error_kind_from_type_error_kind(kind: &TypeErrorKind) -> Che
         TypeErrorKind::PrecisionMismatch | TypeErrorKind::DtypeFamilyMismatch => {
             CheckErrorKind::PrecisionMismatch
         }
+        TypeErrorKind::KeyInstantiation => CheckErrorKind::KeyReuse,
         TypeErrorKind::DimensionMismatch => CheckErrorKind::DimensionMismatch,
         TypeErrorKind::ArityMismatch => CheckErrorKind::ArityMismatch,
         TypeErrorKind::OccursCheck => CheckErrorKind::OccursCheck,
@@ -1157,6 +1158,11 @@ pub(super) fn collect_all_declarations(
             diagnostic_owner,
         );
     }
+    // [04-LIN-10] / spec/04 section 8.4.1: every `type` of this check, and of
+    // the library context it extends, is registered now and no body has been
+    // inferred yet, so the key-carrying set is complete before any generic is
+    // instantiated.
+    subst.set_key_carrying_adts(adt_reg.key_carrying_adts());
 }
 
 /// Collect nominal names and arities before resolving any declaration body.
@@ -1828,6 +1834,11 @@ pub(super) fn collect_declarations(
                 match (resolved, installed) {
                     (Ok(resolved), Ok(())) => {
                         let scheme = env.generalize(&resolved.ty, subst);
+                        subst.name_generic_parameters(
+                            &scheme,
+                            name,
+                            &resolved.binder_identities.type_names(),
+                        );
                         env.bind(name.to_string(), scheme);
                         env.record_declared_binder_identities(name, resolved.binder_identities);
                     }
@@ -2224,6 +2235,29 @@ pub(super) fn check_rank_body_discipline(
 
 // ── Top-level inference (second pass) ────────────────────────────
 
+/// A recursive group member's inferred type, held until the whole group is
+/// inferred and generalized together.
+pub(super) struct DeferredRecursiveBinding {
+    pub(super) name: String,
+    pub(super) ty: Type,
+    pub(super) owned_contracts: Vec<crate::unify::CollectionContractId>,
+    /// The authored binders of the member's declaration, so [04-LIN-10]'s
+    /// diagnostic can name the parameter a key reached.
+    pub(super) binder_names: UnordMap<TypeVar, String>,
+}
+
+/// Generalize a recursive group member and name its generic parameters.
+pub(super) fn generalize_deferred_recursive_binding(
+    binding: DeferredRecursiveBinding,
+    env: &Env,
+    subst: &Subst,
+) -> (String, Scheme) {
+    let scheme =
+        env.generalize_with_collection_contracts(&binding.ty, subst, &binding.owned_contracts);
+    subst.name_generic_parameters(&scheme, &binding.name, &binding.binder_names);
+    (binding.name, scheme)
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(super) fn infer_top_level(
     expr: &deep::Expr,
@@ -2239,7 +2273,7 @@ pub(super) fn infer_top_level(
     user_def_names: &UnordSet<String>,
     declared_signatures: &UnordMap<String, DeclaredSigMetadata>,
     declaration_diagnostic_owner: Option<&DeclarationDiagnosticOwner>,
-) -> Option<(String, Type, Vec<crate::unify::CollectionContractId>)> {
+) -> Option<DeferredRecursiveBinding> {
     let Some((tag, declaration_meta, kids)) = stamped_parts(expr) else {
         // chelis#858 / [04-TOT-1]: a top-level list with no decoded tag
         // used to be silently skipped here, so a program like
@@ -2693,15 +2727,17 @@ pub(super) fn infer_top_level(
         // chelis#631: same discipline for list-literal lengths.
         note_list_literal_binding(env, &name, &kids[1]);
         if defer_recursive_binding {
-            Some((
+            Some(DeferredRecursiveBinding {
                 name,
-                scheme_body,
-                subst.collection_contract_ids_since(collection_contract_mark),
-            ))
+                ty: scheme_body,
+                owned_contracts: subst.collection_contract_ids_since(collection_contract_mark),
+                binder_names: declared_type_names,
+            })
         } else {
             let owned_contracts = subst.collection_contract_ids_since(collection_contract_mark);
             let scheme =
                 env.generalize_with_collection_contracts(&scheme_body, subst, &owned_contracts);
+            subst.name_generic_parameters(&scheme, &name, &declared_type_names);
             env.bind(name, scheme);
             None
         }

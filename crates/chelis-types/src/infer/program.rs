@@ -319,10 +319,7 @@ fn sweep_recursive_collection_contracts(
         component_scope.complete(env, var_gen, subst);
         let schemes = deferred_bindings
             .into_iter()
-            .map(|(name, ty, owned_contracts)| {
-                let scheme = env.generalize_with_collection_contracts(&ty, subst, &owned_contracts);
-                (name, scheme)
-            })
+            .map(|binding| generalize_deferred_recursive_binding(binding, env, subst))
             .collect::<Vec<_>>();
         debug_assert!(schemes.iter().all(|(name, scheme)| {
             scheme.constraints.len()
@@ -666,11 +663,7 @@ pub(super) fn infer_program_with_product_in_session(
                 .complete(&mut env, &vg, &mut subst);
             let schemes = deferred_bindings
                 .into_iter()
-                .map(|(name, ty, owned_contracts)| {
-                    let scheme =
-                        env.generalize_with_collection_contracts(&ty, &subst, &owned_contracts);
-                    (name, scheme)
-                })
+                .map(|binding| generalize_deferred_recursive_binding(binding, &env, &subst))
                 .collect::<Vec<_>>();
             for (name, scheme) in schemes {
                 env.bind(name, scheme);
@@ -1752,13 +1745,8 @@ pub(super) fn infer_ir_program_with_state(
                 .complete(&mut state.env, &state.var_gen, &mut state.subst);
             let schemes = deferred_bindings
                 .into_iter()
-                .map(|(name, ty, owned_contracts)| {
-                    let scheme = state.env.generalize_with_collection_contracts(
-                        &ty,
-                        &state.subst,
-                        &owned_contracts,
-                    );
-                    (name, scheme)
+                .map(|binding| {
+                    generalize_deferred_recursive_binding(binding, &state.env, &state.subst)
                 })
                 .collect::<Vec<_>>();
             for (name, scheme) in schemes {
@@ -2364,6 +2352,7 @@ fn prebind_defsig_less_function_body_types(
         match resolved {
             Ok(ty) => {
                 let scheme = env.generalize(&ty, subst);
+                subst.name_generic_parameters(&scheme, &name, &UnordMap::new());
                 env.bind(name, scheme);
             }
             Err(witness) => {
@@ -2411,6 +2400,7 @@ fn prebind_literal_external_input_for_declaration(
     match resolved {
         Ok(ty) => {
             let scheme = env.generalize(&ty, subst);
+            subst.name_generic_parameters(&scheme, name, &UnordMap::new());
             env.bind(name.to_string(), scheme);
             None
         }

@@ -59,7 +59,8 @@ keys, [05-OP-70] through [05-OP-72] derive them, and a draw keyed by a key
 reads it under [05-RNG-2]. An operation admits `key` elements only where its
 own atom names `key`: a domain written as every active tensor element dtype
 admits exactly the nine active data element dtypes. Keys are affine
-([04-LIN-9]).
+([04-LIN-9]), and no function's type parameter stands for a key-carrying
+type ([04-LIN-10]).
 
 Code, tests, examples, and stdlib signatures referenced from any active spec
 section must use these set names with exactly those meanings. The reserved
@@ -3132,6 +3133,26 @@ lexical binding, change which callable is selected, or memoize function results.
 > a backward pass or a checkpoint recomputation is not a use. A violation
 > is a type error whose suggested repair derives fresh keys with
 > `split_key` or `split_keys` ([05-OP-70], [05-OP-71]), never `copy`.
+
+> **[04-LIN-10]** A function's type parameter SHALL NOT be instantiated at a
+> key-carrying type (§8.4.1), because a generic body may use a value of its
+> parameter type more than once. Every type variable that a definition's or
+> a `let` binding's type scheme quantifies is such a parameter, authored or
+> inferred: an authored type binder, including one that names a tensor
+> element dtype with or without a dtype-family bound, and a variable that
+> inference leaves free in the binding's type, whatever the bound value is,
+> since a tuple or a data value can hold a closure over it. The rule holds
+> however the generic is reached: called directly, bound to another name,
+> stored in a tuple or a data value, returned from a function, or passed as
+> an argument to another function, a builtin operation included. A key
+> reaches a function only through a parameter whose declared type carries a
+> key without a type parameter, such as `key`, `tensor[n, key]`, or a data
+> type with a key field. A data type's own type parameters are not function
+> type parameters: `List[key]`, `Option[key]`, and a data type instantiated
+> at a key are key-carrying types that construction, matching, and the
+> builtin operations handle under [04-LIN-9]. A violation is a type error
+> that names the generic, and the type parameter when the program spells
+> one, and whose suggested repair passes the key through such a parameter.
 
 Diagnostics for violations of these rules SHALL name a binding the
 program's source spells — the alias or component name written at the
