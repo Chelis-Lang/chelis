@@ -180,11 +180,18 @@ impl KeyGraph for DecodedKeys<'_> {
         self.0
             .nodes
             .get(node)
-            .map_or("", |node| node.declaration.as_str())
+            .and_then(|node| usize::try_from(node.declaration).ok())
+            .and_then(|row| self.0.declarations.get(row))
+            .map_or("", String::as_str)
     }
 
+    /// Two nodes' declarations are one when they name one row: a name
+    /// alone is not an identity, since two rows may share it.
     fn same_declaration(&self, left: usize, right: usize) -> bool {
-        self.declaration(left) == self.declaration(right)
+        match (self.0.nodes.get(left), self.0.nodes.get(right)) {
+            (Some(left), Some(right)) => left.declaration == right.declaration,
+            _ => false,
+        }
     }
 
     /// Each wire dim as the IR dim it decodes to. An extent beyond the
@@ -449,6 +456,21 @@ fn literal_result_axis_is_supported(dag: &WireDag, node: &WireDagNode, axis: usi
 }
 
 pub(super) fn validate(dag: &WireDag) -> Result<()> {
+    let mut declared = vec![false; dag.declarations.len()];
+    for node in &dag.nodes {
+        let row = usize::try_from(node.declaration)
+            .ok()
+            .filter(|row| *row < declared.len())
+            .ok_or_else(|| {
+                reject("a node's declaration must be a row of the owning DAG's declaration table")
+            })?;
+        declared[row] = true;
+    }
+    if declared.contains(&false) {
+        return Err(reject(
+            "every row of the declaration table must be the declaration of some node",
+        ));
+    }
     for (index, node) in dag.nodes.iter().enumerate() {
         if node.id != host_index(index) {
             return Err(reject(

@@ -2202,6 +2202,12 @@ impl std::error::Error for WireDagContractError {}
 pub struct WireDag {
     /// Exact schema version of this serialized DAG surface.
     pub schema_version: u32,
+    /// The declarations the nodes belong to, one row each, by name
+    /// (spec/10 section 3.4). Two rows may carry one name: new code that
+    /// replaces a library definition keeps the replaced declaration beside
+    /// its own. A node names its declaration by row, never by name, and
+    /// every row is some node's declaration.
+    pub declarations: Vec<String>,
     pub nodes: Vec<WireDagNode>,
     pub roots: Vec<u64>,
 }
@@ -2209,6 +2215,7 @@ pub struct WireDag {
 #[derive(Serialize, Deserialize)]
 struct WireDagFields {
     schema_version: u32,
+    declarations: Vec<String>,
     nodes: Vec<WireDagNode>,
     roots: Vec<u64>,
 }
@@ -2216,6 +2223,7 @@ struct WireDagFields {
 #[derive(Serialize)]
 struct WireDagFieldsRef<'a> {
     schema_version: u32,
+    declarations: &'a [String],
     nodes: &'a [WireDagNode],
     roots: &'a [u64],
 }
@@ -2231,6 +2239,7 @@ impl Serialize for WireDag {
             .map_err(<S::Error as serde::ser::Error>::custom)?;
         WireDagFieldsRef {
             schema_version: self.schema_version,
+            declarations: &self.declarations,
             nodes: &self.nodes,
             roots: &self.roots,
         }
@@ -2252,6 +2261,7 @@ impl<'de> Deserialize<'de> for WireDag {
             serde_json::from_str(raw.get()).map_err(<D::Error as serde::de::Error>::custom)?;
         let dag = Self {
             schema_version: fields.schema_version,
+            declarations: fields.declarations,
             nodes: fields.nodes,
             roots: fields.roots,
         };
@@ -2886,6 +2896,7 @@ impl WireDag {
             serde_json::from_str(json).map_err(WireDagDecodeError::Parse)?;
         let dag = Self {
             schema_version: fields.schema_version,
+            declarations: fields.declarations,
             nodes: fields.nodes,
             roots: fields.roots,
         };
@@ -3627,10 +3638,12 @@ pub struct WireDagNode {
     #[serde(deserialize_with = "require_explicit_span")]
     pub span_id: Option<String>,
     pub merged_spans: Vec<String>,
-    /// The declaration this node belongs to, by name: required on every
-    /// node. A `Load` reads its declaration's parameter, so a key parameter
-    /// is its declaration and its name (spec/10 section 3.2).
-    pub declaration: String,
+    /// The declaration this node belongs to, as its row in
+    /// [`WireDag::declarations`]: required on every node. A `Load` reads its
+    /// declaration's parameter, so a key parameter is its declaration's row
+    /// and its name (spec/10 section 3.2); two declarations that share a name
+    /// stay two.
+    pub declaration: u64,
     pub id: u64,
     pub op: WireRiscOp,
     pub inputs: Vec<u64>,
@@ -4103,6 +4116,7 @@ mod tests {
     fn empty_wire_dag() -> WireDag {
         WireDag {
             schema_version: WIRE_DAG_SCHEMA_VERSION,
+            declarations: Vec::new(),
             nodes: vec![],
             roots: vec![],
         }
@@ -4176,6 +4190,7 @@ mod tests {
         assert!(serde_json::from_str::<WireDag>(&json).is_err());
         let dag = WireDag {
             schema_version: future,
+            declarations: Vec::new(),
             nodes: vec![],
             roots: vec![],
         };
@@ -4236,7 +4251,7 @@ mod tests {
             "nodes": [{
                 "shape_deps": [],
                 "span_id": null,
-                "merged_spans": [], "declaration": "entry",
+                "merged_spans": [], "declaration": 0,
                 "id": 0,
                 "op": {"kind": "pad", "padding": [], "fill": 1.5},
                 "inputs": [],
@@ -4320,8 +4335,9 @@ mod tests {
         let exact = 9_007_199_254_740_993i64;
         let dag = WireDag {
             schema_version: WIRE_DAG_SCHEMA_VERSION,
+            declarations: vec!["entry".to_owned()],
             nodes: vec![WireDagNode {
-                declaration: "entry".to_owned(),
+                declaration: 0,
                 shape_deps: vec![],
                 span_id: None,
                 merged_spans: vec![],
@@ -4482,7 +4498,7 @@ mod tests {
             precision: precision.to_string(),
         };
         let load = |id, precision: &str, size| WireDagNode {
-            declaration: "entry".to_owned(),
+            declaration: 0,
             shape_deps: vec![],
             span_id: None,
             merged_spans: vec![],
@@ -4496,11 +4512,12 @@ mod tests {
         let validate = |op, inputs, output_type| {
             WireDag {
                 schema_version: WIRE_DAG_SCHEMA_VERSION,
+                declarations: vec!["entry".to_owned()],
                 nodes: vec![
                     load(0, "f32", 4),
                     load(1, "f32", 4),
                     WireDagNode {
-                        declaration: "entry".to_owned(),
+                        declaration: 0,
                         shape_deps: vec![],
                         span_id: None,
                         merged_spans: vec![],

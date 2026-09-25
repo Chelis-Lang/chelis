@@ -184,7 +184,7 @@ def dag_cases():
                 )
             )
 
-    empty = {"schema_version": 19, "nodes": [], "roots": []}
+    empty = {"schema_version": 19, "declarations": [], "nodes": [], "roots": []}
     add("empty", empty, True)
     for version in (None, 10, 11, 12, 13, 14, 15, 16, 17, 18, 20):
         value = {**empty, "schema_version": version}
@@ -194,12 +194,13 @@ def dag_cases():
     scalar = {"dtype": "f64", "bits": "8000000000000000"}
     const = {
         "schema_version": 19,
+        "declarations": ["entry"],
         "nodes": [
             {
                 "shape_deps": [],
                 "span_id": None,
                 "merged_spans": [],
-                "declaration": "entry",
+                "declaration": 0,
                 "id": 0,
                 "op": {"kind": "const", "value": scalar},
                 "inputs": [],
@@ -222,7 +223,7 @@ def dag_cases():
         "shape_deps": [],
         "span_id": None,
         "merged_spans": [],
-        "declaration": "entry",
+        "declaration": 0,
         "id": 0,
         "op": {"kind": "load", "name": "x"},
         "inputs": [],
@@ -232,13 +233,14 @@ def dag_cases():
     def graph(op):
         return {
             "schema_version": 19,
+            "declarations": ["entry"],
             "nodes": [
                 copy.deepcopy(load),
                 {
                     "shape_deps": [],
                     "span_id": None,
                     "merged_spans": [],
-                    "declaration": "entry",
+                    "declaration": 0,
                     "id": 1,
                     "op": op,
                     "inputs": [0],
@@ -265,6 +267,27 @@ def dag_cases():
         bad = copy.deepcopy(good)
         del bad["nodes"][1][field]
         add("missing-node-" + field, bad, False, "missing field")
+    bad = copy.deepcopy(good)
+    del bad["declarations"]
+    add("missing-declarations", bad, False, "missing field")
+    # A node names its declaration by row; two rows may share a name, and
+    # every row is some node's declaration.
+    shared = copy.deepcopy(good)
+    shared["declarations"] = ["entry", "entry"]
+    shared["nodes"][1]["declaration"] = 1
+    add("shared-declaration-name", shared, True)
+    for name, row in (
+        ("outside", 1),
+        ("large", 18446744073709551615),
+        ("negative", -1),
+        ("float", 0.0),
+    ):
+        bad = copy.deepcopy(good)
+        bad["nodes"][1]["declaration"] = row
+        add("declaration-row-" + name, bad, False)
+    bad = copy.deepcopy(good)
+    bad["declarations"] = ["entry", "other"]
+    add("declaration-row-unused", bad, False)
     for size in (0, -1, 9223372036854775808, 2.0):
         changed = copy.deepcopy(good)
         for node in changed["nodes"]:
@@ -302,6 +325,7 @@ def dag_cases():
     witness_node["output_type"]["dims"] = [{"kind": "lit", "size": 4}]
     reference_graph = {
         "schema_version": 19,
+        "declarations": ["entry"],
         "nodes": [
             value_node,
             witness_node,
@@ -309,7 +333,7 @@ def dag_cases():
                 "shape_deps": [],
                 "span_id": None,
                 "merged_spans": [],
-                "declaration": "entry",
+                "declaration": 0,
                 "id": 2,
                 "op": {
                     "kind": "expand",
@@ -406,13 +430,14 @@ def dag_cases():
 
     witness = {
         "schema_version": 19,
+        "declarations": ["entry"],
         "nodes": [
             copy.deepcopy(load),
             {
                 "shape_deps": [],
                 "span_id": "call-f",
                 "merged_spans": ["inlined-g"],
-                "declaration": "entry",
+                "declaration": 0,
                 "id": 1,
                 "op": {
                     "kind": "extent_witness",
@@ -429,7 +454,7 @@ def dag_cases():
                 "shape_deps": [1],
                 "span_id": None,
                 "merged_spans": [],
-                "declaration": "entry",
+                "declaration": 0,
                 "id": 2,
                 "op": {
                     "kind": "const",
@@ -658,12 +683,13 @@ def result_reference_cases():
     cases = []
     dag = {
         "schema_version": 19,
+        "declarations": ["entry"],
         "nodes": [
             {
                 "shape_deps": [],
                 "span_id": None,
                 "merged_spans": [],
-                "declaration": "entry",
+                "declaration": 0,
                 "id": 0,
                 "inputs": [],
                 "op": {"kind": "load", "name": "x"},

@@ -160,8 +160,7 @@ fn cast_trunc_rejects_unknown_spelling_and_missing_target() {
 
 #[test]
 fn wire_dag_accepts_current_version_and_rejects_missing_old_and_future_versions() {
-    let mut encoded =
-        serde_json::json!({"schema_version": WIRE_DAG_SCHEMA_VERSION, "nodes": [], "roots": []});
+    let mut encoded = serde_json::json!({"schema_version": WIRE_DAG_SCHEMA_VERSION, "declarations": [], "nodes": [], "roots": []});
     assert!(WireDag::from_validated_json(&encoded.to_string()).is_ok());
     for version in [WIRE_DAG_SCHEMA_VERSION - 1, WIRE_DAG_SCHEMA_VERSION + 1] {
         encoded["schema_version"] = version.into();
@@ -175,8 +174,9 @@ fn wire_dag_accepts_current_version_and_rejects_missing_old_and_future_versions(
 fn wire_dag_integer_dtype_vocabulary_stays_ecosystem_spelled() {
     let dag = WireDag {
         schema_version: WIRE_DAG_SCHEMA_VERSION,
+        declarations: vec!["entry".to_owned()],
         nodes: vec![WireDagNode {
-            declaration: "entry".to_owned(),
+            declaration: 0,
             shape_deps: vec![],
             span_id: None,
             merged_spans: vec![],

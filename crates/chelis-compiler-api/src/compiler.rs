@@ -6614,12 +6614,31 @@ fn wire_axis(value: usize) -> WireResult<i32> {
 }
 
 fn wire_dag(dag: &Dag) -> WireResult<WireDag> {
+    // One row per declaration a node belongs to, in declaration order: a
+    // declaration whose nodes are all gone has no row, so a graph has one
+    // table whatever its passes removed.
+    let mut used = vec![false; dag.declarations().len()];
+    for node in dag.nodes() {
+        used[node.decl.0 as usize] = true;
+    }
+    let mut declarations = Vec::new();
+    let mut rows = vec![None; used.len()];
+    for (index, declaration) in dag.declarations().iter().enumerate() {
+        if used[index] {
+            rows[index] = Some(crate::schema::host_index(declarations.len()));
+            declarations.push(declaration.name.clone());
+        }
+    }
     let wire = WireDag {
         schema_version: crate::schema::WIRE_DAG_SCHEMA_VERSION,
+        declarations,
         nodes: dag
             .nodes()
             .iter()
-            .map(|node| wire_dag_node(dag, node))
+            .map(|node| {
+                let row = rows[node.decl.0 as usize].expect("every node's declaration has a row");
+                wire_dag_node(node, row)
+            })
             .collect::<WireResult<_>>()?,
         roots: dag
             .roots()
@@ -6632,9 +6651,11 @@ fn wire_dag(dag: &Dag) -> WireResult<WireDag> {
     Ok(wire)
 }
 
-fn wire_dag_node(dag: &Dag, node: &chelis_ir::dag::DagNode) -> WireResult<WireDagNode> {
+/// `node` on the wire, whose declaration is row `declaration` of the
+/// graph's declaration table.
+fn wire_dag_node(node: &chelis_ir::dag::DagNode, declaration: u64) -> WireResult<WireDagNode> {
     Ok(WireDagNode {
-        declaration: dag.declaration(node.decl).name.clone(),
+        declaration,
         shape_deps: node
             .shape_deps
             .iter()
@@ -7326,6 +7347,59 @@ mod tests {
             kinds[5],
             &serde_json::json!({"kind":"split_n","count":{"bound":"lit","value":3}})
         );
+        let decoded = crate::schema::WireDag::from_validated_json(&json.to_string()).unwrap();
+        assert_eq!(serde_json::to_value(decoded).unwrap(), json);
+    }
+
+    /// Rule I on the wire (spec/10 §3.2, §3.4): a key parameter is its
+    /// declaration and its name. New code that redefines a library's `keep`
+    /// replaces it in a composed lowering, and the composed graph holds both
+    /// declarations called `keep`, each consuming its own parameter `k`. The
+    /// wire keeps them apart: each node names its declaration by its row in
+    /// the graph's declaration table, and the two rows share a name.
+    ///
+    /// Evidentiary status: REGRESSION TEST. At 441e5c8b2 a node carried its
+    /// declaration's name, so the two parameters merged and `wire_dag`
+    /// rejected the graph because one key was consumed twice.
+    #[test]
+    fn a_replaced_definitions_key_parameter_stays_its_own_on_the_wire() {
+        let source =
+            "def keep(k: key, x: tensor[4, f32]) -> tensor[4, f32] = dropout(k, x, 0.5f32)\n";
+        let exprs =
+            chelis_surf::desugar::desugar_program(&chelis_surf::parser::parse_str(source).unwrap())
+                .unwrap();
+        let (type_env, library) = chelis_types::build_compiled_library_context(&exprs).unwrap();
+        let library = chelis_effects::check_program(&library).unwrap();
+        let library = chelis_types::check_linearity(&library).unwrap();
+        let lowered = chelis_ir::lower::lower_program_to_library(&library);
+        let new = chelis_types::check_ir_with_context(&type_env, &exprs).unwrap();
+        let new = chelis_effects::check_effects_with_context(&library, &new).unwrap();
+        let new = chelis_types::check_linearity_with_context(&library, &new).unwrap();
+        let dag = chelis_ir::lower::try_lower_program_with_context(&lowered, &new)
+            .unwrap()
+            .dag;
+        let keeps = dag
+            .declarations()
+            .iter()
+            .filter(|declaration| declaration.name == "keep")
+            .count();
+        assert_eq!(keeps, 2, "{:?}", dag.declarations());
+        let wire = wire_dag(&dag).unwrap_or_else(|error| panic!("{error}"));
+        let key_loads = wire
+            .nodes
+            .iter()
+            .filter(
+                |node| matches!(&node.op, crate::schema::WireRiscOp::Load { name } if name == "k"),
+            )
+            .map(|node| node.declaration)
+            .collect::<Vec<_>>();
+        assert_eq!(key_loads.len(), 2, "{wire:?}");
+        assert_ne!(key_loads[0], key_loads[1]);
+        for row in key_loads {
+            let row = usize::try_from(row).unwrap();
+            assert_eq!(wire.declarations[row], "keep");
+        }
+        let json = serde_json::to_value(&wire).unwrap();
         let decoded = crate::schema::WireDag::from_validated_json(&json.to_string()).unwrap();
         assert_eq!(serde_json::to_value(decoded).unwrap(), json);
     }
@@ -9945,6 +10019,7 @@ bad = shape(scalar_to_tensor(cast(3, i64)), axis)
     fn wire_dag_at_version(version: u32) -> WireDag {
         WireDag {
             schema_version: version,
+            declarations: Vec::new(),
             nodes: Vec::new(),
             roots: Vec::new(),
         }

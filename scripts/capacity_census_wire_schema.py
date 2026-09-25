@@ -1077,8 +1077,19 @@ class _SchemaShapeGraph(_CodecShapeGraph):
                 ("encode", self._schema_reference(stem + "Ref")),
                 ("header", self._schema_reference(_ENVELOPE + "VersionHeader")),
             ]
-            expected = [
-                ("schema_version", ("primitive", "u32")),
+            expected = [("schema_version", ("primitive", "u32"))]
+            if dag:
+                expected.append(
+                    (
+                        "declarations",
+                        (
+                            "container",
+                            "alloc::vec::Vec",
+                            (("atomic", "alloc::string::String"),),
+                        ),
+                    )
+                )
+            expected += [
                 (
                     "nodes" if dag else "roots",
                     (

@@ -1545,7 +1545,7 @@ fn two_declarations_key_parameters_of_one_name_are_two_keys() {
         .nodes
         .iter()
         .filter(|node| matches!(&node.op, WireRiscOp::Load { name } if name.as_str() == "k"))
-        .map(|node| node.declaration.as_str())
+        .map(|node| lowered.dag.declarations[usize::try_from(node.declaration).unwrap()].as_str())
         .collect::<Vec<_>>();
     assert_eq!(key_loads, ["sample", "other"]);
 }
