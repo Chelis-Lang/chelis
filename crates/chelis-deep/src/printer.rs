@@ -4,7 +4,7 @@
 //! files and `chelis deep`.
 
 use crate::annotations_codec::{
-    WireExpr, WireMetaExpr as MetaExpr, WireMetadata as MetaMap, WireNode,
+    WireExpr, WireMetaExpr as MetaExpr, WireMetadata as MetaMap, WireNode, WireUnknown,
 };
 use crate::ast::{Atom, Expr};
 use crate::tag::DeepTag;
@@ -189,13 +189,14 @@ fn sorted_entries(entries: &[(String, WireExpr)]) -> Vec<(&str, &WireExpr)> {
 }
 
 fn write_atom(out: &mut String, atom: &Atom) {
+    use std::fmt::Write as _;
     match atom {
         Atom::Name(s) => out.push_str(s),
-        Atom::Int(n) => out.push_str(&n.to_string()),
+        Atom::Int(n) => write!(out, "{n}").expect("writing to a String cannot fail"),
         Atom::Float(f) => {
-            let s = f.to_string();
-            out.push_str(&s);
-            if !s.contains('.') {
+            let start = out.len();
+            write!(out, "{f}").expect("writing to a String cannot fail");
+            if !out[start..].contains('.') {
                 out.push_str(".0");
             }
         }
@@ -219,6 +220,13 @@ fn write_atom(out: &mut String, atom: &Atom) {
     }
 }
 
+/// The canonical text of one atom.
+fn atom_text(atom: &Atom) -> String {
+    let mut out = String::new();
+    write_atom(&mut out, atom);
+    out
+}
+
 /// The pretty layout. Every width it measures is a flat rendering from
 /// [`write_flat`]; only breaking a line recurses.
 struct Printer {
@@ -236,40 +244,13 @@ impl Printer {
 
     fn fmt_expr(&self, expr: &WireExpr, indent: usize) -> String {
         match expr {
-            WireExpr::ExtensionData(_) | WireExpr::Atom(..) => render_flat(Flat::Expr(expr)),
+            WireExpr::ExtensionData(data) => data.syntax().to_string(),
+            WireExpr::Atom(atom, _) => atom_text(atom),
             WireExpr::Map(map, _) => self.fmt_map(map, indent),
             WireExpr::MetaExpr(meta, _) => self.fmt_meta_expr(meta, indent),
             WireExpr::Node(node, _) => self.fmt_node(node, indent),
-            WireExpr::BareList(items, _) => {
-                let flat = render_flat(Flat::Expr(expr));
-                if indent + flat.len() <= self.max_width {
-                    return flat;
-                }
-                let Some((first, rest)) = items.split_first() else {
-                    return flat;
-                };
-                let child_indent = indent + self.indent_step;
-                self.fmt_broken_list(
-                    &self.fmt_expr(first, child_indent),
-                    rest.iter().map(|child| self.fmt_expr(child, child_indent)),
-                    indent,
-                )
-            }
-            // An unknown form prints as the list of its head symbol, its
-            // metadata map and its children, laid out from the borrowed form.
-            WireExpr::UnknownForm(form) => {
-                let flat = render_flat(Flat::Expr(expr));
-                if indent + flat.len() <= self.max_width {
-                    return flat;
-                }
-                let child_indent = indent + self.indent_step;
-                let meta = self.fmt_map(&form.meta, child_indent);
-                let children = form
-                    .children
-                    .iter()
-                    .map(|child| self.fmt_expr(child, child_indent));
-                self.fmt_broken_list(&form.head, std::iter::once(meta).chain(children), indent)
-            }
+            WireExpr::BareList(items, _) => self.fmt_list(expr, items, indent),
+            WireExpr::UnknownForm(form) => self.fmt_unknown_form(expr, form, indent),
         }
     }
 
@@ -301,14 +282,7 @@ impl Printer {
         let prefix = " ".repeat(child_indent);
         let mut lines: Vec<String> = header.lines().map(ToString::to_string).collect();
         for child in children {
-            let rendered = self.fmt_expr(child, child_indent);
-            let mut child_lines = rendered.lines();
-            if let Some(first) = child_lines.next() {
-                lines.push(format!("{prefix}{first}"));
-            }
-            for line in child_lines {
-                lines.push(line.to_string());
-            }
+            push_child_lines(&mut lines, &prefix, &self.fmt_expr(child, child_indent));
         }
         lines
             .last_mut()
@@ -317,25 +291,48 @@ impl Printer {
         lines.join("\n")
     }
 
-    /// A structural list, or an unknown form's head-map-children sequence,
-    /// too wide for one line: the first element follows the opening
-    /// parenthesis and every later element starts its own line.
+    /// A structural list prints flat when it fits, else broken after its
+    /// first element.
+    fn fmt_list(&self, list: &WireExpr, items: &[WireExpr], indent: usize) -> String {
+        let flat = render_flat(Flat::Expr(list));
+        let Some((first, rest)) = items.split_first() else {
+            return flat;
+        };
+        if indent + flat.len() <= self.max_width {
+            return flat;
+        }
+        let first = self.fmt_expr(first, indent + self.indent_step);
+        self.fmt_broken_list(&first, None, rest, indent)
+    }
+
+    /// An unknown form prints as the list of its head symbol, its metadata
+    /// map and its children, laid out from the borrowed form.
+    fn fmt_unknown_form(&self, form_expr: &WireExpr, form: &WireUnknown, indent: usize) -> String {
+        let flat = render_flat(Flat::Expr(form_expr));
+        if indent + flat.len() <= self.max_width {
+            return flat;
+        }
+        self.fmt_broken_list(&form.head, Some(&form.meta), &form.children, indent)
+    }
+
+    /// A list too wide for one line: `first` follows the opening parenthesis,
+    /// and the metadata map, when there is one, and every item start their
+    /// own lines.
     fn fmt_broken_list(
         &self,
         first: &str,
-        rest: impl Iterator<Item = String>,
+        meta: Option<&MetaMap>,
+        items: &[WireExpr],
         indent: usize,
     ) -> String {
-        let prefix = " ".repeat(indent + self.indent_step);
+        let child_indent = indent + self.indent_step;
+        let prefix = " ".repeat(child_indent);
         let mut lines = vec![format!("({first}")];
-        for rendered in rest {
-            let mut child_lines = rendered.lines();
-            if let Some(first) = child_lines.next() {
-                lines.push(format!("{prefix}{first}"));
-            }
-            for line in child_lines {
-                lines.push(line.to_string());
-            }
+        if let Some(meta) = meta {
+            push_child_lines(&mut lines, &prefix, &self.fmt_map(meta, child_indent));
+        }
+        for item in items {
+            push_child_lines(&mut lines, &prefix, &self.fmt_expr(item, child_indent));
         }
         lines
             .last_mut()
@@ -395,6 +392,16 @@ impl Printer {
         }
         output
     }
+}
+
+/// Append a rendered child: its first line indented by `prefix`, and its
+/// continuation lines as rendered.
+fn push_child_lines(lines: &mut Vec<String>, prefix: &str, rendered: &str) {
+    let mut child_lines = rendered.lines();
+    if let Some(first) = child_lines.next() {
+        lines.push(format!("{prefix}{first}"));
+    }
+    lines.extend(child_lines.map(ToString::to_string));
 }
 
 /// Leaf tags that always print on one line.
