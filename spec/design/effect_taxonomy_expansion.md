@@ -22,13 +22,10 @@ driven and not bounded enough to design speculatively).
 
 ## Current taxonomy
 
-The shipped `Effect` enum in `crates/chelis-types/src/types.rs:144-154` has
-exactly five variants:
+The shipped `Effect` enum in `crates/chelis-types/src/types.rs` has
+exactly four variants (randomness is not an effect: random primitives take an
+explicit `key`, [05-RNG-1]):
 
-- `Random` — operations whose result depends on a random source. Today this
-  fires on `dropout`, `uniform_like`, and stdlib random helpers reachable
-  through those operations unless covered by a surrounding `with seed(...)`
-  handler.
 - `Accum` — internal design hook for backward-pass accumulation. Not yet
   user-facing as a checked effect; reserved.
 - `Io` — host-side print and debug. Narrow today; covers stdout/stderr-style
@@ -122,7 +119,7 @@ audit a package as a whole because there is no command that surfaces this.
   `crates/chelis-tide/src/mcp.rs`). Agent-driven workflows can request
   the effect aggregation alongside the rest of the compiler API.
 - Output format: human-readable lists "this package's public API uses
-  the following effects: {Filesystem, Random}", with optional
+  the following effects: {Filesystem, Io}", with optional
   `--per-symbol` flag that lists each export and its declared effect
   row. JSON form is a flat object keyed by symbol name with effect
   arrays as values plus an aggregated `union` field at the top.
@@ -153,7 +150,7 @@ deployer has no way to reject a binary at execution time.
 **Scope.**
 
 - New CLI flag on `chelis run`: `--refuse Network,Filesystem` (and the
-  symmetric `--allow-only Random,Io`). Reads the binary's effect
+  symmetric `--allow-only Io`). Reads the binary's effect
   manifest (the union computed at compile time, stored alongside the
   binary), compares it against the deployer's allow/refuse list, and
   refuses to execute if the binary declares effects beyond the allowlist.

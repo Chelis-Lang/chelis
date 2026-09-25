@@ -567,17 +567,15 @@ behavior and is exactly what the atom forbids.
 
 Every dropout evaluator uses the sealed `dtype_semantics::PreparedDropout`
 boundary. `new(&TensorStorage, ScalarValue)` checks the input family, same-dtype
-rate and [05-OP-37] domain without allocating or consuming Random. After the
+rate and [05-OP-37] domain without allocating or drawing. After the
 draw's key is taken, `apply(key: RandomKey)` computes [05-RNG-2]'s unit of
-`word(key, e)` for each element `e` (for a counter-stream key, [05-RNG-1]'s
-unit), arithmetic-width comparison, positive dropped zero, and finalized
+`word(key, e)` for each element `e`, arithmetic-width comparison, positive dropped zero, and finalized
 sub/div into `TensorStorage`. `PreparedUniformLike` is the same split for
 [05-OP-8]: `new` validates the bounds at the arithmetic width, and
 `apply(key)` fills the template's element count. A draw over a key batch
 stacks its rows: each row is one `new` and `apply` over that row's elements,
 with the row's key and controls. `RandomKey` is an opaque, structurally
-non-numeric carrier. `RandomKey::from_counter(seed, ordinal)` forms the
-counter stream's key and `from_seed` forms [05-OP-69]'s; `derive`
+non-numeric carrier. `from_seed` forms [05-OP-69]'s key; `derive`
 ([05-RNG-2]), `split` ([05-OP-70]), `fold_in` ([05-OP-72]) and `split_n`
 ([05-OP-71]) form keys from a key. The numerical owners have no ambient
 stream or replay authority. Their private fields prevent bypassing preparation;
@@ -1469,6 +1467,30 @@ new role needs an existing governing semantic contract and an exact structural
 admission rule, or a numbered-spec amendment first. There is no name heuristic,
 generic chapter citation, or maintainer override that admits it.
 
+#### Random-key carriers
+
+A random key (spec/04 §1.1, [05-RNG-2]) is a 64-bit word with no arithmetic,
+comparison, or cast, so every key carrier is structurally non-numeric and
+never a bare integer. Each enumerator classifies its key carrier by its tag,
+not by the width of its payload:
+
+- the primary census: the published scalar carrier
+  `typedef struct { uint64_t bits; } chelis_key;` is an exact tagged carrier
+  whose nominal type is the tag; `chelis_key_from_seed(int64_t seed)` is a
+  numeric operation registered to [05-OP-69], because its seed is an `i64`;
+  and `CHELIS_DTYPE_KEY = 9` is the `key` member of the closed `chelis_dtype`
+  vocabulary, which `chelis_scalar` never carries ([05-OP-31]);
+- the wire leg: the execution value `{"type":"key","bits":h}` and the
+  `{"dtype":"key","bits":[h,...]}` storage object of a key tensor are tagged
+  transports of spec/10 §3.2, whose `"key"` tag binds the 16 hex digits to a
+  key, never to an `int64` scalar carrier or a JSON integer;
+- the PyO3 leg: keys cross only inside those execution values, and DLPack
+  and NumPy conversion refuse a key tensor with a typed rejection.
+
+A key crossing any of these surfaces as `uint64_t`, `int64_t`, an integer
+scalar carrier, or a raw dtype id is a review-blocking finding under the rule
+above.
+
 #### Representation and enforcement
 
 The wire leg replaces bare `StaticSurfaceDescriptor` transport registrations
@@ -1641,7 +1663,7 @@ contract; it does not complete binding or runtime obligations.
 
 #### Final wire and binding contract handoff
 
-**Current integration state.** Execution version 3 and WireDag version 18 are
+**Current integration state.** Execution version 3 and WireDag version 19 are
 the source contract for spec/10 §§3.2–3.5. Measured at WireDag version 16, the
 executed wire baseline contains 97 distinct numeric leaves: 80 verified
 transports and 17 numeric operations, with zero exception rows. It includes the shape-dependency and opaque
