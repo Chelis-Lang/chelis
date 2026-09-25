@@ -868,6 +868,7 @@ fn is_one_dim(dim: &DimInfo) -> bool {
     matches!(dim, DimInfo::Lit(1) | DimInfo::Named(_, Some(1)))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn align_matmul_operand(
     decl: DeclId,
     dag: &mut Dag,
