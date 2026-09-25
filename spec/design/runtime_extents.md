@@ -322,10 +322,11 @@ distinct `LiteralResultClaim` witness role. Lowering selects that ownership mode
 from the authored declaration identity and its top-level call relationship, not
 from later graph reachability. The same mode is explicit in the ordinary
 private gradient subcontext so zero and unused cotangents retain the forward
-guard; mapped-gradient transport remains separate. Direct and root lowering,
-movement and device paths, and mapped-gradient lowering retain their established
-literal carriers rather than gaining a token because an equal dimension is
-reachable.
+guard; mapped-gradient transport remains separate. Authored direct results
+whose axis originates at a runtime carrier use the same token role, including
+later forwarding of that introduced axis. Pure input-axis forwarding and
+op-computed or mapped-gradient cases retain their existing admission; an equal
+reachable dimension alone does not admit a token.
 
 In the selected mode, lowering allocates one token containing the exact tagged
 requirement before lowering that declaration's body, then attaches it to the
@@ -1683,20 +1684,25 @@ claim on the input tensor axis itself, whose guard runs at entry. Both lanes
 must consume that same classification, not whichever failure they currently
 report first.
 
-The #2377 receipts execute generic and monomorphic earlier-overflow controls,
-mismatching and agreeing inserts with scalar-only f64 precision evidence,
-effects on both sides of the producer, and an independent wrong input-axis
-claim. The two-insert controls cover an earlier axis carried into either
-position of the returned tensor, on both lanes and both lowering paths.
-Authored literal results whose checked site reads a carrier use producer tokens,
-including forwarded axes; admission reads that site's observation rather than
-re-deriving it from the final primitive's own size slot. Physical literal classes
-use the same output-owner classification and coalesce an exact token comparison
-without dropping a different requirement. Tensor lowering
-retains discarded eager initializers through exact dependencies on its return
-carrier, omitting already reachable values and inert literal/copy subgraphs.
-These receipts establish the enrolled insert/result-order cases; they do not
-close general movement coverage or host-builder ascription admission (#2374).
+The partial #2377 receipts execute generic and monomorphic mismatching and
+agreeing inserts with scalar-only f64 precision evidence, retained effects on
+both sides of the producer, and independent wrong input-axis claims. The
+two-insert controls cover an earlier axis carried into either result position.
+Literal result token admission requires an extent introduced by a runtime
+carrier, including later forwarding; a pure pass-through from an existing input
+axis does not expand that admission. The shared result-site derivation records
+this provenance separately from the carrier read by the final producer.
+Physical literal classes keep their output-owner classification and coalesce
+an exact token comparison without dropping a different requirement.
+
+Discarded potentially trapping initializers remain an open #2377 obligation
+under #1277. Tensor lowering does not yet retain them as activation-scoped
+observable roots throughout projection and rebuilding. The required earlier
+`neg` outcome above is therefore not an acceptance claim of these receipts.
+C2.4 forbids encoding arbitrary eager values as shape dependencies; the future
+retention repair must follow spec/06 §5.2 and preserve activation selection and
+transformation replacement. These receipts also do not close general movement
+coverage or host-builder ascription admission (#2374).
 
 Both lanes represent a movement failure by its operation, trap kind, dtype,
 axis, bound/observed values and source labels before rendering. Eval must not

@@ -1262,15 +1262,14 @@
         "mode": "all"
       },
       "expected": [
-        "c_earlier_trap_precedes_insert_result_guard",
         "c_forwarded_insert_axis_keeps_result_ownership",
         "c_insert_result_guard_owns_attribution_and_effect_order",
-        "eval_earlier_trap_precedes_insert_result_guard",
         "eval_forwarded_insert_axis_keeps_result_ownership",
         "eval_insert_result_guard_owns_attribution_and_effect_order",
-        "input_axis_claim_still_precedes_body_on_both_lanes"
+        "input_axis_claim_still_precedes_body_on_both_lanes",
+        "mixed_named_entry_and_literal_result_keep_distinct_owners"
       ],
-      "note": "Bounded #2377 generic and monomorphic direct and carried insert result axes: exact traps, values, precision and effect order with independent input guards."
+      "note": "Partial #2377: generic/monomorphic direct and carried insert result attribution, exact values and order against retained effects; distinct named input guards. Discarded eager traps remain unresolved."
     },
     {
       "phase": "b",

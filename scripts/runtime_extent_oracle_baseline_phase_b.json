@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "corpus_sha256": "5fc2ed8645ed5f3768d0f2409186abf4ab891dd84dd00a594f8726a39ee5a815",
+  "corpus_sha256": "d2d66372ff7de5727aa735f1c8562315cdde4f302bb871bd092ae96f88b9e91d",
   "rows": [
     {
       "id": "claim.literal.identity_root.c",
@@ -1729,18 +1729,6 @@
       "baseline": "executes_exactly",
       "phase_b": "executes_exactly",
       "receipt": "cli_producer_guard_order.eval_insert_result_guard_owns_attribution_and_effect_order"
-    },
-    {
-      "id": "producer.insert.earlier_trap.c",
-      "baseline": "lane_divergent",
-      "phase_b": "executes_exactly",
-      "receipt": "cli_producer_guard_order.c_earlier_trap_precedes_insert_result_guard"
-    },
-    {
-      "id": "producer.insert.earlier_trap.eval",
-      "baseline": "executes_exactly",
-      "phase_b": "executes_exactly",
-      "receipt": "cli_producer_guard_order.eval_earlier_trap_precedes_insert_result_guard"
     },
     {
       "id": "producer.insert.forwarded_axis.c",

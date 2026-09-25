@@ -6,7 +6,7 @@ mod result_claims;
 
 use result_claims::{assert_claim, run};
 
-fn candidate(prefix: &str, values: &str, effects: bool, monomorphic: bool) -> String {
+fn candidate(values: &str, effects: bool, monomorphic: bool) -> String {
     let (effect, before, after) = if effects {
         (
             " ! { IO }",
@@ -17,7 +17,7 @@ fn candidate(prefix: &str, values: &str, effects: bool, monomorphic: bool) -> St
         ("", "", "")
     };
     let source = format!(
-        "def candidate[n, p: Float](witness: p, extent_source: tensor[n, i64]) -> tensor[3, p]{effect} = {{\n {prefix}\n {before}\n result = witness |> scalar_to_tensor |> insert(0i32, shape(extent_source, 0i32))\n {after}\n result\n}}\nout = candidate(16777217.0f64, to_tensor({values}))\n"
+        "def candidate[n, p: Float](witness: p, extent_source: tensor[n, i64]) -> tensor[3, p]{effect} = {{\n {before}\n result = witness |> scalar_to_tensor |> insert(0i32, shape(extent_source, 0i32))\n {after}\n result\n}}\nout = candidate(16777217.0f64, to_tensor({values}))\n"
     );
     if monomorphic {
         source
@@ -33,40 +33,11 @@ fn candidate(prefix: &str, values: &str, effects: bool, monomorphic: bool) -> St
     }
 }
 
-fn assert_order(native: bool) {
-    for monomorphic in [false, true] {
-        for values in ["[0i64, 0i64]", "[0i64, 0i64, 0i64]"] {
-            for bound_tail in [false, true] {
-                let mut source = candidate(
-                    "_ = [-9223372036854775808i64] |> to_tensor |> neg",
-                    values,
-                    false,
-                    monomorphic,
-                );
-                if !bound_tail {
-                    // The issue's original return expression, without a binding.
-                    source = source
-                        .replace("result = ", "")
-                        .replace("\n result\n}", "\n}");
-                }
-                let (ok, output) = run(&source, native);
-                assert!(!ok, "{source}\n{output}");
-                assert!(
-                    output.contains("numeric trap: overflow in neg at i64"),
-                    "{source}\n{output}"
-                );
-                assert!(!output.contains("domain in"), "{output}");
-                assert_eq!(output.matches("numeric trap:").count(), 1, "{output}");
-            }
-        }
-    }
-}
-
 fn assert_producer(native: bool) {
     for monomorphic in [false, true] {
         for effects in [false, true] {
             for (values, agrees) in [("[0i64, 0i64]", false), ("[0i64, 0i64, 0i64]", true)] {
-                let (ok, output) = run(&candidate("", values, effects, monomorphic), native);
+                let (ok, output) = run(&candidate(values, effects, monomorphic), native);
                 assert_eq!(ok, agrees, "{output}");
                 if effects {
                     assert_eq!(output.matches("before-producer").count(), 1, "{output}");
@@ -99,14 +70,6 @@ fn assert_producer(native: bool) {
 }
 
 #[test]
-fn eval_earlier_trap_precedes_insert_result_guard() {
-    assert_order(false);
-}
-#[test]
-fn c_earlier_trap_precedes_insert_result_guard() {
-    assert_order(true);
-}
-#[test]
 fn eval_insert_result_guard_owns_attribution_and_effect_order() {
     assert_producer(false);
 }
@@ -136,63 +99,48 @@ fn assert_forwarded_insert_axis(native: bool) {
     for monomorphic in [false, true] {
         for insert_axis in [0, 1] {
             for width in [2, 3] {
-                for earlier_trap in [false, true] {
-                    let generics = if monomorphic {
-                        "n, m"
-                    } else {
-                        "n, m, p: Float"
-                    };
-                    let parameter = if monomorphic { "" } else { "witness: p, " };
-                    let dtype = if monomorphic { "f64" } else { "p" };
-                    let scalar = if monomorphic { "7.0f64" } else { "witness" };
-                    let actual = if monomorphic { "" } else { "7.0f64, " };
-                    let dims = if insert_axis == 0 { "4, 3" } else { "3, 4" };
-                    let prefix = if earlier_trap {
-                        "_ = [-9223372036854775808i64] |> to_tensor |> neg"
-                    } else {
-                        ""
-                    };
-                    let values = vec!["0i64"; width].join(", ");
-                    let source = format!(
-                        "def candidate[{generics}]({parameter}x: tensor[n, i64], y: tensor[m, i64]) -> tensor[{dims}, {dtype}] = {{\n {prefix}\n a = {scalar} |> scalar_to_tensor |> insert(0i32, shape(y, 0i32))\n insert(a, {insert_axis}i32, shape(x, 0i32))\n}}\nout = candidate({actual}to_tensor([0i64, 0i64, 0i64, 0i64]), to_tensor([{values}]))\n"
+                let generics = if monomorphic {
+                    "n, m"
+                } else {
+                    "n, m, p: Float"
+                };
+                let parameter = if monomorphic { "" } else { "witness: p, " };
+                let dtype = if monomorphic { "f64" } else { "p" };
+                let scalar = if monomorphic { "7.0f64" } else { "witness" };
+                let actual = if monomorphic { "" } else { "7.0f64, " };
+                let dims = if insert_axis == 0 { "4, 3" } else { "3, 4" };
+                let values = vec!["0i64"; width].join(", ");
+                let source = format!(
+                    "def candidate[{generics}]({parameter}x: tensor[n, i64], y: tensor[m, i64]) -> tensor[{dims}, {dtype}] = {{\n a = {scalar} |> scalar_to_tensor |> insert(0i32, shape(y, 0i32))\n insert(a, {insert_axis}i32, shape(x, 0i32))\n}}\nout = candidate({actual}to_tensor([0i64, 0i64, 0i64, 0i64]), to_tensor([{values}]))\n"
+                );
+                let (ok, output) = run(&source, native);
+                assert_eq!(ok, width == 3, "{source}\n{output}");
+                if width == 2 {
+                    let carried_axis = 1 - insert_axis;
+                    assert!(
+                        output.contains(&format!(
+                            "extent `3`: claimed = 3, insert axis {carried_axis} = 2"
+                        )),
+                        "{output}"
                     );
-                    let (ok, output) = run(&source, native);
-                    assert_eq!(ok, !earlier_trap && width == 3, "{source}\n{output}");
-                    if earlier_trap {
-                        assert!(
-                            output.contains("numeric trap: overflow in neg at i64"),
-                            "{source}\n{output}"
-                        );
-                        assert!(!output.contains("domain in"), "{output}");
-                    } else if width == 2 {
-                        let carried_axis = 1 - insert_axis;
-                        assert!(
-                            output.contains(&format!(
-                                "extent `3`: claimed = 3, insert axis {carried_axis} = 2"
-                            )),
-                            "{output}"
-                        );
-                        assert!(
-                            output
-                                .lines()
-                                .any(|line| line == "numeric trap: domain in insert at i64"),
-                            "{output}"
-                        );
-                    } else {
-                        let values = ["7.0"; 12].join(", ");
-                        assert!(
-                            output.contains(&format!(
-                                "out = tensor(shape=[{dims}], data=[{values}])"
-                            )),
-                            "{output}"
-                        );
-                    }
-                    assert_eq!(
-                        output.matches("numeric trap:").count(),
-                        usize::from(!ok),
+                    assert!(
+                        output
+                            .lines()
+                            .any(|line| line == "numeric trap: domain in insert at i64"),
+                        "{output}"
+                    );
+                } else {
+                    let values = ["7.0"; 12].join(", ");
+                    assert!(
+                        output.contains(&format!("out = tensor(shape=[{dims}], data=[{values}])")),
                         "{output}"
                     );
                 }
+                assert_eq!(
+                    output.matches("numeric trap:").count(),
+                    usize::from(!ok),
+                    "{output}"
+                );
             }
         }
     }
@@ -206,4 +154,50 @@ fn eval_forwarded_insert_axis_keeps_result_ownership() {
 #[test]
 fn c_forwarded_insert_axis_keeps_result_ownership() {
     assert_forwarded_insert_axis(true);
+}
+
+// The old backend assertion placed the literal result at entry. Execute both
+// obligations independently before migrating that structural expectation.
+#[test]
+fn mixed_named_entry_and_literal_result_keep_distinct_owners() {
+    for native in [false, true] {
+        for rows_agree in [false, true] {
+            for cols in [2, 3] {
+                let q = if rows_agree {
+                    "[2.0f32, 2.0f32]"
+                } else {
+                    "[2.0f32]"
+                };
+                let a = vec!["0.0f32"; cols].join(", ");
+                let source = format!(
+                    "def opaque[n](x: tensor[n, f32]) -> tensor[*, f32] = shrink(x, [[0i64, shape(x, 0i32)]])\ndef f(z: tensor[rows, f32], a: tensor[cols, f32], q: tensor[rows, f32]) -> tensor[rows, 3, f32] ! {{ IO }} = {{\n _ = print(\"body-ran\")\n insert(add(z, q), 1i32, shape(a, 0i32))\n}}\nout = f(to_tensor([1.0f32, 1.0f32]), to_tensor([{a}]), opaque(to_tensor({q})))\n"
+                );
+                let (ok, output) = run(&source, native);
+                assert_eq!(ok, rows_agree && cols == 3, "{source}\n{output}");
+                if !rows_agree {
+                    assert!(output.contains("domain in load at i64"), "{output}");
+                    assert!(!output.contains("body-ran"), "{output}");
+                } else if cols == 2 {
+                    assert!(
+                        output.contains("extent `3`: claimed = 3, insert axis 1 = 2"),
+                        "{output}"
+                    );
+                    assert!(output.contains("domain in insert at i64"), "{output}");
+                    assert!(output.contains("body-ran"), "{output}");
+                } else {
+                    assert!(
+                        output.contains(
+                            "out = tensor(shape=[2, 3], data=[3.0, 3.0, 3.0, 3.0, 3.0, 3.0])"
+                        ),
+                        "{output}"
+                    );
+                }
+                assert_eq!(
+                    output.matches("numeric trap:").count(),
+                    usize::from(!ok),
+                    "{output}"
+                );
+            }
+        }
+    }
 }

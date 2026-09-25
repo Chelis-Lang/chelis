@@ -2844,6 +2844,7 @@ pub struct ResultExtentSite {
     producer: NodeId,
     producer_axis: RtAxis,
     observation: LocalGuardObservation,
+    runtime_carrier_origin: Option<(NodeId, RtAxis)>,
     operation: &'static str,
 }
 
@@ -2860,9 +2861,42 @@ impl ResultExtentSite {
     pub fn observation(&self) -> &LocalGuardObservation {
         &self.observation
     }
+    /// The operation/axis that introduced a runtime extent carrier, before
+    /// any later forwarding. A pure pass-through from an input has none.
+    pub fn runtime_carrier_origin(&self) -> Option<(NodeId, RtAxis)> {
+        self.runtime_carrier_origin
+    }
     pub fn operation(&self) -> &'static str {
         self.operation
     }
+}
+
+/// Follow the same typed axis relation used for observation. Stop at an
+/// introducing carrier instead of resolving through it to input metadata:
+/// the carrier's producer owns its declared result even when its size is
+/// available at entry. No new DAG annotation or execution dependency is made.
+fn runtime_carrier_origin(
+    dag: &Dag,
+    mut node: NodeId,
+    mut axis: usize,
+) -> Option<(NodeId, RtAxis)> {
+    for _ in 0..dag.len() {
+        let producer = dag.get(node)?;
+        if expand_or_reshape_carrier(&producer.op, axis).is_some() {
+            return Some((node, RtAxis::Lit(i32::try_from(axis).ok()?)));
+        }
+        match output_axis_sources(dag, node).get(axis)? {
+            AxisSource::InputAxis {
+                input,
+                axis: RtAxis::Lit(read),
+            } => {
+                node = *producer.inputs.get(*input)?;
+                axis = usize::try_from(*read).ok()?;
+            }
+            _ => return None,
+        }
+    }
+    None
 }
 
 /// Locate inherited result checks without changing graph or execution identity.
@@ -2929,6 +2963,7 @@ pub fn result_extent_sites(dag: &Dag, root: NodeId) -> Vec<ResultExtentSite> {
                 producer,
                 producer_axis: RtAxis::Lit(i32::try_from(axis).expect("rank fits i32")),
                 observation,
+                runtime_carrier_origin: runtime_carrier_origin(dag, producer, axis),
                 operation: expansion_kind(dag, attributed).map_or_else(
                     || crate::grad::risc_op_name(&attributed_node.op),
                     ExpansionKind::primitive_name,

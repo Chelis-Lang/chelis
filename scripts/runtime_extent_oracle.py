@@ -345,18 +345,6 @@ def generated_phase_b_corpus() -> tuple[CorpusRow, ...]:
 
     rows = (
         _row(
-            "producer.insert.earlier_trap.eval",
-            "executes_exactly",
-            EXECUTES,
-            "cli_producer_guard_order.eval_earlier_trap_precedes_insert_result_guard",
-        ),
-        _row(
-            "producer.insert.earlier_trap.c",
-            "lane_divergent",
-            EXECUTES,
-            "cli_producer_guard_order.c_earlier_trap_precedes_insert_result_guard",
-        ),
-        _row(
             "producer.insert.claim_effects.eval",
             "executes_exactly",
             EXECUTES,

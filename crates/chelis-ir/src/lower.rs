@@ -8397,9 +8397,9 @@ impl<'program> LowerCtx<'program> {
         }
     }
 
-    /// Admit the shared result site's carrier observation, including an axis
-    /// forwarded by a later operation. Re-reading only that operation's own
-    /// size slot loses carried axes and can move their claims onto inputs.
+    /// Admit an axis introduced by a runtime carrier, including later
+    /// forwarding. Reading an existing input axis alone does not introduce
+    /// a carrier; the shared site derivation preserves that distinction.
     /// Op-computed observations keep their existing admission.
     fn runtime_carrier_result_owner_is_admitted(&self, id: NodeId, axis: usize) -> bool {
         crate::axis_sources::result_extent_sites(&self.dag, id)
@@ -8407,10 +8407,7 @@ impl<'program> LowerCtx<'program> {
             .any(|site| {
                 let RtAxis::Lit(output_axis) = site.output_axis();
                 usize::try_from(output_axis).ok() == Some(axis)
-                    && matches!(
-                        site.observation(),
-                        crate::axis_sources::LocalGuardObservation::Carrier(_)
-                    )
+                    && site.runtime_carrier_origin().is_some()
             })
     }
 
@@ -8941,7 +8938,6 @@ impl<'program> LowerCtx<'program> {
     /// `(let {} (bind {} name1 expr1 name2 expr2 ...) body)`
     fn lower_let(&mut self, kids: &[Expr]) -> LoweredValue {
         let witness_start = self.invocation_witnesses.len();
-        let mut eager_values = Vec::new();
         if kids.len() < 2 {
             raise_malformed_deep(
                 "a `let` form with fewer than 4 elements",
@@ -9098,7 +9094,6 @@ impl<'program> LowerCtx<'program> {
                         } else {
                             self.binding_witnesses.remove(name);
                         }
-                        eager_values.extend(val_id.flatten_nodes());
                         self.bindings.insert(name.clone(), val_id);
                     }
                 }
@@ -9108,7 +9103,6 @@ impl<'program> LowerCtx<'program> {
 
         let result = self.lower_expr(&kids[1]);
         let result = self.retain_invocation_witnesses(result, witness_start);
-        let result = self.retain_eager_values(result, &eager_values);
         self.bindings = saved; // Restore scope
         self.binding_witnesses = saved_witnesses;
         self.local_unit_refinements = saved_unit_refinements;
@@ -16893,84 +16887,6 @@ impl<'program> LowerCtx<'program> {
         })
     }
 
-    /// An eager binding is evaluated even when its value is discarded. Keep
-    /// its exact graph dependencies on each return leaf so DCE cannot erase an
-    /// earlier trap. The new carrier avoids mutating a pre-existing return.
-    fn retain_eager_values(&mut self, result: LoweredValue, required: &[NodeId]) -> LoweredValue {
-        let mut reachable = vec![false; self.dag.len()];
-        let mut pending = result.flatten_nodes();
-        while let Some(id) = pending.pop() {
-            if reachable[id.0] {
-                continue;
-            }
-            reachable[id.0] = true;
-            let node = self.dag.get(id).expect("lowered value");
-            pending.extend(
-                node.inputs
-                    .iter()
-                    .chain(&node.shape_deps)
-                    .chain(&node.result_claim_deps),
-            );
-        }
-        // Literal payloads and administrative copies of them have no language
-        // observation. Everything else is retained conservatively: an empty
-        // effect row does not prove that checked arithmetic cannot trap.
-        let mut inert = vec![false; self.dag.len()];
-        for node in self.dag.nodes() {
-            inert[node.id.0] = matches!(
-                node.op,
-                RiscOp::Const { .. } | RiscOp::ConstTensor { .. } | RiscOp::Copy
-            ) && node
-                .inputs
-                .iter()
-                .chain(&node.shape_deps)
-                .chain(&node.result_claim_deps)
-                .all(|dependency| inert[dependency.0]);
-        }
-        let required = required
-            .iter()
-            .flat_map(|id| {
-                let node = self.dag.get(*id).expect("lowered initializer");
-                // Ownership rebuilds lifetime drops. Their evaluated arguments
-                // still belong to this eager initializer's observations.
-                if matches!(node.op, RiscOp::Drop) {
-                    node.inputs
-                        .iter()
-                        .chain(&node.shape_deps)
-                        .chain(&node.result_claim_deps)
-                        .copied()
-                        .collect::<Vec<_>>()
-                } else {
-                    vec![*id]
-                }
-            })
-            .filter(|id| !reachable[id.0] && !inert[id.0])
-            .collect::<Vec<_>>();
-        if required.is_empty() {
-            return result;
-        }
-        let nodes = result
-            .flatten_nodes()
-            .into_iter()
-            .map(|id| {
-                let ty = self
-                    .dag
-                    .get(id)
-                    .expect("lowered return")
-                    .output_type
-                    .clone();
-                let carrier =
-                    self.dag
-                        .add_node(RiscOp::Copy, vec![id], ty, self.current_span_id.clone());
-                for dependency in &required {
-                    self.dag.add_shape_dep(carrier, *dependency);
-                }
-                carrier
-            })
-            .collect::<Vec<_>>();
-        LoweredValue::from_flat(&result, &mut nodes.into_iter())
-    }
-
     fn retain_invocation_witnesses(&mut self, result: LoweredValue, start: usize) -> LoweredValue {
         let Some(id) = result.as_single_node() else {
             return result;
@@ -21512,8 +21428,8 @@ mod tests {
     }
 
     #[test]
-    fn eager_copy_retention_checks_value_and_guard_dependencies() {
-        for guarded in [false, true] {
+    fn runtime_result_admission_requires_an_introduced_carrier() {
+        for introduced in [false, true] {
             let mut ctx = LowerCtx::new(
                 BTreeMap::new(),
                 BTreeMap::new(),
@@ -21521,45 +21437,84 @@ mod tests {
                 LinearityInfo::default(),
             );
             let ty = TensorType {
-                dims: vec![],
+                dims: vec![DimInfo::Named("n".into(), None)],
                 precision: Prim::Int64,
             };
-            let value = ctx.dag.add_node(
-                RiscOp::Const {
-                    value: chelis_types::scalar_from_i64("const", Prim::Int64, i64::MIN).unwrap(),
+            let input =
+                ctx.dag
+                    .add_node(RiscOp::Load { name: "x".into() }, vec![], ty.clone(), None);
+            let inner = if introduced {
+                let scalar = ctx.dag.add_node(
+                    RiscOp::Const {
+                        value: chelis_types::scalar_from_i64("const", Prim::Int64, 7).unwrap(),
+                    },
+                    vec![],
+                    TensorType {
+                        dims: vec![],
+                        precision: Prim::Int64,
+                    },
+                    None,
+                );
+                ctx.dag.add_node(
+                    RiscOp::Expand {
+                        axis: 0,
+                        size: RtDim::InputAxis {
+                            tensor: 1,
+                            axis: RtAxis::Lit(0),
+                        },
+                    },
+                    vec![scalar, input],
+                    ty.clone(),
+                    None,
+                )
+            } else {
+                input
+            };
+            let outer = ctx.dag.add_node(
+                RiscOp::Expand {
+                    axis: 0,
+                    size: RtDim::Lit(4),
                 },
-                vec![],
-                ty.clone(),
-                None,
-            );
-            let trap = ctx.dag.add_node(RiscOp::Neg, vec![value], ty.clone(), None);
-            let copy = ctx.dag.add_node(
-                RiscOp::Copy,
-                vec![if guarded { value } else { trap }],
-                ty.clone(),
-                None,
-            );
-            if guarded {
-                ctx.dag.add_shape_dep(copy, trap);
-            }
-            let tail = ctx.dag.add_node(
-                RiscOp::Const {
-                    value: chelis_types::scalar_from_i64("const", Prim::Int64, 9).unwrap(),
+                vec![inner],
+                TensorType {
+                    dims: vec![DimInfo::Lit(4), ty.dims[0].clone()],
+                    precision: Prim::Int64,
                 },
-                vec![],
-                ty,
                 None,
             );
-            let retained = ctx.retain_eager_values(LoweredValue::Node(tail), &[copy]);
-            ctx.dag
-                .add_root(retained.expect_node("retained eager initializer"));
-            let dag = crate::optimize::dead_code_eliminate(&ctx.dag);
-            let error = crate::eval::eval_tensor_with(&dag, |_| None).unwrap_err();
-            assert!(
-                error.contains("numeric trap: overflow in neg at i64"),
-                "{error}"
+            assert_eq!(
+                ctx.runtime_carrier_result_owner_is_admitted(outer, 1),
+                introduced
             );
+            assert!(!ctx.runtime_carrier_result_owner_is_admitted(outer, 0));
         }
+    }
+
+    #[test]
+    fn discarded_eager_values_are_not_shape_sources() {
+        let exprs = chelis_deep::parser::parse_str(
+            r#"
+            (let {} (bind {} unused
+                (app {} (var {} neg) (lit {type: (t-prim {} i64)} 7)))
+                (lit {type: (t-prim {} i64)} 9))
+        "#,
+        )
+        .unwrap();
+        let mut ctx = LowerCtx::new(
+            BTreeMap::new(),
+            BTreeMap::new(),
+            BTreeMap::new(),
+            LinearityInfo::default(),
+        );
+        ctx.lower_expr(&exprs[0]);
+        assert!(
+            ctx.dag
+                .nodes()
+                .iter()
+                .all(|node| node.shape_deps.is_empty()),
+            "{:?}",
+            ctx.dag.nodes()
+        );
     }
 
     #[test]

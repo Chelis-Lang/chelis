@@ -153,6 +153,8 @@ fn forwarded_axis_observation_and_physical_claim_keep_their_owners() {
         let sites = result_extent_sites(&dag, outer);
         let site = &sites[1];
         assert_eq!(site.producer(), outer);
+        assert_eq!(site.runtime_carrier_origin(), Some((inner, RtAxis::Lit(0))));
+        assert_eq!(sites[0].runtime_carrier_origin(), None);
         assert_eq!(site.producer_axis(), RtAxis::Lit(1));
         assert_eq!(
             site.observation(),

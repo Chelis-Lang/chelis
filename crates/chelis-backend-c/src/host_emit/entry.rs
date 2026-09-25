@@ -579,7 +579,7 @@ mod tests {
     }
 
     #[test]
-    fn lowered_mixed_result_claim_delegates_the_following_rows_guard() {
+    fn lowered_mixed_result_claim_keeps_rows_at_entry_and_literal_local() {
         let verified = verified_host_from_source(
             "def f(z: tensor[rows, f32], a: tensor[cols, f32], q: tensor[rows, f32]) -> tensor[rows, 3, f32] = insert(add(z, q), 1i32, shape(a, 0i32))",
         );
@@ -591,15 +591,22 @@ mod tests {
         let helper_guards = helper.dag().entry_extent_guards();
         assert!(
             matches!(helper_guards.as_slice(), [
-                EntryExtentGuard::Literal { required: 3, .. },
                 EntryExtentGuard::Named { claim, .. }
             ] if claim == "rows"),
             "{helper_guards:#?}"
         );
-        assert_eq!(
-            delegated_function_guards(function, &[helper]),
-            plan.guards()
-        );
+        // The literal belongs to insert, while rows still belongs to entry.
+        // Eval/C agreement and independent mismatch cases execute in
+        // issue_2377_producer_guards::mixed_named_entry_and_literal_result_keep_distinct_owners.
+        let local = helper.dag().local_dim_guard_sites().unwrap();
+        let literal = local
+            .iter()
+            .filter(|(_, claim)| claim.claim == "3")
+            .collect::<Vec<_>>();
+        assert_eq!(literal.len(), 1, "{local:#?}");
+        assert_eq!(literal[0].0.1, 1);
+        assert_eq!(literal[0].1.op, "insert");
+        assert!(delegated_function_guards(function, &[helper]).is_empty());
         assert!(helper_coverage_with_verified(function, &[helper]).variants[0][0].is_empty());
     }
 
