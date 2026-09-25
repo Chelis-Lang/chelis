@@ -327,21 +327,22 @@ def transpose[a, b](x: tensor[a, b, f32]) -> tensor[b, a, f32] = permute(x, 1, 0
 ## Effects and handlers
 
 A function's effects can be annotated with a `! { ... }` suffix on the signature or the
-`def`. The handled effects are `Random` and `Resource("device")`; `IO` is inferred from
-host operations such as `print`. Handlers are introduced by `with`:
+`def`. The handled effect is `Resource("device")`; `IO` is inferred from host operations
+such as `print`. Randomness is not an effect: a draw takes a `key`. Handlers are introduced
+by `with`:
 
 An explicit empty effect row `! {}` declares a pure upper bound. It is distinct
 from omitting the clause, which leaves effects inferred.
 
 ```chelis-surf-fragment
-with seed(42i64) {
-  dropout(x, 0.5)
+with device("gpu:0") {
+  dropout(key_from_seed(42i64), x, 0.5)
 }
 ```
 
-`with seed(...)` takes an i64-suffixed integer literal (`42i64`; an unsuffixed literal is a
-type error) and `with device("...")` takes a string literal. See
-[Effects and Handlers](effects.md) for the full model.
+`with device("...")` takes a string literal. `with seed(...)` and a `Random` effect are
+retired spellings that the parser rejects. See [Effects and Handlers](effects.md) for the
+full model.
 
 ## Transforms
 

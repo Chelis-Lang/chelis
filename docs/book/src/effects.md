@@ -1,18 +1,34 @@
 # Effects and Handlers
 
 Chelis tracks effects explicitly. Pure tensor code stays pure, and the places that touch
-randomness, host input and output, or a specific device are surfaced in the type and
-discharged by a handler. Effect inference runs after type checking: a function's effect set
-is the union of the effects of the operations in its body.
+host input and output or a specific device are surfaced in the type. Effect inference runs
+after type checking: a function's effect set is the union of the effects of the operations
+in its body.
 
 ## The effects
 
-- `Random` comes from `dropout` and `uniform_like`, and from the `Std.Init` initializers
-  that call them. It is discharged by `with seed(...)`.
 - `IO` is inferred from host operations such as `print` and the file builtins. It is
   permitted at the top level rather than requiring a handler.
 - `Resource("device")` marks a region that runs on a named device. It is introduced by
   `with device(...)` and validated against the build target.
+- `Test` comes from the assertion operations; only `chelis test` handles it.
+
+## Randomness is not an effect
+
+A random draw is a pure function of the key it is given. `dropout`, `uniform_like` and the
+`Std.Init` initializers take a `key` as their first argument and contribute no effect, so a
+function that draws takes a `key` parameter and needs no annotation. `key_from_seed(42i64)`
+makes a root key; `split_key`, `split_keys` and `fold_in` derive fresh keys from one. A key
+is used at most once on every path, so two draws need two keys:
+
+```chelis-surf-fragment
+(k1, k2) = split_key(key_from_seed(42i64))
+first = dropout(k1, x, 0.5)
+second = dropout(k2, x, 0.5)
+```
+
+`with seed(...)` and a `Random` effect annotation are retired spellings; the parser rejects
+both. See [Types](type-reference.md) for the `key` type.
 
 ## Annotating effects
 
@@ -20,23 +36,21 @@ A signature or a `def` carries its effect set as a `! { ... }` suffix. The annot
 optional; the checker infers the set and verifies any annotation you supply.
 
 ```chelis-surf-fragment
-sig predict[n]: tensor[n, f32] -> tensor[n, f32] ! { Random }
+sig report[n]: tensor[n, f32] -> unit ! { IO }
 ```
 
 In Deep the effect set is `eff` metadata on the function type:
 
 ```chelis-deep-fragment
-(t-fn {eff: (effects {} random)}
+(t-fn {eff: (effects {} io)}
   (t-tensor {} (d-var {} n) (t-prim {} f32))
-  (t-tensor {} (d-var {} n) (t-prim {} f32)))
+  (t-unit {}))
 ```
 
 ## Handlers
 
-A handler is a `with` block. `with seed(...)` takes an i64-suffixed integer literal
-(`42i64`; the seed is semantically i64, so an unsuffixed literal is a type error) and makes
-the randomness inside it deterministic; an unhandled `Random` effect at the top level is a
-check error with repair guidance. `with device(...)` takes a string literal naming the device.
+A handler is a `with` block, and `with device(...)` is the one user handler. It takes a
+string literal naming the device.
 
 The core host-C build accepts only exact `with device("cpu")`. Any labeled CPU,
 accelerator, unknown, or malformed selector—including `cpu:worker_0`, `cuda:0`,
@@ -45,21 +59,13 @@ accelerator, unknown, or malformed selector—including `cpu:worker_0`, `cuda:0`
 and transfer semantics remain experimental; a device request is never treated
 as permission to run the region on host C.
 
-```chelis-surf-fragment
-with seed(42i64) {
-  dropout(x, 0.5)
-}
-```
-
-Handlers nest. A region can sit on a device and seed its randomness at once:
+A draw inside a device region takes its key like any other:
 
 ```chelis-surf-fragment
 with device("gpu:0") {
-  with seed(42i64) {
-    dropout(x, 0.5)
-  }
+  dropout(k, x, 0.5)
 }
 ```
 
-The handled names are `seed` and `device`. For the effect-checking details see
+The handled name is `device`. For the effect-checking details see
 `spec/04-type-system.md` and the effect-checking crates and tests.

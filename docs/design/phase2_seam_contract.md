@@ -81,7 +81,7 @@ codec in `spec/10-serialization.md` §3.2 preserves nonfinite bit patterns as
 well as finite values; it does not collapse them to `null`. BoxRange retains
 its existing finite-only proof support: the WI-3 producer rejects a nonfinite
 node-op value before hashing a proof artifact. The graph's own numeric and
-reference domains are validated first, including Random's finite-parameter
+reference domains are validated first, including the random draws' finite-parameter
 requirements. This proof precondition does not narrow the wire codec's value
 domain. Named output references must resolve to nodes of the enclosed,
 validated DAG before a handle is created.

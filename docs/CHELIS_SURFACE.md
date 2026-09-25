@@ -175,8 +175,8 @@ broadcast axis). The named-axis and four-argument anchored forms belong to `inse
 |---|---|---|
 | `const` | `(value, shape...) -> tensor[shape,p]` | zero gradient |
 | `load` | `(source, shape...) -> tensor[shape,p]` | zero gradient |
-| `dropout` | `(&tensor[D,p_float], rate: p_float) -> tensor[D,p_float]` | all active float dtypes; fixed-control input AD replays its forward mask; introduces `Random`. C build accepts source-fixed rates/seeds through sealed direct entries and host helpers; runtime controls and HIP/Metal remain unsupported. |
-| `uniform_like` | `(&tensor[D,p], lo: f32, hi: f32) -> tensor[D,p]` | active float `p`; zero gradient; introduces `Random`; seeded via `with seed(Ni64) { }` |
+| `dropout` | `(key, &tensor[D,p_float], rate: p_float) -> tensor[D,p_float]` | all active float dtypes; consumes its key and introduces no effect; fixed-control input AD replays its forward mask. C build accepts source-fixed rates/keys through sealed direct entries and host helpers; runtime controls and HIP/Metal remain unsupported. |
+| `uniform_like` | `(key, &tensor[D,p_float], lo: p_float, hi: p_float) -> tensor[D,p_float]` | active float `p`; consumes its key and introduces no effect; zero gradient to the template |
 | `key_from_seed` | `(i64) -> key` | [05-OP-69]; non-differentiable |
 | `split_key` | `(key) -> (key, key)` | [05-OP-70]; consumes its key ([04-LIN-9]) |
 | `split_keys` | `(key, i64) -> tensor[n, key]` | [05-OP-71]; consumes its key; `n` is the runtime count |
@@ -553,14 +553,15 @@ does not describe the sealed fixed-control C lane (see #1872).
 
 | Effect | Introduced by | Handled by |
 |---|---|---|
-| `Random` | `dropout`, `uniform_like` | `with seed(Ni64) { ... }` |
 | `IO` | file ops, `mmap_*`, `process_run`, `print` | root / runtime |
 | `Test` | `test_assert*` | pinned at root, no handler |
 | `Accum` | accumulation contexts | — |
 | `Resource(String)` | device/resource pinning | exact `with device("cpu") { ... }` for host C; every other selector is rejected before C artifacts |
 
 Effects are inferred and checked after types, before lowering. The style gate and
-`chelis check` report effect rows per function.
+`chelis check` report effect rows per function. Randomness is not an effect: a draw
+takes a `key` (§1.6), and `with seed` and `Random` are a typed `RetiredRandomness`
+parse error.
 
 The C/HIP compiler APIs check Resource regions against their selected target
 before emitting an artifact or invoking an emission observer. Entry-scoped C
@@ -626,7 +627,7 @@ chelis-std 0.4.0 — there is no upstream NN fallback. Use these; do not reimple
 |---|---|
 | `Std.Tensor.Construct` | `linspace`, `arange` (evaluator; their `Float`/`Int` dtype families are declared bounds and are enforced, while compiled-host generic casts remain [chelis#1418](https://github.com/Chelis-Lang/chelis/issues/1418)); `stack`, `squeeze`, and `unsqueeze` are exported but concrete-call typing is not fully implemented ([chelis#1416](https://github.com/Chelis-Lang/chelis/issues/1416)) |
 | `Std.Tensor.Mask` | `where_indices` |
-| `Std.Init.{Random,Xavier,Kaiming,XavierExt}` | `normal_like`, `kaiming_*`, `xavier_*`, `trunc_normal` (seeded, Box-Muller; handlers advance only for draws on the executed runtime path, including computed/nested conditionals inside `grad`) |
+| `Std.Init.{Random,Kaiming,XavierExt}` | `normal_like`, `kaiming_*`, `xavier_*`, `trunc_normal` (each takes its key first and consumes it; Box-Muller `normal_like` splits its key for its two uniforms) |
 | `Std.Sort` | `sort` (rank-polymorphic numeric tensor; returns sorted values and `i64` indices) |
 | `Std.Scan` | `scan_list` (list lane; tensor lane is the `tensor_scan` builtin) |
 | `Std.Index` | `list_index`, `take_list`, `skip_list` (scalar/tensor/nested/multi-target List adjoints preserve runtime length/positions through composed calls in eval and generated C) |

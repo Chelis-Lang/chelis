@@ -92,8 +92,11 @@ clipped = clamp(running, floor15, ceil30)
 
 ### Randomness
 
-`dropout(x, rate)` and `uniform_like(x, low, high)` carry the `Random` effect, discharged by
-`with seed(...)`. The `Std.Init` modules build their initializers on these.
+`dropout(k, x, rate)` and `uniform_like(k, x, low, high)` draw from the key `k` they are
+given and consume it; they carry no effect. `key_from_seed(seed)` makes a root key from an
+`i64`, `split_key(k)` returns two keys, `split_keys(k, n)` returns a `tensor[n, key]`, and
+`fold_in(k, n)` derives the key of an integer. The `Std.Init` modules build their
+initializers on these.
 
 ## Standard library modules
 
@@ -122,22 +125,22 @@ do not yet actualize the helpers' generic cast targets
 
 `Std.Init.Random`:
 
-- `normal_like(template, mean, std)` draws a normal tensor shaped like the template.
+- `normal_like(k, template, mean, std)` draws a normal tensor shaped like the template. It
+  splits `k` and draws its two Box-Muller uniforms from the halves.
 
 `Std.Init.Kaiming`:
 
-- `kaiming_uniform(template, fan_in)`, `kaiming_normal(template, fan_in)`.
+- `kaiming_uniform(k, template, fan_in)`, `kaiming_normal(k, template, fan_in)`.
 
 `Std.Init.XavierExt`:
 
-- `xavier_uniform(template, fan_in, fan_out)`, `xavier_normal(template, fan_in, fan_out)`.
-- `trunc_normal(template, mean, std, a, b)` draws a normal tensor clipped to `[a, b]`.
+- `xavier_uniform(k, template, fan_in, fan_out)`, `xavier_normal(k, template, fan_in, fan_out)`.
+- `trunc_normal(k, template, mean, std, a, b)` draws a normal tensor clipped to `[a, b]`.
 
-All initializers carry the `Random` effect. A `with seed(...)` handler advances
-only for draws that actually execute: an untaken conditional branch inside a
-forward call or `grad(...)` consumes no stream positions. This includes
-computed and nested predicates, branches with different numbers of draws, and
-repeated or nested seed handlers.
+Every initializer takes its key first, consumes it, and carries no effect. The same key
+gives the same tensor, so `kaiming_uniform(key_from_seed(7i64), w, 4.0)` is reproducible;
+initialising two tensors takes two keys, for example the halves of one `split_key`. A draw
+in a conditional branch that does not run is not evaluated.
 
 ### Sorting and scanning
 
