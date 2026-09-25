@@ -708,7 +708,9 @@ fn key_operation_operands(
     let inputs = (0..)
         .map_while(|slot| graph.input(node, slot))
         .collect::<Vec<_>>();
-    if inputs.len() != arity {
+    // A key-consuming operation may end with one activation (rule V3).
+    let activated = role.consumes() && inputs.len() == arity + 1;
+    if inputs.len() != arity && !activated {
         errors.push(format!(
             "node {node}: key operation has the wrong number of inputs"
         ));
@@ -725,6 +727,16 @@ fn key_operation_operands(
         ));
         return;
     };
+    if activated
+        && !(graph.dtype(inputs[arity]) == Some(Prim::Bool)
+            && graph
+                .dims(inputs[arity])
+                .is_some_and(|active| key.starts_with(&active)))
+    {
+        errors.push(format!(
+            "node {node}: key operation may end with exactly one Bool activation, shaped like a leading part of its key's shape"
+        ));
+    }
     let valid = match role {
         KeyRole::SplitN { count } => {
             dims.len() == key.len() + 1
@@ -930,6 +942,24 @@ impl KeyRole {
                 Self::Split { .. } | Self::FoldIn | Self::SplitN { .. }
             )
     }
+
+    /// The input slot of a key consumer's optional activation: after a
+    /// draw's key, or after a key operation's operands (a split's runtime
+    /// count among them).
+    fn activation_slot(self) -> Option<usize> {
+        match self {
+            Self::Split { .. }
+            | Self::SplitN {
+                count: SplitCount::Lit(_) | SplitCount::Other,
+            } => Some(1),
+            Self::FoldIn
+            | Self::SplitN {
+                count: SplitCount::Input(_),
+            } => Some(2),
+            _ if self.is_draw() => self.key_slot().map(|slot| slot + 1),
+            _ => None,
+        }
+    }
 }
 
 /// A `SplitN` count as the operand rules of [`verify_random_operands`] read
@@ -1091,9 +1121,13 @@ fn activations_exclusive(graph: &impl KeyGraph, left: usize, right: usize) -> bo
 /// - V2: a key's uses are exactly one draw, one `FoldIn`, one `SplitN`, or
 ///   one root, or at most one `Split` of each branch. Every `Load` of one
 ///   parameter is one key.
-/// - V3: two draws may consume one key only when each carries an activation
-///   and every pair of their activations is structurally exclusive: one
-///   implies `X` and the other `Not(X)`, or either implies `false`.
+/// - V3: two consumers of one key, draws and key operations alike, other
+///   than one `Split` of each branch, may share it only when each carries an
+///   activation and their activations are structurally exclusive: one
+///   implies `X` and the other `Not(X)`, or either implies `false`. A key a
+///   key operation derives under such sharing, and every key derived from
+///   it, is used only under that operation's activation
+///   ([`verify_confinement`]).
 /// - V4: a key reaching any other operation or a dependency list is
 ///   rejected; replays read their forward draw's key without consuming it.
 pub fn verify_key_rules(graph: &impl KeyGraph, errors: &mut Vec<String>) {
@@ -1139,9 +1173,10 @@ pub fn verify_key_rules(graph: &impl KeyGraph, errors: &mut Vec<String>) {
             }
         }
     }
+    let mut exclusive = vec![false; graph.node_count()];
     for (key, consuming) in consumers.iter().enumerate() {
         if consuming.len() > 1 {
-            verify_shared_key(graph, key, consuming, errors);
+            verify_shared_key(graph, key, consuming, &mut exclusive, errors);
         }
     }
     // A root is a use: returning a key hands it to the caller.
@@ -1162,6 +1197,7 @@ pub fn verify_key_rules(graph: &impl KeyGraph, errors: &mut Vec<String>) {
             ));
         }
     }
+    verify_confinement(graph, identity, &consumers, &exclusive, &rooted, errors);
     // Replay reads: each must read a key that a forward draw of the matching
     // kind consumes under the same rate or template type and activation.
     for node in 0..graph.node_count() {
@@ -1211,63 +1247,115 @@ pub fn verify_key_rules(graph: &impl KeyGraph, errors: &mut Vec<String>) {
     }
 }
 
-/// Rules V2 and V3 for a key with several consumers.
+/// Rules V2 and V3 for a key with several consumers, pair by pair: a `Left`
+/// and a `Right` split are the two halves of one `split_key`, and any other
+/// pair, whatever the consumers' kinds, must carry structurally exclusive
+/// activations. Each consumer that shares the key only through exclusive
+/// activations is marked in `exclusive`, for [`verify_confinement`].
 fn verify_shared_key(
     graph: &impl KeyGraph,
     key: usize,
     consuming: &[usize],
+    exclusive: &mut [bool],
     errors: &mut Vec<String>,
 ) {
-    let roles = consuming
-        .iter()
-        .map(|node| graph.role(*node))
-        .collect::<Vec<_>>();
-    if roles
-        .iter()
-        .all(|role| matches!(role, KeyRole::Split { .. }))
-    {
-        for branch in [crate::dag::KeyBranch::Left, crate::dag::KeyBranch::Right] {
-            let same = consuming
-                .iter()
-                .zip(&roles)
-                .filter(|(_, role)| **role == KeyRole::Split { branch })
-                .map(|(node, _)| *node)
-                .collect::<Vec<_>>();
-            if same.len() > 1 {
-                errors.push(format!(
-                    "key {key} is split twice for the {branch:?} branch, by nodes {} and {}",
-                    same[0], same[1]
-                ));
+    for (index, &left) in consuming.iter().enumerate() {
+        for &right in &consuming[index + 1..] {
+            let (left_role, right_role) = (graph.role(left), graph.role(right));
+            if let (KeyRole::Split { branch: first }, KeyRole::Split { branch: second }) =
+                (left_role, right_role)
+                && first != second
+            {
+                continue;
+            }
+            match (activation(graph, left), activation(graph, right)) {
+                (Some(left_active), Some(right_active))
+                    if activations_exclusive(graph, left_active, right_active) =>
+                {
+                    exclusive[left] = true;
+                    exclusive[right] = true;
+                }
+                (Some(_), Some(_)) => errors.push(format!(
+                    "key {key} is consumed twice, by nodes {left} and {right}, whose activations are not exclusive"
+                )),
+                _ => errors.push(match left_role {
+                    KeyRole::Split { branch } if left_role == right_role => format!(
+                        "key {key} is split twice for the {branch:?} branch, by nodes {left} and {right}"
+                    ),
+                    _ => format!("key {key} is consumed twice, by nodes {left} and {right}"),
+                }),
             }
         }
-        return;
     }
-    let activation = |node: usize, role: KeyRole| {
-        role.key_slot()
-            .filter(|_| role.is_draw())
-            .and_then(|slot| graph.input(node, slot + 1))
-    };
-    let activations = consuming
-        .iter()
-        .zip(&roles)
-        .map(|(node, role)| activation(*node, *role))
-        .collect::<Vec<_>>();
-    if activations.iter().any(Option::is_none) {
-        errors.push(format!(
-            "key {key} is consumed twice, by nodes {} and {}",
-            consuming[0], consuming[1]
-        ));
-        return;
+}
+
+/// A key consumer's activation, if it carries one.
+fn activation(graph: &impl KeyGraph, node: usize) -> Option<usize> {
+    graph
+        .role(node)
+        .activation_slot()
+        .and_then(|slot| graph.input(node, slot))
+}
+
+/// Rule V3's confinement. A key operation that shares its key with an
+/// exclusive consumer may derive what that consumer derives: two exclusive
+/// `Split{Left}`s derive one key, and so do a `FoldIn` of `n` and row `n` of
+/// a `SplitN`. Such keys stay apart only while each is used under the
+/// activation it was derived under. So a key derived by an operation that
+/// `exclusive` marks, and every key derived from it in turn, is used only by
+/// consumers whose activations imply that activation (their `And` conjuncts
+/// contain it) or contain the constant `false`, and is never a root.
+/// `identity` names the key a node's value is, as in [`verify_key_rules`].
+fn verify_confinement(
+    graph: &impl KeyGraph,
+    identity: impl Fn(usize) -> usize,
+    consumers: &[Vec<usize>],
+    exclusive: &[bool],
+    rooted: &[usize],
+    errors: &mut Vec<String>,
+) {
+    // The activations each key must be used under. Nodes precede their
+    // consumers, so a parent's entry is complete before its children read it.
+    let mut required = vec![Vec::<usize>::new(); graph.node_count()];
+    for node in 0..graph.node_count() {
+        let role = graph.role(node);
+        if !(role.produces_key() && role.consumes()) {
+            continue;
+        }
+        let mut under = graph
+            .input(node, 0)
+            .and_then(|parent| required.get(identity(parent)).cloned())
+            .unwrap_or_default();
+        if exclusive[node]
+            && let Some(active) = activation(graph, node)
+            && !under.contains(&active)
+        {
+            under.push(active);
+        }
+        required[node] = under;
     }
-    for (index, left) in consuming.iter().enumerate() {
-        for (offset, right) in consuming.iter().enumerate().skip(index + 1) {
-            let (Some(left_active), Some(right_active)) = (activations[index], activations[offset])
-            else {
+    for (key, under) in required.iter().enumerate() {
+        let Some(&first) = under.first() else {
+            continue;
+        };
+        if rooted[key] > 0 {
+            errors.push(format!(
+                "key {key} is derived under node {first}'s activation from a key shared by exclusive consumers, and is a graph root"
+            ));
+        }
+        for &consumer in &consumers[key] {
+            let conjuncts = activation(graph, consumer)
+                .map(|active| activation_conjuncts(graph, active))
+                .unwrap_or_default();
+            if conjuncts
+                .iter()
+                .any(|node| graph.role(*node) == KeyRole::ConstFalse)
+            {
                 continue;
-            };
-            if !activations_exclusive(graph, left_active, right_active) {
+            }
+            if let Some(missing) = under.iter().find(|active| !conjuncts.contains(active)) {
                 errors.push(format!(
-                    "key {key} is consumed twice, by nodes {left} and {right}, whose activations are not exclusive"
+                    "key {key} is derived under node {missing}'s activation from a key shared by exclusive consumers, but node {consumer} uses it outside that activation"
                 ));
             }
         }

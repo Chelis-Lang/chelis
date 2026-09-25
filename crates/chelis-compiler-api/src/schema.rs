@@ -2610,9 +2610,13 @@ impl WireDag {
                             unreachable!("owner validation rejects forbidden SplitN carriers")
                         }
                     };
-                    if node.inputs.len() != expected_inputs {
+                    // At most one activation follows the operands; the key
+                    // rules check its dtype and shape (spec/10 §3.2).
+                    if node.inputs.len() != expected_inputs
+                        && node.inputs.len() != expected_inputs + 1
+                    {
                         return Err(WireDagContractError::new(format!(
-                            "WireDag SplitN node {} has {} inputs; count requires {expected_inputs}",
+                            "WireDag SplitN node {} has {} inputs; count requires {expected_inputs}, then at most one activation",
                             node.id,
                             node.inputs.len()
                         )));
@@ -3207,8 +3211,10 @@ fn wire_axis_origin(
             require_input_agreement,
         )
     };
-    let same_shape_input_origin = || {
-        let mut origins = node.inputs.iter().filter_map(|source_id| {
+    // The origin every one of the first `operands` inputs agrees on; a key
+    // operation's trailing activation is not one of its operands.
+    let same_shape_input_origin = |operands: usize| {
+        let mut origins = node.inputs.iter().take(operands).filter_map(|source_id| {
             let source = wire_node_by_id(nodes, *source_id)?;
             (!source.output_type.dims.is_empty()).then_some(source)
         });
@@ -3336,9 +3342,9 @@ fn wire_axis_origin(
         | WireRiscOp::CastTrunc { .. }
         | WireRiscOp::FusedElem { .. }
         | WireRiscOp::CheckedUnitAxis { .. }
-        | WireRiscOp::KeyFromSeed {}
-        | WireRiscOp::Split { .. }
-        | WireRiscOp::FoldIn {} => same_shape_input_origin(),
+        | WireRiscOp::KeyFromSeed {} => same_shape_input_origin(node.inputs.len()),
+        WireRiscOp::Split { .. } => same_shape_input_origin(1),
+        WireRiscOp::FoldIn {} => same_shape_input_origin(2),
         // A draw's data operand is its only same-shape operand: its controls,
         // key and activation are shaped like leading parts of the data.
         WireRiscOp::UniformLike {} | WireRiscOp::Dropout {} | WireRiscOp::DropoutReplay {} => {
@@ -3413,10 +3419,10 @@ fn wire_axis_origin(
                                 source.output_type.dims.len() == node.output_type.dims.len()
                             })
                     })
-                    .then(same_shape_input_origin)
+                    .then(|| same_shape_input_origin(node.inputs.len()))
                     .flatten()
             } else {
-                same_shape_input_origin()
+                same_shape_input_origin(node.inputs.len())
             }
         }
         WireRiscOp::Const { .. } | WireRiscOp::ConstTensor { .. } => node

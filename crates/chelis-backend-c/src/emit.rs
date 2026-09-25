@@ -4838,7 +4838,9 @@ impl CEmitter {
     /// then every extent the result declares against the first operand's,
     /// with the local extent guard's report; the evaluator builds the result
     /// from its operands and reads no declared extent. Every index below the
-    /// result's size is then in bounds for every operand.
+    /// result's size is then in bounds for every operand. A `Split`'s or
+    /// `FoldIn`'s trailing activation is not an operand: it changes no key,
+    /// so this lane never reads it.
     fn emit_key_operation_extent_guards(
         &mut self,
         op: &'static str,
@@ -4851,7 +4853,11 @@ impl CEmitter {
             .expect("verified key operand")
             .output_type
             .dims;
-        for (slot, input) in node.inputs.iter().enumerate().skip(1) {
+        let operands = node
+            .op
+            .key_operation_operand_count()
+            .unwrap_or(node.inputs.len());
+        for (slot, input) in node.inputs.iter().enumerate().take(operands).skip(1) {
             self.emit_operand_extent_guards(op, first, dims, slot, *input, dims.len());
         }
         self.emit_declared_extent_guards(op, &node.output_type.dims, |axis| {
@@ -4926,6 +4932,10 @@ impl CEmitter {
 
     /// [05-OP-71]: row `j` of key `i` is `derive(derive(k[i], 2), j)`, the
     /// count axis last. A negative runtime count traps before allocation.
+    /// Where the split's activation holds in no row, it reads no count: the
+    /// count axis takes its declared extent where a literal or an earlier
+    /// binding fixes it, and zero where this split declares it, as the DAG
+    /// evaluator's `inactive_split_count` does, so no check below can fail.
     fn emit_split_keys(&mut self, node: &DagNode, count: &RtDim) {
         let id = node.id.0;
         let key = node.inputs[0];
@@ -4939,6 +4949,26 @@ impl CEmitter {
         }
         .to_string();
         self.line(&format!("{index} t{id}_count = ({index})({extent});"));
+        if let Some(active) = node
+            .op
+            .key_operation_operand_count()
+            .and_then(|slot| node.inputs.get(slot))
+        {
+            let inactive = if self.runtime_dim_sites.contains_key(&(id, last)) {
+                "0".to_string()
+            } else {
+                Self::emit_dim_info(&node.output_type.dims[last])
+            };
+            let active = active.0;
+            let byte = Self::prim_elem_type(Prim::Bool);
+            self.line(&format!("int t{id}_live = 0;"));
+            self.line(&format!(
+                "for ({index} a = 0; a < t{active}_size && !t{id}_live; a++) t{id}_live = ((const {byte}*)t{active}_data)[a] != 0;"
+            ));
+            self.line(&format!(
+                "if (!t{id}_live) t{id}_count = ({index})({inactive});"
+            ));
+        }
         if matches!(count, RtDim::Node(_)) {
             self.line(&format!(
                 "if (t{id}_count < 0) chelis_numeric_trap({trap:?});"

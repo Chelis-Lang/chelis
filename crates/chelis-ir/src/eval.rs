@@ -3848,21 +3848,26 @@ where
             }
             RiscOp::SplitN { count } => {
                 let keys = &values[&node.inputs[0]];
-                // [05-OP-71]: a negative runtime count traps before
-                // allocation, with the C lane's `Domain` trap.
-                if let RtDim::Node(slot) = count
-                    && let Some(value) = node.inputs.get(*slot).and_then(|input| values.get(input))
-                    && rank0_scalar(value, "split_keys count")?
-                        .as_i64_exact()
-                        .is_some_and(|count| count < 0)
-                {
-                    return Err(NumericTrap::Domain {
-                        op: "split_keys",
-                        prim: Prim::Int64,
+                let count = if key_operation_is_live(node, &values)? {
+                    // [05-OP-71]: a negative runtime count traps before
+                    // allocation, with the C lane's `Domain` trap.
+                    if let RtDim::Node(slot) = count
+                        && let Some(value) =
+                            node.inputs.get(*slot).and_then(|input| values.get(input))
+                        && rank0_scalar(value, "split_keys count")?
+                            .as_i64_exact()
+                            .is_some_and(|count| count < 0)
+                    {
+                        return Err(NumericTrap::Domain {
+                            op: "split_keys",
+                            prim: Prim::Int64,
+                        }
+                        .to_string());
                     }
-                    .to_string());
-                }
-                let count = resolve_eval_bound(count, node, &values, 0)?;
+                    resolve_eval_bound(count, node, &values, 0)?
+                } else {
+                    inactive_split_count(&node.output_type, &runtime_dims)
+                };
                 let mut shape = keys.shape.clone();
                 shape.push(count);
                 // The key's extents and the count are the result's; every
@@ -4487,6 +4492,42 @@ fn local_guard_verdict(
 /// operation declared. A name nothing has bound yet is declared by this
 /// result (`op_declared_axes`), and an anonymous one claims nothing. The
 /// report is [`local_guard_verdict`]'s, which the C lane mirrors.
+/// Whether a key operation's optional activation (spec/10 §3.2) holds in some
+/// row: absent, or a Bool with at least one true element. A key operation
+/// whose activation holds in no row reads no count.
+fn key_operation_is_live(
+    node: &DagNode,
+    values: &UnordMap<NodeId, TensorValue>,
+) -> Result<bool, String> {
+    let Some(input) = node
+        .op
+        .key_operation_operand_count()
+        .and_then(|slot| node.inputs.get(slot))
+    else {
+        return Ok(true);
+    };
+    let active = values
+        .get(input)
+        .ok_or("key operation activation is not available")?;
+    if active.prim() != Prim::Bool {
+        return Err("key operation activation is not a Bool".into());
+    }
+    let storage = active.storage();
+    Ok((0..storage.len()).any(|index| storage.scalar_at(index).as_bool_exact() == Some(true)))
+}
+
+/// The count axis of a `SplitN` whose activation holds in no row
+/// ([`RiscOp::SplitN`]): the extent its type declares where a literal or an
+/// earlier binding fixes it, and zero where the split itself would declare
+/// it. The C lane reads the same declaration.
+fn inactive_split_count(declared: &TensorType, runtime_dims: &UnordMap<String, usize>) -> usize {
+    match declared.dims.last() {
+        Some(DimInfo::Lit(value) | DimInfo::Named(_, Some(value))) => *value,
+        Some(DimInfo::Named(name, None)) => runtime_dims.get(name).copied().unwrap_or(0),
+        None => 0,
+    }
+}
+
 fn check_declared_extents(
     op: &str,
     declared: &TensorType,

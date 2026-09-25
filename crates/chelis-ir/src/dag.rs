@@ -750,20 +750,29 @@ pub enum RiscOp {
     /// never constant-folded, so an exported key stays symbolic.
     KeyFromSeed,
     /// One half of `[05-OP-70]` `split_key`: input `[k: tensor[D, key]]`,
-    /// output the `tensor[D, key]` of `derive(k, 0)` (`Left`) or
+    /// optionally followed by one Bool activation shaped like a leading part
+    /// of `D`, output the `tensor[D, key]` of `derive(k, 0)` (`Left`) or
     /// `derive(k, 1)` (`Right`). A parent feeds at most one `Split` of each
-    /// branch, and nothing else.
+    /// branch, and nothing else, unless rule V3 admits the sharing through
+    /// exclusive activations (spec/10 §3.2). The activation changes no key.
     Split {
         branch: KeyBranch,
     },
     /// `[05-OP-72]` `fold_in`: inputs `[k: tensor[D, key], n: tensor[D, i64]]`
-    /// of exactly equal shape, output `derive(derive(k, 2), n)` element-wise.
+    /// of exactly equal shape, optionally followed by one Bool activation
+    /// shaped like a leading part of `D`; output `derive(derive(k, 2), n)`
+    /// element-wise. The activation changes no key.
     FoldIn,
     /// `[05-OP-71]` `split_keys`: input `[k: tensor[D, key]]`, then the
-    /// rank-0 exact i64 count node when `count` is `RtDim::Node(1)`. The
+    /// rank-0 exact i64 count node when `count` is `RtDim::Node(1)`, then
+    /// optionally one Bool activation shaped like a leading part of `D`. The
     /// output is `tensor[D ++ [count], key]`, the new axis last; row `j` is
     /// `derive(derive(k, 2), j)`. A negative runtime count traps before
-    /// allocation, as a negative movement bound does.
+    /// allocation, as a negative movement bound does. Where the activation
+    /// holds in no row the count is not read: the count axis takes the extent
+    /// the output type declares where another node or a literal fixes it, and
+    /// zero where the split itself declares it, so an unselected arm's split
+    /// neither traps nor allocates on its count.
     SplitN {
         count: RtDim,
     },
@@ -1339,6 +1348,21 @@ pub enum RiscAtomDisposition {
 }
 
 impl RiscOp {
+    /// The number of operands a key-consuming key operation (`Split`,
+    /// `FoldIn`, `SplitN`) reads before its optional activation, which is
+    /// therefore the activation's input slot; `None` for any other operation.
+    pub fn key_operation_operand_count(&self) -> Option<usize> {
+        match self {
+            Self::Split { .. } => Some(1),
+            Self::FoldIn => Some(2),
+            Self::SplitN {
+                count: RtDim::Node(_),
+            } => Some(2),
+            Self::SplitN { .. } => Some(1),
+            _ => None,
+        }
+    }
+
     /// The batch layout of a key-operand random primitive, or `None` for any
     /// other operation.
     pub fn draw_batch_layout(&self) -> Option<DrawBatchLayout> {

@@ -7174,23 +7174,34 @@ impl<'program> LowerCtx<'program> {
 
     /// `[05-OP-70]` `split_key(k)`: two IR nodes, `Split{Left}` and
     /// `Split{Right}`, because an IR node has one output. Each half has the
-    /// key's shape.
+    /// key's shape and carries the position's [`Self::draw_activation`].
     fn lower_split_key(&mut self, key_expr: &Expr) -> LoweredValue {
         let key = self.lower_expr_node(key_expr, "split_key key");
         let key_ty = self.key_operand_type(key);
-        let span = self.current_span_id.clone();
         let halves = [crate::dag::KeyBranch::Left, crate::dag::KeyBranch::Right]
             .into_iter()
             .map(|branch| {
-                LoweredValue::Node(self.dag.add_node(
+                LoweredValue::Node(self.lower_key_operation(
                     RiscOp::Split { branch },
                     vec![key],
                     key_ty.clone(),
-                    span.clone(),
                 ))
             })
             .collect();
         LoweredValue::Tuple(halves)
+    }
+
+    /// Lower one key-consuming operation (`Split`, `FoldIn` or `SplitN`) over
+    /// its `operands`, the parent key first. Like a draw
+    /// ([`Self::lower_keyed_draw`]) it carries the position's
+    /// [`Self::draw_activation`] when it has one, so a key operation in a
+    /// where-lowered arm and a consumer of the same key in the exclusive arm
+    /// share it under rule V3 (spec/10 section 3.2), and a `SplitN` in an
+    /// unselected arm does not trap on its count.
+    fn lower_key_operation(&mut self, op: RiscOp, operands: Vec<NodeId>, ty: TensorType) -> NodeId {
+        let span = self.current_span_id.clone();
+        let inputs = operands.into_iter().chain(self.draw_activation()).collect();
+        self.dag.add_node(op, inputs, ty, span)
     }
 
     /// The type of a lowered key operand: its own shape at dtype `key`.
@@ -12408,12 +12419,7 @@ impl<'program> LowerCtx<'program> {
                 let key = self.lower_expr_node(&args[0], "fold_in key");
                 let n = self.lower_expr_node(&args[1], "fold_in index");
                 let key_ty = self.key_operand_type(key);
-                self.dag.add_node(
-                    RiscOp::FoldIn,
-                    vec![key, n],
-                    key_ty,
-                    self.current_span_id.clone(),
-                )
+                self.lower_key_operation(RiscOp::FoldIn, vec![key, n], key_ty)
             }
             // [05-OP-71]: `split_keys(k, n)` appends the count axis. A literal
             // count is a literal extent; any other count is the rank-0 i64
@@ -12441,12 +12447,7 @@ impl<'program> LowerCtx<'program> {
                     }
                 };
                 out_ty.dims.push(count_dim);
-                self.dag.add_node(
-                    RiscOp::SplitN { count },
-                    inputs,
-                    out_ty,
-                    self.current_span_id.clone(),
-                )
+                self.lower_key_operation(RiscOp::SplitN { count }, inputs, out_ty)
             }
             "uniform_like" if args.len() == 4 => {
                 // [05-OP-8]: the key comes first and is consumed.

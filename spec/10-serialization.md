@@ -300,11 +300,17 @@ key is produced by `KeyFromSeed`, `Split`, `FoldIn` or `SplitN`, or enters as
 a key-precision `Load`, and every `Load` of one parameter is one key. A key
 has at most one use: one `UniformLike`, `Dropout`, `FoldIn` or `SplitN`, one
 place among the roots, or at most one `Split` of each branch. It is otherwise
-read only by its draw's replays. Two draws may consume one key only when each carries an activation
-and, for every pair, one activation's `And` conjuncts include a node `X` and
-the other's include `Not(X)`, or either's include the `bool` constant `false`,
-whose draw never runs. A key reaching any other operation or a shape
-dependency is a decode error.
+read only by its draw's replays. Two consumers of one key, draws and key
+operations alike, other than one `Split` of each branch, may both consume it
+only when each carries an activation and one activation's `And` conjuncts
+include a node `X` and the other's include `Not(X)`, or either's include the
+`bool` constant `false`, whose consumer never runs. Two key operations sharing
+a key this way may derive equal keys, as two `Split`s of one branch do, so a
+key that a key operation derives from a key it shares this way, and every key
+derived from that key in turn, is used only under that operation's
+activation: each of its consumers carries an activation whose `And` conjuncts
+include that activation or the constant `false`, and it is never a root. A key
+reaching any other operation or a shape dependency is a decode error.
 
 `KeyFromSeed.inputs` is one `int64` tensor, and its output is the `key` tensor
 of that shape holding [05-OP-69]'s key of each element. `Split` carries its
@@ -315,7 +321,13 @@ exactly equal shape, and its output is [05-OP-72]'s key of each pair.
 `SplitN.count` is a `WireRtDim` under the same carrier rules as
 `Expand.size`, except that only `lit` and a `node` at input slot 1 are
 admitted; its output appends that extent to its `key` input's shape, and row
-`j` of each key is [05-OP-71]'s.
+`j` of each key is [05-OP-71]'s. `Split`, `FoldIn` and `SplitN` take at most
+one Bool path activation after their operands, shaped like the key's leading
+`c` axes for some `c`. An activation changes no key that the operation
+derives. Where a `SplitN`'s activation is false in every element, the split
+reads no count and checks nothing: its count axis has the extent its output
+type declares when a literal or an earlier node fixes that extent, and zero
+when the split alone would bind it.
 
 ### 3.3 Source Syntax And Locations
 
