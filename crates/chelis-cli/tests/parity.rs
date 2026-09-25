@@ -18,7 +18,8 @@
 //! The runtime-shaped dropout example retains a bounded per-file exception:
 //! clean check, exact executable eval output, and the current typed C rejection
 //! are all tested. The fixed-stream example runs the ordinary three-lane
-//! driver and also pins its exact values, including the next draw after AD.
+//! driver and also pins its exact values, including the draw from the second
+//! half of its split key after AD.
 //! The annotated concat/softmax example likewise pins check, all eval values,
 //! and its explicit C rejection; it is not a C parity claim.
 //!
@@ -531,7 +532,7 @@ fn parity_dropout_fixed_stream() {
     let path = examples_root().join("dropout_fixed_stream.ch");
     assert_eq!(
         run_eval(&path),
-        b"main.0 = tensor(shape=[4], data=[0.0, 2.0, 0.0, 0.0])\nmain.1 = tensor(shape=[4], data=[2.0, 0.0, 0.0, 0.0])\n",
+        b"main.0 = tensor(shape=[4], data=[2.0, 0.0, 0.0, 2.0])\nmain.1 = tensor(shape=[4], data=[2.0, 2.0, 0.0, 0.0])\n",
     );
     drive_parity(&path, true);
 }
@@ -541,7 +542,7 @@ fn parity_dropout_static_rate() {
     let path = examples_root().join("dropout_static_rate.ch");
     assert_eq!(
         run_eval(&path),
-        b"result.0 = tensor(shape=[4], data=[0.0, 2.0, 0.0, 0.0])\nresult.1 = tensor(shape=[4], data=[2.0, 0.0, 0.0, 0.0])\nresult.2 = tensor(shape=[4], data=[2.0, 2.0, 0.0, 0.0])\nresult.3 = tensor(shape=[4], data=[1.0, 1.0, 1.0, 1.0])\n",
+        b"result.0 = tensor(shape=[4], data=[2.0, 0.0, 0.0, 2.0])\nresult.1 = tensor(shape=[4], data=[2.0, 0.0, 0.0, 0.0])\nresult.2 = tensor(shape=[4], data=[2.0, 2.0, 0.0, 0.0])\nresult.3 = tensor(shape=[4], data=[1.0, 1.0, 1.0, 1.0])\n",
     );
     drive_parity(&path, true);
 }
@@ -552,7 +553,7 @@ fn parity_dropout_staged_claim() {
     assert_check_clean(&path);
     assert_eq!(
         run_eval(&path),
-        b"main = tensor(shape=[2, 2], data=[2.0, 0.0, 0.0, 0.0])\n",
+        b"main = tensor(shape=[2, 2], data=[2.0, 2.0, 0.0, 0.0])\n",
     );
     drive_parity(&path, true);
 }

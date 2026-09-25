@@ -1,1 +1,1 @@
-def sample(x: tensor[4, f32]) -> tensor[4, f32] = with seed(42i64) { dropout(x, 0.5f32) }
+def sample(x: tensor[4, f32]) -> tensor[4, f32] = dropout(key_from_seed(1i64), x, 0.5f32)
