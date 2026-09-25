@@ -34,8 +34,8 @@ jobs:
   # keeps the hosted uv-managed interpreter.
   #
   # On main those warm jobs also share the linux-extended-warm-x64 concurrency
-  # group, so a run holds at most one runner of the two-runner pool and
-  # pull-request Fast Tests (Linux) keeps the other: GitHub Actions has no job
+  # group, so a run holds at most one runner of the two-runner pool and leaves
+  # the other free for the pool's other jobs: GitHub Actions has no job
   # priority (chelis#2543). `queue: max` keeps the waiting jobs pending in
   # order; the default queue would cancel all but one of them. Off main each
   # job has its own group, so hosted candidate validation stays parallel.

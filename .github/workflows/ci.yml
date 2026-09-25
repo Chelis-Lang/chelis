@@ -1114,12 +1114,11 @@ jobs:
     name: Fast Tests (Linux)
     # Reserve 25 minutes for cold hosted Devenv realization.
     timeout-minutes: 55
-    # Ordinary pull-request and push events run this job on the warm
-    # self-hosted runner; it is the pipeline's critical path (20 minutes on a
-    # 2-vCPU hosted runner, 9.5 minutes on chelis-ci-warm in run 35715695263).
-    # Every other job keeps the hosted default for those events. Explicit
-    # dispatches keep their existing target selection.
-    runs-on: ${{ github.event_name != 'workflow_dispatch' && 'chelis-ci-warm-x64' || inputs.execution_target == 'self-hosted' && fromJSON(format('["chelis-ci-warm-x64","chelis-ci-reviewed-{0}"]', inputs.retarget_token)) || 'ubuntu-latest' }}
+    # Hosted for ordinary events, like every other job here (chelis#2543). On
+    # the two-runner warm pool this pull-request critical path queued behind
+    # the nightly, and the pool admits pull requests only against main.
+    # Explicit dispatches keep their existing target selection.
+    runs-on: ${{ github.event_name == 'workflow_dispatch' && inputs.execution_target == 'self-hosted' && fromJSON(format('["chelis-ci-warm-x64","chelis-ci-reviewed-{0}"]', inputs.retarget_token)) || 'ubuntu-latest' }}
     defaults:
       run:
         shell: chelis-ci-shell run {0}

@@ -23,8 +23,8 @@ MOVED = {
     "runtime-representation-phase0-oracle": "chelis-gate runtime-representation",
     "generalize-sweep-oracle-shard": "cargo nextest run --workspace --profile ci-full --ignore-default-filter --features chelis-types/generalize-sweep-oracle",
 }
-# chelis#2543: pull-request `Fast Tests (Linux)` shares this two-runner pool
-# with the nightly, and GitHub Actions has no job priority.
+# chelis#2543: the nightly shares this two-runner pool with every other warm
+# job, and GitHub Actions has no job priority.
 WARM_LABEL = "chelis-ci-warm-x64"
 MAIN_REF = "refs/heads/main"
 # The one expression shape a nightly `runs-on` or lane group may take: the ref
@@ -256,10 +256,11 @@ def assert_one_warm_lane(test, nightly):
     """chelis#2543: the nightly holds at most one warm runner at a time.
 
     Every job routed to the warm pool on main waits in one concurrency group,
-    so at most one of them holds a runner and `Fast Tests (Linux)` keeps the
-    other. `queue: max` keeps the lane's waiting jobs pending; the default
-    queue cancels all but one of them. Off main the jobs run hosted, where a
-    group per job keeps candidate validation parallel. Returns the lane.
+    so at most one of them holds a runner and the other stays free for the
+    pool's other jobs. `queue: max` keeps the lane's waiting jobs pending; the
+    default queue cancels all but one of them. Off main the jobs run hosted,
+    where a group per job keeps candidate validation parallel. Returns the
+    lane.
     """
     lanes = {}
     hosted = {}
@@ -495,7 +496,7 @@ class ExtendedCadenceTests(unittest.TestCase):
 
 
 class WarmLaneTests(unittest.TestCase):
-    """chelis#2543: the nightly leaves a warm runner to pull requests."""
+    """chelis#2543: the nightly leaves the second warm runner free."""
 
     def setUp(self):
         self.nightly = yaml.safe_load((ROOT / ".github/workflows/heavy-e2e.yml").read_text())
