@@ -1024,11 +1024,11 @@ fn every_current_concrete_host_expr_kind_has_a_closed_disposition() {
     ]
     .into_iter()
     .collect();
-    let successor: BTreeSet<&str> = ["Filter", "Scan", "Partition", "FlatMap", "WithSeed"]
+    let successor: BTreeSet<&str> = ["Filter", "Scan", "Partition", "FlatMap"]
         .into_iter()
         .collect();
     assert!(lowered.is_disjoint(&successor));
-    assert_eq!(lowered.len() + successor.len(), 24);
+    assert_eq!(lowered.len() + successor.len(), 23);
 }
 
 #[test]
