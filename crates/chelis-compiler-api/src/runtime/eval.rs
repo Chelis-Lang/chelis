@@ -193,11 +193,15 @@ impl DeclaredResultClaim {
         let RuntimeValue::Tensor(tensor) = produced else {
             return Ok(());
         };
-        if tensor.value.shape.len() != self.rank {
+        self.shape_verdict(&tensor.value.shape, op)
+    }
+
+    fn shape_verdict(&self, shape: &[usize], op: &str) -> Result<(), String> {
+        if shape.len() != self.rank {
             return Ok(());
         }
         for &(axis, required) in &self.axes {
-            let observed = tensor.value.shape[axis];
+            let observed = shape[axis];
             if required < 0 || required as usize != observed {
                 return Err(format!(
                     "extent `{required}`: claimed = {required}, {op} axis {axis} = {observed}\n\
@@ -1659,6 +1663,19 @@ impl<'a> EvalContext<'a> {
         }
 
         if let Some(name) = self.active_builtin_name(func) {
+            if name == "pad_sequences_to" && !claims.is_empty() {
+                let sequences = expect_list_arg(&args, 0)?;
+                let width = expect_int_arg(&args, 1)?;
+                // Preserve the operation precondition before the local claim.
+                if width < 0 {
+                    return Err(format!(
+                        "pad_sequences_to requires non-negative width, got {width}"
+                    ));
+                }
+                for claim in claims {
+                    claim.shape_verdict(&[sequences.len(), width as usize], name)?;
+                }
+            }
             let value =
                 self.eval_builtin(name, &args, &arg_type_exprs, result_type_expr.as_ref())?;
             self.result_producer = match name {
@@ -1710,8 +1727,10 @@ impl<'a> EvalContext<'a> {
                     .and_then(ResultProducer::operation)
                     .unwrap_or(name)
             };
-            for claim in claims {
-                claim.verdict(&value, producer)?;
+            if name != "pad_sequences_to" {
+                for claim in claims {
+                    claim.verdict(&value, producer)?;
+                }
             }
             return Ok(value);
         }
@@ -2131,6 +2150,28 @@ impl<'a> EvalContext<'a> {
         region: &chelis_ir::lower::LocalAscriptionBindingRegion,
         inherited_result_claims: &[DeclaredResultClaim],
     ) -> Result<RuntimeValue, String> {
+        if let Some(local_claims) = lowering
+            .host_local_ascription_claims(region)
+            .map_err(|diagnostic| diagnostic.to_string())?
+        {
+            let mut claims = inherited_result_claims.to_vec();
+            for claim in local_claims {
+                let axes = claim
+                    .dims
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(axis, dim)| match dim {
+                        DimInfo::Lit(required) => Some((axis, *required as i64)),
+                        DimInfo::Named(_, _) => None,
+                    })
+                    .collect();
+                claims.push(DeclaredResultClaim {
+                    rank: claim.dims.len(),
+                    axes,
+                });
+            }
+            return self.eval_under_result_claim(region.initializer(), &claims);
+        }
         let lowering = lowering.for_local_ascription_region(region);
         let mut scoped_types = UnordMap::new();
         let mut staged_inputs = UnordMap::new();

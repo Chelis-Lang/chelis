@@ -1544,6 +1544,7 @@ pub struct LocalAscriptionBindingRegion {
     /// obligation to one another.
     ascription_ids: Vec<u64>,
     expression: Expr,
+    initializer: Expr,
 }
 
 impl LocalAscriptionBindingRegion {
@@ -1557,6 +1558,10 @@ impl LocalAscriptionBindingRegion {
 
     pub fn expression(&self) -> &Expr {
         &self.expression
+    }
+
+    pub fn initializer(&self) -> &Expr {
+        &self.initializer
     }
 }
 
@@ -1782,9 +1787,71 @@ impl SubexprLoweringContext {
                         .collect(),
                     ascription_ids: parts.ascription_ids.into_iter().collect(),
                     expression,
+                    initializer: bind_kids[producer_binding_index + 1].clone(),
                 })
             })
             .collect()
+    }
+
+    /// Preserve the checked obligations at a host initializer instead of
+    /// pretending that a host-only builder is a tensor DAG operation.
+    /// The selected checker identities, rather than inferred result metadata,
+    /// supply the claims. Named witnesses need a host carrier of their own.
+    pub fn host_local_ascription_claims(
+        &self,
+        region: &LocalAscriptionBindingRegion,
+    ) -> Result<Option<Vec<TensorType>>, LowerDiagnostic> {
+        if !crate::host::should_keep_tensor_expr_in_host_lane(region.initializer())
+            || !expr_requires_host_runtime(region.initializer())
+        {
+            return Ok(None);
+        }
+        let mut claims = Vec::new();
+        for ascription in self
+            .local_tensor_ascriptions
+            .iter()
+            .filter(|ascription| region.ascription_ids.contains(&ascription.id().get()))
+        {
+            let mut ty = tensor_type_from_deep(ascription.authored_type());
+            ty.dims.fill(DimInfo::Named("*".into(), None));
+            for claim in ascription.outstanding_claims() {
+                let chelis_types::types::Dim::Lit(required) = claim.required_extent() else {
+                    let unsupported = Unsupported::new(
+                        UnsupportedKind::Construct("named host local tensor ascription".into()),
+                        "host local ascription requires a declaring-witness carrier",
+                        Stage::Lowering,
+                        chelis_types::unimplemented_rejection!(
+                            2374,
+                            "named local host tensor witnesses are not implemented"
+                        ),
+                    );
+                    return Err(LowerDiagnostic::new(
+                        unsupported.to_string(),
+                        Some(ascription.ascription_span()),
+                        None,
+                    )
+                    .fatal());
+                };
+                let Some(axis) = ty.dims.get_mut(claim.axis()) else {
+                    return Err(LowerDiagnostic::new(
+                        "checked host local ascription has no declared axis",
+                        Some(ascription.ascription_span()),
+                        None,
+                    )
+                    .fatal());
+                };
+                *axis = DimInfo::Lit(usize::try_from(*required).map_err(|_| {
+                    LowerDiagnostic::new(
+                        "invalid local ascription extent",
+                        Some(ascription.ascription_span()),
+                        None,
+                    )
+                    .fatal()
+                })?);
+            }
+            claims.push(ty);
+        }
+        Ok(Some(claims))
     }
 
     /// Restrict one synthetic region to the exact checker identities selected

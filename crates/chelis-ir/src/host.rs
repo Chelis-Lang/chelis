@@ -1648,12 +1648,16 @@ pub struct HostExpr<T = HostTypeTerm> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HostResultClaimPlan {
     result: TensorType,
+    outer_claims_first: bool,
 }
 
 impl HostResultClaimPlan {
-    /// The authored tensor result is the existing tagged numeric carrier for
-    /// this private lowering plan. Consumers derive literal obligations from
-    /// it instead of introducing a parallel bare extent channel.
+    /// Local annotations follow the enclosing signature in declaration order.
+    pub fn outer_claims_first(&self) -> bool {
+        self.outer_claims_first
+    }
+
+    /// The authored result is the tagged numeric carrier for this plan.
     pub fn result(&self) -> &TensorType {
         &self.result
     }
@@ -7420,6 +7424,13 @@ fn lower_checked_local_ascription_region(
     scope: &UnordMap<String, HostTypeTerm>,
     tensor_helpers: &mut TensorHelperSink,
 ) -> Result<HostExpr, crate::lower::LowerDiagnostic> {
+    if let Some(claims) = checked_lowering.host_local_ascription_claims(local_region)? {
+        let mut body = lower_host_expr(initializer, program, scope, tensor_helpers)?;
+        for claim in claims.into_iter().rev() {
+            body = retain_actualized_result_claim_with_order(body, Some(&claim), true);
+        }
+        return Ok(body);
+    }
     let region_context = checked_lowering.for_local_ascription_region(local_region);
     let expected = expr_tensor_type(initializer, program, scope)
         .or_else(|| tensor_type_from_host_input(&expr_host_type(initializer, program, scope)))
@@ -9036,7 +9047,7 @@ fn refine_host_callback_types(
     }
 }
 
-fn should_keep_tensor_expr_in_host_lane(expr: &Expr) -> bool {
+pub(crate) fn should_keep_tensor_expr_in_host_lane(expr: &Expr) -> bool {
     let Expr::Node(list, _) = expr else {
         return false;
     };
@@ -12398,6 +12409,14 @@ fn retain_inlined_result_claim(
 }
 
 fn retain_actualized_result_claim(body: HostExpr, result: Option<&TensorType>) -> HostExpr {
+    retain_actualized_result_claim_with_order(body, result, false)
+}
+
+fn retain_actualized_result_claim_with_order(
+    body: HostExpr,
+    result: Option<&TensorType>,
+    outer_claims_first: bool,
+) -> HostExpr {
     let Some(result) = result else {
         return body;
     };
@@ -12415,6 +12434,7 @@ fn retain_actualized_result_claim(body: HostExpr, result: Option<&TensorType>) -
     }
     let plan = HostResultClaimPlan {
         result: result.clone(),
+        outer_claims_first,
     };
     let HostExpr {
         kind,
