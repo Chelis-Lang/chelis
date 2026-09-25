@@ -3013,6 +3013,11 @@ That gives the compiler a stronger basis for safe in-place buffer reuse.
   at closure creation time; a capture whose body uses are all borrow-reads borrows the
   outer binding instead. Which binding a consuming capture lands on is [04-LIN-2]'s
   subject below.
+- A top-level function declaration ([04-INF-7]) is not a closure creation. A free
+  reference in its body to a top-level value never consumes that value's top-level
+  binding, so any number of declarations, in one module or in several linked modules,
+  and later top-level uses may read one top-level value. A consuming use in the body
+  yields each call's owned result through a copy, per [04-LIN-4].
 - Ordinary consuming fan-out is handled by inserted copies. Diagnostics remain for
   invalid borrows, borrow escapes, impossible branch/loop ownership, and recursive or
   cyclic consume cases for which a unique terminal path cannot be proven.

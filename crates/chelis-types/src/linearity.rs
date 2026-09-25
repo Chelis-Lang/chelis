@@ -715,6 +715,19 @@ impl Checker {
                         self.invalid_borrow(body, "borrow cannot be returned from a function");
                         return;
                     }
+                    // chelis#2549: a def whose initializer is a lambda is a
+                    // function declaration ([04-INF-7]), not a closure
+                    // created in the top-level scope. Its free references
+                    // keep their declaration scope and every call's result
+                    // is a new owner ([04-LIN-4]), so its body is checked
+                    // against a fork of the top-level scope: the body still
+                    // sees every earlier consume, but nothing it does can
+                    // consume a top-level binding for later readers.
+                    if matches!(get_tag_expr(body), Some(DeepTag::Fn)) {
+                        let mut declaration_scope = scope.clone();
+                        self.check_expr(body, &mut declaration_scope);
+                        return;
+                    }
                     // V2-F4: top-level `def name() = x` where the body is a
                     // bare `(var x)` of an owned-linear type is an
                     // aliasing binding consume; at the IR level
