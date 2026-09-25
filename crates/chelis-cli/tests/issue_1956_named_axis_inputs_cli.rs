@@ -29,7 +29,7 @@ fn package(formal: bool, body: &str, failing: bool) -> tempfile::TempDir {
     std::fs::create_dir(dir.path().join("src")).unwrap();
     std::fs::write(dir.path().join("reef.toml"), format!("[package]\nname = \"named_axis_inputs\"\nversion = \"0.1.0\"\ncompiler = \"={}\"\nmodule_prefix = \"Probe\"\n", env!("CARGO_PKG_VERSION"))).unwrap();
     let initializer = if failing {
-        "_ = to_tensor([0.0f32, 0.0f32]) |> uniform_like(0.0f32, 1.0f32)\n to_tensor([floor_div(1i32, 0i32) |> cast(f32), 0.0f32])"
+        "uniform_like(key_from_seed(17i64), to_tensor([0.0f32, 0.0f32]), 0.0f32, 1.0f32); to_tensor([floor_div(1i32, 0i32) |> cast(f32), 0.0f32])"
     } else {
         "to_tensor([3.0f32, 5.0f32])"
     };
@@ -38,9 +38,20 @@ fn package(formal: bool, body: &str, failing: bool) -> tempfile::TempDir {
     } else {
         ("x", "(tensor[..pre, ..post, f32], tensor[f32])")
     };
-    std::fs::write(dir.path().join("src/captures.ch"), format!("module Probe.Captures\nexport (total)\nbaseline = to_tensor([7.0f32, 11.0f32])\nweights = with seed(17i64) {{ _ = print(\"initialize\")\n {initializer} }}\ndef total[pre, post]({param}: &tensor[..pre, seq, ..post, f32]) -> {result} = {body}\n")).unwrap();
-    let draws = "_ = uniform_like(copy(x), 0.0f32, 1.0f32)\n".repeat(5);
-    std::fs::write(dir.path().join("src/client.ch"), format!("module Probe.Client\nimport Probe.Captures (total)\ndef entry(x: tensor[seq, f32]) = with seed(42i64) {{ _ = print(\"entry\")\n {draws} result = total(x)\n (result, uniform_like(x, 0.0f32, 1.0f32)) }}\nalias = entry\ndef main() = alias(to_tensor([7.0f32, 11.0f32]))\nout = main()\n")).unwrap();
+    std::fs::write(dir.path().join("src/captures.ch"), format!("module Probe.Captures\nexport (total)\nbaseline = to_tensor([7.0f32, 11.0f32])\nweights = do {{ print(\"initialize\"); {initializer} }}\ndef total[pre, post]({param}: &tensor[..pre, seq, ..post, f32]) -> {result} = {body}\n")).unwrap();
+    // Five discarded draws along a `split_key` chain, then the kept draw
+    // from the chain's last remainder.
+    let draws = (0..5)
+        .map(|j| {
+            let parent = if j == 0 {
+                "key_from_seed(42i64)".to_string()
+            } else {
+                format!("r{}", j - 1)
+            };
+            format!("(k{j}, r{j}) = split_key({parent})\n _ = uniform_like(k{j}, copy(x), 0.0f32, 1.0f32)\n")
+        })
+        .collect::<String>();
+    std::fs::write(dir.path().join("src/client.ch"), format!("module Probe.Client\nimport Probe.Captures (total)\ndef entry(x: tensor[seq, f32]) = {{ _ = print(\"entry\")\n {draws} result = total(x)\n (result, uniform_like(r4, x, 0.0f32, 1.0f32)) }}\nalias = entry\ndef main() = alias(to_tensor([7.0f32, 11.0f32]))\nout = main()\n")).unwrap();
     for file in ["src/captures.ch", "src/client.ch"] {
         success(dir.path(), &["fmt", "--inplace", file]);
         success(dir.path(), &["fmt", "--check", file]);
@@ -84,9 +95,12 @@ fn assert_values(formal: bool, body: &str, captured_bits: &str, transcript: &[&s
             expected.push((format!("{entry}.0.0"), tensor(&[], &["41900000"])));
             expected.push((format!("{entry}.0.1"), tensor(&[], &[captured_bits])));
         }
+        // `uniform_like` over 2 f32 elements keyed by the fifth remainder of
+        // the `split_key` chain from `key_from_seed(42)` (0xb06b4e4bcc67415d),
+        // from `key_ref.py`/`slice2_ref.py`.
         expected.push((
             format!("{entry}.1"),
-            tensor(&[2], &["3f5b1b74", "3daedee7"]),
+            tensor(&[2], &["3edc4654", "3f027eac"]),
         ));
     }
     let roots = result["roots"].as_array().unwrap();
