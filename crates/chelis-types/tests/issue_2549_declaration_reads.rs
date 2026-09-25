@@ -172,6 +172,9 @@ def first() -> tensor[2, f32] = {
     );
 }
 
+/// Also locks that the declaration is checked against a clone of the full
+/// top-level scope: the capture loop reads `sampled`'s type from that scope,
+/// so an empty fork, or one without binding types, accepts this program.
 #[test]
 fn local_closure_capture_inside_a_declaration_is_still_rejected_on_reuse() {
     assert_use_after_consume(
@@ -206,6 +209,8 @@ twice = add(sampled, sampled)
     );
 }
 
+/// Also locks that the fork carries every earlier binding's state and type:
+/// an empty fork, or one without binding types, accepts this program.
 #[test]
 fn declaration_reading_an_already_consumed_value_is_still_rejected() {
     assert_use_after_consume(
@@ -218,5 +223,43 @@ def first() -> tensor[2, f32] = sampled
         ),
         &["variable `sampled`", "realize"],
         "a declaration reading a value an earlier initializer consumed",
+    );
+}
+
+#[test]
+fn declaration_reading_a_value_an_earlier_match_consumed_is_still_rejected() {
+    assert_use_after_consume(
+        linearity(
+            r#"
+type Holder =
+  | Holder { items: tensor[2, f32] }
+held = Holder { items: to_tensor([1.0f32, 2.0f32]) }
+m = match held with {
+  | Holder { items } => add(items, to_tensor([10.0f32, 10.0f32]))
+}
+def first() -> Holder = held
+"#,
+        ),
+        &["variable `held`", "match scrutinee"],
+        "a declaration reading a value an earlier match scrutinee consumed",
+    );
+}
+
+#[test]
+fn match_after_a_declaration_reading_the_scrutinee_is_accepted() {
+    assert_clean(
+        linearity(
+            r#"
+type Holder =
+  | Holder { items: tensor[2, f32] }
+held = Holder { items: to_tensor([1.0f32, 2.0f32]) }
+def first() -> Holder = held
+m = match held with {
+  | Holder { items } => add(items, to_tensor([10.0f32, 10.0f32]))
+}
+z = first().items
+"#,
+        ),
+        "a match on `held` after a declaration that reads it",
     );
 }
