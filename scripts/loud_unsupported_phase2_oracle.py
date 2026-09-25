@@ -120,17 +120,12 @@ def mutate_effect_kind(source: str) -> str:
 
     replacements = (
         (
-            "pub enum EffectKind {\n    Random,\n    Resource,\n}",
-            "pub enum EffectKind {\n    Random,\n    Resource,\n"
-            "    Phase2OracleMutation,\n}",
+            "pub enum EffectKind {\n    Resource,\n}",
+            "pub enum EffectKind {\n    Resource,\n    Phase2OracleMutation,\n}",
         ),
         (
-            "pub const ALL: [Self; 2] = [Self::Random, Self::Resource];",
-            "pub const ALL: [Self; 3] = [\n"
-            "        Self::Random,\n"
-            "        Self::Resource,\n"
-            "        Self::Phase2OracleMutation,\n"
-            "    ];",
+            "pub const ALL: [Self; 1] = [Self::Resource];",
+            "pub const ALL: [Self; 2] = [Self::Resource, Self::Phase2OracleMutation];",
         ),
         (
             '            Self::Resource => "resource",\n',
