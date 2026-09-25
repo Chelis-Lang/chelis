@@ -507,11 +507,11 @@ fn eval_ill_typed_dp_fails_with_type_error() {
     );
 }
 
-// ── EFFECT SOUNDNESS: module-wrapped .dp rejects declared-pure-does-Random ─
+// ── EFFECT SOUNDNESS: module-wrapped .dp rejects declared-pure-does-IO ─────
 
 #[test]
-fn check_module_wrapped_dp_rejects_declared_pure_body_doing_random() {
-    // A `.dp` MODULE whose declared-pure (`! { }`) `entry` calls a Random-
+fn check_module_wrapped_dp_rejects_declared_pure_body_doing_io() {
+    // A `.dp` MODULE whose declared-pure (`! { }`) `entry` calls an IO-
     // performing sibling must be REJECTED by `chelis check <module>.dp`. The
     // whole-program effect validators descend into the `(module ...)` wrapper,
     // so the module-wrapped check agrees with the flattened build/eval path.
@@ -519,7 +519,7 @@ fn check_module_wrapped_dp_rejects_declared_pure_body_doing_random() {
     // `chelis deep` so the wrapper is genuinely present.
     let dir = tempdir().expect("tempdir");
     let ch_src = "module Frag.Effect\nexport (entry)\n\
-        def noisy(x: tensor[8, f32]) -> tensor[8, f32] = dropout(x, 0.5)\n\
+        def noisy(x: tensor[8, f32]) -> tensor[8, f32] = { _ = print(x)\n x }\n\
         def entry(x: tensor[8, f32]) -> tensor[8, f32] ! { } = noisy(x)\n";
     let ch_path = write_fixture(dir.path(), "effect.ch", ch_src);
     let deep_out = Command::cargo_bin("chelis")
@@ -549,10 +549,10 @@ fn check_module_wrapped_dp_rejects_declared_pure_body_doing_random() {
     assert!(
         errors.iter().any(|e| {
             let message = e["message"].as_str().unwrap_or("");
-            message.contains("entry") && message.contains("Random")
+            message.contains("entry") && message.contains("IO")
         }),
-        "module-wrapped declared-pure body performing Random must be rejected with an \
-         effect error naming entry and Random; stdout={stdout}"
+        "module-wrapped declared-pure body performing IO must be rejected with an \
+         effect error naming entry and IO; stdout={stdout}"
     );
     assert_eq!(
         code,

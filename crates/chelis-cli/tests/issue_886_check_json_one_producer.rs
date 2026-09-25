@@ -250,7 +250,7 @@ fn the_error_object_member_order_is_pinned_to_its_bytes() {
     // compares through `serde_json::json!`, which erases member order, so
     // until now no test pinned the bytes of an effect diagnostic at all.
     let effect = check_stdout_bytes(
-        "def noisy(x: tensor[3, f32]) -> tensor[3, f32] ! {} = dropout(x, 0.5f32)\n",
+        "def noisy(x: tensor[3, f32]) -> tensor[3, f32] ! {} = { _ = print(x)\n x }\n",
     );
     let effect_rendered = String::from_utf8(effect).expect("stdout is UTF-8");
     let effect_line = effect_rendered
@@ -260,9 +260,9 @@ fn the_error_object_member_order_is_pinned_to_its_bytes() {
     assert_eq!(
         effect_line,
         "  \"errors\": [{\"kind\":\"UnhandledEffect\",\"message\":\"Function `noisy` is \
-         declared with effects `{}` but its body performs effects `{Random}` that were \
+         declared with effects `{}` but its body performs effects `{IO}` that were \
          not declared\",\"severity\":0.8,\"suggestions\":[\"Either add the missing \
-         effect(s) to the signature of `noisy` (e.g. `! { Random }`) or refactor the \
+         effect(s) to the signature of `noisy` (e.g. `! { IO }`) or refactor the \
          body so it does not perform them.\"]}]",
         "an effect diagnostic's member order and spelling are the wire contract too"
     );

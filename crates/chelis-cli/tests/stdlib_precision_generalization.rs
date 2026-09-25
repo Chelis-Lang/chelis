@@ -227,17 +227,18 @@ fn stub_sig_conv_shapes_accept_all_dtypes_at_sig_level() {
     }
 }
 
-/// Std.Init.Xavier.sample: stub sig with Random effect; the precision
-/// tvar appears in both the tensor slot and the scalar gain argument.
+/// Std.Init.Xavier.sample: stub sig taking its key first (chelis#2413); the
+/// precision tvar appears in both the tensor slot and the scalar gain
+/// argument.
 #[test]
 fn stub_sig_xavier_sample_shape_accepts_all_dtypes_at_sig_level() {
     for dtype in ARITHMETIC_DTYPES {
         let dir = tempdir().expect("tempdir");
         let path = dir.path().join("xavier.ch");
         let src = format!(
-            r#"sig sample[p]: tensor[32, 128, p] -> p -> tensor[32, 128, p] ! {{ Random }}
-def sample(template, gain) = fail("stub")
-def call_xavier(t: tensor[32, 128, {dtype}], gain: {dtype}) -> tensor[32, 128, {dtype}] ! {{ Random }} = sample(t, gain)
+            r#"sig sample[p]: key -> tensor[32, 128, p] -> p -> tensor[32, 128, p]
+def sample(k, template, gain) = fail("stub")
+def call_xavier(k: key, t: tensor[32, 128, {dtype}], gain: {dtype}) -> tensor[32, 128, {dtype}] = sample(k, t, gain)
 "#
         );
         write_file(&path, &src);
@@ -319,9 +320,9 @@ fn neg_xavier_sample_rejects_mismatched_gain_precision() {
     let path = dir.path().join("neg_xavier.ch");
     write_file(
         &path,
-        r#"sig sample[p]: tensor[32, 128, p] -> p -> tensor[32, 128, p] ! { Random }
-def sample(template, gain) = fail("stub")
-def bad(t: tensor[32, 128, f32], gain: f64) -> tensor[32, 128, f32] ! { Random } = sample(t, gain)
+        r#"sig sample[p]: key -> tensor[32, 128, p] -> p -> tensor[32, 128, p]
+def sample(k, template, gain) = fail("stub")
+def bad(k: key, t: tensor[32, 128, f32], gain: f64) -> tensor[32, 128, f32] = sample(k, t, gain)
 "#,
     );
     let json = run_check(&path);
