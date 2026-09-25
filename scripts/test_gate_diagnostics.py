@@ -4,11 +4,15 @@ from __future__ import annotations
 
 import importlib.util
 import io
+import json
 import os
 import re
+import shutil
+import subprocess
 import sys
 import tempfile
 import unittest
+import venv
 from pathlib import Path
 from unittest import mock
 
@@ -77,11 +81,12 @@ class ManagedRuntimeTests(unittest.TestCase):
 
         with self.assertRaisesRegex(RuntimeError, "exec intercepted"):
             gate.ensure_managed_runtime(
-                ["--local"],
+                ["--validation"],
                 environ={"PATH": "/usr/bin"},
                 executable=Path("/usr/bin/python3"),
                 prefix=Path("/System/Python"),
                 base_prefix=Path("/System/Python"),
+                repo_root=Path(tempfile.gettempdir()) / "gate-no-owned-venv",
                 find_uv=lambda _: "/opt/bin/uv",
                 execvpe=fake_execvpe,
             )
@@ -102,7 +107,7 @@ class ManagedRuntimeTests(unittest.TestCase):
                 str(Path(gate.__file__).resolve()),
             ],
         )
-        self.assertEqual(argv[8:], ["--local"])
+        self.assertEqual(argv[8:], ["--validation"])
         self.assertEqual(environment["PATH"], "/usr/bin")
 
     def test_reexec_drops_a_conflicting_python_preference(self):
@@ -131,6 +136,7 @@ class ManagedRuntimeTests(unittest.TestCase):
                 executable=Path("/usr/bin/python3"),
                 prefix=Path("/System/Python"),
                 base_prefix=Path("/System/Python"),
+                repo_root=Path(tempfile.gettempdir()) / "gate-no-owned-venv",
                 find_uv=lambda _: "/opt/bin/uv",
                 execvpe=fake_execvpe,
             )
@@ -162,6 +168,7 @@ class ManagedRuntimeTests(unittest.TestCase):
                 executable=Path("/usr/bin/python3"),
                 prefix=Path("/System/Python"),
                 base_prefix=Path("/System/Python"),
+                repo_root=Path(tempfile.gettempdir()) / "gate-no-owned-venv",
                 find_uv=lambda _: "/opt/bin/uv",
                 execvpe=fake_execvpe,
             )
@@ -171,11 +178,12 @@ class ManagedRuntimeTests(unittest.TestCase):
     def test_missing_uv_prints_install_and_setup_guidance(self):
         error = io.StringIO()
         result = gate.ensure_managed_runtime(
-            ["--local"],
+            ["--validation"],
             environ={},
             executable=Path("/usr/bin/python3"),
             prefix=Path("/System/Python"),
             base_prefix=Path("/System/Python"),
+            repo_root=Path(tempfile.gettempdir()) / "gate-no-owned-venv",
             find_uv=lambda _: None,
             error_stream=error,
         )
@@ -185,6 +193,198 @@ class ManagedRuntimeTests(unittest.TestCase):
         self.assertIn("astral.sh/uv/install.sh", diagnostic)
         self.assertIn("uv --version", diagnostic)
         self.assertIn("uv python install 3.11", diagnostic)
+
+
+class OwnedInterpreterTests(unittest.TestCase):
+    """chelis#2511: a venv another checkout put first on PATH is managed but
+    not owned, so the gate must not hand it to every child command."""
+
+    def setUp(self):
+        self.directory = tempfile.TemporaryDirectory(prefix="gate-owned-")
+        self.addCleanup(self.directory.cleanup)
+        self.base = Path(self.directory.name).resolve()
+        self.root = self.base / "worktree"
+        self.root.mkdir()
+        self.foreign = self.base / "primary" / ".venv"
+
+    def fake_venv(self, prefix):
+        (prefix / "bin").mkdir(parents=True)
+        (prefix / "bin" / "python").write_text("", encoding="utf-8")
+        (prefix / "pyvenv.cfg").write_text("uv = 0.9.28\n", encoding="utf-8")
+        return prefix / "bin" / "python"
+
+    def launch(self, environ, prefix):
+        calls = []
+
+        def fake_execvpe(program, argv, environment):
+            calls.append((program, argv))
+            self.reexec_environment = environment
+            raise RuntimeError("exec intercepted")
+
+        def no_uv(_):
+            raise AssertionError("an owned interpreter must not route through uv")
+
+        try:
+            result = gate.ensure_managed_runtime(
+                ["--validation"],
+                environ=environ,
+                executable=prefix / "bin" / "python",
+                prefix=prefix,
+                base_prefix=Path("/uv/python"),
+                repo_root=self.root,
+                find_uv=no_uv,
+                execvpe=fake_execvpe,
+            )
+        except RuntimeError:
+            return "exec", calls
+        return result, calls
+
+    def test_foreign_checkout_venv_reexecs_through_the_owned_venv(self):
+        self.fake_venv(self.foreign)
+        owned = self.fake_venv(self.root / ".venv")
+        result, calls = self.launch({"PATH": f"{self.foreign}/bin"}, self.foreign)
+        self.assertEqual(result, "exec")
+        self.assertEqual(
+            calls,
+            [(str(owned), [str(owned), str(Path(gate.__file__).resolve()), "--validation"])],
+        )
+        self.assertEqual(self.reexec_environment[gate.OWNED_REEXEC_ENV], "1")
+
+    def test_a_second_unowned_arrival_stops_instead_of_looping(self):
+        """The re-exec target was chosen because it exists; if it still does
+        not start as this checkout's environment, the gate must stop."""
+        self.fake_venv(self.foreign)
+        owned = self.fake_venv(self.root / ".venv")
+        error = io.StringIO()
+        result = gate.ensure_managed_runtime(
+            ["--validation"],
+            environ={gate.OWNED_REEXEC_ENV: "1"},
+            executable=self.foreign / "bin" / "python",
+            prefix=self.foreign,
+            base_prefix=Path("/uv/python"),
+            repo_root=self.root,
+            find_uv=lambda _: self.fail("must not route through uv"),
+            execvpe=lambda *_: self.fail("must not re-exec again"),
+            error_stream=error,
+        )
+        self.assertEqual(result, gate.EXIT_ENVIRONMENT)
+        self.assertIn(str(owned), error.getvalue())
+        self.assertIn("uv venv --python 3.11", error.getvalue())
+
+    def test_a_malformed_owned_venv_fails_loudly_when_really_executed(self):
+        """Execute the bootstrap for real: a `.venv/bin/python` that starts
+        the base interpreter, not the venv, must end in one clear failure."""
+        checkout = self.base / "malformed"
+        scripts = checkout / "scripts"
+        scripts.mkdir(parents=True)
+        here = Path(__file__).resolve().parent
+        for name in ("gate.py", "unrepresentable_domain_oracle.py"):
+            shutil.copy2(here / name, scripts / name)
+        wrapper = checkout / ".venv" / "bin" / "python"
+        wrapper.parent.mkdir(parents=True)
+        base = Path(sys.base_prefix) / "bin" / f"python{sys.version_info[0]}"
+        wrapper.write_text(f'#!/bin/sh\nexec "{base}" "$@"\n', encoding="utf-8")
+        wrapper.chmod(0o755)
+        environment = {
+            key: value
+            for key, value in os.environ.items()
+            if key not in {"PYO3_PYTHON", "DEVENV_STATE", gate.OWNED_REEXEC_ENV}
+        }
+        result = subprocess.run(
+            [sys.executable, str(scripts / "gate.py"), "--list"],
+            cwd=checkout, env=environment, capture_output=True, text=True,
+            timeout=60,
+        )
+        self.assertEqual(result.returncode, gate.EXIT_ENVIRONMENT, result.stderr)
+        self.assertIn("does not start as this checkout's own environment", result.stderr)
+
+    def test_owned_venv_proceeds_without_any_reexec(self):
+        self.fake_venv(self.root / ".venv")
+        result, calls = self.launch({}, self.root / ".venv")
+        self.assertIsNone(result)
+        self.assertEqual(calls, [])
+
+    def test_owned_venv_without_a_uv_marker_proceeds_rather_than_looping(self):
+        """Re-exec into the owned venv must end there: routing it back
+        through uv would re-exec into the owned venv again."""
+        prefix = self.root / ".venv"
+        self.fake_venv(prefix)
+        (prefix / "pyvenv.cfg").write_text("home = /usr/bin\n", encoding="utf-8")
+        self.assertEqual(self.launch({}, prefix), (None, []))
+
+    def test_owned_devenv_state_venv_is_preferred_and_proceeds(self):
+        state = self.root / ".devenv" / "profiles" / "ci" / "state"
+        devenv = self.fake_venv(state / "venv")
+        self.fake_venv(self.root / ".venv")
+        environ = {"DEVENV_STATE": str(state)}
+        self.assertEqual(self.launch(environ, state / "venv"), (None, []))
+        self.fake_venv(self.foreign)
+        result, calls = self.launch(environ, self.foreign)
+        self.assertEqual(result, "exec")
+        self.assertEqual(calls[0][0], str(devenv))
+
+    def test_devenv_state_outside_the_checkout_is_not_owned(self):
+        state = self.base / "primary" / ".devenv" / "state"
+        self.fake_venv(state / "venv")
+        owned = self.fake_venv(self.root / ".venv")
+        result, calls = self.launch({"DEVENV_STATE": str(state)}, state / "venv")
+        self.assertEqual(result, "exec")
+        self.assertEqual(calls[0][0], str(owned))
+
+    def test_explicit_pyo3_python_is_authoritative(self):
+        self.fake_venv(self.foreign)
+        self.fake_venv(self.root / ".venv")
+        environ = {"PYO3_PYTHON": str(self.foreign / "bin" / "python")}
+        self.assertEqual(self.launch(environ, self.foreign), (None, []))
+
+    def test_foreign_venv_without_an_owned_interpreter_keeps_the_managed_runtime(self):
+        self.fake_venv(self.foreign)
+        self.assertEqual(self.launch({}, self.foreign), (None, []))
+
+    def test_ownership_rule_agrees_with_the_census(self):
+        """Both copies of the rule answer the same on real interpreters."""
+        scripts = str(Path(__file__).resolve().parent)
+        probe = (
+            "import json, sys; from pathlib import Path; "
+            f"sys.path.insert(0, {scripts!r}); "
+            "from capacity_census_native_execution import _owned_interpreter; "
+            "print(json.dumps([sys.prefix, "
+            f"_owned_interpreter(Path({str(self.root)!r}))]))"
+        )
+        owned_state = self.root / ".devenv" / "profiles" / "ci" / "state"
+        foreign_state = self.base / "primary" / ".devenv" / "state"
+        cases = {
+            "checkout venv": (self.root / ".venv", None),
+            "checkout devenv": (owned_state / "venv", owned_state),
+            "foreign devenv": (foreign_state / "venv", foreign_state),
+            "foreign venv": (self.foreign, None),
+        }
+        verdicts = {}
+        for name, (prefix, state) in cases.items():
+            venv.EnvBuilder(with_pip=False, symlinks=os.name != "nt").create(prefix)
+            environment = dict(os.environ)
+            environment.pop("DEVENV_STATE", None)
+            if state is not None:
+                environment["DEVENV_STATE"] = str(state)
+            reported, census = json.loads(subprocess.check_output(
+                [str(prefix / "bin" / "python"), "-I", "-c", probe],
+                cwd=self.root, env=environment, text=True,
+            ))
+            with self.subTest(case=name):
+                self.assertEqual(
+                    gate.owns_interpreter(environment, Path(reported), self.root),
+                    census,
+                )
+            verdicts[name] = census
+        self.assertEqual(
+            verdicts,
+            {
+                "checkout venv": True,
+                "checkout devenv": True,
+                "foreign devenv": False,
+                "foreign venv": False,
+            },
+        )
 
 
 class GateEnvironmentTests(unittest.TestCase):

@@ -174,6 +174,26 @@ def schema_cases(vocabulary: list[dict], order: tuple[str, ...]) -> list[CodecCa
             )
     for dtype in vocabulary:
         name = dtype["name"]
+        if dtype["kind"] == "key":
+            # spec/10 section 3.2: a key tensor has no execution-value carrier
+            # either, so every attempted tensor spelling of one is rejected.
+            for label, storage in (
+                ("no-literal-bits", {"dtype": name, "bits": ["0" * 16]}),
+                ("no-literal-values", {"dtype": name, "values": [7]}),
+            ):
+                wire = {"shape": [1], "data": storage}
+                for codec in ("json", "construct"):
+                    cases.append(
+                        CodecCase(
+                            f"TensorValue/{codec}/{name}/{label}",
+                            name,
+                            "TensorValue",
+                            codec,
+                            canonical(wire),
+                            None,
+                        )
+                    )
+            continue
         value = (
             "8" + "0" * (dtype["width"] * 2 - 1)
             if dtype["kind"] == "float"

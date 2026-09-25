@@ -4,7 +4,6 @@ naming the input and both dtypes, then traps with
 `numeric trap: domain in load at <declared dtype>`. Previously the entry
 checked only rank and extents, so a wrong-dtype `chelis_tensor` was accepted
 and its storage was read at the declared dtype. The check covers the
-four-argument tensor entry and every authored host entry, whatever it returns.
-A tensor nested inside a parameter value, such as a tuple, is checked only
-where a tensor kernel receives it. See
+four-argument tensor entry and every authored host entry, whatever it returns,
+including a tensor nested inside a parameter value. See
 [#2490](https://github.com/Chelis-Lang/chelis/issues/2490).

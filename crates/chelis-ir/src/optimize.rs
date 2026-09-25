@@ -358,8 +358,12 @@ fn dead_code_eliminate_impl(
         // `implicit_observations`. A projected slice may legitimately drop an
         // unrelated `Store`, but never an abort: [05-OP-68] says it may not
         // be removed, and a slice that silently skipped one would report a
-        // successful result for a program that aborts.
-        if (implicit_observations && observed) || node.op.is_unconditional_effect() {
+        // successful result for a program that aborts. chelis#2413: a random
+        // node that can trap by itself is in the same class.
+        if (implicit_observations && observed)
+            || node.op.is_unconditional_effect()
+            || dag.random_node_may_trap(node)
+        {
             live[node.id.0] = true;
         }
     }
@@ -578,6 +582,14 @@ pub fn common_subexpr_eliminate(dag: &Dag) -> Dag {
                     | RiscOp::CheckedUnitAxis { .. }
             )
             && !matches!(node.op, RiscOp::DrawKey { .. })
+            // Two key operations with equal inputs produce equal bits, but
+            // merging them would hand one key to both consumers, which the
+            // key rules reject: a key is consumed once in the graph, not
+            // merely once per value.
+            && !matches!(
+                node.op,
+                RiscOp::KeyFromSeed | RiscOp::Split { .. } | RiscOp::FoldIn | RiscOp::SplitN { .. }
+            )
             && let Some(&existing) = seen.get(&cse_key)
         {
             // Duplicate: its full provenance (canonical + merged) folds

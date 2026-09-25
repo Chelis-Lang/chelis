@@ -141,12 +141,7 @@ pub(super) fn delegated_function_guards(
         env.insert(param.name.clone(), index);
     }
     let plan = function_entry_plan(function);
-    let plan_args = function
-        .params
-        .iter()
-        .filter(|param| matches!(param.ty, HostAbiType::Tensor(_)))
-        .map(|param| HostExpr::new(HostExprKind::Var(param.name.clone(), param.ty.clone())))
-        .collect::<Vec<_>>();
+    let plan_args = super::entry_walk::entry_plan_args(function);
     let plan_guards = plan
         .guards()
         .iter()
@@ -227,12 +222,7 @@ pub(super) fn helper_coverage_with_verified(
     for param in &function.params {
         env.insert(param.name.clone(), walker.fresh());
     }
-    let args = function
-        .params
-        .iter()
-        .filter(|p| matches!(p.ty, HostAbiType::Tensor(_)))
-        .map(|p| HostExpr::new(HostExprKind::Var(p.name.clone(), p.ty.clone())))
-        .collect::<Vec<_>>();
+    let args = super::entry_walk::entry_plan_args(function);
     let plan = function_entry_plan(function);
     let delegated = delegated_function_guards(function, verified_helpers);
     let mut facts = plan

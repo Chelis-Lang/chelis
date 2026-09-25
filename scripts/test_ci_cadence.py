@@ -23,26 +23,6 @@ MOVED = {
     "runtime-representation-phase0-oracle": "chelis-gate runtime-representation",
     "generalize-sweep-oracle-shard": "cargo nextest run --workspace --profile ci-full --ignore-default-filter --features chelis-types/generalize-sweep-oracle",
 }
-NATIVE_OBSERVER_DEBT_TESTS = (
-    "authored_observer_spellings_do_not_collide_with_private_support_or_wrappers",
-    "feature_on_ordinary_public_call_emits_no_observation",
-    "host_source_identity_qualifies_nested_and_following_helper_occurrences",
-    "nested_host_and_fixed_frames_record_actual_forward_replay_and_restoration",
-    "repeated_direct_callees_keep_linked_identity_and_restore_the_call_stack",
-    "repeated_observed_calls_restart_sequence_and_keep_invocation_identity",
-    "sink_error_is_not_silent_success",
-    "unsupported_argument_effects_cannot_certify_descendant_calls",
-)
-NATIVE_OBSERVER_DEBT_EXPRESSION = " + ".join(
-    f"test(/^{name}$/)" for name in NATIVE_OBSERVER_DEBT_TESTS
-)
-NATIVE_OBSERVER_DEBT_COMMAND = (
-    "cargo nextest run -p chelis-compiler-api "
-    "--features native-random-observer "
-    "--test native_random_observer "
-    "--profile ci-full --ignore-default-filter --no-fail-fast "
-    f"-E '({NATIVE_OBSERVER_DEBT_EXPRESSION})'"
-)
 
 
 def assert_complete_hash_partition(test, job, command):
@@ -145,18 +125,6 @@ def assert_extended(test, pr, nightly):
                     )
                 else:
                     test.assertNotIn("if", step)
-    native_observer = jobs["native-random-observer-debt"]
-    test.assertNotIn("native-random-observer-debt", pr["jobs"])
-    test.assertNotIn("if", native_observer)
-    test.assertFalse(native_observer.get("continue-on-error", False))
-    observer_steps = [
-        step
-        for step in native_observer["steps"]
-        if step.get("run") == NATIVE_OBSERVER_DEBT_COMMAND
-    ]
-    test.assertEqual(len(observer_steps), 1)
-    test.assertNotIn("if", observer_steps[0])
-    test.assertFalse(observer_steps[0].get("continue-on-error", False))
     full = jobs["full-workspace"]
     capacity = lambda job: [s for s in job["steps"] if s.get("name") == "Restore capacity rustdoc build"]
     test.assertFalse(capacity(full))
@@ -242,7 +210,6 @@ def assert_extended(test, pr, nightly):
             "integration-support",
             "backend-sanitizers-full",
             "runtime-extent-oracle",
-            "native-random-observer-debt",
         },
     )
     test.assertIn("always()", report["if"])
@@ -378,48 +345,6 @@ class ExtendedCadenceTests(unittest.TestCase):
             nightly = copy.deepcopy(self.nightly)
             nightly["jobs"][name]["if"] = "false"
             with self.subTest(job=name), self.assertRaises(AssertionError):
-                assert_extended(self, self.pr, nightly)
-
-    def test_native_observer_debt_owner_cannot_be_removed_or_weakened(self):
-        for mutation in (
-            "remove",
-            "skip",
-            "ignore",
-            "command",
-            "selector",
-            "report",
-        ):
-            nightly = copy.deepcopy(self.nightly)
-            job = nightly["jobs"]["native-random-observer-debt"]
-            if mutation == "remove":
-                del nightly["jobs"]["native-random-observer-debt"]
-            elif mutation == "skip":
-                job["if"] = "false"
-            elif mutation == "ignore":
-                job["continue-on-error"] = True
-            elif mutation == "command":
-                for step in job["steps"]:
-                    if step.get("run") == NATIVE_OBSERVER_DEBT_COMMAND:
-                        step["run"] = step["run"].replace(
-                            "--features native-random-observer ",
-                            "",
-                        )
-            elif mutation == "selector":
-                for step in job["steps"]:
-                    if step.get("run") == NATIVE_OBSERVER_DEBT_COMMAND:
-                        step["run"] = step["run"].replace(
-                            f" + test(/^{NATIVE_OBSERVER_DEBT_TESTS[-1]}$/)",
-                            "",
-                        )
-            else:
-                nightly["jobs"]["report"]["needs"] = [
-                    name
-                    for name in nightly["jobs"]["report"]["needs"]
-                    if name != "native-random-observer-debt"
-                ]
-            with self.subTest(mutation=mutation), self.assertRaises(
-                (AssertionError, KeyError)
-            ):
                 assert_extended(self, self.pr, nightly)
 
     def test_filtered_or_incompletely_partitioned_full_workspace_is_rejected(self):

@@ -133,10 +133,44 @@ extent-based anchor recovery, wire field, cache version, worker protocol, or
 semantic/normative rule. The evaluator/context regression covers direct, alias,
 both elementwise operand orders, caller alpha-renaming, rank-spliced caller
 names, independent same-spelled callee axes and real
-authored mismatches. Native-C attempts stopped before emission at an undeclared
-axis (#1277) or generic unresolved-host diagnostic; those residuals remain
-unclassified and outside this repair. This is a
-lowering-only repair, not approval of the broader origin/template design below.
+authored mismatches. The initial #1895 native-C attempts stopped before
+emission at an undeclared axis (#1277) or generic unresolved-host diagnostic.
+A later exact replay at `81a68cbda` emitted, linked and ran the direct case
+(`direct = 5.0`), while the local callable alias still failed before emission.
+That later receipt is historical, not a current-main acceptance result. This
+is a lowering-only repair, not approval of the broader origin/template design
+below.
+
+### Remaining #1889 execution exits
+
+The direct/helper result label and the local callable identity are different
+facts. A local binding `f = aligned_left` must retain its statically known
+callee identity through sequential lexical scope, capture and shadowing so
+the host/tensor-helper choice sees the same callable as a direct invocation.
+The checked caller-side axis label must then reach the named reduction without
+becoming a callee-authored claim or an inferred runtime width. Preserve the
+original authored result obligation and the #1277 witness/source mapping
+through both paths. Do not introduce general indirect-call support to repair
+this statically known alias.
+
+The separate live/decoded/worker/disk context query paths need executable
+receipts, not merely successfully decoded checker snapshots. Two regressions
+bisected to #2070 also remain in this issue's class: the compiled-context
+helper-result query compares independent `fixed` axes as if equal, and a
+rank-polymorphic named `expand` joins distinct `seq` axes. Their shared first
+bad merge does not prove one internal statement is responsible; both exact
+cases must remain in the matrix. The direct native 5.0 result is a positive
+control, not a substitute for the alias or context exits.
+
+Before implementation, add red tests for the direct and alias programs, with
+the alias's positional-reduction and no-reduction discriminators. The alias
+must build, link and execute on C and agree with Eval. Run caller alpha-renaming,
+both elementwise operand orders, a shadowed local alias and two independent
+same-spelled callees as negative controls. Execute the live, decoded, worker
+and disk queries, plus both #2070 regression witnesses, against the same
+checked contract. A wrong authored result extent still raises its original
+guard at the producing operation; a merely equal checked label never creates
+one. This is #1889's exit, not proof of the wider checker-context project.
 
 ## Unselected broader origin-aware investigation
 

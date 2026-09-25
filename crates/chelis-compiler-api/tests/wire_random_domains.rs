@@ -7,6 +7,9 @@ use chelis_compiler_api::schema::{
     CheckRequest, LowerRequest, SourceKind, WIRE_DAG_SCHEMA_VERSION, WireDag, WireDagDecodeError,
     WireDagNode,
 };
+use chelis_ir::dag::{Dag, DimInfo, KeyBranch, NodeId, RiscOp, RtDim, TensorType, UniformBound};
+use chelis_types::scalar_from_i64;
+use chelis_types::types::Prim;
 use serde_json::{Value, json};
 
 fn construct(value: &Value) -> WireDag {
@@ -139,7 +142,7 @@ fn version_16_random_payloads_have_no_version_17_spelling() {
 }
 
 #[test]
-fn a_key_is_consumed_once_and_only_by_a_random_primitive() {
+fn a_key_is_consumed_once_and_only_by_a_key_consumer() {
     let dag = lower(HANDLED, "sample");
     let dropout = first(&dag, "dropout");
     let uniform = first(&dag, "uniform_like");
@@ -159,52 +162,466 @@ fn a_key_is_consumed_once_and_only_by_a_random_primitive() {
         "op":{"kind":"neg"},"inputs":[dropout_key],
         "output_type":{"dims":[],"precision":"key"}}),
     );
-    rejects_domain(&foreign, "only a random primitive consumes a key");
+    rejects_domain(
+        &foreign,
+        "only a key operation or a random primitive consumes a key",
+    );
 
-    // A key slot fed by something other than a draw key.
-    let mut not_drawn = dag.clone();
+    // A key slot fed by something that is not a key.
+    let mut not_a_key = dag.clone();
     let rate = input(&dag, dropout, 1);
-    not_drawn["nodes"][dropout]["inputs"][2] = json!(rate);
-    rejects_domain(&not_drawn, "produced by a draw key");
+    not_a_key["nodes"][dropout]["inputs"][2] = json!(rate);
+    rejects_domain(
+        &not_a_key,
+        "requires a key batch matching its data's leading axes",
+    );
+
+    // A draw key's key derived from: only its draw consumes it.
+    let mut derived = dag.clone();
+    let id = derived["nodes"].as_array().unwrap().len();
+    derived["nodes"].as_array_mut().unwrap().push(
+        json!({"shape_deps":[],"span_id":null,"merged_spans":[],"id":id,
+        "op":{"kind":"split","branch":"left"},"inputs":[dropout_key],
+        "output_type":{"dims":[],"precision":"key"}}),
+    );
+    derived["roots"].as_array_mut().unwrap().push(json!(id));
+    rejects_domain(&derived, "a draw key's key feeds only its draw");
 }
 
-/// spec/10 §3.2: every key is the output of a `DrawKey`, read only by the
-/// draw that consumes it, if any, and that draw's replays. The IR verifier
-/// rejects each payload below, and so does the codec.
-///
-/// Evidentiary status: REGRESSION TEST. At dcc9256c4 `from_validated_json`
-/// accepted the key-precision load, that load as a root, the rooted draw key
-/// and the key shape dependency.
+/// spec/10 §3.2 (v18): a key enters a graph as a key operation's or draw
+/// key's output or as a key-precision `Load`, and may be a root; it is never
+/// a shape dependency, and no constant carries one.
 #[test]
-fn a_key_is_drawn_and_never_a_root_or_a_dependency() {
+fn a_key_may_be_loaded_or_rooted_and_is_never_a_dependency_or_a_constant() {
     let dag = lower(HANDLED, "sample");
     let dropout = first(&dag, "dropout");
     let key = input(&dag, dropout, 2);
 
-    // A key-precision node that no draw key produced, left unconsumed.
-    let mut stray = dag.clone();
-    let id = stray["nodes"].as_array().unwrap().len();
-    stray["nodes"].as_array_mut().unwrap().push(
+    // A key-precision Load, unconsumed: dropping a key is allowed.
+    let mut loaded = dag.clone();
+    let id = loaded["nodes"].as_array().unwrap().len();
+    loaded["nodes"].as_array_mut().unwrap().push(
         json!({"shape_deps":[],"span_id":null,"merged_spans":[],"id":id,
         "op":{"kind":"load","name":"k"},"inputs":[],
         "output_type":{"dims":[],"precision":"key"}}),
     );
-    rejects_domain(&stray, "only a draw key produces one");
+    accepts(&loaded);
 
-    // The same stray key as a root.
-    let mut stray_root = stray.clone();
-    stray_root["roots"].as_array_mut().unwrap().push(json!(id));
-    rejects_domain(&stray_root, "only a draw key produces one");
-
-    // A consumed draw key as a root.
+    // The loaded key as a root. A draw key's key is its draw's alone, so a
+    // consumed draw key is no root.
+    let mut loaded_root = loaded.clone();
+    loaded_root["roots"].as_array_mut().unwrap().push(json!(id));
+    accepts(&loaded_root);
     let mut key_root = dag.clone();
     key_root["roots"].as_array_mut().unwrap().push(json!(key));
-    rejects_domain(&key_root, "is a graph root");
+    rejects_domain(&key_root, "a draw key's key feeds only its draw");
 
     // A key as a shape dependency of its own consumer.
     let mut key_dependency = dag.clone();
     key_dependency["nodes"][dropout]["shape_deps"] = json!([key]);
     rejects_domain(&key_dependency, "as a dependency");
+
+    // A constant typed as a key: every key is a node's output, never bits.
+    let mut constant = dag.clone();
+    let id = constant["nodes"].as_array().unwrap().len();
+    constant["nodes"].as_array_mut().unwrap().push(
+        json!({"shape_deps":[],"span_id":null,"merged_spans":[],"id":id,
+        "op":{"kind":"const","value":{"dtype":"int64","value":7}},"inputs":[],
+        "output_type":{"dims":[],"precision":"key"}}),
+    );
+    let text = constant.to_string();
+    assert!(WireDag::from_validated_json(&text).is_err(), "{text}");
+}
+
+fn wire_node(id: usize, op: Value, inputs: &[usize], dims: &[u64], precision: &str) -> Value {
+    json!({"shape_deps":[],"span_id":null,"merged_spans":[],"id":id,"op":op,
+        "inputs":inputs,
+        "output_type":{"dims":dims.iter().map(|size| json!({"kind":"lit","size":size})).collect::<Vec<_>>(),
+        "precision":precision}})
+}
+
+/// The explicit key chain of spec/10 §3.2 (v18): key_from_seed, both split
+/// branches, fold_in, split_n, a batched dropout, and a key root.
+fn key_chain() -> Value {
+    let nodes = vec![
+        wire_node(
+            0,
+            json!({"kind":"const","value":{"dtype":"int64","value":-3}}),
+            &[],
+            &[],
+            "int64",
+        ),
+        wire_node(1, json!({"kind":"key_from_seed"}), &[0], &[], "key"),
+        wire_node(2, json!({"kind":"split","branch":"left"}), &[1], &[], "key"),
+        wire_node(
+            3,
+            json!({"kind":"split","branch":"right"}),
+            &[1],
+            &[],
+            "key",
+        ),
+        wire_node(
+            4,
+            json!({"kind":"const","value":{"dtype":"int64","value":-5}}),
+            &[],
+            &[],
+            "int64",
+        ),
+        wire_node(5, json!({"kind":"fold_in"}), &[2, 4], &[], "key"),
+        wire_node(
+            6,
+            json!({"kind":"split_n","count":{"bound":"lit","value":3}}),
+            &[5],
+            &[3],
+            "key",
+        ),
+        wire_node(7, json!({"kind":"load","name":"x"}), &[], &[3, 4], "f32"),
+        wire_node(
+            8,
+            json!({"kind":"const","value":{"dtype":"f32","bits":"3f000000"}}),
+            &[],
+            &[],
+            "f32",
+        ),
+        wire_node(9, json!({"kind":"dropout"}), &[7, 8, 6], &[3, 4], "f32"),
+        wire_node(
+            10,
+            json!({"kind":"const","value":{"dtype":"int64","value":9}}),
+            &[],
+            &[],
+            "int64",
+        ),
+        wire_node(11, json!({"kind":"fold_in"}), &[3, 10], &[], "key"),
+    ];
+    json!({"schema_version": WIRE_DAG_SCHEMA_VERSION, "nodes": nodes, "roots": [9, 11]})
+}
+
+fn push(graph: &mut Value, op: Value, inputs: &[usize], dims: &[u64], precision: &str) -> usize {
+    let nodes = graph["nodes"].as_array_mut().unwrap();
+    let id = nodes.len();
+    nodes.push(wire_node(id, op, inputs, dims, precision));
+    id
+}
+
+/// Oracle (d) on the wire: the codec applies the IR verifier's key rules
+/// and its own operand rules to the explicit key operations.
+#[test]
+fn the_codec_admits_the_key_chain_and_rejects_every_malformed_key_form() {
+    accepts(&key_chain());
+
+    let mut two_lefts = key_chain();
+    two_lefts["nodes"][3]["op"]["branch"] = json!("left");
+    rejects_domain(&two_lefts, "split twice for the Left branch");
+
+    let mut split_and_fold = key_chain();
+    split_and_fold["nodes"][5]["inputs"][0] = json!(1);
+    rejects_domain(&split_and_fold, "is consumed twice");
+
+    let mut added = key_chain();
+    let sum = push(&mut added, json!({"kind":"add"}), &[11, 11], &[], "key");
+    added["roots"].as_array_mut().unwrap().push(json!(sum));
+    rejects_domain(
+        &added,
+        "only a key operation or a random primitive consumes a key",
+    );
+
+    let mut selected = key_chain();
+    let condition = push(
+        &mut selected,
+        json!({"kind":"load","name":"c"}),
+        &[],
+        &[],
+        "bool",
+    );
+    let chosen = push(
+        &mut selected,
+        json!({"kind":"where"}),
+        &[condition, 11, 11],
+        &[],
+        "key",
+    );
+    selected["roots"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!(chosen));
+    // Keys select through activations, never through `where` (V4); a
+    // key-precision `where` is also no key operation (V1).
+    rejects_domain(
+        &selected,
+        &format!("key 11 reaches node {chosen} input 1; only a key operation"),
+    );
+
+    let mut dependency = key_chain();
+    dependency["nodes"][9]["shape_deps"] = json!([6]);
+    rejects_domain(&dependency, "as a dependency");
+
+    // V5: a key batch that does not match the data's leading axis.
+    let mut batch = key_chain();
+    batch["nodes"][6]["op"]["count"] = json!({"bound":"lit","value":2});
+    batch["nodes"][6]["output_type"]["dims"] = json!([{"kind":"lit","size":2}]);
+    rejects_domain(&batch, "key batch matching its data's leading axes");
+
+    // V5 at rank 2: G split into [3] and then [3, 2] keys batch a draw over
+    // [3, 2, 4] data, with a rate shaped like the key's leading axis.
+    let rank_two = |data: &[u64], rate: &[u64]| {
+        let mut graph = key_chain();
+        let rows = push(
+            &mut graph,
+            json!({"kind":"split_n","count":{"bound":"lit","value":3}}),
+            &[11],
+            &[3],
+            "key",
+        );
+        let keys = push(
+            &mut graph,
+            json!({"kind":"split_n","count":{"bound":"lit","value":2}}),
+            &[rows],
+            &[3, 2],
+            "key",
+        );
+        let x = push(
+            &mut graph,
+            json!({"kind":"load","name":"x2"}),
+            &[],
+            data,
+            "f32",
+        );
+        let rates = push(
+            &mut graph,
+            json!({"kind":"load","name":"r"}),
+            &[],
+            rate,
+            "f32",
+        );
+        let drawn = push(
+            &mut graph,
+            json!({"kind":"dropout"}),
+            &[x, rates, keys],
+            data,
+            "f32",
+        );
+        graph["roots"] = json!([9, drawn]);
+        graph
+    };
+    accepts(&rank_two(&[3, 2, 4], &[3]));
+    accepts(&rank_two(&[3, 2, 4], &[3, 2]));
+    rejects_domain(
+        &rank_two(&[3, 2, 4], &[2]),
+        "shaped like a leading part of its key's shape",
+    );
+    rejects_domain(
+        &rank_two(&[2, 3, 4], &[]),
+        "key batch matching its data's leading axes",
+    );
+
+    // A declared count axis that disagrees with its literal count.
+    let mut declared = key_chain();
+    declared["nodes"][6]["output_type"]["dims"] = json!([{"kind":"lit","size":4}]);
+    assert!(WireDag::from_validated_json(&declared.to_string()).is_err());
+
+    // V2 counts uses of a key: a root is one, and every Load of one
+    // parameter is the same key.
+    let mut rooted = key_chain();
+    rooted["roots"].as_array_mut().unwrap().push(json!(6));
+    rejects_domain(&rooted, "is a graph root and is also consumed");
+    let mut reloaded = key_chain();
+    let y = push(
+        &mut reloaded,
+        json!({"kind":"load","name":"y"}),
+        &[],
+        &[4],
+        "f32",
+    );
+    let mut roots = vec![json!(9), json!(11)];
+    for _ in 0..2 {
+        let k = push(
+            &mut reloaded,
+            json!({"kind":"load","name":"k"}),
+            &[],
+            &[],
+            "key",
+        );
+        let drawn = push(
+            &mut reloaded,
+            json!({"kind":"dropout"}),
+            &[y, 8, k],
+            &[4],
+            "f32",
+        );
+        roots.push(json!(drawn));
+    }
+    reloaded["roots"] = json!(roots);
+    rejects_domain(&reloaded, "is consumed twice");
+
+    // The same disagreement against a named count axis whose extent is
+    // known; the batched draw's data declares that axis too.
+    let mut named = key_chain();
+    let n4 = json!({"kind":"named","name":"n","size":4});
+    named["nodes"][6]["output_type"]["dims"] = json!([n4]);
+    for data in [7, 9] {
+        named["nodes"][data]["output_type"]["dims"] = json!([n4, {"kind":"lit","size":4}]);
+    }
+    rejects_domain(&named, "with a split's count axis appended last");
+    named["nodes"][6]["op"]["count"] = json!({"bound":"lit","value":4});
+    accepts(&named);
+
+    // A count carrier outside `lit` and a node at slot 1.
+    let mut axis_count = key_chain();
+    axis_count["nodes"][6]["op"]["count"] =
+        json!({"bound":"input_axis","tensor":1,"axis":{"axis":"lit","value":0}});
+    assert!(WireDag::from_validated_json(&axis_count.to_string()).is_err());
+
+    // A seed of the wrong integer width, and a fold of unequal shapes.
+    let mut narrow = key_chain();
+    narrow["nodes"][0] = wire_node(
+        0,
+        json!({"kind":"const","value":{"dtype":"int32","value":-3}}),
+        &[],
+        &[],
+        "int32",
+    );
+    rejects_domain(&narrow, "wrong operand dtype");
+    let mut unequal = key_chain();
+    let indices = push(
+        &mut unequal,
+        json!({"kind":"load","name":"n"}),
+        &[],
+        &[2],
+        "int64",
+    );
+    unequal["nodes"][11]["inputs"][1] = json!(indices);
+    // Node 11 now reads a later node, which the reference rules reject too;
+    // rebuild it at the end so only the shape rule applies.
+    let fold = push(
+        &mut unequal,
+        json!({"kind":"fold_in"}),
+        &[3, indices],
+        &[],
+        "key",
+    );
+    unequal["nodes"][11]["inputs"][1] = json!(10);
+    unequal["nodes"][11]["op"] = json!({"kind":"neg"});
+    unequal["nodes"][11]["inputs"] = json!([10]);
+    unequal["nodes"][11]["output_type"]["precision"] = json!("int64");
+    unequal["roots"] = json!([9, fold]);
+    rejects_domain(&unequal, "element-wise over one exact shape");
+
+    // A replay of a key no draw consumes.
+    let mut replay = key_chain();
+    let g = push(
+        &mut replay,
+        json!({"kind":"load","name":"g"}),
+        &[],
+        &[3, 4],
+        "f32",
+    );
+    let replayed = push(
+        &mut replay,
+        json!({"kind":"dropout_replay"}),
+        &[g, 8, 11],
+        &[3, 4],
+        "f32",
+    );
+    replay["roots"] = json!([9, replayed]);
+    rejects_domain(&replay, "that no forward random primitive consumes");
+}
+
+/// Rule V3 on the wire: two draws share a key only under exclusive arms.
+#[test]
+fn the_codec_admits_exclusive_arms_and_rejects_overlapping_ones() {
+    let arms = |exclusive: bool| {
+        let mut graph = key_chain();
+        let condition = push(
+            &mut graph,
+            json!({"kind":"load","name":"c"}),
+            &[],
+            &[],
+            "bool",
+        );
+        let other = if exclusive {
+            push(
+                &mut graph,
+                json!({"kind":"logical","logical":"not"}),
+                &[condition],
+                &[],
+                "bool",
+            )
+        } else {
+            condition
+        };
+        let x = push(
+            &mut graph,
+            json!({"kind":"load","name":"y"}),
+            &[],
+            &[4],
+            "f32",
+        );
+        let first = push(
+            &mut graph,
+            json!({"kind":"dropout"}),
+            &[x, 8, 11, condition],
+            &[4],
+            "f32",
+        );
+        let second = push(
+            &mut graph,
+            json!({"kind":"dropout"}),
+            &[x, 8, 11, other],
+            &[4],
+            "f32",
+        );
+        graph["roots"] = json!([9, first, second]);
+        graph
+    };
+    accepts(&arms(true));
+    rejects_domain(&arms(false), "whose activations are not exclusive");
+}
+
+/// Rule V3 on the wire after constant folding: an activation that is the
+/// `bool` constant `false` never draws, so it is exclusive with any other
+/// activation; two `true` constants are not.
+#[test]
+fn the_codec_admits_a_constant_false_arm_and_rejects_two_true_ones() {
+    let arms = |first: bool, second: bool| {
+        let mut graph = key_chain();
+        let mut constant = |value: bool| {
+            push(
+                &mut graph,
+                json!({"kind":"const","value":{"dtype":"bool","value":value}}),
+                &[],
+                &[],
+                "bool",
+            )
+        };
+        let (first, second) = (constant(first), constant(second));
+        let x = push(
+            &mut graph,
+            json!({"kind":"load","name":"y"}),
+            &[],
+            &[4],
+            "f32",
+        );
+        let a = push(
+            &mut graph,
+            json!({"kind":"dropout"}),
+            &[x, 8, 11, first],
+            &[4],
+            "f32",
+        );
+        let b = push(
+            &mut graph,
+            json!({"kind":"dropout"}),
+            &[x, 8, 11, second],
+            &[4],
+            "f32",
+        );
+        graph["roots"] = json!([9, a, b]);
+        graph
+    };
+    accepts(&arms(true, false));
+    accepts(&arms(false, true));
+    accepts(&arms(false, false));
+    rejects_domain(&arms(true, true), "whose activations are not exclusive");
 }
 
 /// spec/10 §3.2: a key is read only by the draw that consumes it and that
@@ -285,7 +702,10 @@ fn random_controls_seeds_and_keys_keep_their_structural_types() {
     // The rate is a rank-zero value of the data dtype, never an integer.
     let mut integer_rate = dag.clone();
     integer_rate["nodes"][dropout]["inputs"][1] = json!(seed);
-    rejects_domain(&integer_rate, "random control must be a rank-zero value");
+    rejects_domain(
+        &integer_rate,
+        "random control must be a value of the draw's dtype",
+    );
 
     // A scoped draw key's first input is its literal int64 seed.
     let mut runtime_seed = dag.clone();
@@ -344,5 +764,222 @@ fn gradient_random_lowering_preserves_scalar_bool_activation() {
     let mut malformed = dag.clone();
     malformed["nodes"][activation]["op"] = json!({"kind":"load","name":"bad_activation"});
     malformed["nodes"][activation]["output_type"]["precision"] = json!("f32");
-    rejects_domain(&malformed, "rank-zero Bool activation");
+    rejects_domain(&malformed, "exactly one Bool activation");
+}
+
+// ---- one operand rule on both sides of the codec ----
+
+/// Axis `name` of unknown extent, or a literal extent.
+enum Axis {
+    Named(&'static str),
+    Lit(usize),
+}
+
+fn tensor(axes: &[Axis], precision: Prim) -> TensorType {
+    TensorType {
+        dims: axes
+            .iter()
+            .map(|axis| match axis {
+                Axis::Named(name) => DimInfo::Named((*name).into(), None),
+                Axis::Lit(extent) => DimInfo::Lit(*extent),
+            })
+            .collect(),
+        precision,
+    }
+}
+
+fn ir_node(dag: &mut Dag, op: RiscOp, inputs: Vec<NodeId>, ty: TensorType) -> NodeId {
+    dag.add_node(op, inputs, ty, None)
+}
+
+/// The wire form of the loads, constants, key operations and draws below.
+fn wire_of(dag: &Dag) -> Value {
+    let nodes = dag
+        .nodes()
+        .iter()
+        .map(|node| {
+            let op = match &node.op {
+                RiscOp::Load { name } => json!({"kind":"load","name":name.as_str()}),
+                RiscOp::Const { value } if value.prim() == Prim::Int64 => {
+                    json!({"kind":"const","value":{"dtype":"int64","value":value.as_i64_exact().unwrap()}})
+                }
+                RiscOp::Const { value } => json!({"kind":"const","value":{"dtype":"f32",
+                    "bits":format!("{:08x}", (value.as_f64_lossy() as f32).to_bits())}}),
+                RiscOp::KeyFromSeed => json!({"kind":"key_from_seed"}),
+                RiscOp::Split { branch } => json!({"kind":"split","branch":match branch {
+                    KeyBranch::Left => "left",
+                    KeyBranch::Right => "right",
+                }}),
+                RiscOp::SplitN {
+                    count: RtDim::Lit(count),
+                } => json!({"kind":"split_n","count":{"bound":"lit","value":count}}),
+                RiscOp::UniformLike => json!({"kind":"uniform_like"}),
+                RiscOp::UniformBoundAdjoint { .. } => {
+                    json!({"kind":"uniform_bound_adjoint","bound":"high"})
+                }
+                other => panic!("no wire form here for {other:?}"),
+            };
+            let dims = node
+                .output_type
+                .dims
+                .iter()
+                .map(|dim| match dim {
+                    DimInfo::Named(name, None) => json!({"kind":"named","name":name,"size":null}),
+                    DimInfo::Lit(size) => json!({"kind":"lit","size":size}),
+                    other => panic!("no wire form here for {other:?}"),
+                })
+                .collect::<Vec<_>>();
+            json!({"shape_deps":[],"span_id":null,"merged_spans":[],"id":node.id.0,"op":op,
+                "inputs":node.inputs.iter().map(|input| input.0).collect::<Vec<_>>(),
+                "output_type":{"dims":dims,"precision":node.output_type.precision.interchange_name()}})
+        })
+        .collect::<Vec<_>>();
+    let roots = dag.roots().iter().map(|root| root.0).collect::<Vec<_>>();
+    json!({"schema_version": WIRE_DAG_SCHEMA_VERSION, "nodes": nodes, "roots": roots})
+}
+
+/// Keys `split_n(key(7), 3)`: nodes 0 to 2.
+fn three_keys(dag: &mut Dag) -> NodeId {
+    let seed = ir_node(
+        dag,
+        RiscOp::Const {
+            value: scalar_from_i64("test", Prim::Int64, 7).unwrap(),
+        },
+        vec![],
+        tensor(&[], Prim::Int64),
+    );
+    let key = ir_node(dag, RiscOp::KeyFromSeed, vec![seed], tensor(&[], Prim::Key));
+    ir_node(
+        dag,
+        RiscOp::SplitN {
+            count: RtDim::Lit(3),
+        },
+        vec![key],
+        tensor(&[Axis::Lit(3)], Prim::Key),
+    )
+}
+
+fn f32_bound(dag: &mut Dag, value: f64) -> NodeId {
+    ir_node(
+        dag,
+        RiscOp::synth_const(Prim::F32, value),
+        vec![],
+        tensor(&[], Prim::F32),
+    )
+}
+
+/// Round 3's witness: a `UniformLike` over `t: [3, 4]` declared `[rows, 4]`.
+fn uniform_declaring(rows: usize) -> Dag {
+    let mut dag = Dag::new();
+    let keys = three_keys(&mut dag);
+    let t = ir_node(
+        &mut dag,
+        RiscOp::Load { name: "t".into() },
+        vec![],
+        tensor(&[Axis::Lit(3), Axis::Lit(4)], Prim::F32),
+    );
+    let low = f32_bound(&mut dag, 0.0);
+    let high = f32_bound(&mut dag, 1.0);
+    let drawn = ir_node(
+        &mut dag,
+        RiscOp::UniformLike,
+        vec![t, low, high, keys],
+        tensor(&[Axis::Lit(rows), Axis::Lit(4)], Prim::F32),
+    );
+    dag.add_root(drawn);
+    dag
+}
+
+/// A `Split` of `k: [n]` declared `[out]`.
+fn split_declaring(out: &'static str) -> Dag {
+    let mut dag = Dag::new();
+    let k = ir_node(
+        &mut dag,
+        RiscOp::Load { name: "k".into() },
+        vec![],
+        tensor(&[Axis::Named("n")], Prim::Key),
+    );
+    let split = ir_node(
+        &mut dag,
+        RiscOp::Split {
+            branch: KeyBranch::Left,
+        },
+        vec![k],
+        tensor(&[Axis::Named(out)], Prim::Key),
+    );
+    dag.add_root(split);
+    dag
+}
+
+/// A forward `UniformLike` over `t: [3, 5]` and its bound adjoint over a
+/// cotangent `g: [3, trailing]`.
+fn adjoint_over(trailing: usize) -> Dag {
+    let mut dag = Dag::new();
+    let keys = three_keys(&mut dag);
+    let t = ir_node(
+        &mut dag,
+        RiscOp::Load { name: "t".into() },
+        vec![],
+        tensor(&[Axis::Lit(3), Axis::Lit(5)], Prim::F32),
+    );
+    let low = f32_bound(&mut dag, 0.0);
+    let high = f32_bound(&mut dag, 1.0);
+    let forward = ir_node(
+        &mut dag,
+        RiscOp::UniformLike,
+        vec![t, low, high, keys],
+        tensor(&[Axis::Lit(3), Axis::Lit(5)], Prim::F32),
+    );
+    let g = ir_node(
+        &mut dag,
+        RiscOp::Load { name: "g".into() },
+        vec![],
+        tensor(&[Axis::Lit(3), Axis::Lit(trailing)], Prim::F32),
+    );
+    let adjoint = ir_node(
+        &mut dag,
+        RiscOp::UniformBoundAdjoint {
+            bound: UniformBound::High,
+        },
+        vec![t, g, keys],
+        tensor(&[], Prim::F32),
+    );
+    dag.add_root(forward);
+    dag.add_root(adjoint);
+    dag
+}
+
+/// Round 3 found the IR verifier and the wire decoder applying different
+/// operand rules in three places. Both now call `verify_random_operands`,
+/// so each divergent graph gets the same sentence, node number included,
+/// from `verify` and from the decoder, and each agreeing graph passes both.
+///
+/// Evidentiary status: REGRESSION TEST. At c23ec448a `verify` accepted all
+/// three divergent graphs, and the decoder's reports named no node.
+#[test]
+fn the_verifier_and_the_codec_share_one_operand_rule() {
+    let cases = [
+        (
+            uniform_declaring(2),
+            uniform_declaring(3),
+            "node 6: uniform_like must preserve its float template's exact shape and dtype",
+        ),
+        (
+            split_declaring("m"),
+            split_declaring("n"),
+            "node 1: key operation must be element-wise over one exact shape, with a split's count axis appended last",
+        ),
+        (
+            adjoint_over(7),
+            adjoint_over(5),
+            "node 8: a uniform bound adjoint is a value of its template's dtype, shaped like a leading part of its key's shape, over a cotangent of its template's exact type",
+        ),
+    ];
+    for (divergent, agreeing, sentence) in cases {
+        let errors = chelis_ir::verify::verify(&divergent);
+        assert!(errors.iter().any(|error| error == sentence), "{errors:?}");
+        rejects_domain(&wire_of(&divergent), sentence);
+        assert_eq!(chelis_ir::verify::verify(&agreeing), Vec::<String>::new());
+        accepts(&wire_of(&agreeing));
+    }
 }

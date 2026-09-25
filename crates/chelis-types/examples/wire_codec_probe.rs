@@ -72,6 +72,10 @@ fn main() {
                 "float"
             } else if prim.is_integer() {
                 "integer"
+            } else if prim == Prim::Key {
+                // A random key (spec/04 §1.1): stored, but with no literal
+                // carrier in the codec.
+                "key"
             } else {
                 assert_eq!(prim, Prim::Bool);
                 "bool"

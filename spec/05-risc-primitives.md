@@ -1070,6 +1070,58 @@ compile-time-only alias.
 > assigns them as sequential evaluation of its branches in source order
 > would. (Not every lane meets this rule yet; chelis#2413 tracks the gaps.)
 
+### 2.7 Random Keys
+
+A `key` (spec/04 §1.1) names the stream of one random draw. The operations
+below create and derive keys; they are pure and deterministic, and each
+derivation consumes the key it is given. (These operations are not yet
+reachable from source; chelis#2413.)
+
+| Name | Signature | Semantics |
+|---|---|---|
+| `key_from_seed` | `(i64) -> key` | The root key of a seed ([05-OP-69]) |
+| `split_key` | `(key) -> (key, key)` | Two child keys ([05-OP-70]) |
+| `split_keys` | `(key, i64) -> tensor[n, key]` | `n` child keys ([05-OP-71]) |
+| `fold_in` | `(key, i64) -> key` | The child key of an integer ([05-OP-72]) |
+
+> **[05-RNG-2]** A key is a 64-bit word. For a key `k` and a 64-bit word
+> `j`, `derive(k, j) = splitmix64(k XOR rotl64(splitmix64(j), 29))`, where
+> `rotl64(x, r)` rotates `x` left by `r` bits modulo `2^64` and `splitmix64`
+> is [05-RNG-1]'s map. `derive` is a bijection in each argument when the
+> other is fixed. The source word of flat element index `i` of a draw keyed
+> by `k` is `word(k, i) = splitmix64(k XOR rotl64(splitmix64(i), 41))`, and
+> its unit value is the exact rational formed by the word's high 53 bits
+> divided by `2^53`. [05-RNG-1]'s draw with seed bits `s` and call ordinal
+> `c` is the draw keyed by `s XOR rotl64(splitmix64(c), 17)`. `derive` and
+> `word` are definitions, not callable operations.
+
+> **[05-OP-69]** `key_from_seed(seed) -> key` takes an `i64` seed and returns
+> the key whose 64 bits are the seed's two's-complement bits, with no mixing.
+> A `tensor[D, i64]` of seeds gives the `tensor[D, key]` of their keys element
+> by element. The operation is non-differentiable: the seed receives no
+> cotangent and the key carries none.
+
+> **[05-OP-70]** `split_key(k) -> (key, key)` consumes the key `k` and returns
+> the pair `(derive(k, 0), derive(k, 1))` of [05-RNG-2]. For a
+> `tensor[D, key]` operand each half is a `tensor[D, key]` computed element by
+> element. The two halves are distinct keys, each usable once, and neither
+> carries a cotangent.
+
+> **[05-OP-71]** `split_keys(k, n) -> tensor[n, key]` consumes the key `k` and
+> takes a runtime `i64` count `n`. Row `j` of the result, for `0 <= j < n`,
+> is `derive(derive(k, 2), j)` of [05-RNG-2], the key that folding `j` into
+> `k` yields. `n` SHALL be non-negative: a negative count traps before
+> allocation, as a negative runtime movement bound does, and `n = 0` gives an
+> empty tensor. For a `tensor[D, key]` operand the result is
+> `tensor[D ++ [n], key]`, the new axis last. No row carries a cotangent.
+
+> **[05-OP-72]** `fold_in(k, n) -> key` consumes the key `k` and returns
+> `derive(derive(k, 2), n)` of [05-RNG-2], reading the `i64` `n` as its
+> two's-complement 64 bits, so every `n`, negative ones included, is valid.
+> A `tensor[D, key]` and a `tensor[D, i64]` of exactly equal shape give the
+> `tensor[D, key]` computed element by element, with no broadcasting. The key
+> carries no cotangent and `n` receives none.
+
 ---
 
 ## 3. Derived Built-Ins (Tier 2)
@@ -1588,7 +1640,7 @@ traps `Test` with its supplied label and the operation name.
 > **[05-OP-25]** `to_string(value) -> result` borrows exactly one value
 > without consuming it and returns `string`. It admits exactly an active
 > numeric, `bool`, or `string` scalar; a tensor whose element dtype is one of
-> the nine active tensor element dtypes in spec/04 §1.1; or a `List` whose
+> the nine active data element dtypes in spec/04 §1.1; or a `List` whose
 > reachable elements are recursively admitted by this rule. Unit, tuples,
 > `Dict`, `Option`, ADTs, functions, resource handles, and
 > deferred values are type errors. A `string`
@@ -1780,7 +1832,7 @@ exact ADT identity by [05-OP-34].
 >
 > `typedef uint8_t chelis_dtype;`
 >
-> `enum { CHELIS_DTYPE_F32 = 0, CHELIS_DTYPE_F64 = 1, CHELIS_DTYPE_I32 = 2, CHELIS_DTYPE_BOOL = 3, CHELIS_DTYPE_I64 = 4, CHELIS_DTYPE_BF16 = 5, CHELIS_DTYPE_F16 = 6, CHELIS_DTYPE_I8 = 7, CHELIS_DTYPE_I16 = 8 };`
+> `enum { CHELIS_DTYPE_F32 = 0, CHELIS_DTYPE_F64 = 1, CHELIS_DTYPE_I32 = 2, CHELIS_DTYPE_BOOL = 3, CHELIS_DTYPE_I64 = 4, CHELIS_DTYPE_BF16 = 5, CHELIS_DTYPE_F16 = 6, CHELIS_DTYPE_I8 = 7, CHELIS_DTYPE_I16 = 8, CHELIS_DTYPE_KEY = 9 };`
 >
 > `typedef struct { chelis_dtype dtype; uint8_t reserved[7]; uint64_t bits; } chelis_scalar;`
 >
@@ -1799,15 +1851,17 @@ exact ADT identity by [05-OP-34].
 > `typedef struct { chelis_value key; chelis_value value; } chelis_dict_entry;`
 >
 > `chelis_dtype` has the closed active IDs `F32=0`, `F64=1`, `I32=2`,
-> `Bool=3`, `I64=4`, `Bf16=5`, `F16=6`, `I8=7`, and `I16=8`. In that
-> order, the low 32/64/32/8/64/16/16/8/16 bits of `chelis_scalar.bits` are
-> the exact stored image and all unused high bits are zero. A bool payload is
-> exactly `0` or `1`. Float construction and transport preserve NaN payload
+> `Bool=3`, `I64=4`, `Bf16=5`, `F16=6`, `I8=7`, `I16=8`, and `Key=9`.
+> `Key` is a tensor dtype only: its element is one opaque 64-bit random key
+> (spec/04 §1.1), and a `chelis_scalar` never carries it. For the other nine
+> IDs in order, the low 32/64/32/8/64/16/16/8/16 bits of `chelis_scalar.bits`
+> are the exact stored image and all unused high bits are zero. A bool payload
+> is exactly `0` or `1`. Float construction and transport preserve NaN payload
 > and signed-zero bits. Every consumer validates both the foreign dtype value
 > and this canonical bit shape before sizing, allocation, storage access, or
-> observation. An unknown dtype, nonzero unused bit, malformed bool, or
-> dtype mismatch traps `Domain` at that boundary; no operation repairs or
-> reinterprets it.
+> observation. An unknown dtype, a `Key` scalar, nonzero unused bit,
+> malformed bool, or dtype mismatch traps `Domain` at that boundary; no
+> operation repairs or reinterprets it.
 >
 > Every `reserved` byte is zero. An optional scalar result is one owned
 > [05-OP-44] option node whose `Some` child is a validated scalar-tagged

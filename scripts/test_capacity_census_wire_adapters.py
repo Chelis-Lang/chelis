@@ -313,6 +313,92 @@ class CanonicalCodecControls(unittest.TestCase):
             with self.subTest(observations=observations), self.assertRaises(GraphError):
                 check_observations([case], observations)
 
+    NUMERIC = [
+        ("f64", 8, "float"),
+        ("f32", 4, "float"),
+        ("int64", 8, "integer"),
+        ("bool", 1, "bool"),
+    ]
+
+    @staticmethod
+    def vocabulary(rows):
+        return [{"name": n, "width": w, "kind": k} for n, w, k in rows]
+
+    def test_a_stored_key_gets_only_rejected_literal_spellings(self):
+        # spec/10 section 3.2: `key` is a runtime dtype with no literal or
+        # storage carrier. Every key case is an executed rejection, in both
+        # codecs and both carriers, and the key shifts no carried ordinal.
+        from capacity_census_wire_adapters import codec_cases
+
+        plain = codec_cases(self.vocabulary(self.NUMERIC))
+        with_key = codec_cases(self.vocabulary(self.NUMERIC + [("key", 8, "key")]))
+        keys = [c for c in with_key if c.dtype == "key"]
+        self.assertEqual([c for c in with_key if c.dtype != "key"], plain)
+        self.assertEqual(
+            sorted(c.identity for c in keys),
+            sorted(
+                f"{carrier}/{codec}/key/{label}"
+                for carrier in ("scalar", "storage")
+                for codec, label in (
+                    ("json", "no-literal-bits"),
+                    ("json", "no-literal-value"),
+                    ("binary", "no-literal-ordinal"),
+                )
+            ),
+        )
+        self.assertTrue(all(c.expected is None and c.rejection_contains for c in keys))
+        # The bincode control uses the first ordinal past the carried variants,
+        # the one an appended key variant would take.
+        for case in keys:
+            if case.codec == "binary":
+                ordinal = int.from_bytes(bytes.fromhex(case.input)[:4], "little")
+                self.assertEqual(ordinal, len(self.NUMERIC))
+
+    def test_a_numeric_payload_cannot_be_declared_a_key(self):
+        # Negative controls: the key kind admits exactly the one 64-bit `key`
+        # dtype, and no codec order may carry it.
+        from capacity_census_wire_adapters import codec_cases
+
+        for rows, order in (
+            (self.NUMERIC + [("f16", 2, "key")], None),
+            (self.NUMERIC + [("key", 4, "key")], None),
+            ([("f64", 8, "key"), ("f32", 4, "float")], None),
+            (self.NUMERIC + [("key", 8, "key"), ("key2", 8, "key")], None),
+            (
+                self.NUMERIC + [("key", 8, "key")],
+                ("f64", "f32", "int64", "bool", "key"),
+            ),
+        ):
+            with self.subTest(rows=rows, order=order), self.assertRaises(GraphError):
+                codec_cases(self.vocabulary(rows), order)
+
+    def test_an_accepted_key_literal_fails_the_executed_observation_check(self):
+        from capacity_census_wire_adapters import check_observations, codec_cases
+
+        keys = [
+            c
+            for c in codec_cases(self.vocabulary(self.NUMERIC + [("key", 8, "key")]))
+            if c.dtype == "key"
+        ]
+        rejected = [
+            {"id": c.identity, "observation": None, "decode_error": c.rejection_contains}
+            for c in keys
+        ]
+        self.assertEqual(
+            {o.outcome for o in check_observations(keys, rejected)}, {"passed"}
+        )
+        accepted = copy.deepcopy(rejected)
+        accepted[0] = {
+            "id": keys[0].identity,
+            "observation": {"dtype": "key", "elements": ["0000000000000007"]},
+        }
+        with self.assertRaisesRegex(GraphError, "wrong codec observation"):
+            check_observations(keys, accepted)
+        unrelated = copy.deepcopy(rejected)
+        unrelated[0]["decode_error"] = "unrelated failure"
+        with self.assertRaisesRegex(GraphError, "wrong decode rejection reason"):
+            check_observations(keys, unrelated)
+
 
 class CodecTargetLease(unittest.TestCase):
     def test_canonical_codec_cleans_an_initialized_owned_target(self):
@@ -437,6 +523,64 @@ class ActualCanonicalCodec(unittest.TestCase):
         identities = {d.identity for d in discovered.definitions}
         self.assertTrue(any(name.endswith("::BinaryScalarWire") for name in identities))
         self.assertTrue(any(name.endswith("::HexBits") for name in identities))
+
+    def test_the_actual_codec_stores_keys_with_no_literal_carrier(self):
+        # The executed runtime vocabulary holds the key dtype, the actual
+        # codec rejected every key spelling, and the opaque key payload added
+        # no numeric leaf (the leaf set above is the eight numeric dtypes).
+        vocabulary = json.loads(self.receipt.vocabulary)
+        self.assertIn({"name": "key", "width": 8, "kind": "key"}, vocabulary)
+        executed = {row.identity: row for row in self.receipt.outcomes}
+        keys = [identity for identity in executed if "/key/" in identity]
+        self.assertEqual(len(keys), 6)
+        self.assertTrue(all(executed[k].outcome == "passed" for k in keys))
+
+    def test_a_key_wire_variant_or_a_bare_word_key_payload_is_rejected(self):
+        # Negative controls on the actual rustdoc graph: a `key` variant in a
+        # wire mirror would be a literal carrier, and a native key payload
+        # other than the opaque `RandomKey` would be a bare numeric word.
+        from capacity_census_wire_adapters import _CodecShapeGraph
+
+        vocabulary = json.loads(self.receipt.vocabulary)
+        for change, message in (
+            ("mirror-variant", "a random key has no wire literal carrier"),
+            ("bare-word", "native dtype/width vocabulary differs"),
+        ):
+            with self.subTest(change=change):
+                document = copy.deepcopy(self.document)
+                items = document["index"]
+                if change == "mirror-variant":
+                    mirror = next(
+                        i for i in items.values() if i.get("name") == "ScalarWire"
+                    )
+                    variants = mirror["inner"]["enum"]["variants"]
+                    source = next(
+                        items[str(v)] for v in variants if items[str(v)]["name"] == "I64"
+                    )
+                    added = copy.deepcopy(source)
+                    added["id"] = max(int(k) for k in items) + 1
+                    added["name"] = "Key"
+                    added["attrs"] = [
+                        a if "rename" not in str(a) else {"other": '#[serde(rename = "key")]'}
+                        for a in added["attrs"]
+                    ]
+                    items[str(added["id"])] = added
+                    variants.append(added["id"])
+                else:
+                    native = next(
+                        i
+                        for i in items.values()
+                        if i.get("name") == "Bits" and "enum" in i["inner"]
+                    )
+                    variant = next(
+                        items[str(v)]
+                        for v in native["inner"]["enum"]["variants"]
+                        if items[str(v)]["name"] == "Key"
+                    )
+                    field = items[str(variant["inner"]["variant"]["kind"]["tuple"][0])]
+                    field["inner"]["struct_field"] = {"primitive": "u64"}
+                with self.assertRaisesRegex(GraphError, message):
+                    _CodecShapeGraph([document], vocabulary).canonical_graph()
 
     def test_arbitrary_or_changed_artifacts_cannot_reuse_execution(self):
         from capacity_census_wire_adapters import CanonicalWireGraph, VerifiedCodec

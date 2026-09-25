@@ -120,6 +120,9 @@ fn checked_literals_preserve_every_storage_width_and_reject_count_mismatch() {
             StorageView::I16(v) => v.iter().flat_map(|x| x.to_ne_bytes()).collect(),
             StorageView::I8(v) => v.iter().map(|x| *x as u8).collect(),
             StorageView::Bool(v) => v.to_vec(),
+            StorageView::Key(_) => {
+                unreachable!("the dtype list above has no key: a key has no literal")
+            }
         };
         let source = codegen(
             &checked_literal_dag(storage.clone(), 4, dtype),
@@ -571,6 +574,7 @@ fn checked_blas_batches_scratch_and_empty_domains_execute_under_sanitizers() {
                 globals: vec![],
                 global_tensor_helpers: vec![],
                 summary_rejections: vec![],
+                adt_layouts: Vec::new(),
                 functions: vec![HostFunction {
                     helper_result_claim_axes: Vec::new(),
                     name: "host_blas".into(),
@@ -944,6 +948,7 @@ int main(void) {{
                     globals: vec![],
                     global_tensor_helpers: vec![],
                     summary_rejections: vec![],
+                    adt_layouts: Vec::new(),
                     functions: vec![HostFunction {
                         helper_result_claim_axes: Vec::new(),
                         name: "host_sparse_add".into(),
@@ -4962,6 +4967,10 @@ fn c_storage_case(storage: &chelis_types::TensorStorage) -> (&'static str, &'sta
             .iter()
             .map(|value| format!("UINT8_C({value})"))
             .collect::<Vec<_>>(),
+        StorageView::Key(keys) => keys
+            .iter()
+            .map(|key| format!("UINT64_C(0x{:016x})", key.bits()))
+            .collect::<Vec<_>>(),
     };
     let (c_type, c_dtype) = match storage.prim() {
         Prim::F64 => ("double", "CHELIS_DTYPE_F64"),
@@ -4973,6 +4982,7 @@ fn c_storage_case(storage: &chelis_types::TensorStorage) -> (&'static str, &'sta
         Prim::Int16 => ("int16_t", "CHELIS_DTYPE_I16"),
         Prim::Int8 => ("int8_t", "CHELIS_DTYPE_I8"),
         Prim::Bool => ("uint8_t", "CHELIS_DTYPE_BOOL"),
+        Prim::Key => ("uint64_t", "CHELIS_DTYPE_KEY"),
         other => panic!("unsupported C test dtype {other:?}"),
     };
     (c_type, c_dtype, values.join(", "))
@@ -6497,6 +6507,7 @@ fn host_binary_program(builtin: &str, lhs: Vec<usize>, rhs: Vec<usize>) -> HostP
             summary_rejections: Vec::new(),
         }],
         summary_rejections: Vec::new(),
+        adt_layouts: Vec::new(),
     }
 }
 
@@ -7343,6 +7354,7 @@ fn host_scalar_relu_program(ty: HostType) -> HostProgram {
             summary_rejections: Vec::new(),
         }],
         summary_rejections: Vec::new(),
+        adt_layouts: Vec::new(),
     }
 }
 
@@ -9247,6 +9259,7 @@ fn host_diagonal_program(operand: Vec<usize>, declared: usize) -> HostProgram {
             summary_rejections: Vec::new(),
         }],
         summary_rejections: Vec::new(),
+        adt_layouts: Vec::new(),
     }
 }
 

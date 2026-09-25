@@ -7,7 +7,7 @@ use chelis_runtime::{
 };
 
 const CHILD_CASE_ENV: &str = "CHELIS_RUNTIME_DTYPE_INVALID_CHILD_CASE";
-const INVALID_DTYPE: chelis_dtype = 9;
+const INVALID_DTYPE: chelis_dtype = 10;
 
 #[test]
 fn invalid_dtype_child() {
@@ -47,7 +47,7 @@ fn every_raw_dtype_ffi_boundary_rejects_before_returning_a_value() {
         );
         let stderr = String::from_utf8_lossy(&output.stderr);
         assert!(
-            stderr.contains("invalid Chelis runtime dtype id: 9"),
+            stderr.contains("invalid Chelis runtime dtype id: 10"),
             "invalid dtype case `{case}` lost the raw ID diagnostic:\n{stderr}"
         );
     }

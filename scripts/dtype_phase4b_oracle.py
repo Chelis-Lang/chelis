@@ -1095,12 +1095,13 @@ def validate_normative_contract(
     require_all(
         spec04,
         (
-            ("The active primitive set is exactly ten names", "ten active primitives"),
+            ("The active primitive set is exactly eleven names", "eleven active primitives"),
             (
-                "one of the ten active primitives is well-typed",
+                "one of the eleven active primitives is well-typed",
                 "backend-neutral active primitive set",
             ),
-            ("nine active tensor element dtypes", "nine tensor element dtypes"),
+            ("ten active tensor element dtypes", "ten tensor element dtypes"),
+            ("nine active data element dtypes", "nine data element dtypes"),
             (
                 "For an unconsumed local owner, the compiler inserts `Drop` at the "
                 "earliest\npost-dominating point after its last use",
@@ -1159,7 +1160,7 @@ def validate_normative_contract(
     require_all(
         spec10,
         (
-            ("Schema version 17 is explicitly\npresent", "wire v17 presence"),
+            ("Schema version 18 is explicitly\npresent", "wire v18 presence"),
             ("the only accepted version", "wire current-version exactness"),
             ("There is no versionless default", "wire versionless rejection"),
             ("versionless default, legacy migration", "wire migration rejection"),
@@ -2048,7 +2049,7 @@ def validate_normative_contract(
             "`to_string(value) -> result` borrows exactly one value",
             "without consuming it and returns `string`",
             "It admits exactly an active numeric, `bool`, or `string` scalar",
-            "a tensor whose element dtype is one of the nine active tensor element dtypes",
+            "a tensor whose element dtype is one of the nine active data element dtypes",
             "a `List` whose reachable elements are recursively admitted by this rule",
             "Unit, tuples, `Dict`, `Option`, ADTs, functions, resource handles, and "
             "deferred values are type errors",

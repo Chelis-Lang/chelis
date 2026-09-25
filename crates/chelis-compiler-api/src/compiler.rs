@@ -1244,6 +1244,7 @@ fn project_host_program_to_entry(
         global_tensor_helpers: Vec::new(),
         functions,
         summary_rejections,
+        adt_layouts: program.adt_layouts.clone(),
     })
 }
 
@@ -6920,6 +6921,17 @@ fn wire_op(op: &RiscOp) -> WireResult<WireRiscOp> {
                 chelis_ir::dag::UniformBound::High => crate::schema::WireUniformBound::High,
             },
         },
+        RiscOp::KeyFromSeed => WireRiscOp::KeyFromSeed {},
+        RiscOp::Split { branch } => WireRiscOp::Split {
+            branch: match branch {
+                chelis_ir::dag::KeyBranch::Left => crate::schema::WireKeyBranch::Left,
+                chelis_ir::dag::KeyBranch::Right => crate::schema::WireKeyBranch::Right,
+            },
+        },
+        RiscOp::FoldIn => WireRiscOp::FoldIn {},
+        RiscOp::SplitN { count } => WireRiscOp::SplitN {
+            count: wire_bound(count)?,
+        },
         RiscOp::DrawKey {
             handler,
             draw,
@@ -7379,6 +7391,92 @@ mod tests {
         dag.node_mut(root).unwrap().shape_deps = vec![witness];
         dag.add_root(root);
         dag
+    }
+
+    /// chelis#2413 step 1: every explicit key operation projects onto its
+    /// schema-18 variant, and the projection decodes back to itself.
+    #[test]
+    fn explicit_key_operations_project_onto_wire_v18_and_round_trip() {
+        let ty = |dims: &[usize], precision| chelis_ir::dag::TensorType {
+            dims: dims
+                .iter()
+                .map(|extent| chelis_ir::dag::DimInfo::Lit(*extent))
+                .collect(),
+            precision,
+        };
+        let mut dag = Dag::new();
+        let seed = dag.add_node(
+            RiscOp::Const {
+                value: chelis_types::scalar_from_i64("test", chelis_types::types::Prim::Int64, -3)
+                    .unwrap(),
+            },
+            vec![],
+            ty(&[], chelis_types::types::Prim::Int64),
+            None,
+        );
+        let root = dag.add_node(
+            RiscOp::KeyFromSeed,
+            vec![seed],
+            ty(&[], chelis_types::types::Prim::Key),
+            None,
+        );
+        let left = dag.add_node(
+            RiscOp::Split {
+                branch: chelis_ir::dag::KeyBranch::Left,
+            },
+            vec![root],
+            ty(&[], chelis_types::types::Prim::Key),
+            None,
+        );
+        let right = dag.add_node(
+            RiscOp::Split {
+                branch: chelis_ir::dag::KeyBranch::Right,
+            },
+            vec![root],
+            ty(&[], chelis_types::types::Prim::Key),
+            None,
+        );
+        let folded = dag.add_node(
+            RiscOp::FoldIn,
+            vec![left, seed],
+            ty(&[], chelis_types::types::Prim::Key),
+            None,
+        );
+        let rows = dag.add_node(
+            RiscOp::SplitN {
+                count: chelis_ir::dag::RtDim::Lit(3),
+            },
+            vec![folded],
+            ty(&[3], chelis_types::types::Prim::Key),
+            None,
+        );
+        dag.add_root(rows);
+        dag.add_root(right);
+        let projected = wire_dag(&dag).unwrap();
+        let json = serde_json::to_value(&projected).unwrap();
+        assert_eq!(json["schema_version"], 18);
+        let kinds: Vec<&serde_json::Value> = json["nodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|node| &node["op"])
+            .collect();
+        assert_eq!(kinds[1], &serde_json::json!({"kind":"key_from_seed"}));
+        assert_eq!(
+            kinds[2],
+            &serde_json::json!({"kind":"split","branch":"left"})
+        );
+        assert_eq!(
+            kinds[3],
+            &serde_json::json!({"kind":"split","branch":"right"})
+        );
+        assert_eq!(kinds[4], &serde_json::json!({"kind":"fold_in"}));
+        assert_eq!(
+            kinds[5],
+            &serde_json::json!({"kind":"split_n","count":{"bound":"lit","value":3}})
+        );
+        let decoded = crate::schema::WireDag::from_validated_json(&json.to_string()).unwrap();
+        assert_eq!(serde_json::to_value(decoded).unwrap(), json);
     }
 
     #[test]

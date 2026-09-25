@@ -501,6 +501,26 @@ pub enum RandomHandler {
     Scoped { instance: u32 },
 }
 
+/// Which half of `[05-OP-70]`'s pair a [`RiscOp::Split`] produces: `Left` is
+/// `derive(k, 0)` and `Right` is `derive(k, 1)` of `[05-RNG-2]`. `split_key`
+/// is two nodes because an IR node has one output (LaCaDiLE's
+/// `KeyPath.left/right`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum KeyBranch {
+    Left,
+    Right,
+}
+
+impl KeyBranch {
+    /// The kernel half this branch computes.
+    pub const fn half(self) -> chelis_types::dtype_semantics::KeyHalf {
+        match self {
+            Self::Left => chelis_types::dtype_semantics::KeyHalf::Left,
+            Self::Right => chelis_types::dtype_semantics::KeyHalf::Right,
+        }
+    }
+}
+
 /// The random primitive whose controls a [`RiscOp::DrawKey`] validates before
 /// it advances its handler.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -519,6 +539,26 @@ impl RandomDraw {
             Self::UniformLike => 2,
         }
     }
+}
+
+/// How a key-operand random primitive's inputs relate to its key batch
+/// (spec/10 §3.2, rule V5). Every lane checks their runtime extents in this
+/// order before it reads one: the data's leading axes against the key's
+/// shape, then each present per-row input's axes against the key's leading
+/// ones. The DAG evaluator and the C lane both read this one table, so they
+/// check the same inputs in the same order and report the same line.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DrawBatchLayout {
+    /// The operation its traps name.
+    pub op: &'static str,
+    /// The key's input slot.
+    pub key: usize,
+    /// The input whose leading axes are the key's shape: the data, the
+    /// template, or a bound adjoint's cotangent.
+    pub data_input: usize,
+    /// The controls' and the activation's slots, each shaped like a leading
+    /// part of the key's shape; an absent activation is skipped.
+    pub per_row: &'static [usize],
 }
 
 impl ReduceWindowKind {
@@ -711,16 +751,19 @@ pub enum RiscOp {
     /// `1.0f / x` (or the f64 / mixed-precision analog).
     Recip,
     /// `[05-OP-8]` with operand controls. Inputs are `[template, low, high,
-    /// key]`, optionally followed by one rank-0 Bool activation. The template
-    /// supplies only the shape and dtype `p`; `low` and `high` are rank-0
-    /// floats of dtype `p`, or f32 while the checker's bound signature is f32
-    /// (chelis#1295); `key` is this draw's `Prim::Key`, consumed here. An
-    /// inactive draw validates nothing and produces positive zeros.
+    /// key]`, optionally followed by one Bool activation. The template
+    /// supplies only the shape and dtype `p`; `low` and `high` are floats of
+    /// dtype `p`, or f32 while the checker's bound signature is f32
+    /// (chelis#1295); `key` is this draw's `Prim::Key`, consumed here. Under
+    /// spec/10 §3.2's rule V5 the key's shape is the template's leading axes
+    /// and the bounds and activation are shaped like leading parts of the
+    /// key's shape. An inactive draw validates nothing and produces positive
+    /// zeros.
     UniformLike,
     /// `[05-OP-37]` with an operand rate. Inputs are `[x, rate, key]`,
-    /// optionally followed by one rank-0 Bool activation; `rate` is a rank-0
-    /// value of `x`'s dtype and `key` is consumed here. An inactive draw
-    /// validates nothing and produces positive zeros.
+    /// optionally followed by one Bool activation, shaped as for
+    /// `UniformLike`; `rate` is a value of `x`'s dtype and `key` is consumed
+    /// here. An inactive draw validates nothing and produces positive zeros.
     Dropout,
     /// AD-only `[05-OP-37]` pathwise input adjoint. Inputs are `[g, rate,
     /// key]`, optionally followed by the forward draw's activation. It reads
@@ -729,8 +772,9 @@ pub enum RiscOp {
     DropoutReplay,
     /// AD-only `[05-OP-8]` bound adjoint. Inputs are `[template, g, key]`,
     /// optionally followed by the forward draw's activation; the result is a
-    /// rank-0 value of the template's dtype. It reads its forward
-    /// `UniformLike`'s key without consuming it.
+    /// value of the template's dtype shaped like a leading part of the key's
+    /// shape (rule V5). It reads its forward `UniformLike`'s key without
+    /// consuming it.
     UniformBoundAdjoint {
         bound: UniformBound,
     },
@@ -747,6 +791,28 @@ pub enum RiscOp {
         handler: RandomHandler,
         draw: RandomDraw,
         dtype: Prim,
+    },
+    /// `[05-OP-69]` `key_from_seed`: input `[seed: tensor[D, i64]]`, output
+    /// the `tensor[D, key]` of each seed's two's-complement bits. Pure and
+    /// never constant-folded, so an exported key stays symbolic.
+    KeyFromSeed,
+    /// One half of `[05-OP-70]` `split_key`: input `[k: tensor[D, key]]`,
+    /// output the `tensor[D, key]` of `derive(k, 0)` (`Left`) or
+    /// `derive(k, 1)` (`Right`). A parent feeds at most one `Split` of each
+    /// branch, and nothing else.
+    Split {
+        branch: KeyBranch,
+    },
+    /// `[05-OP-72]` `fold_in`: inputs `[k: tensor[D, key], n: tensor[D, i64]]`
+    /// of exactly equal shape, output `derive(derive(k, 2), n)` element-wise.
+    FoldIn,
+    /// `[05-OP-71]` `split_keys`: input `[k: tensor[D, key]]`, then the
+    /// rank-0 exact i64 count node when `count` is `RtDim::Node(1)`. The
+    /// output is `tensor[D ++ [count], key]`, the new axis last; row `j` is
+    /// `derive(derive(k, 2), j)`. A negative runtime count traps before
+    /// allocation, as a negative movement bound does.
+    SplitN {
+        count: RtDim,
     },
 
     // --- Reduction ---
@@ -1126,6 +1192,10 @@ pub enum RiscAtomIdentity {
     Dropout,
     DropoutReplay,
     UniformBoundAdjoint,
+    KeyFromSeed,
+    SplitKey,
+    SplitKeys,
+    FoldIn,
     Sum,
     MaxReduce,
     MinReduce,
@@ -1197,6 +1267,10 @@ impl RiscAtomIdentity {
         Self::Dropout,
         Self::DropoutReplay,
         Self::UniformBoundAdjoint,
+        Self::KeyFromSeed,
+        Self::SplitKey,
+        Self::SplitKeys,
+        Self::FoldIn,
         Self::Sum,
         Self::MaxReduce,
         Self::MinReduce,
@@ -1268,6 +1342,10 @@ impl RiscAtomIdentity {
             Self::Dropout => "dropout",
             Self::DropoutReplay => "DropoutReplay",
             Self::UniformBoundAdjoint => "UniformBoundAdjoint",
+            Self::KeyFromSeed => "key_from_seed",
+            Self::SplitKey => "split_key",
+            Self::SplitKeys => "split_keys",
+            Self::FoldIn => "fold_in",
             Self::Sum => "sum",
             Self::MaxReduce => "max_reduce",
             Self::MinReduce => "min_reduce",
@@ -1308,6 +1386,23 @@ pub enum RiscAtomDisposition {
 }
 
 impl RiscOp {
+    /// The batch layout of a key-operand random primitive, or `None` for any
+    /// other operation.
+    pub fn draw_batch_layout(&self) -> Option<DrawBatchLayout> {
+        let (op, key, data_input, per_row): (_, _, _, &'static [usize]) = match self {
+            Self::Dropout | Self::DropoutReplay => ("dropout", 2, 0, &[1, 3]),
+            Self::UniformLike => ("uniform_like", 3, 0, &[1, 2, 4]),
+            Self::UniformBoundAdjoint { .. } => ("uniform_like", 2, 1, &[3]),
+            _ => return None,
+        };
+        Some(DrawBatchLayout {
+            op,
+            key,
+            data_input,
+            per_row,
+        })
+    }
+
     /// chelis#2368 / [05-OP-68]: operations that must execute because of
     /// what they DO, not because something consumes their result.
     ///
@@ -1374,6 +1469,11 @@ impl RiscOp {
             // The counter-stream bridge supplies a key; it is not a Table-A
             // operation and the explicit-key switch deletes it.
             Self::DrawKey { .. } => Structural,
+            Self::KeyFromSeed => Semantic(Id::KeyFromSeed),
+            // Both halves are one identity: [05-OP-70] returns the pair.
+            Self::Split { .. } => Semantic(Id::SplitKey),
+            Self::SplitN { .. } => Semantic(Id::SplitKeys),
+            Self::FoldIn => Semantic(Id::FoldIn),
             Self::Sum { .. } => Semantic(Id::Sum),
             Self::MaxReduce { .. } => Semantic(Id::MaxReduce),
             Self::MinReduce { .. } => Semantic(Id::MinReduce),
@@ -1736,6 +1836,11 @@ impl RiscOp {
             | RiscOp::DropoutReplay
             | RiscOp::UniformBoundAdjoint { .. }
             | RiscOp::DrawKey { .. } => false,
+
+            // Key derivations produce opaque keys, not a numeric envelope.
+            RiscOp::KeyFromSeed | RiscOp::Split { .. } | RiscOp::FoldIn | RiscOp::SplitN { .. } => {
+                false
+            }
 
             // Argmax/argmin return discrete indices, not a numeric
             // envelope over the reals; outside the forward-bound story.
@@ -2211,6 +2316,30 @@ impl Dag {
             .collect()
     }
 
+    /// chelis#2413: whether a random node can trap by itself, and so is an
+    /// observable root for dead-code elimination (`spec/06-transformations.md`
+    /// §5.2, "purity alone does not make a possible trap dead").
+    ///
+    /// A draw validates its own rate or bounds ([05-OP-37]/[05-OP-8]) unless
+    /// its key is a `DrawKey`'s output: that `DrawKey` validates the same
+    /// controls first, and whether it runs is the counter stream's own
+    /// liveness rule, so the draw adds no trap of its own. A `SplitN` traps
+    /// on a negative runtime count ([05-OP-71]); a literal count cannot be
+    /// negative. The other key operations are total.
+    pub fn random_node_may_trap(&self, node: &DagNode) -> bool {
+        let key_slot = match &node.op {
+            RiscOp::Dropout => 2,
+            RiscOp::UniformLike => 3,
+            RiscOp::SplitN { count } => return count.as_lit().is_none(),
+            _ => return false,
+        };
+        !node
+            .inputs
+            .get(key_slot)
+            .and_then(|key| self.get(*key))
+            .is_some_and(|key| matches!(key.op, RiscOp::DrawKey { .. }))
+    }
+
     pub fn set_roots(&mut self, roots: Vec<NodeId>) {
         self.roots = roots;
     }
@@ -2301,6 +2430,15 @@ fn op_declared_output_axes(dag: &Dag, node: &DagNode) -> Vec<(String, usize)> {
             }
             _ => Vec::new(),
         },
+        // A key split's node-valued count computes its appended last axis.
+        RiscOp::SplitN {
+            count: RtDim::Node(_),
+        } => match node.output_type.dims.last() {
+            Some(DimInfo::Named(symbol, None)) if !is_anon(symbol) => {
+                vec![(symbol.clone(), node.output_type.dims.len() - 1)]
+            }
+            _ => Vec::new(),
+        },
         _ => Vec::new(),
     }
 }
@@ -2331,6 +2469,15 @@ pub(crate) fn op_declarable_axes(dag: &Dag, node: &DagNode) -> Vec<usize> {
             size: RtDim::Node(_) | RtDim::InputAxis { .. },
         } => vec![*axis],
         RiscOp::Expand { .. } => Vec::new(),
+        RiscOp::SplitN {
+            count: RtDim::Node(_),
+        } => node
+            .output_type
+            .dims
+            .len()
+            .checked_sub(1)
+            .into_iter()
+            .collect(),
         _ => Vec::new(),
     }
 }
@@ -2372,6 +2519,13 @@ pub(crate) fn op_declared_axes_by_node(dag: &Dag) -> UnordMap<NodeId, Vec<(Strin
 pub fn record_runtime_dim_shape_deps(dag: &mut Dag) {
     let mut declarers: UnordMap<String, NodeId> = UnordMap::new();
     for node in dag.nodes() {
+        // chelis#2413: a runtime-count `SplitN` declares its count axis, but
+        // its value is a key, which no node may take as a dependency (spec/10
+        // §3.2). It needs no edge: a runtime count can trap, so every pruner
+        // keeps the split live by itself (`Dag::random_node_may_trap`).
+        if node.output_type.precision == Prim::Key {
+            continue;
+        }
         for (symbol, _) in op_declared_output_axes(dag, node) {
             declarers.entry(symbol).or_insert(node.id);
         }
@@ -2517,7 +2671,20 @@ fn shape_source_for_axis(dag: &Dag, id: NodeId, axis: usize) -> Option<(String, 
         | RiscOp::Drop
         | RiscOp::Realize
         | RiscOp::Cast { .. }
-        | RiscOp::CastTrunc { .. } => shape_source_for_axis(dag, *node.inputs.first()?, axis),
+        | RiscOp::CastTrunc { .. }
+        | RiscOp::KeyFromSeed
+        | RiscOp::Split { .. }
+        | RiscOp::FoldIn => shape_source_for_axis(dag, *node.inputs.first()?, axis),
+        // [05-OP-71]: the key's axes pass through; the appended count axis
+        // comes from the count, not from the key.
+        RiscOp::SplitN { .. } => {
+            let key = *node.inputs.first()?;
+            if axis < dag.get(key)?.output_type.dims.len() {
+                shape_source_for_axis(dag, key, axis)
+            } else {
+                None
+            }
+        }
         // chelis#384/#397: an Expand INSERTS a new axis (rank+1) or SETS an
         // existing size-1 axis (rank unchanged) at `expand_axis`. The newly
         // inserted/set axis's extent comes from the Expand's `size`, NOT from
@@ -3502,6 +3669,14 @@ mod tests {
                 draw: RandomDraw::Dropout,
                 dtype: Prim::F32,
             },
+            RiscOp::KeyFromSeed,
+            RiscOp::Split {
+                branch: KeyBranch::Left,
+            },
+            RiscOp::FoldIn,
+            RiscOp::SplitN {
+                count: RtDim::Lit(3),
+            },
             RiscOp::Sum {
                 axis: 0,
                 accumulator: Prim::F32,
@@ -3585,8 +3760,8 @@ mod tests {
         // identities so they cannot inherit a verifier disposition.
         assert_eq!(
             all.len(),
-            62,
-            "one_of_every_risc_op must list all 62 classified samples"
+            66,
+            "one_of_every_risc_op must list all 66 classified samples"
         );
 
         // The classifier returns a definite bool for every variant (no
@@ -3610,13 +3785,14 @@ mod tests {
         // output envelope, and relaxing it to its fallback's envelope would
         // drop the trap. The chelis#2413 key-operand IR replaces the two
         // baked draws with the two key-operand draws and adds their two
-        // AD replays and the draw key (+3 = 28).
+        // AD replays and the draw key (+3 = 28). The four explicit key
+        // derivations produce opaque keys, not numeric envelopes (+4 = 32).
         assert_eq!(
             targetable, 34,
             "targetable op count drifted from the pinned WI-2 subset"
         );
         assert_eq!(
-            excluded, 28,
+            excluded, 32,
             "excluded op count drifted from the pinned WI-2 subset"
         );
 

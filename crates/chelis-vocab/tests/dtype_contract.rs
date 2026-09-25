@@ -32,6 +32,7 @@ fn every_dtype_has_its_exact_stored_and_arithmetic_representation() {
             Some(A::ExactTwosComplement16),
             2,
         ),
+        (D::Key, R::Word64, None, 8),
     ];
     assert_eq!(rows.map(|row| row.0), RuntimeDType::ALL);
     for (dtype, repr, arithmetic, width) in rows {
@@ -58,6 +59,7 @@ fn equal_width_is_not_representation_identity() {
         (RuntimeDType::F32, RuntimeDType::I32),
         (RuntimeDType::Bool, RuntimeDType::I8),
         (RuntimeDType::F16, RuntimeDType::Bf16),
+        (RuntimeDType::Key, RuntimeDType::I64),
     ] {
         assert_eq!(lhs.contract().byte_width(), rhs.contract().byte_width());
         assert_ne!(lhs.contract().repr(), rhs.contract().repr());
@@ -78,8 +80,9 @@ fn arithmetic_does_not_follow_storage_width_or_grant_bool_arithmetic() {
         assert_eq!(dtype.byte_width(), 2);
     }
     assert_eq!(RuntimeDType::Bool.contract().arithmetic(), None);
+    assert_eq!(RuntimeDType::Key.contract().arithmetic(), None);
     for dtype in RuntimeDType::ALL {
-        if dtype != RuntimeDType::Bool {
+        if !matches!(dtype, RuntimeDType::Bool | RuntimeDType::Key) {
             assert!(dtype.contract().arithmetic().is_some());
         }
     }

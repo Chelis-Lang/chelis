@@ -1125,7 +1125,9 @@ pub(crate) fn cast_result_from_settled_source(
 ) -> Result<Type, Box<CheckError>> {
     match resolved {
         Type::Tensor(dims, src_prec) => {
-            if !new_prec.is_valid_tensor_precision() {
+            // spec/04 §1.1: a key has no cast, so a cast target is a data
+            // element dtype.
+            if !new_prec.is_data_element_dtype() {
                 return Err(Box::new(unsupported_precision_error(
                     new_prec, /* tensor = */ true,
                 )));

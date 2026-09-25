@@ -286,9 +286,9 @@ Shard 1 of `macos-workspace-shard` installs Clippy and runs both configurations;
 `macos-smoke` aggregate requires that shard to succeed. Attribute-form
 `#[cfg(target_os = "macos")]` regions therefore receive these two lint
 configurations nightly and on manual dispatch, not on ordinary PRs or main
-pushes. `python3 scripts/gate.py --local` remains an optional
+pushes. `python3 scripts/gate.py --validation` remains an optional
 local reproduction. The
-`no-default-features` row is Linux-only: `--local` dropped it and kept the
+`no-default-features` row is Linux-only: `--validation` dropped it and kept the
 other two because the closure check's source-reconciliation leg needs the
 solver-free row on a fresh target (`crates/chelis-prove/src/clarabel_sos.rs`
 is compiled per pull request by that row alone), while the no-default row
@@ -435,11 +435,11 @@ parity, reshape-regression, and fresh-process CLI suites. The legs whose subject
 was the two-candidate settlement are deleted with it, and the runner keeps the
 four that were never about it: the cache-version test, the executable-example and
 eval/C parity rows, and `issue_942_inferred_tensor_cast`. The raw-store
-compile-fail leg is gone from the gate's `lint-and-unit` stage and the `--local`
+compile-fail leg is gone from the gate's `lint-and-unit` stage and the `--validation`
 subset with the store it probed; `scripts/test_gate.py` still locks that
 membership. Phase B's configuration-closure check and named
 cache-byte tests run in its named oracle, and two of its legs also run in the
-gate's `lint-and-unit` stage and the `--local` subset: the closure check,
+gate's `lint-and-unit` stage and the `--validation` subset: the closure check,
 ordered after the Clippy commands that produce the dep-info it reads, and the
 disallowed-type compile-fail fixture. That fixture is the ban's liveness proof.
 Nothing else continuous reads `clippy.toml`, and no workspace source spells the

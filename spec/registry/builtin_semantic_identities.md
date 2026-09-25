@@ -122,12 +122,14 @@ Each row names its governing atom.
 | `Numeric:expand:TableA` | [05-OP-49] |
 | `Numeric:floor:TableA` | [05-OP-46] |
 | `Numeric:floor_div:TableA` | [05-OP-64] |
+| `Numeric:fold_in:TableA` | [05-OP-72] |
 | `Numeric:gather:TableA` | [05-OP-52] |
 | `Numeric:gelu:TableA` | [05-OP-48] |
 | `Numeric:gt:TableA` | [05-OP-36] |
 | `Numeric:gte:TableA` | [05-OP-36] |
 | `Numeric:guarded_fail:TableA` | [05-OP-68] |
 | `Numeric:insert:TableA` | [05-OP-49] |
+| `Numeric:key_from_seed:TableA` | [05-OP-69] |
 | `Numeric:layer_norm:TableA` | [05-OP-51] |
 | `Numeric:log:TableA` | [05-OP-46] |
 | `Numeric:lt:TableA` | [05-OP-36] |
@@ -171,6 +173,8 @@ Each row names its governing atom.
 | `Numeric:sin:TableA` | [05-OP-46] |
 | `Numeric:softmax:TableA` | [05-OP-48] |
 | `Numeric:sort:TableA` | [05-OP-53] |
+| `Numeric:split_key:TableA` | [05-OP-70] |
+| `Numeric:split_keys:TableA` | [05-OP-71] |
 | `Numeric:sqrt:TableA` | [05-OP-46] |
 | `Numeric:stride:TableA` | [05-OP-49] |
 | `Numeric:sub:TableA` | [05-OP-41] |
