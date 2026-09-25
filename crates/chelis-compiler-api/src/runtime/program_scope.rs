@@ -29,9 +29,11 @@
 
 use std::cell::OnceCell;
 
+use chelis_deep::DeepTag;
 use chelis_deep::ast::Expr;
 use chelis_ir::lower::SubexprLoweringContext;
-use chelis_unord::UnordMap;
+use chelis_types::linearity::free_runtime_variables;
+use chelis_unord::{UnordMap, UnordSet};
 
 thread_local! {
     /// Terminal-name index builds on this thread (chelis#2393): one per
@@ -112,6 +114,75 @@ impl ProgramScope {
         match index.get(super::host_ops::terminal_name(name))?.as_slice() {
             [key] => Some(key),
             _ => None,
+        }
+    }
+
+    /// The value declarations an evaluation that runs the declarations
+    /// `roots` initializes (spec/03 §4.4): every value declaration a root's
+    /// body names, or that a declaration so named names in turn, whether or
+    /// not anything reads it. A function contributes what its own body names
+    /// whether or not it is applied, as `chelis_ir::Dag::entered_declarations`
+    /// traverses a lowered program. A name resolves as a read of it resolves
+    /// ([`Self::resolve_def_key`]), so a name that is no declaration names
+    /// nothing. An input declaration (`x: T = x`) has no initializer to run:
+    /// its value is the caller's, so it is never initialized here.
+    pub(super) fn entered_value_declarations<'r>(
+        &self,
+        roots: impl IntoIterator<Item = &'r str>,
+    ) -> UnordSet<String> {
+        let mut entered = UnordSet::new();
+        let mut visited = UnordSet::new();
+        let mut pending = Vec::new();
+        for root in roots {
+            if let Some(key) = self.resolve_def_key(root).map(str::to_owned)
+                && visited.insert(key.clone())
+            {
+                pending.push(key);
+            }
+        }
+        while let Some(declaration) = pending.pop() {
+            let Some(body) = self.defs.get(&declaration) else {
+                continue;
+            };
+            for name in free_runtime_variables(body) {
+                let Some(key) = self.resolve_def_key(&name).map(str::to_owned) else {
+                    continue;
+                };
+                if !visited.insert(key.clone()) {
+                    continue;
+                }
+                let Some(referenced) = self.defs.get(&key) else {
+                    continue;
+                };
+                let is_function = super::tagged_expr_children(referenced)
+                    .is_some_and(|(tag, _)| tag == DeepTag::Fn);
+                if !is_function && !self.reads_itself(&key, referenced) {
+                    entered.insert(key.clone());
+                }
+                pending.push(key);
+            }
+        }
+        entered
+    }
+
+    /// Whether `body` is a bare read of the declaration `key` itself, the
+    /// shape of an input declaration the checker admitted.
+    fn reads_itself(&self, key: &str, body: &Expr) -> bool {
+        let mut current = body;
+        loop {
+            match current {
+                Expr::MetaExpr(meta, _) => current = &meta.expr,
+                Expr::Node(node, _) => {
+                    return node.tag() == DeepTag::Var
+                        && node
+                            .children_slice()
+                            .first()
+                            .and_then(super::symbol_name)
+                            .and_then(|name| self.resolve_def_key(name))
+                            == Some(key);
+                }
+                _ => return false,
+            }
         }
     }
 
