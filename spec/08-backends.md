@@ -103,8 +103,6 @@ Current design points:
 - pattern-match BLAS-friendly subgraphs such as matrix multiplication
 - manage temporary buffers with explicit lifetime-aware memory planning
 - ship `chelis_runtime.h` plus a Rust static runtime library alongside generated code
-- preserve `with seed(...)` and [05-RNG-1]'s ordinal assignment in generated code
-  through a handler-scoped random state
 - tuple-returning host exports use the stable runtime tuple ABI:
   generated headers surface `chelis_tuple*`, drivers construct tuples with
   `chelis_tuple_from_values(...)`, and typed extraction goes through the
@@ -112,9 +110,18 @@ Current design points:
 
 This backend is the correctness oracle for future GPU and interoperability backends.
 
-Generated host Random state belongs to one public entry invocation. Internal calls
-inherit that invocation's active handler as [05-RNG-1] requires. Reentrant and
-concurrent public invocations do not share mutable Random state. Private context transport does not change authored public
+Generated code holds no random state: every draw reads the key it is given
+([05-RNG-1]), so reentrant and concurrent public invocations share nothing
+random. A scalar `key` parameter or result of a public entry crosses the C ABI
+as the published carrier `typedef struct { uint64_t bits; } chelis_key;`,
+whose `bits` are the key's 64 bits ([05-RNG-2]), and
+`chelis_key chelis_key_from_seed(int64_t seed)` returns [05-OP-69]'s key. A key tensor
+crosses as a `chelis_tensor` of runtime dtype `key` (id 9) under
+[04-NUM-11]'s entry dtype check. A key is never a bare integer at the
+boundary. DLPack exchange (spec/11 §1.3) and NumPy conversion refuse a key
+tensor with a typed rejection, because no numeric interchange dtype describes
+a key; Python passes keys through spec/10 §3.2's execution values.
+Private context transport does not change authored public
 function declarations or the four-argument public tensor ABI.
 
 ### 2.1 Runtime artifact identity

@@ -2968,7 +2968,7 @@ conformant. This is the executable requirement for zero capacity exceptions.
    `(ExternalCallableFamily, CanonicalCallableId, ExternalTargetContext)`
    target-disposition registry. Exact effect dependencies populate the
    `(CanonicalEffectRequirement, BackendId)` disposition registry over
-   `Random | Accum | IO | Test | Resource(ResourceId)`. Table A and sibling
+   `Accum | IO | Test | Resource(ResourceId)`. Table A and sibling
    semantic cells use typed signature, result, atom, and diagnostic identities;
    backend and effect cells use typed implementation, issue, or
    rejected-by-design authorities.

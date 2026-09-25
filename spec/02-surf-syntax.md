@@ -54,7 +54,7 @@ The canonical forms are:
 - canonical output omits trailing commas and semicolons, but the parser accepts
   one trailing separator in a delimited nonempty family. The comma in a
   singleton tuple or singleton tuple pattern is semantic rather than cosmetic;
-- built-in effects are spelled `Diff`, `Random`, `Accum`, `IO`, `Test`, and
+- built-in effects are spelled `Diff`, `Accum`, `IO`, `Test`, and
   `Resource(...)` with exactly that casing;
 - record fields preserve source order and evaluate left-to-right; a field
   whose value is the same-named variable is written as a pun;
@@ -117,7 +117,7 @@ cast  cast_trunc  par  do  quote  unquote  splice  true  false
 **Total: 29.**
 
 `property`, `forall`, `where`, `opaque`, `invariant`, `wrt`, `axis`,
-`seed`, `device`, the dtype-family names `Float`, `Int`, and `Numeric`, and
+`device`, the dtype-family names `Float`, `Int`, and `Numeric`, and
 the property-option names are contextual words only in the productions that
 name them. A dtype-family name is a family only in a type binder's bound
 position; everywhere else it is an ordinary type name. `effect`, `handler`, `perform`, `resume`, and
@@ -416,13 +416,14 @@ Arrow chain reads as: arg₁ -> arg₂ -> ... -> return. Always flat in Deep (`t
 Effect annotations are optional suffixes on either `sig` or `def`:
 
 ```text
-sig predict[n]: tensor[n, f32] -> tensor[n, f32] ! { Random }
-def train[n](x: tensor[n, f32]) -> tensor[n, f32] ! { Random, Resource("gpu:0") } = ...
+sig predict[n]: tensor[n, f32] -> tensor[n, f32] ! { IO }
+def train[n](x: tensor[n, f32]) -> tensor[n, f32] ! { IO, Resource("gpu:0") } = ...
 ```
 
-Surf accepts the built-in names `Diff`, `Random`, `Accum`, `IO`, `Test`, and
-`Resource("device")`. `Random` and `Resource("...")` are the user-handler
-boundaries. `IO` covers host interaction and may remain unhandled at the
+Surf accepts the built-in names `Diff`, `Accum`, `IO`, `Test`, and
+`Resource("device")`. `Resource("...")` is the user-handler boundary.
+Randomness is not an effect: a function that draws takes a `key` parameter
+(spec/05 §2.7). `IO` covers host interaction and may remain unhandled at the
 program boundary. `Test` is handled by `chelis test`. `Diff` denotes a
 compiler capability rather than a user-handled effect, and `Accum` is
 internal-only.
@@ -661,28 +662,24 @@ No `where` clauses. Use blocks.
 
 ### P5a: Effect Handlers
 
-Surf defines two `with` block forms:
+Surf defines one `with` block form:
 
 ```text
-with seed(42i64) {
-  dropout(x, 0.5)
-}
-
 with device("gpu:0") {
   body
 }
 ```
 
-`with` handlers are expressions. They take exactly one argument in parentheses and a
+A `with` handler is an expression. It takes exactly one argument in parentheses and a
 brace-delimited block body.
 
 The handler argument rules are:
 
-- `with seed(...)` requires an explicit signed integer literal seed carrying the `i64`
-  suffix (`with seed(42i64) { ... }` or `with seed(-1i64) { ... }`); the seed is semantically i64 and an
-  unsuffixed literal is a type error naming the suffix (§P10a)
 - `with device(...)` requires an explicit string literal device name
-- only `seed` and `device` are valid handler names
+- `device` is the only valid handler name
+
+Randomness has no handler. A random primitive takes an explicit key
+(`dropout(key_from_seed(42i64), x, 0.5)`; spec/05 §2.7).
 
 ### P5b: Macros
 
@@ -1313,7 +1310,7 @@ Params        <- '(' S (Param (S ',' S Param)* (S ',')?)? S ')'
 Param         <- Ident (S ':' S TypeExpr)?
 ReturnType    <- S '->' S TypeExpr
 EffectClause  <- S '!' S '{' S (EffectExpr (S ',' S EffectExpr)* (S ',')?)? S '}'
-EffectExpr    <- 'Diff' / 'Random' / 'Accum' / 'IO' / 'Test'
+EffectExpr    <- 'Diff' / 'Accum' / 'IO' / 'Test'
                / 'Resource' S '(' S StringLit (S ',')? S ')'
 
 MacroDecl     <- 'macro' S Ident MacroParams S '=' S Expr
@@ -1351,7 +1348,7 @@ TypeName      <- TypeIdent ('.' TypeIdent)*
 
 PrecType      <- 'f32' / 'f64' / 'bf16' / 'f16'
                / 'i8' / 'i16' / 'i32' / 'i64'
-               / 'bool' / 'string'
+               / 'bool' / 'string' / 'key'
                # The reserved names of spec/04-type-system.md §1.1.1 are
                # rejected at check time:
                # f8e4m3, f8e5m2, uint8/uint16/uint32/uint64, int4/uint4,
@@ -1423,7 +1420,7 @@ BlockBody     <- (BlockBinding Newline)+ Expr
 BlockBinding  <- LetPattern S '=' S Expr
 DoExpr        <- 'do' S '{' S Expr (S ';' S Expr)* (S ';')? S '}'
 ParExpr       <- 'par' S '{' S Expr (S ';' S Expr)* (S ';')? S '}'
-WithHandler   <- 'with' S ('seed' / 'device') S '(' S Expr (S ',')? S ')'
+WithHandler   <- 'with' S 'device' S '(' S Expr (S ',')? S ')'
                   S HandlerBlock
 HandlerBlock  <- '{' S (Expr / BlockBody) S '}'
 # The tail Expr, like a BlockBinding value, is Sep-bounded: a top-level

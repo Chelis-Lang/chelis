@@ -140,7 +140,7 @@ EXPECTED_PHASE4B_OP_HEADINGS = {
     5: "`io/json::to_json`",
     6: "`cast_trunc(source, target)`",
     7: "The runtime extent read",
-    8: "`uniform_like(template, low, high) -> result`",
+    8: "`uniform_like(k, template, low, high) -> result`",
     9: "`pad_sequences(sequences: List[List[T]], pad: T) ->",
     10: "`pad_sequences_to(sequences: List[List[T]], width: i64,",
     11: "`mean(x, axes...) -> result`",
@@ -169,7 +169,7 @@ EXPECTED_PHASE4B_OP_HEADINGS = {
     34: "`numeric_adt(fields...) -> value`",
     35: "`stdlib_numeric_def(arguments...) -> result`",
     36: "`comparison(left, right) -> result`",
-    37: "`dropout(input, rate) -> result`",
+    37: "`dropout(k, input, rate) -> result`",
     38: "`host_numeric_builtin(arguments...) -> result`",
     39: "`window_reduction(arguments...) -> result`",
     40: "`max_elem(left, right) -> result` and",
@@ -1160,7 +1160,7 @@ def validate_normative_contract(
     require_all(
         spec10,
         (
-            ("Schema version 18 is explicitly\npresent", "wire v18 presence"),
+            ("Schema version 19 is explicitly\npresent", "wire v19 presence"),
             ("the only accepted version", "wire current-version exactness"),
             ("There is no versionless default", "wire versionless rejection"),
             ("versionless default, legacy migration", "wire migration rejection"),
@@ -1896,8 +1896,9 @@ def validate_normative_contract(
             "returns `tensor[D, p]` with the template's dimensions",
             "Both bounds must be finite and `low <= high`",
             "At the selected arithmetic width, `high - low` must also be finite",
-            "complete before the operation consumes a Random call ordinal",
-            "failure traps `Domain` as `uniform_like` and consumes none",
+            "consumes the key `k`",
+            "complete before any element is drawn",
+            "failure traps `Domain` as `uniform_like` before any element is produced",
             "Equal bounds are valid and produce that stored value",
             "For `p = f64`, the element is the one f64 fused multiply-add",
             "For `p = f32`, it is the one f32 fused multiply-add",
@@ -1906,8 +1907,8 @@ def validate_normative_contract(
             "the result narrows exactly once to `p`",
             "There is no f32 public-bound signature, default bound, or f64 "
             "intermediate",
-            "introduces `Random`",
-            "does not observe the template's element values",
+            "does not observe the template's element values, and the key carries no "
+            "cotangent",
             "pathwise adjoint contributes zero to the template",
             "contributes `g_i * (1-u_i)` to `low` and `g_i * u_i` to `high`",
             "canonical adjacent-pair balanced tree",
@@ -2424,7 +2425,8 @@ def validate_normative_contract(
             "without invoking a shell",
             "every random stdlib callable has the pathwise adjoint of its exact "
             "graph above",
-            "source units and mask comparisons contribute zero cotangent",
+            "the key, source units, and mask comparisons contribute zero cotangent",
+            "splits `k` by [05-OP-70] into `(k1, k2)`",
             "rounded result equals the stored upper endpoint",
             "computed denominator must be finite and strictly positive",
             "`days_between(lhs,rhs) = ordinal(rhs) - ordinal(lhs)`",
@@ -2481,9 +2483,10 @@ def validate_normative_contract(
             "admits every active float dtype `p`",
             "requires `input: &tensor[D,p]` and a scalar `rate: p`",
             "rate must be finite and satisfy `0 <= rate < 1`",
-            "validation completes before Random consumption",
-            "failure traps `Domain` as `dropout` while consuming no call ordinal",
-            "accepted call consumes exactly one ordinal",
+            "consumes the key `k`",
+            "validation completes before any element is drawn",
+            "failure traps `Domain` as `dropout` before any element is produced",
+            "accepted call consumes its key",
             "including for an empty tensor or `rate = 0`",
             "saved forward mask drops the element exactly when that value is less "
             "than the rate",
@@ -2676,12 +2679,13 @@ def validate_normative_contract(
             "no accumulator and is outside AD",
         ),
         "05-RNG-1": (
-            "Every conforming evaluation of a `with seed(N)` program produces "
-            "byte-identical random results",
+            "A random primitive is a pure function of the key it is given",
+            "Every conforming evaluation produces byte-identical random results "
+            "for the same key",
             "compiler version and target do not vary this result",
-            "high 53 bits divided by `2^53`",
-            "Each entered random primitive consumes exactly one call ordinal",
-            "validation that precedes Random consumption consumes none",
+            "No handler, ordinal, execution order, or other state contributes to a "
+            "draw",
+            "A draw in an `if` or `match` arm that is not selected is not evaluated",
         ),
         "05-OBS-1": (
             "every NaN payload renders as the exact spelling `NaN`",
@@ -3113,7 +3117,7 @@ def validate_schema_and_consumers(
                 "effect disposition key",
             ),
             (
-                "`Random | Accum | IO | Test | Resource(ResourceId)`",
+                "`Accum | IO | Test | Resource(ResourceId)`",
                 "closed effect requirement domain",
             ),
             (

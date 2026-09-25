@@ -23,9 +23,9 @@ before consuming any package or symbol metadata.
 
 ## 3. Compiler API Wire Contract
 
-WireDag JSON is an exact-version contract. Schema version 18 is explicitly
+WireDag JSON is an exact-version contract. Schema version 19 is explicitly
 present in every payload and is the only accepted version. A missing version,
-versions 1 through 17, and every future version are decode errors before any IR
+versions 1 through 18, and every future version are decode errors before any IR
 node is consumed. There is no versionless default, legacy migration, additive-
 variant tolerance, or best-effort compatibility path.
 
@@ -163,7 +163,7 @@ int64 node. The decoder enforces the owner matrix from
 `spec/05-risc-primitives.md` §2.4.1, the source rank and dtype, the normalized
 axis range, and the exact input cardinality before IR construction.
 
-Every tagged variant must be known to the version 18 decoder. `OneHot` remains only a transient
+Every tagged variant must be known to the version 19 decoder. `OneHot` remains only a transient
 IR/specialization marker and backends must not receive it after specialization.
 
 Execution-value envelopes carry the independently required exact
@@ -225,14 +225,18 @@ mapping; neither vocabulary is accepted as an alias at the other's ingress.
 | `f64`, `f32`, `f16`, `bf16` | `{"dtype":p,"bits":h}` | `{"dtype":p,"bits":[h,...]}` |
 | `int64`, `int32`, `int16`, `int8` | `{"dtype":p,"value":n}` | `{"dtype":p,"values":[n,...]}` |
 | `bool` | `{"dtype":"bool","value":b}` | `{"dtype":"bool","values":[b,...]}` |
+| `key` | none | `{"dtype":"key","bits":[h,...]}` |
 
 Here `p` is a JSON string naming the exact dtype, `b` is a JSON boolean,
 and `n` is an exact signed JSON integer within that dtype's range, never a
 float or numeric string. `h` is a JSON string of lowercase hexadecimal digits
-containing the stored IEEE bits, most significant digit first, with no sign,
-prefix, separators, or whitespace. Its exact digit counts are
-f64: 16; f32: 8; f16: 4; bf16: 4. Leading zeroes are required to reach that
-width. The encoding is independent of machine endianness.
+containing the stored IEEE bits, or a key's 64 bits ([05-RNG-2]), most
+significant digit first, with no sign, prefix, separators, or whitespace. Its
+exact digit counts are f64: 16; f32: 8; f16: 4; bf16: 4; key: 16. Leading
+zeroes are required to reach that width. The encoding is independent of
+machine endianness. A key is not a number: it has no scalar object and is
+never an integer carrier, and its storage object appears only in a tensor
+execution value.
 
 All bit patterns are representable, including finite values, subnormals,
 positive and negative zero, infinities, and quiet or signaling NaNs with their
@@ -245,7 +249,8 @@ number and bit encodings. Numeric integers never pass through binary64.
 
 Numeric scalar execution values use `{"type":"scalar","value":s}`, where
 `s` is the scalar carrier above. Boolean execution values retain
-`{"type":"bool","value":b}`. Tensor execution values use
+`{"type":"bool","value":b}`. A scalar key execution value is
+`{"type":"key","bits":h}`, with `h` the key's 16 digits. Tensor execution values use
 `{"type":"tensor","value":{"shape":[d,...],"data":t}}`, where `t` is
 the storage carrier and each `d` is an exact nonnegative int64 JSON integer.
 Non-scalar aggregate execution variants retain their recursive element order
@@ -273,7 +278,7 @@ for some `c <= r`, and row `b` reads the element that `b`'s leading `c`
 indices name, so under a rank-zero key every control and the activation are
 rank zero.
 Both operations preserve the first input's exact shape and dtype. Their
-value-domain checks remain [05-OP-8/37], before Random consumption. Each row
+value-domain checks remain [05-OP-8/37], before any element is drawn. Each row
 is one draw and checks the control elements it reads only when it is active,
 so a row whose activation is false, or a batch with no rows, checks nothing,
 as the stack of the rows' draws would. The codec neither inserts casts nor
@@ -286,17 +291,16 @@ template's exact shape and dtype, and its result has the template's dtype and
 the shape of the key's leading `c` axes for some `c <= r`, and
 each element is one canonical tree over the contributions, in row-major
 order, of the rows whose leading `c` indices name it. Each reads the key
-without consuming it. A `DrawKey`'s controls and activation are rank zero. An activation is an earlier-node
+without consuming it. An activation is an earlier-node
 reference under §3.4, not another template.
 
 `key` is a structural precision with no literal or storage carrier in a
 graph, at any rank: no `Const`, `ConstTensor` or `Pad.fill` holds a key. Every
-key is produced by `KeyFromSeed`, `Split`, `FoldIn`, `SplitN` or a `DrawKey`,
-or enters as a key-precision `Load`, and every `Load` of one parameter is one
-key. A key has at most one use: one `UniformLike`, `Dropout`, `FoldIn` or
-`SplitN`, one place among the roots, or at most one `Split` of each branch.
-It is otherwise read only by its draw's replays, and a `DrawKey`'s key is used
-only by a draw. Two draws may consume one key only when each carries an activation
+key is produced by `KeyFromSeed`, `Split`, `FoldIn` or `SplitN`, or enters as
+a key-precision `Load`, and every `Load` of one parameter is one key. A key
+has at most one use: one `UniformLike`, `Dropout`, `FoldIn` or `SplitN`, one
+place among the roots, or at most one `Split` of each branch. It is otherwise
+read only by its draw's replays. Two draws may consume one key only when each carries an activation
 and, for every pair, one activation's `And` conjuncts include a node `X` and
 the other's include `Not(X)`, or either's include the `bool` constant `false`,
 whose draw never runs. A key reaching any other operation or a shape
@@ -311,16 +315,7 @@ exactly equal shape, and its output is [05-OP-72]'s key of each pair.
 `SplitN.count` is a `WireRtDim` under the same carrier rules as
 `Expand.size`, except that only `lit` and a `node` at input slot 1 are
 admitted; its output appends that extent to its `key` input's shape, and row
-`j` of each key is [05-OP-71]'s. `DrawKey` carries
-its `handler`, its `draw` (`uniform_like` or `dropout`) and the draw's
-template or input `dtype`. An `inherited` handler takes the next ordinal of
-the stream the graph's caller holds. A `scoped` handler is a `with seed`
-region lowered inside the graph: its `instance` is an exact u32 region
-identity, not a count or a numeric value, and its first input is a rank-zero
-`int64` constant holding the region's signed seed, whose two's-complement
-image is [05-RNG-1]'s stream seed. Every seed bit is significant; zero is a
-seed, not absence, and there is no default seed. The remaining inputs are the
-draw's controls, in the draw's own order, and at most one activation.
+`j` of each key is [05-OP-71]'s.
 
 ### 3.3 Source Syntax And Locations
 

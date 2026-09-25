@@ -15,7 +15,7 @@ structure that the compiler cannot recover automatically.
 
 The semantics of `par` do not require a particular scheduler. A conforming
 implementation may execute it sequentially or in parallel, but observable results must
-be identical. [05-RNG-1] governs the random ordinals of draws in `par` branches.
+be identical.
 
 (`par` is not fully implemented and is currently rejected by the checker; chelis#2503.)
 

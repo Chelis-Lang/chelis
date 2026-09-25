@@ -253,8 +253,8 @@ unchanged, and its argument receives the shape-preserving exact zero
 cotangent.
 
 An explicit `wrt` target must contain at least one differentiable float leaf.
-A bool, signed-integer, string, function, resource, or recursively all-unit
-parameter is a `non_differentiable` type error. A List, tuple, or ADT with a
+A bool, signed-integer, key, string, function, resource, or recursively
+all-unit parameter is a `non_differentiable` type error. A List, tuple, or ADT with a
 differentiable leaf is legal and returns §2.1's shape-preserving cotangent;
 its discrete fields remain present as `unit`.
 
@@ -387,10 +387,14 @@ carrier is a backend capability gap, not a language restriction.
 - `Diff` is treated as a capability of the AD pipeline rather than a boundary effect
 - `Accum` is an internal backward-pass accumulation effect and is not a
   user-handled boundary effect
-- `with seed(...)` fixes [05-RNG-1]'s stream for the complete forward and
-  reverse execution; random source words and the seed have zero cotangent,
-  while [05-OP-8]'s bounds, [05-OP-37]'s data input, and the stdlib graphs use
-  their exact pathwise adjoints and [05-OP-37] states the rate's contract
+- a `key` is a discrete input, like an integer: a key, its seed, and random
+  source words have zero cotangent (`unit` in a structured cotangent), while
+  [05-OP-8]'s bounds, [05-OP-37]'s data input, and the stdlib graphs use their
+  exact pathwise adjoints at the forward draw's key and [05-OP-37] states the
+  rate's contract
+- the backward pass, and checkpoint recomputation under §2.9, re-read the bits
+  of a key that its forward draw consumed in order to replay that draw; such a
+  replay read is not a use under spec/04 [04-LIN-9]
 
 `with device(...)` is not a DAG-to-DAG transform. It selects the declared
 `Resource(Device)` region at the checked execution boundary; a target
@@ -422,7 +426,13 @@ Conceptually, the default-axis form `vmap(f)` is equivalent to:
 vmap(f)(x) = stack([f(x[i]) for i in batch_dimension])
 ```
 
-But it is **not** implemented as a loop. Instead, it is a DAG rewrite that lifts every operation to operate over the additional batch dimension. [05-RNG-1] governs the random ordinals of a vmapped `Random` function.
+But it is **not** implemented as a loop. Instead, it is a DAG rewrite that lifts every operation to operate over the additional batch dimension.
+
+A scalar `key` formal of `f` is mapped: its actual SHALL be a
+`tensor[n, key]` holding one key per row, and row `i` of the expansion above
+applies `f` to that tensor's row-`i` key, so row `i`'s draws are keyed from it
+([05-RNG-1]). A scalar key actual for a key formal, or a key captured by `f`,
+is a type error: every row would consume the same key (spec/04 [04-LIN-9]).
 
 The executable [`vmap_tensor_capture.ch`](../examples/vmap_tensor_capture.ch)
 demonstrates that the mapped input varies by row while one lexical tensor
@@ -460,6 +470,8 @@ or shape broadcasting in elementwise primitives.
 | `Insert(x, dim, size)` | `Insert(x', dim, size)` -- insert within each batch element |
 | `Const(v, D, P)` | Batch-typed `Const(v, {batch} + D, P)` -- broadcast constant |
 | `Load(mapped_formal)` | Load with batch dimension added to the mapped formal type |
+| `Load(key formal)` | Load of `tensor[{batch}, key]`, one key per row |
+| Random draw keyed by `k` | The same draw keyed by the batched `k'`: row `b` draws with `k'[b]` (spec/10 §3.2) |
 | `Load(capture)` | Exact authored capture load followed by `Insert(capture, 0, batch)` |
 
 The key principle: the batch dimension passes through all operations without being touched. Elementwise ops are naturally batched. Reductions reduce over the original axis, not the batch axis. Shape operations preserve the batch dimension. The rank-0 subgraph that produces a bound, and the bound carrier inside a movement operation, follow §3.7: in the rewritten DAG's numbering a positional `dim` and an `InputAxis` axis shift by the inserted batch axis, and a rank-0 extent value is shared rather than batched.
@@ -480,6 +492,15 @@ If `f` takes multiple arguments, each mapped tensor formal gains the batch dimen
       ---------------------------------------------------
       G |- vmap(f) : (tensor[{batch} + D1, P], tensor[{batch} + D2, P])
                              -> tensor[{batch} + D3, P]
+```
+
+A scalar `key` formal maps to a key tensor with the batch axis alone:
+
+```
+      G |- f : (key, tensor[D, P]) -> tensor[D', P]
+      ---------------------------------------------------
+      G |- vmap(f) : (tensor[{batch}, key], tensor[{batch} + D, P])
+                             -> tensor[{batch} + D', P]
 ```
 
 A lexical tensor capture is not an additional mapped argument. In the
@@ -520,7 +541,7 @@ These two are distinct concepts:
 
 - `axis_out_of_bounds`: The integer axis is out of bounds for one of the vmapped tensor
   arguments or results.
-- If `f` has non-tensor arguments, those arguments are broadcast (shared across the batch). They are not vmapped.
+- If `f` has non-tensor arguments other than scalar `key` formals, those arguments are broadcast (shared across the batch). They are not vmapped. A scalar `key` formal is always mapped (§3.2).
 
 ### 3.7 Runtime Extents
 
@@ -596,7 +617,7 @@ Optimization passes are DAG-to-DAG rewrites that preserve semantics while improv
 
 ### 5.1 Constant Folding
 
-**Rule:** If all inputs to a node are `Const` nodes, evaluate the operation at compile time and replace the node with a single `Const` node containing the result.
+**Rule:** If all inputs to a node are `Const` nodes, evaluate the operation at compile time and replace the node with a single `Const` node containing the result. A key operation ([05-OP-69] through [05-OP-72]) is never folded: no `Const` holds a key (spec/10 §3.2), so key derivations stay symbolic.
 
 **Applies to:** All elementwise ops (unary and binary), reductions, Cast. Does not apply to Load/Store (which depend on external buffers).
 
@@ -643,9 +664,13 @@ DCE is particularly important after `grad`, which may produce gradient nodes for
 **Rule:** If two total, deterministic, pure nodes perform the same operation on
 the same typed inputs and semantic parameters, they may merge only when one
 execution has the same stored result and observation order as both original
-executions. Effectful, Random, resource, IO, Test, and potentially trapping
+executions. Effectful, resource, IO, Test, and potentially trapping
 nodes never merge. The key includes the complete dtype, shape, accumulator,
-and operation identity; an implementation name is not a semantic key.
+and operation identity; an implementation name is not a semantic key. A
+random draw or random-key operation is a pure function of its operands
+([05-RNG-1]): CSE, reordering, and DCE treat it like any other pure node, and
+a draw or `split_keys` count that can trap is potentially trapping under
+§5.2.
 
 **Algorithm:**
 1. For each node, compute a hash: `hash(op, input_node_id_1, input_node_id_2, ..., params)`.

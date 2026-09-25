@@ -80,7 +80,7 @@ class ContractValidationTests(unittest.TestCase):
 
     def test_wire_binding_decisions_have_positive_and_negative_freeze_controls(self) -> None:
         cases = (
-            ("spec/10-serialization.md", "Schema version 18 is explicitly\npresent", "wire v18 presence"),
+            ("spec/10-serialization.md", "Schema version 19 is explicitly\npresent", "wire v19 presence"),
             ("spec/10-serialization.md", "`schema_version: 3`", "execution v3 exactness"),
             ("spec/10-serialization.md", "f64: 16; f32: 8; f16: 4; bf16: 4", "wire IEEE bit widths"),
             ("spec/10-serialization.md", "No codec normalizes a NaN payload or a signed zero.", "wire bit preservation"),
@@ -450,10 +450,10 @@ class ContractValidationTests(unittest.TestCase):
                 "OP-8.*must also be finite",
             ),
             (
-                "These checks, including the equal-bound case, complete before the "
-                "operation\n> consumes a Random call ordinal",
-                "These checks occur after consuming Random",
-                "OP-8.*before the operation consumes",
+                "These checks, including the equal-bound case, complete before any "
+                "element\n> is drawn",
+                "These checks occur after the draw",
+                "OP-8.*before any element is drawn",
             ),
             (
                 "There is no f32 public-bound signature, default bound,\n"
@@ -486,10 +486,10 @@ class ContractValidationTests(unittest.TestCase):
                 "OP-37.*0 <= rate < 1",
             ),
             (
-                "The accepted call consumes exactly one\n"
-                "> ordinal, including for an empty tensor or `rate = 0`",
-                "Empty and zero-rate calls consume no ordinal",
-                "OP-37.*exactly one ordinal",
+                "The accepted call consumes its key,\n"
+                "> including for an empty tensor or `rate = 0`",
+                "Empty and zero-rate calls leave their key unconsumed",
+                "OP-37.*accepted call consumes its key",
             ),
             (
                 "For f16 and bf16, `sub` exact-widens its stored operands to f32",
@@ -666,19 +666,19 @@ class ContractValidationTests(unittest.TestCase):
                 finally:
                     path.write_text(original, encoding="utf-8")
 
-    def test_rng_ordinals_are_consumed_once_only_after_validation(self) -> None:
+    def test_rng_draw_is_a_pure_function_of_its_key(self) -> None:
         path = self.root / "spec/05-risc-primitives.md"
         mutations = (
             (
-                "Each entered random primitive consumes exactly one call ordinal",
-                "A random primitive may consume an implementation-defined number "
-                "of call ordinals",
-                "05-RNG-1.*one call ordinal",
+                "No handler, ordinal, execution order, or other state contributes to a\n"
+                "> draw",
+                "The active handler's call ordinal also contributes to a\n> draw",
+                "05-RNG-1.*No handler, ordinal",
             ),
             (
-                "validation\n> that precedes Random consumption consumes none",
-                "validation failures may consume a Random ordinal",
-                "05-RNG-1.*validation",
+                "A draw in an `if` or `match` arm that is not selected is not evaluated",
+                "A draw in an `if` or `match` arm that is not selected is still evaluated",
+                "05-RNG-1.*not selected is not evaluated",
             ),
         )
         for old, new, message in mutations:
@@ -3506,8 +3506,8 @@ class ContractValidationTests(unittest.TestCase):
     def test_effect_registry_covers_every_fixed_effect(self) -> None:
         self.replace(
             Path("spec/design/capability_table.md"),
-            "`Random | Accum | IO | Test | Resource(ResourceId)`",
-            "`Random | Accum | IO | Resource(ResourceId)`",
+            "`Accum | IO | Test | Resource(ResourceId)`",
+            "`Accum | IO | Resource(ResourceId)`",
         )
         self.assert_contract_fails("closed effect requirement domain")
 
@@ -3948,8 +3948,8 @@ class ContractValidationTests(unittest.TestCase):
     def test_effect_requirement_domain_uses_language_IO_spelling(self) -> None:
         self.replace(
             Path("spec/design/capability_table.md"),
-            "`Random | Accum | IO | Test | Resource(ResourceId)`",
-            "`Random | Accum | Io | Test | Resource(ResourceId)`",
+            "`Accum | IO | Test | Resource(ResourceId)`",
+            "`Accum | Io | Test | Resource(ResourceId)`",
         )
         self.assert_contract_fails("closed effect requirement domain")
 

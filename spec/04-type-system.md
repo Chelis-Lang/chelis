@@ -184,7 +184,7 @@ the spec or in user-facing docs must resolve to a cell in this table.
 | i32  | admitted                                                                                                          | admitted                                                                                                                                                                                                 | admitted                                     | admitted  |
 | i64  | admitted                                                                                                          | admitted                                                                                                                                                                                                 | admitted                                     | admitted  |
 | bool   | admitted                                                                                                          | admitted                                                                                                                                                                                                 | admitted                                     | admitted  |
-| key    | admitted                                                                                                          | **operation-limited**: only the key ([05-RNG-2]) that a `with seed` region lowered into the same graph gives one of its [05-OP-8] draws with literal bounds and no activation; [05-OP-69] through [05-OP-72], key parameters, and key results are rejected | **operation-limited**: no operation          | admitted  |
+| key    | admitted                                                                                                          | **operation-limited**: no operation                                                                                                                                                                      | **operation-limited**: no operation          | admitted  |
 
 **Arithmetic width is not a cell of this table.** It is a target-independent
 property of the dtype, declared once by [04-NUM-8] and owned by the semantic
@@ -2163,9 +2163,7 @@ context-inferred `[2, 2]` would hide exactly the distinction the dtype
 exists to carry. Chelis programs are written and, more often, audited by
 agents; a suffix states the kind at the site, the write-side cost is one
 edit under a diagnostic that names the fix, and the read-side cost of
-context-dependent literals is paid on every audit. This is the trade
-`with seed(...)` already records (§7.1): its seed demands `i64` and the
-literal states it (`with seed(42i64)`), with no adoption carve-out.
+context-dependent literals is paid on every audit.
 
 Outside this closed set, numeric literals in a tensor body fall back to the
 §5.3 literal defaults: integer literals to `i32`, float literals to `f32`.
@@ -2789,7 +2787,6 @@ satisfy [04-FIT-26]; chelis#2130 owns that gap.)
 
 Built-in effect vocabulary in the type layer:
 
-- `Random` -- stochasticity introduced by compiler-known operations such as `dropout`
 - `Accum` -- internal-only hook for associative gradient accumulation
 - `IO` -- host-side effects such as `print` and `debug`,
   the file builtins (`read_file`, `write_file`, ...), and subprocess exec via
@@ -2798,15 +2795,19 @@ Built-in effect vocabulary in the type layer:
 - `Resource(Device)` -- allocation / placement region on a concrete device
 
 `Diff` is a compiler capability marker, not a user-handled boundary effect.
-`Accum` is internal-only and users do not handle it directly. `Random` and
-`Resource(Device)` are the two user-handler boundaries. `IO` may remain
+`Accum` is internal-only and users do not handle it directly.
+`Resource(Device)` is the one user-handler boundary. `IO` may remain
 unhandled at the program boundary. `Test` is consumed by `chelis test`; other
 execution boundaries reject an unhandled `Test` effect.
 
-> **[04-EFF-1]** A `handle-effect` form SHALL name one of the two user
-> handler boundaries, `random` or `resource`. Any other handler kind is a
-> type error; lowering SHALL NOT erase its handler or execute the body as if
-> no handler were present.
+Randomness is not an effect. A random primitive ([05-OP-8], [05-OP-37]) is a
+pure function of the explicit key it is given ([05-RNG-1]), and a function
+that draws takes a `key` parameter and needs no effect annotation.
+
+> **[04-EFF-1]** A `handle-effect` form SHALL name the one user handler
+> boundary, `resource`. Any other handler kind is a type error; lowering
+> SHALL NOT erase its handler or execute the body as if no handler were
+> present.
 
 > **[04-EFF-2]** Before emitting a host-C artifact, the build boundary SHALL
 > reject every reachable `resource` handler whose device designator is not
@@ -2822,30 +2823,19 @@ Inference and checking obey these rules:
   type checker
 - a function's inferred effect set is the union of the effects of compiler-known
   operations in its body
-- `dropout(x, rate)` and tensor RNG operations such as `uniform_like` are
-  `Random` sources; stdlib random helpers such as
-  `normal_like` and Kaiming/Xavier initializers inherit that effect through
-  calls
+- random primitives, the key operations [05-OP-69] through [05-OP-72], and
+  stdlib random helpers such as `normal_like` and the Kaiming/Xavier
+  initializers contribute no effect; [04-LIN-9] makes each key single-use
 - `print(x)` and `debug(x)` are `IO` sources, alongside
   the file builtins (`read_file`, `write_file`, `read_lines`, `read_bytes`,
   `file_exists`, `list_dir`, `mmap_file`) and `process_run` (subprocess exec).
   Compiled host execution preserves these effects and their order under
   spec/05-risc-primitives.md [05-HOST-1..2]
-- `with seed(seed) { ... }` handles `Random` across direct operations and calls made
-  inside the handled region; the C host backend preserves this with generated
-  handler-scoped RNG state for nested stdlib/user functions. The seed is
-  semantically i64, and a seed written as an integer literal SHALL carry the
-  `i64` suffix (`with seed(42i64) { ... }`, spec/02-surf-syntax.md §P10a); an
-  unsuffixed literal is a type error naming the required suffix. The body is
-  checked in the enclosing context and its type is returned, so the enclosing
-  signature is enforced. `spec/05-risc-primitives.md` [05-RNG-1] governs the
-  seeded stream in every lane
 - `with device(device) { ... }` marks a resource region that is validated against the
   chosen build target; [04-EFF-2] defines the host-C admission boundary
 - declared `Resource("...")` annotations on `t-fn` expressions constrain the
   inferred resource set, and checked `fn` metadata records every unhandled
   `Resource(Device)` effect
-- unhandled top-level `Random` is a check error with repair guidance
 - top-level `IO` is permitted
 - assertion operations introduce `Test`; only the test runner handles it
 
@@ -2891,8 +2881,8 @@ discovered probe files, not on [04-TEST-1]'s runnable-test count.
 Declared function types with effects use `eff` metadata on `t-fn`:
 
 ```scheme
-;; f : tensor[D, f32] -> tensor[D, f32] ! {Random, Resource("gpu:0")}
-(t-fn {eff: (effects {} random (resource {} "gpu:0"))}
+;; f : tensor[D, f32] -> tensor[D, f32] ! {IO, Resource("gpu:0")}
+(t-fn {eff: (effects {} io (resource {} "gpu:0"))}
   (t-tensor {} (d-var {} d) (t-prim {} f32))
   (t-tensor {} (d-var {} d) (t-prim {} f32)))
 ```
@@ -2900,7 +2890,7 @@ Declared function types with effects use `eff` metadata on `t-fn`:
 Checked function bodies may also carry inferred effect metadata:
 
 ```scheme
-(fn {type: (t-fn {} ...), effects: (effects {} random)} (params {} x) body)
+(fn {type: (t-fn {} ...), effects: (effects {} io)} (params {} x) body)
 ```
 
 The `effects` metadata records the complete inferred, unhandled effect set.
