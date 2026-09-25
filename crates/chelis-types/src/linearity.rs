@@ -179,6 +179,11 @@ struct BindingRecord {
     /// projected at most once, and a binding with a moved component cannot
     /// be used whole again. Empty for every binding that carries no key.
     moved_key_components: BTreeSet<usize>,
+    /// [04-LIN-9]: the generic top-level definition this binding names when
+    /// it was bound to a reference to one (`f = dup`). A call through the
+    /// binding instantiates that definition, so its duplicating type
+    /// parameters are checked there as at a direct call.
+    instance_of: Option<String>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -225,6 +230,7 @@ impl LinearScope {
                 },
                 origin: BindingOrigin::default(),
                 moved_key_components: BTreeSet::new(),
+                instance_of: None,
             },
         );
         self.visible.entry(name).or_default().push(id);
@@ -394,6 +400,16 @@ impl LinearScope {
         }
     }
 
+    /// The innermost generation of every visible name. Called right after
+    /// top-level pre-declaration, when every visible name is a definition.
+    fn top_level_ids(&self) -> BTreeMap<String, BindingId> {
+        self.visible
+            .to_sorted()
+            .into_iter()
+            .filter_map(|(name, ids)| Some((name.clone(), *ids.last()?)))
+            .collect()
+    }
+
     /// Walk the alias chain from the generation `id` to the underlying
     /// non-alias source generation.  Returns `None` if `id` carries no
     /// alias link; returns `Some(source)` if it aliases `source`
@@ -469,6 +485,45 @@ struct Checker {
     /// chelis#229 sibling-sweep gap.
     signature_inference: SignatureInferenceMetadata,
     type_headers: crate::deep_type::TypeResolutionEnv,
+    /// [04-LIN-9] through generic definitions: every top-level definition
+    /// whose type mentions a type variable, with the type parameters its
+    /// body duplicates. Filled by [`Checker::summarize_generic_defs`] before
+    /// the main walk; the main walk reads it at every call site.
+    generic_defs: BTreeMap<String, GenericDef>,
+    /// The pre-declared generation of every top-level definition, so a call
+    /// site can tell a top-level callee from a local that shadows its name.
+    def_ids: BTreeMap<String, BindingId>,
+    /// `Some` while summarizing one generic body, `None` in the main walk.
+    summary: Option<SummaryState>,
+}
+
+/// [04-LIN-9] summary of one generic top-level definition.
+#[derive(Debug, Clone, Default)]
+struct GenericDef {
+    /// The type variables of the definition's type, as `type_env` spells them.
+    vars: BTreeSet<String>,
+    /// The type variables whose values the body duplicates: uses more than
+    /// once on a path, copies, borrows, captures or reads in place, directly
+    /// or by passing them to another generic that does.
+    duplicating: BTreeSet<String>,
+    /// `type_env` spelling to the authored binder name, for diagnostics.
+    binder_names: BTreeMap<String, String>,
+    /// Calls in the body: (callee, callee type parameter, this definition's
+    /// type variables that parameter is instantiated with).
+    edges: Vec<(String, String, BTreeSet<String>)>,
+    /// A let-bound generic closure, summarized where it is bound and already
+    /// solved, rather than a top-level definition in the fixed point.
+    local: bool,
+}
+
+/// The state of one summary walk over a generic body. A value whose type
+/// carries one of `affine` in a data position is checked as a key would be,
+/// and a violation marks the variables it carries instead of erroring.
+#[derive(Debug, Clone, Default)]
+struct SummaryState {
+    affine: BTreeSet<String>,
+    duplicating: BTreeSet<String>,
+    edges: Vec<(String, String, BTreeSet<String>)>,
 }
 
 impl Checker {
@@ -528,10 +583,19 @@ pub fn check_linearity(program: &CheckedProgram) -> Result<CheckedProgram, Vec<C
         key_carrying_adts,
         signature_inference: program.signature_inference().clone(),
         type_headers: program.type_headers().clone(),
+        generic_defs: BTreeMap::new(),
+        def_ids: BTreeMap::new(),
+        summary: None,
     };
     let mut scope = LinearScope::default();
 
     pre_declare_top_level_defs(program.annotated_exprs(), program.type_env(), &mut scope);
+    checker.def_ids = scope.top_level_ids();
+    checker.generic_defs = checker.summarize_generic_defs(
+        program.annotated_exprs(),
+        program.type_env(),
+        &BTreeMap::new(),
+    );
 
     // chelis#930: cooperative cancellation at top-level-declaration
     // granularity — the same grain as the type checker's own schedule, and
@@ -665,7 +729,34 @@ pub fn check_linearity_with_context(
         key_carrying_adts,
         signature_inference: merged_signature_inference,
         type_headers: merged_type_headers,
+        generic_defs: BTreeMap::new(),
+        def_ids: BTreeMap::new(),
+        summary: None,
     };
+
+    // [04-LIN-9]: library generics are summarized too, since a new-code call
+    // can instantiate one with a key. The walk is a summary walk only: its
+    // diagnostics are discarded and its bindings never enter this scope.
+    // Library summaries resolve library callees; new-code summaries see the
+    // library ones beneath their own, and new code wins on a shared name.
+    let library_defs = checker.summarize_generic_defs(
+        library_program.annotated_exprs(),
+        library_program.type_env(),
+        &BTreeMap::new(),
+    );
+    let new_defs = checker.summarize_generic_defs(
+        new_program.annotated_exprs(),
+        new_program.type_env(),
+        &library_defs,
+    );
+    let mut new_def_names = Vec::new();
+    collect_top_level_defs(new_program.annotated_exprs(), &mut new_def_names);
+    let mut generic_defs = library_defs;
+    for (name, _) in new_def_names {
+        generic_defs.remove(name);
+    }
+    generic_defs.extend(new_defs);
+    checker.generic_defs = generic_defs;
 
     let mut scope = LinearScope::default();
 
@@ -689,6 +780,7 @@ pub fn check_linearity_with_context(
         new_program.type_env(),
         &mut scope,
     );
+    checker.def_ids = scope.top_level_ids();
 
     // Walk ONLY new-code bodies. Library bodies are never re-walked,
     // so library tensor parameters never enter the new-code scope.
@@ -735,6 +827,11 @@ impl Checker {
                     if matches!(get_tag_expr(body), Some(DeepTag::Borrow)) {
                         self.invalid_borrow(body, "borrow cannot be returned from a function");
                         return;
+                    }
+                    if is_var_expr(body)
+                        && let Some(formal) = self.top_level_types.get(name).cloned()
+                    {
+                        self.check_value_flow(body, &formal, scope);
                     }
                     // V2-F4: top-level `def name() = x` where the body is a
                     // bare `(var x)` of an owned-linear type is an
@@ -1009,7 +1106,7 @@ impl Checker {
             if is_var_expr(copied) && self.expr_holds_key(copied, scope) {
                 // [04-LIN-9]: a key is never copied, explicitly or by the
                 // compiler; a second key comes from deriving, not copying.
-                self.reject_key_read(copied, "copied");
+                self.reject_key_read(copied, "copied", scope);
                 return;
             }
             if let Some(borrowed) = borrow_inner(child) {
@@ -1058,6 +1155,7 @@ impl Checker {
 
     fn check_app(&mut self, expr: &Expr, children: &[Expr], scope: &mut LinearScope) {
         let builtin = children.first().and_then(var_name);
+        self.check_generic_call(expr, children, scope);
         if let Some(func) = children.first() {
             self.check_expr(func, scope);
         }
@@ -1076,7 +1174,7 @@ impl Checker {
                 if !observational
                     && self.arg_is_borrowed(children.first(), builtin, index - 1, scope)
                 {
-                    self.reject_key_read(arg, "borrowed by this call");
+                    self.reject_key_read(arg, "borrowed by this call", scope);
                 } else {
                     self.consume_var_expr(arg, scope, app_site(expr, children));
                 }
@@ -1096,7 +1194,7 @@ impl Checker {
 
     fn check_borrow_arg(&mut self, borrow_expr: &Expr, inner: &Expr, scope: &mut LinearScope) {
         if is_var_expr(inner) && self.expr_holds_key(inner, scope) {
-            self.reject_key_read(inner, "borrowed");
+            self.reject_key_read(inner, "borrowed", scope);
             return;
         }
         if !is_var_expr(inner) {
@@ -1222,7 +1320,13 @@ impl Checker {
                 } else {
                     self.check_expr(value, scope);
                 }
+                let instance_of = self
+                    .operand_namespace(value, scope)
+                    .or_else(|| self.summarize_local_closure(value, scope));
                 let id = scope.declare(name, self.value_type(value, scope));
+                if let Some(record) = scope.record_mut(id) {
+                    record.instance_of = instance_of;
+                }
                 if let Some(source_id) = alias_source_id {
                     scope.record_alias(id, source_id);
                 }
@@ -1275,21 +1379,25 @@ impl Checker {
                 // [04-LIN-9]: function types record no captures, and a
                 // closure that used a captured key would use it once per
                 // call. Keys are passed as parameters.
-                self.push_diagnostic(CheckError::new(
-                    CheckErrorKind::KeyReuse,
-                    with_macro_provenance(
-                        expr,
-                        format!(
-                            "closure {} captures key-carrying variable `{name}`; a closure may \
-                             not capture a key, because every call would use it again \
-                             ([04-LIN-9])",
-                            diag_site(expr)
+                let ty = ty.clone();
+                self.key_violation(
+                    Some(&ty),
+                    CheckError::new(
+                        CheckErrorKind::KeyReuse,
+                        with_macro_provenance(
+                            expr,
+                            format!(
+                                "closure {} captures key-carrying variable `{name}`; a closure \
+                                 may not capture a key, because every call would use it again \
+                                 ([04-LIN-9])",
+                                diag_site(expr)
+                            ),
                         ),
+                        vec![format!(
+                            "Pass `{name}` to the closure as a parameter instead of capturing it"
+                        )],
                     ),
-                    vec![format!(
-                        "Pass `{name}` to the closure as a parameter instead of capturing it"
-                    )],
-                ));
+                );
                 inner_scope.declare(name.clone(), outer_scope.ty(&name).cloned());
                 continue;
             }
@@ -1395,16 +1503,27 @@ impl Checker {
         }
 
         let mut pushed: Vec<(String, BindingId)> = Vec::new();
+        // The closure's own stamp types every parameter, including one
+        // written without an annotation.
+        let stamped = type_metadata(expr).and_then(|ty| tagged_children(ty, DeepTag::TFn));
         if let Some(params) = tagged_children(&children[0], DeepTag::Params) {
-            for param in params {
-                if let Some((name, ty)) = param_name_and_type(param) {
-                    if let Some(ty) = ty {
+            let stamped_params = stamped.filter(|kids| kids.len() == params.len() + 1);
+            for (index, param) in params.iter().enumerate() {
+                if let Some((name, authored)) = param_name_and_type(param) {
+                    let stamp = stamped_params.and_then(|kids| kids.get(index));
+                    let ty = self.param_type(authored, stamp).cloned();
+                    if let Some(ty) = &ty {
                         self.reject_borrowed_key_parameter(expr, name, ty);
                     }
-                    let id = inner_scope.declare(name, ty.cloned());
+                    let id = inner_scope.declare(name, ty);
                     pushed.push((name.to_string(), id));
                 }
             }
+        }
+        if is_var_expr(body)
+            && let Some(ret) = stamped.and_then(<[Expr]>::last)
+        {
+            self.check_value_flow(body, ret, &inner_scope);
         }
         for param in params {
             if !pushed.iter().any(|(name, _)| name == &param) {
@@ -1971,8 +2090,46 @@ impl Checker {
 
     /// [04-LIN-9]: whether `ty` has key evidence: a key, a key tensor, or a
     /// tuple, reference or data type that carries one (spec/04 section 8.4.1).
+    ///
+    /// While a generic body is summarized, a type that carries one of the
+    /// definition's own type variables in a data position counts too: it is
+    /// a key at the instantiations that matter, so it is checked as one.
     fn type_holds_key(&self, ty: &Expr) -> bool {
-        type_expr_holds_key(ty, &self.key_carrying_adts)
+        match &self.summary {
+            None => type_expr_holds_key(ty, &self.key_carrying_adts),
+            Some(state) => matches!(
+                key_evidence_with(ty, &self.key_carrying_adts, &mut |name| {
+                    if state.affine.contains(name) {
+                        TensorEvidence::Contains
+                    } else {
+                        TensorEvidence::Absent
+                    }
+                }),
+                TensorEvidence::Contains
+            ),
+        }
+    }
+
+    /// Report a [04-LIN-9] violation on a value of type `ty`. In a generic
+    /// summary it is not an error: it marks every type variable of the
+    /// definition that `ty` carries in a data position as duplicating, and a
+    /// call that instantiates one of them with a key reports it there.
+    fn key_violation(&mut self, ty: Option<&Expr>, error: CheckError) {
+        let Some(state) = self.summary.as_mut() else {
+            self.push_diagnostic(error);
+            return;
+        };
+        let Some(ty) = ty else {
+            return;
+        };
+        let affine = &state.affine;
+        let duplicating = &mut state.duplicating;
+        key_evidence_with(ty, &self.key_carrying_adts, &mut |name| {
+            if affine.contains(name) {
+                duplicating.insert(name.to_string());
+            }
+            TensorEvidence::Absent
+        });
     }
 
     fn expr_holds_key(&self, expr: &Expr, scope: &LinearScope) -> bool {
@@ -2018,19 +2175,24 @@ impl Checker {
         self.value_type(body, &inner)
     }
 
-    fn key_reuse(&mut self, expr: &Expr, message: String) {
-        self.push_diagnostic(CheckError::new(
-            CheckErrorKind::KeyReuse,
-            with_macro_provenance(expr, message),
-            vec![KEY_REUSE_SUGGESTION.to_string()],
-        ));
+    fn key_reuse(&mut self, expr: &Expr, ty: Option<&Expr>, message: String) {
+        self.key_violation(
+            ty,
+            CheckError::new(
+                CheckErrorKind::KeyReuse,
+                with_macro_provenance(expr, message),
+                vec![KEY_REUSE_SUGGESTION.to_string()],
+            ),
+        );
     }
 
     /// [04-LIN-9]: a key holder has no read that leaves it live.
-    fn reject_key_read(&mut self, expr: &Expr, how: &str) {
+    fn reject_key_read(&mut self, expr: &Expr, how: &str, scope: &LinearScope) {
         let name = var_name(expr).unwrap_or("<expression>");
+        let ty = self.expr_type(expr, scope).cloned();
         self.key_reuse(
             expr,
+            ty.as_ref(),
             format!(
                 "key-carrying variable `{name}` cannot be {how} {}: a key is used at most once and \
                  has no read that leaves it live ([04-LIN-9])",
@@ -2054,6 +2216,7 @@ impl Checker {
             kind: ConsumeKind::Structural,
             ..site
         };
+        let ty = self.expr_type(expr, scope).cloned();
         match scope.state(target) {
             Some(BindingState::Live { .. }) => {
                 let moved = scope
@@ -2068,6 +2231,7 @@ impl Checker {
                         .join(", ");
                     self.key_reuse(
                         expr,
+                        ty.as_ref(),
                         format!(
                             "key-carrying variable `{name}` already had its key component at \
                              position {positions} taken by `tuple_get`; using it whole {} would \
@@ -2082,6 +2246,7 @@ impl Checker {
                 let description = consumed_at.description.clone();
                 self.key_reuse(
                     expr,
+                    ty.as_ref(),
                     format!(
                         "key-carrying variable `{name}` was already consumed by {description}; a \
                          key is used at most once on every path, so the later use {} is invalid \
@@ -2102,12 +2267,15 @@ impl Checker {
             return;
         };
         let position = index.and_then(literal_index);
-        let component_holds_key = match (position, self.expr_type(target, scope)) {
+        let component = match (position, self.expr_type(target, scope)) {
             (Some(position), Some(ty)) => tagged_children(ty, DeepTag::TTuple)
                 .and_then(|elements| elements.get(position))
-                .map(|element| self.type_holds_key(element)),
+                .cloned(),
             _ => None,
         };
+        let component_holds_key = component
+            .as_ref()
+            .map(|element| self.type_holds_key(element));
         let (Some(position), Some(component_holds_key)) = (position, component_holds_key) else {
             // No literal position or no readable tuple type: take the whole
             // holder, which is the conservative reading of a projection.
@@ -2126,6 +2294,7 @@ impl Checker {
                 let description = consumed_at.description.clone();
                 self.key_reuse(
                     target,
+                    component.as_ref(),
                     format!(
                         "key-carrying variable `{name}` was already consumed by {description}; \
                          taking its key component at position {position} {} would use that key \
@@ -2141,6 +2310,7 @@ impl Checker {
                 if already_moved {
                     self.key_reuse(
                         target,
+                        component.as_ref(),
                         format!(
                             "the key component at position {position} of `{name}` was already \
                              taken; taking it again {} would use that key twice ([04-LIN-9])",
@@ -2159,18 +2329,21 @@ impl Checker {
     /// `&(key, ..)` is rejected where a parameter declares it.
     fn reject_borrowed_key_parameter(&mut self, expr: &Expr, name: &str, ty: &Expr) {
         if type_expr_is_ref(ty) && self.type_holds_key(ty) {
-            self.push_diagnostic(CheckError::new(
-                CheckErrorKind::KeyReuse,
-                with_macro_provenance(
-                    expr,
-                    format!(
-                        "parameter `{name}` {} borrows a key-carrying type; a key is never \
-                         borrowed, so a parameter takes it owned ([04-LIN-9])",
-                        diag_site(expr)
+            self.key_violation(
+                Some(ty),
+                CheckError::new(
+                    CheckErrorKind::KeyReuse,
+                    with_macro_provenance(
+                        expr,
+                        format!(
+                            "parameter `{name}` {} borrows a key-carrying type; a key is never \
+                             borrowed, so a parameter takes it owned ([04-LIN-9])",
+                            diag_site(expr)
+                        ),
                     ),
+                    vec![format!("Drop the `&` from `{name}`'s type")],
                 ),
-                vec![format!("Drop the `&` from `{name}`'s type")],
-            ));
+            );
         }
     }
 
@@ -2227,6 +2400,361 @@ impl Checker {
                 ));
             }
         }
+    }
+
+    /// The type a parameter is declared with. The main walk keeps the
+    /// authored annotation and reads the closure's stamp only for an
+    /// unannotated parameter that carries a key, so a key reaching a closure
+    /// through an inferred parameter is still affine. A generic summary reads
+    /// the stamp, which spells the definition's type variables as `type_env`
+    /// does, and the authored annotation only when there is no stamp.
+    fn param_type<'e>(
+        &self,
+        authored: Option<&'e Expr>,
+        stamp: Option<&'e Expr>,
+    ) -> Option<&'e Expr> {
+        if self.summary.is_some() {
+            stamp.or(authored)
+        } else {
+            authored.or_else(|| stamp.filter(|ty| self.type_holds_key(ty)))
+        }
+    }
+
+    /// The type-variable namespace of an operand whose type is a top-level
+    /// scheme: a reference to a top-level definition or builtin, or a local
+    /// bound to a generic definition. Each such use instantiates the scheme
+    /// afresh, so its variables are kept apart from the enclosing body's.
+    fn operand_namespace(&self, expr: &Expr, scope: &LinearScope) -> Option<String> {
+        let name = var_name(expr)?;
+        match scope.top_id(name) {
+            None => self
+                .top_level_types
+                .contains_key(name)
+                .then(|| name.to_string()),
+            Some(id) if self.def_ids.get(name) == Some(&id) => Some(name.to_string()),
+            Some(id) => scope
+                .record(id)
+                .and_then(|record| record.instance_of.clone()),
+        }
+    }
+
+    /// [04-LIN-9] at a call: instantiate the callee's type with the argument
+    /// and result types, and report every duplicating type parameter of a
+    /// generic definition used here that the call instantiates with a key.
+    fn check_generic_call(&mut self, expr: &Expr, children: &[Expr], scope: &LinearScope) {
+        if self.generic_defs.is_empty() {
+            return;
+        }
+        let Some(func) = children.first() else {
+            return;
+        };
+        let Some(callee_ty) = self.value_type(func, scope) else {
+            return;
+        };
+        let Some(formals) = tagged_children(peel_instantiation_type(&callee_ty), DeepTag::TFn)
+        else {
+            return;
+        };
+        let callee_ns = self.operand_namespace(func, scope);
+        let arity = formals.len().saturating_sub(1);
+        let mut instantiation = Instantiation::default();
+        for (formal, arg) in formals.iter().take(arity).zip(children.iter().skip(1)) {
+            let operand = borrow_inner(arg).unwrap_or(arg);
+            if let Some(actual) = self.value_type(operand, scope) {
+                let actual_ns = self.operand_namespace(operand, scope);
+                instantiation.unify((&callee_ns, formal), (&actual_ns, &actual), 0);
+            }
+        }
+        if let (Some(result), Some(actual)) = (formals.last(), type_metadata(expr)) {
+            instantiation.unify((&callee_ns, result), (&None, actual), 0);
+        }
+        self.report_instantiation(expr, &instantiation);
+    }
+
+    /// [04-LIN-9] where a value flows into a declared type without a call:
+    /// a definition or closure whose body is a reference to a generic
+    /// definition instantiates it at the declared result type.
+    fn check_value_flow(&mut self, value: &Expr, formal: &Expr, scope: &LinearScope) {
+        if self.generic_defs.is_empty() {
+            return;
+        }
+        let Some(namespace) = self.operand_namespace(value, scope) else {
+            return;
+        };
+        let Some(actual) = self.value_type(value, scope) else {
+            return;
+        };
+        let mut instantiation = Instantiation::default();
+        instantiation.unify((&None, formal), (&Some(namespace), &actual), 0);
+        self.report_instantiation(value, &instantiation);
+    }
+
+    fn report_instantiation(&mut self, site: &Expr, instantiation: &Instantiation) {
+        let instantiated = instantiation
+            .seen
+            .iter()
+            .filter(|(namespace, var)| {
+                namespace
+                    .as_ref()
+                    .and_then(|def| self.generic_defs.get(def))
+                    .is_some_and(|generic| generic.vars.contains(var))
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        for var in instantiated {
+            let (Some(def), binder) = &var else {
+                continue;
+            };
+            if let Some(affine) = self.summary.as_ref().map(|state| state.affine.clone()) {
+                // A summary records the edge and the fixed point decides it;
+                // a local closure is already solved, so it decides here.
+                let mut vars = BTreeSet::new();
+                self.instantiated_affine_vars(instantiation, &var, &affine, &mut vars, 0);
+                let local = self
+                    .generic_defs
+                    .get(def)
+                    .map(|generic| (generic.local, generic.duplicating.contains(binder)));
+                if let Some(state) = self.summary.as_mut()
+                    && !vars.is_empty()
+                {
+                    match local {
+                        Some((true, true)) => state.duplicating.extend(vars),
+                        Some((true, false)) => {}
+                        _ => state.edges.push((def.clone(), binder.clone(), vars)),
+                    }
+                }
+                continue;
+            }
+            let Some(generic) = self.generic_defs.get(def) else {
+                continue;
+            };
+            if !generic.duplicating.contains(binder)
+                || self.instantiated_key_evidence(instantiation, &var, 0)
+                    != TensorEvidence::Contains
+            {
+                continue;
+            }
+            let shown = generic.binder_names.get(binder).unwrap_or(binder).clone();
+            let def = def.clone();
+            self.push_diagnostic(CheckError::new(
+                CheckErrorKind::KeyReuse,
+                with_macro_provenance(
+                    site,
+                    format!(
+                        "this use of `{def}` {} instantiates its type parameter `{shown}` with a \
+                         key-carrying type, but `{def}` duplicates values of that type: it uses \
+                         one more than once on a path, copies, borrows or captures it, or reads it \
+                         in place, and a key is used at most once ([04-LIN-9])",
+                        diag_site(site)
+                    ),
+                ),
+                vec![KEY_REUSE_SUGGESTION.to_string()],
+            ));
+        }
+    }
+
+    /// Key evidence of what `var` is instantiated with.
+    fn instantiated_key_evidence(
+        &self,
+        instantiation: &Instantiation,
+        var: &NamespacedVar,
+        depth: usize,
+    ) -> TensorEvidence {
+        if depth > INSTANTIATION_DEPTH {
+            return TensorEvidence::Absent;
+        }
+        let Some((namespace, ty)) = instantiation.bound.get(&instantiation.find(var)) else {
+            return TensorEvidence::Absent;
+        };
+        key_evidence_with(ty, &self.key_carrying_adts, &mut |name| {
+            self.instantiated_key_evidence(
+                instantiation,
+                &(namespace.clone(), name.to_string()),
+                depth + 1,
+            )
+        })
+    }
+
+    /// The enclosing body's own type variables (from `affine`) that `var` is
+    /// instantiated with, in data positions.
+    fn instantiated_affine_vars(
+        &self,
+        instantiation: &Instantiation,
+        var: &NamespacedVar,
+        affine: &BTreeSet<String>,
+        out: &mut BTreeSet<String>,
+        depth: usize,
+    ) {
+        if depth > INSTANTIATION_DEPTH {
+            return;
+        }
+        let root = instantiation.find(var);
+        for member in &instantiation.seen {
+            if member.0.is_none()
+                && affine.contains(&member.1)
+                && instantiation.find(member) == root
+            {
+                out.insert(member.1.clone());
+            }
+        }
+        let Some((namespace, ty)) = instantiation.bound.get(&root) else {
+            return;
+        };
+        key_evidence_with(ty, &self.key_carrying_adts, &mut |name| {
+            if namespace.is_none() && affine.contains(name) {
+                out.insert(name.to_string());
+            }
+            self.instantiated_affine_vars(
+                instantiation,
+                &(namespace.clone(), name.to_string()),
+                affine,
+                out,
+                depth + 1,
+            );
+            TensorEvidence::Absent
+        });
+    }
+
+    /// [04-LIN-9]: a closure bound by `let` is generalized, so a call through
+    /// its name can instantiate it with a key. Summarize its body here, where
+    /// it is bound, and register it under a name no source spelling can
+    /// produce; the binding then instantiates it at each call as it would a
+    /// top-level generic.
+    fn summarize_local_closure(&mut self, value: &Expr, scope: &LinearScope) -> Option<String> {
+        if get_tag_expr(value) != Some(DeepTag::Fn) {
+            return None;
+        }
+        let mut vars = BTreeSet::new();
+        collect_type_vars(type_metadata(value)?, &mut vars);
+        if vars.is_empty() {
+            return None;
+        }
+        let saved_errors = std::mem::take(&mut self.errors);
+        let saved_summary = self.summary.replace(SummaryState {
+            affine: vars.clone(),
+            ..SummaryState::default()
+        });
+        let mut closure_scope = scope.clone();
+        self.check_expr(value, &mut closure_scope);
+        let state = std::mem::replace(&mut self.summary, saved_summary).unwrap_or_default();
+        self.errors = saved_errors;
+        let mut duplicating = state.duplicating;
+        for (callee, binder, passed) in state.edges {
+            if self
+                .generic_defs
+                .get(&callee)
+                .is_some_and(|generic| generic.duplicating.contains(&binder))
+            {
+                duplicating.extend(passed);
+            }
+        }
+        let name = format!("closure {}", diag_site(value));
+        self.generic_defs.insert(
+            name.clone(),
+            GenericDef {
+                vars,
+                duplicating,
+                local: true,
+                ..GenericDef::default()
+            },
+        );
+        Some(name)
+    }
+
+    /// [04-LIN-9] summaries of the generic top-level definitions in `exprs`,
+    /// whose types `env` holds. Each body is walked once in summary mode,
+    /// with its diagnostics discarded, to find the type parameters it
+    /// duplicates itself and the calls that pass them on; a least fixed point
+    /// over those calls then closes the set, so transitive and mutually
+    /// recursive duplication is found. `beneath` holds already-solved
+    /// summaries that these definitions may call.
+    fn summarize_generic_defs(
+        &self,
+        exprs: &[Expr],
+        env: &BTreeMap<String, Expr>,
+        beneath: &BTreeMap<String, GenericDef>,
+    ) -> BTreeMap<String, GenericDef> {
+        let mut bodies = Vec::new();
+        collect_top_level_defs(exprs, &mut bodies);
+        let mut defs: BTreeMap<String, GenericDef> = BTreeMap::new();
+        for (name, body) in &bodies {
+            let Some(ty) = env.get(*name) else {
+                continue;
+            };
+            let mut vars = BTreeSet::new();
+            collect_type_vars(ty, &mut vars);
+            if !vars.is_empty() {
+                let mut binder_names = BTreeMap::new();
+                collect_binder_names(body, &mut binder_names);
+                defs.insert(
+                    (*name).to_string(),
+                    GenericDef {
+                        vars,
+                        binder_names,
+                        ..GenericDef::default()
+                    },
+                );
+            }
+        }
+        if defs.is_empty() {
+            return defs;
+        }
+        let mut known = beneath.clone();
+        known.extend(defs.clone());
+        let mut walker = Checker {
+            errors: Vec::new(),
+            info: LinearityInfo::default(),
+            top_level_types: env.clone(),
+            tensor_carrying_adts: self.tensor_carrying_adts.clone(),
+            key_carrying_adts: self.key_carrying_adts.clone(),
+            signature_inference: self.signature_inference.clone(),
+            type_headers: self.type_headers.clone(),
+            generic_defs: known,
+            def_ids: BTreeMap::new(),
+            summary: None,
+        };
+        for (name, body) in &bodies {
+            let Some(def) = defs.get_mut(*name) else {
+                continue;
+            };
+            walker.summary = Some(SummaryState {
+                affine: def.vars.clone(),
+                ..SummaryState::default()
+            });
+            let mut scope = LinearScope::default();
+            if is_var_expr(body)
+                && let Some(formal) = env.get(*name)
+            {
+                walker.check_value_flow(body, formal, &scope);
+            }
+            walker.check_expr(body, &mut scope);
+            let state = walker.summary.take().unwrap_or_default();
+            def.duplicating = state.duplicating;
+            def.edges = state.edges;
+        }
+        loop {
+            let solved: BTreeMap<String, BTreeSet<String>> = defs
+                .iter()
+                .map(|(name, def)| (name.clone(), def.duplicating.clone()))
+                .collect();
+            let mut grew = false;
+            for def in defs.values_mut() {
+                for (callee, binder, vars) in &def.edges {
+                    let duplicating = solved
+                        .get(callee)
+                        .or_else(|| beneath.get(callee).map(|generic| &generic.duplicating));
+                    if duplicating.is_some_and(|set| set.contains(binder)) {
+                        for var in vars {
+                            grew |= def.duplicating.insert(var.clone());
+                        }
+                    }
+                }
+            }
+            if !grew {
+                break;
+            }
+        }
+        defs
     }
 
     fn expr_is_owned_or_borrow_linear(&self, expr: &Expr, scope: &LinearScope) -> bool {
@@ -3039,15 +3567,29 @@ const KEY_OPERAND_BUILTINS: &[(&str, usize)] = &[
 /// 8.4). A type variable carries none here; its instantiation is checked
 /// where it is instantiated.
 fn key_evidence(expr: &Expr, key_carrying_adts: &UnordSet<String>) -> TensorEvidence {
+    key_evidence_with(expr, key_carrying_adts, &mut |_| TensorEvidence::Absent)
+}
+
+/// Key evidence with a caller-chosen reading of each type variable in a data
+/// position (never one inside a function type). The main walk reads a type
+/// variable as absent; a generic summary reads its definition's own type
+/// variables as present; a call site reads a variable as what the call
+/// instantiates it with.
+fn key_evidence_with(
+    expr: &Expr,
+    key_carrying_adts: &UnordSet<String>,
+    type_var: &mut dyn FnMut(&str) -> TensorEvidence,
+) -> TensorEvidence {
     if !type_syntax_is_well_formed(expr) {
         return TensorEvidence::Unreadable;
     }
-    key_evidence_from_well_formed_type(expr, key_carrying_adts)
+    key_evidence_from_well_formed_type(expr, key_carrying_adts, type_var)
 }
 
 fn key_evidence_from_well_formed_type(
     expr: &Expr,
     key_carrying_adts: &UnordSet<String>,
+    type_var: &mut dyn FnMut(&str) -> TensorEvidence,
 ) -> TensorEvidence {
     match expr.carrier() {
         ExprCarrier::DecodedNode(tag, _, children) => match tag {
@@ -3060,24 +3602,34 @@ fn key_evidence_from_well_formed_type(
             }
             // The element dtype is the tensor type's last child.
             DeepTag::TTensor => children.last().map_or(TensorEvidence::Absent, |precision| {
-                key_evidence_from_well_formed_type(precision, key_carrying_adts)
+                key_evidence_from_well_formed_type(precision, key_carrying_adts, type_var)
             }),
-            DeepTag::TRef | DeepTag::TTuple => combine_tensor_evidence(
-                children
+            DeepTag::TVar => children
+                .first()
+                .and_then(symbol_name)
+                .map_or(TensorEvidence::Absent, &mut *type_var),
+            DeepTag::TRef | DeepTag::TTuple => {
+                let evidence = children
                     .iter()
-                    .map(|child| key_evidence_from_well_formed_type(child, key_carrying_adts)),
-            ),
+                    .map(|child| {
+                        key_evidence_from_well_formed_type(child, key_carrying_adts, type_var)
+                    })
+                    .collect::<Vec<_>>();
+                combine_tensor_evidence(evidence)
+            }
             DeepTag::TAdt => {
                 let name_carries = children
                     .first()
                     .and_then(symbol_name)
                     .is_some_and(|name| key_carrying_adts.contains(name));
-                match combine_tensor_evidence(
-                    children
-                        .iter()
-                        .skip(1)
-                        .map(|child| key_evidence_from_well_formed_type(child, key_carrying_adts)),
-                ) {
+                let evidence = children
+                    .iter()
+                    .skip(1)
+                    .map(|child| {
+                        key_evidence_from_well_formed_type(child, key_carrying_adts, type_var)
+                    })
+                    .collect::<Vec<_>>();
+                match combine_tensor_evidence(evidence) {
                     TensorEvidence::Absent if name_carries => TensorEvidence::Contains,
                     evidence => evidence,
                 }
@@ -3085,7 +3637,7 @@ fn key_evidence_from_well_formed_type(
             _ => TensorEvidence::Absent,
         },
         ExprCarrier::MetadataExpression(meta) => {
-            key_evidence_from_well_formed_type(&meta.expr, key_carrying_adts)
+            key_evidence_from_well_formed_type(&meta.expr, key_carrying_adts, type_var)
         }
         ExprCarrier::StructuralList(_)
         | ExprCarrier::UndecodableHead(_, _, _)
@@ -3146,6 +3698,236 @@ fn literal_index(expr: &Expr) -> Option<usize> {
     match literal {
         Expr::Atom(Atom::Int(n), _) => usize::try_from(*n).ok(),
         _ => None,
+    }
+}
+
+/// A type variable at one call: `None` for the enclosing body's own
+/// variables, `Some(scheme)` for a variable of a top-level scheme that this
+/// use instantiates afresh.
+type NamespacedVar = (Option<String>, String);
+
+/// Bound on the recursion through instantiated types; a type that binds a
+/// variable to itself cannot loop past it.
+const INSTANTIATION_DEPTH: usize = 64;
+
+/// The instantiation one call makes: which type variables are the same and
+/// what they are bound to. The type checker has already accepted the call,
+/// so a shape mismatch is skipped rather than reported.
+#[derive(Debug, Default)]
+struct Instantiation {
+    parent: BTreeMap<NamespacedVar, NamespacedVar>,
+    bound: BTreeMap<NamespacedVar, (Option<String>, Expr)>,
+    seen: BTreeSet<NamespacedVar>,
+}
+
+impl Instantiation {
+    fn find(&self, var: &NamespacedVar) -> NamespacedVar {
+        let mut current = var.clone();
+        for _ in 0..=self.parent.len() {
+            match self.parent.get(&current) {
+                Some(next) => current = next.clone(),
+                None => break,
+            }
+        }
+        current
+    }
+
+    fn unify(
+        &mut self,
+        (lhs_ns, lhs): (&Option<String>, &Expr),
+        (rhs_ns, rhs): (&Option<String>, &Expr),
+        depth: usize,
+    ) {
+        if depth > INSTANTIATION_DEPTH {
+            return;
+        }
+        let lhs = peel_instantiation_type(lhs);
+        let rhs = peel_instantiation_type(rhs);
+        match (type_var_name(lhs), type_var_name(rhs)) {
+            (Some(left), Some(right)) => {
+                let left = (lhs_ns.clone(), left.to_string());
+                let right = (rhs_ns.clone(), right.to_string());
+                self.seen.insert(left.clone());
+                self.seen.insert(right.clone());
+                self.union(&left, &right, depth);
+            }
+            (Some(left), None) => {
+                let left = (lhs_ns.clone(), left.to_string());
+                self.seen.insert(left.clone());
+                self.bind(&left, (rhs_ns, rhs), depth);
+            }
+            (None, Some(right)) => {
+                let right = (rhs_ns.clone(), right.to_string());
+                self.seen.insert(right.clone());
+                self.bind(&right, (lhs_ns, lhs), depth);
+            }
+            (None, None) => {
+                let (Some((left_tag, left)), Some((right_tag, right))) =
+                    (decoded_type_node(lhs), decoded_type_node(rhs))
+                else {
+                    return;
+                };
+                if left_tag != right_tag {
+                    return;
+                }
+                if left_tag == DeepTag::TTensor {
+                    // Only the element dtype of a tensor can carry a key, and
+                    // a rest dimension makes the dimension lists differ.
+                    if let (Some(left), Some(right)) = (left.last(), right.last()) {
+                        self.unify((lhs_ns, left), (rhs_ns, right), depth + 1);
+                    }
+                } else if left.len() == right.len() {
+                    for (left, right) in left.iter().zip(right) {
+                        self.unify((lhs_ns, left), (rhs_ns, right), depth + 1);
+                    }
+                }
+            }
+        }
+    }
+
+    fn bind(&mut self, var: &NamespacedVar, (ns, ty): (&Option<String>, &Expr), depth: usize) {
+        let root = self.find(var);
+        match self.bound.get(&root).cloned() {
+            Some((bound_ns, bound)) => self.unify((&bound_ns, &bound), (ns, ty), depth + 1),
+            None => {
+                self.bound.insert(root, (ns.clone(), ty.clone()));
+            }
+        }
+    }
+
+    fn union(&mut self, left: &NamespacedVar, right: &NamespacedVar, depth: usize) {
+        let left = self.find(left);
+        let right = self.find(right);
+        if left == right {
+            return;
+        }
+        let moved = self.bound.remove(&left);
+        self.parent.insert(left, right.clone());
+        if let Some((ns, ty)) = moved {
+            self.bind(&right, (&ns, &ty), depth + 1);
+        }
+    }
+}
+
+/// A type with its metadata wrapper and any reference peeled: an
+/// instantiation relates the referenced types.
+fn peel_instantiation_type(mut ty: &Expr) -> &Expr {
+    loop {
+        match ty.carrier() {
+            ExprCarrier::MetadataExpression(meta) => ty = &meta.expr,
+            ExprCarrier::DecodedNode(DeepTag::TRef, _, [inner]) => ty = inner,
+            ExprCarrier::DecodedNode(_, _, _)
+            | ExprCarrier::StructuralList(_)
+            | ExprCarrier::UndecodableHead(_, _, _)
+            | ExprCarrier::Atom(_)
+            | ExprCarrier::MetadataMap(_) => return ty,
+        }
+    }
+}
+
+fn decoded_type_node(ty: &Expr) -> Option<(DeepTag, &[Expr])> {
+    match ty.carrier() {
+        ExprCarrier::DecodedNode(tag, _, children) => Some((tag, children)),
+        ExprCarrier::StructuralList(_)
+        | ExprCarrier::UndecodableHead(_, _, _)
+        | ExprCarrier::Atom(_)
+        | ExprCarrier::MetadataMap(_)
+        | ExprCarrier::MetadataExpression(_) => None,
+    }
+}
+
+fn type_var_name(ty: &Expr) -> Option<&str> {
+    tagged_children(ty, DeepTag::TVar)?
+        .first()
+        .and_then(symbol_name)
+}
+
+/// Every type variable a type mentions, function types included.
+fn collect_type_vars(ty: &Expr, out: &mut BTreeSet<String>) {
+    if let Some(name) = type_var_name(ty) {
+        out.insert(name.to_string());
+        return;
+    }
+    match ty.carrier() {
+        ExprCarrier::DecodedNode(_, _, children) => {
+            for child in children {
+                collect_type_vars(child, out);
+            }
+        }
+        ExprCarrier::MetadataExpression(meta) => collect_type_vars(&meta.expr, out),
+        ExprCarrier::StructuralList(_)
+        | ExprCarrier::UndecodableHead(_, _, _)
+        | ExprCarrier::Atom(_)
+        | ExprCarrier::MetadataMap(_) => {}
+    }
+}
+
+/// Every top-level `def` with its body, through module wrappers.
+fn collect_top_level_defs<'a>(exprs: &'a [Expr], out: &mut Vec<(&'a str, &'a Expr)>) {
+    for expr in exprs {
+        match expr.carrier() {
+            ExprCarrier::DecodedNode(DeepTag::Module, _, children) => {
+                collect_top_level_defs(children.get(1..).unwrap_or_default(), out);
+            }
+            ExprCarrier::DecodedNode(DeepTag::Def, _, children) => {
+                if let (Some(name), Some(body)) =
+                    (children.first().and_then(symbol_name), children.get(1))
+                {
+                    out.push((name, body));
+                }
+            }
+            ExprCarrier::DecodedNode(_, _, _)
+            | ExprCarrier::StructuralList(_)
+            | ExprCarrier::UndecodableHead(_, _, _)
+            | ExprCarrier::Atom(_)
+            | ExprCarrier::MetadataMap(_)
+            | ExprCarrier::MetadataExpression(_) => {}
+        }
+    }
+}
+
+/// The authored binder name of each `type_env` type variable, read by
+/// pairing a definition's annotated parameter types with its stamp.
+fn collect_binder_names(body: &Expr, out: &mut BTreeMap<String, String>) {
+    let Some(children) = tagged_children(body, DeepTag::Fn) else {
+        return;
+    };
+    let (Some(params), Some(stamped)) = (
+        children
+            .first()
+            .and_then(|params| tagged_children(params, DeepTag::Params)),
+        type_metadata(body).and_then(|ty| tagged_children(ty, DeepTag::TFn)),
+    ) else {
+        return;
+    };
+    for (param, stamp) in params.iter().zip(stamped) {
+        if let Some((_, Some(authored))) = param_name_and_type(param) {
+            pair_type_vars(authored, stamp, out);
+        }
+    }
+}
+
+fn pair_type_vars(authored: &Expr, stamped: &Expr, out: &mut BTreeMap<String, String>) {
+    let authored = peel_instantiation_type(authored);
+    let stamped = peel_instantiation_type(stamped);
+    if let (Some(authored), Some(stamped)) = (type_var_name(authored), type_var_name(stamped)) {
+        out.entry(stamped.to_string())
+            .or_insert_with(|| authored.to_string());
+        return;
+    }
+    if let (Some((authored_tag, authored)), Some((stamped_tag, stamped))) =
+        (decoded_type_node(authored), decoded_type_node(stamped))
+        && authored_tag == stamped_tag
+    {
+        if authored_tag == DeepTag::TTensor {
+            if let (Some(authored), Some(stamped)) = (authored.last(), stamped.last()) {
+                pair_type_vars(authored, stamped, out);
+            }
+        } else if authored.len() == stamped.len() {
+            for (authored, stamped) in authored.iter().zip(stamped) {
+                pair_type_vars(authored, stamped, out);
+            }
+        }
     }
 }
 

@@ -3131,7 +3131,10 @@ lexical binding, change which callable is selected, or memoize function results.
 > allow for another owned value are refused for it. It SHALL NOT be
 > borrowed, copied, captured by a closure, or read by any operation that
 > leaves it live, and no signature SHALL declare a borrowed key-carrying
-> parameter. Binding it to another name moves it. Every call consumes a
+> parameter. Binding it to another name moves it. A value whose type is a
+> type parameter instantiated at a key-carrying type is key-carrying, so a
+> generic function or closure instantiated at one is held to this rule
+> throughout its body. Every call consumes a
 > key-carrying argument, including the otherwise observational arguments of
 > a `grad(f)(...)` or `vmap(f)(...)` call. A key inside a key-carrying
 > value is reached only by consuming that value: a destructuring `let` or

@@ -645,3 +645,36 @@ def f(x: tensor[4, f32]) -> tensor[4, f32] =
         "empty-library context must accept a clean snippet"
     );
 }
+
+/// [04-LIN-9] (chelis#2413): library generics are summarized too, so a
+/// new-code call that instantiates a duplicating library parameter with a
+/// key is rejected, and the same call on numbers is accepted. The library
+/// body is `chelis-std`'s `list_index`, whose `index` reads the list in place.
+#[test]
+fn a_duplicating_library_generic_rejects_a_key_and_accepts_numbers() {
+    let library_src = "def list_index[item](values: List[item], idx: i64) -> item = \
+                       index(values, idx)\ndef lib_dup[a](x: a) -> (a, a) = (x, x)\n";
+    check_new_with_context(
+        library_src,
+        "def good(xs: List[f32], x: i64) -> (f32, (i64, i64)) = (list_index(xs, 0i64), \
+         lib_dup(x))\n",
+    )
+    .expect("a duplicating library generic instantiated with numbers is accepted");
+    for (name, new_src) in [
+        (
+            "list_index",
+            "def bad(k: key) -> key = {\n  (a, b) = split_key(k)\n  list_index([a, b], 0i64)\n}\n",
+        ),
+        ("lib_dup", "def bad(k: key) -> (key, key) = lib_dup(k)\n"),
+    ] {
+        let errors = check_new_with_context(library_src, new_src)
+            .expect_err("a duplicating library generic instantiated with a key is rejected");
+        assert!(
+            errors.iter().any(|error| matches!(
+                error.kind,
+                chelis_types::errors::CheckErrorKind::KeyReuse
+            ) && error.message.contains(&format!("`{name}`"))),
+            "{name}: expected a KeyReuse naming the library callee, got {errors:?}"
+        );
+    }
+}
