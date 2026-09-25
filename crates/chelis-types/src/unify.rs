@@ -391,6 +391,14 @@ pub(crate) enum DeferredOperandGate {
         mode: chelis_deep::CastMode,
         result: Box<Type>,
     },
+    /// chelis#2534: a checked `cast` whose TARGET is a declaration's dtype
+    /// binder and whose SOURCE was unresolved. Carries the target binder and
+    /// the result variable the call returned; discharge decides the settled
+    /// source with the same function the eager arm calls.
+    CastToBinder {
+        target: crate::types::TypeVar,
+        result: Box<Type>,
+    },
     /// A host-lane slot that unifies against a fixed expected type:
     /// the ten csv routes, which funnel through `unify_host_slot`. Carries
     /// what the slot expected so discharge can re-decide without re-running
@@ -523,9 +531,10 @@ impl DeferredOperandGate {
     /// cannot be added without deciding this.
     fn result(&self) -> Option<&Type> {
         match self {
-            Self::Copy { result } | Self::Cast { result, .. } | Self::ShapeRoute { result, .. } => {
-                Some(result.as_ref())
-            }
+            Self::Copy { result }
+            | Self::Cast { result, .. }
+            | Self::CastToBinder { result, .. }
+            | Self::ShapeRoute { result, .. } => Some(result.as_ref()),
             Self::HostSlot { .. } => None,
         }
     }
@@ -584,6 +593,20 @@ impl DeferredOperandGate {
                     resolved.clone(),
                     target,
                     mode,
+                    subst,
+                ) {
+                    Ok(settled) => {
+                        self.reconcile_result(result, settled, subst);
+                    }
+                    Err(error) => subst.record_operand_gate_failure(OperandGateFailure::Decision {
+                        error: *error,
+                    }),
+                }
+            }
+            Self::CastToBinder { target, ref result } => {
+                match crate::infer::expr_record::binder_cast_result_from_settled_source(
+                    resolved.clone(),
+                    target,
                     subst,
                 ) {
                     Ok(settled) => {
@@ -659,6 +682,9 @@ impl DeferredOperandGate {
         match self {
             Self::Copy { .. } => format!("copy requires tensor input, got {subject}"),
             Self::Cast { .. } => format!("cast requires tensor or prim type, got {subject}"),
+            Self::CastToBinder { .. } => format!(
+                "cast to a quantified scalar dtype requires a numeric or bool scalar, got {subject}"
+            ),
             Self::HostSlot {
                 fname, description, ..
             } => format!("{fname} expects {description}, got {subject}"),
@@ -672,7 +698,7 @@ impl DeferredOperandGate {
     pub(crate) fn noun(&self) -> &str {
         match self {
             Self::Copy { .. } => "copy",
-            Self::Cast { .. } => "cast",
+            Self::Cast { .. } | Self::CastToBinder { .. } => "cast",
             Self::HostSlot { fname, .. } => fname,
             Self::ShapeRoute { route, .. } => route.op(),
         }
@@ -687,7 +713,7 @@ impl DeferredOperandGate {
     pub(crate) fn kind(&self) -> crate::errors::CheckErrorKind {
         use crate::errors::CheckErrorKind as Kind;
         match self {
-            Self::Cast { .. } => Kind::CastNonTensor,
+            Self::Cast { .. } | Self::CastToBinder { .. } => Kind::CastNonTensor,
             Self::Copy { .. } | Self::HostSlot { .. } | Self::ShapeRoute { .. } => {
                 Kind::TypeMismatch
             }
@@ -1688,9 +1714,9 @@ impl Subst {
     /// Identifying two variables must carry the obligation across, exactly as
     /// the shape ledgers' `merge_alias` does; dropping it here would silently
     /// un-defer the constraint.
-    /// Remove and decide every suspended scalar `Cast` gate whose operand now
-    /// resolves to a variable with a declared dtype-family bound, when that
-    /// bound alone settles it (chelis#2151). See
+    /// Remove and decide every suspended scalar `Cast` or `CastToBinder` gate
+    /// whose operand now resolves to a variable with a declared dtype-family
+    /// bound, when that bound alone settles it (chelis#2151, chelis#2534). See
     /// [`discharge_bounded_scalar_casts`].
     ///
     /// Almost every binding runs with an empty ledger, so it returns early
@@ -1711,9 +1737,12 @@ impl Subst {
         }
         let mut decided = Vec::new();
         ledger.retain(|(tv, gate)| {
-            let DeferredOperandGate::Cast { target, mode, .. } = gate else {
+            if !matches!(
+                gate,
+                DeferredOperandGate::Cast { .. } | DeferredOperandGate::CastToBinder { .. }
+            ) {
                 return true;
-            };
+            }
             let Type::Var(operand) = self.apply(&Type::Var(*tv)) else {
                 return true;
             };
@@ -1725,7 +1754,16 @@ impl Subst {
             else {
                 return true;
             };
-            match crate::infer::expr_record::bounded_scalar_cast_result(bound, *target, *mode) {
+            let decision = match gate {
+                DeferredOperandGate::Cast { target, mode, .. } => {
+                    crate::infer::expr_record::bounded_scalar_cast_result(bound, *target, *mode)
+                }
+                // chelis#2534: every member of a numeric bound is a scalar
+                // source a binder-target `cast` admits ([05-OP-63]).
+                DeferredOperandGate::CastToBinder { target, .. } => Some(Ok(Type::Var(*target))),
+                _ => None,
+            };
+            match decision {
                 Some(decision) => {
                     decided.push((gate.clone(), decision));
                     false
@@ -3228,7 +3266,9 @@ fn bind_tvar(v: TypeVar, ty: &Type, subst: &mut Subst) -> Result<(), TypeError> 
 /// that reads only the target); a gate it declines stays suspended.
 fn discharge_bounded_scalar_casts(subst: &mut Subst) {
     for (gate, decision) in subst.take_bounded_scalar_cast_gates() {
-        let DeferredOperandGate::Cast { ref result, .. } = gate else {
+        let (DeferredOperandGate::Cast { ref result, .. }
+        | DeferredOperandGate::CastToBinder { ref result, .. }) = gate
+        else {
             continue;
         };
         match decision {
