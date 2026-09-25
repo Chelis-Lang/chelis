@@ -551,10 +551,36 @@ fn a_type_parameter_is_never_instantiated_at_a_key() {
 #[test]
 fn a_generic_reached_indirectly_is_never_instantiated_at_a_key() {
     let dup = "def dup[a](x: a) -> (a, a) = (x, x)\n";
-    let cases: [(&str, String, &str, Option<&str>); 7] = [
+    let cases: [(&str, String, &str, Option<&str>); 10] = [
         (
             "map(dup, keys)",
             format!("{dup}def bad(ks: List[key]) -> List[(key, key)] = map(dup, ks)\n"),
+            "dup",
+            Some("a"),
+        ),
+        (
+            "map(dup, [a, b]), chelis#2541's witness",
+            format!(
+                "{dup}def bad(k: key) -> List[(key, key)] = {{\n  (a, b) = split_key(k)\n  \
+                 map(dup, [a, b])\n}}\n"
+            ),
+            "dup",
+            Some("a"),
+        ),
+        (
+            "a generic stored in a record and then applied",
+            format!(
+                "type Twice[a] =\n  | Twice {{ f: (a) -> (a, a) }}\n{dup}def bad(k: key) -> (key, \
+                 key) = match Twice {{ f: dup }} with {{\n  | Twice {{ f }} => f(k)\n}}\n"
+            ),
+            "dup",
+            Some("a"),
+        ),
+        (
+            "a generic stored in a list and then applied",
+            format!(
+                "{dup}def bad(k: key) -> (key, key) = {{\n  fs = [dup]\n  (index(fs, 0i64))(k)\n}}\n"
+            ),
             "dup",
             Some("a"),
         ),
