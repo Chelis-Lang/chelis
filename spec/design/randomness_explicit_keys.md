@@ -73,7 +73,7 @@ The JAX idiom of repeated `fold_in(k, step)` on one retained key is written `spl
 - runtime dtype `key` with id 9 (one 64-bit word, no arithmetic representation), so a `tensor[n, key]` is a `chelis_tensor` of dtype key; DLPack refuses key tensors with a typed rejection;
 - a `key` precision at any rank in the wire format;
 - `{"type":"key","bits":"<16 lowercase hex>"}` in execution values;
-- an opaque published `chelis_key` for scalar keys at public entries.
+- an opaque published `chelis_key` for a scalar key at a host entry; an entry on the four-argument tensor ABI passes every key input and result as a `chelis_tensor` of dtype key, rank 0 for a scalar key.
 
 It is never a bare integer (`dtype_semantics.md` §C6). Adding the runtime dtype changes the #893 runtime vocabulary (`chelis-vocab` `RuntimeDType`, the sealed `TensorElement` set, `chelis_runtime_dtype.h`), so it is a Phase 0 inventory freeze move (`runtime_representation.md` §B1), coordinated with that plan: the new element spellings route through the existing dtype authorities.
 
