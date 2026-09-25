@@ -358,7 +358,7 @@ fn fixed_control_gradients_keep_the_same_authored_activation_claim() {
             "[1.0f32, 2.0f32, 3.0f32]"
         };
         let source = format!(
-            "{CLAIM_FUNCTION}def h(x: tensor[{width}, f32], z: tensor[2, f32]) -> tensor[f32] = dropout(sum(f(x, to_tensor([1.0f32, 2.0f32, 3.0f32])), 0i32), 0.0f32)\ndef main() = with seed(42i64) {{ grad(h, wrt=(x, z))(to_tensor({values}), to_tensor([4.0f32, 5.0f32])) }}\n"
+            "{CLAIM_FUNCTION}def h(k: key, x: tensor[{width}, f32], z: tensor[2, f32]) -> tensor[f32] = dropout(k, sum(f(x, to_tensor([1.0f32, 2.0f32, 3.0f32])), 0i32), 0.0f32)\ndef main() = grad(h, wrt=(x, z))(key_from_seed(42i64), to_tensor({values}), to_tensor([4.0f32, 5.0f32]))\n"
         );
         if width == 2 {
             assert_extent_failure(source);

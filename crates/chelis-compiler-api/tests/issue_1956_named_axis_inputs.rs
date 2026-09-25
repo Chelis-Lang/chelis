@@ -23,9 +23,17 @@ fn prepare(library: &str) -> chelis_compiler_api::compiler::PreparedEvalInContex
     )
     .unwrap();
     let context = compile_reef_context(directory.path(), directory.path()).unwrap();
-    let draws = "_ = uniform_like(copy(x), 0.0f32, 1.0f32)\n".repeat(5);
+    // Five discarded draws on their own keys; under explicit keys they do not
+    // move the returned draw, which is keyed by `key_from_seed(42)` alone.
+    let draws = (0..5)
+        .map(|n| {
+            format!(
+                "_ = uniform_like(fold_in(key_from_seed(7i64), {n}i64), copy(x), 0.0f32, 1.0f32)\n"
+            )
+        })
+        .collect::<String>();
     let source = format!(
-        "module Probe.Client\nimport Probe.Values (total)\ndef entry(x: tensor[seq, f32]) = with seed(42i64) {{ _ = print(\"entry\")\n {draws} result = total(x)\n (result, uniform_like(x, 0.0f32, 1.0f32)) }}\nalias = entry\ndef main() = alias(to_tensor([7.0f32, 11.0f32]))\nout = main()\n"
+        "module Probe.Client\nimport Probe.Values (total)\ndef entry(x: tensor[seq, f32]) = {{ _ = print(\"entry\")\n {draws} result = total(x)\n (result, uniform_like(key_from_seed(42i64), x, 0.0f32, 1.0f32)) }}\nalias = entry\ndef main() = alias(to_tensor([7.0f32, 11.0f32]))\nout = main()\n"
     );
     prepare_eval_in_context(&context, &source).unwrap()
 }
@@ -33,7 +41,7 @@ fn prepare(library: &str) -> chelis_compiler_api::compiler::PreparedEvalInContex
 #[test]
 fn spread_rank_library_formal_does_not_initialize_same_named_declaration() {
     let prepared = prepare(
-        "weights = with seed(17i64) { _ = print(\"initialize\")\n to_tensor([3.0f32, 5.0f32]) }\ndef total[pre, post](weights: &tensor[..pre, seq, ..post, f32]) -> tensor[..pre, ..post, f32] = sum(weights, seq)\n",
+        "weights = { _ = print(\"initialize\")\n to_tensor([3.0f32, 5.0f32]) }\ndef total[pre, post](weights: &tensor[..pre, seq, ..post, f32]) -> tensor[..pre, ..post, f32] = sum(weights, seq)\n",
     );
     let results = (0..2)
         .map(|_| {
@@ -57,9 +65,9 @@ fn spread_rank_library_formal_does_not_initialize_same_named_declaration() {
             .iter()
             .find(|root| root.name.as_deref() == Some("out.1"))
             .unwrap();
-        // [05-RNG-1]/[05-OP-8] for seed 42, ordinal 5 (after five discarded
-        // draws), [0, 1), f32: `rng_ref.py uniform 42 5 2 0 1 f32`.
-        let expected = json!({"dtype":"f32","bits":["3f5b1b74","3daedee7"]});
+        // [05-OP-8] keyed by `key_from_seed(42)`, [0, 1), f32: the f32
+        // rounding of key_ref.py's `unit(key_from_seed(42), i)`, i = 0, 1.
+        let expected = json!({"dtype":"f32","bits":["3efa06fe","3e762d86"]});
         assert_eq!(
             serde_json::to_value(&next.value).unwrap(),
             json!({"type":"tensor","value":{"shape":[2],"data":expected}})
@@ -74,9 +82,13 @@ fn spread_rank_library_formal_does_not_initialize_same_named_declaration() {
     );
 }
 
+/// The initializer is a helper's body rather than a bare block: a captured
+/// block-bodied declaration whose block binds `_ = print(...)` reads as rank
+/// zero inside the capturing definition, a defect that predates the key
+/// switch (the retired `with seed` wrapper masked it here).
 fn capture_library(initializer: &str, body: &str) -> String {
     format!(
-        "baseline = to_tensor([7.0f32, 11.0f32])\nweights = with seed(17i64) {{ _ = print(\"initialize\")\n {initializer} }}\ndef total[pre, post](x: &tensor[..pre, seq, ..post, f32]) -> (tensor[..pre, ..post, f32], tensor[f32]) = {body}\n"
+        "baseline = to_tensor([7.0f32, 11.0f32])\ndef initialize() -> tensor[2, f32] = {{ _ = print(\"initialize\")\n {initializer} }}\nweights = initialize()\ndef total[pre, post](x: &tensor[..pre, seq, ..post, f32]) -> (tensor[..pre, ..post, f32], tensor[f32]) = {body}\n"
     )
 }
 
@@ -102,7 +114,7 @@ fn assert_capture(body: &str, second: &str, transcript: &[&str]) {
             .unwrap();
         assert_eq!(
             serde_json::to_value(&next.value).unwrap(),
-            json!({"type":"tensor","value":{"shape":[2],"data":{"dtype":"f32","bits":["3f5b1b74","3daedee7"]}}})
+            json!({"type":"tensor","value":{"shape":[2],"data":{"dtype":"f32","bits":["3efa06fe","3e762d86"]}}})
         );
         assert_eq!(result.transcript, transcript);
     }
@@ -129,7 +141,7 @@ fn spread_rank_library_dead_capture_does_not_initialize() {
 #[test]
 fn spread_rank_library_capture_preserves_initializer_error() {
     let prepared = prepare(&capture_library(
-        "_ = uniform_like(to_tensor([0.0f32, 0.0f32]), 0.0f32, 1.0f32)\n to_tensor([cast(floor_div(1i32, 0i32), f32), 0.0f32])",
+        "_ = uniform_like(key_from_seed(17i64), to_tensor([0.0f32, 0.0f32]), 0.0f32, 1.0f32)\n to_tensor([cast(floor_div(1i32, 0i32), f32), 0.0f32])",
         "(sum(x, seq), sum(weights, 0i32))",
     ));
     for _ in 0..2 {

@@ -180,12 +180,15 @@ fn actuals_run_once_in_primal_order_before_written_wrt_result_order() {
     }
 }
 
-const DRAW: &str = "uniform_like(to_tensor([0.0f32, 0.0f32]), 0.0f32, 1.0f32)";
-// [05-RNG-1]/[05-OP-8] over [0, 1) at f32, ordinal 0: seed 17 for the
-// declaration's initializer and seed 42 for the parent's draw
-// (`rng_ref.py uniform SEED 0 2 0 1 f32`).
-const INITIALIZED: [&str; 2] = ["3f3ab37e", "3ed865f8"];
-const PARENT_FIRST: [&str; 2] = ["3e1caae7", "3f127a5d"];
+/// A two-element [0, 1) f32 draw keyed by `key_from_seed(seed)`.
+fn draw(seed: i64) -> String {
+    format!("uniform_like(key_from_seed({seed}i64), to_tensor([0.0f32, 0.0f32]), 0.0f32, 1.0f32)")
+}
+// [05-OP-8] over [0, 1) at f32: the f32 rounding of key_ref.py's
+// `unit(key_from_seed(SEED), i)`, i = 0, 1, with seed 17 for the
+// declaration's initializer and seed 42 for the parent's draw.
+const INITIALIZED: [&str; 2] = ["3f250d3b", "3f7aee67"];
+const PARENT_FIRST: [&str; 2] = ["3efa06fe", "3e762d86"];
 
 fn initialized_loss(failing: bool) -> String {
     let tail = if failing {
@@ -193,8 +196,13 @@ fn initialized_loss(failing: bool) -> String {
     } else {
         "value".to_string()
     };
+    // The initializer is a helper's body: a captured block-bodied declaration
+    // that binds `_ = print(...)` reads as rank zero inside the capturing
+    // definition, a defect that predates the key switch (the retired
+    // `with seed` wrapper masked it here).
     format!(
-        "w = with seed(17i64) {{ _ = print(\"initialize\")\n value = {DRAW}\n {tail} }}\ndef loss(x: tensor[2, f32]) -> tensor[f32] = sum(mul(x, w), 0i32)\n"
+        "def initialize() -> tensor[2, f32] = {{ _ = print(\"initialize\")\n value = {}\n {tail} }}\nw = initialize()\ndef loss(x: tensor[2, f32]) -> tensor[f32] = sum(mul(x, w), 0i32)\n",
+        draw(17)
     )
 }
 
@@ -205,11 +213,12 @@ fn assert_reused_declaration(selected: bool, shadow: bool) {
         ""
     };
     let source = format!(
-        "{}out = with seed(42i64) {{ _ = print(\"entry\")\n {binding} first = grad(loss)(to_tensor([1.0f32, 2.0f32]))\n second = grad(loss)(to_tensor([3.0f32, 4.0f32]))\n (first, second, {DRAW}) }}\n",
-        initialized_loss(false)
+        "{}out = {{ _ = print(\"entry\")\n {binding} first = grad(loss)(to_tensor([1.0f32, 2.0f32]))\n second = grad(loss)(to_tensor([3.0f32, 4.0f32]))\n (first, second, {}) }}\n",
+        initialized_loss(false),
+        draw(42)
     );
     let result = evaluate(&source, selected);
-    // Independent parent-stream observation is checked even on the capture RED.
+    // The parent's own keyed draw is checked even on the capture RED.
     assert_tensor(&result, "out.2", &PARENT_FIRST);
     let events = if selected {
         ["entry", "initialize"]
