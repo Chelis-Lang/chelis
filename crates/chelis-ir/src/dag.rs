@@ -42,7 +42,10 @@ pub struct Declaration {
     /// function's body runs inlined in each caller's own activation, so its
     /// standalone nodes run only when it is itself selected.
     pub value: bool,
-    /// The declarations this one's body names, called or not.
+    /// The value declarations this one's lowering named, read or not:
+    /// directly, inside a function body inlined where this one calls it, or
+    /// inside a `grad` or `vmap` body spliced into it. A call names no
+    /// declaration, and neither does a function named without being applied.
     pub references: Vec<DeclId>,
 }
 
@@ -2454,8 +2457,8 @@ impl Dag {
         DeclId(id)
     }
 
-    /// Set the declarations `decl`'s body names, once every declaration is
-    /// known.
+    /// Set the value declarations `decl`'s lowering named
+    /// ([`Declaration::references`]).
     pub fn set_declaration_references(&mut self, decl: DeclId, references: Vec<DeclId>) {
         self.declarations[decl.0 as usize].references = references;
     }
@@ -2499,26 +2502,28 @@ impl Dag {
 
     /// The declarations an activation of the `selected` roots enters, as a
     /// mask over [`Self::declarations`]: each selected root's declaration,
-    /// and every value declaration its body names, directly or through any
-    /// declaration it names in turn. A function's own nodes are entered only
-    /// when it is selected: a call runs the function inlined in the caller's
-    /// own nodes.
+    /// and every value declaration an entered declaration names
+    /// ([`Declaration::references`]), transitively. A function's own nodes
+    /// are entered only when it is selected: a call runs the function inlined
+    /// in the caller's own nodes, and the value declarations its body names
+    /// there are the caller's references.
     pub fn entered_declarations(&self, selected: &[NodeId]) -> Vec<bool> {
-        let mut pending = selected
-            .iter()
-            .map(|root| (self.nodes[root.0].decl, true))
-            .collect::<Vec<_>>();
         let mut entered = vec![false; self.declarations.len()];
-        let mut visited = vec![false; self.declarations.len()];
-        while let Some((decl, is_selected)) = pending.pop() {
-            let index = decl.0 as usize;
-            let entry = &self.declarations[index];
-            if is_selected || entry.value {
-                entered[index] = true;
+        let mut pending = Vec::new();
+        for root in selected {
+            let decl = self.nodes[root.0].decl;
+            if !entered[decl.0 as usize] {
+                entered[decl.0 as usize] = true;
+                pending.push(decl);
             }
-            if !visited[index] {
-                visited[index] = true;
-                pending.extend(entry.references.iter().map(|reference| (*reference, false)));
+        }
+        while let Some(decl) = pending.pop() {
+            for reference in &self.declarations[decl.0 as usize].references {
+                let index = reference.0 as usize;
+                if self.declarations[index].value && !entered[index] {
+                    entered[index] = true;
+                    pending.push(*reference);
+                }
             }
         }
         entered

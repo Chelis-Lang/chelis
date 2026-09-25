@@ -1282,6 +1282,24 @@ fn lower_program_with_context_inner(
                 .insert(name.clone(), LoweredValue::Node(mapped));
         }
     }
+    // The library's value declarations stay visible to new code by name, as
+    // the values the symbol table binds; the latest declaration of a name
+    // wins, as it does for the binding.
+    let library_values = ctx
+        .dag
+        .declarations()
+        .iter()
+        .enumerate()
+        .filter(|(_, declaration)| declaration.value && !declaration.name.is_empty())
+        .map(|(index, declaration)| {
+            let decl = DeclId(u32::try_from(index).expect("declaration index fits u32"));
+            (declaration.name.clone(), decl)
+        })
+        .collect::<Vec<_>>();
+    for (name, decl) in library_values {
+        let bound = ctx.bindings.get(&name).cloned();
+        ctx.top_level_values.insert(name, (decl, bound));
+    }
 
     for_each_top_level_item(new_program.exprs(), &mut |expr| {
         if top_level_expr_name(expr).and_then(|name| lowered_names.get(name).copied()) == Some(true)
@@ -6364,6 +6382,19 @@ enum LoweredValue {
     },
 }
 
+/// Whether a name this context binds to `bound` (`None` when unbound) names
+/// the top-level value declaration whose binding here holds `declared`
+/// (`None` when nothing binds it here): an unbound name resolves to the
+/// declaration, and a bound one only when it holds the declaration's own
+/// value, since a local binding of the same name holds another.
+fn names_top_level_value(bound: Option<&LoweredValue>, declared: Option<&LoweredValue>) -> bool {
+    match (bound, declared) {
+        (None, _) => true,
+        (Some(value), Some(declared)) => value.is_same_value(declared),
+        (Some(_), None) => false,
+    }
+}
+
 /// A tuple whose every leaf is a key (spec/04 §8.4.1), such as the pair
 /// `split_key` returns. The graph carries each key as a key node and a tuple
 /// of them as a lowered tuple, so a staged host region never takes one as an
@@ -6519,6 +6550,36 @@ impl LoweredValue {
             Self::Node(id) => vec![*id],
             Self::Tuple(items) => items.iter().flat_map(Self::flatten_nodes).collect(),
             Self::Adt { fields, .. } => fields.iter().flat_map(Self::flatten_nodes).collect(),
+        }
+    }
+
+    /// Whether `other` is this value: the same nodes and host values in the
+    /// same tuple and constructor structure.
+    fn is_same_value(&self, other: &LoweredValue) -> bool {
+        let same_items = |left: &[LoweredValue], right: &[LoweredValue]| {
+            left.len() == right.len()
+                && left
+                    .iter()
+                    .zip(right)
+                    .all(|(left, right)| left.is_same_value(right))
+        };
+        match (self, other) {
+            (Self::Node(left), Self::Node(right)) => left == right,
+            (Self::Host { id: left, .. }, Self::Host { id: right, .. }) => left == right,
+            (Self::Tuple(left), Self::Tuple(right)) => same_items(left, right),
+            (
+                Self::Adt {
+                    ctor: left_ctor,
+                    fields: left,
+                    ..
+                },
+                Self::Adt {
+                    ctor: right_ctor,
+                    fields: right,
+                    ..
+                },
+            ) => left_ctor == right_ctor && same_items(left, right),
+            _ => false,
         }
     }
 
@@ -6883,10 +6944,21 @@ struct LowerCtx<'program> {
     /// subtracts these from the declared root names before aligning them
     /// against `dag.roots()`.
     rootless_defs: BTreeSet<String>,
-    /// chelis#2476: each top-level declaration lowered so far with the names
-    /// its body references, resolved to declarations by
-    /// [`LowerCtx::resolve_declaration_references`] once all are known.
-    declaration_references: Vec<(DeclId, Vec<String>)>,
+    /// chelis#2476, #2413: the value declarations lowering has seen each
+    /// declaration name, as (naming declaration, named value declaration).
+    /// A name is recorded where lowering resolves it, so a reference inside a
+    /// called function's body belongs to the caller that inlines it, one
+    /// inside a `grad` or `vmap` body to the declaration that body is spliced
+    /// into, and a function named without being applied records nothing.
+    /// [`LowerCtx::resolve_declaration_references`] writes them onto the
+    /// graph's declarations.
+    value_references: BTreeSet<(DeclId, DeclId)>,
+    /// Each top-level value declaration visible to this context, by name: its
+    /// declaration and the value its binding holds here (`None` when nothing
+    /// binds the name here). A name lookup that finds that same value, or
+    /// finds the name unbound, names the declaration; a local binding of the
+    /// same name holds another value, so shadowing names nothing.
+    top_level_values: UnordMap<String, (DeclId, Option<LoweredValue>)>,
     /// The declaration being lowered: every node this context adds belongs
     /// to it ([`Self::decl`]). `lower_top_level` registers and sets it for
     /// each top-level item before lowering its body; a context that lowers a
@@ -7008,7 +7080,8 @@ impl<'program> LowerCtx<'program> {
             fn_typed_params: UnordSet::new(),
             callable_dependency_state: CallableDependencyState::default(),
             rootless_defs: BTreeSet::new(),
-            declaration_references: Vec::new(),
+            value_references: BTreeSet::new(),
+            top_level_values: UnordMap::new(),
             decl: None,
             dim_substitutions: UnordMap::new(),
             prec_substitutions: UnordMap::new(),
@@ -7409,6 +7482,20 @@ impl<'program> LowerCtx<'program> {
                 .bindings
                 .insert(name.clone(), LoweredValue::Node(load));
             captures.insert(name.clone(), *node_id);
+        }
+        // A top-level value declaration the body names is named by the
+        // declaration this body is spliced into. The sub-context sees it as
+        // the Load that stands for it, or unbound when it is not a single
+        // node, and records the name for this context to absorb.
+        for (name, (declaration, declared)) in self.top_level_values.to_sorted() {
+            if names_top_level_value(self.bindings.get(name), declared.as_ref())
+                && !shadowed.contains(name)
+            {
+                subctx.top_level_values.insert(
+                    name.clone(),
+                    (*declaration, subctx.bindings.get(name).cloned()),
+                );
+            }
         }
         subctx.local_callables.extend(
             self.local_callables
@@ -7840,11 +7927,40 @@ impl<'program> LowerCtx<'program> {
         } else {
             self.dag.declare(declaration_name)
         };
-        self.declaration_references
-            .push((decl, chelis_types::linearity::free_runtime_variables(expr)));
         let enclosing = self.decl.replace(decl);
         self.lower_top_level_body(expr);
         self.decl = enclosing;
+        if is_value
+            && !declaration_name.is_empty()
+            && let Some(value) = self.bindings.get(declaration_name)
+        {
+            self.top_level_values
+                .insert(declaration_name.to_owned(), (decl, Some(value.clone())));
+        }
+    }
+
+    /// Record that the declaration being lowered names `name`, which this
+    /// context binds to `bound` (`None` when unbound here): when `name` is a
+    /// visible top-level value declaration and `bound` is its binding's
+    /// value, the declaration being lowered enters it (Rule D; spec/03 §4.4:
+    /// a referenced declaration's initializer runs whether or not its value
+    /// is read). A local binding of the same name, a function name, and a
+    /// name no top-level value declares record nothing.
+    fn record_value_reference(&mut self, name: &str, bound: Option<&LoweredValue>) {
+        let (Some(current), Some((declaration, declared))) =
+            (self.decl, self.top_level_values.get(name))
+        else {
+            return;
+        };
+        if names_top_level_value(bound, declared.as_ref()) && *declaration != current {
+            self.value_references.insert((current, *declaration));
+        }
+    }
+
+    /// Take the references a `grad` or `vmap` sub-context recorded while
+    /// lowering a body this context splices into its own declaration.
+    fn absorb_value_references(&mut self, subctx: &mut LowerCtx) {
+        self.value_references.append(&mut subctx.value_references);
     }
 
     /// A unit test's context: one declaration, `test`, owns every node it
@@ -7868,38 +7984,15 @@ impl<'program> LowerCtx<'program> {
         })
     }
 
-    /// Resolve every lowered declaration's referenced names to the
-    /// declarations they name: the latest declaration of each name, so new
-    /// code shadows a library declaration it replaces. Names that are not
-    /// declarations (builtins, types) name nothing.
+    /// Write the recorded value references onto the graph's declarations.
     fn resolve_declaration_references(&mut self) {
-        let mut by_name = BTreeMap::<&str, DeclId>::new();
-        for (index, declaration) in self.dag.declarations().iter().enumerate() {
-            if !declaration.name.is_empty() {
-                by_name.insert(
-                    declaration.name.as_str(),
-                    DeclId(u32::try_from(index).expect("declaration index fits u32")),
-                );
-            }
+        let mut references = BTreeMap::<DeclId, Vec<DeclId>>::new();
+        for (declaration, referenced) in std::mem::take(&mut self.value_references) {
+            references.entry(declaration).or_default().push(referenced);
         }
-        let resolved = self
-            .declaration_references
-            .iter()
-            .map(|(declaration, names)| {
-                let mut references = names
-                    .iter()
-                    .filter_map(|name| by_name.get(name.as_str()).copied())
-                    .filter(|reference| reference != declaration)
-                    .collect::<Vec<_>>();
-                references.sort_unstable();
-                references.dedup();
-                (*declaration, references)
-            })
-            .collect::<Vec<_>>();
-        for (declaration, references) in resolved {
-            self.dag.set_declaration_references(declaration, references);
+        for (declaration, referenced) in references {
+            self.dag.set_declaration_references(declaration, referenced);
         }
-        self.declaration_references.clear();
     }
 
     fn lower_top_level_body(&mut self, expr: &Expr) {
@@ -8163,7 +8256,9 @@ impl<'program> LowerCtx<'program> {
             .set(crate::host::staged::StagingStatus::HasSources);
         let mut captures = Vec::new();
         for name in referenced.into_sorted() {
-            if let Some(value) = self.bindings.get(&name).cloned() {
+            let bound = self.bindings.get(&name).cloned();
+            self.record_value_reference(&name, bound.as_ref());
+            if let Some(value) = bound {
                 let captured = match &value {
                     LoweredValue::Node(id) => StageValue::Tensor(*id),
                     LoweredValue::Host { id, .. } => StageValue::Host(*id),
@@ -8714,8 +8809,9 @@ impl<'program> LowerCtx<'program> {
     fn lower_atom(&mut self, atom: &Atom) -> LoweredValue {
         match atom {
             Atom::Name(name) => {
-                if let Some(value) = self.bindings.get(name) {
-                    let cached = value.clone();
+                let bound = self.bindings.get(name).cloned();
+                self.record_value_reference(name, bound.as_ref());
+                if let Some(cached) = bound {
                     // N→1 lowering collapse per
                     // spec/design/chelis_span_survival.md §2.3 rule (b):
                     // returning a cached `LoweredValue` for a span-bearing
@@ -9610,8 +9706,9 @@ impl<'program> LowerCtx<'program> {
         let explicit_ty = self.type_from_meta(meta);
 
         if let Some(Expr::Atom(Atom::Name(name), _)) = kids.first() {
-            if let Some(id) = self.bindings.get(name) {
-                let cached = id.clone();
+            let bound = self.bindings.get(name).cloned();
+            self.record_value_reference(name, bound.as_ref());
+            if let Some(cached) = bound {
                 // N→1 lowering collapse per
                 // spec/design/chelis_span_survival.md §2.3 rule (b):
                 // returning a cached `LoweredValue` for a span-bearing
@@ -10499,6 +10596,7 @@ impl<'program> LowerCtx<'program> {
         }
         let wrt: Vec<_> = targets.iter().map(|target| target.formal).collect();
         let lowered_output = subctx.lower_resolved_body(fn_expr, &param_names, body);
+        self.absorb_value_references(&mut subctx);
         let output = lowered_output.expect_node("grad requires a scalar floating output");
         if subctx
             .callable_dependency_state
@@ -11736,6 +11834,7 @@ impl<'program> LowerCtx<'program> {
         // runtime extent witness.
         let captured_bindings = self.seed_subctx_with_lexical_scope(&mut subctx, &param_names);
         let root_value = subctx.lower_resolved_body(fn_expr, &param_names, body);
+        self.absorb_value_references(&mut subctx);
         for root in root_value.flatten_nodes() {
             subctx.dag.add_root(root);
         }
@@ -12034,6 +12133,7 @@ impl<'program> LowerCtx<'program> {
         let output = subctx
             .lower_resolved_body(fn_expr, &param_names, body)
             .expect_node("vmap(grad(...)) requires a scalar floating output");
+        self.absorb_value_references(&mut subctx);
         if subctx
             .callable_dependency_state
             .output_depends_on_unresolved(&subctx.dag, output)
@@ -19616,7 +19716,8 @@ mod declaration_attribution_tests {
             .references
             .clone();
         references.sort_unstable();
-        assert_eq!(references, [named("x"), named("sampled"), named("h")]);
+        // The value declarations `selected` names; calling `h` names none.
+        assert_eq!(references, [named("x"), named("sampled")]);
         // `h`'s own draw, and the copy inlined where `selected` calls it.
         assert_eq!(draws(dag), ["sampled", "h", "selected"]);
         // A discarded value's `Drop` is its declaration's, not no one's.
