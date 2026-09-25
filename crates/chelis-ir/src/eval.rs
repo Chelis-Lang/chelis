@@ -3866,7 +3866,7 @@ where
                     }
                     resolve_eval_bound(count, node, &values, 0)?
                 } else {
-                    inactive_split_count(&node.output_type, &runtime_dims)
+                    inactive_split_count(&node.output_type, &runtime_dims)?
                 };
                 let mut shape = keys.shape.clone();
                 shape.push(count);
@@ -4520,11 +4520,19 @@ fn key_operation_is_live(
 /// ([`RiscOp::SplitN`]): the extent its type declares where a literal or an
 /// earlier binding fixes it, and zero where the split itself would declare
 /// it. The C lane reads the same declaration.
-fn inactive_split_count(declared: &TensorType, runtime_dims: &UnordMap<String, usize>) -> usize {
+fn inactive_split_count(
+    declared: &TensorType,
+    runtime_dims: &UnordMap<String, usize>,
+) -> Result<usize, String> {
     match declared.dims.last() {
-        Some(DimInfo::Lit(value) | DimInfo::Named(_, Some(value))) => *value,
-        Some(DimInfo::Named(name, None)) => runtime_dims.get(name).copied().unwrap_or(0),
-        None => 0,
+        Some(DimInfo::Lit(value) | DimInfo::Named(_, Some(value))) => Ok(*value),
+        Some(DimInfo::Named(name, None)) => Ok(match runtime_dims.get(name) {
+            Some(value) => *value,
+            // Nothing has bound the name, so the split declares its own
+            // count axis, and an unselected split's axis is empty.
+            None => 0,
+        }),
+        None => Err("split_keys declares no count axis".into()),
     }
 }
 

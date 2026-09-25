@@ -1322,10 +1322,15 @@ fn verify_confinement(
         if !(role.produces_key() && role.consumes()) {
             continue;
         }
-        let mut under = graph
-            .input(node, 0)
-            .and_then(|parent| required.get(identity(parent)).cloned())
-            .unwrap_or_default();
+        // A key operation without a parent key in this graph is the operand
+        // rules' error, and derives nothing these rules can follow.
+        let Some(parent) = graph.input(node, 0).map(&identity) else {
+            continue;
+        };
+        let Some(inherited) = required.get(parent) else {
+            continue;
+        };
+        let mut under = inherited.clone();
         if exclusive[node]
             && let Some(active) = activation(graph, node)
             && !under.contains(&active)
@@ -1344,9 +1349,13 @@ fn verify_confinement(
             ));
         }
         for &consumer in &consumers[key] {
-            let conjuncts = activation(graph, consumer)
-                .map(|active| activation_conjuncts(graph, active))
-                .unwrap_or_default();
+            let Some(active) = activation(graph, consumer) else {
+                errors.push(format!(
+                    "key {key} is derived under node {first}'s activation from a key shared by exclusive consumers, but node {consumer} uses it outside that activation"
+                ));
+                continue;
+            };
+            let conjuncts = activation_conjuncts(graph, active);
             if conjuncts
                 .iter()
                 .any(|node| graph.role(*node) == KeyRole::ConstFalse)
