@@ -778,6 +778,119 @@ fn a_negative_runtime_split_count_traps_in_c_as_in_eval() {
     assert!(run_c_failure(build(), &inputs).contains(trap));
 }
 
+/// chelis#2413 B3: `split_keys(s, n)` under the activation `c`, over a key
+/// batch of `batch` (rank 0 splits `key(7)`), its count axis declared
+/// `declared`; `d` of `[n, 2]` binds `n` when the declaration names it.
+fn gated_split(batch: &[usize], declared: DimInfo) -> Dag {
+    let mut dag = Dag::new();
+    let key = if batch.is_empty() {
+        let seed = i64_const(&mut dag, 7);
+        node(&mut dag, RiscOp::KeyFromSeed, vec![seed], &[], Prim::Key)
+    } else {
+        let seeds = load(&mut dag, "s", batch, Prim::Int64);
+        node(&mut dag, RiscOp::KeyFromSeed, vec![seeds], batch, Prim::Key)
+    };
+    let n = load(&mut dag, "n", &[], Prim::Int64);
+    let active = load(&mut dag, "c", batch, Prim::Bool);
+    let mut dims = batch
+        .iter()
+        .map(|extent| DimInfo::Lit(*extent))
+        .collect::<Vec<_>>();
+    dims.push(declared.clone());
+    let rows = dag.add_node(
+        RiscOp::SplitN {
+            count: RtDim::Node(1),
+        },
+        vec![key, n, active],
+        TensorType {
+            dims,
+            precision: Prim::Key,
+        },
+        None,
+    );
+    dag.add_root(rows);
+    if matches!(&declared, DimInfo::Named(name, None) if name == "n") {
+        let d = dag.add_node(
+            RiscOp::Load { name: "d".into() },
+            vec![],
+            TensorType {
+                dims: vec![declared, DimInfo::Lit(2)],
+                precision: Prim::F32,
+            },
+            None,
+        );
+        dag.add_root(d);
+    }
+    dag
+}
+
+/// chelis#2413 B3: a `split_keys` whose activation holds in no row reads no
+/// count, in C as in the evaluator: a negative or impossible count neither
+/// traps nor allocates, the count axis is empty where the split declares it
+/// and the declared extent where a literal or another input fixes it, and the
+/// keys are the split's own. Once a row is active the same counts trap.
+/// Regression test: at the base the verifier refuses the activation, and
+/// without one each of these counts traps.
+#[test]
+fn an_inactive_runtime_split_reads_no_count_in_c_as_in_eval() {
+    let own = || DimInfo::Named("keys".into(), None);
+    for count in [-3i64, i64::MAX, 1 << 61, 2] {
+        let inputs = |active: bool| {
+            [
+                ("n", Input::Ints(vec![], vec![count])),
+                ("c", Input::Bools(vec![], vec![i64::from(active)])),
+            ]
+        };
+        let want = vec![Vec::<u64>::new()];
+        let scalar = || gated_split(&[], own());
+        assert_eq!(run_eval(&scalar(), &inputs(false)).unwrap(), want);
+        assert_eq!(run_c(scalar(), &inputs(false)), want, "n = {count}");
+        let batch = |active: [i64; 2]| {
+            [
+                ("s", Input::Ints(vec![2], vec![7, 8])),
+                ("n", Input::Ints(vec![], vec![count])),
+                ("c", Input::Bools(vec![2], active.to_vec())),
+            ]
+        };
+        let batched = || gated_split(&[2], own());
+        assert_eq!(run_eval(&batched(), &batch([0, 0])).unwrap(), want);
+        assert_eq!(run_c(batched(), &batch([0, 0])), want, "n = {count}");
+        if count != 2 {
+            let trap = run_eval(&scalar(), &inputs(true)).unwrap_err();
+            assert!(trap.contains("in split_keys at i64"), "n = {count}: {trap}");
+            let stderr = run_c_failure(scalar(), &inputs(true));
+            assert!(
+                stderr.contains("in split_keys at i64") || stderr.contains("Overflow"),
+                "n = {count}: {stderr}"
+            );
+            assert!(run_eval(&batched(), &batch([0, 1])).is_err(), "n = {count}");
+            assert!(
+                !run_c_failure(batched(), &batch([0, 1])).is_empty(),
+                "n = {count}"
+            );
+        }
+    }
+    // A declared literal, or an extent `d` binds, is the inactive split's
+    // count axis, and its keys are key_ref.py's `split_n(key(7), 4)`.
+    let keys = vec![
+        0x25ea_33e6_1c10_576f,
+        0x7071_24fb_ecd5_f054,
+        0x8239_3615_3a56_5205,
+        0x53c6_f7e8_3810_b049,
+    ];
+    let inputs = [
+        ("n", Input::Ints(vec![], vec![-3])),
+        ("c", Input::Bools(vec![], vec![0])),
+        ("d", Input::Floats(Prim::F32, vec![4, 2], vec![1.0; 8])),
+    ];
+    let literal = || gated_split(&[], DimInfo::Lit(4));
+    assert_eq!(run_eval(&literal(), &inputs[..2]).unwrap()[0], keys);
+    assert_eq!(run_c(literal(), &inputs[..2])[0], keys);
+    let bound = || gated_split(&[], DimInfo::Named("n".into(), None));
+    assert_eq!(run_eval(&bound(), &inputs).unwrap()[0], keys);
+    assert_eq!(run_c(bound(), &inputs)[0], keys);
+}
+
 /// `split_keys(key(7), count)` whose count axis is declared `n`, which the
 /// input `d` also binds, and, when `draw`, a dropout of `d` batched by those
 /// keys.

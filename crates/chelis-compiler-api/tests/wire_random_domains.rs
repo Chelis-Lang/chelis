@@ -735,6 +735,132 @@ fn the_codec_admits_a_constant_false_arm_and_rejects_two_true_ones() {
     rejects_domain(&arms(true, true), "whose activations are not exclusive");
 }
 
+/// How the B3 payload below spells its gated split.
+#[derive(Clone, Copy)]
+enum GatedSplit {
+    /// The admitted payload.
+    Exclusive,
+    /// The split's derived keys drawn outside its activation.
+    Escaping,
+    /// The split's derived keys returned.
+    Rooted,
+    /// The split and the draw under one activation.
+    Overlapping,
+    /// An `int64` activation.
+    IntegerActivation,
+    /// Two activations after the operands.
+    TwoActivations,
+}
+
+/// chelis#2413 B3 (spec/10 §3.2): in the v19 key chain, `fold_in(R, 9)` is
+/// consumed by a `SplitN` under `c` and by a dropout under `Not(c)`, and the
+/// split's keys batch a dropout under `c`.
+fn gated_split_chain(form: GatedSplit) -> Value {
+    let mut graph = key_chain();
+    let condition = push(
+        &mut graph,
+        json!({"kind":"load","name":"c"}),
+        &[],
+        &[],
+        "bool",
+    );
+    let other = push(
+        &mut graph,
+        json!({"kind":"logical","logical":"not"}),
+        &[condition],
+        &[],
+        "bool",
+    );
+    let integer = push(
+        &mut graph,
+        json!({"kind":"load","name":"i"}),
+        &[],
+        &[],
+        "int64",
+    );
+    let split_active: &[usize] = match form {
+        GatedSplit::IntegerActivation => &[integer],
+        GatedSplit::TwoActivations => &[condition, condition],
+        _ => &[condition],
+    };
+    let split_inputs = std::iter::once(11)
+        .chain(split_active.iter().copied())
+        .collect::<Vec<_>>();
+    let split = push(
+        &mut graph,
+        json!({"kind":"split_n","count":{"bound":"lit","value":2}}),
+        &split_inputs,
+        &[2],
+        "key",
+    );
+    let rows = push(
+        &mut graph,
+        json!({"kind":"load","name":"z"}),
+        &[],
+        &[2, 4],
+        "f32",
+    );
+    let split_draw_inputs: &[usize] = match form {
+        GatedSplit::Escaping => &[rows, 8, split],
+        _ => &[rows, 8, split, condition],
+    };
+    let batched = push(
+        &mut graph,
+        json!({"kind":"dropout"}),
+        split_draw_inputs,
+        &[2, 4],
+        "f32",
+    );
+    let y = push(
+        &mut graph,
+        json!({"kind":"load","name":"y"}),
+        &[],
+        &[4],
+        "f32",
+    );
+    let draw_active = match form {
+        GatedSplit::Overlapping => condition,
+        _ => other,
+    };
+    let drawn = push(
+        &mut graph,
+        json!({"kind":"dropout"}),
+        &[y, 8, 11, draw_active],
+        &[4],
+        "f32",
+    );
+    graph["roots"] = match form {
+        GatedSplit::Rooted => json!([9, split, drawn, integer]),
+        _ => json!([9, batched, drawn, integer]),
+    };
+    graph
+}
+
+/// chelis#2413 B3: v19's key operations take an optional activation operand.
+/// The codec round-trips it, admits a key shared by a key operation and a
+/// draw under exclusive activations, and applies the IR verifier's operand,
+/// V3 and confinement rules to it. Regression test: at the base the codec
+/// refuses the admitted payload by the split's arity.
+#[test]
+fn the_codec_admits_a_gated_key_operation_and_confines_its_keys() {
+    accepts(&gated_split_chain(GatedSplit::Exclusive));
+    for (form, reason) in [
+        (GatedSplit::Escaping, "uses it outside that activation"),
+        (GatedSplit::Rooted, "and is a graph root"),
+        (
+            GatedSplit::Overlapping,
+            "whose activations are not exclusive",
+        ),
+        (
+            GatedSplit::IntegerActivation,
+            "exactly one Bool activation, shaped like a leading part",
+        ),
+        (GatedSplit::TwoActivations, "wrong number of inputs"),
+    ] {
+        rejects_domain(&gated_split_chain(form), reason);
+    }
+}
+
 /// spec/10 §3.2: a key is read only by the draw that consumes it and that
 /// draw's replays, and a replay reads its forward draw's own controls. The
 /// codec applies the IR verifier's key rules, so it rejects each payload
