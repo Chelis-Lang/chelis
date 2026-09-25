@@ -8888,11 +8888,39 @@ impl<'program> LowerCtx<'program> {
             .and_then(stamped_parts)
             .and_then(|(tag, _, kids)| (tag == DeepTag::TFn).then(|| kids.last()).flatten())
             .map(Self::type_from_type_expr);
+        // A checked value declaration has a bare tensor signature rather
+        // than a function result. Its direct free-variable RHS is an external
+        // input; lower_var/lower_atom otherwise mint default_type() for that
+        // Load, which is a placeholder, not a declared rank-zero tensor.
+        let declared_value = self
+            .program_signatures
+            .get(&name)
+            .filter(|signature| {
+                stamped_parts(signature).is_some_and(|(tag, _, _)| tag == DeepTag::TTensor)
+            })
+            .map(Self::type_from_type_expr);
+        let direct_free_name = match &kids[1] {
+            Expr::Atom(Atom::Name(name), _) => Some(name.as_str()),
+            Expr::Node(node, _) if node.tag() == DeepTag::Var => {
+                node.children_slice().first().and_then(symbol_name)
+            }
+            _ => None,
+        };
+        let before_body = self.dag.len();
         let body_id = self.lower_expr_with_claim(
             &kids[1],
             declared_result.as_ref(),
             declared_result.is_some(),
         );
+        if let (Some(declared), Some(id)) = (declared_value, body_id.as_single_node())
+            && id.0 >= before_body
+            && let Some(node) = self.dag.get(id)
+            && matches!(&node.op, RiscOp::Load { name } if direct_free_name == Some(name.as_str()))
+            && node.output_type == Self::default_type()
+        {
+            let op = node.op.clone();
+            self.dag.replace_node(id, op, Vec::new(), declared);
+        }
         if !name.is_empty() {
             if self.is_host_list_expr(&kids[1]) {
                 self.list_bindings.insert(name.clone(), kids[1].clone());
