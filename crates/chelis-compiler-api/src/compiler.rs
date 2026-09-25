@@ -2954,6 +2954,25 @@ fn eval_compiled(
         })
         .collect::<Result<Vec<_>>>()?;
     let active_dag = &compiled.dag;
+    // The evaluator admits exactly the graphs the compiled lanes admit
+    // (spec/10 section 3.2): a lowered program whose keys break the key
+    // rules is rejected here as it is by the wire codec and by ownership
+    // lowering for C, rather than evaluated.
+    let mut key_rule_errors = Vec::new();
+    chelis_ir::verify::verify_random_operands(active_dag, &mut key_rule_errors);
+    if key_rule_errors.is_empty() {
+        chelis_ir::verify::verify_key_rules(active_dag, &mut key_rule_errors);
+    }
+    if !key_rule_errors.is_empty() {
+        return Err(stage_error(
+            "eval",
+            format!(
+                "the lowered program breaks the key rules: {}",
+                key_rule_errors.join("; ")
+            ),
+            GeneralKind::LowerError,
+        ));
+    }
     let tensor_values = if roots.is_empty() {
         UnordMap::new()
     } else {
