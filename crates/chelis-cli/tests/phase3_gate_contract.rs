@@ -191,7 +191,7 @@ fn hip_narrow_blas_matmul_stays_admitted_across_build_paths() {
 #[test]
 fn compiled_dropout_rejection_agrees_across_public_build_paths() {
     let source = "def noisy(x: tensor[4, f32]) -> tensor[4, f32] = \
-                  with seed(42i64) { dropout(x, 0.5) }\n";
+                  dropout(key_from_seed(42i64), x, 0.5)\n";
 
     compile(CompileRequest {
         source_kind: SourceKind::Surf,
@@ -232,53 +232,74 @@ fn compiled_dropout_rejection_agrees_across_public_build_paths() {
     }
 }
 
-/// #1872: static rate is not a closed entry; the public ABI supplies no RNG.
+/// #1872 in key form (chelis#2413): a public entry has no ambient randomness.
+/// A keyless draw is an arity error on every public path; the entry that
+/// takes its key as a parameter compiles, the public ABI supplying the key.
 #[test]
-fn bare_inherited_random_c_surf_entry_rejects_across_public_paths() {
-    assert_bare_inherited_random_rejects(SourceKind::Surf);
+fn keyless_c_surf_entry_rejects_across_public_paths() {
+    assert_keyless_entry_rejects(SourceKind::Surf);
 }
 
 #[test]
-fn bare_inherited_random_c_deep_entry_rejects_across_public_paths() {
-    assert_bare_inherited_random_rejects(SourceKind::Deep);
+fn keyless_c_deep_entry_rejects_across_public_paths() {
+    assert_keyless_entry_rejects(SourceKind::Deep);
 }
 
-fn assert_bare_inherited_random_rejects(kind: SourceKind) {
-    let source = "def sample(x: tensor[4, f32]) -> tensor[4, f32] = dropout(x, 0.5f32)\n";
-    let decls = chelis_surf::parser::parse_str(source).unwrap();
-    let deep = chelis_deep::printer::print_canonical(
-        &chelis_surf::desugar::desugar_program(&decls).expect("Surf fixture must desugar"),
-    );
-    let text = match kind {
-        SourceKind::Surf => source,
-        SourceKind::Deep => deep.as_str(),
+fn assert_keyless_entry_rejects(kind: SourceKind) {
+    let keyless = "def sample(x: tensor[4, f32]) -> tensor[4, f32] = dropout(x, 0.5f32)\n";
+    let keyed = "def sample(k: key, x: tensor[4, f32]) -> tensor[4, f32] = dropout(k, x, 0.5f32)\n";
+    let deep_of = |source: &str| {
+        let decls = chelis_surf::parser::parse_str(source).unwrap();
+        chelis_deep::printer::print_canonical(
+            &chelis_surf::desugar::desugar_program(&decls).expect("Surf fixture must desugar"),
+        )
+    };
+    let text = |source: &str| match kind {
+        SourceKind::Surf => source.to_string(),
+        SourceKind::Deep => deep_of(source),
     };
     for execution in [false, true] {
-        let request = CompileRequest {
+        let request = |source: &str| CompileRequest {
             source_kind: kind,
-            source: text.to_string(),
+            source: text(source),
             target: CompileTarget::C,
             entry_name: Some("sample".into()),
         };
         let errors = if execution {
-            compile_for_execution(request)
-                .expect_err("public entry has no ambient RNG")
+            compile_for_execution(request(keyless))
+                .expect_err("a keyless draw is an arity error")
                 .errors
         } else {
-            compile(request)
-                .expect_err("public entry has no ambient RNG")
+            compile(request(keyless))
+                .expect_err("a keyless draw is an arity error")
                 .errors
         };
-        assert_eq!(errors[0].kind().as_str(), "unsupported_feature");
-        assert!(errors[0].message.contains("inherited Random"), "{errors:?}");
+        assert!(
+            errors
+                .iter()
+                .any(|error| error.message.contains("expected 3 args, got 2")),
+            "{errors:?}"
+        );
+        if execution {
+            compile_for_execution(request(keyed)).expect("the keyed entry compiles");
+        } else {
+            compile(request(keyed)).expect("the keyed entry compiles");
+        }
     }
-    let result = match kind {
-        SourceKind::Surf => build(source, "inherited_surf", "c"),
-        SourceKind::Deep => build_deep(&deep, "inherited_deep", "c"),
+    let (rejected, admitted) = match kind {
+        SourceKind::Surf => (
+            build(keyless, "keyless_surf", "c"),
+            build(keyed, "keyed_surf", "c"),
+        ),
+        SourceKind::Deep => (
+            build_deep(&deep_of(keyless), "keyless_deep", "c"),
+            build_deep(&deep_of(keyed), "keyed_deep", "c"),
+        ),
     };
-    result
+    rejected
         .failure()
-        .stderr(predicates::str::contains("unsupported:"));
+        .stderr(predicates::str::contains("expected 3 args, got 2"));
+    admitted.success();
 }
 
 /// Entry-scoped compilation admits both the pure and source-fixed C entry;
@@ -287,7 +308,7 @@ fn assert_bare_inherited_random_rejects(kind: SourceKind) {
 fn compiled_dropout_gate_follows_the_emitted_entry_scope() {
     let source = "def clean(x: tensor[4, f32]) -> tensor[4, f32] = add(x, x)\n\
                   def noisy(x: tensor[4, f32]) -> tensor[4, f32] = \
-                  with seed(42i64) { dropout(x, 0.5) }\n";
+                  dropout(key_from_seed(42i64), x, 0.5)\n";
 
     compile_for_execution(CompileRequest {
         source_kind: SourceKind::Surf,
@@ -307,7 +328,10 @@ fn compiled_dropout_gate_follows_the_emitted_entry_scope() {
 
     // [05-OP-37]: a runtime rate is an operand the C draw validates at
     // execution, so the selected entry compiles (chelis#2411).
-    let runtime = source.replace("dropout(x, 0.5)", "dropout(x, tensor_to_scalar(sum(x, 0)))");
+    let runtime = source.replace(
+        "dropout(key_from_seed(42i64), x, 0.5)",
+        "dropout(key_from_seed(42i64), x, tensor_to_scalar(sum(x, 0)))",
+    );
     compile_for_execution(CompileRequest {
         source_kind: SourceKind::Surf,
         source: runtime,
@@ -325,7 +349,7 @@ fn scalar_activation_entry_ignores_an_unemitted_dropout_sibling() {
     let source = "def activate(x: f64) -> f64 = gelu(x)\n\
                   def clean(x: f64) -> f64 = activate(x)\n\
                   def noisy(x: tensor[4, f32]) -> tensor[4, f32] = \
-                  with seed(42i64) { dropout(x, 0.5) }\n";
+                  dropout(key_from_seed(42i64), x, 0.5)\n";
 
     let artifact = compile_for_execution(CompileRequest {
         source_kind: SourceKind::Surf,
@@ -357,7 +381,7 @@ fn scalar_activation_entry_ignores_an_unemitted_dropout_sibling() {
 #[test]
 fn scalar_activation_entry_respects_parameter_shadowing() {
     let source = "def noisy(x: tensor[4, f32]) -> tensor[4, f32] = \
-                  with seed(42i64) { dropout(x, 0.5) }\n\
+                  dropout(key_from_seed(42i64), x, 0.5)\n\
                   def clean(noisy: f64) -> f64 = gelu(noisy)\n";
 
     let artifact = compile_for_execution(CompileRequest {
@@ -407,7 +431,7 @@ fn deep_dropout_uses_the_shared_typed_effect_gate() {
 fn host_tensor_helper_dropout_uses_the_shared_typed_effect_gate() {
     let source = "def label() -> string = \"host\"\n\
                   def noisy(x: tensor[4, f32]) -> tensor[4, f32] = \
-                  with seed(42i64) { dropout(x, 0.5) }\n";
+                  dropout(key_from_seed(42i64), x, 0.5)\n";
 
     build(source, "host_helper_dropout", "c").success();
     for target in ["hip", "metal"] {
