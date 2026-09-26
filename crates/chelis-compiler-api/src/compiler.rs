@@ -7562,21 +7562,15 @@ mod tests {
             .iter()
             .find(|node| node.shape_deps.contains(&claim.id))
             .expect("the initializer owns the projected claim");
-        let activations = owner
-            .shape_deps
-            .iter()
-            .filter_map(|dependency| {
-                projected
-                    .nodes
-                    .get(usize::try_from(*dependency).ok()?)
-                    .filter(|node| {
-                        node.output_type.dims.is_empty() && node.output_type.precision == "bool"
-                    })
-            })
-            .collect::<Vec<_>>();
-        assert_eq!(
-            activations.len(),
-            1,
+        // The claim's activation is its carrier's owner activation (spec/10
+        // section 3.2), so it crosses the boundary as that node's
+        // `activation`, one exact scalar Bool.
+        let activation = owner
+            .activation
+            .and_then(|activation| projected.nodes.get(usize::try_from(activation).ok()?))
+            .expect("the claim's carrier crosses the boundary under the arm's activation");
+        assert!(
+            activation.output_type.dims.is_empty() && activation.output_type.precision == "bool",
             "one exact scalar Bool activation crosses the artifact boundary"
         );
         let json = serde_json::to_value(&projected).unwrap();

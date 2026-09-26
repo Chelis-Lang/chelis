@@ -412,6 +412,16 @@ name = "issue_1906_concat_admission"
 package = "chelis-ir"
 name = "issue_2491_eval_extent_admission"
 
+# chelis#2413 / chelis#2440: a local tensor ascription checks only under its
+# carrier's owner activation (grad/vmap bodies in arms, per-row vmap arms).
+[[standing_target]]
+package = "chelis-compiler-api"
+name = "local_ascription_activation"
+
+[[standing_target]]
+package = "chelis-cli"
+name = "issue_2563_local_ascription_eval_file"
+
 [[standing_target]]
 package = "chelis-compiler-api"
 name = "issue_1906_annotated_softmax"

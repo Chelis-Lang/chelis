@@ -7935,12 +7935,21 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
                 other => other.to_string(),
             };
             let mismatch = format!("({extent_expr}) != {operand}");
+            // The claim's activation is its carrier's owner activation
+            // (spec/10 section 3.2): rank 0 at an arm, one Bool per row under
+            // `vmap`. The extent is every row's, so the guard runs when any
+            // row is active, as the evaluator's `local_guard_is_active`.
             let predicate = if let Some(activation) = site.activation {
-                self.finish_tensor_write_for_checked_read(activation.0);
-                format!(
-                    "chelis_tensor_to_scalar(t{}).bits == UINT64_C(1) && ({mismatch})",
-                    activation.0
-                )
+                let act = activation.0;
+                self.finish_tensor_write_for_checked_read(act);
+                let bool_et = Self::prim_elem_type(Prim::Bool);
+                self.line("{");
+                self.indent += 1;
+                self.line("int __local_guard_active = 0;");
+                self.line(&format!(
+                    "for (int64_t __r = 0; __r < chelis_tensor_numel(t{act}); ++__r) __local_guard_active |= (((const {bool_et}*)t{act}_data)[__r] != 0);"
+                ));
+                format!("__local_guard_active && ({mismatch})")
             } else {
                 mismatch.clone()
             };
@@ -7956,6 +7965,10 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
             ));
             self.indent -= 1;
             self.line("}");
+            if site.activation.is_some() {
+                self.indent -= 1;
+                self.line("}");
+            }
         }
     }
 

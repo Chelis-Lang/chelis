@@ -6945,20 +6945,22 @@ struct LowerCtx<'program> {
     /// Activation-local lowering tokens allocated before its body executes.
     local_ascription_tokens: Vec<(u64, Vec<(usize, NodeId)>)>,
     /// Scalar Bool selecting the runtime control-flow path currently being
-    /// lowered. A local-ascription owner retains this as a non-value
-    /// dependency so its guard executes only when that source branch is
-    /// selected. Unlike [`Self::random_path_condition`], this is present in
+    /// lowered. Unlike [`Self::random_path_condition`], this is present in
     /// ordinary tensor DAGs as well as transform/helper subcontexts.
     /// The conjunction of the enclosing `if` branch predicates, or `None`
     /// at the top level. Maintained unconditionally by `lower_if` and
     /// restored on exit.
     ///
-    /// Two consumers: a local tensor ascription activates only on its path,
-    /// and (chelis#1464) an [05-OP-68] guard fires only on its path. The
-    /// DAG is evaluated eagerly in topological order, so a guard node that
-    /// did not conjoin this would be checked even when the forward program
-    /// takes the sibling branch — the exact thing
-    /// `spec/06-transformations.md` §2.10.1 forbids.
+    /// Every node's owner activation ([`Self::draw_activation`]) conjoins
+    /// it, and a local tensor ascription's claims read that owner (see
+    /// `axis_sources::local_ascription_guard_activation`). The one direct
+    /// consumer is (chelis#1464) an [05-OP-68] guard's fire condition,
+    /// which conjoins it so a guard fires only on its path even in a lane
+    /// that does not yet gate the guard on its owner activation. The DAG is
+    /// evaluated eagerly in topological order, so a guard node that did not
+    /// conjoin this would be checked even when the forward program takes the
+    /// sibling branch — the exact thing `spec/06-transformations.md`
+    /// §2.10.1 forbids.
     branch_path_condition: Option<NodeId>,
     local_unit_refinements: BTreeMap<(NodeId, usize), NodeId>,
     /// Unique scalar carriers for computed reshape targets. They are Copy
@@ -9531,11 +9533,20 @@ impl<'program> LowerCtx<'program> {
                             for (axis, _) in &claims {
                                 self.restore_local_ascription_owner_axis(owner, *axis);
                             }
+                            // The node carrying the claims is owned by the
+                            // ascription's own position: its owner activation
+                            // is the one fact the claims are checked under
+                            // (spec/10 section 3.2), the random path inside a
+                            // spliced `grad` or `vmap` body as well as an
+                            // arm's branch path. An initializer produced
+                            // before a claim token, or under another owner
+                            // (before this arm, say), gets a fresh carrier.
+                            let ascription_owner = self.owner();
                             for (_axis, token) in &claims {
-                                let latest_dependency = self
-                                    .branch_path_condition
-                                    .map_or(token.0, |activation| token.0.max(activation.0));
-                                if owner.0 <= latest_dependency {
+                                if owner.0 <= token.0
+                                    || self.dag.get(owner).expect("initializer").owner
+                                        != ascription_owner
+                                {
                                     let ty = self
                                         .dag
                                         .get(owner)
@@ -9543,7 +9554,7 @@ impl<'program> LowerCtx<'program> {
                                         .output_type
                                         .clone();
                                     owner = self.dag.add_node(
-                                        self.owner(),
+                                        ascription_owner,
                                         RiscOp::Copy,
                                         vec![owner],
                                         ty,
@@ -9552,11 +9563,6 @@ impl<'program> LowerCtx<'program> {
                                     val_id = LoweredValue::Node(owner);
                                 }
                                 self.dag.add_shape_dep(owner, *token);
-                            }
-                            if let Some(activation) = self.branch_path_condition
-                                && !claims.is_empty()
-                            {
-                                self.dag.add_shape_dep(owner, activation);
                             }
                             if !claims.is_empty() {
                                 self.invocation_witnesses.push(owner);

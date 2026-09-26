@@ -141,7 +141,7 @@ fn local_ascription_with_activation_fixture() -> WireDag {
             },
             WireDagNode {
                 declaration: 0,
-                activation: None,
+                activation: Some(2),
                 id: 3,
                 op: WireRiscOp::Pad {
                     padding: vec![(
@@ -158,7 +158,7 @@ fn local_ascription_with_activation_fixture() -> WireDag {
                     }],
                     precision: "f32".into(),
                 },
-                shape_deps: vec![1, 2],
+                shape_deps: vec![1],
                 span_id: None,
                 merged_spans: vec![],
             },
@@ -391,31 +391,25 @@ fn local_ascription_site_roundtrips_exact_identity_and_rejects_missing_or_unknow
     assert!(WireDag::from_validated_json(&unknown.to_string()).is_err());
 }
 
+/// A local ascription's claims are checked under the owner activation of the
+/// node carrying them, which the wire carries as that node's `activation`;
+/// there is no second, dependency-shaped activation to disagree with it
+/// (spec/10 section 3.2, #2413). A carrier's activation is validated like
+/// any node's: it must name an earlier bool node.
 #[test]
-fn local_ascription_owner_rejects_multiple_runtime_branch_activations() {
+fn a_local_ascriptions_activation_travels_as_its_carriers_owner_activation() {
     let dag = local_ascription_with_activation_fixture();
     let json = serde_json::to_value(&dag).unwrap();
     let decoded = WireDag::from_validated_json(&json.to_string()).unwrap();
     assert_eq!(serde_json::to_value(decoded).unwrap(), json);
 
     let mut malformed = json;
-    let nodes = malformed["nodes"].as_array_mut().unwrap();
-    let mut second_activation = nodes[2].clone();
-    second_activation["id"] = 3.into();
-    second_activation["op"]["value"] =
-        serde_json::to_value(boolean(false)).expect("Bool scalar encodes");
-    let mut owner = nodes.pop().unwrap();
-    owner["id"] = 4.into();
-    owner["shape_deps"] = serde_json::json!([1, 2, 3]);
-    nodes.push(second_activation);
-    nodes.push(owner);
-    malformed["roots"] = serde_json::json!([4]);
-
+    malformed["nodes"][3]["activation"] = 1.into();
     let error = WireDag::from_validated_json(&malformed.to_string())
-        .expect_err("multiple path activations are ambiguous");
+        .expect_err("the claim token is not a bool activation");
     assert!(
         format!("{error:#}")
-            .contains("local ascription owner has multiple runtime branch activations"),
+            .contains("a node's activation must be an earlier bool node of the owning DAG"),
         "{error:#}"
     );
 }
