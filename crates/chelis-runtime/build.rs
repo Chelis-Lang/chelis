@@ -13,15 +13,18 @@
 //!
 //! The record is `$OUT_DIR/build_record.txt`, exposed as
 //! `chelis_runtime::build_record::SOURCES`, whose documentation gives the
-//! format. Cargo reruns this script when a declared root changes. A `build.rs`
-//! or `include/` added later to one of those crates enters the record the next
-//! time the script runs.
+//! format. Cargo reruns this script when anything in a declared crate's
+//! directory or the lockfile changes. Watching whole crate directories, not
+//! only the roots they hold now, means a `build.rs` or `include/` added later
+//! enters the record on the next build. An edit elsewhere in those directories,
+//! such as to a test, also reruns the script, and Cargo then recompiles the
+//! runtime even though the record is unchanged.
 //!
-//! Each root is declared to Cargo relative to this package's directory, as
-//! `../../<path>`. A build-script execution cache, such as Kache from 0.26 on,
-//! replays a recorded run when the declared roots as spelled hold the same
-//! bytes. Only paths under the package directory are relocated to the checkout
-//! being built, so an absolute spelling of a root outside it would let the cache
+//! Each watched path is declared to Cargo relative to this package's directory,
+//! as `../../<path>`. A build-script execution cache, such as Kache from 0.26
+//! on, replays a recorded run when the watched paths as spelled hold the same
+//! bytes. It relocates only paths under the package directory to the checkout
+//! being built, so an absolute spelling of a path outside it would let the cache
 //! serve another checkout's record.
 //!
 //! A compilation outside the Chelis workspace, such as a per-crate Nix build,
@@ -108,6 +111,11 @@ fn unavailable(required: &[String], missing: &[String]) -> String {
 }
 
 fn available(root: &Path, crates: &[&str]) -> String {
+    declare("Cargo.lock");
+    for krate in crates {
+        declare(krate);
+    }
+
     let mut directories = Vec::new();
     let mut files = BTreeMap::new();
     record_file(root, "Cargo.lock", &mut files);
@@ -129,16 +137,9 @@ fn available(root: &Path, crates: &[&str]) -> String {
 
     let mut record = String::new();
     for directory in &directories {
-        declare(directory);
         writeln!(record, "dir {directory}").expect("writing to a String succeeds");
     }
     for (path, digest) in &files {
-        if !directories
-            .iter()
-            .any(|directory| path.starts_with(&format!("{directory}/")))
-        {
-            declare(path);
-        }
         writeln!(record, "sha256 {digest} {path}").expect("writing to a String succeeds");
     }
     record

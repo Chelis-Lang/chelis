@@ -13,9 +13,10 @@ crate-type = ["cdylib", "rlib"]
 [features]
 default = []
 extension-module = ["pyo3/extension-module"]
-# Distribution builds of the extension, such as wheels, are sealed builds
-# (spec/08-backends.md §2.1): they carry no checkout path and skip the
-# development source-freshness check. Staging receipts record the mode.
+# A sealed build (spec/08-backends.md §2.1) carries no checkout path and skips
+# the development source-freshness check, so an extension that must run without
+# its checkout needs it; no wheel build enables it yet. Staging receipts record
+# the mode.
 sealed-runtime = ["chelis-runtime-bundle/sealed"]
 
 [dependencies]

@@ -3,8 +3,9 @@
 //! checkout (`spec/08-backends.md` §2.1).
 //!
 //! The test copies the runtime, its workspace dependencies and the runtime
-//! bundle into a temporary workspace, builds a consumer that stages the carried
-//! runtime, and then edits, rebuilds and finally deletes that checkout.
+//! bundle into a temporary workspace, and builds a consumer that stages the
+//! carried runtime. It then edits the checkout, rebuilds, adds a root to a
+//! runtime dependency, and finally deletes the checkout.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -217,6 +218,31 @@ fn development_consumers_stage_only_from_their_unchanged_checkout() {
         "a rebuild records the edited source: {}",
         String::from_utf8_lossy(&output.stderr)
     );
+
+    // A root that did not exist when the runtime was first built, here an
+    // `include/` directory in a runtime dependency, enters the record on the
+    // next build, so a later edit to it is refused.
+    let added = "crates/chelis-vocab/include/added.h";
+    fs::create_dir_all(checkout.join("crates/chelis-vocab/include")).expect("include directory");
+    fs::write(checkout.join(added), "/* added after the first build */\n").expect("add");
+    build_consumer(&checkout, &target, &[], &development);
+    let recorded = scratch.path().join("recorded");
+    let output = stage(&development, &recorded);
+    assert!(
+        output.status.success(),
+        "a rebuild records the added root: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    fs::write(checkout.join(added), "/* edited */\n").expect("edit the added header");
+    let unrebuilt = scratch.path().join("unrebuilt");
+    let output = stage(&development, &unrebuilt);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !output.status.success(),
+        "an edit to a root added before the last build stages: {stderr}"
+    );
+    assert!(stderr.contains(&format!("changed: {added}")), "{stderr}");
+    assert!(is_empty(&unrebuilt), "a refused staging writes nothing");
 
     fs::remove_dir_all(&checkout).expect("remove the checkout");
     let orphaned = scratch.path().join("orphaned");

@@ -7,9 +7,9 @@ repository.workspace = true
 description = "The runtime static archive and headers a Chelis compiler carries and stages."
 
 [features]
-# Distribution builds (release, Nix, and wheel builds) are sealed builds
-# (spec/08-backends.md §2.1): they carry no checkout path and skip the
-# development source-freshness check. Staging receipts record the mode.
+# Release and Nix builds of the CLI are sealed builds (spec/08-backends.md
+# §2.1): they carry no checkout path and skip the development source-freshness
+# check. Staging receipts record the mode.
 sealed = []
 
 [dependencies]

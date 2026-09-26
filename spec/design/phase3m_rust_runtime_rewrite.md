@@ -174,7 +174,9 @@ target directory are never read.
 - A development build checks its runtime's sources before staging.
   `crates/chelis-runtime/build.rs` records the SHA-256 of each declared input,
   relative to the workspace root, as `chelis_runtime::build_record::SOURCES`, and
-  has Cargo rerun it when a declared root changes. It declares each root
+  has Cargo rerun it when anything in a declared crate's directory or the
+  lockfile changes, so a build script or `include/` added to a runtime
+  dependency enters the record on the next build. It declares each watched path
   relative to its package directory (`../../<path>`), the only checkout root
   Kache's build-script execution cache relocates; an absolute spelling let that
   cache replay another checkout's record. A development bundle embeds
