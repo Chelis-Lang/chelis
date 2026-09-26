@@ -89,7 +89,14 @@ pub fn lower_sigmoid(
     parent_span: Option<&str>,
 ) -> NodeId {
     let neg_x = add_synth(owner, dag, RiscOp::Neg, vec![x], ty.clone(), parent_span);
-    let exp_neg = add_synth(owner, dag, RiscOp::Exp, vec![neg_x], ty.clone(), parent_span);
+    let exp_neg = add_synth(
+        owner,
+        dag,
+        RiscOp::Exp,
+        vec![neg_x],
+        ty.clone(),
+        parent_span,
+    );
     let one = add_synth(
         owner,
         dag,
@@ -106,7 +113,14 @@ pub fn lower_sigmoid(
         ty.clone(),
         parent_span,
     );
-    add_synth(owner, dag, RiscOp::Recip, vec![sum], ty.clone(), parent_span)
+    add_synth(
+        owner,
+        dag,
+        RiscOp::Recip,
+        vec![sum],
+        ty.clone(),
+        parent_span,
+    )
 }
 
 /// `tanh(x)` = `2 * sigmoid(2*x) - 1`
@@ -1261,7 +1275,15 @@ pub fn lower_layer_norm(
         &x_ty.dims,
         parent_span,
     );
-    let beta_node = expand_to_match(owner, dag, beta, beta_ty.clone(), x, &x_ty.dims, parent_span);
+    let beta_node = expand_to_match(
+        owner,
+        dag,
+        beta,
+        beta_ty.clone(),
+        x,
+        &x_ty.dims,
+        parent_span,
+    );
     let scaled = add_synth(
         owner,
         dag,

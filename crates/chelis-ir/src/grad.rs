@@ -869,8 +869,7 @@ fn prune_to_requested_outputs(
             // drift. Without this the AD seed/backward nodes would lose
             // their `__synthesized_grad__` markers post-prune.
             let new_id = new_dag.add_node(
-                node.owner
-                    .remap_with(|old| id_map.get(&old.0).copied()),
+                node.owner.remap_with(|old| id_map.get(&old.0).copied()),
                 node.op.clone(),
                 new_inputs,
                 node.output_type.clone(),
@@ -974,8 +973,13 @@ fn compute_adjoints(
             let da = dag.add_node(node.owner, RiscOp::Div, vec![g, b], ty.clone(), None);
             let g_times_y =
                 dag.add_node(node.owner, RiscOp::Mul, vec![g, node.id], ty.clone(), None);
-            let g_y_over_b =
-                dag.add_node(node.owner, RiscOp::Div, vec![g_times_y, b], ty.clone(), None);
+            let g_y_over_b = dag.add_node(
+                node.owner,
+                RiscOp::Div,
+                vec![g_times_y, b],
+                ty.clone(),
+                None,
+            );
             let db = dag.add_node(node.owner, RiscOp::Neg, vec![g_y_over_b], ty, None);
             Some(vec![(a, da), (b, db)])
         }
@@ -1214,8 +1218,13 @@ fn compute_adjoints(
                 ty.clone(),
                 None,
             );
-            let two_sqrt =
-                dag.add_node(node.owner, RiscOp::Mul, vec![two, node.id], ty.clone(), None);
+            let two_sqrt = dag.add_node(
+                node.owner,
+                RiscOp::Mul,
+                vec![two, node.id],
+                ty.clone(),
+                None,
+            );
             let dx = tier2::lower_div(node.owner, dag, g, two_sqrt, &ty, None);
             Some(vec![(x, dx)])
         }
@@ -1233,7 +1242,13 @@ fn compute_adjoints(
             let x = node.inputs[0];
             let ty = forward.get(x).unwrap().output_type.clone();
             let cos_x = dag.add_node(node.owner, RiscOp::Cos, vec![x], ty.clone(), None);
-            let cos_sq = dag.add_node(node.owner, RiscOp::Mul, vec![cos_x, cos_x], ty.clone(), None);
+            let cos_sq = dag.add_node(
+                node.owner,
+                RiscOp::Mul,
+                vec![cos_x, cos_x],
+                ty.clone(),
+                None,
+            );
             let dx = tier2::lower_div(node.owner, dag, g, cos_sq, &ty, None);
             Some(vec![(x, dx)])
         }
@@ -5176,7 +5191,13 @@ mod tests {
         };
         let mut dag = Dag::new();
         let owner = Owner::from(dag.declare("test"));
-        let x = dag.add_node(owner, RiscOp::Load { name: "x".into() }, vec![], mat23, None);
+        let x = dag.add_node(
+            owner,
+            RiscOp::Load { name: "x".into() },
+            vec![],
+            mat23,
+            None,
+        );
         let am = dag.add_node(owner, RiscOp::Argmax { axis: 0 }, vec![x], vec3, None);
         let out = dag.add_node(
             owner,
@@ -5218,7 +5239,13 @@ mod tests {
         };
         let mut dag = Dag::new();
         let owner = Owner::from(dag.declare("test"));
-        let x = dag.add_node(owner, RiscOp::Load { name: "x".into() }, vec![], mat23, None);
+        let x = dag.add_node(
+            owner,
+            RiscOp::Load { name: "x".into() },
+            vec![],
+            mat23,
+            None,
+        );
         let am = dag.add_node(owner, RiscOp::Argmin { axis: 1 }, vec![x], vec3, None);
         let out = dag.add_node(
             owner,

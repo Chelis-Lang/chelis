@@ -727,7 +727,13 @@ fn tier2_sub_nodes_inherit_parent_span() {
         scalar_f32(),
         None,
     );
-    let result = tier2::lower_sigmoid(decl.into(), &mut dag, x, &scalar_f32(), Some("sigmoid.expr"));
+    let result = tier2::lower_sigmoid(
+        decl.into(),
+        &mut dag,
+        x,
+        &scalar_f32(),
+        Some("sigmoid.expr"),
+    );
 
     // The operand const has no span. The sub-nodes are Neg, Exp, Add,
     // and Recip. Every synthesized one should carry span_id =

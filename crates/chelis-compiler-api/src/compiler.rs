@@ -6625,7 +6625,8 @@ fn wire_dag(dag: &Dag) -> WireResult<WireDag> {
             .nodes()
             .iter()
             .map(|node| {
-                let row = rows[node.owner.decl.0 as usize].expect("every node's declaration has a row");
+                let row =
+                    rows[node.owner.decl.0 as usize].expect("every node's declaration has a row");
                 wire_dag_node(node, row)
             })
             .collect::<WireResult<_>>()?,

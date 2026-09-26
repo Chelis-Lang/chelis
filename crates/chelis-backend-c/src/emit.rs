@@ -1307,10 +1307,7 @@ impl CEmitter {
     /// checks accept where the element's row is inactive.
     fn gated(&self, elem: String, slot: usize) -> String {
         match &self.gate {
-            Some(gate) => format!(
-                "(({}) ? ({elem}) : {})",
-                gate.element, gate.neutrals[slot]
-            ),
+            Some(gate) => format!("(({}) ? ({elem}) : {})", gate.element, gate.neutrals[slot]),
             None => elem,
         }
     }

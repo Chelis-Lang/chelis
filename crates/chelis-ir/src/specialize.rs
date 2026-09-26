@@ -285,7 +285,8 @@ fn lower_unmatched_one_hot(dag: &Dag) -> Dag {
     for node in dag.nodes() {
         if let RiscOp::OneHot { vocab } = node.op {
             let indices = id_map[&node.inputs[0]];
-            let new_id = lower_one_hot_node(&mut out, node.owner.remap(&id_map), indices, node, vocab);
+            let new_id =
+                lower_one_hot_node(&mut out, node.owner.remap(&id_map), indices, node, vocab);
             out.preserve_shape_deps(new_id, &node.shape_deps, &id_map);
             out.preserve_result_claim_deps(new_id, &node.result_claim_deps, &id_map);
             id_map.insert(node.id, new_id);

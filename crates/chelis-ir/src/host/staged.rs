@@ -379,7 +379,8 @@ impl Partition<'_> {
                 )?;
             }
             let id = dag.add_node(
-                node.owner.remap_with(|activation| remap.get(&activation).copied()),
+                node.owner
+                    .remap_with(|activation| remap.get(&activation).copied()),
                 node.op.clone(),
                 node.inputs.iter().map(|i| remap[i]).collect(),
                 node.output_type.clone(),

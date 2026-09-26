@@ -517,11 +517,7 @@ fn node_activity(
 
 /// `value` with the elements of the rows its node checks nothing in
 /// replaced by `neutral`; `value`'s leading axes are the activation's `shape`.
-fn neutral_rows(
-    value: &TensorValue,
-    rows: &[bool],
-    neutral: i64,
-) -> Result<TensorValue, String> {
+fn neutral_rows(value: &TensorValue, rows: &[bool], neutral: i64) -> Result<TensorValue, String> {
     let len = value.len();
     let per_row = if rows.is_empty() { 0 } else { len / rows.len() };
     let mask = (0..len)

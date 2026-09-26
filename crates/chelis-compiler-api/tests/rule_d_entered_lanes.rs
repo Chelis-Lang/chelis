@@ -1181,7 +1181,11 @@ fn a_vmapped_arm_checks_only_in_the_rows_that_take_it_in_the_evaluator_and_c() {
     );
     rows.c(
         "C untaken row",
-        run_c(&compile_c(&vmapped_arm(untaken, 1), "selected"), "selected", 0),
+        run_c(
+            &compile_c(&vmapped_arm(untaken, 1), "selected"),
+            "selected",
+            0,
+        ),
         Ok(()),
     );
     let taken = "gt(-2.0f32, s)";
@@ -1192,7 +1196,11 @@ fn a_vmapped_arm_checks_only_in_the_rows_that_take_it_in_the_evaluator_and_c() {
     );
     rows.c(
         "C taken row",
-        run_c(&compile_c(&vmapped_arm(taken, 1), "selected"), "selected", 0),
+        run_c(
+            &compile_c(&vmapped_arm(taken, 1), "selected"),
+            "selected",
+            0,
+        ),
         Err(CAST_OVERFLOW),
     );
     rows.assert_empty();

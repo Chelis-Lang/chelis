@@ -414,8 +414,7 @@ fn dead_code_eliminate_impl(
             // and the audit invariant says input Deep spans must appear
             // on at least one IR node post-pipeline).
             let new_id = new_dag.add_node(
-                node.owner
-                    .remap_with(|old| id_map.get(&old.0).copied()),
+                node.owner.remap_with(|old| id_map.get(&old.0).copied()),
                 node.op.clone(),
                 new_inputs,
                 node.output_type.clone(),
@@ -527,9 +526,7 @@ pub fn common_subexpr_eliminate(dag: &Dag) -> Dag {
         // its name, a node's declaration decides which selection runs it, and
         // its activation decides whether it checks (the same operation under
         // `c` and under `Not c` stays two nodes).
-        let owner = node
-            .owner
-            .remap_with(|old| id_map.get(&old.0).copied());
+        let owner = node.owner.remap_with(|old| id_map.get(&old.0).copied());
         let cse_key = (
             owner,
             op_key,

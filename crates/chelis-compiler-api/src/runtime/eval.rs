@@ -4345,7 +4345,15 @@ impl<'a> EvalContext<'a> {
                             None,
                         );
                         tier2::lower_layer_norm(
-                            decl.into(), dag, x_id, gamma_id, beta_id, tys.0, tys.1, tys.2, epsilon_id,
+                            decl.into(),
+                            dag,
+                            x_id,
+                            gamma_id,
+                            beta_id,
+                            tys.0,
+                            tys.1,
+                            tys.2,
+                            epsilon_id,
                             None,
                         )
                     },

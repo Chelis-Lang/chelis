@@ -587,8 +587,8 @@ use chelis_types::{
 use chelis_vocab::EffectKind;
 
 use crate::dag::{
-    ComparisonKind, Dag, DeclId, DimExpr, DimInfo, LogicalKind, NodeId, Owner, RiscOp, RtAxis, RtDim,
-    TensorType,
+    ComparisonKind, Dag, DeclId, DimExpr, DimInfo, LogicalKind, NodeId, Owner, RiscOp, RtAxis,
+    RtDim, TensorType,
 };
 use crate::grad::grad_dag_checked;
 use crate::tier2;
@@ -11925,7 +11925,7 @@ impl<'program> LowerCtx<'program> {
                 self.materialize_vmapped_arg(arg_id, param_ty, &batch_dim, batch_source),
             );
         }
-arg_map.merge(captured_bindings);
+        arg_map.merge(captured_bindings);
         arg_map.extend(caller_activation_arg);
 
         // chelis#383: `vectorize_axis0` prepended the batch dim to EVERY
@@ -12578,13 +12578,27 @@ arg_map.merge(captured_bindings);
                 let a = self.lower_expr_node(&args[0], "cmplt lhs");
                 let b = self.lower_expr_node(&args[1], "cmplt rhs");
                 let parent_span = self.current_span_id.clone();
-                tier2::lower_cmplt(self.owner(), &mut self.dag, a, b, ty, parent_span.as_deref())
+                tier2::lower_cmplt(
+                    self.owner(),
+                    &mut self.dag,
+                    a,
+                    b,
+                    ty,
+                    parent_span.as_deref(),
+                )
             }
             "lt" if args.len() == 2 => {
                 let a = self.lower_expr_node(&args[0], "lt lhs");
                 let b = self.lower_expr_node(&args[1], "lt rhs");
                 let parent_span = self.current_span_id.clone();
-                tier2::lower_lt(self.owner(), &mut self.dag, a, b, ty, parent_span.as_deref())
+                tier2::lower_lt(
+                    self.owner(),
+                    &mut self.dag,
+                    a,
+                    b,
+                    ty,
+                    parent_span.as_deref(),
+                )
             }
             "max_elem" if args.len() == 2 => {
                 let a = self.lower_expr_node(&args[0], "max_elem lhs");
@@ -13234,38 +13248,80 @@ arg_map.merge(captured_bindings);
                 let a = self.lower_expr_node(&args[0], "gt lhs");
                 let b = self.lower_expr_node(&args[1], "gt rhs");
                 let parent_span = self.current_span_id.clone();
-                tier2::lower_gt(self.owner(), &mut self.dag, a, b, ty, parent_span.as_deref())
+                tier2::lower_gt(
+                    self.owner(),
+                    &mut self.dag,
+                    a,
+                    b,
+                    ty,
+                    parent_span.as_deref(),
+                )
             }
             "gte" if args.len() == 2 => {
                 let a = self.lower_expr_node(&args[0], "gte lhs");
                 let b = self.lower_expr_node(&args[1], "gte rhs");
                 let parent_span = self.current_span_id.clone();
-                tier2::lower_gte(self.owner(), &mut self.dag, a, b, ty, parent_span.as_deref())
+                tier2::lower_gte(
+                    self.owner(),
+                    &mut self.dag,
+                    a,
+                    b,
+                    ty,
+                    parent_span.as_deref(),
+                )
             }
             "lte" if args.len() == 2 => {
                 let a = self.lower_expr_node(&args[0], "lte lhs");
                 let b = self.lower_expr_node(&args[1], "lte rhs");
                 let parent_span = self.current_span_id.clone();
-                tier2::lower_lte(self.owner(), &mut self.dag, a, b, ty, parent_span.as_deref())
+                tier2::lower_lte(
+                    self.owner(),
+                    &mut self.dag,
+                    a,
+                    b,
+                    ty,
+                    parent_span.as_deref(),
+                )
             }
             "eq" if args.len() == 2 => {
                 let a = self.lower_expr_node(&args[0], "eq lhs");
                 let b = self.lower_expr_node(&args[1], "eq rhs");
                 let parent_span = self.current_span_id.clone();
-                tier2::lower_eq(self.owner(), &mut self.dag, a, b, ty, parent_span.as_deref())
+                tier2::lower_eq(
+                    self.owner(),
+                    &mut self.dag,
+                    a,
+                    b,
+                    ty,
+                    parent_span.as_deref(),
+                )
             }
             "neq" if args.len() == 2 => {
                 let a = self.lower_expr_node(&args[0], "neq lhs");
                 let b = self.lower_expr_node(&args[1], "neq rhs");
                 let parent_span = self.current_span_id.clone();
-                tier2::lower_neq(self.owner(), &mut self.dag, a, b, ty, parent_span.as_deref())
+                tier2::lower_neq(
+                    self.owner(),
+                    &mut self.dag,
+                    a,
+                    b,
+                    ty,
+                    parent_span.as_deref(),
+                )
             }
             // Direct Tier-1 minimum selection identity
             "min_elem" if args.len() == 2 => {
                 let a = self.lower_expr_node(&args[0], "min_elem lhs");
                 let b = self.lower_expr_node(&args[1], "min_elem rhs");
                 let parent_span = self.current_span_id.clone();
-                tier2::lower_min_elem(self.owner(), &mut self.dag, a, b, ty, parent_span.as_deref())
+                tier2::lower_min_elem(
+                    self.owner(),
+                    &mut self.dag,
+                    a,
+                    b,
+                    ty,
+                    parent_span.as_deref(),
+                )
             }
 
             // H2: Boolean operators
@@ -13273,13 +13329,27 @@ arg_map.merge(captured_bindings);
                 let a = self.lower_expr_node(&args[0], "and lhs");
                 let b = self.lower_expr_node(&args[1], "and rhs");
                 let parent_span = self.current_span_id.clone();
-                tier2::lower_and(self.owner(), &mut self.dag, a, b, ty, parent_span.as_deref())
+                tier2::lower_and(
+                    self.owner(),
+                    &mut self.dag,
+                    a,
+                    b,
+                    ty,
+                    parent_span.as_deref(),
+                )
             }
             "or" if args.len() == 2 => {
                 let a = self.lower_expr_node(&args[0], "or lhs");
                 let b = self.lower_expr_node(&args[1], "or rhs");
                 let parent_span = self.current_span_id.clone();
-                tier2::lower_or(self.owner(), &mut self.dag, a, b, ty, parent_span.as_deref())
+                tier2::lower_or(
+                    self.owner(),
+                    &mut self.dag,
+                    a,
+                    b,
+                    ty,
+                    parent_span.as_deref(),
+                )
             }
             "not" if args.len() == 1 => {
                 let a = self.lower_expr_node(&args[0], "not input");

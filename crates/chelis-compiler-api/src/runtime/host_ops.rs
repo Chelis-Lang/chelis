@@ -1433,7 +1433,15 @@ pub(super) fn tensor_matmul_host(
     let rhs_name = format!("{COMPOSED_PLACEHOLDER_PREFIX}1");
     let lhs_id = add_load(&mut dag, decl, lhs_name.clone(), lhs_ty.clone());
     let rhs_id = add_load(&mut dag, decl, rhs_name.clone(), rhs_ty.clone());
-    let root = tier2::lower_matmul(decl.into(), &mut dag, lhs_id, rhs_id, &lhs_ty, &rhs_ty, None);
+    let root = tier2::lower_matmul(
+        decl.into(),
+        &mut dag,
+        lhs_id,
+        rhs_id,
+        &lhs_ty,
+        &rhs_ty,
+        None,
+    );
     let mut inputs = UnordMap::new();
     inputs.insert(lhs_name, lhs.value.clone());
     inputs.insert(rhs_name, rhs.value.clone());
@@ -2170,7 +2178,16 @@ pub(super) fn conv_host(
     let x_id = add_load(&mut dag, decl, x_name.clone(), input_ty.clone());
     let k_id = add_load(&mut dag, decl, k_name.clone(), kernel_ty.clone());
     let root = tier2::lower_conv(
-        decl.into(), &mut dag, x_id, k_id, &input_ty, &kernel_ty, &output_ty, strides, padding, None,
+        decl.into(),
+        &mut dag,
+        x_id,
+        k_id,
+        &input_ty,
+        &kernel_ty,
+        &output_ty,
+        strides,
+        padding,
+        None,
     );
     let mut inputs = UnordMap::new();
     inputs.insert(x_name, input.value.clone());

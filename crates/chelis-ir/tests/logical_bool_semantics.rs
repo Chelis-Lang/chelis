@@ -75,7 +75,14 @@ fn tier2_preserves_every_comparison_and_logical_identity() {
             operand_ty.clone(),
             None,
         );
-        let result = lower(decl.into(), &mut dag, left, right, &operand_ty, Some("comparison"));
+        let result = lower(
+            decl.into(),
+            &mut dag,
+            left,
+            right,
+            &operand_ty,
+            Some("comparison"),
+        );
         assert_eq!(
             dag.get(result).unwrap().op,
             RiscOp::Compare(kind),
@@ -162,7 +169,14 @@ fn symbolic_comparison_inherits_proven_operand_shape_without_authored_claims() {
         symbolic("n", Prim::F32),
         None,
     );
-    let comparison = tier2::lower_lt(valid_decl.into(), &mut valid, left, right, &inferred_result, None);
+    let comparison = tier2::lower_lt(
+        valid_decl.into(),
+        &mut valid,
+        left,
+        right,
+        &inferred_result,
+        None,
+    );
     assert_eq!(
         valid.get(comparison).unwrap().output_type,
         symbolic("n", Prim::Bool),
