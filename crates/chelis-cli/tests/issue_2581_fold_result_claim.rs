@@ -27,9 +27,6 @@ struct Shape {
     op: &'static str,
     /// The value the agreeing program prints.
     value: &'static str,
-    /// Whether `chelis eval` runs this program. chelis#2574: eval refuses a
-    /// `fold` that reaches it through a block binding or a callee.
-    eval_runs: bool,
 }
 
 const SHAPES: &[Shape] = &[
@@ -40,7 +37,6 @@ const SHAPES: &[Shape] = &[
                  out = f({items}, {seed})\n",
         op: "fold",
         value: "tensor(shape=[3], data=[4.0, 5.0, 6.0])",
-        eval_runs: true,
     },
     Shape {
         name: "fold_returns_an_iteration_result",
@@ -49,7 +45,6 @@ const SHAPES: &[Shape] = &[
                  out = f({items}, {seed})\n",
         op: "fold",
         value: "tensor(shape=[3], data=[5.0, 7.0, 9.0])",
-        eval_runs: true,
     },
     Shape {
         name: "fold_over_an_empty_list",
@@ -58,7 +53,6 @@ const SHAPES: &[Shape] = &[
                  out = f({items}, {seed})\n",
         op: "fold",
         value: "tensor(shape=[3], data=[4.0, 5.0, 6.0])",
-        eval_runs: true,
     },
     Shape {
         name: "fold_selected_by_a_branch",
@@ -67,7 +61,6 @@ const SHAPES: &[Shape] = &[
                  out = f(true, {items}, {seed})\n",
         op: "fold",
         value: "tensor(shape=[3], data=[5.0, 7.0, 9.0])",
-        eval_runs: true,
     },
     Shape {
         name: "fold_in_a_match_arm",
@@ -78,7 +71,6 @@ const SHAPES: &[Shape] = &[
                  out = f(Some({seed}), {items}, {seed})\n",
         op: "fold",
         value: "tensor(shape=[3], data=[5.0, 7.0, 9.0])",
-        eval_runs: true,
     },
     Shape {
         name: "fold_bound_before_a_later_effect",
@@ -90,7 +82,6 @@ const SHAPES: &[Shape] = &[
                  out = f({items}, {seed})\n",
         op: "fold",
         value: "tensor(shape=[3], data=[5.0, 7.0, 9.0])",
-        eval_runs: true,
     },
     Shape {
         name: "fold_as_a_block_tail_binding",
@@ -100,7 +91,6 @@ const SHAPES: &[Shape] = &[
                  out = f({items}, {seed})\n",
         op: "fold",
         value: "tensor(shape=[3], data=[5.0, 7.0, 9.0])",
-        eval_runs: false,
     },
     Shape {
         name: "fold_in_a_callee",
@@ -110,7 +100,6 @@ const SHAPES: &[Shape] = &[
                  out = f({items}, {seed})\n",
         op: "fold",
         value: "tensor(shape=[3], data=[5.0, 7.0, 9.0])",
-        eval_runs: false,
     },
 ];
 
@@ -150,14 +139,12 @@ fn check_shape(shape: &Shape) -> Result<(), String> {
             shape.name
         ));
     }
-    if shape.eval_runs {
-        let (eval_ok, evaluated) = run(&failing, false);
-        if eval_ok || trap_lines(&evaluated) != trap_lines(&compiled) {
-            return Err(format!(
-                "{}: eval and compiled C traps differ\n{evaluated}\n---\n{compiled}",
-                shape.name
-            ));
-        }
+    let (eval_ok, evaluated) = run(&failing, false);
+    if eval_ok || trap_lines(&evaluated) != trap_lines(&compiled) {
+        return Err(format!(
+            "{}: eval and compiled C traps differ\n{evaluated}\n---\n{compiled}",
+            shape.name
+        ));
     }
     // Negative parity: the true extent passes and returns the value.
     let agreeing = source(shape, 3);
@@ -169,14 +156,12 @@ fn check_shape(shape: &Shape) -> Result<(), String> {
             shape.name
         ));
     }
-    if shape.eval_runs {
-        let (eval_ok, evaluated) = run(&agreeing, false);
-        if !eval_ok || evaluated != compiled {
-            return Err(format!(
-                "{}: eval and compiled C differ\n{evaluated}\n---\n{compiled}",
-                shape.name
-            ));
-        }
+    let (eval_ok, evaluated) = run(&agreeing, false);
+    if !eval_ok || evaluated != compiled {
+        return Err(format!(
+            "{}: eval and compiled C differ\n{evaluated}\n---\n{compiled}",
+            shape.name
+        ));
     }
     Ok(())
 }
