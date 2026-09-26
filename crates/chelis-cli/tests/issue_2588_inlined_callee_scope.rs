@@ -145,9 +145,14 @@ def main() -> tensor[1, f32] = {\n  y = to_tensor([10.0f32])\n  grad(f)(add(to_t
     assert_both_lanes(source, "main", "tensor(shape=[1], data=[2.0])");
 }
 
+fn assert_both_lanes_out(source: &str, expected: &str) {
+    assert_both_lanes(source, "out", expected);
+}
+
 /// A transform in a top-level value's block runs through the host
-/// interpreter's transform route. The compiled lane has no lowering for these
-/// positions, and now says so instead of building the caller's value.
+/// interpreter's transform route on the evaluator. This one has no compiled
+/// lowering (an unrelated host-site failure), so only its evaluator value is
+/// pinned, and the compiled lane must not build a value.
 fn assert_evaluator_only(source: &str, expected: &str) {
     assert_eq!(printed(&eval(source), "out"), expected, "eval\n{source}");
     let dir = tempdir().expect("tempdir");
@@ -165,7 +170,7 @@ fn assert_evaluator_only(source: &str, expected: &str) {
 
 #[test]
 fn transform_route_vmap_of_a_declaration_is_not_captured() {
-    assert_evaluator_only(
+    assert_both_lanes_out(
         "y = to_tensor([2.0f32])\n\
 def f(x: tensor[1, f32]) -> tensor[1, f32] = add(x, y)\n\
 out = {\n  y = to_tensor([10.0f32])\n  vmap(f)(to_tensor([[1.0f32], [3.0f32]]))\n}\n",
@@ -175,7 +180,7 @@ out = {\n  y = to_tensor([10.0f32])\n  vmap(f)(to_tensor([[1.0f32], [3.0f32]]))\
 
 #[test]
 fn transform_route_grad_through_a_callee_is_not_captured() {
-    assert_evaluator_only(
+    assert_both_lanes_out(
         "w = to_tensor([3.0f32, 5.0f32])\n\
 def inner(x: tensor[2, f32]) -> tensor[2, f32] = mul(x, w)\n\
 def loss(x: tensor[2, f32]) -> tensor[f32] = sum(inner(x), 0i32)\n\
@@ -271,4 +276,15 @@ fn a_global_block_local_after_a_grad_does_not_stop_its_kernel() {
 def f(x: tensor[1, f32]) -> tensor[f32] = sum(mul(x, c), 0i32)\n\
 out = {\n  a = grad(f)(to_tensor([1.0f32]))\n  c = to_tensor([10.0f32])\n  add(a, c)\n}\n";
     assert_both_lanes(source, "out", "tensor(shape=[1], data=[12.0])");
+}
+
+/// A top-level function name in a global block's scope is that function: a
+/// higher-order callee substituted one level down still reaches `apply`.
+#[test]
+fn a_global_block_nested_substitution_keeps_its_callees() {
+    let source = format!(
+        "{HIGHER_ORDER_CALLEE}def outer(k: (tensor[1, f32]) -> tensor[1, f32], x: tensor[1, f32]) -> tensor[1, f32] = apply(k, x)\n\
+out = outer(dbl, to_tensor([1.0f32]))\n"
+    );
+    assert_both_lanes(&source, "out", "tensor(shape=[1], data=[4.0])");
 }
