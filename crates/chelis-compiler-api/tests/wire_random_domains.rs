@@ -1696,3 +1696,21 @@ fn exclusive_splits_of_one_key_may_not_return_their_halves() {
     graph["roots"] = json!(roots);
     rejects_domain(&graph, "is a graph root");
 }
+
+/// A tuple of keys built directly by `split_key` is a function's result:
+/// each `Store` that names a root is the key it stores, so the codec admits
+/// the graph, and rooting that key a second time is still a second use.
+///
+/// Evidentiary status: REGRESSION TEST. At `b47fdd7d3` the codec refused
+/// the lowered graph ("produces a key, but only a key operation, a join or a
+/// Load produces one").
+#[test]
+fn a_key_store_root_is_the_key_it_stores() {
+    let dag = lower("def pair(k: key) -> (key, key) = split_key(k)\n", "pair");
+    accepts(&dag);
+    let store = first(&dag, "store");
+    let stored = input(&dag, store, 0);
+    let mut twice = dag.clone();
+    twice["roots"].as_array_mut().unwrap().push(json!(stored));
+    rejects_domain(&twice, "is a graph root twice");
+}

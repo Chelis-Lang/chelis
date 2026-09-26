@@ -115,7 +115,9 @@ Generated code holds no random state: every draw reads the key it is given
 random. A scalar `key` parameter or result of a host entry crosses the C ABI
 as the published carrier `typedef struct { uint64_t bits; } chelis_key;`,
 whose `bits` are the key's 64 bits ([05-RNG-2]), and
-`chelis_key chelis_key_from_seed(int64_t seed)` returns [05-OP-69]'s key. A key tensor
+`chelis_key chelis_key_from_seed(int64_t seed)` returns [05-OP-69]'s key, and
+`chelis_string chelis_string_from_key(chelis_key key)` returns its printed form
+([05-OBS-2]), which a compiled program prints for a key root. A key tensor
 at a host entry crosses as a `chelis_tensor` of runtime dtype `key` (id 9).
 An entry on the four-argument public tensor ABI carries every input and result
 as a `chelis_tensor`, a scalar as a rank-0 tensor, so its key inputs and key

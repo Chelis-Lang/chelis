@@ -2391,6 +2391,22 @@ pub extern "C" fn chelis_key_from_seed(seed: i64) -> chelis_key {
     }
 }
 
+/// [05-OBS-2]: a key's printed form, `key(` then its 64 bits as 16
+/// lowercase hex digits, then `)`. Byte-identical to the reference renderer
+/// `chelis_types::observation::format_key_bits`, locked by
+/// `tests/format_key_matches_reference.rs`; the production staticlib keeps
+/// no checker dependency.
+fn format_key_bits(bits: u64) -> String {
+    format!("key({bits:016x})")
+}
+
+/// [05-OBS-2]: a key's printed form. A key has no scalar carrier, so its
+/// text has its own entry point rather than [`chelis_string_from_scalar`].
+#[no_mangle]
+pub extern "C" fn chelis_string_from_key(key: chelis_key) -> chelis_string {
+    new_runtime_string(format_key_bits(key.bits))
+}
+
 #[no_mangle]
 pub unsafe extern "C" fn chelis_scalar_tensor(value: chelis_scalar) -> *mut chelis_tensor {
     let dtype = validate_scalar(value, "chelis_scalar_tensor");
@@ -7409,7 +7425,8 @@ unsafe fn tensor_elem_to_string(t: *const chelis_tensor, dtype: RuntimeDType, i:
             let bits = *(tensor_data(t) as *const u16).add(i);
             format_shortest(f64::from(half::f16::from_bits(bits)), RuntimeDType::F16)
         }
-        RuntimeDType::Key => runtime_fail!("Domain: tensor formatting: a key has no text form"),
+        // [05-OBS-2]: a key element renders as its printed form.
+        RuntimeDType::Key => format_key_bits(*(tensor_data(t) as *const u64).add(i)),
     }
 }
 
@@ -7418,8 +7435,9 @@ unsafe fn tensor_elem_to_string(t: *const chelis_tensor, dtype: RuntimeDType, i:
 const TENSOR_RENDER_LIMIT: usize = 32;
 
 unsafe fn tensor_to_string(t: *const chelis_tensor) -> String {
-    // Checked at entry, not per element, so an empty key tensor is rejected.
-    let [dtype] = validate_tensor_inputs([(t, "tensor formatting")]);
+    // Observation renders every active tensor element dtype, `key` included
+    // ([05-OBS-2]); the checker keeps keys out of `to_string` ([05-OP-25]).
+    let dtype = tensor_dtype(t, "tensor formatting");
     // [05-OBS-4]: a rank-0 tensor renders as its single element, bare -
     // the `tensor(shape=[], data=[..])` wrapper is not an exit form.
     if (*t).rank() == 0 {

@@ -216,8 +216,13 @@ pub fn format_element(prim: Prim, value: ElementRef) -> String {
 /// lowercase hex digits of spec/10 section 3.1's key carrier, then `)`. A
 /// key has no numeric value, so no numeric formatter renders it.
 pub fn format_key(key: crate::dtype_semantics::RandomKey) -> String {
+    format_key_bits(key.bits())
+}
+
+/// [`format_key`] over a key's stored 64 bits, for a native runtime that
+/// holds a key as its storage word ([05-OBS-2]).
+pub fn format_key_bits(bits: u64) -> String {
     const DIGITS: &[u8; 16] = b"0123456789abcdef";
-    let bits = key.bits();
     let hex = (0..16)
         .rev()
         .map(|nibble| char::from(DIGITS[((bits >> (nibble * 4)) & 0xf) as usize]))

@@ -1736,6 +1736,18 @@ const FINAL_NUMERIC_OPERATION_ROWS: &[FinalNumericOperationRegistration] = &[
         atom: "[05-OP-69]",
         authority_anchor: "Its published C form is\n> `chelis_key chelis_key_from_seed(int64_t seed)`",
     },
+    // A key's printed form: a key carrier in, a string out, no arithmetic
+    // type in the signature.
+    FinalNumericOperationRegistration {
+        surface: StaticSurfaceDescriptor::new(
+            PRIMARY_CENSUS_FAMILY,
+            "header-export",
+            "chelis_runtime.h: chelis_string chelis_string_from_key ( chelis_key key ) ;",
+            &[],
+        ),
+        atom: "[05-OP-69]",
+        authority_anchor: "A key's printed form ([05-OBS-2]) is\n> published as `chelis_string chelis_string_from_key(chelis_key key)`",
+    },
     FinalNumericOperationRegistration {
         surface: StaticSurfaceDescriptor::new(
             PRIMARY_CENSUS_FAMILY,

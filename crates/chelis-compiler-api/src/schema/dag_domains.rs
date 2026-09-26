@@ -116,6 +116,7 @@ impl KeyGraph for DecodedKeys<'_> {
                 },
             },
             Some(WireRiscOp::Load { .. }) => KeyRole::Load,
+            Some(WireRiscOp::Store { .. }) => KeyRole::Store,
             Some(WireRiscOp::Dropout {}) => KeyRole::Dropout,
             Some(WireRiscOp::UniformLike {}) => KeyRole::UniformLike,
             Some(WireRiscOp::DropoutReplay {}) => KeyRole::DropoutReplay,

@@ -315,7 +315,9 @@ activation is its forward draw's.
 `key` is a structural precision with no literal or storage carrier in a
 graph, at any rank: no `Const`, `ConstTensor` or `Pad.fill` holds a key. Every
 key is produced by `KeyFromSeed`, `Split`, `FoldIn`, `SplitN` or `KeySelect`,
-or enters as a key-precision `Load`. Every node carries its declaration's row, and a
+or enters as a key-precision `Load`; a key-precision `Store`, which names a
+root, is the key it stores, so rooting the `Store` is that key's place among
+the roots. Every node carries its declaration's row, and a
 parameter is its declaration's row and its name: every `Load` of one name in one
 row is one key, and `Load`s of one name in two rows read two parameters, even
 when the two rows hold one name. A node reads a node of another row only when

@@ -334,6 +334,9 @@ chelis_tensor *chelis_scalar_tensor(chelis_scalar value);
 chelis_scalar chelis_tensor_to_scalar(const chelis_tensor *tensor);
 void chelis_fill_scalar(chelis_tensor_write *guard, chelis_scalar value);
 chelis_string chelis_string_from_scalar(chelis_scalar value);
+/* [05-OBS-2]: a key's printed form, `key(` then its 64 bits as 16 lowercase
+ * hex digits, then `)` (spec/08 section 2). */
+chelis_string chelis_string_from_key(chelis_key key);
 chelis_option *chelis_parse_scalar(chelis_string text, chelis_dtype dtype);
 chelis_option *chelis_dict_get_scalar(const chelis_dict *dict, chelis_value key, chelis_dtype dtype);
 int32_t chelis_tensor_rank(const chelis_tensor *tensor);

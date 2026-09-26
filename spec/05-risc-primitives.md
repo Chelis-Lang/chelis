@@ -1096,7 +1096,8 @@ path.
 > cotangent and the key carries none. Its published C form is
 > `chelis_key chelis_key_from_seed(int64_t seed)`, returning spec/08 §2's
 > scalar key carrier `typedef struct { uint64_t bits; } chelis_key;`, whose
-> `bits` are the key's 64 bits.
+> `bits` are the key's 64 bits. A key's printed form ([05-OBS-2]) is
+> published as `chelis_string chelis_string_from_key(chelis_key key)`.
 
 > **[05-OP-70]** `split_key(k) -> (key, key)` consumes the key `k` and returns
 > the pair `(derive(k, 0), derive(k, 1))` of [05-RNG-2]. For a
@@ -4356,7 +4357,9 @@ count allowlist is supporting evidence only and cannot satisfy [05-UNS-1].
 
 > **[05-OBS-2]** Integer dtypes SHALL print as integers with all digits
 > exact; floats SHALL print the shortest string that round-trips at
-> their own width; `bool` SHALL print `true`/`false` at every exit; the
+> their own width; `bool` SHALL print `true`/`false` at every exit; a
+> `key` SHALL print `key(` followed by its 64 bits ([05-RNG-2]) as 16
+> lowercase hexadecimal digits and `)` at every exit that observes it; the
 > number grammar (digit selection, exponent form, special-value
 > spellings) SHALL be identical across lanes and is pinned in §8.1.
 

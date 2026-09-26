@@ -108,6 +108,8 @@ fn header_has_only_the_exact_tagged_dynamic_rank_abi() {
         // and its one constructor.
         "typedef struct { uint64_t bits; } chelis_key;",
         "chelis_key chelis_key_from_seed(int64_t seed);",
+        // [05-OBS-2]: a key's printed form, which has no scalar carrier.
+        "chelis_string chelis_string_from_key(chelis_key key);",
     ] {
         assert!(header.contains(required), "missing exact declaration: {required}");
     }

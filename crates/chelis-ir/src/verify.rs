@@ -941,6 +941,9 @@ pub enum KeyRole {
     KeySelect,
     /// A `Load`, which may enter a key into the graph.
     Load,
+    /// A `Store`, a named graph output: a key `Store` is the key at its
+    /// input 0, observed by the root that names it.
+    Store,
     /// `Dropout`, which consumes the key at input 2.
     Dropout,
     /// `UniformLike`, which consumes the key at input 3.
@@ -976,6 +979,7 @@ impl KeyRole {
             Self::KeyFromSeed
             | Self::KeySelect
             | Self::Load
+            | Self::Store
             | Self::And
             | Self::Not
             | Self::ConstFalse
@@ -988,6 +992,7 @@ impl KeyRole {
     fn key_slots(self) -> &'static [usize] {
         match self {
             Self::KeySelect => &[0, 1],
+            Self::Store => &[0],
             _ => match self.key_slot() {
                 Some(0) => &[0],
                 Some(2) => &[2],
@@ -1036,6 +1041,7 @@ impl KeyRole {
             Self::DropoutReplay => "`dropout` replay",
             Self::UniformBoundAdjoint => "`uniform_like` bound adjoint",
             Self::Load
+            | Self::Store
             | Self::And
             | Self::Not
             | Self::ConstFalse
@@ -1149,6 +1155,7 @@ impl KeyGraph for Dag {
                 },
             },
             Some(RiscOp::Load { .. }) => KeyRole::Load,
+            Some(RiscOp::Store { .. }) => KeyRole::Store,
             Some(RiscOp::Dropout) => KeyRole::Dropout,
             Some(RiscOp::UniformLike) => KeyRole::UniformLike,
             Some(RiscOp::DropoutReplay) => KeyRole::DropoutReplay,
@@ -1267,7 +1274,8 @@ fn activations_exclusive(graph: &impl KeyGraph, left: usize, right: usize) -> bo
 /// §4, rules V1 to V4; V5, the batched-draw shapes, is an operand rule).
 ///
 /// - V1: a key is produced by a key operation, a join or a key-typed `Load`,
-///   and a key may be a graph root.
+///   and a key may be a graph root, directly or through the `Store` that
+///   names it; a key `Store` is the key it stores.
 /// - V2: a key's uses are exactly one draw, one `FoldIn`, one `SplitN`, one
 ///   slot of one join, or one root, or at most one `Split` of each branch.
 ///   Every `Load` of one parameter of one declaration is one key.
@@ -1289,18 +1297,28 @@ fn activations_exclusive(graph: &impl KeyGraph, left: usize, right: usize) -> bo
 /// [`KeyGraph::describe_node`].
 pub fn verify_key_rules(graph: &impl KeyGraph, errors: &mut Vec<String>) {
     let is_key = |node: usize| graph.dtype(node) == Some(Prim::Key);
-    // The key a node's value is: every key `Load` of one parameter is the
-    // first such `Load`, and any other key is its own node. A parameter is
-    // its declaration and its name: two declarations' `k` are two keys.
-    let identity = |node: usize| match graph.load_name(node) {
-        Some(name) if is_key(node) => (0..node)
-            .find(|earlier| {
-                is_key(*earlier)
-                    && graph.load_name(*earlier) == Some(name)
-                    && graph.same_declaration(*earlier, node)
-            })
-            .unwrap_or(node),
-        _ => node,
+    // The key a node's value is: a key `Store` is the key it names, every
+    // key `Load` of one parameter is the first such `Load`, and any other
+    // key is its own node. A parameter is its declaration and its name: two
+    // declarations' `k` are two keys.
+    let identity = |node: usize| {
+        let mut node = node;
+        while is_key(node) && graph.role(node) == KeyRole::Store {
+            match graph.input(node, 0) {
+                Some(stored) if stored < node => node = stored,
+                _ => break,
+            }
+        }
+        match graph.load_name(node) {
+            Some(name) if is_key(node) => (0..node)
+                .find(|earlier| {
+                    is_key(*earlier)
+                        && graph.load_name(*earlier) == Some(name)
+                        && graph.same_declaration(*earlier, node)
+                })
+                .unwrap_or(node),
+            _ => node,
+        }
     };
     let key = |node: usize| graph.describe_key(identity(node));
     let mut consumers = vec![Vec::<KeyUse>::new(); graph.node_count()];
@@ -1312,7 +1330,7 @@ pub fn verify_key_rules(graph: &impl KeyGraph, errors: &mut Vec<String>) {
                 graph.describe_node(node)
             ));
         }
-        if is_key(node) && !role.produces_key() && role != KeyRole::Load {
+        if is_key(node) && !role.produces_key() && !matches!(role, KeyRole::Load | KeyRole::Store) {
             errors.push(format!(
                 "{} produces a key, but only a key operation, a join or a Load produces one",
                 graph.describe_node(node)

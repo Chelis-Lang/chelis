@@ -239,9 +239,11 @@ pub(crate) fn emit_host_abi_program(
     body.push(String::new());
     append_tensor_reshape_helper(&mut body);
     body.push(String::new());
-    append_tensor_print_helper(&mut body);
-    body.push(String::new());
+    // The key helpers precede the tensor printer, which reads a key tensor's
+    // elements through `chelis_key_at`.
     append_uniform_sample_helper(&mut body);
+    body.push(String::new());
+    append_tensor_print_helper(&mut body);
     body.push(String::new());
     append_tensor_math_helpers(&mut body);
     body.push(String::new());
@@ -831,6 +833,15 @@ fn append_uniform_sample_helper(out: &mut Vec<String>) {
         "        abort();",
         "    }",
         "    chelis_key key = { ((const unsigned long long *)view.data)[0] };",
+        "    return key;",
+        "}",
+        "static inline chelis_key chelis_key_at(const chelis_tensor *tensor, int64_t index) {",
+        "    chelis_read_view view = chelis_tensor_read_view(tensor);",
+        "    if (view.dtype != CHELIS_DTYPE_KEY || index < 0 || index >= view.count) {",
+        "        fprintf(stderr, \"internal: no key at this index of a key tensor\\n\");",
+        "        abort();",
+        "    }",
+        "    chelis_key key = { ((const unsigned long long *)view.data)[index] };",
         "    return key;",
         "}",
         "static inline chelis_key chelis_key_take_value(chelis_value value) {",
@@ -1617,6 +1628,16 @@ fn append_tensor_print_helper(out: &mut Vec<String>) {
         "static void chelis_print_tensor_elem_stdout(const chelis_tensor* t, int64_t i) {"
             .to_string(),
     );
+    // [05-OBS-2]: a key has no scalar carrier; its element renders through
+    // the runtime's key text.
+    out.push("    if (chelis_tensor_read_view(t).dtype == CHELIS_DTYPE_KEY) {".to_string());
+    out.push(
+        "        chelis_string key_text = chelis_string_from_key(chelis_key_at(t, i));".to_string(),
+    );
+    out.push("        chelis_print_string(key_text);".to_string());
+    out.push("        chelis_string_release(key_text);".to_string());
+    out.push("        return;".to_string());
+    out.push("    }".to_string());
     out.push(
         "    chelis_string text = chelis_string_from_scalar(chelis_host_tensor_scalar_at(t, i));"
             .to_string(),
@@ -9351,6 +9372,12 @@ impl<'a> HostEmitter<'a> {
             HostType::Bool => self.lines.push(format!(
                 "{}printf(\"%s\", {} ? \"true\" : \"false\");",
                 self.indent, value
+            )),
+            // [05-OBS-2]: a key root renders as the runtime's key text.
+            HostType::Key => self.lines.push(format!(
+                "{}{{ chelis_string text = chelis_string_from_key({value}); \
+                 chelis_print_string(text); chelis_string_release(text); }}",
+                self.indent
             )),
             HostType::Tensor(_) => self.lines.push(format!(
                 "{}chelis_print_tensor_stdout({});",

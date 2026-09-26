@@ -147,11 +147,6 @@
     },
     {
       "kind": "header-export",
-      "id": "chelis_runtime.h: void chelis_fail ( chelis_string message ) ;",
-      "flags": []
-    },
-    {
-      "kind": "header-export",
       "id": "chelis_runtime.h: chelis_adt * chelis_adt_construct ( chelis_string ctor , const chelis_value * fields , int64_t len ) ;",
       "flags": [
         "numeric-op"
@@ -461,6 +456,11 @@
     {
       "kind": "header-export",
       "id": "chelis_runtime.h: chelis_string chelis_string_from_cstr ( const char * value ) ;",
+      "flags": []
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: chelis_string chelis_string_from_key ( chelis_key key ) ;",
       "flags": []
     },
     {
@@ -1080,6 +1080,11 @@
     },
     {
       "kind": "header-export",
+      "id": "chelis_runtime.h: void chelis_fail ( chelis_string message ) ;",
+      "flags": []
+    },
+    {
+      "kind": "header-export",
       "id": "chelis_runtime.h: void chelis_fill_scalar ( chelis_tensor_write * guard , chelis_scalar value ) ;",
       "flags": []
     },
@@ -1555,14 +1560,14 @@
     },
     {
       "kind": "std-def-numeric",
-      "id": "index::skip_list: (t-fn {} (t-adt {} List (t-var {} item)) (t-prim {} i64) (t-adt {} List (t-var {} item)))",
+      "id": "index::list_index: (t-fn {} (t-adt {} List (t-var {} item)) (t-prim {} i64) (t-var {} item))",
       "flags": [
         "numeric-op"
       ]
     },
     {
       "kind": "std-def-numeric",
-      "id": "index::list_index: (t-fn {} (t-adt {} List (t-var {} item)) (t-prim {} i64) (t-var {} item))",
+      "id": "index::skip_list: (t-fn {} (t-adt {} List (t-var {} item)) (t-prim {} i64) (t-adt {} List (t-var {} item)))",
       "flags": [
         "numeric-op"
       ]

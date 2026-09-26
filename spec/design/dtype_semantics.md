@@ -1478,7 +1478,9 @@ not by the width of its payload:
   `typedef struct { uint64_t bits; } chelis_key;` is an exact tagged carrier
   whose nominal type is the tag; `chelis_key_from_seed(int64_t seed)` is a
   numeric operation registered to [05-OP-69], because its seed is an `i64`;
-  and `CHELIS_DTYPE_KEY = 9` is the `key` member of the closed `chelis_dtype`
+  `chelis_string_from_key(chelis_key key)`, the key's printed form
+  ([05-OBS-2]), is registered to [05-OP-69] with no arithmetic type in its
+  signature; and `CHELIS_DTYPE_KEY = 9` is the `key` member of the closed `chelis_dtype`
   vocabulary, which `chelis_scalar` never carries ([05-OP-31]);
 - the wire leg: the execution value `{"type":"key","bits":h}` and the
   `{"dtype":"key","bits":[h,...]}` storage object of a key tensor are tagged

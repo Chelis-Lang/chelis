@@ -7,17 +7,16 @@
 
 use chelis_runtime::{
     chelis_alloc, chelis_contiguous, chelis_dict_from_pairs, chelis_dict_get_scalar, chelis_list,
-    chelis_list_from_values, chelis_metadata_plan_new, chelis_print_list, chelis_scalar,
-    chelis_scalar_from_bits, chelis_string_from_cstr, chelis_tensor, chelis_tensor_alloc_like,
-    chelis_tensor_begin_write, chelis_tensor_clamp, chelis_tensor_cmplt, chelis_tensor_concat,
-    chelis_tensor_cumsum, chelis_tensor_diagonal, chelis_tensor_einsum, chelis_tensor_elements,
-    chelis_tensor_end_write, chelis_tensor_from_values, chelis_tensor_gather,
-    chelis_tensor_read_view, chelis_tensor_release, chelis_tensor_reshape,
-    chelis_tensor_scatter_add, chelis_tensor_scatter_replace, chelis_tensor_sort,
-    chelis_tensor_split, chelis_tensor_trace, chelis_tensor_where, chelis_tensor_write_literal,
-    chelis_tensor_write_view, chelis_value_box_scalar, chelis_value_take_tensor, CHELIS_DTYPE_BOOL,
-    CHELIS_DTYPE_F32, CHELIS_DTYPE_I16, CHELIS_DTYPE_I32, CHELIS_DTYPE_I64, CHELIS_DTYPE_I8,
-    CHELIS_DTYPE_KEY,
+    chelis_list_from_values, chelis_metadata_plan_new, chelis_scalar, chelis_scalar_from_bits,
+    chelis_string_from_cstr, chelis_tensor, chelis_tensor_alloc_like, chelis_tensor_begin_write,
+    chelis_tensor_clamp, chelis_tensor_cmplt, chelis_tensor_concat, chelis_tensor_cumsum,
+    chelis_tensor_diagonal, chelis_tensor_einsum, chelis_tensor_elements, chelis_tensor_end_write,
+    chelis_tensor_from_values, chelis_tensor_gather, chelis_tensor_read_view,
+    chelis_tensor_release, chelis_tensor_reshape, chelis_tensor_scatter_add,
+    chelis_tensor_scatter_replace, chelis_tensor_sort, chelis_tensor_split, chelis_tensor_trace,
+    chelis_tensor_where, chelis_tensor_write_literal, chelis_tensor_write_view,
+    chelis_value_box_scalar, chelis_value_take_tensor, CHELIS_DTYPE_BOOL, CHELIS_DTYPE_F32,
+    CHELIS_DTYPE_I16, CHELIS_DTYPE_I32, CHELIS_DTYPE_I64, CHELIS_DTYPE_I8, CHELIS_DTYPE_KEY,
 };
 use std::env;
 use std::ffi::CString;
@@ -326,10 +325,6 @@ fn run_key_case(case: &str) -> ! {
             "elements-empty" => {
                 chelis_tensor_elements(tensor(CHELIS_DTYPE_KEY, &[0]));
             }
-            "format-empty" => {
-                let parts = [chelis_value_take_tensor(tensor(CHELIS_DTYPE_KEY, &[0]))];
-                chelis_print_list(chelis_list_from_values(parts.as_ptr(), 1));
-            }
             "write-literal-empty" => {
                 let guard = chelis_tensor_begin_write(tensor(CHELIS_DTYPE_KEY, &[0]));
                 chelis_tensor_write_literal(
@@ -370,7 +365,6 @@ fn key_tensors_are_forbidden_carriers_of_every_data_operation() {
         "metadata-plan-exemplar",
         "dict-scalar-dtype",
         "elements-empty",
-        "format-empty",
         "write-literal-empty",
     ] {
         let output = Command::new(&test_binary)
