@@ -11,6 +11,7 @@ import ChelisBridge.Runtime.Stack
 import ChelisBridge.Runtime.Ids
 import ChelisBridge.Runtime.Unwind
 import ChelisBridge.Runtime.Scopes
+import ChelisBridge.Runtime.ExtractedScopes
 import ChelisBridge.Numeric
 import ChelisBridge.Numeric.Flat
 import ChelisBridge.Numeric.Decode
@@ -224,6 +225,31 @@ def accepted : List Name := [
   ``ChelisBridge.Runtime.Scopes.model_speculate_clears,
   ``ChelisBridge.Runtime.Scopes.model_restore_restores,
   ``ChelisBridge.Runtime.Scopes.model_rollback_restores,
+  ``ChelisBridge.Runtime.Scopes.scopeSpec_iff_on,
+  ``ChelisBridge.Runtime.Scopes.restores_of_specOn,
+  ``ChelisBridge.Runtime.Scopes.clears_of_specOn,
+  ``ChelisBridge.Runtime.Scopes.installed_of_specOn,
+  -- Runtime Section E on the extracted combinators (Bridge2)
+  ``ChelisBridge.Runtime.ExtractedScopes.uLens_lawful,
+  ``ChelisBridge.Runtime.ExtractedScopes.oLens_lawful,
+  ``ChelisBridge.Runtime.ExtractedScopes.withSuppress_eq,
+  ``ChelisBridge.Runtime.ExtractedScopes.withSuppress_spec,
+  ``ChelisBridge.Runtime.ExtractedScopes.withSuppress_obligation,
+  ``ChelisBridge.Runtime.ExtractedScopes.withSuppress_nested_clears,
+  ``ChelisBridge.Runtime.ExtractedScopes.intoDiagnostic_ok,
+  ``ChelisBridge.Runtime.ExtractedScopes.intoDiagnostic_diagnostic,
+  ``ChelisBridge.Runtime.ExtractedScopes.catchLoweringWith_spec,
+  ``ChelisBridge.Runtime.ExtractedScopes.catchLoweringWith_clears,
+  ``ChelisBridge.Runtime.ExtractedScopes.catchLowering_spec,
+  ``ChelisBridge.Runtime.ExtractedScopes.raiseLowering_spec,
+  ``ChelisBridge.Runtime.ExtractedScopes.raiseFatal_spec,
+  ``ChelisBridge.Runtime.ExtractedScopes.resumeAtBoundary_never_ok,
+  ``ChelisBridge.Runtime.ExtractedScopes.opacityLens_lawful,
+  ``ChelisBridge.Runtime.ExtractedScopes.withOpacity_spec,
+  ``ChelisBridge.Runtime.ExtractedScopes.withOpacity_obligation,
+  ``ChelisBridge.Runtime.ExtractedScopes.replaceCaller_eq,
+  ``ChelisBridge.Runtime.ExtractedScopes.withRecursiveCaller_none,
+  ``ChelisBridge.Runtime.ExtractedScopes.withRecursiveCaller_some,
   -- Numeric (BridgeNumeric)
   ``ChelisBridge.Numeric.pairLevelQ_sum,
   ``ChelisBridge.Numeric.pairLevel_length_le,
@@ -559,6 +585,15 @@ def accepted : List Name := [
   ``ChelisBridge.Random.dropout_f16,
   ``ChelisBridge.Random.dropout_bf16,
   ``ChelisBridge.Random.dropout_forward_f64,
+  ``ChelisBridge.Random.dropout_forward_key,
+  ``ChelisBridge.Random.dropout_forward_f32,
+  ``ChelisBridge.Random.dropout_forward_f16,
+  ``ChelisBridge.Random.dropout_forward_bf16,
+  ``ChelisBridge.Random.dropout_masked,
+  ``ChelisBridge.Random.dropout_replay_key,
+  ``ChelisBridge.Random.dropoutRun_accepted,
+  ``ChelisBridge.Random.dropoutRun_simulates,
+  ``ChelisBridge.Random.dropoutRun_checks,
   -- Resource: every target of `validate_build_target_handler` (ResourceTargets)
   ``ChelisBridge.Resource.str_eq_lit,
   ``ChelisBridge.Resource.starts_with_gpu,

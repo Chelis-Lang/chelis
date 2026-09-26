@@ -114,7 +114,9 @@ theorem lowerDagOwnership_sound {dag : Model.Dag} {supply : Model.CapacityScopeS
 
 /-- Proof-producing acceptance of the actual production pipeline: run the extracted
 `grad_dag_checked forward output wrt`, run the extracted `lower_dag_ownership` on the
-returned post-AD DAG (as production does), then decode the source, the post-AD artifact
+returned post-AD DAG (as production does), require the extracted production verifier
+`DagOwnershipPlan::verify` to accept the returned plan against the returned payload DAG (the
+check `verify_ownership` runs for a DAG program), then decode the source, the post-AD artifact
 and the returned final plan independently and require `Validation.acceptPlan` (reference
 ownership check of the original plan, gradient correspondence, copy-normalized value
 correspondence of the final plan). -/
@@ -126,12 +128,16 @@ def acceptLowered (dt : DType) (forward : Model.Dag) (output : Model.NodeId)
   | some r =>
       match loweredPlan r.dag supply with
       | none => false
-      | some pl => Validation.acceptPlan dt forward (wrt.val.map (·.val)) output.val r pl
-          adWitness normalizationWitness
+      | some pl =>
+          match Model.dagPlanVerify pl.plan pl.dag with
+          | .ok (.Ok ()) => Validation.acceptPlan dt forward (wrt.val.map (·.val)) output.val r pl
+              adWitness normalizationWitness
+          | _ => false
 
 /-- **Composed pipeline theorem for the actual returned artifacts.** If `acceptLowered`
 accepts, then the extracted AD returned `r`, the extracted ownership lowering of `r.dag`
-returned a program whose plan `pl` is over `r.dag` itself, and for the independently
+returned a program whose plan `pl` is over `r.dag` itself, the extracted production verifier
+accepted exactly that returned plan against that DAG, and for the independently
 decoded source loss `p`, post-AD circuit `actual` and final plan `final` (over the artifact's own roots `Ω`): no owned
 root is transferred twice; `final` executes under the reference ownership machine from
 borrowed entries, returning its value semantics and terminating each local owner exactly
@@ -150,6 +156,7 @@ theorem acceptLowered_sound {dt : DType} {forward : Model.Dag} {output : Model.N
       Model.gradDagChecked forward output wrt = .ok (.Ok r) ∧
       Model.lowerDagOwnership r.dag supply = .ok (.Ok prog, supply') ∧
       pl.dag = r.dag ∧ Model.dagProgramParts prog = some (pl.dag, pl.plan) ∧
+      Model.dagPlanVerify pl.plan r.dag = .ok (.Ok ()) ∧
       decodeSource dt forward (wrt.val.map (·.val)) output.val = some ⟨Γ, p⟩ ∧
       decodeArtifact dt forward (wrt.val.map (·.val)) p r = some actual ∧
       decodeArtifactRoots dt forward (wrt.val.map (·.val)) p r = some ⟨Ω, rc⟩ ∧
@@ -178,34 +185,40 @@ theorem acceptLowered_sound {dt : DType} {forward : Model.Dag} {output : Model.N
     split at h
     · contradiction
     · rename_i pl hpl
-      have hgrad : Model.gradDagChecked forward output wrt = .ok (.Ok r) := by
-        unfold extractedResult at hr
-        split at hr
-        · cases Option.some.inj hr; assumption
-        · contradiction
-      obtain ⟨hdag, prog, supply', hlow, hparts⟩ := loweredPlan_spec hpl
-      obtain ⟨Γ, p, actual, Ω, rc, final, hs, ha, hroots, ⟨ids, hids, hf⟩, hall⟩ :=
-        Validation.checkGradient_bridge h
-      exact ⟨r, pl, prog, supply', Γ, p, actual, Ω, rc, final, hgrad, hlow, hdag, hparts, hs, ha,
-        hroots, ⟨ids, hids, hf⟩, (decodeOwned_sound hf).2.1, hall⟩
+      split at h
+      · rename_i hv
+        have hgrad : Model.gradDagChecked forward output wrt = .ok (.Ok r) := by
+          unfold extractedResult at hr
+          split at hr
+          · cases Option.some.inj hr; assumption
+          · contradiction
+        obtain ⟨hdag, prog, supply', hlow, hparts⟩ := loweredPlan_spec hpl
+        obtain ⟨Γ, p, actual, Ω, rc, final, hs, ha, hroots, ⟨ids, hids, hf⟩, hall⟩ :=
+          Validation.checkGradient_bridge h
+        exact ⟨r, pl, prog, supply', Γ, p, actual, Ω, rc, final, hgrad, hlow, hdag, hparts,
+          hdag ▸ hv, hs, ha, hroots, ⟨ids, hids, hf⟩, (decodeOwned_sound hf).2.1, hall⟩
+      · contradiction
 
 /-! ## Relation to the Rust independent verifier
 
-Production seals a DAG plan with `verify_ownership`, which (per the Rust source; not yet
-checked against extracted code) for a DAG payload runs the
-private `DagOwnershipPlan::verify`: it re-derives, node by node and root by root, the one
-directive the lowering would emit (exact `DagDirective` equality), the owner origins
-(`BTreeMap` equality) and the scope drops in ascending node order, and rejects any
-leftover directive or unterminated owned producer.
+Production seals a DAG plan with `verify_ownership`, which for a DAG payload runs the private
+`DagOwnershipPlan::verify` on the plan and the payload DAG. That verifier is extracted
+(`Model.dagPlanVerify`) and `acceptLowered` requires it to accept the actual returned plan,
+in addition to — never instead of — the independent reference check `OwnedCode.check` of the
+decoded plan. The public `verify_ownership` wrapper itself is not yet in the model: its host
+arm (the host verifier) needs a collection model for `Flatten` (`last_use.rs:353`), so the
+statement that the verified program wraps the decoded plan is about the DAG verifier the
+wrapper dispatches to.
 
-That entry is not in the extracted model: admitting it needs the collection obligation of the
-`SuccessorEdges` iterator's `size_hint` (Aeneas `-emit-collection-obligations`), which no bridge
-theorem discharges yet. `acceptLowered` therefore requires only what is extracted: the
-actual plan returned by `lower_dag_ownership`, decoded and accepted by the independent
-reference check `OwnedCode.check`. That check is never replaced by the Rust verifier, and the
-Rust verifier's acceptance is not assumed anywhere. The Rust verifier is strictly more
-demanding on order: it fixes the scope-drop order and the owner-origin map, which the
-reference check ignores. The converse question — whether the reference check accepts every
-decodable plan the Rust verifier accepts — is open until the verifier is extracted. -/
+The two checks are not equivalent. The Rust verifier re-derives, node by node and root by
+root, the one directive the lowering emits (exact `DagDirective` equality), the owner-origin
+map (`BTreeMap` equality) and the scope drops in ascending node order, and rejects any
+leftover directive or unterminated owned producer; the reference check ignores the order of
+terminations. `Examples.lean` checks the counterexample (`scopeDropSwapped`): the lowered plan
+of a graph with two unrooted owned producers, with its two scope drops swapped, decodes and is
+accepted by the reference check, and the extracted verifier rejects it. So reference
+acceptance does not imply Rust acceptance. The converse (every decodable plan the Rust verifier
+accepts passes the reference check) holds on every lowered example plan the examples check and
+is not proved in general. -/
 
 end ChelisBridge.ExtractedOwnership

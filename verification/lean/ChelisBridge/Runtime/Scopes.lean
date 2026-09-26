@@ -19,10 +19,12 @@ state-transformer interface:
 * a body is any state transformer `σ → M (σ × γ)` (the extracted closure's `call_once` applied to
   its captured trait instance), and every obligation quantifies over all bodies.
 
-Instantiation (once the extracted names exist, after `open <root>`): take `comb := fun body s =>
-<crate>.<path>.with_scope s body` (adapting argument order / the backward-function pair
-convention) and a `Lens` onto the relevant field, then prove e.g.
-`MonoProbeObligation okView monoLens comb` against the extracted definition.
+Instantiation: `Runtime/ExtractedScopes.lean` takes `comb := fun body s => <crate>.<path>.with_scope
+s body` (adapting argument order / the backward-function pair convention through
+`ScopeSpecOn` below) with a `Lens` onto the relevant field, and proves the obligations against
+the extracted definitions: the suppression and install/restore obligations for the lowering
+runtime and the checker's diagnostic sink. The host scopes (`with_host_invocation`,
+`with_mono_probe`, `with_inlining`, preflight) are not yet extracted strictly (see there).
 
 `scope_obligations_are_satisfiable` shows the obligations are not vacuous, `restore_ne_clear`
 records why restore and clear-to-false must stay separate obligations, and the `model_*`
@@ -176,6 +178,75 @@ theorem suppression_clears {M : Type → Type} {σ γ : Type} (ok : M (σ × γ)
     (hL : flag.Lawful) (comb : Combinator M σ γ) (h : SuppressionObligation ok flag comb) :
     ClearsOnExit ok flag comb :=
   clears_of_spec ok flag hL _ comb h
+
+/-! ## Extracted interfaces
+
+An extracted combinator does not take a Lean state transformer: it takes a closure value
+`b : B` together with its `FnOnce` instance, its successful result may carry more than
+`(state, result)` (the backward functions of nested borrows), and a catch maps the body's
+result (`catch_lowering_with` maps a lowering failure to its diagnostic). `ScopeSpecOn`
+states the specification over such an interface: `run b s` is the successful-exit view of the
+body `b` run from `s`, `comb b s` the one of the combinator, and `post` the result map (`id`
+for every scope but a catch). `ScopeSpec` is its instance for state-transformer bodies
+(`scopeSpec_iff_on`), so an extracted combinator meeting `ScopeSpecOn` for every closure
+instance meets the corresponding obligation above for every body. -/
+
+/-- Scope specification over an extracted interface (see the section header). -/
+def ScopeSpecOn {B σ γ δ : Type} (run : B → σ → Option (σ × γ)) (comb : B → σ → Option (σ × δ))
+    (enter : σ → σ) (exit : σ → σ → σ) (post : γ → δ) : Prop :=
+  ∀ b s, comb b s = (run b (enter s)).map (fun x => (exit s x.1, post x.2))
+
+theorem scopeSpec_iff_on {M : Type → Type} {σ γ : Type} (ok : M (σ × γ) → Option (σ × γ))
+    (enter : σ → σ) (exit : σ → σ → σ) (comb : Combinator M σ γ) :
+    ScopeSpec ok enter exit comb ↔
+      ScopeSpecOn (fun body s => ok (body s)) (fun body s => ok (comb body s)) enter exit id :=
+  Iff.rfl
+
+/-- A restore specification over an extracted interface restores on every successful exit. -/
+theorem restores_of_specOn {B σ β γ δ : Type} {run : B → σ → Option (σ × γ)}
+    {comb : B → σ → Option (σ × δ)} {L : Lens σ β} (hL : L.Lawful) {enter : σ → σ}
+    {post : γ → δ} (h : ScopeSpecOn run comb enter (restoreExit L) post) :
+    ∀ b s s' r, comb b s = some (s', r) → L.get s' = L.get s := by
+  intro b s s' r hc
+  rw [h b s] at hc
+  cases hb : run b (enter s) with
+  | none => rw [hb] at hc; cases hc
+  | some x =>
+    rw [hb] at hc
+    simp only [Option.map_some, Option.some.injEq, Prod.mk.injEq] at hc
+    rw [← hc.1]
+    exact hL.get_set _ _
+
+/-- A clear specification over an extracted interface clears on every successful exit. -/
+theorem clears_of_specOn {B σ γ δ : Type} {run : B → σ → Option (σ × γ)}
+    {comb : B → σ → Option (σ × δ)} {L : Lens σ Bool} (hL : L.Lawful) {enter : σ → σ}
+    {post : γ → δ} (h : ScopeSpecOn run comb enter (clearExit L) post) :
+    ∀ b s s' r, comb b s = some (s', r) → L.get s' = false := by
+  intro b s s' r hc
+  rw [h b s] at hc
+  cases hb : run b (enter s) with
+  | none => rw [hb] at hc; cases hc
+  | some x =>
+    rw [hb] at hc
+    simp only [Option.map_some, Option.some.injEq, Prod.mk.injEq] at hc
+    rw [← hc.1]
+    exact hL.get_set _ _
+
+/-- Under an install specification the body ran on the installed value, and the combinator
+returned the body's (mapped) result with the exit of the body's final state. -/
+theorem installed_of_specOn {B σ β γ δ : Type} {run : B → σ → Option (σ × γ)}
+    {comb : B → σ → Option (σ × δ)} (L : Lens σ β) (v : β) {exit : σ → σ → σ}
+    {post : γ → δ} (h : ScopeSpecOn run comb (L.set v) exit post) :
+    ∀ b s s' r, comb b s = some (s', r) →
+      ∃ s₁ r₁, run b (L.set v s) = some (s₁, r₁) ∧ s' = exit s s₁ ∧ r = post r₁ := by
+  intro b s s' r hc
+  rw [h b s] at hc
+  cases hb : run b (L.set v s) with
+  | none => rw [hb] at hc; cases hc
+  | some x =>
+    rw [hb] at hc
+    simp only [Option.map_some, Option.some.injEq, Prod.mk.injEq] at hc
+    exact ⟨x.1, x.2, rfl, hc.1.symm, hc.2.symm⟩
 
 /-! ## Non-vacuity and the restore/clear distinction -/
 

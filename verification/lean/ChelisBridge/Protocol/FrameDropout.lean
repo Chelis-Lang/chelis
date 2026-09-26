@@ -21,7 +21,14 @@ the extracted function is decomposed into exactly these accepted steps (`dropout
   `value W`, and the dtype's quotient `x / (1 - w)` otherwise; the output shape is the input
   shape (`dropout_f64`, `dropout_f32`, `dropout_f16`, `dropout_bf16`);
 * at a forward site of a well-formed frame, the call draws exactly the reference key of the
-  active scope (`dropout_forward_simulates`).
+  active scope (`dropout_forward_simulates`), composed with the output per dtype in
+  `dropout_forward_f64`, `dropout_forward_f32`, `dropout_forward_f16`, `dropout_forward_bf16`;
+* a whole run of source controls and dropouts (`DropoutRun`) is an `AcceptedRun`
+  (`dropoutRun_accepted`), simulates the reference `runProtocol` and passes `checkProtocol`
+  from and back to a root frame, and each of its dropouts returns its input masked
+  (`Masked`, per float dtype) by the key it used: the drawn reference key `(seed, c)` for a
+  forward dropout, the recorded key for a replay (`dropoutRun_simulates`,
+  `dropoutRun_checks`).
 
 No hypothesis restricts the rate or the input values: non-finite and out-of-range rates are
 rejected by the extracted code itself.
@@ -516,5 +523,332 @@ theorem dropout_forward_f64 (target : Target) {F : Frame} {node : chelis_ir.dag.
   simp only [Result.ok.injEq, Prod.mk.injEq, core.result.Result.Ok.injEq] at he2
   obtain ⟨rfl, -⟩ := he2
   exact ⟨c, ys, hc, hrun, hwf', hfin, h0, h1, hsh, hout, hys⟩
+
+/-- The counter of the active scope at a forward site: an accepted dropout there draws the key
+`(seed, c)` of that counter (no well-formedness needed for the key itself). -/
+theorem dropout_forward_key {F : Frame} {node : chelis_ir.dag.NodeId} {input : TV} {rate : F64}
+    {seed : U64} {out : TV} {F' : Frame} {back : Frame → Frame}
+    {draw : chelis_ir.evaluation.DrawId} {s : chelis_ir.evaluation.ScopeId}
+    (hsite : siteOf F node = .ok (some (.Forward draw s)))
+    (h : chelis_ir.evaluation.ExecutionFrame.dropout F node input rate seed =
+      .ok (.Ok out, F', back)) :
+    ∃ c, counterAt F s = some c ∧
+      ∃ back', chelis_ir.evaluation.ExecutionFrame.enter F node seed = .ok (.Ok ⟨seed, c⟩, F', back') := by
+  obtain ⟨k, back', he⟩ := dropout_enter h
+  obtain ⟨c, -, -, hc, -, rfl, -⟩ := enter_forward_inv F node seed draw s k F' back' hsite he
+  exact ⟨c, hc, back', he⟩
+
+/-- **Composed f32 dropout at a forward site.** As `dropout_forward_f64`, with the f32 rate
+`w = rate as f32`, its widening `W = f64::from(w)`, the f32 rounding of the reference unit of the
+drawn key `(seed, c)`, and the binary32 quotient. -/
+theorem dropout_forward_f32 (target : Target) {F : Frame} {node : chelis_ir.dag.NodeId}
+    {input : TV} {rate : F64} {seed : U64} {out : TV} {F' : Frame} {back : Frame → Frame}
+    {draw : chelis_ir.evaluation.DrawId} {s : chelis_ir.evaluation.ScopeId}
+    {xs : alloc.vec.Vec F32} (hs : input.storage = ⟨.F32 xs⟩)
+    (hsite : siteOf F node = .ok (some (.Forward draw s))) (hwf : StackWF F)
+    (hno : ∀ c, counterAt F s = some c → c.val + 1 < 2 ^ 64)
+    (h : chelis_ir.evaluation.ExecutionFrame.dropout F node input rate seed =
+      .ok (.Ok out, F', back)) :
+    ∃ (c : U64) (ys : alloc.vec.Vec F32), counterAt F s = some c ∧
+      runProtocol target [.draw (keyOfDraw seed c)] (absState F) = some (absState F') ∧
+      StackWF F' ∧
+      (F32.toF64 (F64.toF32 rate)).isFinite = true ∧ 0 ≤ value (F32.toF64 (F64.toF32 rate)) ∧
+      value (F32.toF64 (F64.toF32 rate)) < 1 ∧
+      out.shape = input.shape ∧ out.storage = ⟨.F32 ys⟩ ∧
+      ys.val = xs.val.mapIdx (fun i x =>
+        if value (F64.toF32 (unitAt seed c i)) < value (F32.toF64 (F64.toF32 rate))
+        then zero32 else F32.div x (F32.sub one32 (F64.toF32 rate))) := by
+  obtain ⟨c, hc, ⟨b1, he1⟩, hrun, hwf'⟩ := dropout_forward_simulates target hsite hwf hno h
+  obtain ⟨k, b2, ys, he2, hfin, h0, h1, hsh, hout, hys⟩ := dropout_f32 hs h
+  rw [he1] at he2
+  simp only [Result.ok.injEq, Prod.mk.injEq, core.result.Result.Ok.injEq] at he2
+  obtain ⟨rfl, -⟩ := he2
+  exact ⟨c, ys, hc, hrun, hwf', hfin, h0, h1, hsh, hout, hys⟩
+
+/-- **Composed f16 dropout at a forward site.** As `dropout_forward_f64`, with the f16 rate `w`
+returned by the extracted `cast_raw`, its widening, the f32 rounding of the reference unit of
+the drawn key `(seed, c)`, and the f16 quotient. -/
+theorem dropout_forward_f16 (target : Target) {F : Frame} {node : chelis_ir.dag.NodeId}
+    {input : TV} {rate : F64} {seed : U64} {out : TV} {F' : Frame} {back : Frame → Frame}
+    {draw : chelis_ir.evaluation.DrawId} {s : chelis_ir.evaluation.ScopeId}
+    {xs : alloc.vec.Vec F16} (hs : input.storage = ⟨.F16 xs⟩)
+    (hsite : siteOf F node = .ok (some (.Forward draw s))) (hwf : StackWF F)
+    (hno : ∀ c, counterAt F s = some c → c.val + 1 < 2 ^ 64)
+    (h : chelis_ir.evaluation.ExecutionFrame.dropout F node input rate seed =
+      .ok (.Ok out, F', back)) :
+    ∃ (c : U64) (w : F16) (ys : alloc.vec.Vec F16), counterAt F s = some c ∧
+      runProtocol target [.draw (keyOfDraw seed c)] (absState F) = some (absState F') ∧
+      StackWF F' ∧
+      chelis_types.dtype_semantics.cast_raw (toStr "dropout") (.Float rate) .F16 =
+        .ok (.Ok ⟨.F16 w⟩) ∧
+      (f16To64 w).isFinite = true ∧ 0 ≤ value (f16To64 w) ∧ value (f16To64 w) < 1 ∧
+      out.shape = input.shape ∧ out.storage = ⟨.F16 ys⟩ ∧
+      ys.val = xs.val.mapIdx (fun i x =>
+        if value (F64.toF32 (unitAt seed c i)) < value (f16To64 w) then F16.ZERO
+        else f16Div x (f16Sub F16.ONE w)) := by
+  obtain ⟨c, hc, ⟨b1, he1⟩, hrun, hwf'⟩ := dropout_forward_simulates target hsite hwf hno h
+  obtain ⟨k, b2, w, ys, he2, hcast, hfin, h0, h1, hsh, hout, hys⟩ := dropout_f16 hs h
+  rw [he1] at he2
+  simp only [Result.ok.injEq, Prod.mk.injEq, core.result.Result.Ok.injEq] at he2
+  obtain ⟨rfl, -⟩ := he2
+  exact ⟨c, w, ys, hc, hrun, hwf', hcast, hfin, h0, h1, hsh, hout, hys⟩
+
+/-- **Composed bf16 dropout at a forward site.** As `dropout_forward_f16`, with the bf16 rate and
+quotient. -/
+theorem dropout_forward_bf16 (target : Target) {F : Frame} {node : chelis_ir.dag.NodeId}
+    {input : TV} {rate : F64} {seed : U64} {out : TV} {F' : Frame} {back : Frame → Frame}
+    {draw : chelis_ir.evaluation.DrawId} {s : chelis_ir.evaluation.ScopeId}
+    {xs : alloc.vec.Vec BF16} (hs : input.storage = ⟨.Bf16 xs⟩)
+    (hsite : siteOf F node = .ok (some (.Forward draw s))) (hwf : StackWF F)
+    (hno : ∀ c, counterAt F s = some c → c.val + 1 < 2 ^ 64)
+    (h : chelis_ir.evaluation.ExecutionFrame.dropout F node input rate seed =
+      .ok (.Ok out, F', back)) :
+    ∃ (c : U64) (w : BF16) (ys : alloc.vec.Vec BF16), counterAt F s = some c ∧
+      runProtocol target [.draw (keyOfDraw seed c)] (absState F) = some (absState F') ∧
+      StackWF F' ∧
+      chelis_types.dtype_semantics.cast_raw (toStr "dropout") (.Float rate) .Bf16 =
+        .ok (.Ok ⟨.Bf16 w⟩) ∧
+      (bf16To64 w).isFinite = true ∧ 0 ≤ value (bf16To64 w) ∧ value (bf16To64 w) < 1 ∧
+      out.shape = input.shape ∧ out.storage = ⟨.Bf16 ys⟩ ∧
+      ys.val = xs.val.mapIdx (fun i x =>
+        if value (F64.toF32 (unitAt seed c i)) < value (bf16To64 w) then BF16.ZERO
+        else bf16Div x (bf16Sub BF16.ONE w)) := by
+  obtain ⟨c, hc, ⟨b1, he1⟩, hrun, hwf'⟩ := dropout_forward_simulates target hsite hwf hno h
+  obtain ⟨k, b2, w, ys, he2, hcast, hfin, h0, h1, hsh, hout, hys⟩ := dropout_bf16 hs h
+  rw [he1] at he2
+  simp only [Result.ok.injEq, Prod.mk.injEq, core.result.Result.Ok.injEq] at he2
+  obtain ⟨rfl, -⟩ := he2
+  exact ⟨c, w, ys, hc, hrun, hwf', hcast, hfin, h0, h1, hsh, hout, hys⟩
+
+/-! ## Runs of dropouts -/
+
+/-- The output relation of one accepted dropout against the key `k` it used, per float
+storage dtype (the characterizations of `dropout_f64` … `dropout_bf16` with `k`). Integer
+storages are outside the reference Random domain and are not related. -/
+def Masked (k : chelis_ir.evaluation.DrawKey) (input : TV) (rate : F64) (out : TV) : Prop :=
+  out.shape = input.shape ∧
+  (∀ xs, input.storage = ⟨.F64 xs⟩ →
+    rate.isFinite = true ∧ 0 ≤ value rate ∧ value rate < 1 ∧
+    ∃ ys : alloc.vec.Vec F64, out.storage = ⟨.F64 ys⟩ ∧
+      ys.val = xs.val.mapIdx (fun i x =>
+        if (keyOfDraw k.seed k.ordinal).unitValue i < value rate then zero64
+        else F64.div x (F64.sub one64 rate))) ∧
+  (∀ xs, input.storage = ⟨.F32 xs⟩ →
+    (F32.toF64 (F64.toF32 rate)).isFinite = true ∧ 0 ≤ value (F32.toF64 (F64.toF32 rate)) ∧
+    value (F32.toF64 (F64.toF32 rate)) < 1 ∧
+    ∃ ys : alloc.vec.Vec F32, out.storage = ⟨.F32 ys⟩ ∧
+      ys.val = xs.val.mapIdx (fun i x =>
+        if value (F64.toF32 (unitAt k.seed k.ordinal i)) < value (F32.toF64 (F64.toF32 rate))
+        then zero32 else F32.div x (F32.sub one32 (F64.toF32 rate)))) ∧
+  (∀ xs, input.storage = ⟨.F16 xs⟩ →
+    ∃ (w : F16) (ys : alloc.vec.Vec F16),
+      chelis_types.dtype_semantics.cast_raw (toStr "dropout") (.Float rate) .F16 =
+        .ok (.Ok ⟨.F16 w⟩) ∧
+      (f16To64 w).isFinite = true ∧ 0 ≤ value (f16To64 w) ∧ value (f16To64 w) < 1 ∧
+      out.storage = ⟨.F16 ys⟩ ∧
+      ys.val = xs.val.mapIdx (fun i x =>
+        if value (F64.toF32 (unitAt k.seed k.ordinal i)) < value (f16To64 w) then F16.ZERO
+        else f16Div x (f16Sub F16.ONE w))) ∧
+  (∀ xs, input.storage = ⟨.Bf16 xs⟩ →
+    ∃ (w : BF16) (ys : alloc.vec.Vec BF16),
+      chelis_types.dtype_semantics.cast_raw (toStr "dropout") (.Float rate) .Bf16 =
+        .ok (.Ok ⟨.Bf16 w⟩) ∧
+      (bf16To64 w).isFinite = true ∧ 0 ≤ value (bf16To64 w) ∧ value (bf16To64 w) < 1 ∧
+      out.storage = ⟨.Bf16 ys⟩ ∧
+      ys.val = xs.val.mapIdx (fun i x =>
+        if value (F64.toF32 (unitAt k.seed k.ordinal i)) < value (bf16To64 w) then BF16.ZERO
+        else bf16Div x (bf16Sub BF16.ONE w)))
+
+/-- An accepted dropout's output is masked by the key its `enter` returned. -/
+theorem dropout_masked {F : Frame} {node : chelis_ir.dag.NodeId} {input : TV} {rate : F64}
+    {seed : U64} {out : TV} {F' : Frame} {back : Frame → Frame}
+    (h : chelis_ir.evaluation.ExecutionFrame.dropout F node input rate seed =
+      .ok (.Ok out, F', back)) :
+    ∃ (k : chelis_ir.evaluation.DrawKey) (back' : Frame → Frame),
+      chelis_ir.evaluation.ExecutionFrame.enter F node seed = .ok (.Ok k, F', back') ∧
+      Masked k input rate out := by
+  obtain ⟨k, back', he⟩ := dropout_enter h
+  have same : ∀ {k' : chelis_ir.evaluation.DrawKey} {b' : Frame → Frame},
+      chelis_ir.evaluation.ExecutionFrame.enter F node seed = .ok (.Ok k', F', b') → k' = k := by
+    intro k' b' he'
+    rw [he] at he'
+    simp only [Result.ok.injEq, Prod.mk.injEq, core.result.Result.Ok.injEq] at he'
+    exact he'.1.symm
+  obtain ⟨-, -, -, -, -, -, -, -, -, hsh⟩ := dropout_ok_inv h
+  refine ⟨k, back', he, hsh, ?_, ?_, ?_, ?_⟩
+  · intro xs hs
+    obtain ⟨k', b', ys, he', hfin, h0, h1, -, hout, hys⟩ := dropout_f64 hs h
+    cases same he'
+    exact ⟨hfin, h0, h1, ys, hout, hys⟩
+  · intro xs hs
+    obtain ⟨k', b', ys, he', hfin, h0, h1, -, hout, hys⟩ := dropout_f32 hs h
+    cases same he'
+    exact ⟨hfin, h0, h1, ys, hout, hys⟩
+  · intro xs hs
+    obtain ⟨k', b', w, ys, he', hc, hfin, h0, h1, -, hout, hys⟩ := dropout_f16 hs h
+    cases same he'
+    exact ⟨w, ys, hc, hfin, h0, h1, hout, hys⟩
+  · intro xs hs
+    obtain ⟨k', b', w, ys, he', hc, hfin, h0, h1, -, hout, hys⟩ := dropout_bf16 hs h
+    cases same he'
+    exact ⟨w, ys, hc, hfin, h0, h1, hout, hys⟩
+
+/-- One operation of a run with dropouts: a source control, or an `ExecutionFrame::dropout` of
+`input` at `node` with the plan's `rate` and raw `seed`, returning `out`. -/
+inductive DropOp where
+  | control (c : chelis_ir.execution_spine.Control)
+  | dropout (node : chelis_ir.dag.NodeId) (input : TV) (rate : F64) (seed : U64) (out : TV)
+
+/-- The frame operation of a run operation (a dropout enters its random site). -/
+def DropOp.frameOp : DropOp → FrameOp
+  | .control c => .control c
+  | .dropout node _ _ seed _ => .site node seed
+
+/-- The `(input, rate, output)` of the dropouts of a run, in order. -/
+def DropOp.dropouts : List DropOp → List (TV × F64 × TV)
+  | [] => []
+  | .control _ :: ops => DropOp.dropouts ops
+  | .dropout _ input rate _ out :: ops => (input, rate, out) :: DropOp.dropouts ops
+
+/-- `DropoutRun F ops evs ks F'`: the extracted `control` and `ExecutionFrame::dropout` accept
+every operation of `ops` in order (each returns `Ok`, a dropout returning its `out`) and lead
+from `F` to `F'`; `evs` are the reference protocol events and `ks` the key each dropout used,
+in order. A forward dropout draws `(seed, c)` from the counter `c` of its active scope; a replay
+uses the key recorded for its draw. The premises beyond acceptance are the domain restrictions
+of `AcceptedRun` (fresh seeded scopes, no forward counter overflow); `c` and the recorded key
+are not restrictions: an accepted dropout has them (`dropout_forward_key`,
+`dropout_replay_key`). -/
+inductive DropoutRun : Frame → List DropOp → List ProtocolEvent →
+    List chelis_ir.evaluation.DrawKey → Frame → Prop
+  | nil (F : Frame) : DropoutRun F [] [] [] F
+  | enter (F F' F'' : Frame) (scope : chelis_ir.evaluation.ScopeId) (payload sd : U64)
+      (back : Frame → Frame) (ops : List DropOp) (evs : List ProtocolEvent)
+      (ks : List chelis_ir.evaluation.DrawKey)
+      (h : chelis_ir.evaluation.ExecutionFrame.control F (.Enter scope payload) =
+        .ok (.Ok (), F', back))
+      (hseed : F.metadata.scopes.val[scope.val]? = some ⟨some sd⟩)
+      (hfresh : scope ∉ F.scopes.val)
+      (rest : DropoutRun F' ops evs ks F'') :
+      DropoutRun F (.control (.Enter scope payload) :: ops)
+        (.enter (UInt64.ofBitVec sd.bv) :: evs) ks F''
+  | leave (F F' F'' : Frame) (scope : chelis_ir.evaluation.ScopeId) (back : Frame → Frame)
+      (ops : List DropOp) (evs : List ProtocolEvent) (ks : List chelis_ir.evaluation.DrawKey)
+      (h : chelis_ir.evaluation.ExecutionFrame.control F (.Leave scope) = .ok (.Ok (), F', back))
+      (rest : DropoutRun F' ops evs ks F'') :
+      DropoutRun F (.control (.Leave scope) :: ops) (.leave :: evs) ks F''
+  | forward (F F' F'' : Frame) (node : chelis_ir.dag.NodeId) (input : TV) (rate : F64)
+      (seed : U64) (out : TV) (draw : chelis_ir.evaluation.DrawId)
+      (s : chelis_ir.evaluation.ScopeId) (c : U64) (back : Frame → Frame) (ops : List DropOp)
+      (evs : List ProtocolEvent) (ks : List chelis_ir.evaluation.DrawKey)
+      (hsite : siteOf F node = .ok (some (.Forward draw s)))
+      (h : chelis_ir.evaluation.ExecutionFrame.dropout F node input rate seed =
+        .ok (.Ok out, F', back))
+      (hc : counterAt F s = some c) (hno : c.val + 1 < 2 ^ 64)
+      (rest : DropoutRun F' ops evs ks F'') :
+      DropoutRun F (.dropout node input rate seed out :: ops)
+        (.draw (keyOfDraw seed c) :: evs) (⟨seed, c⟩ :: ks) F''
+  | replay (F F' F'' : Frame) (node : chelis_ir.dag.NodeId) (input : TV) (rate : F64)
+      (seed : U64) (out : TV) (draw : chelis_ir.evaluation.DrawId)
+      (k : chelis_ir.evaluation.DrawKey) (back : Frame → Frame) (ops : List DropOp)
+      (evs : List ProtocolEvent) (ks : List chelis_ir.evaluation.DrawKey)
+      (hsite : siteOf F node = .ok (some (.Replay draw)))
+      (h : chelis_ir.evaluation.ExecutionFrame.dropout F node input rate seed =
+        .ok (.Ok out, F', back))
+      (hk : F.keys.val[draw.val]? = some (some k))
+      (rest : DropoutRun F' ops evs ks F'') :
+      DropoutRun F (.dropout node input rate seed out :: ops) evs (k :: ks) F''
+
+/-- An accepted replay dropout used the key recorded for its draw. -/
+theorem dropout_replay_key {F : Frame} {node : chelis_ir.dag.NodeId} {input : TV} {rate : F64}
+    {seed : U64} {out : TV} {F' : Frame} {back : Frame → Frame}
+    {draw : chelis_ir.evaluation.DrawId}
+    (hsite : siteOf F node = .ok (some (.Replay draw)))
+    (h : chelis_ir.evaluation.ExecutionFrame.dropout F node input rate seed =
+      .ok (.Ok out, F', back)) :
+    ∃ k, F.keys.val[draw.val]? = some (some k) ∧ F' = F ∧
+      ∃ back', chelis_ir.evaluation.ExecutionFrame.enter F node seed = .ok (.Ok k, F', back') := by
+  obtain ⟨k, back', he⟩ := dropout_enter h
+  obtain ⟨hF, hk⟩ := enter_replay_inv F node seed draw k F' back' hsite he
+  exact ⟨k, hk, hF, back', he⟩
+
+/-- **A dropout run is an accepted frame run.** From a well-formed stack, the frame operations
+of a dropout run form an `AcceptedRun` with the same events, and the stack stays well formed. -/
+theorem dropoutRun_accepted {F : Frame} {ops : List DropOp} {evs : List ProtocolEvent}
+    {ks : List chelis_ir.evaluation.DrawKey} {F' : Frame} (h : DropoutRun F ops evs ks F')
+    (hwf : StackWF F) :
+    AcceptedRun F (ops.map DropOp.frameOp) evs F' ∧ StackWF F' := by
+  induction h with
+  | nil F => exact ⟨.nil F, hwf⟩
+  | enter F F' F'' scope payload sd back ops evs ks h hseed hfresh rest ih =>
+    have step := AcceptedRun.enter F F' F' scope payload sd back [] [] h hseed hfresh (.nil F')
+    obtain ⟨hr, hwf1⟩ := ih (accepted_run_simulates .c step hwf).2
+    exact ⟨.enter F F' F'' scope payload sd back _ evs h hseed hfresh hr, hwf1⟩
+  | leave F F' F'' scope back ops evs ks h rest ih =>
+    have step := AcceptedRun.leave F F' F' scope back [] [] h (.nil F')
+    obtain ⟨hr, hwf1⟩ := ih (accepted_run_simulates .c step hwf).2
+    exact ⟨.leave F F' F'' scope back _ evs h hr, hwf1⟩
+  | forward F F' F'' node input rate seed out draw s c back ops evs ks hsite h hc hno rest ih =>
+    have hno' : ∀ c', counterAt F s = some c' → c'.val + 1 < 2 ^ 64 := by
+      intro c' hc'
+      rw [hc] at hc'
+      cases hc'
+      exact hno
+    obtain ⟨c', hc', ⟨b', he⟩, -, hwf1⟩ := dropout_forward_simulates .c hsite hwf hno' h
+    rw [hc] at hc'
+    cases hc'
+    obtain ⟨hr, hwf2⟩ := ih hwf1
+    exact ⟨.forward F F' F'' node seed draw s ⟨seed, c⟩ b' _ evs hsite he hno hr, hwf2⟩
+  | replay F F' F'' node input rate seed out draw k back ops evs ks hsite h hk rest ih =>
+    obtain ⟨k', hk', rfl, b', he⟩ := dropout_replay_key hsite h
+    rw [hk] at hk'
+    cases hk'
+    obtain ⟨hr, hwf1⟩ := ih hwf
+    exact ⟨.replay _ _ F'' node seed draw k b' _ evs hsite he hr, hwf1⟩
+
+/-- **Run-level dropout composition.** From a well-formed stack, every dropout run of the
+extracted frame is a run of the reference `runProtocol` between the abstracted frames (for
+every target), keeps the stack well formed, and each of its dropouts, in order, returns its
+input masked (`Masked`) by the key it used: the drawn reference key `(seed, c)` of the active
+scope for a forward dropout (the event emitted at that step), the recorded key for a replay. -/
+theorem dropoutRun_simulates (target : Target) {F : Frame} {ops : List DropOp}
+    {evs : List ProtocolEvent} {ks : List chelis_ir.evaluation.DrawKey} {F' : Frame}
+    (h : DropoutRun F ops evs ks F') (hwf : StackWF F) :
+    runProtocol target evs (absState F) = some (absState F') ∧ StackWF F' ∧
+      List.Forall₂ (fun (d : TV × F64 × TV) k => Masked k d.1 d.2.1 d.2.2)
+        (DropOp.dropouts ops) ks := by
+  refine ⟨(accepted_run_simulates target (dropoutRun_accepted h hwf).1 hwf).1,
+    (dropoutRun_accepted h hwf).2, ?_⟩
+  clear hwf
+  induction h with
+  | nil F => exact .nil
+  | enter F F' F'' scope payload sd back ops evs ks h hseed hfresh rest ih => exact ih
+  | leave F F' F'' scope back ops evs ks h rest ih => exact ih
+  | forward F F' F'' node input rate seed out draw s c back ops evs ks hsite h hc hno rest ih =>
+    obtain ⟨c', hc', b', he⟩ := dropout_forward_key hsite h
+    rw [hc] at hc'
+    cases hc'
+    obtain ⟨k, b'', he', hm⟩ := dropout_masked h
+    rw [he] at he'
+    simp only [Result.ok.injEq, Prod.mk.injEq, core.result.Result.Ok.injEq] at he'
+    obtain ⟨rfl, -⟩ := he'
+    exact .cons hm ih
+  | replay F F' F'' node input rate seed out draw k back ops evs ks hsite h hk rest ih =>
+    obtain ⟨k', hk', -, b', he⟩ := dropout_replay_key hsite h
+    rw [hk] at hk'
+    cases hk'
+    obtain ⟨k'', b'', he', hm⟩ := dropout_masked h
+    rw [he] at he'
+    simp only [Result.ok.injEq, Prod.mk.injEq, core.result.Result.Ok.injEq] at he'
+    obtain ⟨rfl, -⟩ := he'
+    exact .cons hm ih
+
+/-- **Protocol acceptance of a dropout run.** A dropout run from a root frame back to a root
+frame passes the reference `checkProtocol`. -/
+theorem dropoutRun_checks (target : Target) {F : Frame} {ops : List DropOp}
+    {evs : List ProtocolEvent} {ks : List chelis_ir.evaluation.DrawKey} {F' : Frame}
+    (h : DropoutRun F ops evs ks F') (h0 : F.scopes.val = [0#usize])
+    (h1 : F'.scopes.val = [0#usize]) :
+    checkProtocol target evs (absState F) = true :=
+  accepted_run_checks target (dropoutRun_accepted h (stackWF_root F h0)).1 h0 h1
 
 end ChelisBridge.Random

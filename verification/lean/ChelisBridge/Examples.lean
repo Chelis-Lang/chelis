@@ -266,4 +266,48 @@ def discardDag : Model.Dag :=
   (⟨mkDag [node 0 (load "x") [] [2], node 1 .Drop [0] [2]] [],
     [.borrowLoad 0, .ownedDrop 1 0]⟩ : PlanMirror)).isNone
 
+/-- Whether the extracted production verifier `DagOwnershipPlan::verify` accepts a plan
+against its DAG. -/
+def verifies (pl : ExtractedOwnership.LoweredPlan) : Bool :=
+  match Model.dagPlanVerify pl.plan pl.dag with
+  | .ok (.Ok ()) => true
+  | _ => false
+
+-- The extracted verifier accepts the plans the extracted lowering returns.
+#guard (lowered rootsDag).map verifies == some true
+#guard (lowered discardDag).map verifies == some true
+#guard (lowered (mkDag [node 0 (load "x") [] [2], node 1 .Mul [0, 0] [2]] [1])).map verifies ==
+  some true
+
+/-- Two owned producers no root consumes: the lowered plan ends with their scope drops, in
+ascending node order. -/
+def twoDrops : Model.Dag :=
+  mkDag [node 0 (load "x") [] [2], node 1 .Mul [0, 0] [2], node 2 .Mul [0, 0] [2]] [0]
+
+#guard loweredDirectives twoDrops ==
+  some [.borrowLoad 0, .produce 1 [0, 0], .produce 2 [0, 0], .rootClone 0, .scopeDrop 1,
+    .scopeDrop 2]
+#guard (lowered twoDrops).map verifies == some true
+#guard ((lowered twoDrops).bind (Ownership.decodeOwned .f64 [some 0] [[2]] [[2]])).map
+  (fun c => c.check (LaCaDiLECore.Ownership.initial 1)) == some true
+
+/-- The lowered plan of `twoDrops` with its two scope drops swapped (owner map unchanged). -/
+def scopeDropSwapped : Option ExtractedOwnership.LoweredPlan :=
+  (lowered twoDrops).map fun pl =>
+    let ds := pl.plan.directives.val
+    { pl with plan := { pl.plan with directives := ⟨ds.take 4 ++ (ds.drop 4).reverse, by
+        have h : (ds.take 4 ++ (ds.drop 4).reverse).length = ds.length := by simp; omega
+        rw [h]
+        exact pl.plan.directives.property⟩ } }
+
+-- Counterexample (reference acceptance does not imply Rust acceptance): the swapped plan
+-- decodes and the independent reference check accepts it, but the extracted production
+-- verifier rejects it (it fixes the scope-drop order).
+#guard scopeDropSwapped.map OwnershipPlan.directives ==
+  some [.borrowLoad 0, .produce 1 [0, 0], .produce 2 [0, 0], .rootClone 0, .scopeDrop 2,
+    .scopeDrop 1]
+#guard (scopeDropSwapped.bind (Ownership.decodeOwned .f64 [some 0] [[2]] [[2]])).map
+  (fun c => c.check (LaCaDiLECore.Ownership.initial 1)) == some true
+#guard scopeDropSwapped.map verifies == some false
+
 end ChelisBridge.Examples

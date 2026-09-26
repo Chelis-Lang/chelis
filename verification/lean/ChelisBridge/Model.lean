@@ -79,6 +79,12 @@ abbrev lowerDagOwnership : Dag → CapacityScopeSupply →
       (Aeneas.Std.core.result.Result DagOwnershipProgram OwnershipError × CapacityScopeSupply) :=
   chelis_ir.ownership.lower_dag_ownership
 
+/-- The extracted production DAG verifier, the private `DagOwnershipPlan::verify` that
+`chelis_ir::ownership::verify_ownership` runs on a DAG program's plan against its payload DAG. -/
+abbrev dagPlanVerify : DagOwnershipPlan → Dag →
+    Aeneas.Std.Result (Aeneas.Std.core.result.Result Unit OwnershipError) :=
+  chelis_ir.ownership.DagOwnershipPlan.verify
+
 /-- The directive vector of a DAG ownership plan, in order. -/
 def planDirectives (p : DagOwnershipPlan) : List DagDirective := p.directives.val
 
