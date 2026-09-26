@@ -547,6 +547,15 @@ target/debug/chelis --help
 cargo run -p chelis-cli --bin chelis -- --help
 ```
 
+A development build of `chelis` or of the Python extension stages the runtime it
+was built with, and first checks that the runtime's sources in this checkout
+have not changed since (`spec/08-backends.md` §2.1). After editing the manifest,
+build script, `src/` or `include/` of `chelis-runtime`, `chelis-abi` or
+`chelis-vocab` (and of `chelis-unord` in an `ownership-ledger` build), or
+`Cargo.lock`, rebuild before `chelis build`; otherwise it fails and names the
+changed files.
+Builds meant to run without this checkout use the `sealed-runtime` feature.
+
 `--fast` is the pre-push gate: fix-in-place, run before every push. `--validation`
 (chelis#360) is optional for troubleshooting or additional local validation. Applicable
 CI checks must pass on the pushed candidate before marking the draft ready for review;

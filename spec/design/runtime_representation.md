@@ -1603,6 +1603,13 @@ constants that the CLI stages beside the carried archive. The structural scan
 finds no new representation seam, with no foundation, classifier or mutation
 change.
 
+Development runtime freshness (chelis#1354) registers `chelis-runtime/build.rs`
+and `chelis-runtime/src/build_record.rs`: 89 sources (78 Rust and eleven
+C/C++/Objective-C). The build script hashes the runtime's declared source
+inputs into a text record, and the module exposes that record as an
+`include_str!` constant. The structural scan finds no new representation seam,
+with no foundation, classifier or mutation change.
+
 ## B2. Invariants at every phase boundary
 
 1. The public C ABI remains [05-OP-31]/[05-OP-44]-exact and

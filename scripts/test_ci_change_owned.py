@@ -574,11 +574,14 @@ class SchemaTests(unittest.TestCase):
                 for rule in config.required_package_rules
             },
             {
+                "Cargo.lock": ("chelis-runtime-bundle",),
+                "crates/chelis-abi/": ("chelis-runtime-bundle",),
                 "crates/chelis-deep/src/dtype_bounds.rs": ("chelis-types",),
                 "crates/chelis-deep/src/role.rs": ("chelis-types",),
                 "crates/chelis-deep/src/stamp_to_typed.rs": (
                     "chelis-types",
                 ),
+                "crates/chelis-runtime/": ("chelis-runtime-bundle",),
                 "crates/chelis-surf/src/ast.rs": ("chelis-types",),
                 "crates/chelis-surf/src/desugar.rs": ("chelis-types",),
                 "crates/chelis-surf/src/dtype_name.rs": ("chelis-types",),
@@ -588,6 +591,8 @@ class SchemaTests(unittest.TestCase):
                 "crates/chelis-types/src/deep_type.rs": ("chelis-types",),
                 "crates/chelis-types/src/infer/": ("chelis-types",),
                 "crates/chelis-types/src/session.rs": ("chelis-types",),
+                "crates/chelis-unord/": ("chelis-runtime-bundle",),
+                "crates/chelis-vocab/": ("chelis-runtime-bundle",),
             },
         )
         root = Path(__file__).resolve().parents[1]

@@ -171,6 +171,28 @@ target directory are never read.
   that runtime feature, or links an exact instrumented Cargo artifact itself.
 - The Python extension stages its carried runtime into the artifact directory
   and rejects a set `CHELIS_RUNTIME_DIR` (chelis#1354).
+- A development build checks its runtime's sources before staging.
+  `crates/chelis-runtime/build.rs` records the SHA-256 of each declared input,
+  relative to the workspace root, as `chelis_runtime::build_record::SOURCES`, and
+  has Cargo rerun it when anything in a declared crate's directory or the
+  lockfile changes, so a build script or `include/` added to a runtime
+  dependency enters the record on the next build. It declares each watched path
+  relative to its package directory (`../../<path>`), the only checkout root
+  Kache's build-script execution cache relocates; an absolute spelling let that
+  cache replay another checkout's record. A development bundle embeds
+  the path of its checkout and, before `chelis build`, `chelis runtime export`
+  or `compile_and_load` does other work, compares the record with that checkout
+  and fails with the changed, removed and added paths. A runtime compiled
+  outside the workspace, such as a per-crate Nix build, records its missing
+  roots, and a development build refuses it. Sealed builds (`sealed-runtime` on
+  the CLI and the extension) carry no checkout path and skip the check.
+  `crates/chelis-runtime-bundle/tests/declared_runtime_inputs.rs` checks the
+  declared roots against Cargo's dep-info for each runtime configuration. The
+  workspace manifest, `.cargo/config.toml` and `rust-toolchain.toml` are outside
+  the declared inputs. Because the embedded path is a `CARGO_MANIFEST_DIR` value,
+  Kache keys the development bundle, and the CLI and extension crates that link
+  it, per checkout; the runtime's record carries no path, so the runtime stays
+  shareable across checkouts.
 
 ## Execution Plan
 

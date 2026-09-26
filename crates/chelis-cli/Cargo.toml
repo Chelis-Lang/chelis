@@ -53,7 +53,8 @@ walkdir = "2"
 default = ["chelis-prove"]
 smt = ["chelis-prove/smt", "chelis-tide/smt"]
 # Distribution builds (release, Nix) are sealed builds (spec/08-backends.md
-# §2.1); staging receipts record the mode.
+# §2.1): they carry no checkout path and skip the development source-freshness
+# check. Staging receipts record the mode.
 sealed-runtime = ["chelis-runtime-bundle/sealed"]
 
 [dev-dependencies]

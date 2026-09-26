@@ -100,7 +100,7 @@ fn print_staged_runtime(staged: &chelis_runtime_bundle::StagedRuntime) {
 fn cmd_runtime(command: RuntimeCommand) -> Result<(), Box<dyn std::error::Error>> {
     match command {
         RuntimeCommand::Export { dir } => {
-            chelis_runtime_bundle::reject_runtime_dir()?;
+            chelis_runtime_bundle::preflight()?;
             fs::create_dir_all(&dir)?;
             let staged = chelis_runtime_bundle::stage(&dir)?;
             print_staged_runtime(&staged);
@@ -3742,10 +3742,11 @@ fn cmd_build_dispatch(
     allow_style_violations: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let target = BuildTarget::try_from(target).map_err(boxed_string_error)?;
-    // Every build target stages the runtime this chelis carries; a runtime
-    // location variable is an error, reported before any output is written
+    // Every build target stages the runtime this chelis carries. A runtime
+    // location variable, or in a development build runtime sources changed
+    // since this build, is an error reported before any output is written
     // (spec/08-backends.md §2.1).
-    chelis_runtime_bundle::reject_runtime_dir()?;
+    chelis_runtime_bundle::preflight()?;
     let extension_is_dp = file
         .extension()
         .and_then(|s| s.to_str())
