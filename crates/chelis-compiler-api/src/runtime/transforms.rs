@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+
 use chelis_deep::DeepTag;
 use chelis_unord::{UnordMap, UnordSet};
 
@@ -390,7 +392,37 @@ impl<'a> EvalContext<'a> {
         let mut app_children: Vec<Expr> = Vec::with_capacity(1 + arg_exprs.len());
         app_children.push(callee);
         app_children.extend(arg_exprs);
-        let app_expr = empty_node(DeepTag::App, app_children, span);
+        let application = empty_node(DeepTag::App, app_children, span);
+        // chelis#2619: the target reads the caller's frame lexically, and each
+        // caller closure it reaches reads its own environment. Closure-convert
+        // them: every such read is respelled to a fresh name bound around the
+        // application (a placeholder for a value), so lowering resolves it in
+        // the right scope. A declaration the target inlines resolves its free
+        // names at top level, and no frame entry is served to it by spelling.
+        let mut captures = FrameCaptures {
+            argument_count: args.len(),
+            placeholder_names: &mut placeholder_names,
+            placeholder_types: &mut placeholder_types,
+            placeholder_tensors: &mut placeholder_tensors,
+            bindings: Vec::new(),
+            fresh: 0,
+            span,
+        };
+        let application = captures.convert(&application, &captured_env);
+        let capture_bindings = captures.bindings;
+        let app_expr = if capture_bindings.is_empty() {
+            application
+        } else {
+            let bind = empty_node(
+                DeepTag::Bind,
+                capture_bindings
+                    .into_iter()
+                    .flat_map(|(name, value)| [Expr::Atom(Atom::Name(name), span), value])
+                    .collect(),
+                span,
+            );
+            empty_node(DeepTag::Let, vec![bind, application], span)
+        };
 
         let scoped_types: UnordMap<String, TensorType> = placeholder_names
             .iter()
@@ -398,27 +430,10 @@ impl<'a> EvalContext<'a> {
             .zip(placeholder_types.iter().cloned())
             .collect();
 
-        // Build a fresh `program_defs` that includes both top-level defs from
-        // the host runtime AND any captured local closures. The captured
-        // binding wins when its name shadows a top-level def, matching the
-        // evaluator's lexical environment and [04-LIN-1]. The closure owns the
-        // exact checked function expression: reconstructing one from only
-        // parameter names and the body erases parameter types and the checked
-        // function signature. A nested function-valued capture then reaches
-        // lowering as rank zero and corrupts the backward DAG (chelis#676).
-        //
-        // A direct declaration target reads only declarations (chelis#2588):
-        // a caller's closure must not replace a function its body calls.
-        let mut program_defs = self.program.defs().clone();
-        for (name, value) in captured_env.to_sorted() {
-            if let RuntimeValue::Closure {
-                checked_function, ..
-            } = value
-                && !declaration_captures
-            {
-                program_defs.insert(name.clone(), checked_function.as_ref().clone());
-            }
-        }
+        // Caller closures are bound around the application above, never
+        // written into the definition table, where a declaration's own call
+        // of a same-named function would find them (chelis#2588, #2619).
+        let program_defs = self.program.defs().clone();
 
         // Fail-closed for host-runtime-only builtins reached through
         // grad/vmap. The IR lowerer doesn't recognize `tensor_scan`
@@ -559,21 +574,11 @@ impl<'a> EvalContext<'a> {
         // parity gap pinned by `issue_352_grad_over_capturing_def_eval_gap`.
         // Only `Tensor` captures are served; non-tensor captures (closures,
         // scalars routed elsewhere) are not load inputs here.
-        // A direct declaration's served captures come from the canonical
-        // provider below, never the caller's same-spelled lexical tensors.
-        // Keep the served values in this map for the existing rank guard.
-        let mut captured_tensors: UnordMap<String, IrTensorValue> = if declaration_captures {
-            UnordMap::new()
-        } else {
-            captured_env
-                .to_sorted()
-                .into_iter()
-                .filter_map(|(name, value)| match value {
-                    RuntimeValue::Tensor(tensor) => Some((name.clone(), tensor.value.clone())),
-                    _ => None,
-                })
-                .collect()
-        };
+        // Frame values reach the graph only through their placeholders
+        // (chelis#2619): a load by an authored name is a top-level read,
+        // served by the canonical provider below. Keep the served values in
+        // this map for the existing rank guard.
+        let mut captured_tensors: UnordMap<String, IrTensorValue> = UnordMap::new();
 
         // chelis#377 (vmap-inside-a-def): when the transform is applied
         // inside another def's body (`def fv(xs) = xs |> vmap(dot_w)`), the
@@ -1097,6 +1102,97 @@ fn stage_grad_list_value(
             "host runtime: `grad(...)` structured argument {argument_index}: recursive \
              element is not a supported scalar, tensor, List, tuple, ADT, or unit value"
         )),
+    }
+}
+
+/// Frame values a transform's lowering reads, staged under fresh names
+/// (chelis#2619).
+struct FrameCaptures<'a> {
+    argument_count: usize,
+    placeholder_names: &'a mut Vec<String>,
+    placeholder_types: &'a mut Vec<TensorType>,
+    placeholder_tensors: &'a mut UnordMap<String, IrTensorValue>,
+    bindings: Vec<(String, Expr)>,
+    fresh: usize,
+    span: Span,
+}
+
+impl FrameCaptures<'_> {
+    fn fresh_name(&mut self) -> String {
+        let name = format!("__chelis_xform_capture_{}", self.fresh);
+        self.fresh += 1;
+        name
+    }
+
+    /// `expr` with each free name `env` binds respelled to a fresh name that
+    /// stands for that entry: closure conversion against the environment the
+    /// expression was written in. A name `env` does not bind is a top-level
+    /// read and keeps its spelling. A function literal in `env` is converted
+    /// against its own environment, so it reads what it closed over rather
+    /// than whatever the caller's frame binds under the same spelling.
+    fn convert(&mut self, expr: &Expr, env: &Frame) -> Expr {
+        let mut renames = BTreeMap::new();
+        for name in chelis_types::linearity::free_runtime_variables(expr) {
+            if let Some(value) = env.get(&name)
+                && let Some(fresh) = self.stage(value)
+            {
+                renames.insert(name, fresh);
+            }
+        }
+        chelis_types::linearity::rename_free_runtime_variables(expr, &renames)
+    }
+
+    /// The fresh name a frame value is read under, or `None` when the value
+    /// cannot be staged (it is then left unbound, as it always was).
+    fn stage(&mut self, value: &RuntimeValue) -> Option<String> {
+        let span = self.span;
+        let bound = match value {
+            RuntimeValue::Tensor(_) | RuntimeValue::Scalar(_)
+                if !matches!(value, RuntimeValue::Scalar(payload) if payload.dtype().is_integer()) =>
+            {
+                let (tensor, ty) = runtime_value_to_dag_input_lossy(value, None, 0).ok()?;
+                let placeholder = self.fresh_name();
+                self.placeholder_tensors.insert(placeholder.clone(), tensor);
+                self.placeholder_names.push(placeholder.clone());
+                self.placeholder_types.push(ty);
+                // A placeholder is an input of the lowering, bound already.
+                return Some(placeholder);
+            }
+            RuntimeValue::Scalar(payload) => {
+                make_integer_literal_with_type(payload.as_i64(), payload.dtype(), span)
+            }
+            RuntimeValue::Bool(flag) => make_bool_literal_with_type(*flag, span),
+            RuntimeValue::List(_) | RuntimeValue::Tuple(_) | RuntimeValue::Adt { .. } => {
+                let mut leaf_index = 0;
+                let argument_index = self.argument_count + self.fresh;
+                stage_grad_list_value(
+                    value,
+                    argument_index,
+                    &mut leaf_index,
+                    self.placeholder_names,
+                    self.placeholder_types,
+                    self.placeholder_tensors,
+                    span,
+                )
+                .ok()?
+                .0
+            }
+            // A declaration's closure keeps reading top-level names.
+            RuntimeValue::Closure {
+                def_name: Some(declaration),
+                ..
+            } => var_expr(declaration, span),
+            RuntimeValue::Closure {
+                checked_function,
+                env,
+                def_name: None,
+                ..
+            } => self.convert(checked_function, env),
+            _ => return None,
+        };
+        let name = self.fresh_name();
+        self.bindings.push((name.clone(), bound));
+        Some(name)
     }
 }
 
