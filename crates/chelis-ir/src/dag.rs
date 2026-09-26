@@ -1490,6 +1490,21 @@ impl RiscOp {
         }
     }
 
+    /// The input slot where a draw, a draw's replay or a key-consuming key
+    /// operation reads its own activation when it has one, after its
+    /// operands; `None` for any other operation. A join's two activations are
+    /// its keys' consumption activations, not its own, so it has none.
+    pub fn own_activation_slot(&self) -> Option<usize> {
+        match self {
+            Self::Dropout | Self::DropoutReplay | Self::UniformBoundAdjoint { .. } => Some(3),
+            Self::UniformLike => Some(4),
+            Self::Split { .. } | Self::FoldIn | Self::SplitN { .. } => {
+                self.key_operation_operand_count()
+            }
+            _ => None,
+        }
+    }
+
     /// The batch layout of a key-operand random primitive, or `None` for any
     /// other operation.
     pub fn draw_batch_layout(&self) -> Option<DrawBatchLayout> {
@@ -2292,7 +2307,21 @@ impl Dag {
         } else {
             Vec::new()
         };
-        let owner = owner.into();
+        let mut owner = owner.into();
+        // One fact, one carrier (spec/10 section 3.2): the activation a draw
+        // or key operation reads after its operands is the node's own, so the
+        // owner takes it, and an owner that names another one is a defect of
+        // the constructing pass.
+        if let Some(slot) = op.own_activation_slot() {
+            let operand = inputs.get(slot).copied();
+            match (owner.activation, operand) {
+                (None, Some(activation)) => owner.activation = Some(activation),
+                (own, operand) => assert!(
+                    own == operand,
+                    "a {op:?} node's activation operand {operand:?} is not its own activation {own:?}"
+                ),
+            }
+        }
         let decl = owner.decl;
         assert!(
             (decl.0 as usize) < self.declarations.len(),

@@ -165,6 +165,10 @@ impl KeyGraph for DecodedKeys<'_> {
             .filter_map(wire_position)
     }
 
+    fn activation(&self, node: usize) -> Option<usize> {
+        wire_position(self.0.nodes.get(node)?.activation?)
+    }
+
     fn roots(&self) -> impl Iterator<Item = usize> + '_ {
         self.0.roots.iter().copied().filter_map(wire_position)
     }
