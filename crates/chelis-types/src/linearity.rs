@@ -725,6 +725,79 @@ impl Checker {
             }
             self.check_function_declarations(expr, scope);
         }
+        for expr in exprs {
+            self.observe_top_level_key_roots(expr, scope);
+        }
+    }
+
+    /// [04-LIN-6] and [04-LIN-9]: every top-level value binding is a root
+    /// ([05-OBS-7]), and its observation is, in manifest order, a terminal
+    /// consuming use. A key-carrying binding that an initializer already
+    /// consumed would be used twice, whether the other use is a key
+    /// operation, a draw or a projection of one of its components.
+    fn observe_top_level_key_roots(&mut self, expr: &Expr, scope: &mut LinearScope) {
+        let children = match expr.carrier() {
+            ExprCarrier::DecodedNode(DeepTag::Module, _, children) => {
+                for child in children.iter().skip(1) {
+                    self.observe_top_level_key_roots(child, scope);
+                }
+                return;
+            }
+            ExprCarrier::DecodedNode(DeepTag::Def, _, children) => children,
+            ExprCarrier::DecodedNode(_, _, _)
+            | ExprCarrier::StructuralList(_)
+            | ExprCarrier::UndecodableHead(_, _, _)
+            | ExprCarrier::Atom(_)
+            | ExprCarrier::MetadataMap(_)
+            | ExprCarrier::MetadataExpression(_) => return,
+        };
+        let Some(name) = children.first().and_then(symbol_name) else {
+            return;
+        };
+        if function_declaration_body(children).is_some() {
+            return;
+        }
+        let Some(id) = scope.top_id(name) else {
+            return;
+        };
+        let Some(record) = scope.record(id) else {
+            return;
+        };
+        if !record.ty.as_ref().is_some_and(|ty| self.type_holds_key(ty)) {
+            return;
+        }
+        let earlier = match &record.state {
+            BindingState::Consumed(site) => Some(site.description.clone()),
+            BindingState::Live { .. } if !record.moved_key_components.is_empty() => {
+                Some("a projection of one of its key components".to_string())
+            }
+            BindingState::Live { .. } => None,
+        };
+        let site = children.get(1).map_or_else(String::new, diag_site);
+        if let Some(earlier) = earlier {
+            self.push_diagnostic(CheckError::new(
+                CheckErrorKind::KeyReuse,
+                format!(
+                    "top-level key-carrying binding `{name}` is a root, and observing a root \
+                     consumes it ([04-LIN-6]), but it was already consumed by {earlier}; a key \
+                     is used at most once ([04-LIN-9]), so its initializer {site} cannot also \
+                     feed another binding"
+                ),
+                vec![
+                    "Bind only the keys a root shows: derive every other key inside the \
+                     binding that uses it, for example `d = dropout(key_from_seed(1i64), x, \
+                     0.5f32)`, or split a key inside a `def`"
+                        .to_string(),
+                ],
+            ));
+        }
+        scope.consume_id(
+            id,
+            ConsumeSite {
+                description: format!("the root observation of `{name}`"),
+                kind: ConsumeKind::Structural,
+            },
+        );
     }
 
     /// chelis#2549: a function declaration ([04-INF-7]) is not a closure

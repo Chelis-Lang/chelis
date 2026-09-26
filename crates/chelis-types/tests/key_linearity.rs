@@ -439,18 +439,72 @@ fn a_field_access_consumes_the_whole_value() {
     );
 }
 
+/// [04-LIN-6] and [04-LIN-9]: every top-level value binding is a root, and
+/// observing a root consumes it, so a top-level key-carrying binding that
+/// another binding also consumes is used twice. The `fold_in`, `dropout`,
+/// `split_key` and projection forms agree; a key-carrying root that is only
+/// observed checks.
+///
+/// Evidentiary status: REGRESSION TEST. At `b47fdd7d3` every single-use
+/// negative checked, and so did "two roots over split halves", which this
+/// test used to lock as accepted.
 #[test]
 fn top_level_roots_observe_a_key_once() {
+    let x0 = "x0 = to_tensor([1.0f32, 2.0f32, 3.0f32, 4.0f32])\n";
     rejects_reuse(
         "two roots over one key",
         "root = key_from_seed(1i64)\nfirst = fold_in(root, 1i64)\nsecond = fold_in(root, \
          2i64)\n",
     );
-    accepts(
-        "two roots over split halves",
-        "root = key_from_seed(1i64)\npair = split_key(root)\nfirst = fold_in(pair.0, \
-         1i64)\nsecond = fold_in(pair.1, 2i64)\n",
-    );
+    for (name, source) in [
+        (
+            "a root that fold_in consumes",
+            "root = key_from_seed(1i64)\nfirst = fold_in(root, 1i64)\n".to_string(),
+        ),
+        (
+            "a root that dropout consumes",
+            format!("root = key_from_seed(1i64)\n{x0}d = dropout(root, x0, 0.5f32)\n"),
+        ),
+        (
+            "a root that split_key consumes",
+            "root = key_from_seed(1i64)\npair = split_key(root)\n".to_string(),
+        ),
+        (
+            "two roots over split halves",
+            "pair = split_key(key_from_seed(1i64))\nfirst = fold_in(pair.0, 1i64)\nsecond = \
+             fold_in(pair.1, 2i64)\n"
+                .to_string(),
+        ),
+    ] {
+        let errors = rejects(name, &source, CheckErrorKind::KeyReuse);
+        assert!(
+            errors
+                .iter()
+                .any(|error| error.message.contains("is a root")
+                    && error.message.contains("[04-LIN-6]")),
+            "{name}: expected the root-observation diagnostic: {errors:?}"
+        );
+    }
+    for (name, source) in [
+        (
+            "an observed key root",
+            "first = fold_in(key_from_seed(1i64), 1i64)\n".to_string(),
+        ),
+        (
+            "an observed pair of keys",
+            "pair = split_key(key_from_seed(1i64))\n".to_string(),
+        ),
+        (
+            "an observed key tensor",
+            "ks = split_keys(key_from_seed(1i64), 2i64)\n".to_string(),
+        ),
+        (
+            "a draw keyed where it is bound",
+            format!("{x0}d = dropout(key_from_seed(1i64), x0, 0.5f32)\n"),
+        ),
+    ] {
+        accepts(name, &source);
+    }
 }
 
 /// The `KeyReuse` diagnostics that reject a declaration's capture of the
@@ -492,7 +546,7 @@ fn a_function_declaration_never_captures_a_top_level_key() {
         "the key passed to the declaration as a parameter",
         &format!(
             "{TOP_LEVEL_KEY}def f(k: key, x: tensor[4, f32]) -> tensor[4, f32] = dropout(k, x, \
-             0.5f32)\nout = f(k0, x0)\n"
+             0.5f32)\nout = f(key_from_seed(2i64), x0)\n"
         ),
     );
 }
@@ -518,7 +572,8 @@ fn every_function_declaration_reading_a_top_level_key_is_refused() {
 }
 
 /// [04-LIN-9] across top-level initializers: two draws from `k0` reuse it,
-/// and one draw is its single use.
+/// and a draw keyed where it is bound is its key's single use ([04-LIN-6]
+/// makes `k0`'s own root observation its one use).
 ///
 /// Evidentiary status: DISPOSITION LOCK for chelis#2549, which reorders how
 /// top-level initializers and declarations are walked.
@@ -530,9 +585,11 @@ fn top_level_initializers_draw_from_a_key_once() {
             "{TOP_LEVEL_KEY}first = dropout(k0, x0, 0.5f32)\nsecond = dropout(k0, x0, 0.5f32)\n"
         ),
     );
+    // [04-LIN-6]: `k0`'s root observation is its one use, so a draw keyed
+    // where it is bound is the single-use twin.
     accepts(
-        "one top-level draw from `k0`",
-        &format!("{TOP_LEVEL_KEY}first = dropout(k0, x0, 0.5f32)\n"),
+        "one top-level draw keyed where it is bound",
+        &format!("{TOP_LEVEL_KEY}first = dropout(key_from_seed(2i64), x0, 0.5f32)\n"),
     );
 }
 
