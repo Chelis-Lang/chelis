@@ -7,6 +7,53 @@ import shlex
 import subprocess
 import tempfile
 
+# Translation options shared by every extraction (single root or whole core).
+CHARON_OPTIONS = (
+    "--preset=aeneas", "--monomorphize-mut=except-types", "--remove-adt-clauses",
+    "--lift-associated-types=*",
+)
+# Charon rejects its own warnings and stops at the first error when accepting.
+CHARON_STRICT = ("--error-on-warnings", "--abort-on-error")
+# Transparent adapter fields recombine disjoint mutable captures using their
+# real Rust types. Opaque state models instead provide explicit mergers.
+ITERATOR_ADAPTERS = (
+    "map::Map", "filter_map::FilterMap", "filter::Filter",
+    "copied::Copied", "cloned::Cloned", "enumerate::Enumerate",
+    "take::Take", "rev::Rev",
+)
+# Specialize mutable control-flow payloads from their real Rust bodies;
+# the generic value-only Lean models cannot restore borrowed payload state.
+CORE_FAMILIES = (
+    "core::option::{core::option::Option}",
+    "core::result::{core::result::Result}",
+    "core::option::{core::ops::try_trait::Try}",
+    "core::option::{core::ops::try_trait::FromResidual}",
+    "core::result::{core::ops::try_trait::Try}",
+    "core::result::{core::ops::try_trait::FromResidual}",
+    "core::ops::deref::{core::ops::deref::Deref}",
+    "core::ops::deref::{core::ops::deref::DerefMut}",
+    "core::ops::arith::{core::ops::arith::Add}",
+    "core::cmp",
+    "{core::cmp::PartialEq}::ne",
+    "{core::cmp::PartialOrd}",
+    "{core::cmp::Ord}",
+    "core::f64::consts::FRAC_PI_2",
+    "core::iter::traits::iterator::Iterator::by_ref",
+    "{core::iter::traits::iterator::Iterator}::by_ref",
+)
+
+
+def charon_includes(crates) -> list[str]:
+    """The --include arguments: std families first, then the workspace crates."""
+    command: list[str] = []
+    for adapter in ITERATOR_ADAPTERS:
+        command.extend(["--include", f"core::iter::adapters::{adapter}"])
+    for family in CORE_FAMILIES:
+        command.extend(["--include", family])
+    for member in sorted(crates):
+        command.extend(["--include", member])
+    return command
+
 
 def run(command: list[str], root: Path, *, capture: bool = False) -> str:
     print("+ " + shlex.join(command), flush=True)
@@ -52,42 +99,9 @@ def generate_model(*, entry: str | None = None, mir: str = "promoted") -> Path:
     output = Path(tempfile.mkdtemp(prefix=f"{crate}-", dir=output_root))
     llbc = output / f"{crate}.llbc"
     command = [
-        "charon", "cargo", "--preset=aeneas", f"--mir={mir}",
-        "--monomorphize-mut=except-types", "--remove-adt-clauses",
-        "--lift-associated-types=*",
-        "--error-on-warnings", "--abort-on-error",
+        "charon", "cargo", *CHARON_OPTIONS, f"--mir={mir}", *CHARON_STRICT,
+        *charon_includes(crates),
     ]
-    # Transparent adapter fields recombine disjoint mutable captures using their
-    # real Rust types. Opaque state models instead provide explicit mergers.
-    for adapter in (
-        "map::Map", "filter_map::FilterMap", "filter::Filter",
-        "copied::Copied", "cloned::Cloned", "enumerate::Enumerate",
-        "take::Take", "rev::Rev",
-    ):
-        command.extend(["--include", f"core::iter::adapters::{adapter}"])
-    # Specialize mutable control-flow payloads from their real Rust bodies;
-    # the generic value-only Lean models cannot restore borrowed payload state.
-    for family in (
-        "core::option::{core::option::Option}",
-        "core::result::{core::result::Result}",
-        "core::option::{core::ops::try_trait::Try}",
-        "core::option::{core::ops::try_trait::FromResidual}",
-        "core::result::{core::ops::try_trait::Try}",
-        "core::result::{core::ops::try_trait::FromResidual}",
-        "core::ops::deref::{core::ops::deref::Deref}",
-        "core::ops::deref::{core::ops::deref::DerefMut}",
-        "core::ops::arith::{core::ops::arith::Add}",
-        "core::cmp",
-        "{core::cmp::PartialEq}::ne",
-        "{core::cmp::PartialOrd}",
-        "{core::cmp::Ord}",
-        "core::f64::consts::FRAC_PI_2",
-        "core::iter::traits::iterator::Iterator::by_ref",
-        "{core::iter::traits::iterator::Iterator}::by_ref",
-    ):
-        command.extend(["--include", family])
-    for member in sorted(crates):
-        command.extend(["--include", member])
     if entry:
         command.extend(["--start-from", entry])
     command.extend([
@@ -101,13 +115,21 @@ def generate_model(*, entry: str | None = None, mir: str = "promoted") -> Path:
         raise RuntimeError("Charon returned without a fresh nonempty LLBC model")
     lean = output / "lean"
     lean.mkdir()
-    # Keep only one function's symbolic contexts live during translation.
+    # Propositions that admitted collections rely on (e.g. a crate iterator's total
+    # size_hint); checked theorems must prove them.
+    obligations = output / "obligations.json"
+    # -sequential keeps only one function's symbolic contexts live during translation.
     run([
         "aeneas", "-backend", "lean", "-checks", "-abort-on-error", "-warnings-as-errors",
-        "-strict-joins", "-sequential", "-dest", str(lean), str(llbc),
+        "-strict-joins", "-sequential", "-emit-collection-obligations", str(obligations),
+        "-dest", str(lean), str(llbc),
     ], root)
     if not any(lean.rglob("*.lean")):
         raise RuntimeError("Aeneas returned without a Lean model")
+    data = json.loads(obligations.read_text())
+    if data.get("version") != 1 or not isinstance(data.get("obligations"), list):
+        raise RuntimeError(f"malformed collection obligations: {obligations}")
+    print(f"Collection obligations: {obligations}", flush=True)
     print(f"Generated model: {lean}. Correspondence and Lean acceptance remain separate obligations.")
     return lean
 
