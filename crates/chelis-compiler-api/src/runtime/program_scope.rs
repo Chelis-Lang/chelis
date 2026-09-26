@@ -64,6 +64,11 @@ pub(super) struct ProgramScope {
     /// before this a routed reduction re-folded the whole program, all of
     /// `chelis-std` included, on every call.
     routing_lowering_context: OnceCell<SubexprLoweringContext>,
+    /// The lowering context `grad` and `vmap` applications lower through
+    /// (chelis#2439). It also reads the checked program and the declared
+    /// signatures, which are fixed for the evaluation context that owns this
+    /// scope, so its first application builds it and the rest reuse it.
+    transform_lowering_context: OnceCell<SubexprLoweringContext>,
     /// Every definition key grouped by its terminal segment, each group
     /// sorted (chelis#2393). A short or import-qualified reference resolves
     /// through one group instead of sorting and scanning the whole linked
@@ -78,6 +83,7 @@ impl ProgramScope {
             defs,
             type_env,
             routing_lowering_context: OnceCell::new(),
+            transform_lowering_context: OnceCell::new(),
             terminal_index: OnceCell::new(),
         }
     }
@@ -113,6 +119,15 @@ impl ProgramScope {
             [key] => Some(key),
             _ => None,
         }
+    }
+
+    /// The transform lowering context, built by `build` on first use and
+    /// reused for the scope's lifetime (chelis#2439).
+    pub(super) fn transform_lowering_context(
+        &self,
+        build: impl FnOnce() -> SubexprLoweringContext,
+    ) -> SubexprLoweringContext {
+        self.transform_lowering_context.get_or_init(build).clone()
     }
 
     /// The lowering context named-axis routing uses, built on first use and

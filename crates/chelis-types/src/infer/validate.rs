@@ -1782,11 +1782,64 @@ pub(super) fn expr_type_expr(expr: &deep::Expr, type_env: &IrTypeEnv) -> Option<
             {
                 return type_env.get(name).cloned();
             }
+            // A block's value is its body's (chelis#2547): read the body with
+            // each binding's type in scope, so a top-level value defined by
+            // a block records its type like any other.
+            if node.tag() == DeepTag::Let {
+                return let_type_expr(expr, type_env);
+            }
             None
         }
         deep::Expr::MetaExpr(meta, _) => expr_type_expr(&meta.expr, type_env),
         _ => None,
     }
+}
+
+/// The type of a `let` block: its body's, with each binding's type in scope.
+/// A block desugars to one `let` per binding, so the nesting is walked in a
+/// loop over a single copy of the environment rather than copying it again
+/// at each level.
+fn let_type_expr(expr: &deep::Expr, type_env: &IrTypeEnv) -> Option<deep::Expr> {
+    let mut scoped = type_env.clone();
+    let mut current = expr;
+    loop {
+        let node = match current {
+            deep::Expr::Node(node, _) => node,
+            deep::Expr::MetaExpr(meta, _) => {
+                current = &meta.expr;
+                continue;
+            }
+            _ => break,
+        };
+        if node.tag() != DeepTag::Let {
+            break;
+        }
+        if let Some(ty) = node.meta().ty() {
+            return Some(ty.expression().clone());
+        }
+        let [bind, body] = node.children_slice() else {
+            return None;
+        };
+        let Some((DeepTag::Bind, _, pairs)) = stamped_parts(bind) else {
+            return None;
+        };
+        for pair in pairs.chunks(2) {
+            let [name, value] = pair else {
+                return None;
+            };
+            let name = symbol_name(name)?;
+            match expr_type_expr(value, &scoped) {
+                Some(ty) => {
+                    scoped.insert(name.to_string(), ty);
+                }
+                None => {
+                    scoped.remove(name);
+                }
+            }
+        }
+        current = body;
+    }
+    expr_type_expr(current, &scoped)
 }
 
 pub(super) fn extend_ir_env_with_fn_params(

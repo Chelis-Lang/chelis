@@ -4673,6 +4673,75 @@ mod issue_2207_routing_lowering_context {
     }
 }
 
+/// chelis#2439: a `grad` application prepared a fresh subexpression lowering
+/// context, which copies and folds every definition in the program, standard
+/// library included. The context is now a fact of the evaluation context, so
+/// the folds are bounded by the program rather than by the number of
+/// applications. Counted, like chelis#2207's receipt above, not timed.
+///
+/// Failing first, measured on this test with only the memo in
+/// `ProgramScope::transform_lowering_context` bypassed: 1 application cost 3
+/// whole-program folds and 40 cost 42, one per application. With the memo
+/// both counts are 2.
+mod issue_2439_transform_lowering_context {
+    use crate::compiler::{eval_selected, wire_values};
+    use crate::schema::{EvalRequest, SourceKind};
+
+    /// A program whose recursion applies one `grad` per step.
+    fn source(applications: u32) -> String {
+        format!(
+            "def loss(x: tensor[2, f32]) -> tensor[f32] = sum(mul(x, x), 0i32)\n\
+             def repeat(n: i64, acc: f32) -> f32 = {{\n\
+             g = grad(loss)(to_tensor([1.0f32, 1.0f32]))\n\
+             if n <= 0i64 then acc else repeat(n - 1i64, acc + tensor_to_scalar(sum(g, 0i32)))\n\
+             }}\n\
+             answer = repeat({applications}i64, 0.0f32)\n"
+        )
+    }
+
+    /// Evaluate the program and return its whole-program fold passes, after
+    /// checking the answer, so an evaluation that failed cannot report a
+    /// flattering zero.
+    fn fold_passes_for(applications: u32) -> u64 {
+        chelis_ir::lower::reset_program_def_fold_passes();
+        let result = eval_selected(
+            EvalRequest {
+                source_kind: SourceKind::Surf,
+                source: source(applications),
+                bindings: Default::default(),
+            },
+            &["answer".to_string()],
+        )
+        .expect("the grad program evaluates");
+        let passes = chelis_ir::lower::program_def_fold_passes();
+        // d/dx sum(x * x) at [1, 1] is [2, 2], so each application adds 4.
+        assert_eq!(
+            serde_json::to_value(&result.roots[0].value).unwrap(),
+            serde_json::to_value(wire_values::scalar_f32(applications as f32 * 4.0)).unwrap(),
+            "{applications} grad applications"
+        );
+        passes
+    }
+
+    #[test]
+    fn repeated_grad_applications_fold_the_program_once() {
+        std::thread::Builder::new()
+            .stack_size(32 * 1024 * 1024)
+            .spawn(|| {
+                let one = fold_passes_for(1);
+                let many = fold_passes_for(40);
+                eprintln!("whole-program folds: 1 grad application = {one}, 40 = {many}");
+                assert_eq!(
+                    many, one,
+                    "40 grad applications cost {many} whole-program definition folds, 1 costs {one}"
+                );
+            })
+            .expect("spawn the deep-stack evaluator thread")
+            .join()
+            .expect("the evaluator thread finishes");
+    }
+}
+
 /// chelis#2567: the worklist `Clone` copies every container kind with its
 /// children in order, dict entries paired, and data-type names and field
 /// names intact, and the copy shares no container with the original.
@@ -4717,4 +4786,58 @@ fn runtime_value_clone_copies_every_container_in_order() {
         render_value(&original),
         "Record([1, 2], (true, ()), dict(a: 3, b: []))"
     );
+}
+
+/// chelis#2619: a transform's closures are closure-converted against their
+/// own environments. A closure several others reach is staged once, however
+/// many paths reach it: a chain where each closure calls the previous two
+/// reached the first ones along Fibonacci-many paths, which took 75 s and
+/// 8.4 GB at depth 18 before staged values were keyed by value.
+///
+/// Failing first, measured with only the `FrameCaptures::staged` lookup
+/// bypassed: depth 12 staged 431 values; with it, 13.
+mod issue_2619_shared_capture_staging {
+    use crate::compiler::eval_selected;
+    use crate::schema::{EvalRequest, SourceKind};
+
+    fn source(depth: usize) -> String {
+        let mut body = String::from(
+            "  w = to_tensor([1.0f32, 1.0f32])\n  f0 = fn (x: tensor[2, f32]) -> mul(x, w)\n  f1 = fn (x: tensor[2, f32]) -> mul(x, w)\n",
+        );
+        for k in 2..depth {
+            body.push_str(&format!(
+                "  f{k} = fn (x: tensor[2, f32]) -> add(f{}(x), f{}(x))\n",
+                k - 1,
+                k - 2
+            ));
+        }
+        format!(
+            "out = {{\n{body}  grad(fn (x: tensor[2, f32]) -> sum(f{}(x), 0i32))(to_tensor([1.0f32, 2.0f32]))\n}}\n",
+            depth - 1
+        )
+    }
+
+    #[test]
+    fn a_closure_many_closures_reach_is_staged_once() {
+        super::super::transforms::reset_staged_frame_values();
+        let result = eval_selected(
+            EvalRequest {
+                source_kind: SourceKind::Surf,
+                source: source(12),
+                bindings: Default::default(),
+            },
+            &["out".to_string()],
+        )
+        .expect("the closure chain evaluates");
+        let staged = super::super::transforms::staged_frame_values();
+        // f11 is Fib(12) = 144 copies of w, so its gradient is [144, 144].
+        assert_eq!(
+            serde_json::to_value(&result.roots[0].value).unwrap()["value"]["data"]["bits"],
+            serde_json::json!(["43100000", "43100000"])
+        );
+        assert!(
+            staged <= 16,
+            "a depth-12 closure chain staged {staged} frame values; one per closure and value is 13"
+        );
+    }
 }
