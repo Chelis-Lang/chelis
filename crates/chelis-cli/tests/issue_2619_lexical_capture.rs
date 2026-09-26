@@ -214,3 +214,24 @@ fn an_unused_string_local_the_target_reads_is_harmless() {
 out = {\n  s = \"run-1\"\n  grad(fn (x: tensor[2, f32]) -> loss(x, s))(to_tensor([1.0f32, 2.0f32]))\n}\n";
     assert_eval(source, "out", "tensor(shape=[2], data=[2.0, 4.0])");
 }
+
+/// A recorded list that calls a top-level function keeps calling it after a
+/// later local takes the function's name.
+#[test]
+fn a_let_bound_list_keeps_calling_the_top_level_function_it_named() {
+    let source = "def scale(x: tensor[1, f32]) -> tensor[1, f32] = mul(x, to_tensor([3.0f32]))\n\
+def main() -> tensor[2, f32] = {\n  y = to_tensor([1.0f32])\n  rows = [scale(y), y]\n  scale = to_tensor([100.0f32])\n  concat(rows, 0i32)\n}\n";
+    assert_both_lanes(source, "main", "tensor(shape=[2], data=[3.0, 1.0])");
+}
+
+/// The same for a recorded `shape` of a call.
+#[test]
+fn a_let_bound_shape_keeps_calling_the_top_level_function_it_named() {
+    let source = "def twice(x: tensor[2, f32]) -> tensor[4, f32] = concat([x, x], 0i32)\n\
+def main() -> tensor[2, 4, f32] = {\n  y = to_tensor([1.0f32, 2.0f32])\n  n = shape(twice(y), 0i32)\n  twice = to_tensor([100.0f32])\n  reshape(to_tensor([1.0f32, 2.0f32, 3.0f32, 4.0f32, 5.0f32, 6.0f32, 7.0f32, 8.0f32]), [cast(2, i64), n])\n}\n";
+    assert_both_lanes(
+        source,
+        "main",
+        "tensor(shape=[2, 4], data=[1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0])",
+    );
+}

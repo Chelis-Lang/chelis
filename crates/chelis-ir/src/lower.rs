@@ -7252,8 +7252,9 @@ impl<'program> LowerCtx<'program> {
     /// is used, which can be after a rebinding of a name it reads. Reading
     /// its names through aliases nothing else spells keeps them meaning what
     /// they meant where it was bound. The aliases live exactly as long as
-    /// the scope the expression was recorded in. A name the scope does not
-    /// bind, a top-level declaration or a builtin, keeps its spelling.
+    /// the scope the expression was recorded in. A top-level function it
+    /// calls is pinned to its declaration; any other name the scope does not
+    /// bind, a builtin or a top-level value, keeps its spelling.
     fn pin_free_names(&mut self, expr: &Expr, top_level: bool) -> Expr {
         fn pin<V: Clone>(
             table: &mut UnordMap<String, V>,
@@ -7317,6 +7318,25 @@ impl<'program> LowerCtx<'program> {
                     top.fn_typed_params.insert(alias.clone());
                 }
                 bound = true;
+            }
+            // A top-level function it calls is pinned too: a later local of
+            // that name must not replace the call where it is lowered again.
+            if !bound && self.program_defs.contains_key(&name) {
+                let reference = Expr::node(
+                    DeepTag::Var,
+                    Metadata::default(),
+                    vec![Expr::Atom(Atom::Name(name.clone()), expr.span())],
+                    expr.span(),
+                );
+                if let Some(callable) = self.resolve_callable_expr(&reference) {
+                    if top_level {
+                        self.top_level
+                            .local_callables
+                            .insert(alias.clone(), callable.clone());
+                    }
+                    self.local_callables.insert(alias.clone(), callable);
+                    bound = true;
+                }
             }
             if bound {
                 self.next_pin += 1;
