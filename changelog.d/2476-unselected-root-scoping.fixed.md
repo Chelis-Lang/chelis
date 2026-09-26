@@ -6,7 +6,8 @@ records its declaration, and the evaluator and dead-code elimination seed an
 abort, a potentially trapping node or a draw that can trap only when its
 declaration is a selected root's. A function runs inlined where it is
 applied, and a value declaration whose initializer can trap runs inlined
-where it is referenced, so an uncalled function's nodes do not run and its
+where it is referenced, one copy for each referencing declaration and
+activation, so an uncalled function's nodes do not run and its
 parameters are not inputs, and a function named as a value and not applied
 (`g = f`) runs nothing and initializes no value declaration its body
 names. A selected

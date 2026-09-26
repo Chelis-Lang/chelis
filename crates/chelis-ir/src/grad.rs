@@ -7,8 +7,8 @@ use chelis_unord::UnordMap;
 use std::fmt;
 
 use crate::dag::{
-    ComparisonKind, Dag, DagNode, DimInfo, ExtremaKind, ExtremaOperand, NodeId, Owner, RiscOp,
-    RtDim, TensorType,
+    ComparisonKind, Dag, DagNode, DimInfo, ExtremaKind, ExtremaOperand, LogicalKind, NodeId, Owner,
+    RiscOp, RtAxis, RtDim, TensorType,
 };
 use crate::tier2;
 use chelis_types::types::Prim;
@@ -69,6 +69,12 @@ pub enum AdRejectionReason {
     /// The output node's type is not a scalar float — reverse-mode AD
     /// requires a scalar loss.
     NonScalarOutput,
+    /// A cotangent the op's adjoint sends out of a branch arm does not carry
+    /// the arm's activation on its leading axes, so the arm's untaken rows
+    /// cannot be selected away (spec/06 §2.10.1). An activation is rank zero
+    /// or shaped like its node's leading axes (spec/10 §3); the refusal keeps
+    /// a batched activation from masking along the wrong axis.
+    ActivationNotLeadingAxes,
     /// Catch-all for legacy free-text rejection reasons that have not
     /// yet been given a structured variant. Carries the original
     /// message verbatim. Adding a new structured variant should
@@ -153,6 +159,12 @@ impl fmt::Display for AdError {
                 AdRejectionReason::NonScalarOutput => {
                     write!(f, "grad: output of {op} must be a scalar float")
                 }
+                AdRejectionReason::ActivationNotLeadingAxes => write!(
+                    f,
+                    "grad: the cotangent {op} sends out of its branch arm does not carry the \
+                     arm's per-row activation on its leading axes, so the arm's untaken rows \
+                     cannot be selected away (spec/06 section 2.10.1)"
+                ),
                 AdRejectionReason::Other(msg) => write!(f, "{msg}"),
             },
         }
@@ -414,10 +426,27 @@ fn grad_dag_checked_impl(
         }
     }
 
-    grad_dag_result(forward, output, wrt).map_err(|why| AdError::NotSupported {
-        op: "<unknown>",
-        reason: AdRejectionReason::Other(format!("failed to construct backward DAG ({why})")),
+    grad_dag_result(forward, output, wrt).map_err(|failure| match failure {
+        BackwardFailure::Rejected(error) => error,
+        BackwardFailure::Construction(why) => AdError::NotSupported {
+            op: "<unknown>",
+            reason: AdRejectionReason::Other(format!("failed to construct backward DAG ({why})")),
+        },
     })
+}
+
+/// Why [`grad_dag_result`] built no backward graph: a typed rejection, which
+/// [`grad_dag_checked`] reports as it is, or a construction failure, which it
+/// wraps in [`AdRejectionReason::Other`].
+enum BackwardFailure {
+    Rejected(AdError),
+    Construction(String),
+}
+
+impl From<String> for BackwardFailure {
+    fn from(why: String) -> Self {
+        Self::Construction(why)
+    }
 }
 
 /// [05-OP-37]'s rate rejection. A parameter reaches a node when the node is
@@ -616,9 +645,13 @@ pub fn grad_dag(forward: &Dag, output: NodeId, wrt: &[NodeId]) -> Option<GradRes
 /// (`grad_dag_checked` and its user-facing lowering error) can report
 /// *why* the backward DAG could not be built rather than the legacy
 /// opaque "unsupported op or verification failure".
-fn grad_dag_result(forward: &Dag, output: NodeId, wrt: &[NodeId]) -> Result<GradResult, String> {
+fn grad_dag_result(
+    forward: &Dag,
+    output: NodeId,
+    wrt: &[NodeId],
+) -> Result<GradResult, BackwardFailure> {
     if forward.is_empty() {
-        return Err("grad: forward DAG is empty".to_string());
+        return Err("grad: forward DAG is empty".to_string().into());
     }
     let output_ty = forward
         .get(output)
@@ -626,9 +659,7 @@ fn grad_dag_result(forward: &Dag, output: NodeId, wrt: &[NodeId]) -> Result<Grad
         .output_type
         .clone();
     if !is_scalar_float(&output_ty) {
-        return Err(format!(
-            "grad: output node type {output_ty:?} is not a scalar float"
-        ));
+        return Err(format!("grad: output node type {output_ty:?} is not a scalar float").into());
     }
     // Forward nodes clone span_id + merged_spans unchanged via Dag::clone()
     // — `forward.clone()` deep-copies the DagNodes, and the existing
@@ -693,8 +724,18 @@ fn grad_dag_result(forward: &Dag, output: NodeId, wrt: &[NodeId]) -> Result<Grad
                     node.id.0
                 )
             })?;
-        // Every node added inside compute_adjoints is a backward
-        // (adjoint) node for `node`. Stamp the grad marker + the
+        let input_grads = input_grads
+            .into_iter()
+            .map(|(input_id, grad_node)| {
+                let input = forward
+                    .get(input_id)
+                    .expect("adjoint input is a forward node");
+                mask_to_activation(&mut dag, &node, input, grad_node)
+                    .map(|masked| (input_id, masked))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        // Every node added inside compute_adjoints, and every mask, is a
+        // backward (adjoint) node for `node`. Stamp the grad marker + the
         // forward span onto each.
         stamp_grad_marker(&mut dag, dag_size_before, &node);
 
@@ -740,7 +781,8 @@ fn grad_dag_result(forward: &Dag, output: NodeId, wrt: &[NodeId]) -> Result<Grad
         return Err(format!(
             "grad: constructed backward DAG failed verification: {}",
             verify_errors.join("; ")
-        ));
+        )
+        .into());
     }
 
     Ok(GradResult {
@@ -748,6 +790,133 @@ fn grad_dag_result(forward: &Dag, output: NodeId, wrt: &[NodeId]) -> Result<Grad
         output_node,
         grad_nodes,
     })
+}
+
+/// The cotangent contribution an adjoint of `consumer` produced for its
+/// forward input `input`, as it may reach `input`'s cotangent.
+///
+/// spec/06 §2.10.1: a runtime `if` differentiates the executed branch, and
+/// the untaken arm contributes nothing. An arm lowered into a `Where` is
+/// still computed where its activation is false (spec/10 §3), from operands
+/// its checks accept, and its adjoints run too, multiplying a zero cotangent
+/// by local derivatives of those values, which need not be finite (`log` of
+/// a substituted zero, or of a genuine zero the forward program never
+/// reaches). So a contribution produced under `consumer`'s activation that
+/// leaves it, for an input whose activation does not imply it, is selected
+/// against an exact zero by that activation. A select, not a product: zero
+/// times an infinity is NaN. Adjoint nodes already carry their forward
+/// node's owner, and within one activation nothing is masked, so a taken
+/// arm's genuinely non-finite derivative is returned unchanged.
+///
+/// Only a float contribution can be non-finite: every integer or Bool
+/// cotangent starts as an exact zero constant (a `Cast` out of a float, a
+/// comparison operand, a `Where` condition) and stays one.
+fn mask_to_activation(
+    dag: &mut Dag,
+    consumer: &DagNode,
+    input: &DagNode,
+    contribution: NodeId,
+) -> Result<NodeId, BackwardFailure> {
+    let Some(activation) = consumer.owner.activation else {
+        return Ok(contribution);
+    };
+    if activation_implies(dag, input.owner.activation, activation) {
+        return Ok(contribution);
+    }
+    let ty = dag
+        .get(contribution)
+        .expect("an adjoint contribution is a node of the backward graph")
+        .output_type
+        .clone();
+    if !ty.precision.is_float() {
+        return Ok(contribution);
+    }
+    let owner = consumer.owner;
+    // An activation is rank zero, or under a batched branch shaped like its
+    // node's leading axes (spec/10 §3), so it widens to the contribution's
+    // shape by expanding the trailing axes, as `lower_if` widens a scalar
+    // condition. A contribution that does not carry those axes cannot be
+    // masked row by row, and is a typed rejection rather than a mask along
+    // the wrong axis.
+    let activation_dims = dag
+        .get(activation)
+        .expect("an activation is a node of the graph")
+        .output_type
+        .dims
+        .clone();
+    if activation_dims.len() > ty.dims.len()
+        || activation_dims[..] != ty.dims[..activation_dims.len()]
+    {
+        return Err(BackwardFailure::Rejected(AdError::not_supported(
+            risc_op_name(&consumer.op),
+            AdRejectionReason::ActivationNotLeadingAxes,
+        )));
+    }
+    let mut condition = activation;
+    let mut dims = activation_dims.clone();
+    for (axis, dim) in ty.dims.iter().enumerate().skip(activation_dims.len()) {
+        dims.push(dim.clone());
+        let (size, inputs) = match dim {
+            DimInfo::Lit(value) | DimInfo::Named(_, Some(value)) => {
+                (RtDim::Lit(*value), vec![condition])
+            }
+            DimInfo::Named(_, None) => (
+                RtDim::InputAxis {
+                    tensor: 1,
+                    axis: RtAxis::Lit(i32::try_from(axis).expect("tensor rank fits i32")),
+                },
+                vec![condition, contribution],
+            ),
+        };
+        condition = dag.add_node(
+            owner,
+            RiscOp::Expand { axis, size },
+            inputs,
+            TensorType {
+                dims: dims.clone(),
+                precision: Prim::Bool,
+            },
+            None,
+        );
+    }
+    let zero = dag.add_node(
+        owner,
+        RiscOp::synth_const(ty.precision, 0.0),
+        vec![],
+        ty.clone(),
+        None,
+    );
+    dag.add_shape_dep(zero, contribution);
+    Ok(dag.add_node(
+        owner,
+        RiscOp::Where,
+        vec![condition, contribution, zero],
+        ty,
+        None,
+    ))
+}
+
+/// Whether `inner` holds only where `outer` holds: `inner` is `outer`, or has
+/// it among its `And` conjuncts, transitively. `None` (every execution) implies
+/// no activation.
+fn activation_implies(dag: &Dag, inner: Option<NodeId>, outer: NodeId) -> bool {
+    let mut stack = inner.into_iter().collect::<Vec<_>>();
+    let mut seen = Vec::new();
+    while let Some(node) = stack.pop() {
+        if node == outer {
+            return true;
+        }
+        if seen.contains(&node) {
+            continue;
+        }
+        seen.push(node);
+        if let Some(conjunction) = dag.get(node)
+            && matches!(conjunction.op, RiscOp::Logical(LogicalKind::And))
+        {
+            stack.extend(conjunction.inputs.iter().copied());
+        }
+    }
+    false
 }
 
 /// Combine one forward value's incoming cotangent contributions in the exact
@@ -4012,6 +4181,120 @@ mod tests {
             crate::verify::verify(&grad_result.dag).is_empty(),
             "grad result should be structurally valid"
         );
+    }
+
+    /// `where(lt(5, x), x * log(x), x)` with the product and the `log` under
+    /// the arm's activation, as `lower_if` builds them.
+    fn arm_of_x_log_x() -> (Dag, NodeId, NodeId) {
+        build_unary_dag(|dag, owner, x, ty| {
+            let five = dag.add_node(
+                owner,
+                RiscOp::synth_const(Prim::F64, 5.0),
+                vec![],
+                ty.clone(),
+                None,
+            );
+            let condition = dag.add_node(
+                owner,
+                RiscOp::Compare(ComparisonKind::CmpLt),
+                vec![five, x],
+                TensorType {
+                    dims: vec![],
+                    precision: Prim::Bool,
+                },
+                None,
+            );
+            let arm = Owner::new(owner.decl, Some(condition));
+            let log = dag.add_node(arm, RiscOp::Log, vec![x], ty.clone(), None);
+            let product = dag.add_node(arm, RiscOp::Mul, vec![x, log], ty.clone(), None);
+            dag.add_node(
+                owner,
+                RiscOp::Where,
+                vec![condition, product, x],
+                ty.clone(),
+                None,
+            )
+        })
+    }
+
+    /// spec/06 §2.10.1: at `x = 0` the arm is not taken and its product's
+    /// adjoint for `x` is `0 * log(0) = 0 * -inf`; the mask selects it away,
+    /// so the gradient is the else arm's 1. At `x = 7` the arm is taken and
+    /// the gradient is `log(7) + 1`.
+    ///
+    /// Evidentiary status: REGRESSION TEST (NaN at `x = 0` without
+    /// [`mask_to_activation`]).
+    #[test]
+    fn an_untaken_arms_contribution_is_selected_away_by_its_activation() {
+        let (dag, x, out) = arm_of_x_log_x();
+        let grad_result = grad_dag(&dag, out, &[x]).unwrap();
+        let gradient = |at: f64| {
+            let inputs = UnordMap::from_iter([("x".to_string(), at)]);
+            eval_scalar(&grad_result.dag, &inputs)[&grad_result.grad_nodes[&x]]
+        };
+        assert_eq!(gradient(0.0), 1.0);
+        assert_grad_close(gradient(7.0), 7.0f64.ln() + 1.0);
+    }
+
+    /// The mask widens an activation over its node's leading axes only; a
+    /// contribution that does not carry them is a typed rejection, never a
+    /// panic and never an unmasked contribution. Surface programs do not
+    /// reach it (`vmap` batches every node an arm's activation covers), so
+    /// the graph is built directly: a `[2]` activation over a `[3]` negation.
+    ///
+    /// Evidentiary status: DISPOSITION LOCK.
+    #[test]
+    fn a_contribution_without_its_activations_leading_axes_is_refused() {
+        let mut dag = Dag::new();
+        let owner = Owner::from(dag.declare("test"));
+        let vector = |len| TensorType {
+            dims: vec![DimInfo::Lit(len)],
+            precision: Prim::F64,
+        };
+        let x = dag.add_node(
+            owner,
+            RiscOp::Load { name: "x".into() },
+            vec![],
+            vector(3),
+            None,
+        );
+        let rows = dag.add_node(
+            owner,
+            RiscOp::Load {
+                name: "rows".into(),
+            },
+            vec![],
+            TensorType {
+                dims: vec![DimInfo::Lit(2)],
+                precision: Prim::Bool,
+            },
+            None,
+        );
+        let negated = dag.add_node(
+            Owner::new(owner.decl, Some(rows)),
+            RiscOp::Neg,
+            vec![x],
+            vector(3),
+            None,
+        );
+        let out = dag.add_node(
+            owner,
+            RiscOp::Sum {
+                axis: 0,
+                accumulator: Prim::F64,
+            },
+            vec![negated],
+            scalar_f64(),
+            None,
+        );
+        assert_eq!(
+            grad_dag_checked(&dag, out, &[x]).err(),
+            Some(AdError::NotSupported {
+                op: "neg",
+                reason: AdRejectionReason::ActivationNotLeadingAxes,
+            })
+        );
+        assert!(grad_dag(&dag, out, &[x]).is_none());
     }
 
     // ================================================================

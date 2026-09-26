@@ -5538,6 +5538,7 @@ fn lower_def_body_kernel(
         dag,
         #[cfg(feature = "lowering-trace")]
         _trace,
+        program,
         &signature.scope,
         tensor_helpers,
         expected,
@@ -5954,6 +5955,7 @@ fn try_lower_tensor_helper_call_inner(
         product.dag,
         #[cfg(feature = "lowering-trace")]
         product.trace,
+        program,
         scope,
         tensor_helpers,
         expected,
@@ -6531,6 +6533,7 @@ fn lower_tensor_helper_dag_with_controls(
 
 fn finish_tensor_helper_call(
     dag: crate::Dag,
+    program: &HostLoweringSession<'_>,
     scope: &UnordMap<String, HostTypeTerm>,
     tensor_helpers: &mut TensorHelperSink,
     expected: TensorType,
@@ -6539,6 +6542,7 @@ fn finish_tensor_helper_call(
         dag,
         #[cfg(feature = "lowering-trace")]
         None,
+        program,
         scope,
         tensor_helpers,
         expected,
@@ -6548,6 +6552,7 @@ fn finish_tensor_helper_call(
 fn finish_tensor_helper_product(
     dag: crate::Dag,
     #[cfg(feature = "lowering-trace")] trace: Option<crate::lowering_trace::HelperLoweringTrace>,
+    program: &HostLoweringSession<'_>,
     scope: &UnordMap<String, HostTypeTerm>,
     tensor_helpers: &mut TensorHelperSink,
     expected: TensorType,
@@ -6587,7 +6592,7 @@ fn finish_tensor_helper_product(
         [] => HostTypeTerm::Tensor(expected.clone()),
         _ => HostTypeTerm::Tuple(root_tys),
     };
-    let args = tensor_helper_args(&inputs, scope);
+    let args = tensor_helper_args(program, &inputs, scope);
     // A summary runs the helper's root operation and nothing else, so a
     // helper whose evaluation runs discarded work, such as a trapping `let`
     // nothing reads, is not a summary candidate: the summary would drop that
@@ -6776,7 +6781,8 @@ fn lower_staged_host_plan(
                     .expect("kernel root")
                     .output_type
                     .clone();
-                let call = finish_tensor_helper_call(dag.clone(), &scope, helpers, expected);
+                let call =
+                    finish_tensor_helper_call(dag.clone(), program, &scope, helpers, expected);
                 let ty = host_expr_type(&call);
                 if outputs.len() == 1 {
                     bindings.push(HostBinding {
@@ -11618,7 +11624,7 @@ fn try_lower_general_list_grad_app(
     }
 
     let helper_number = tensor_helpers.len();
-    let call = finish_tensor_helper_call(lowered.dag, scope, tensor_helpers, expected);
+    let call = finish_tensor_helper_call(lowered.dag, program, scope, tensor_helpers, expected);
     let binding_name = format!("__grad_result_{helper_number}");
     let binding_ty = host_expr_type(&call);
     let mut value_roots = (0..lowered.value_root_count)
@@ -16017,7 +16023,15 @@ fn lower_list_literal_items(
     }
 }
 
+/// The host values a tensor helper's inputs read, one per input `Load`, each
+/// typed as the value the host holds under that name: a binding in `scope`,
+/// or else the top-level value declaration the name resolves to (a global,
+/// which a function body reads when a helper re-lowers a referenced value's
+/// initializer, spec/06 §5.2). A rank-zero input is ambiguous between a host
+/// scalar and a rank-zero tensor, so only a name that is neither is typed
+/// from its `Load` alone.
 fn tensor_helper_args(
+    program: &HostLoweringSession<'_>,
     inputs: &[HostTensorInput],
     scope: &UnordMap<String, HostTypeTerm>,
 ) -> Vec<HostExpr> {
@@ -16029,10 +16043,25 @@ fn tensor_helper_args(
                 scope
                     .get(&input.name)
                     .cloned()
+                    .or_else(|| top_level_value_host_type(program, &input.name))
                     .unwrap_or_else(|| host_type_from_tensor_input(&input.ty)),
             ))
         })
         .collect()
+}
+
+/// The host type of the top-level value declaration `name` resolves to: the
+/// checked type of its initializer, which its global holds. `None` when
+/// `name` resolves to no declaration or to a function.
+fn top_level_value_host_type(
+    program: &HostLoweringSession<'_>,
+    name: &str,
+) -> Option<HostTypeTerm> {
+    let (_, value) = program.def_named(name)?;
+    if matches!(stamped_parts(value), Some((DeepTag::Fn, _, _))) {
+        return None;
+    }
+    Some(expr_host_type(value, program, &UnordMap::new()))
 }
 
 fn tensor_helper_inputs(dag: &crate::Dag) -> Vec<HostTensorInput> {
