@@ -590,7 +590,7 @@ the transform boundary (reachability-scoped).
 
 | Command | Purpose | Style gate? |
 |---|---|---|
-| `build` | Compile to C/HIP/Metal (`--target {c\|hip\|metal}`, default `c`) | yes |
+| `build` | Compile to C/HIP/Metal (`--target {c\|hip\|metal}`, default `c`), staging the runtime `chelis` carries | yes |
 | `check` | Type/effect/linearity front-end (`--show-inferred`) | yes |
 | `validate` | Syntax validation (`--surf`/`--deep`/`--desugar`) | file subject |
 | `eval` | Evaluate expr or `--file` (`--json`) | yes (file) |
@@ -604,6 +604,7 @@ the transform boundary (reachability-scoped).
 | `tide` | REPL / HTTP API / MCP / LSP server (`serve`, `mcp`, `lsp`) | no |
 | `cove` | Terminal UI (`--file`) | no |
 | `reef` | Package manager (`init`, `build`, `publish`, `install`) | no |
+| `runtime` | `export <dir>`: write the carried runtime archive, public headers and staging receipt | no |
 
 The style gate (`fmt --check` + blocking `lint`) runs inside `build`, `check`,
 `validate`, and `eval --file`. Bypass with `--allow-style-violations` (never in CI) or

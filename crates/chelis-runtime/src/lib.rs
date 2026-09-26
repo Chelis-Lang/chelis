@@ -31,6 +31,7 @@ use metadata::{
     ShapeMetadata, SparseMetadata, StridedMetadata, WindowMetadata,
 };
 mod ownership_ledger;
+pub mod public_headers;
 
 #[cfg(test)]
 mod runtime_dtype_contract_tests;

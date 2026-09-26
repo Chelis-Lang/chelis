@@ -1,0 +1,16 @@
+[package]
+name = "chelis-runtime-bundle-macro"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Embeds the runtime static archive produced beside the linked chelis-runtime library."
+
+[lib]
+proc-macro = true
+
+[dependencies]
+sha2 = "0.10"
+
+[lints]
+workspace = true

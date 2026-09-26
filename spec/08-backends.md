@@ -119,59 +119,45 @@ function declarations or the four-argument public tensor ABI.
 
 ### 2.1 Runtime artifact identity
 
-A runtime build SHALL carry a versioned, canonical, domain-separated SHA-256
-descriptor of its runtime recipe. Compatibility is exact descriptor equality;
-a release version, pathname, filename hash, modification time, or compiler image
-identity SHALL NOT substitute for that descriptor. Its compatibility dimensions are:
+A compiler build carries its runtime: the static archive and public runtime
+headers produced by the runtime compilation unit that the same build links. The
+CLI and the Python extension SHALL stage, link and export only those carried
+bytes. They SHALL NOT select a runtime archive by searching directories or by
+file name, modification time, enumeration order, location relative to the
+executable, or environment variable. A set `CHELIS_RUNTIME_DIR` SHALL be rejected
+before staging; it is neither honored nor ignored.
 
-- The complete runtime source and declared build-input closure: logical paths and
-  bytes, relevant dirty or untracked inputs, transitive local dependencies,
-  manifests and lock resolution, build scripts and their declared generated or
-  configuration inputs, and resolved external dependency identities and checksums.
-- The complete shipped public runtime-header closure and its ABI identity.
-- The actual target specification/triple and effective target CPU and features.
-- The effective runtime and dependency feature closure, including explicitly
-  selected `ownership-ledger` instrumentation.
-- Directly observed runtime optimization, debug information, debug assertions,
-  panic strategy, rustflags reaching compilation, and Cargo debug/release profile
-  class. A profile name or a reconstruction of Cargo configuration files is not
-  an observation. Overflow-check, LTO, codegen-unit and custom-profile-name
-  settings are not separate compatibility dimensions.
-- The compiler identity and code-affecting native/build tool inputs.
+The carried archive SHALL be the static-library output of the same runtime
+compilation that produced the Rust library the consumer links. A compilation
+that emits linkable output and cannot locate that archive SHALL fail. A
+compilation that emits no linkable output MAY carry an inert placeholder, and
+staging and export SHALL refuse it. A sealed distribution build SHALL carry no
+build path.
 
-Absolute checkout locations and timestamps are not compatibility inputs. The
-runtime recipe, rather than unrelated compiler features or a host build script's
-recipe, governs these dimensions. Missing or unrecordable required inputs SHALL
-fail production; they SHALL NOT be omitted or filled with inferred defaults.
+Staging SHALL replace each staged file atomically, verify the written archive
+against the carried SHA-256 digest before publishing it, and write
+`chelis_runtime.receipt.json` last, recording that digest, the header digests and
+the build mode; a staging without a receipt is incomplete. The receipt records
+staging only; it makes no claim about linking or
+execution. `chelis build` SHALL name the staged archive and its digest on stdout.
+Link commands that Chelis prints or runs SHALL name the staged archive by path,
+never through a library search.
 
-Build-level observation MAY supply compilation-unit facts that package build
-scripts cannot observe. Reused build inputs SHALL be bound to the actual cached
-compilation units and validated before reuse. Cache filenames, prior successful
-builds, or matching source timestamps do not establish that binding. Additions,
-deletions and content changes in the required input closure SHALL invalidate the
-affected production. No producing build script invokes Cargo recursively.
+A development build SHALL refuse to stage when the runtime's declared source
+inputs changed after it was built. The runtime compilation SHALL record a digest for
+each file of the runtime crate, of its workspace dependencies, and of the
+workspace lockfile; a changed or missing recorded file, or an unrecorded file in
+those roots, fails staging with its path. A sealed distribution build is
+declared when it is built and reads no source checkout. An unavailable checkout
+SHALL NOT select sealed mode.
 
-The runtime compilation SHALL emit one private retained identity record in its
-native archive. Its decoder SHALL parse the archive and native object sections,
-without executing the candidate, and distinguish missing, duplicate (including
-identical duplicates), malformed, truncated and unsupported records. The complete
-archive-byte digest is separate from the embedded descriptor. A post-build scan or
-adjacent sidecar SHALL NOT relabel an existing archive with current source identity.
+A distribution that ships a runtime archive or headers beside a compiler SHALL
+take them from that compiler's runtime export and SHALL verify the archive
+against the export's digest. The carried runtime adds no C callable and does not
+change callable metadata `abi_version: 2` (spec/11 §1.4).
 
-CLI and Python extension builds SHALL derive their expected runtime descriptors
-independently from complete observed runtime inputs, without adopting a candidate
-archive's descriptor or another compiler's expectation. They SHALL emit explicit
-source-worktree or sealed-distribution provenance separately from compatibility.
-Source-worktree provenance identifies its required source root and runtime recipe;
-an unavailable root requires rebuilding and SHALL NOT select sealed mode.
-Sealed production still requires complete inputs at build time, but does not require
-the build checkout at consumption. Neither producer evidence nor provenance alone
-establishes that a later native artifact was selected, staged, linked or executed.
-
-The record does not add a C callable or change callable metadata
-`abi_version: 2` (spec/11 §1.4). Producer acceptance and subsequent consumer
-enforcement are separate claims; producer support alone does not certify the
-existing archive selectors or a source-free installed package.
+(The Python extension's carried runtime and development freshness are not yet
+implemented; see [#1354](https://github.com/Chelis-Lang/chelis/issues/1354).)
 
 ## 3. Phase 1: HIP Backend
 

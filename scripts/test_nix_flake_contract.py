@@ -94,6 +94,18 @@ def assert_automatic_crate2nix_contract(
         )
 
 
+RUNTIME_EXPORT_HEADER = re.compile(
+    r'cp "\$runtime_export/(chelis_[^\s/"]+\.h)" "\$staging/include/"'
+)
+
+
+def release_staging_steps(release: str) -> list[str]:
+    """Each release job's `Stage tarball contents` step, up to its next step."""
+    marker = "      - name: Stage tarball contents\n"
+    return [part.split("\n      - name: ", 1)[0] for part in release.split(marker)[1:]]
+
+
+
 class NixFlakeContractTests(unittest.TestCase):
     @REQUIRES_NIX
     def test_contract_records_exact_release_header_manifest(self) -> None:
@@ -103,18 +115,30 @@ class NixFlakeContractTests(unittest.TestCase):
         release = (REPO_ROOT / ".github" / "workflows" / "release.yml").read_text(
             encoding="utf-8"
         )
-        staged_headers = set(
-            re.findall(
-                r"cp crates/chelis-runtime/include/(chelis_[^\s/]+\.h) "
-                r'"\$staging/include/"',
-                release,
-            )
-        )
-        self.assertEqual(staged_headers, set(EXPECTED_HEADERS))
-        self.assertIn('cp target/release/chelis "$staging/bin/"', release)
-        self.assertIn(
-            'cp target/release/libchelis_runtime.a "$staging/lib/"', release
-        )
+        # Every release job ships the runtime its chelis carries: `lib/` and
+        # `include/` come from `chelis runtime export`, and the shipped archive
+        # must match the sealed export's receipt (spec/08-backends.md §2.1).
+        steps = release_staging_steps(release)
+        self.assertEqual(len(steps), 3, "each release job stages one tarball")
+        for step in steps:
+            with self.subTest(staging=re.search(r'staging="([^"]+)"', step).group(1)):
+                self.assertIn('cp target/release/chelis "$staging/bin/"', step)
+                self.assertIn(
+                    './target/release/chelis runtime export "$runtime_export"', step
+                )
+                self.assertIn(
+                    'cp "$runtime_export/libchelis_runtime.a" "$staging/lib/"', step
+                )
+                self.assertIn('("sealed", digest)', step)
+                self.assertIn(
+                    '"$runtime_export/chelis_runtime.receipt.json" '
+                    '"$staging/lib/libchelis_runtime.a"',
+                    step,
+                )
+                self.assertEqual(
+                    set(RUNTIME_EXPORT_HEADER.findall(step)), set(EXPECTED_HEADERS)
+                )
+        self.assertNotIn("target/release/libchelis_runtime.a", release)
         self.assertEqual(
             contracts["runtimeConsumers"],
             {"aarch64-darwin": "Accelerate", "x86_64-linux": "OpenBLAS"},
@@ -599,10 +623,35 @@ class NixSourceContractTests(unittest.TestCase):
             cargo_nix_exists=(REPO_ROOT / "Cargo.nix").exists(),
         )
         self.assertIn('workspaceMembers."chelis-cli".build', packages)
-        self.assertIn('workspaceMembers."chelis-runtime".build', packages)
         self.assertIn('workspaceMembers."chelisup".build', packages)
-        self.assertIn('features = [ "smt" ];', packages)
         self.assertNotIn("buildRustPackage", packages)
+
+    def test_packages_ship_the_sealed_compilers_runtime_export(self) -> None:
+        # `chelis` and `chelis-runtime` ship the runtime the compiler carries,
+        # never a separately built crate (spec/08-backends.md §2.1).
+        packages = (REPO_ROOT / "nix" / "packages.nix").read_text(encoding="utf-8")
+        compiler = re.search(
+            r'compilerCrate = cargoGraph\.workspaceMembers\."chelis-cli"\.build\.override \{\s*'
+            r"features = \[([^\]]*)\];",
+            packages,
+        )
+        self.assertIsNotNone(compiler, "the compiler crate override is missing")
+        self.assertEqual(
+            set(re.findall(r'"([^"]+)"', compiler.group(1))), {"smt", "sealed-runtime"}
+        )
+        self.assertNotIn('workspaceMembers."chelis-runtime"', packages)
+        runtime = packages.split('runtime = pkgs.runCommand "chelis-runtime-${version}"', 1)[
+            1
+        ].split("\n  '';", 1)[0]
+        for line in (
+            '${compiler}/bin/chelis runtime export "$export_dir"',
+            'test "$(jq -r .mode "$receipt")" = sealed',
+            'test "$archive_sha256" = "$(jq -r .archive_sha256 "$receipt")"',
+        ):
+            self.assertIn(line, runtime)
+        self.assertIn(
+            "cp ${runtime}/lib/libchelis_runtime.a $out/lib/libchelis_runtime.a", packages
+        )
 
     def test_disabled_ifd_fails_the_automatic_graph_contract(self) -> None:
         flake = (REPO_ROOT / "flake.nix").read_text(encoding="utf-8")

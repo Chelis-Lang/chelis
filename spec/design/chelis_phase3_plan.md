@@ -422,8 +422,9 @@ more C-side ownership risk exactly where the language is getting broader.
 - `chelis build` emits generated source/header plus `chelis_runtime.h` and
   `libchelis_runtime.a`
 - `chelis_runtime.c` stops being an emitted build artifact
-- runtime library discovery order is explicit: `CHELIS_RUNTIME_DIR`, then path
-  relative to `current_exe()`, then a clear hard failure
+- `chelis build` stages the runtime the CLI carries and rejects a set
+  `CHELIS_RUNTIME_DIR` (`spec/08-backends.md` §2.1; chelis#1354 replaced the
+  original directory discovery order)
 
 ### Implementation Shape
 
@@ -442,7 +443,7 @@ A mixed tensor + host-value Chelis program can:
 
 - build through `chelis build --target c`
 - emit `chelis_runtime.h` and `libchelis_runtime.a` but not `chelis_runtime.c`
-- compile and link with `-lchelis_runtime`
+- compile and link against the staged `libchelis_runtime.a`
 - run as a native binary and match `chelis eval`
 
 Authoritative oracle:
@@ -451,7 +452,7 @@ Authoritative oracle:
 
 Manual HIP mirror gate:
 
-- `CHELIS_RUNTIME_DIR=<runtime-dir> cargo test -p chelis-cli phase3m_rust_runtime_hip_manual_gate -- --ignored --nocapture`
+- `cargo test -p chelis-cli phase3m_rust_runtime_hip_manual_gate -- --ignored --nocapture`
 
 ---
 
@@ -1814,8 +1815,8 @@ Before calling Phase 3 healthy enough to continue, red-team these concrete surfa
 
 - no active docs or build/test paths still rely on `chelis_runtime.c`
 - generated host C no longer peeks into non-tensor runtime struct fields
-- runtime discovery failures clearly mention `libchelis_runtime.a` and
-  `CHELIS_RUNTIME_DIR`
+- `chelis build` stages only the runtime the CLI carries and rejects a set
+  `CHELIS_RUNTIME_DIR` (`spec/08-backends.md` §2.1)
 - mixed-program compiled execution matches `chelis eval` on both C and HIP paths
 
 **Data loading/tokenization (`3g`):**

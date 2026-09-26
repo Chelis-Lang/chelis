@@ -28,6 +28,7 @@ chelis-types = { path = "../chelis-types" }
 chelis-effects.workspace = true
 chelis-ir = { path = "../chelis-ir" }
 chelis-runtime.workspace = true
+chelis-runtime-bundle.workspace = true
 chelis-backend-c = { path = "../chelis-backend-c" }
 chelis-backend-hip = { path = "../chelis-backend-hip" }
 chelis-backend-metal = { path = "../chelis-backend-metal" }
@@ -51,6 +52,9 @@ walkdir = "2"
 # that Tide uses, so solver availability cannot fork fuzz semantics.
 default = ["chelis-prove"]
 smt = ["chelis-prove/smt", "chelis-tide/smt"]
+# Distribution builds (release, Nix) are sealed builds (spec/08-backends.md
+# §2.1); staging receipts record the mode.
+sealed-runtime = ["chelis-runtime-bundle/sealed"]
 
 [dev-dependencies]
 assert_cmd = "2"
