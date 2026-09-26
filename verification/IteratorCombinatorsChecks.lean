@@ -132,6 +132,16 @@ set_option synthInstance.maxSize 512 in
     (decode id chainRestoration) (.ok (4, (1, 11)))
   expect "zip constructor restores terminal right state through IntoIterator lens"
     (decode id zipRestoration) (.ok (2, (4, 11)))
-  IO.println "Iterator combinator smoke: 22 behavioral checks passed"
+  expect "random-access zip collects enumerated fields over the shorter length"
+    (decode (fun (v : alloc.vec.Vec (Usize × U8 × U8)) =>
+      v.val.map fun (x : Usize × U8 × U8) => (x.1.val, x.2.1.val, x.2.2.val))
+      iterator_combinators.zip_collect_fields)
+    (.ok [(0, 1, 7), (1, 2, 8)])
+  expect "random-access zip collect runs the left callback on zipped positions only"
+    (decode (fun ((v, calls) : alloc.vec.Vec (U8 × U8) × Usize) =>
+      (v.val.map fun (x : U8 × U8) => (x.1.val, x.2.val), calls.val))
+      iterator_combinators.zip_collect_mapped)
+    (.ok ([(1, 7)], 1))
+  IO.println "Iterator combinator smoke: 24 behavioral checks passed"
 
 end IteratorCombinatorsChecks

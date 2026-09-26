@@ -71,4 +71,33 @@ set_option synthInstance.maxSize 512 in
       (sharedCount.val, sharedCalls.val, ownedCount.val, ownedCalls.val))
       btree_maps.zipped_iterator_callbacks)
     (.ok (1, 1, 1, 1))
-  IO.println "BTreeMap smoke: 18 behavioral checks passed"
+  expect "keys map and collect into a map in key order"
+    (decode pairs btree_maps.keys_collected) (.ok [(1, 10), (2, 20), (3, 30)])
+  expect "keys and values iterate in key order with exact hints"
+    (decode (fun ((ranks, values, (lower, upper), first, count) :
+        alloc.vec.Vec U32 × alloc.vec.Vec U32 × (Usize × Option Usize) × Option U32 × Usize) =>
+      (ranks.val.map UScalar.val, values.val.map UScalar.val, lower.val, upper.map UScalar.val,
+        first.map UScalar.val, count.val))
+      btree_maps.keys_and_values)
+    (.ok ([2, 3], [100, 200, 300], 2, some 2, some 10, 3))
+  expect "map equality compares lengths, then entries through their PartialEq"
+    (decode id btree_maps.maps_equal) (.ok (true, true, false, false))
+  expect "a next-only crate source is converted once and polled to its first None"
+    (decode (fun ((entries, polls) : alloc.vec.Vec (U32 × U32) × U32) =>
+      (pairs entries, polls.val)) (btree_maps.delegated_collection_state 2#u32))
+    (.ok ([(1, 10), (2, 20)], 13))
+  expect "an empty next-only crate source is polled once"
+    (decode (fun ((entries, polls) : alloc.vec.Vec (U32 × U32) × U32) =>
+      (pairs entries, polls.val)) (btree_maps.delegated_collection_state 0#u32))
+    (.ok ([], 11))
+  expect "for over &map visits entries in key order and leaves the map"
+    (decode (fun ((entries, empty) : alloc.vec.Vec (U32 × U32 × U32) × Bool) =>
+      (triples entries, empty)) btree_maps.borrowed_for_loop)
+    (.ok ([(1, 10, 100), (2, 20, 200), (3, 30, 300)], false))
+  expect "&map as a generic IntoIterator dictionary"
+    (decode UScalar.val btree_maps.borrowed_generic_total) (.ok 1400)
+  expect "&map as the IntoIterator dictionary of generic loops"
+    (decode (fun ((total, count, empty) : U32 × U32 × Bool) => (total.val, count.val, empty))
+      btree_maps.generic_loop_totals)
+    (.ok (1400, 3, false))
+  IO.println "BTreeMap smoke: 26 behavioral checks passed"

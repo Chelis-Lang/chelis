@@ -39,7 +39,7 @@ def checkWidth (f : BinaryFormat) : IO Unit := do
       IO.println s!"{label}{width}-{i}={value}"
     for (label, value) in [("neg", x.neg), ("abs", x.abs)] do
       IO.println s!"{label}{width}-{i}={value.bits.toNat}"
-    for (label, value) in [("trunc", x.trunc), ("fract", x.fract)] do
+    for (label, value) in [("trunc", x.trunc), ("fract", x.fract), ("floor", x.floor)] do
       if x.isFinite then IO.println s!"{label}{width}-{i}={value.bits.toNat}"
       else IO.println s!"{label}nan{width}-{i}={value.isNaN}"
     for (c, j) in [0, sign, one, inf, inf + 1].zipIdx do
@@ -92,6 +92,8 @@ def checkWidth (f : BinaryFormat) : IO Unit := do
   IO.println s!"widen-6={(F32.toF64 (f32 2139095039)).bits.toNat}"
   IO.println s!"widen-7={(F32.toF64 (f32 2139095040)).bits.toNat}"
   IO.println s!"widen-8={(F32.toF64 (f32 4286578688)).bits.toNat}"
+  for (b, i) in [0, 2147483648, 1, 1065353217, 2139095040, 4286578688].zipIdx do
+    emitFloat s!"widen-from-{i}" (core.convert.num.FromF64F32.from_ (f32 b))
   let castInputs : List Nat := [0x0, 0x8000000000000000, 0x3ff8000000000000, 0xbff8000000000000, 0x43dfffffffffffff, 0x43e0000000000000, 0xc3e0000000000000, 0xc3e0000000000001, 0x43efffffffffffff, 0x43f0000000000000, 0x47e0000000000000, 0x7ff0000000000000, 0xfff0000000000000, 0x7ff0000000000001]
   for (b, i) in castInputs.zipIdx do
     IO.println s!"cast-i8-{i}={(F64.toIScalar .I8 (f64 b)).val}"

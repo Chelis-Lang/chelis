@@ -1,0 +1,19 @@
+# Native oracles for the Lean models of external crates (half, num-bigint, sha2).
+# Standalone: not a member of the Chelis workspace. Versions are the ones
+# pinned by the workspace Cargo.lock.
+[package]
+name = "crate-model-oracle"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[workspace]
+
+[dependencies]
+half = { version = "=2.7.1", features = ["serde"] }
+num-bigint = "=0.4.6"
+sha2 = "=0.10.9"
+
+[profile.release]
+debug = false
+overflow-checks = true

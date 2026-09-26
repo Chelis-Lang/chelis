@@ -2,6 +2,7 @@
 
 import argparse
 from difflib import unified_diff
+import json
 import os
 from pathlib import Path
 import shlex
@@ -37,7 +38,25 @@ MODELS = {
     "uninhabited_variants": "UninhabitedVariants",
     "inherited_dispatch": "InheritedDispatch",
     "move_cleanup": "MoveCleanup",
+    "capacity_std_models": "CapacityStdModels",
+    "generic_collectors": "GenericCollectors",
+    "range_product_models": "RangeProductModels",
+    "lowering_runtime_models": "LoweringRuntimeModels",
+    "start_from_roots": "StartFromRoots",
+    "owned_zip": "OwnedZip",
+    "kernel_std_models": "KernelStdModels",
+    "text_std_models": "TextStdModels",
+    "closure_mut_args": "ClosureMutArgs",
 }
+
+# Fixtures of crate-local native primitives compile under the production crate
+# name, so that the models keyed on production paths replace their primitives.
+MODEL_CRATES = {"lowering_runtime_models": "chelis_ir"}
+
+# The native shell of a primitives fixture: the items of
+# verification/native_shell.json under this prefix, hard-opaque as in the
+# production extraction.
+MODEL_SHELLS = {"lowering_runtime_models": "chelis_ir::lowering_runtime::"}
 
 # Retain the post-move discriminant checks produced by drop elaboration.
 MODEL_MIR = {"move_cleanup": "elaborated"}
@@ -48,16 +67,39 @@ MODEL_EDITIONS = {"join_shared_projection": "2024"}
 # These regressions require a restricted root, rather than all local items.
 MODEL_ROOTS = {
     "inherited_dispatch": ("inherited_dispatch::count_visible",),
+    # Charon's canonical patterns, as in the whole-core chunks, and a comma-joined list.
+    "start_from_roots": (
+        "start_from_roots::plain,start_from_roots::other",
+        "start_from_roots::{impl start_from_roots::Counter}::bump",
+        "start_from_roots::{impl start_from_roots::Scale<u32> for start_from_roots::Counter}::scale",
+        "start_from_roots::offsets::{impl core::ops::function::Fn<Tuple<u32>>"
+        " for start_from_roots::offsets::closure#10}::call",
+        "start_from_roots::_#1::{impl start_from_roots::Counter}::reset",
+    ),
     "btree_maps": tuple(f"btree_maps::{entry}" for entry in (
         "ordered_insert", "equivalent_replacement", "occupied_restoration",
         "vacant_restoration", "dropped_entries", "remove_and_lookup",
         "missing_lookup", "shared_exhaustion", "owned_exhaustion", "owned_collect",
         "shared_collect", "duplicate_from_iterator", "empty_from_iterator",
-        "wrapped_entry_restoration", "zipped_iterator_callbacks",
+        "wrapped_entry_restoration", "zipped_iterator_callbacks", "keys_collected",
+        "keys_and_values", "maps_equal", "delegated_collection_state", "borrowed_for_loop",
+        "borrowed_generic_total", "generic_loop_totals",
     )),
     "btree_sets": (
         "btree_sets::duplicate_from_iterator", "btree_sets::borrowed_lookup",
+        "btree_sets::delegated_collection_state",
     ),
+    "generic_collectors": tuple(f"generic_collectors::{entry}" for entry in (
+        "map_collected", "set_collected", "map_extended", "set_extended", "custom_source",
+        "custom_vec",
+    )),
+    "lowering_runtime_models": tuple(f"chelis_ir::{entry}" for entry in (
+        "speculation_flags", "summary_probes", "preflight_frames", "host_inference_vars",
+        "profile_declarations", "profile_unissued_mark", "scoped_push", "grown_push",
+        "speculative_rejection", "rejection_after_inner_catch", "fatal_reraise",
+        "uncaught_rejection", "caught_with_state",
+        "lowering_runtime::{chelis_ir::lowering_runtime::LoweringFailure}::resume_at_boundary",
+    )),
     "associated_iterators": tuple(f"associated_iterators::{entry}" for entry in (
         "copied_signature", "cloned_signature", "copied_resume", "cloned_resume",
         "copied_any_resumes", "cloned_any_resumes", "cloned_first", "copied_count",
@@ -74,17 +116,11 @@ MODEL_ROOTS = {
 # These native behaviors require collection hooks absent from the value-only
 # models. Strict extraction must reject them, including through generic delegates.
 REJECTED_ROOTS = {
-    "btree_maps": ("btree_maps::delegated_collection_state",),
-    "btree_sets": ("btree_sets::delegated_collection_state",),
-    "associated_iterators": (
-        "associated_iterators::generic_filter_map_collect",
-        "associated_iterators::filter_map_collect",
-    ),
     "collection_contracts": tuple(f"collection_contracts::{entry}" for entry in (
         "reject_vec_hint", "reject_empty_hint", "reject_map_hint", "reject_set_hint",
         "reject_extend_hint", "reject_wrapped_hint", "reject_result_hint",
-        "reject_generic_iterator", "reject_generic_collector", "reject_zip_consumer",
-        "reject_default_iterator", "reject_borrowed_map_hint",
+        "reject_generic_collector", "reject_zip_consumer",
+        "reject_borrowed_map_hint", "reject_mapped_vec_zip", "reject_drop_vec_zip",
     )),
 }
 
@@ -107,6 +143,44 @@ def check_float_model(lean_library: Path, root: Path) -> None:
             ))
             raise RuntimeError("Floating model disagrees with the native boundary oracle")
         print(f"Floating model smoke: {len(expected.splitlines())} native/Lean observations agree")
+
+
+# Models of external crates: native oracle binaries of the standalone
+# `crate_model_oracle` package (pinned crate versions) against Lean check files.
+CRATE_MODELS = {
+    "half_model": ("half_model_oracle", "HalfModelChecks.lean"),
+    "biguint_model": ("biguint_model_oracle", "BigUintModelChecks.lean"),
+    "sha256_model": ("sha256_model_oracle", "Sha256ModelChecks.lean"),
+}
+
+
+def crate_oracle_command(binary: str, target: Path, root: Path) -> list[str]:
+    return [
+        "cargo", "run", "--offline", "--locked", "--release", "--quiet",
+        "--manifest-path", str(root / "verification" / "crate_model_oracle" / "Cargo.toml"),
+        "--target-dir", str(target), "--bin", binary,
+    ]
+
+
+def check_crate_model(name: str, lean_library: Path, root: Path) -> None:
+    binary, checks = CRATE_MODELS[name]
+    with tempfile.TemporaryDirectory(prefix=f"chelis-{name}-") as directory:
+        target = Path(directory)
+        if name == "half_model":
+            # Exhaustive: host conversions (FCVT on aarch64+fp16) equal the crate's
+            # software algorithms that the Lean models transliterate.
+            run(crate_oracle_command("half_hw_sw", target, root), root)
+        expected = run(crate_oracle_command(binary, target, root), root, capture=True)
+    actual = run([
+        "lake", "env", "lean", str(root / "verification" / checks),
+    ], lean_library, capture=True)
+    if actual != expected:
+        sys.stderr.writelines(unified_diff(
+            expected.splitlines(keepends=True), actual.splitlines(keepends=True),
+            fromfile="native Rust", tofile="Lean model",
+        ))
+        raise RuntimeError(f"{name} disagrees with the native crate oracle")
+    print(f"{name} smoke: {len(expected.splitlines())} native/Lean observations agree")
 
 
 def charon_command(
@@ -143,9 +217,27 @@ def charon_command(
         "--include", "core::iter::traits::iterator::Iterator::by_ref",
         "--include", "{core::iter::traits::iterator::Iterator}::by_ref",
         *[argument for entry in roots for argument in ("--start-from", entry)],
+        *[argument for entry in shell_patterns(name) for argument in ("--opaque-hard", entry)],
         "--", f"--edition={MODEL_EDITIONS.get(name, '2021')}", "--crate-type=lib",
-        str(source),
+        *crate_arguments(name), str(source),
     ]
+
+
+def crate_arguments(name: str) -> list[str]:
+    """The crate name of a fixture."""
+    return [f"--crate-name={MODEL_CRATES[name]}"] if name in MODEL_CRATES else []
+
+
+def shell_patterns(name: str) -> tuple[str, ...]:
+    """The native shell of a fixture (see MODEL_SHELLS)."""
+    prefix = MODEL_SHELLS.get(name)
+    if prefix is None:
+        return ()
+    shell = json.loads((Path(__file__).resolve().parent / "native_shell.json").read_text())
+    return tuple(
+        item["pattern"] for item in shell["items"] if item["pattern"].startswith(prefix)
+    )
+
 
 
 def aeneas_command(llbc: Path, output: Path) -> list[str]:
@@ -192,7 +284,9 @@ def check_model(name: str, lean_library: Path, root: Path) -> None:
     with tempfile.TemporaryDirectory(prefix=f"chelis-{name}-") as directory:
         output = Path(directory)
         native = output / "native"
-        run(["model-rustc", edition, "--test", str(source), "-o", str(native)], root)
+        run([
+            "model-rustc", edition, *crate_arguments(name), "--test", str(source), "-o", str(native),
+        ], root)
         run([str(native)], root)
         llbc = output / f"{name}.llbc"
         run(charon_command(name, source, llbc, MODEL_ROOTS.get(name, ())), root)
@@ -217,15 +311,18 @@ def main() -> None:
         help="Built backends/lean directory from the pinned patched Aeneas source",
     )
     parser.add_argument(
-        "--model", choices=(*MODELS, "float_model", "collection_contracts"), action="append",
+        "--model", choices=(*MODELS, "float_model", *CRATE_MODELS, "collection_contracts"),
+        action="append",
         help="Check this model (repeatable); by default check every model",
     )
     args = parser.parse_args()
     lean_library = args.aeneas_lean_dir.resolve()
     root = Path(__file__).resolve().parent.parent
-    for name in args.model or ["float_model", *MODELS, "collection_contracts"]:
+    for name in args.model or ["float_model", *CRATE_MODELS, *MODELS, "collection_contracts"]:
         if name == "float_model":
             check_float_model(lean_library, root)
+        elif name in CRATE_MODELS:
+            check_crate_model(name, lean_library, root)
         elif name == "collection_contracts":
             check_collection_contracts(root)
         else:

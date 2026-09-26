@@ -354,6 +354,89 @@ pub fn zipped_iterator_callbacks() -> (usize, u32, usize, u32) {
     (shared_count, shared_calls, owned_count, owned_calls)
 }
 
+// `chelis-ir` ownership/last_use.rs: the keys of a map, mapped and collected
+// into a map.
+pub fn keys_collected() -> Vec<(u32, u32)> {
+    let map = populated();
+    let rekeyed = map
+        .keys()
+        .map(|key| (key.rank, key.identity))
+        .collect::<BTreeMap<u32, u32>>();
+    rekeyed.into_iter().collect()
+}
+
+/// `for (key, value) in &map`: IntoIterator for &BTreeMap is `self.iter()`,
+/// in key order, and leaves the map intact.
+pub fn borrowed_for_loop() -> (Vec<(u32, u32, u32)>, bool) {
+    let map = populated();
+    let mut visited = Vec::new();
+    for (key, value) in &map {
+        visited.push((key.rank, key.identity, *value));
+    }
+    (visited, map.is_empty())
+}
+
+/// The same impl as the IntoIterator dictionary of Vec's FromIterator.
+pub fn borrowed_generic_total() -> u32 {
+    let map = populated();
+    let entries: Vec<(&Key, &u32)> = Vec::from_iter(&map);
+    let mut total = 0;
+    for (key, value) in entries {
+        total += key.rank * *value;
+    }
+    total
+}
+
+fn weighted_total<'a, I: IntoIterator<Item = (&'a Key, &'a u32)>>(entries: I) -> u32 {
+    let mut total = 0;
+    for (key, value) in entries {
+        total += key.rank * *value;
+    }
+    total
+}
+
+fn entry_count<'a, K: 'a, V: 'a, I: IntoIterator<Item = (&'a K, &'a V)>>(entries: I) -> u32 {
+    let mut count = 0;
+    for (_key, _value) in entries {
+        count += 1;
+    }
+    count
+}
+
+/// `&map` as the IntoIterator dictionary of loops in generic functions.
+pub fn generic_loop_totals() -> (u32, u32, bool) {
+    let map = populated();
+    (weighted_total(&map), entry_count(&map), map.is_empty())
+}
+
+pub fn keys_and_values() -> (Vec<u32>, Vec<u32>, (usize, Option<usize>), Option<u32>, usize) {
+    let map = populated();
+    let values: Vec<u32> = map.values().copied().collect();
+    let mut keys = map.keys();
+    let first = keys.next().map(|key| key.identity);
+    let hint = keys.size_hint();
+    let mut ranks = Vec::new();
+    for key in keys {
+        ranks.push(key.rank);
+    }
+    (ranks, values, hint, first, map.values().count())
+}
+
+// `chelis-ir` ownership/mod.rs compares owner maps. Keys compare through their
+// own `PartialEq`, which ignores the identity.
+pub fn maps_equal() -> (bool, bool, bool, bool) {
+    let map = populated();
+    let mut same = BTreeMap::new();
+    same.insert(key(1, 77), 100);
+    same.insert(key(2, 20), 200);
+    same.insert(key(3, 30), 300);
+    let mut changed = populated();
+    changed.insert(key(2, 20), 201);
+    let mut shorter = populated();
+    shorter.remove(&3);
+    (map == same, map != changed, map == shorter, map != same)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -410,9 +493,21 @@ mod tests {
                 ]
             )
         );
+        assert_eq!(keys_collected(), vec![(1, 10), (2, 20), (3, 30)]);
+        assert_eq!(
+            keys_and_values(),
+            (vec![2, 3], vec![100, 200, 300], (2, Some(2)), Some(10), 3)
+        );
+        assert_eq!(maps_equal(), (true, true, false, false));
         assert_eq!(zipped_iterator_callbacks(), (1, 1, 1, 1));
         assert_eq!(delegated_collection_state(2), (vec![(1, 10), (2, 20)], 13));
         assert_eq!(delegated_collection_state(0), (vec![], 11));
+        assert_eq!(
+            borrowed_for_loop(),
+            (vec![(1, 10, 100), (2, 20, 200), (3, 30, 300)], false)
+        );
+        assert_eq!(borrowed_generic_total(), 1400);
+        assert_eq!(generic_loop_totals(), (1400, 3, false));
         let string = String::from("é");
         let borrowed: &str = Borrow::borrow(&string);
         assert_eq!(borrowed.as_bytes(), &[195, 169]);

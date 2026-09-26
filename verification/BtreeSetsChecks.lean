@@ -54,6 +54,14 @@ set_option synthInstance.maxSize 512 in
     (.ok [(1, 88), (2, 99), (3, 30)])
   expect "heterogeneous lookup covers both ordered boundaries and duplicates"
     (decode id btree_sets.borrowed_lookup) (.ok (false, true, false, true))
+  expect "a next-only crate source is converted once and polled to its first None"
+    (decode (fun ((set, polls) : BTreeSet U32 × U32) =>
+      ((keys set).map UScalar.val, polls.val)) (btree_sets.delegated_collection_state 3#u32))
+    (.ok ([1, 2, 3], 14))
+  expect "an empty next-only crate source is polled once"
+    (decode (fun ((set, polls) : BTreeSet U32 × U32) =>
+      ((keys set).map UScalar.val, polls.val)) (btree_sets.delegated_collection_state 0#u32))
+    (.ok ([], 11))
   expect "nonfused source stops at first None and retains unconsumed state"
     (decode (fun ((set, state) : BTreeSet Nat × (List (Option Nat) × Nat)) => (keys set, state))
       (collect natOrd [some 2, none, some 99])) (.ok ([2], ([some 99], 12)))
@@ -81,6 +89,6 @@ set_option synthInstance.maxSize 512 in
   expect "conversion divergence is propagated"
     (decode (fun _ => ()) (FromIteratorBTreeSet.from_iter natOrd divergingSource ([], 0)))
     (.error "divergence")
-  IO.println "BTreeSet smoke: 10 behavioral checks passed"
+  IO.println "BTreeSet smoke: 12 behavioral checks passed"
 
 end BTreeSetsChecks

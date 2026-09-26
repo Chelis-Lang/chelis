@@ -255,6 +255,36 @@ pub fn zip_borrowed_trusted_count() -> (usize, Option<usize>, usize, usize) {
     (count, next, left_calls, right_calls)
 }
 
+// chelis-effects realizability.rs's positional fields: two slice iterators
+// zipped, enumerated, mapped and collected. The native collector folds this
+// TrustedRandomAccess zip over the shorter length.
+pub fn zip_collect_fields() -> Vec<(usize, u8, u8)> {
+    let names = [1u8, 2, 3];
+    let values = [7u8, 8];
+    names
+        .iter()
+        .zip(&values)
+        .enumerate()
+        .map(|(index, (name, value))| (index, *name, *value))
+        .collect()
+}
+
+// A mapped random-access left side runs its callback only on zipped positions.
+pub fn zip_collect_mapped() -> (Vec<(u8, u8)>, usize) {
+    let mut calls = 0;
+    let left = [1u8, 2, 3];
+    let right = [7u8];
+    let pairs = left
+        .iter()
+        .map(|x| {
+            calls += 1;
+            *x
+        })
+        .zip(right.iter().copied())
+        .collect();
+    (pairs, calls)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -280,6 +310,12 @@ mod tests {
         assert_eq!(zip_skip_random_access(), (Some((2, 0)), Some((3, 1)), None, 4, 2));
         assert_eq!(zip_count_after_next(), (2, 3, 3));
         assert_eq!(zip_borrowed_trusted_count(), (2, Some(2), 3, 2));
+    }
+
+    #[test]
+    fn random_access_zip_collects_zipped_positions_only() {
+        assert_eq!(zip_collect_fields(), vec![(0, 1, 7), (1, 2, 8)]);
+        assert_eq!(zip_collect_mapped(), (vec![(1, 7)], 1));
     }
 
     #[test]

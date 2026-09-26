@@ -21,7 +21,7 @@ macro_rules! check_width {
             for (label, value) in [("neg", -x), ("abs", x.abs())] {
                 println!("{label}{width}-{i}={}", value.to_bits());
             }
-            for (label, value) in [("trunc", x.trunc()), ("fract", x.fract())] {
+            for (label, value) in [("trunc", x.trunc()), ("fract", x.fract()), ("floor", x.floor())] {
                 if x.is_finite() { println!("{label}{width}-{i}={}", value.to_bits()); }
                 else { println!("{label}nan{width}-{i}={}", value.is_nan()); }
             }
@@ -84,6 +84,9 @@ fn main() {
     println!("widen-6={}", (f32::from_bits(2139095039) as f64).to_bits());
     println!("widen-7={}", (f32::from_bits(2139095040) as f64).to_bits());
     println!("widen-8={}", (f32::from_bits(4286578688) as f64).to_bits());
+    for (i, b) in [0u32, 2147483648, 1, 1065353217, 2139095040, 4286578688].into_iter().enumerate() {
+        println!("widen-from-{i}={}", f64::from(f32::from_bits(b)).to_bits());
+    }
     let cast_inputs: [u64; 14] = [0x0, 0x8000000000000000, 0x3ff8000000000000, 0xbff8000000000000, 0x43dfffffffffffff, 0x43e0000000000000, 0xc3e0000000000000, 0xc3e0000000000001, 0x43efffffffffffff, 0x43f0000000000000, 0x47e0000000000000, 0x7ff0000000000000, 0xfff0000000000000, 0x7ff0000000000001];
     for (i, b) in cast_inputs.into_iter().enumerate() {
         println!("cast-i8-{i}={}", f64::from_bits(b) as i8);

@@ -19,26 +19,6 @@ impl Iterator for One {
     }
 }
 
-pub struct DefaultOne(pub bool);
-
-impl Iterator for DefaultOne {
-    type Item = u8;
-
-    fn next(&mut self) -> Option<u8> {
-        if self.0 {
-            None
-        } else {
-            self.0 = true;
-            Some(7)
-        }
-    }
-}
-
-// Missing specialization metadata cannot certify even this harmless iterator.
-pub fn reject_default_iterator() -> Vec<u8> {
-    DefaultOne(false).collect()
-}
-
 pub fn reject_vec_hint() -> Vec<u8> {
     One(false).collect()
 }
@@ -121,6 +101,31 @@ pub fn reject_zip_consumer() -> (Vec<(u8, u8)>, u8) {
     (values, seen)
 }
 
+// A left side with a callback: the native collector folds this
+// TrustedRandomAccessNoCoerce zip over the shorter length, while repeated
+// Zip::next would map one surplus left element.
+pub fn reject_mapped_vec_zip() -> (Vec<(i64, i64)>, u32) {
+    let mut calls = 0;
+    let values = vec![5i64, 7]
+        .into_iter()
+        .map(|l| {
+            calls += 1;
+            l
+        })
+        .zip(vec![1i64])
+        .collect();
+    (values, calls)
+}
+
+// vec::IntoIter of an element type with drop glue is not
+// TrustedRandomAccessNoCoerce: its surplus next moves out and drops a value.
+pub fn reject_drop_vec_zip() -> Vec<(String, i64)> {
+    vec![String::from("a"), String::from("b")]
+        .into_iter()
+        .zip(vec![1i64])
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -144,6 +149,7 @@ mod tests {
     fn empty_source_skips_hint_and_trusted_zip_skips_excess_callback() {
         assert_eq!(reject_empty_hint(), Vec::<u8>::new());
         assert_eq!(reject_zip_consumer(), (vec![(1, 7)], 1));
-        assert_eq!(reject_default_iterator(), vec![7]);
+        assert_eq!(reject_mapped_vec_zip(), (vec![(5, 1)], 1));
+        assert_eq!(reject_drop_vec_zip(), vec![(String::from("a"), 1)]);
     }
 }

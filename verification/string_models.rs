@@ -64,6 +64,32 @@ pub fn singleton_join(text: &str, separator: &str) -> String {
     [String::from(text)].join(separator)
 }
 
+/// `str::lines` as `chelis-deep`'s printer iterates it: the first lines.
+pub fn first_lines(text: &str) -> (Option<&str>, Option<&str>, Option<&str>) {
+    let mut lines = text.lines();
+    let first = lines.next();
+    let second = lines.next();
+    (first, second, lines.next())
+}
+
+/// The first line, then a loop over the remaining ones.
+pub fn remaining_lines(text: &str) -> (Option<&str>, usize, usize) {
+    let mut lines = text.lines();
+    let first = lines.next();
+    let mut count = 0;
+    let mut bytes = 0;
+    for line in lines {
+        count += 1;
+        bytes += line.len();
+    }
+    (first, count, bytes)
+}
+
+/// Lines collected through a mapping, as the printer collects its header.
+pub fn line_lengths(text: &str) -> Vec<usize> {
+    text.lines().map(|line| line.len()).collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -135,5 +161,22 @@ mod tests {
         assert_eq!(joined("a\0", "b", ""), "a\0b");
         assert_eq!(empty_join("ignored"), "");
         assert_eq!(singleton_join("β", "ignored"), "β");
+    }
+
+    #[test]
+    fn lines_split_after_newlines_and_strip_one_crlf() {
+        assert_eq!(first_lines(""), (None, None, None));
+        assert_eq!(first_lines("a"), (Some("a"), None, None));
+        assert_eq!(first_lines("a\n"), (Some("a"), None, None));
+        assert_eq!(first_lines("a\r\nb"), (Some("a"), Some("b"), None));
+        assert_eq!(first_lines("\n\n"), (Some(""), Some(""), None));
+        assert_eq!(first_lines("a\rb\r"), (Some("a\rb\r"), None, None));
+        assert_eq!(first_lines("x\r\n\r\n"), (Some("x"), Some(""), None));
+        assert_eq!(first_lines("a\n\rb\r\n"), (Some("a"), Some("\rb"), None));
+        assert_eq!(first_lines("é\n\r"), (Some("é"), Some("\r"), None));
+        assert_eq!(remaining_lines("h\nab\ncde\r\n"), (Some("h"), 2, 5));
+        assert_eq!(remaining_lines(""), (None, 0, 0));
+        assert_eq!(line_lengths("é\n\r\nxyz\r"), vec![2, 0, 4]);
+        assert_eq!(line_lengths("\r\n"), vec![0]);
     }
 }

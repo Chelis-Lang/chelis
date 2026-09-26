@@ -11,6 +11,21 @@ private def outcome : Result α → Except String α
   | .fail _ => .error "failure"
   | .div => .error "divergence"
 
+private def lineText (line : Option Str) : Result (Option String) :=
+  match line with
+  | some line => do
+    let text ← Str.toString line
+    .ok (some text)
+  | none => .ok none
+
+private def firstText (s : Str) : Except String (Option String × Option String × Option String) :=
+  outcome (do
+    let (a, b, c) ← string_models.first_lines s
+    let a ← lineText a
+    let b ← lineText b
+    let c ← lineText c
+    .ok (a, b, c))
+
 #eval do
   expect "Extracted literals preserve UTF-8, quotes, backslashes and controls"
     (outcome (do
@@ -75,4 +90,31 @@ private def outcome : Result α → Except String α
   let malformed : Str := ⟨[0xc0#u8, 0x80#u8], by simp; scalar_tac⟩
   expect "overlong UTF-8 fails undefined rather than introducing replacement text"
     (match Str.toString malformed with | .fail .undef => true | _ => false) true
-  IO.println "String models: 20 behavioral checks passed"
+  expect "no lines in empty text" (firstText (toStr "")) (.ok (none, none, none))
+  expect "an unterminated line" (firstText (toStr "a")) (.ok (some "a", none, none))
+  expect "a terminated line has no empty successor" (firstText (toStr "a\n")) (.ok (some "a", none, none))
+  expect "CRLF ends a line" (firstText (toStr "a\r\nb")) (.ok (some "a", some "b", none))
+  expect "empty lines" (firstText (toStr "\n\n")) (.ok (some "", some "", none))
+  expect "lone carriage returns stay" (firstText (toStr "a\rb\r")) (.ok (some "a\rb\r", none, none))
+  expect "an empty CRLF line" (firstText (toStr "x\r\n\r\n")) (.ok (some "x", some "", none))
+  expect "LF CR is not a line ending" (firstText (toStr "a\n\rb\r\n")) (.ok (some "a", some "\rb", none))
+  expect "multi-byte text and a final lone CR" (firstText (toStr "é\n\r")) (.ok (some "é", some "\r", none))
+  expect "a loop continues after next"
+    (outcome (do
+      let (a, count, bytes) ← string_models.remaining_lines (toStr "h\nab\ncde\r\n")
+      let a ← lineText a
+      .ok (a, count.val, bytes.val))) (.ok (some "h", 2, 5))
+  expect "a loop over no lines"
+    (outcome (do
+      let (a, count, bytes) ← string_models.remaining_lines (toStr "")
+      let a ← lineText a
+      .ok (a, count.val, bytes.val))) (.ok (none, 0, 0))
+  expect "collected line lengths"
+    (outcome (do
+      let v : alloc.vec.Vec Usize ← string_models.line_lengths (toStr "é\n\r\nxyz\r")
+      .ok (v.val.map fun (n : Usize) => n.val))) (.ok [2, 0, 4])
+  expect "a lone CRLF is one empty line"
+    (outcome (do
+      let v : alloc.vec.Vec Usize ← string_models.line_lengths (toStr "\r\n")
+      .ok (v.val.map fun (n : Usize) => n.val))) (.ok [0])
+  IO.println "String models: 33 behavioral checks passed"
