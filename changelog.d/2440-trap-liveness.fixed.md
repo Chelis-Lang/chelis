@@ -37,7 +37,9 @@ traps in every lane.
 Not yet covered: an unused float `mean` over an empty axis, and an unused
 runtime `reshape` or `expand` target or `gather`, `scatter`, `scatter_add`,
 `scatter_elements` or `one_hot` index, may still be removed, and those
-index and target checks still run in an untaken arm; [05-OP-68] and
+index and target checks still run in an untaken arm. A host-only scalar
+operation (such as a shift) discarded inside a `grad` or `vmap` body does
+not run, so its trap does not occur in any lane; [05-OP-68] and
 spec/03 §4.4 keep a note that their rule is not fully implemented for every
 trapping operation. This carries and supersedes
 [#2466](https://github.com/Chelis-Lang/chelis/pull/2466). See
