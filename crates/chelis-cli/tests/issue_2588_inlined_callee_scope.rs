@@ -145,14 +145,12 @@ def main() -> tensor[1, f32] = {\n  y = to_tensor([10.0f32])\n  grad(f)(add(to_t
     assert_both_lanes(source, "main", "tensor(shape=[1], data=[2.0])");
 }
 
-fn assert_both_lanes_out(source: &str, expected: &str) {
-    assert_both_lanes(source, "out", expected);
-}
-
 /// A transform in a top-level value's block runs through the host
-/// interpreter's transform route on the evaluator. This one has no compiled
-/// lowering (an unrelated host-site failure), so only its evaluator value is
-/// pinned, and the compiled lane must not build a value.
+/// interpreter's transform route on the evaluator. On the compiled lane these
+/// have no lowering that can name the top-level value beside the shadowing
+/// local (chelis#2604, and an unrelated host-site failure for the last), so
+/// only the evaluator value is pinned and the compiled lane must not build a
+/// value.
 fn assert_evaluator_only(source: &str, expected: &str) {
     assert_eq!(printed(&eval(source), "out"), expected, "eval\n{source}");
     let dir = tempdir().expect("tempdir");
@@ -170,7 +168,7 @@ fn assert_evaluator_only(source: &str, expected: &str) {
 
 #[test]
 fn transform_route_vmap_of_a_declaration_is_not_captured() {
-    assert_both_lanes_out(
+    assert_evaluator_only(
         "y = to_tensor([2.0f32])\n\
 def f(x: tensor[1, f32]) -> tensor[1, f32] = add(x, y)\n\
 out = {\n  y = to_tensor([10.0f32])\n  vmap(f)(to_tensor([[1.0f32], [3.0f32]]))\n}\n",
@@ -180,7 +178,7 @@ out = {\n  y = to_tensor([10.0f32])\n  vmap(f)(to_tensor([[1.0f32], [3.0f32]]))\
 
 #[test]
 fn transform_route_grad_through_a_callee_is_not_captured() {
-    assert_both_lanes_out(
+    assert_evaluator_only(
         "w = to_tensor([3.0f32, 5.0f32])\n\
 def inner(x: tensor[2, f32]) -> tensor[2, f32] = mul(x, w)\n\
 def loss(x: tensor[2, f32]) -> tensor[f32] = sum(inner(x), 0i32)\n\
@@ -287,4 +285,59 @@ fn a_global_block_nested_substitution_keeps_its_callees() {
 out = outer(dbl, to_tensor([1.0f32]))\n"
     );
     assert_both_lanes(&source, "out", "tensor(shape=[1], data=[4.0])");
+}
+
+/// A match arm that binds another top-level name leaves the rest of the
+/// block's names unambiguous.
+#[test]
+fn a_global_block_match_binder_on_another_name_does_not_stop_substitution() {
+    let source = format!(
+        "{HIGHER_ORDER_CALLEE}x = to_tensor([7.0f32])\n\
+def pick(v: tensor[1, f32]) -> Option[tensor[1, f32]] = Some(v)\n\
+out = {{\n  a = apply(dbl, to_tensor([1.0f32]))\n  b = match pick(to_tensor([10.0f32])) with {{\n    | Some(x) => x\n    | None => to_tensor([0.0f32])\n  }}\n  add(a, b)\n}}\n"
+    );
+    assert_both_lanes(&source, "out", "tensor(shape=[1], data=[14.0])");
+}
+
+/// A local ascription on a block local spelled like a top-level value keeps
+/// its runtime claim on the compiled lane.
+#[test]
+fn a_global_block_local_ascription_spelled_like_a_top_level_value_is_still_checked() {
+    let source = "y = to_tensor([5.0f32])\n\
+def g(x: tensor[*, f32]) -> tensor[*, f32] = x\n\
+out = {\n  v = g(to_tensor([1.0f32, 2.0f32, 3.0f32]))\n  y: tensor[2, f32] = pad(v, [[0i64, 0i64]], 0.0f32)\n  y\n}\n";
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("claim.ch");
+    fs::write(&path, source).expect("source");
+    let out = dir.path().join("out");
+    let build = Command::cargo_bin("chelis")
+        .expect("chelis")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .args(["build", path.to_str().unwrap(), "--target", "c", "--output"])
+        .arg(&out)
+        .output()
+        .expect("build");
+    assert!(build.status.success(), "{build:?}");
+    assert!(
+        common::link_generated(&out, "claim.c", "claim").success(),
+        "link failed"
+    );
+    let run = std::process::Command::new(out.join("claim"))
+        .output()
+        .expect("run");
+    assert!(
+        !run.status.success(),
+        "the claimed extent 2 must trap: {run:?}"
+    );
+}
+
+/// Inside a substituted body, the block's binders that count are those in
+/// scope where the substitution happened: a later local does not.
+#[test]
+fn a_global_block_nested_substitution_ignores_a_later_local() {
+    let source = format!(
+        "{HIGHER_ORDER_CALLEE}def outer(k: (tensor[1, f32]) -> tensor[1, f32], x: tensor[1, f32]) -> tensor[1, f32] = apply(k, x)\n\
+out = {{\n  a = outer(dbl, to_tensor([1.0f32]))\n  n = to_tensor([10.0f32])\n  add(a, n)\n}}\n"
+    );
+    assert_both_lanes(&source, "out", "tensor(shape=[1], data=[14.0])");
 }
