@@ -5217,6 +5217,11 @@ impl<'a> HostEmitter<'a> {
                     preheader_block,
                     body_block,
                 )?;
+                // chelis#2581: `fold` itself produces a returned tensor,
+                // whichever iteration or seed supplied it, so it stamps and
+                // guards that value exactly as a builtin producer does.
+                self.stamp_result_origin(target, ty, "fold");
+                self.emit_result_claim_guard(target, ty, result_claims.as_deref());
                 self.emit_expression_site_excluding_blocks(
                     site,
                     target,
