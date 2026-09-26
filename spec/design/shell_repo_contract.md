@@ -113,8 +113,8 @@ School exemplar: [`school/AGENTS.md`](https://github.com/Chelis-Lang/school/blob
 - **Optional Nix verification job (MAY).** A shell MAY add one CI job that
   rebuilds the shell with atoll's
   [`chelis2nix`](https://github.com/Chelis-Lang/atoll/tree/main/pkgs/by-name/chelis2nix)
-  and compares the result with its chelisup lane. The rule above yields to
-  this job only while the job meets every condition:
+  and compares the result with its chelisup lane. The released-tarball rule
+  above yields to this job only while the job meets every condition:
   - The chelisup lane stays and remains the gate. The job runs only on
     `push` to `main` and is never a required check.
   - The job takes the compiler only by substitution from the CProof mesh
@@ -130,13 +130,14 @@ School exemplar: [`school/AGENTS.md`](https://github.com/Chelis-Lang/school/blob
     enters a Nix build or the Nix store.
   - Its workflow carries the `CHELIS_TAG`/`CHELIS_VERSION` pair above. Before
     the shell bumps its pin, atoll's toolchain table gains the new version.
-  - The shell lists the job under its `AGENTS.md` Scaffolding Divergences
-    (§10), with a link to this clause. Other shells need not mirror it.
+  - The shell lists the job under its `AGENTS.md` Scaffolding Drift Rule
+    section as a recorded per-repo divergence (§10), with a link to this
+    clause. Other shells need not mirror it.
 
   Rationale: the Nix-built compiler is not the released binary, yet Nix
   builds of published shell releases reproduced them byte for byte, and
-  atoll rebuilds them on every push. The comparison on every merge extends
-  that evidence to the shell's own code.
+  atoll's tests check those rebuilds on every push. The comparison on every
+  merge extends that evidence to the shell's own code.
 - **Per-repo toolchain resolution; installs have no machine-global side
   effects.** Toolchains install side-by-side in a version-keyed store
   (first-party: `$CHELIS_HOME/toolchains/<ver>`, default `~/.chelis/`;
