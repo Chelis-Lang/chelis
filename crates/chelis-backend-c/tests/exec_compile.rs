@@ -11004,3 +11004,98 @@ int main(void) {{
     }
     assert!(failures.is_empty(), "\n{}", failures.join("\n"));
 }
+
+/// `f` of `source` (one input `x: tensor[n, f32]` of ones, a rank-0 `f32`
+/// result) lowered as a tensor entry, run by the DAG evaluator and by its
+/// compiled C: each lane's value, or its trap text.
+fn tensor_entry_lanes(source: &str, n: usize) -> (Result<f64, String>, Result<f64, String>) {
+    let decls = chelis_surf::parser::parse_str(source).expect("Surf parse");
+    let checked = chelis_types::check_ir_program(
+        &chelis_surf::desugar::desugar_program(&decls).expect("Surf fixture must desugar"),
+    )
+    .unwrap_or_else(|report| panic!("type check failed: {:?}", report.errors));
+    let dag = chelis_ir::host::lower_named_tensor_entry_dag(&checked, "f")
+        .expect("named tensor entry lowers");
+    let mut values = UnordMap::new();
+    values.insert(
+        "x".to_string(),
+        TensorValue::from_storage(
+            vec![n],
+            finalize_tensor("x", Prim::F32, RawTensor::Float(vec![1.0; n])).unwrap(),
+        ),
+    );
+    let root = *dag.roots().last().expect("a root");
+    let eval = eval_tensor(&dag, &values).map(|result| result[&root].to_f64_lossy_vec()[0]);
+    let generated = codegen(&dag, "claim_arm").expect("codegen");
+    assert_eq!(generated.input_labels, ["x"]);
+    let harness = format!(
+        r#"
+#include "chelis_runtime.h"
+#include <stdio.h>
+void claim_arm(chelis_tensor **, int, chelis_tensor **, int);
+int main(void) {{
+    float x_data[{n}];
+    for (int i = 0; i < {n}; ++i) x_data[i] = 1.0f;
+    int64_t x_shape[1] = {{{n}}};
+    chelis_tensor *x = chelis_tensor_entry_borrow(1, x_shape, CHELIS_DTYPE_F32, x_data, sizeof(x_data));
+    chelis_tensor *inputs[1] = {{x}}, *outputs[1] = {{NULL}};
+    claim_arm(inputs, 1, outputs, 1);
+    chelis_read_view out = chelis_tensor_read_view(outputs[0]);
+    printf("%.1f\n", (double)((const float *)out.data)[0]);
+    return 0;
+}}
+"#
+    );
+    let run = checked_indexing_run(&generated.c_source, &harness);
+    let c = if run.status.success() {
+        String::from_utf8_lossy(&run.stdout)
+            .trim()
+            .parse::<f64>()
+            .map_err(|error| error.to_string())
+    } else {
+        Err(String::from_utf8_lossy(&run.stderr).to_string())
+    };
+    (eval, c)
+}
+
+/// Decisions section 11 for a callee's result claim: a call in a runtime
+/// `if` arm inlines its callee under the arm's activation, and the claim its
+/// declared result makes (a named `tensor[n, f32]` over a `shrink`, and a
+/// literal `tensor[2, 2, f32]` over a `reshape` whose target folds to 3) is
+/// checked under its carrier's owner activation. Untaken, the DAG evaluator
+/// and the compiled C both return the `else` value; taken, both trap with
+/// the claim's typed trap.
+///
+/// Evidentiary status: REGRESSION TEST for both untaken rows (at eaa5f3306
+/// and 224414e1f the evaluator traps each claim in the untaken arm); the
+/// taken rows are a disposition lock.
+#[test]
+fn a_callees_result_claim_checks_only_in_a_taken_arm_in_eval_and_c() {
+    let cases = [
+        (
+            "named result claim",
+            "def g[n](x: tensor[n, f32]) -> tensor[n, f32] = shrink(x, [[1i64, shape(x, 0i32)]])\n\ndef f(x: tensor[4, f32]) -> tensor[f32] = {\n  s = tensor_to_scalar(sum(&x, 0i32))\n  if gt(s, {c}) then sum(g(copy(x)), 0i32) else sum(x, 0i32)\n}\n",
+            4,
+            "numeric trap: domain in shrink at i64",
+        ),
+        (
+            "literal result claim",
+            "def g[n](y: tensor[n, f32]) -> tensor[2, 2, f32] = reshape(y, [floor_div(shape(y, 0i32), 2i64), 2i64])\n\ndef f(x: tensor[6, f32]) -> tensor[f32] = {\n  s = tensor_to_scalar(sum(&x, 0i32))\n  if gt(s, {c}) then sum(sum(g(copy(x)), 0i32), 0i32) else sum(x, 0i32)\n}\n",
+            6,
+            "numeric trap: domain in reshape at i64",
+        ),
+    ];
+    let mut failures = Vec::new();
+    for (kind, source, n, trap) in cases {
+        let untaken = tensor_entry_lanes(&source.replace("{c}", "50.0f32"), n);
+        let expected = n as f64;
+        if !matches!(untaken, (Ok(eval), Ok(c)) if eval == expected && c == expected) {
+            failures.push(format!("untaken {kind}: {untaken:?}"));
+        }
+        let taken = tensor_entry_lanes(&source.replace("{c}", "-5.0f32"), n);
+        if !matches!(&taken, (Err(eval), Err(c)) if eval.contains(trap) && c.contains(trap)) {
+            failures.push(format!("taken {kind}: {taken:?}"));
+        }
+    }
+    assert!(failures.is_empty(), "\n{}", failures.join("\n"));
+}

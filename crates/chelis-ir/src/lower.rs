@@ -6953,7 +6953,7 @@ struct LowerCtx<'program> {
     ///
     /// Every node's owner activation ([`Self::draw_activation`]) conjoins
     /// it, and a local tensor ascription's claims read that owner (see
-    /// `axis_sources::local_ascription_guard_activation`). The one direct
+    /// `axis_sources::claim_carrier_activation`). The one direct
     /// consumer is (chelis#1464) an [05-OP-68] guard's fire condition,
     /// which conjoins it so a guard fires only on its path even in a lane
     /// that does not yet gate the guard on its owner activation. The DAG is

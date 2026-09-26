@@ -1407,10 +1407,12 @@ const UNTAKEN: &str = "lt(100.0f32, s)";
 /// Every kind the evaluator and the C lane now gate beyond operand values:
 /// an integer reduction (consumed and discarded), an empty reduced axis
 /// (`max_reduce`, `argmax_reduce`), runtime movement bounds (`shrink`,
-/// `stride`, `pad`), the two extent-claim operations (a call's named claim
-/// and a checked `reshape` target), and a guarded abort in a `grad` body
-/// spliced into the arm.
-const GATED_KINDS: [GatedKind; 10] = [
+/// `stride`, `pad`), a call's named extent claim, a callee's literal and
+/// named result claims, and a guarded abort in a `grad` body spliced into
+/// the arm. The literal result claim is `tensor[2, 2, f32]` over a
+/// `reshape` whose target the tensor-entry lowering folds to 3, so it is a
+/// result claim, not a `CheckedReshapeExtent`.
+const GATED_KINDS: [GatedKind; 11] = [
     GatedKind {
         name: "consumed integer sum",
         source: "def selected(x: tensor[1, f32]) -> tensor[f32] = {\n  s = tensor_to_scalar(sum(&x, 0i32))\n  if {c} then cast(sum(to_tensor([2000000000i32, 2000000000i32]), 0i32), f32) else sum(x, 0i32)\n}\n",
@@ -1492,13 +1494,23 @@ const GATED_KINDS: [GatedKind; 10] = [
         c_trap: None,
     },
     GatedKind {
-        name: "checked reshape claim",
+        name: "callee's literal result claim",
         source: "def g[n](y: tensor[n, f32]) -> tensor[2, 2, f32] = reshape(y, [floor_div(shape(y, 0i32), 2i64), 2i64])\n\ndef selected(x: tensor[6, f32]) -> tensor[f32] = {\n  s = tensor_to_scalar(sum(&x, 0i32))\n  if {c} then sum(sum(g(copy(x)), 0i32), 0i32) else sum(x, 0i32)\n}\n",
         n: 6,
         d: None,
         lane: Lane::Host,
         expected: &[6.0],
         trap: "numeric trap: domain in reshape at i64",
+        c_trap: None,
+    },
+    GatedKind {
+        name: "callee's named result claim",
+        source: "def g[n](x: tensor[n, f32]) -> tensor[n, f32] = shrink(x, [[1i64, shape(x, 0i32)]])\n\ndef selected(x: tensor[4, f32]) -> tensor[f32] = {\n  s = tensor_to_scalar(sum(&x, 0i32))\n  if {c} then sum(g(copy(x)), 0i32) else sum(x, 0i32)\n}\n",
+        n: 4,
+        d: None,
+        lane: Lane::Host,
+        expected: &[4.0],
+        trap: "numeric trap: domain in shrink at i64",
         c_trap: None,
     },
     GatedKind {
@@ -1669,10 +1681,10 @@ fn a_taken_arms_extent_bound_and_reduction_checks_trap_in_the_evaluator_and_c() 
 /// Evidentiary status: at 224414e1f the untaken rows of every kind but the
 /// discarded integer sum and the negative pad trap (REGRESSION TEST), and
 /// the taken discarded integer sum returns 1.0 (REGRESSION TEST: it was not
-/// a seed); the other rows are a disposition lock. The checked reshape
-/// row lowers here to a literal result claim over a folded target, not a
-/// `CheckedReshapeExtent`, and its untaken row traps at this head and at
-/// 224414e1f through the result-claim guard (see ks5-h2e-handoff.md).
+/// a seed); the other rows are a disposition lock. The two result-claim
+/// rows were added by ks5-h2f: their untaken rows trap at eaa5f3306 and
+/// 224414e1f, where the result-claim guard ignored the arm's activation
+/// (REGRESSION TEST).
 #[test]
 fn every_gated_kind_checks_only_in_a_taken_arm_in_the_dag_evaluator() {
     let mut failures = Vec::new();

@@ -3501,14 +3501,12 @@ pub fn local_dim_guard_sites(dag: &Dag) -> Result<Vec<(LocalGuardSite, LocalGuar
                 let axis = usize::try_from(*axis)
                     .map_err(|_| format!("invalid producer axis {axis} at node {}", node.id.0))?;
                 let site = checked_result_extent_site(dag, node.id, axis)?;
-                let activation = local_ascription_guard_activation(dag, node.id)?;
+                let activation = claim_carrier_activation(dag, node.id)?;
                 // The guard runs at the producer only when the producer can
                 // read both the claim and the activation; a value produced
                 // before either (before its arm, say) is checked at the
                 // carrier, which reads the same extent from its input.
-                let (producer, observed) = if required.0 < site.producer.0
-                    && activation.is_none_or(|activation| activation.0 < site.producer.0)
-                {
+                let (producer, observed) = if producer_reads(*required, activation, site.producer) {
                     (site.producer, site.observation)
                 } else {
                     (
@@ -3550,9 +3548,14 @@ pub fn local_dim_guard_sites(dag: &Dag) -> Result<Vec<(LocalGuardSite, LocalGuar
                     continue;
                 }
                 let site = checked_result_extent_site(dag, node.id, axis)?;
-                // A claim captured after an existing value's production belongs
-                // to this invocation's carrier; never add a backward dependency.
-                let (producer, observed) = if required.0 < site.producer.0 {
+                // The call's claim is checked under its carrier's owner
+                // activation, as a local ascription's is: a callee inlined
+                // into an untaken arm claims nothing.
+                let activation = claim_carrier_activation(dag, node.id)?;
+                // A claim captured after an existing value's production, or
+                // under an activation computed after it, belongs to this
+                // invocation's carrier; never add a backward dependency.
+                let (producer, observed) = if producer_reads(*required, activation, site.producer) {
                     (site.producer, site.observation)
                 } else {
                     (
@@ -3573,7 +3576,7 @@ pub fn local_dim_guard_sites(dag: &Dag) -> Result<Vec<(LocalGuardSite, LocalGuar
                         canonical: CanonicalExtent::Witness(*required),
                         op: site.operation,
                         observed,
-                        activation: None,
+                        activation,
                     },
                 ));
                 continue;
@@ -3596,17 +3599,35 @@ pub fn local_dim_guard_sites(dag: &Dag) -> Result<Vec<(LocalGuardSite, LocalGuar
             let axis = usize::try_from(*axis)
                 .map_err(|_| format!("invalid producer axis {axis} at node {}", node.id.0))?;
             let site = checked_result_extent_site(dag, node.id, axis)?;
-            let RtAxis::Lit(producer_axis) = site.producer_axis;
-            let producer_axis =
-                usize::try_from(producer_axis).expect("verified result producer axis");
+            // Checked under the carrier's owner activation, as above. The
+            // producer is the carrier or sits behind its `Copy`/`Cast` chain,
+            // which keeps every axis, so a producer that precedes the
+            // activation is observed through the carrier's input instead.
+            let activation = claim_carrier_activation(dag, node.id)?;
+            let (producer, producer_axis, observed) =
+                if producer_reads(*required, activation, site.producer) {
+                    let RtAxis::Lit(producer_axis) = site.producer_axis;
+                    let producer_axis =
+                        usize::try_from(producer_axis).expect("verified result producer axis");
+                    (site.producer, producer_axis, site.observation)
+                } else {
+                    (
+                        node.id,
+                        axis,
+                        LocalGuardObservation::Carrier(RtDim::InputAxis {
+                            tensor: 0,
+                            axis: RtAxis::Lit(axis as i32),
+                        }),
+                    )
+                };
             sites.push((
-                (site.producer.0, producer_axis),
+                (producer.0, producer_axis),
                 LocalGuardClaim {
                     claim: claim.clone(),
                     canonical: CanonicalExtent::Witness(*required),
                     op: site.operation,
-                    observed: site.observation,
-                    activation: None,
+                    observed,
+                    activation,
                 },
             ));
         }
@@ -3826,20 +3847,30 @@ pub fn local_dim_guard_sites(dag: &Dag) -> Result<Vec<(LocalGuardSite, LocalGuar
     Ok(sites)
 }
 
-/// The activation a path-local ascription's claims are checked under: the
-/// owner activation of the node carrying them (spec/10 section 3.2, a node
-/// whose activation is false checks nothing).
+/// The activation a claim token's guard is checked under: the owner
+/// activation of the node carrying the token (spec/10 section 3.2, a node
+/// whose activation is false checks nothing). A path-local ascription's
+/// claims, a call's named result claim and a callee's literal result claim
+/// all read it.
 ///
 /// It is the carrier's [`crate::dag::Owner`], not a second record, so it
 /// cannot disagree with the activation the node itself runs under. Lowering
-/// stamps the carrier with the ascription's position, which inside a `grad`
-/// or `vmap` body spliced into a runtime `if` arm is the call site's
-/// activation; `vmap` batches it per row, and an extent every row shares is
-/// checked when any row is active.
-fn local_ascription_guard_activation(dag: &Dag, carrier: NodeId) -> Result<Option<NodeId>, String> {
+/// stamps the carrier with the claim's position: the ascription's, or the
+/// call's, whose inlined callee runs under the caller's activation; inside a
+/// `grad` or `vmap` body spliced into a runtime `if` arm that is the call
+/// site's activation. `vmap` batches it per row, and an extent every row
+/// shares is checked when any row is active.
+fn claim_carrier_activation(dag: &Dag, carrier: NodeId) -> Result<Option<NodeId>, String> {
     dag.get(carrier)
         .map(|carrier| carrier.owner.activation)
-        .ok_or_else(|| "local ascription owner is missing".to_string())
+        .ok_or_else(|| "claim carrier is missing".to_string())
+}
+
+/// Whether a claim's guard can sit at its `producer`: the producer runs
+/// after the claim's canonical token and after its activation, so both are
+/// available there. Otherwise the guard sits at the carrier.
+fn producer_reads(required: NodeId, activation: Option<NodeId>, producer: NodeId) -> bool {
+    required.0 < producer.0 && activation.is_none_or(|activation| activation.0 < producer.0)
 }
 
 #[cfg(test)]
