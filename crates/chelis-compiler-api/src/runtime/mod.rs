@@ -249,11 +249,15 @@ impl Clone for RuntimeValue {
     /// still proportional to the value; making it a shared, copy-on-write
     /// payload is chelis#2592.
     fn clone(&self) -> Self {
+        if let Some(copy) = self.shallow_copy() {
+            return copy;
+        }
         let mut steps = vec![CloneStep::Visit(self)];
         let mut copied: Vec<RuntimeValue> = Vec::new();
         while let Some(step) = steps.pop() {
             match step {
                 CloneStep::Visit(value) => match value {
+                    value if let Some(copy) = value.shallow_copy() => copied.push(copy),
                     RuntimeValue::List(items)
                     | RuntimeValue::Tuple(items)
                     | RuntimeValue::Adt { fields: items, .. } => {
@@ -307,6 +311,56 @@ impl Clone for RuntimeValue {
 }
 
 impl RuntimeValue {
+    /// Whether this value holds no nested runtime value.
+    fn is_leaf(&self) -> bool {
+        !matches!(
+            self,
+            RuntimeValue::List(_)
+                | RuntimeValue::Tuple(_)
+                | RuntimeValue::Adt { .. }
+                | RuntimeValue::Dict(_)
+        )
+    }
+
+    /// The copy of a leaf, or of a container whose children are all leaves,
+    /// made directly: the common shallow value never touches the worklist.
+    fn shallow_copy(&self) -> Option<Self> {
+        let copy_leaves = |items: &[RuntimeValue]| -> Option<Vec<RuntimeValue>> {
+            let mut copied = Vec::with_capacity(items.len());
+            for item in items {
+                if !item.is_leaf() {
+                    return None;
+                }
+                copied.push(item.clone_leaf());
+            }
+            Some(copied)
+        };
+        match self {
+            RuntimeValue::List(items) => copy_leaves(items).map(RuntimeValue::List),
+            RuntimeValue::Tuple(items) => copy_leaves(items).map(RuntimeValue::Tuple),
+            RuntimeValue::Adt {
+                ctor,
+                fields,
+                field_names,
+            } => copy_leaves(fields).map(|fields| RuntimeValue::Adt {
+                ctor: ctor.clone(),
+                fields,
+                field_names: field_names.clone(),
+            }),
+            RuntimeValue::Dict(entries) => {
+                let mut copied = Vec::with_capacity(entries.len());
+                for (key, value) in entries {
+                    if !key.is_leaf() || !value.is_leaf() {
+                        return None;
+                    }
+                    copied.push((key.clone_leaf(), value.clone_leaf()));
+                }
+                Some(RuntimeValue::Dict(copied))
+            }
+            leaf => Some(leaf.clone_leaf()),
+        }
+    }
+
     /// The copy of a value that holds no nested runtime value.
     fn clone_leaf(&self) -> Self {
         match self {

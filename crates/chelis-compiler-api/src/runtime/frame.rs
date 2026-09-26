@@ -78,11 +78,17 @@ impl ResultProducer {
     /// The value is walked from a worklist, so a value nested far deeper than
     /// the native stack is stamped with bounded native depth (chelis#2567).
     pub(crate) fn interface_load(value: &RuntimeValue) -> Option<Self> {
+        if let Some(stamp) = Self::shallow_interface_load(value) {
+            return stamp;
+        }
         let mut steps = vec![InterfaceStep::Visit(value)];
         let mut stamped: Vec<Option<Self>> = Vec::new();
         while let Some(step) = steps.pop() {
             match step {
                 InterfaceStep::Visit(value) => match value {
+                    value if let Some(stamp) = Self::shallow_interface_load(value) => {
+                        stamped.push(stamp)
+                    }
                     RuntimeValue::Tensor(_) => stamped.push(Some(Self::tensor("load"))),
                     RuntimeValue::Tuple(values)
                     | RuntimeValue::List(values)
@@ -99,6 +105,37 @@ impl ResultProducer {
             }
         }
         stamped.pop().flatten()
+    }
+
+    /// The stamp of a leaf, or of an aggregate whose children are all leaves,
+    /// made directly; `None` when a child is itself an aggregate. An aggregate
+    /// with no tensor child is stamped without allocating.
+    fn shallow_interface_load(value: &RuntimeValue) -> Option<Option<Self>> {
+        let values = match value {
+            RuntimeValue::Tensor(_) => return Some(Some(Self::tensor("load"))),
+            RuntimeValue::Tuple(values)
+            | RuntimeValue::List(values)
+            | RuntimeValue::Adt { fields: values, .. } => values,
+            _ => return Some(None),
+        };
+        let mut has_tensor = false;
+        for value in values {
+            match value {
+                RuntimeValue::Tensor(_) => has_tensor = true,
+                RuntimeValue::Tuple(_) | RuntimeValue::List(_) | RuntimeValue::Adt { .. } => {
+                    return None;
+                }
+                _ => {}
+            }
+        }
+        if !has_tensor {
+            return Some(None);
+        }
+        let children = values
+            .iter()
+            .map(|value| matches!(value, RuntimeValue::Tensor(_)).then(|| Self::tensor("load")))
+            .collect();
+        Some(Some(Self::Aggregate(children)))
     }
 
     pub(crate) fn matches_value(&self, value: &RuntimeValue) -> bool {
