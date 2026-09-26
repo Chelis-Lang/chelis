@@ -30,6 +30,7 @@ MODELS = {
     "iterator_sources": "IteratorSources",
     "iterator_combinators": "IteratorCombinators",
     "flat_map_iterators": "FlatMapIterators",
+    "flatten_iterators": "FlattenIterators",
     "result_iterators": "ResultIterators",
     "ended_shared_payload": "EndedSharedPayload",
     "float_operations": "FloatOperations",
@@ -49,6 +50,7 @@ MODELS = {
     "closure_mut_args": "ClosureMutArgs",
     "primitive_order_models": "PrimitiveOrderModels",
     "checked_place_updates": "CheckedPlaceUpdates",
+    "eval_std_models": "EvalStdModels",
 }
 
 # Fixtures of crate-local native primitives compile under the production crate
