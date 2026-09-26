@@ -2903,14 +2903,20 @@ pub fn program_has_top_level_value_bindings(program: &CheckedProgram) -> bool {
     })
 }
 
+/// Whole-program host lowering as its production entry
+/// ([`try_lower_compiled_program_with_lane_overrides`]) runs it: inside the
+/// lowering catch, on that catch's grown stack segment rather than the
+/// caller's thread stack.
 #[cfg(test)]
 fn lower_host_program(
     program: &mut HostCx<'_>,
     lowered_names: &BTreeMap<String, bool>,
 ) -> Result<HostProgram, crate::lower::LowerDiagnostic> {
-    lower_host_program_with_execution(program, lowered_names, false, false)
-        .unwrap_or_else(|failure| failure.resume_at_boundary())
-        .map(|(host, _)| host)
+    program
+        .catch_lowering(|program| {
+            lower_host_program_with_execution(program, lowered_names, false, false)
+        })
+        .and_then(|lowered| lowered.map(|(host, _)| host))
 }
 
 fn lower_host_program_with_execution(
