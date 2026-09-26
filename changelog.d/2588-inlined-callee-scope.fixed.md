@@ -5,8 +5,9 @@ longer replaces it, so `chelis eval` and compiled C return the lexically scoped
 result instead of silently using the caller's binding. This holds through
 nested calls, `grad`, `vmap` and function-valued arguments, with one exception
 that is not yet fixed: when `chelis eval` or `chelis test` applies a `grad` or
-`vmap` to a function literal that calls a declaration, in a top-level value's
-block or a test body, the declaration can still read the caller's local
+`vmap` to a function literal, in a top-level value's block or a test body, a
+caller's local or local function can still replace a top-level name that the
+literal, or a declaration it calls, reads
 ([#2619](https://github.com/Chelis-Lang/chelis/issues/2619)). Where the
 compiled tensor graph would have to name the top-level value and a same-named
 local or parameter in scope at the call the same way, the compiler now fails
