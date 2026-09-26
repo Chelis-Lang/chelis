@@ -38,6 +38,9 @@ thread_local! {
     // currently inside, innermost last. With `INLINING_STACK` these are the
     // bodies whose binders surround a call site.
     static HOST_DECLARATION_STACK: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
+    // chelis#2588: beside each entry of `HOST_DECLARATION_STACK`, for a
+    // global binding's body, the local names in scope at each of its nodes.
+    static SITE_BINDERS: RefCell<Vec<Option<Arc<SiteBinders>>>> = const { RefCell::new(Vec::new()) };
     // The per-program memos that used to live here are fields of
     // `HostLoweringSession` (chelis#1835). The push/pop stacks stay: they
     // track where the lowerer currently IS, which is a property of the
@@ -254,8 +257,24 @@ fn pop_inlining(name: &str) {
 struct HostDeclarationGuard;
 
 impl HostDeclarationGuard {
+    /// A function: its host scope starts empty, so every scope entry is a
+    /// local and no site map is needed.
     fn enter(name: &str) -> Self {
+        Self::push(name, None)
+    }
+
+    /// A global binding: its host scope starts with the globals, so a scope
+    /// entry spelled like one is the global unless a local binder of `body`
+    /// is in scope at the site, matched by the site's source span.
+    fn enter_global(name: &str, body: &Expr) -> Self {
+        let mut sites = UnordMap::new();
+        record_site_binders(body, &Arc::new(UnordSet::new()), &mut sites);
+        Self::push(name, Some(Arc::new(sites)))
+    }
+
+    fn push(name: &str, sites: Option<Arc<SiteBinders>>) -> Self {
         HOST_DECLARATION_STACK.with(|stack| stack.borrow_mut().push(name.to_string()));
+        SITE_BINDERS.with(|stack| stack.borrow_mut().push(sites));
         Self
     }
 }
@@ -265,6 +284,129 @@ impl Drop for HostDeclarationGuard {
         HOST_DECLARATION_STACK.with(|stack| {
             stack.borrow_mut().pop();
         });
+        SITE_BINDERS.with(|stack| {
+            stack.borrow_mut().pop();
+        });
+    }
+}
+
+/// The local names in scope at each node of one body, keyed by the node's
+/// source span. Host lowering rewrites and clones subtrees before it lowers
+/// them, so a node's address does not survive; its span does.
+type SiteBinders = UnordMap<String, Arc<UnordSet<String>>>;
+
+/// The binders in scope at `site`, when it is a node of the global binding's
+/// own body. A body substituted into it carries its callee's spans, so no
+/// answer is given while a substitution is being lowered.
+fn site_binders(site: &Expr) -> Option<Arc<UnordSet<String>>> {
+    if INLINING_STACK.with(|stack| !stack.borrow().is_empty()) {
+        return None;
+    }
+    let key = site.span_id()?;
+    SITE_BINDERS.with(|stack| {
+        stack
+            .borrow()
+            .last()
+            .cloned()
+            .flatten()
+            .and_then(|sites| sites.get(key).cloned())
+    })
+}
+
+/// Record, for `expr` and every node under it, the names its enclosing
+/// `fn` parameters, `let` binders and match patterns bring into scope.
+fn record_site_binders(expr: &Expr, bound: &Arc<UnordSet<String>>, sites: &mut SiteBinders) {
+    if let Some(key) = expr.span_id() {
+        // Nodes that share a span keep the union of their binders, which can
+        // only decline more.
+        let entry = sites
+            .entry(key.to_string())
+            .or_insert_with(|| bound.clone());
+        if !Arc::ptr_eq(entry, bound) && entry.as_ref() != bound.as_ref() {
+            let mut union = entry.as_ref().clone();
+            union.extend(bound.to_sorted().into_iter().cloned());
+            *entry = Arc::new(union);
+        }
+    }
+    let extended = |names: UnordSet<String>| -> Arc<UnordSet<String>> {
+        if names.is_empty() {
+            return bound.clone();
+        }
+        let mut next = bound.as_ref().clone();
+        next.extend(names.into_sorted());
+        Arc::new(next)
+    };
+    match expr {
+        Expr::MetaExpr(meta, _) => record_site_binders(&meta.expr, bound, sites),
+        Expr::BareList(items, _) => {
+            for item in items {
+                record_site_binders(item, bound, sites);
+            }
+        }
+        Expr::Node(node, _) if node.tag() == DeepTag::Fn => {
+            let kids = node.children_slice();
+            let params = kids
+                .first()
+                .and_then(as_node)
+                .map(|params| {
+                    params
+                        .children_slice()
+                        .iter()
+                        .filter_map(param_name)
+                        .collect::<UnordSet<_>>()
+                })
+                .unwrap_or_default();
+            let inner = extended(params);
+            for kid in kids {
+                record_site_binders(kid, &inner, sites);
+            }
+        }
+        Expr::Node(node, _) if node.tag() == DeepTag::Let => {
+            let kids = node.children_slice();
+            let mut current = bound.clone();
+            if let Some(bind_list) = kids.first() {
+                if let Some(bind) = as_node(bind_list) {
+                    for pair in bind.children_slice().chunks(2) {
+                        if let Some(value) = pair.get(1) {
+                            record_site_binders(value, &current, sites);
+                        }
+                        if let Some(name) = pair.first().and_then(symbol_name) {
+                            let mut next = current.as_ref().clone();
+                            next.insert(name.to_string());
+                            current = Arc::new(next);
+                        }
+                    }
+                }
+            }
+            for kid in kids.iter().skip(1) {
+                record_site_binders(kid, &current, sites);
+            }
+        }
+        Expr::Node(node, _) if node.tag() == DeepTag::Match => {
+            let kids = node.children_slice();
+            if let Some(scrutinee) = kids.first() {
+                record_site_binders(scrutinee, bound, sites);
+            }
+            for arm in kids.iter().skip(1) {
+                let mut names = UnordSet::new();
+                // An unreadable pattern binds whatever it might: the arm is
+                // then treated as binding every name, which only declines.
+                let inner = match as_node(arm)
+                    .and_then(|arm| arm.children_slice().first())
+                    .map(|pattern| names_bound_in(pattern, &mut names))
+                {
+                    Some(Ok(())) | None => extended(names),
+                    Some(Err(_)) => extended(UnordSet::from_iter([String::from("*")])),
+                };
+                record_site_binders(arm, &inner, sites);
+            }
+        }
+        Expr::Node(node, _) => {
+            for kid in node.children_slice() {
+                record_site_binders(kid, bound, sites);
+            }
+        }
+        _ => {}
     }
 }
 
@@ -283,13 +425,16 @@ fn inlining_would_capture(
     program: &HostLoweringSession<'_>,
     callee: &str,
     scope: &UnordMap<String, HostTypeTerm>,
+    site: &Expr,
 ) -> bool {
     let Some((_, body)) = program.def_named(callee) else {
         return false;
     };
     chelis_types::linearity::free_runtime_variables(body)
         .iter()
-        .any(|name| scope.contains_key(name) && !is_unshadowed_top_level_value(program, name))
+        .any(|name| {
+            scope.contains_key(name) && !is_unshadowed_top_level_value(program, name, Some(site))
+        })
 }
 
 /// The top-level declarations whose bodies surround the current host
@@ -3089,8 +3234,8 @@ fn lower_host_program_with_execution(
             // before host lowering — same rationale as in
             // `lower_host_function`.
             global_tensor_helpers.declaration_name = Some(name.to_string());
-            let _declaration = HostDeclarationGuard::enter(name);
             let inlined_body = inline_local_callable_lets(body);
+            let _declaration = HostDeclarationGuard::enter_global(name, &inlined_body);
             let mut value = lower_host_expr(
                 &inlined_body,
                 program,
@@ -5425,7 +5570,7 @@ fn kernel_scope_types(
                 tensor_type_from_host_input(&param.ty).map(|ty| (param.name.clone(), ty))
             })
             .collect(),
-        None => collect_tensor_scope(program, scope).into_sorted(),
+        None => collect_tensor_scope(program, scope, None).into_sorted(),
     }
 }
 
@@ -6246,7 +6391,7 @@ fn lower_tensor_helper_dag(
     lower_tensor_helper_with(expr, program, || {
         let dag = crate::lower::try_lower_tensor_helper_program_with_ordered_inputs(
             expr,
-            collect_tensor_scope(program, scope).into_sorted(),
+            collect_tensor_scope(program, scope, Some(expr)).into_sorted(),
             context,
             None,
             false,
@@ -6283,7 +6428,7 @@ fn lower_tensor_helper_product(
     #[cfg(feature = "lowering-trace")]
     if collect_trace {
         return lower_tensor_helper_with(expr, program, || {
-            let scoped = collect_tensor_scope(program, scope).into_sorted();
+            let scoped = collect_tensor_scope(program, scope, Some(expr)).into_sorted();
             let (dag, trace) =
                 crate::lower::try_lower_tensor_helper_program_with_ordered_inputs_and_trace(
                     expr, scoped, &context, None, false,
@@ -6320,7 +6465,7 @@ fn lower_tensor_helper_dag_with_controls(
     let context = cached_subexpr_lowering_context(program);
     let mut lowered = match crate::lower::try_lower_subexpr_program_with_context_and_controls(
         expr,
-        collect_tensor_scope(program, scope),
+        collect_tensor_scope(program, scope, Some(expr)),
         &context,
     ) {
         Ok(lowered) => lowered,
@@ -13362,7 +13507,7 @@ fn lower_named_retained_host_invocation(
     tensor_helpers: &mut TensorHelperSink,
     actualize_polymorphic_contract: bool,
 ) -> Result<Option<(HostExpr, Option<TensorType>)>, crate::lower::LowerDiagnostic> {
-    if is_inlining(name) || inlining_would_capture(program, name, scope) {
+    if is_inlining(name) || inlining_would_capture(program, name, scope, expr) {
         return Ok(None);
     }
     let Some((canonical, body)) = program.def_named(name) else {
@@ -13649,7 +13794,7 @@ fn inline_top_level_host_call(
         .and_then(as_node)
         .filter(|callee| callee.tag() == DeepTag::Var)
         .and_then(|callee| callee.children_slice().first().and_then(symbol_name))?;
-    if is_inlining(callee_name) || inlining_would_capture(program, callee_name, scope) {
+    if is_inlining(callee_name) || inlining_would_capture(program, callee_name, scope, expr) {
         return None;
     }
     let defs = cached_program_defs(program);
@@ -17332,11 +17477,12 @@ fn collect_top_level_items<'a>(expr: &'a Expr, out: &mut Vec<&'a Expr>) {
 fn collect_tensor_scope(
     program: &HostLoweringSession<'_>,
     scope: &UnordMap<String, HostTypeTerm>,
+    site: Option<&Expr>,
 ) -> UnordMap<String, TensorType> {
     scope
         .to_sorted()
         .into_iter()
-        .filter(|(name, _)| !is_unshadowed_top_level_value(program, name))
+        .filter(|(name, _)| !is_unshadowed_top_level_value(program, name, site))
         .filter_map(|(name, ty)| {
             tensor_type_from_host_input(ty).map(|tensor| (name.clone(), tensor))
         })
@@ -17345,12 +17491,23 @@ fn collect_tensor_scope(
 
 /// Whether `name` in the current host scope can only be the top-level value
 /// declared under it: no body surrounding the current site binds it.
-fn is_unshadowed_top_level_value(program: &HostLoweringSession<'_>, name: &str) -> bool {
+///
+/// At a node of the global binding's own body the answer is exact: whether a
+/// local binder is in scope there. Elsewhere, inside a body substituted into
+/// it, any binder of a surrounding body counts, which can only decline.
+fn is_unshadowed_top_level_value(
+    program: &HostLoweringSession<'_>,
+    name: &str,
+    site: Option<&Expr>,
+) -> bool {
     let Some((_, body)) = program.def_named(name) else {
         return false;
     };
     if matches!(body, Expr::Node(node, _) if node.tag() == DeepTag::Fn) {
         return false;
+    }
+    if let Some(in_scope) = site.and_then(site_binders) {
+        return !in_scope.contains(name) && !in_scope.contains("*");
     }
     !enclosing_bodies().into_iter().any(|enclosing| {
         def_binders(program, &enclosing).is_none_or(|binders| binders.contains(name))

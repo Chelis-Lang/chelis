@@ -237,3 +237,38 @@ fn a_function_literal_parameter_does_not_stop_a_callee_from_being_substituted() 
     );
     assert_both_lanes(&source, "main", "tensor(shape=[1], data=[6.0])");
 }
+
+/// In a top-level value's block the host scope also carries the globals, so
+/// whether a name there is the global depends on the binders in scope at the
+/// call site, not on the block's binders as a whole.
+#[test]
+fn a_global_block_local_before_the_call_does_not_capture() {
+    let source = "n = to_tensor([2.0f32])\n\
+def f(x: tensor[1, f32]) -> tensor[1, f32] = mul(x, n)\n\
+out = {\n  n = to_tensor([10.0f32])\n  add(f(to_tensor([1.0f32])), n)\n}\n";
+    assert_both_lanes(source, "out", "tensor(shape=[1], data=[12.0])");
+}
+
+#[test]
+fn a_global_block_local_after_the_call_does_not_stop_substitution() {
+    let source = format!(
+        "{HIGHER_ORDER_CALLEE}out = {{\n  a = apply(dbl, to_tensor([1.0f32]))\n  n = to_tensor([10.0f32])\n  add(a, n)\n}}\n"
+    );
+    assert_both_lanes(&source, "out", "tensor(shape=[1], data=[14.0])");
+}
+
+#[test]
+fn a_global_block_function_literal_parameter_does_not_stop_substitution() {
+    let source = format!(
+        "{HIGHER_ORDER_CALLEE}out = {{\n  a = apply(dbl, to_tensor([1.0f32]))\n  apply(fn (n: tensor[1, f32]) -> add(n, a), to_tensor([1.0f32]))\n}}\n"
+    );
+    assert_both_lanes(&source, "out", "tensor(shape=[1], data=[6.0])");
+}
+
+#[test]
+fn a_global_block_local_after_a_grad_does_not_stop_its_kernel() {
+    let source = "c = to_tensor([2.0f32])\n\
+def f(x: tensor[1, f32]) -> tensor[f32] = sum(mul(x, c), 0i32)\n\
+out = {\n  a = grad(f)(to_tensor([1.0f32]))\n  c = to_tensor([10.0f32])\n  add(a, c)\n}\n";
+    assert_both_lanes(source, "out", "tensor(shape=[1], data=[12.0])");
+}
