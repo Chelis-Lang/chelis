@@ -129,14 +129,20 @@ fn dimension_observations_cover_arithmetic_comparison_and_propagation() {
             false,
             "def run[d,e](x: tensor[d,2,2,f32], g: tensor[batch,row,col,f32]) -> tensor[e,f32] = trace(tag3(x,g),1i32,2i32)",
         ),
+        // chelis#2584: a `let`-bound lambda whose operand gate is pending
+        // stays monomorphic until its application binds the operand
+        // ([04-INF-1]), so the lambda form keeps the direct form's verdict.
+        // Before, the gate was orphaned on the generalized template variable
+        // and the program was rejected with "gather expects tensor input, got
+        // ?N".
         (
-            "unresolved gather lambda at binding rejects",
-            false,
+            "unresolved gather lambda at binding retains the name",
+            true,
             "def run[d](x: tensor[d,2,f32], g: tensor[row,col,f32], i: tensor[1,i32]) = { f = fn (v) -> gather(v,i,1i32)\n sum(f(tag2(x,g)),row) }",
         ),
         (
-            "unresolved trace lambda at binding rejects",
-            false,
+            "unresolved trace lambda at binding retains the name",
+            true,
             "def run[d](x: tensor[d,2,2,f32], g: tensor[batch,row,col,f32]) = { f = fn (v) -> trace(v,1i32,2i32)\n sum(f(tag3(x,g)),batch) }",
         ),
         (

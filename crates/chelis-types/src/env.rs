@@ -1037,11 +1037,11 @@ impl Env {
         let ty_dvars = free_dvars(&ty);
         let ty_rvars = free_rvars(&ty);
         let level = subst.current_level();
-        // chelis#1489: a variable still tied to a pending operand gate stays
-        // monomorphic until the gate discharges; see
-        // `Subst::pending_gate_result_vars`. Levels cannot see that tie -- it
+        // chelis#1489: a variable still tied to a pending operand gate, as its
+        // operand or its result, stays monomorphic until the gate discharges;
+        // see `Subst::pending_gate_vars`. Levels cannot see that tie -- it
         // lives in the gate ledger, not in any unification.
-        let (pending_t, pending_d, pending_r) = subst.pending_gate_result_vars();
+        let (pending_t, pending_d, pending_r) = subst.pending_gate_vars();
         // spec/04 §3.1.1: a variable minted for an in-group recursive
         // instantiation stays monomorphic while its group is inferred, so a
         // let-bound alias of a group member cannot smuggle in polymorphic
@@ -1143,7 +1143,7 @@ impl Env {
             .collect::<UnordSet<_>>();
         // chelis#1489: the same exclusion as `generalize_by_levels`, so the
         // parity assertion in `generalize` keeps comparing like with like.
-        let (pending_t, pending_d, pending_r) = subst.pending_gate_result_vars();
+        let (pending_t, pending_d, pending_r) = subst.pending_gate_vars();
         let current_level = subst.current_level();
         let generalizable = |v: TypeVar| {
             !env_tvars.contains(&v)

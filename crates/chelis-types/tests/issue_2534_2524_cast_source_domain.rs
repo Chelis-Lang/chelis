@@ -130,3 +130,42 @@ fn a_tensor_reaching_a_binder_target_cast_through_a_lambda_keeps_its_shape() {
     accepts("def f[q: Float](b: tensor[2, f32]) -> tensor[2, q] = (fn (y) -> cast(y, q))(b)");
     accepts("def f[q: Float](b: tensor[2, f32]) -> tensor[2, q] = cast(b, q)");
 }
+
+/// REGRESSION TEST (chelis#2584 round 1, P1-1). A `let`-bound lambda whose
+/// cast operand is still a variable carries a pending gate, so it stays
+/// monomorphic until its first application binds the operand ([04-INF-1]).
+/// It was generalized instead, every application bound a fresh copy of the
+/// operand, and the gate stayed on the never-bound template: the well-typed
+/// forms were rejected with `got ?N`, and the string form named no string.
+#[test]
+fn a_let_bound_cast_lambda_is_decided_at_its_application() {
+    for program in [
+        "def f[p: Float](x: f32) -> p = {\n  g = fn (y) -> cast(y, p)\n  g(x)\n}\n",
+        "def f[p: Float](xs: List[f32]) -> List[p] = {\n  conv = fn (y) -> cast(y, p)\n  map(conv, xs)\n}\n",
+        "def f[p: Float](x: f32) -> p = {\n  g = fn (y) -> cast(y, p)\n  a = g(x)\n  g(2.0f32)\n}\n",
+    ] {
+        accepts(program);
+    }
+    rejects_with(
+        "def f[p: Float](x: f32) -> p = {\n  g = fn (y) -> cast(y, p)\n  g(\"s\")\n}\n",
+        &[
+            "[CastNonTensor] cast to a quantified scalar dtype requires a numeric or bool scalar, got string",
+        ],
+    );
+    // Its first application fixes the operand type for every later use.
+    rejects_with(
+        "def f[p: Float](x: f32, n: i32) -> p = {\n  g = fn (y) -> cast(y, p)\n  a = g(x)\n  g(n)\n}\n",
+        &["precision mismatch: expected f32, got i32"],
+    );
+}
+
+/// NEGATIVE PARITY: the same holds for the concrete-target gate, which a
+/// generalized `let` lambda also orphaned (chelis#1489's recorded blind spot).
+#[test]
+fn a_let_bound_concrete_target_cast_lambda_is_decided_at_its_application() {
+    accepts("def f(x: f32) -> f64 = {\n  g = fn (y) -> cast(y, f64)\n  a = g(x)\n  g(2.0f32)\n}\n");
+    rejects_with(
+        "def f(x: f32) -> i64 = {\n  g = fn (y) -> cast(y, i64)\n  g(\"s\")\n}\n",
+        &["cast requires a numeric or bool source, got string"],
+    );
+}

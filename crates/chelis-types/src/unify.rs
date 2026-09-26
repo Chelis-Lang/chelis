@@ -1350,21 +1350,32 @@ impl Subst {
             .push((v, gate));
     }
 
-    /// Every variable that still occurs in a PENDING gate's result (chelis#1489).
+    /// Every variable a PENDING gate waits on or hands out (chelis#1489).
     ///
-    /// Consulted by `Env::generalize`, which must not quantify any of them. A
-    /// suspended `copy`/`cast` hands its consumer a fresh result variable and
-    /// ties it to the operand only through this ledger -- invisibly to levels.
-    /// When an unannotated `let` generalized that variable, every use of the
-    /// bound name got its own unconstrained instance, and discharge later bound
-    /// only the original: a declared result was never checked against what the
-    /// call produces, and a false signature checked and ran.
+    /// Consulted by `Env::generalize`, which must not quantify any of them.
     ///
-    /// ALL free variables of the applied result are returned, not just a
-    /// top-level type variable. A pending result can be partly unified before it
-    /// discharges -- `g` meeting a `tensor[?d, 3, f32]` expectation makes it
-    /// `tensor[?d, 3, f32]` -- and quantifying `?d` reopens the same hole.
-    pub(crate) fn pending_gate_result_vars(
+    /// The result: a suspended `copy`/`cast` hands its consumer a fresh result
+    /// variable and ties it to the operand only through this ledger --
+    /// invisibly to levels. When an unannotated `let` generalized that
+    /// variable, every use of the bound name got its own unconstrained
+    /// instance, and discharge later bound only the original: a declared
+    /// result was never checked against what the call produces, and a false
+    /// signature checked and ran.
+    ///
+    /// The operand: the gate is suspended on this one variable, and only its
+    /// binding discharges the gate. When an unannotated `let` generalized it,
+    /// every application of the bound lambda bound a fresh instance instead,
+    /// the gate stayed on the never-bound template, and the declaration
+    /// boundary rejected a well-typed program as unresolved (chelis#2584:
+    /// `g = fn (y) -> cast(y, p)` then `g(x)`). Keeping it monomorphic is what
+    /// [04-INF-1] requires of a lambda carrying a pending obligation, so its
+    /// first application binds the operand and discharges the gate.
+    ///
+    /// ALL free variables are returned, not just a top-level type variable. A
+    /// pending result can be partly unified before it discharges -- `g` meeting
+    /// a `tensor[?d, 3, f32]` expectation makes it `tensor[?d, 3, f32]` -- and
+    /// quantifying `?d` reopens the same hole.
+    pub(crate) fn pending_gate_vars(
         &self,
     ) -> (UnordSet<TypeVar>, UnordSet<DimVar>, UnordSet<RankVar>) {
         let ledger = self
@@ -1380,14 +1391,14 @@ impl Subst {
         if ledger.is_empty() {
             return (tvars, dvars, rvars);
         }
-        for (_, gate) in ledger.iter() {
-            let Some(result) = gate.result() else {
-                continue;
-            };
-            let result = self.apply(result);
-            tvars.extend(crate::env::free_tvars(&result));
-            dvars.extend(crate::env::free_dvars(&result));
-            rvars.extend(crate::env::free_rvars(&result));
+        for (operand, gate) in ledger.iter() {
+            let operand = self.apply(&Type::Var(*operand));
+            let result = gate.result().map(|result| self.apply(result));
+            for pending in std::iter::once(&operand).chain(result.as_ref()) {
+                tvars.extend(crate::env::free_tvars(pending));
+                dvars.extend(crate::env::free_dvars(pending));
+                rvars.extend(crate::env::free_rvars(pending));
+            }
         }
         (tvars, dvars, rvars)
     }
