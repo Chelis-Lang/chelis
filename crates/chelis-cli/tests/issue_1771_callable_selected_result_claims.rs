@@ -1367,10 +1367,7 @@ fn assert_projection_without_origin_fails_explicitly(native: bool) {
         !output.contains("numeric trap: domain in index"),
         "{output}"
     );
-    assert!(
-        !output.contains("without producer provenance"),
-        "{output}"
-    );
+    assert!(!output.contains("without producer provenance"), "{output}");
 }
 
 fn assert_option_projection_provenance(native: bool) {

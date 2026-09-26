@@ -439,7 +439,10 @@ fn check_combinator(shape: &Combinator) -> Result<(), String> {
     let trap = format!("numeric trap: domain in {} at i64", shape.op);
     for (lane, native) in [("C", true), ("eval", false)] {
         let (ok, output) = run(&failing, native);
-        if ok || trap_lines(&output) != [context.as_str(), trap.as_str()] || printed_a_binding(&output) {
+        if ok
+            || trap_lines(&output) != [context.as_str(), trap.as_str()]
+            || printed_a_binding(&output)
+        {
             return Err(format!(
                 "{}: {lane} must trap with `{context}` / `{trap}`\n{failing}\n{output}",
                 shape.op
@@ -451,7 +454,8 @@ fn check_combinator(shape: &Combinator) -> Result<(), String> {
     let line = format!("a = {}", shape.value);
     for (lane, native) in [("C", true), ("eval", false)] {
         let (ok, output) = run(&agreeing, native);
-        if !ok || !output.lines().any(|printed| printed == line) || output.contains("numeric trap:") {
+        if !ok || !output.lines().any(|printed| printed == line) || output.contains("numeric trap:")
+        {
             return Err(format!(
                 "{}: {lane} must print `{line}`\n{agreeing}\n{output}",
                 shape.op
