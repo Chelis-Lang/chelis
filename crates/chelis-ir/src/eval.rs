@@ -4698,14 +4698,22 @@ fn inactive_unchecked_value(
                 .iter()
                 .enumerate()
                 .map(|(axis, dim)| match dim {
-                    DimInfo::Lit(extent) | DimInfo::Named(_, Some(extent)) => *extent,
+                    DimInfo::Lit(extent) | DimInfo::Named(_, Some(extent)) => Ok(*extent),
+                    // A movement keeps its operand's rank, so the operand
+                    // has every axis the node declares.
                     DimInfo::Named(name, None) => runtime_dims
                         .get(name)
                         .or_else(|| operand.shape.get(axis))
                         .copied()
-                        .unwrap_or(0),
+                        .ok_or_else(|| {
+                            format!(
+                                "node {} declares axis {axis}, which its operand of rank {} does not have",
+                                node.id.0,
+                                operand.shape.len()
+                            )
+                        }),
                 })
-                .collect::<Vec<_>>();
+                .collect::<Result<Vec<_>, String>>()?;
             zeros(&shape).map(Some)
         }
         RuntimeCheck::EmptyAxis => {
