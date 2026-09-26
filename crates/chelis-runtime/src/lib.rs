@@ -19,6 +19,7 @@ use std::io::Write;
 use std::ptr;
 use std::sync::atomic::{fence, AtomicU8, AtomicUsize, Ordering};
 
+pub mod build_record;
 mod decimal_parse;
 pub mod dtype_header;
 mod element;

@@ -987,8 +987,9 @@ fn run_compile_and_load_job(
     job: CompileAndLoadJob,
 ) -> Result<CompileAndLoadOutput, CompileAndLoadError> {
     // The extension links the runtime its own build carries (spec/08 §2.1): a
-    // set runtime directory is refused before any work, never honored.
-    chelis_runtime_bundle::reject_runtime_dir().map_err(runtime_error)?;
+    // set runtime directory, or in a development build runtime sources changed
+    // since this build, is refused before any work.
+    chelis_runtime_bundle::preflight().map_err(runtime_error)?;
     let source = fs::read_to_string(&job.source_path)
         .map_err(|err| CompileAndLoadError::Message(format!("read source failed: {err}")))?;
     let reef_root = resolve_compile_reef_root(&job, &source)?;

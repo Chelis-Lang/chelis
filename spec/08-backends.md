@@ -144,20 +144,20 @@ Link commands that Chelis prints or runs SHALL name the staged archive by path,
 never through a library search.
 
 A development build SHALL refuse to stage when the runtime's declared source
-inputs changed after it was built. The runtime compilation SHALL record a digest for
-each file of the runtime crate, of its workspace dependencies, and of the
-workspace lockfile; a changed or missing recorded file, or an unrecorded file in
-those roots, fails staging with its path. A sealed distribution build is
-declared when it is built and reads no source checkout. An unavailable checkout
-SHALL NOT select sealed mode.
+inputs changed after it was built. The declared inputs are the manifest, any
+build script, and every file under `src/` and `include/` of the runtime crate and
+of each workspace crate it depends on, and the workspace lockfile; files whose
+names begin with `.` are not inputs. The runtime compilation SHALL record a
+digest for each declared input; a changed or missing recorded file, or an
+unrecorded file in those roots, fails staging with its path. A development build
+whose runtime was compiled without its declared inputs SHALL refuse to stage. A
+sealed distribution build is declared when it is built and reads no source
+checkout. An unavailable checkout SHALL NOT select sealed mode.
 
 A distribution that ships a runtime archive or headers beside a compiler SHALL
 take them from that compiler's runtime export and SHALL verify the archive
 against the export's digest. The carried runtime adds no C callable and does not
 change callable metadata `abi_version: 2` (spec/11 §1.4).
-
-(Development freshness is not yet implemented; see
-[#1354](https://github.com/Chelis-Lang/chelis/issues/1354).)
 
 ## 3. Phase 1: HIP Backend
 
