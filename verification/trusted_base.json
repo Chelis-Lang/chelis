@@ -61,5 +61,12 @@
       "assumption": "Native code runs on aarch64 with the fp16 feature (every Apple silicon host), where half 2.7.1 dispatches f16::from_f64 to FCVT Hd, Dd.",
       "justification": "FCVT is the correctly rounded IEEE conversion (round to nearest, ties to even), which the model defines as BinaryFloat.cast, with Arm FPConvertNaN payloads. The crate's software fallback (hosts without fp16/f16c) truncates the low 32 bits of the f64 first and x86 f16c converts through f32; both round twice and differ from the model on some inputs. verification/crate_model_oracle (half_model_oracle) checks the model against the crate on edge cases and dense per-exponent samples. Reached by chelis-types dtype_semantics.rs:2138 (`<half::f16 as ActivationElement>::constant`, from impl_reduced_activation_element!(half::f16) at :2164), which float_vec_activation (:2176) calls for the Sigmoid/Tanh/GELU constants on F16 buffers (:2248), among them 0.044715 and 0.7978845608028654, which are not exactly representable in f16."
     }
+  ],
+  "admission_assumptions": [
+    {
+      "item": "#[automatically_derived] Ord impls (Aeneas llbc/SortContracts.ml)",
+      "assumption": "An Ord impl that carries #[automatically_derived] is rustc's #[derive(Ord)] expansion.",
+      "justification": "The sort_unstable/sort_unstable_by models are exact only where Equal holds exactly for indistinguishable values. SortContracts admits a crate element type only if its Ord impl carries #[automatically_derived], which rustc puts on derive expansions and Charon (since 5fd1554) keeps as an unknown attribute, and every field type is admitted: the derived cmp compares the variants, then the fields in order. Rust also accepts the attribute on a hand-written impl, which is where this assumption lies; no retained production crate writes it (`automatically_derived` does not occur in crates/). Reached by chelis-types linearity.rs:311 (`ids.sort_unstable()` on Vec<BindingId>; BindingId derives Ord over u32 at linearity.rs:161)."
+    }
   ]
 }

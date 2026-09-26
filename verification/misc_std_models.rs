@@ -81,6 +81,14 @@ pub fn through_mut_ref(x: u32) -> (u32, u32, u32) {
     (first, second, add(0))
 }
 
+/// `Option::<&mut u32>::expect`: monomorphized over the mutable borrow, so core's
+/// body is translated; `None` reaches `core::option::expect_failed`, which panics.
+pub fn expect_slot(slot: Option<&mut u32>) -> u32 {
+    let value = slot.expect("a slot");
+    *value += 1;
+    *value
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -121,5 +129,13 @@ mod tests {
     fn map_clone() {
         assert_eq!(cloned_map(&[(3, 30), (1, 10), (3, 31)]), (vec![(1, 10), (3, 31)], 2));
         assert_eq!(cloned_map(&[]), (vec![], 0));
+    }
+
+    #[test]
+    fn expect_failed() {
+        let mut slot = 3;
+        assert_eq!(expect_slot(Some(&mut slot)), 4);
+        assert_eq!(slot, 4);
+        assert!(std::panic::catch_unwind(|| expect_slot(None)).is_err());
     }
 }

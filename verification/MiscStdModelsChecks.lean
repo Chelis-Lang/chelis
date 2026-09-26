@@ -56,3 +56,9 @@ def pairs (v : alloc.vec.Vec (U32 × U32)) : List (Nat × Nat) := v.val.map fun 
   expect "FnMut/FnOnce through &mut F"
     (decode (fun ((a, b, c) : U32 × U32 × U32) => (a.val, b.val, c.val))
       (misc_std_models.through_mut_ref 3#u32)) (.ok (3, 7, 7))
+  expect "Option<&mut u32>::expect on Some (value, slot after)"
+    (decode (fun ((v, s) : U32 × Option U32) => (v.val, optNat s))
+      (misc_std_models.expect_slot (some 3#u32))) (.ok (4, some 4))
+  expect "Option<&mut u32>::expect on None panics (expect_failed)"
+    (decode (fun ((v, s) : U32 × Option U32) => (v.val, optNat s))
+      (misc_std_models.expect_slot none)) (.error "failure")

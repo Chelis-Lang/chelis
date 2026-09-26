@@ -33,6 +33,7 @@ MODELS = {
     "flatten_iterators": "FlattenIterators",
     "double_ended_adapters": "DoubleEndedAdapters",
     "str_split": "StrSplit",
+    "str_char_patterns": "StrCharPatterns",
     "option_collectors": "OptionCollectors",
     "range_inclusive_collectors": "RangeInclusiveCollectors",
     "result_iterators": "ResultIterators",
@@ -57,6 +58,7 @@ MODELS = {
     "eval_std_models": "EvalStdModels",
     "float_std_models": "FloatStdModels",
     "misc_std_models": "MiscStdModels",
+    "sort_std_models": "SortStdModels",
 }
 
 # Fixtures of crate-local native primitives compile under the production crate
@@ -110,6 +112,10 @@ MODEL_ROOTS = {
         "uncaught_rejection", "caught_with_state", "host_scopes",
         "lowering_runtime::{chelis_ir::lowering_runtime::LoweringFailure}::resume_at_boundary",
     )),
+    "sort_std_models": tuple(f"sort_std_models::{entry}" for entry in (
+        "sort_usizes", "sort_pairs", "sort_strings", "sort_strs", "sort_flags", "sort_ids",
+        "sort_slots", "sort_descending", "sort_ascending_by", "sort_ids_descending",
+    )),
     "associated_iterators": tuple(f"associated_iterators::{entry}" for entry in (
         "copied_signature", "cloned_signature", "copied_resume", "cloned_resume",
         "copied_any_resumes", "cloned_any_resumes", "cloned_first", "copied_count",
@@ -135,12 +141,18 @@ REJECTED_ROOTS = {
     # A native-shell scope on a borrow of a borrow: its instance is not the model at
     # an extended state (a staged backward function, see ModelStateABI.threaded_fun_body).
     "lowering_runtime_models": ("chelis_ir::reject_nested_borrow_state",),
+    # Sorts whose Equal may hold between distinct elements (see llbc/SortContracts.ml).
+    "sort_std_models": tuple(f"sort_std_models::{entry}" for entry in (
+        "reject_custom_ord", "reject_partial_comparator", "reject_stateful_comparator",
+        "reject_custom_ord_comparator", "reject_key",
+    )),
 }
 
 # The admission diagnostic that each fixture's rejected roots must report.
 REJECTED_DIAGNOSTICS = {
     "collection_contracts": "E_UNSUPPORTED_COLLECTION",
     "lowering_runtime_models": "Model at a borrowing state",
+    "sort_std_models": "E_UNSUPPORTED_SORT",
 }
 
 
