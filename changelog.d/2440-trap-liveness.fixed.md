@@ -16,7 +16,10 @@ The seeds are scoped to the declarations the evaluation enters, the rule
 function runs inlined in its caller, and a reference to a value declaration
 whose initializer can trap runs that initializer inlined where the reference
 is reached, whether or not it is read, so a function's or a value's own
-nodes run only when it is selected. A discarded trapping node in a selected
+nodes run only when it is selected. The references one declaration makes
+under one activation share one copy of the initializer, and a value named
+in another's initializer reuses its copy there, so the copies grow linearly
+with a chain of such values for each entry. A discarded trapping node in a selected
 declaration, or reached through a call or such a reference, therefore traps
 in `chelis eval` (the DAG evaluator and the host interpreter) and in compiled
 C, while an uncalled function's discarded overflow neither runs nor makes
@@ -27,7 +30,12 @@ sum, `max_reduce` or `argmax_reduce` over an empty axis, runtime `shrink`, `stri
 dead value reference checks nothing in the DAG evaluator and in compiled C,
 including under `grad`, per `vmap` row, at a `vmap` call site and in the
 body of a `vmap` of `grad`
-([#2563](https://github.com/Chelis-Lang/chelis/issues/2563)).
+([#2563](https://github.com/Chelis-Lang/chelis/issues/2563)). Under `grad`
+such an arm also contributes exactly nothing to the gradient, even where the
+values it computes are not finite, so a `log` of zero in an untaken arm, or
+of the zeros an untaken draw yields, no longer turns the gradient into NaN;
+a taken arm's non-finite derivative is returned unchanged
+([#2640](https://github.com/Chelis-Lang/chelis/issues/2640)).
 `chelis build --target hip` gates its integer arithmetic and division
 kernels the same way and refuses any other checking node under an
 activation. A dead `let` of an overflowing integer sum or product, an
