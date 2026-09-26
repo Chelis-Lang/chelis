@@ -63,6 +63,12 @@ syntax-based `Unknown` arm for computed tensor expressions with this checked
 producer fact. It should not broaden the class by routing every `concat`
 through the host lane or by treating every unknown shape as legal.
 
+At the Eval diagnostic boundary, a complete canonical numeric-trap line in a
+legacy evaluator failure becomes a typed numeric-trap diagnostic. The CLI
+renders that line without a generic error prefix or an appended hint; context
+and suggestions occupy separate lines. This preserves the spec/04 §4.7 trap
+line while the producer-fact route and broader acceptance matrix are completed.
+
 ## Acceptance
 
 Write the positive and negative route tests before implementation. Run the

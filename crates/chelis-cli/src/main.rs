@@ -1053,7 +1053,11 @@ fn main() {
         }
     };
     if let Err(e) = result {
-        eprintln!("error: {e}");
+        if e.is::<eval_output::NumericTrapCliError>() {
+            eprintln!("{e}");
+        } else {
+            eprintln!("error: {e}");
+        }
         std::process::exit(1);
     }
 }
@@ -2032,12 +2036,7 @@ fn prepare_eval_in_context(
         match chelis_compiler_api::compiler::eval_in_context_for_target(&context, source, target) {
             Ok(result) => result,
             Err(error) => {
-                let transcript = error.transcript.clone();
-                return Ok(eval_output::EvalOutput::failure(
-                    transcript,
-                    join_eval_error(error),
-                    json,
-                ));
+                return Ok(prepare_eval_failure(error, json));
             }
         };
     if json {
@@ -2057,10 +2056,7 @@ fn prepare_eval_text(
 ) -> Result<eval_output::EvalOutput, Box<dyn std::error::Error>> {
     Ok(match outcome {
         Ok(result) => eval_output::EvalOutput::text(result),
-        Err(error) => {
-            let transcript = error.transcript.clone();
-            eval_output::EvalOutput::failure(transcript, join_eval_error(error), false)
-        }
+        Err(error) => prepare_eval_failure(error, false),
     })
 }
 
@@ -2069,11 +2065,22 @@ fn prepare_eval_json(
 ) -> Result<eval_output::EvalOutput, Box<dyn std::error::Error>> {
     Ok(match outcome {
         Ok(result) => eval_output::EvalOutput::json(serde_json::to_string(&result)?),
-        Err(error) => {
-            let transcript = error.transcript.clone();
-            eval_output::EvalOutput::failure(transcript, join_eval_error(error), true)
-        }
+        Err(error) => prepare_eval_failure(error, true),
     })
+}
+
+fn prepare_eval_failure(error: CompilerError, json: bool) -> eval_output::EvalOutput {
+    let numeric_trap = error
+        .errors
+        .iter()
+        .any(|diagnostic| diagnostic.kind() == DiagnosticKind::NumericTrap);
+    let transcript = error.transcript.clone();
+    let rendered = join_eval_error(error);
+    if numeric_trap {
+        eval_output::EvalOutput::numeric_trap_failure(transcript, rendered, json)
+    } else {
+        eval_output::EvalOutput::failure(transcript, rendered, json)
+    }
 }
 
 /// Keep JSON stdout free of partial results and flush effects before the
@@ -10985,7 +10992,16 @@ fn run_tide_repl() -> Result<(), Box<dyn std::error::Error>> {
                 Ok(result) => println!("= {result}"),
                 Err(error) => {
                     emit_failed_eval_transcript(&error.transcript, false)?;
-                    eprintln!("error: {}", join_eval_error(error));
+                    let numeric_trap = error
+                        .errors
+                        .iter()
+                        .any(|diagnostic| diagnostic.kind() == DiagnosticKind::NumericTrap);
+                    let rendered = join_eval_error(error);
+                    if numeric_trap {
+                        eprintln!("{rendered}");
+                    } else {
+                        eprintln!("error: {rendered}");
+                    }
                 }
             }
         }
@@ -11000,17 +11016,25 @@ fn run_tide_repl() -> Result<(), Box<dyn std::error::Error>> {
 /// Error joining matches [`try_eval`] exactly, so JSON and text mode
 /// surface identical error text on failure.
 fn format_eval_diagnostic(diag: &chelis_compiler_api::schema::Diagnostic) -> String {
-    render_eval_diagnostic(&diag.message, &diag.suggestions)
+    render_eval_diagnostic(
+        &diag.message,
+        &diag.suggestions,
+        diag.kind() == DiagnosticKind::NumericTrap,
+    )
 }
 
 /// The rendering itself, over the two fields it reads. Separated from the
 /// `Diagnostic` adapter above because chelis#959 seals diagnostic production
 /// inside compiler-api: no crate outside it can build a `Diagnostic`, so the
 /// rendering contract is exercised through this function instead.
-fn render_eval_diagnostic(message: &str, suggestions: &[String]) -> String {
+fn render_eval_diagnostic(message: &str, suggestions: &[String], numeric_trap: bool) -> String {
     let mut rendered = message.to_string();
     for hint in suggestions {
-        rendered.push_str("; hint: ");
+        rendered.push_str(if numeric_trap {
+            "\n  hint: "
+        } else {
+            "; hint: "
+        });
         rendered.push_str(hint);
     }
     rendered
@@ -11058,11 +11082,20 @@ fn join_eval_error(err: chelis_compiler_api::compiler::CompilerError) -> String 
     if err.is_cancellation() {
         return chelis_compiler_api::EVAL_CANCELLED_MSG.to_string();
     }
+    let separator = if err
+        .errors
+        .iter()
+        .any(|diagnostic| diagnostic.kind() == DiagnosticKind::NumericTrap)
+    {
+        "\n"
+    } else {
+        "; "
+    };
     err.errors
         .iter()
         .map(format_eval_diagnostic)
         .collect::<Vec<_>>()
-        .join("; ")
+        .join(separator)
 }
 
 #[cfg(test)]
@@ -11079,6 +11112,7 @@ mod eval_diagnostic_rendering_tests {
             render_eval_diagnostic(
                 "renamed trap wording that contains no cast substring",
                 &hints(&["first recovery action", "second recovery action"]),
+                false,
             ),
             "renamed trap wording that contains no cast substring; hint: first recovery action; \
              hint: second recovery action"
@@ -11088,8 +11122,20 @@ mod eval_diagnostic_rendering_tests {
     #[test]
     fn diagnostic_without_suggestions_keeps_its_exact_message() {
         assert_eq!(
-            render_eval_diagnostic("plain failure", &hints(&[])),
+            render_eval_diagnostic("plain failure", &hints(&[]), false),
             "plain failure"
+        );
+    }
+
+    #[test]
+    fn numeric_trap_suggestions_are_separate_lines() {
+        assert_eq!(
+            render_eval_diagnostic(
+                "numeric trap: domain in cast at i64",
+                &hints(&["use cast_trunc"]),
+                true,
+            ),
+            "numeric trap: domain in cast at i64\n  hint: use cast_trunc"
         );
     }
 }

@@ -34,6 +34,7 @@ pub enum DiagnosticKind {
     LowerError,
     ReefError,
     EvalError,
+    NumericTrap,
     Cancelled,
     GradError,
     ValidationError,
@@ -86,7 +87,7 @@ pub enum DiagnosticKind {
 }
 
 impl DiagnosticKind {
-    pub const ALL: [Self; 55] = [
+    pub const ALL: [Self; 56] = [
         Self::SurfParseError,
         Self::DeepParseError,
         Self::MacroError,
@@ -101,6 +102,7 @@ impl DiagnosticKind {
         Self::LowerError,
         Self::ReefError,
         Self::EvalError,
+        Self::NumericTrap,
         Self::Cancelled,
         Self::GradError,
         Self::ValidationError,
@@ -160,6 +162,7 @@ impl DiagnosticKind {
             Self::LowerError => "lower_error",
             Self::ReefError => "reef_error",
             Self::EvalError => "eval_error",
+            Self::NumericTrap => "numeric_trap",
             Self::Cancelled => "cancelled",
             Self::GradError => "grad_error",
             Self::ValidationError => "validation_error",

@@ -145,7 +145,7 @@ fn initializer_failure_preserves_original_error_and_channels() {
         }
         let output = run(dir.path(), &args);
         assert!(!output.status.success());
-        let error = "error: numeric trap: division by zero in floor_div at i32\n";
+        let error = "numeric trap: division by zero in floor_div at i32\n";
         if json {
             assert!(output.stdout.is_empty());
             assert_eq!(

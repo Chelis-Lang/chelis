@@ -20,6 +20,7 @@ fn diagnostic_kind_wire_spellings_are_closed_and_stable() {
         (DiagnosticKind::LowerError, "lower_error"),
         (DiagnosticKind::ReefError, "reef_error"),
         (DiagnosticKind::EvalError, "eval_error"),
+        (DiagnosticKind::NumericTrap, "numeric_trap"),
         (DiagnosticKind::Cancelled, "cancelled"),
         (DiagnosticKind::GradError, "grad_error"),
         (DiagnosticKind::ValidationError, "validation_error"),
@@ -114,6 +115,7 @@ fn diagnostic_kind_consumer_match_is_a_compile_time_ratchet() {
             | DiagnosticKind::LowerError
             | DiagnosticKind::ReefError
             | DiagnosticKind::EvalError
+            | DiagnosticKind::NumericTrap
             | DiagnosticKind::Cancelled
             | DiagnosticKind::GradError
             | DiagnosticKind::ValidationError

@@ -6015,6 +6015,11 @@ fn unknown_name_error(stage: &str, field: &str, name: &str) -> CompilerError {
 fn eval_stage_error(message: String) -> CompilerError {
     let kind = if chelis_types::is_cancellation(&message) {
         GeneralKind::Cancelled
+    } else if message
+        .lines()
+        .any(chelis_types::NumericTrap::is_canonical_line)
+    {
+        GeneralKind::NumericTrap
     } else {
         GeneralKind::EvalError
     };
@@ -6049,6 +6054,36 @@ fn eval_stage_error(message: String) -> CompilerError {
         );
     }
     error
+}
+
+#[cfg(test)]
+mod eval_trap_classification_tests {
+    use super::*;
+
+    #[test]
+    fn canonical_trap_line_becomes_a_typed_eval_diagnostic() {
+        for message in [
+            "numeric trap: overflow in concat at i64",
+            "extent `3`: claimed = 3, concat axis 1 = 4\nnumeric trap: domain in concat at i64",
+        ] {
+            let error = eval_stage_error(message.to_string());
+            assert_eq!(
+                error.errors[0].kind(),
+                chelis_vocab::DiagnosticKind::NumericTrap
+            );
+            assert_eq!(error.errors[0].message, message);
+        }
+        for message in [
+            "error: numeric trap: domain in concat at i64",
+            "this failure mentions numeric trap: domain in concat at i64",
+        ] {
+            let error = eval_stage_error(message.to_string());
+            assert_eq!(
+                error.errors[0].kind(),
+                chelis_vocab::DiagnosticKind::EvalError
+            );
+        }
+    }
 }
 
 /// Lift a [`WireDagSchemaError`] from validating a `WireDag` at a

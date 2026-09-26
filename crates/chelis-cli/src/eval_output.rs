@@ -1,10 +1,22 @@
 //! Prepare evaluation output before deciding which terminal path may emit it.
 use std::io::{self, Write};
 
+#[derive(Debug)]
+pub(crate) struct NumericTrapCliError(pub(crate) String);
+
+impl std::fmt::Display for NumericTrapCliError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for NumericTrapCliError {}
+
 pub(crate) struct EvalOutput {
     stdout: Option<String>,
     stderr: Vec<String>,
     pub(crate) error: Option<String>,
+    numeric_trap: bool,
 }
 
 impl EvalOutput {
@@ -16,12 +28,14 @@ impl EvalOutput {
                     "warning: input contains only def declarations; nothing to evaluate".into(),
                 ],
                 error: None,
+                numeric_trap: false,
             }
         } else {
             Self {
                 stdout: Some(rendered),
                 stderr: vec![],
                 error: None,
+                numeric_trap: false,
             }
         }
     }
@@ -31,20 +45,36 @@ impl EvalOutput {
             stdout: Some(rendered),
             stderr: vec![],
             error: None,
+            numeric_trap: false,
         }
     }
 
     pub(crate) fn failure(transcript: Vec<String>, error: String, json: bool) -> Self {
+        Self::failure_with_trap_kind(transcript, error, json, false)
+    }
+
+    pub(crate) fn numeric_trap_failure(transcript: Vec<String>, error: String, json: bool) -> Self {
+        Self::failure_with_trap_kind(transcript, error, json, true)
+    }
+
+    fn failure_with_trap_kind(
+        transcript: Vec<String>,
+        error: String,
+        json: bool,
+        numeric_trap: bool,
+    ) -> Self {
         Self {
             stdout: (!json && !transcript.is_empty()).then(|| transcript.join("\n")),
             stderr: if json { transcript } else { vec![] },
             error: Some(error),
+            numeric_trap,
         }
     }
 
     pub(crate) fn emit(self) -> Result<(), Box<dyn std::error::Error>> {
         self.emit_effects()?;
         match self.error {
+            Some(error) if self.numeric_trap => Err(Box::new(NumericTrapCliError(error))),
             Some(error) => Err(error.into()),
             None => Ok(()),
         }
