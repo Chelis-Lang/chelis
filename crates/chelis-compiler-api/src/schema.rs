@@ -2128,7 +2128,9 @@ pub struct WireRecordPatternField {
 /// - `19`: the counter-stream bridge operation is deleted with the seed
 ///   handler (chelis#2413); a key comes only from a key operation or a
 ///   key-typed `Load`, or from `KeySelect`, a branch's join, which a
-///   runtime `if` whose value is a key lowers to (spec/10 §3.2, Rule S). A
+///   runtime `if` whose value is a key lowers to (spec/10 §3.2, Rule S).
+///   Every node carries its declaration and its activation; a draw's or a
+///   key operation's activation is its node's, and no input carries it. A
 ///   version-18 graph may hold that bridge operation, which has no
 ///   version-19 spelling, so it is rejected like every other earlier
 ///   version.
@@ -2622,13 +2624,11 @@ impl WireDag {
                             unreachable!("owner validation rejects forbidden SplitN carriers")
                         }
                     };
-                    // At most one activation follows the operands; the key
-                    // rules check its dtype and shape (spec/10 §3.2).
-                    if node.inputs.len() != expected_inputs
-                        && node.inputs.len() != expected_inputs + 1
-                    {
+                    // Its activation is the node's own, never an input
+                    // (spec/10 §3.2).
+                    if node.inputs.len() != expected_inputs {
                         return Err(WireDagContractError::new(format!(
-                            "WireDag SplitN node {} has {} inputs; count requires {expected_inputs}, then at most one activation",
+                            "WireDag SplitN node {} has {} inputs; count requires {expected_inputs}",
                             node.id,
                             node.inputs.len()
                         )));
@@ -3224,8 +3224,8 @@ fn wire_axis_origin(
             require_input_agreement,
         )
     };
-    // The origin every one of the first `operands` inputs agrees on; a key
-    // operation's trailing activation is not one of its operands.
+    // The origin every one of the first `operands` inputs agrees on; a
+    // join's two trailing activations are not among its operands.
     let same_shape_input_origin = |operands: usize| {
         let mut origins = node.inputs.iter().take(operands).filter_map(|source_id| {
             let source = wire_node_by_id(nodes, *source_id)?;
@@ -3890,19 +3890,19 @@ pub enum WireRiscOp {
     Floor,
     Ceil,
     Round,
-    /// `[05-OP-8]`. Inputs are `[template, low, high, key]`, optionally
-    /// followed by one Bool activation, shaped as spec/10 §3.2 fixes.
+    /// `[05-OP-8]`. Inputs are exactly `[template, low, high, key]`; its
+    /// activation is the node's own, shaped as spec/10 §3.2 fixes.
     UniformLike {},
-    /// `[05-OP-37]`. Inputs are `[x, rate, key]`, optionally followed by one
-    /// Bool activation, shaped as spec/10 §3.2 fixes.
+    /// `[05-OP-37]`. Inputs are exactly `[x, rate, key]`; its activation is
+    /// the node's own, shaped as spec/10 §3.2 fixes.
     Dropout {},
-    /// The `[05-OP-37]` pathwise adjoint. Inputs are `[g, rate, key]`,
-    /// optionally followed by the forward draw's activation; it reads its
-    /// forward `Dropout`'s key without consuming it.
+    /// The `[05-OP-37]` pathwise adjoint. Inputs are exactly `[g, rate,
+    /// key]`, under its forward draw's activation; it reads its forward
+    /// `Dropout`'s key without consuming it.
     DropoutReplay {},
-    /// A `[05-OP-8]` bound adjoint. Inputs are `[template, g, key]`,
-    /// optionally followed by the forward draw's activation; it reads its
-    /// forward `UniformLike`'s key without consuming it.
+    /// A `[05-OP-8]` bound adjoint. Inputs are exactly `[template, g, key]`,
+    /// under its forward draw's activation; it reads its forward
+    /// `UniformLike`'s key without consuming it.
     UniformBoundAdjoint {
         bound: WireUniformBound,
     },
@@ -3924,7 +3924,9 @@ pub enum WireRiscOp {
     },
     /// A branch's join (spec/10 §3.2, Rule S). Inputs are the then and else
     /// `key` tensors of the output's exact shape, then the then and else
-    /// Bool activations, each shaped like a leading part of that shape.
+    /// Bool activations, each shaped like a leading part of that shape: the
+    /// node's own activation conjoined with a condition and with its
+    /// negation.
     KeySelect {},
     Sum {
         axis: i32,

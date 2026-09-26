@@ -10,7 +10,7 @@
 //! key rules V1 to V5, `grad`, the optimizer, and `vmap`.
 
 use chelis_ir::dag::{
-    Dag, DimInfo, KeyBranch, LogicalKind, NodeId, RiscOp, RtDim, TensorType, UniformBound,
+    Dag, DimInfo, KeyBranch, LogicalKind, NodeId, Owner, RiscOp, RtDim, TensorType, UniformBound,
     record_runtime_dim_shape_deps,
 };
 use chelis_ir::eval::{TensorValue, eval_tensor_roots_exact};
@@ -458,13 +458,12 @@ fn per_row_controls_and_activations_select_each_row_independently() {
     let x = load(&mut dag, decl, "x", &[3, 4], prim);
     let rates = load(&mut dag, decl, "rates", &[3], prim);
     let active = load(&mut dag, decl, "active", &[3], Prim::Bool);
-    let drawn = node(
-        &mut dag,
-        decl,
+    let drawn = dag.add_node(
+        Owner::new(decl, Some(active)),
         RiscOp::Dropout,
-        vec![x, rates, chain.rows, active],
-        &[3, 4],
-        prim,
+        vec![x, rates, chain.rows],
+        ty(&[3, 4], prim),
+        None,
     );
     dag.add_root(drawn);
     dag.add_root(chain.g);
@@ -1042,8 +1041,13 @@ fn draw(
 ) -> NodeId {
     let x = load(dag, decl, "x", &[4], Prim::F32);
     let rate = float_const(dag, decl, Prim::F32, 0.5);
-    let inputs = [x, rate, key].into_iter().chain(active).collect();
-    node(dag, decl, RiscOp::Dropout, inputs, &[4], Prim::F32)
+    dag.add_node(
+        Owner::new(decl, active),
+        RiscOp::Dropout,
+        vec![x, rate, key],
+        ty(&[4], Prim::F32),
+        None,
+    )
 }
 
 fn split(dag: &mut Dag, decl: chelis_ir::dag::DeclId, key: NodeId, branch: KeyBranch) -> NodeId {

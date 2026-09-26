@@ -7336,10 +7336,10 @@ impl<'program> LowerCtx<'program> {
 
     /// Lower one draw of a key-operand random primitive ([05-OP-8],
     /// [05-OP-37]): the primitive consuming `key`, the lowered source key
-    /// operand. The draw carries the position's [`Self::draw_activation`]
-    /// when it has one, so a draw in a where-lowered arm validates its
-    /// controls only when its arm is selected, and two draws in exclusive
-    /// arms may share one key (spec/10 section 3.2, rule V3).
+    /// operand. Its owner carries the position's [`Self::draw_activation`],
+    /// so a draw in a where-lowered arm validates its controls only when its
+    /// arm is selected, and two draws in exclusive arms may share one key
+    /// (spec/10 section 3.2, rule V3).
     fn lower_keyed_draw(
         &mut self,
         op: RiscOp,
@@ -7349,18 +7349,17 @@ impl<'program> LowerCtx<'program> {
         ty: TensorType,
     ) -> NodeId {
         let span = self.current_span_id.clone();
-        let activation = self.draw_activation();
         let inputs = std::iter::once(data)
             .chain(controls.iter().copied())
             .chain(std::iter::once(key))
-            .chain(activation)
             .collect();
         self.dag.add_node(self.owner(), op, inputs, ty, span)
     }
 
     /// `[05-OP-70]` `split_key(k)`: two IR nodes, `Split{Left}` and
     /// `Split{Right}`, because an IR node has one output. Each half has the
-    /// key's shape and carries the position's [`Self::draw_activation`].
+    /// key's shape, and its owner carries the position's
+    /// [`Self::draw_activation`].
     fn lower_split_key(&mut self, key_expr: &Expr) -> LoweredValue {
         let key = self.lower_expr_node(key_expr, "split_key key");
         let key_ty = self.key_operand_type(key);
@@ -7379,15 +7378,14 @@ impl<'program> LowerCtx<'program> {
 
     /// Lower one key-consuming operation (`Split`, `FoldIn` or `SplitN`) over
     /// its `operands`, the parent key first. Like a draw
-    /// ([`Self::lower_keyed_draw`]) it carries the position's
-    /// [`Self::draw_activation`] when it has one, so a key operation in a
-    /// where-lowered arm and a consumer of the same key in the exclusive arm
-    /// share it under rule V3 (spec/10 section 3.2), and a `SplitN` in an
-    /// unselected arm does not trap on its count.
+    /// ([`Self::lower_keyed_draw`]) its owner carries the position's
+    /// [`Self::draw_activation`], so a key operation in a where-lowered arm
+    /// and a consumer of the same key in the exclusive arm share it under
+    /// rule V3 (spec/10 section 3.2), and a `SplitN` in an unselected arm
+    /// does not trap on its count.
     fn lower_key_operation(&mut self, op: RiscOp, operands: Vec<NodeId>, ty: TensorType) -> NodeId {
         let span = self.current_span_id.clone();
-        let inputs = operands.into_iter().chain(self.draw_activation()).collect();
-        self.dag.add_node(self.owner(), op, inputs, ty, span)
+        self.dag.add_node(self.owner(), op, operands, ty, span)
     }
 
     /// The type of a lowered key operand: its own shape at dtype `key`.
