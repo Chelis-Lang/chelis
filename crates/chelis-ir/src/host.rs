@@ -34,6 +34,10 @@ thread_local! {
     // recursive/mutually recursive definitions — the specialized body would
     // re-encounter the same call and inline forever.
     static INLINING_STACK: RefCell<UnordSet<String>> = RefCell::new(UnordSet::new());
+    // chelis#2588: the top-level declarations whose bodies host lowering is
+    // currently inside, innermost last. With `INLINING_STACK` these are the
+    // bodies whose binders surround a call site.
+    static HOST_DECLARATION_STACK: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
     // The per-program memos that used to live here are fields of
     // `HostLoweringSession` (chelis#1835). The push/pop stacks stay: they
     // track where the lowerer currently IS, which is a property of the
@@ -245,6 +249,114 @@ fn pop_inlining(name: &str) {
     });
 }
 
+/// Keeps a top-level declaration on `HOST_DECLARATION_STACK` while host
+/// lowering is inside its body.
+struct HostDeclarationGuard;
+
+impl HostDeclarationGuard {
+    fn enter(name: &str) -> Self {
+        HOST_DECLARATION_STACK.with(|stack| stack.borrow_mut().push(name.to_string()));
+        Self
+    }
+}
+
+impl Drop for HostDeclarationGuard {
+    fn drop(&mut self) {
+        HOST_DECLARATION_STACK.with(|stack| {
+            stack.borrow_mut().pop();
+        });
+    }
+}
+
+/// Whether substituting top-level `callee`'s body at the current call site
+/// would let a surrounding binder capture one of the body's free names
+/// (chelis#2588).
+///
+/// A substituted body is lowered, and emitted, inside the scope of the call
+/// site, where every free name it reads must still mean the top-level
+/// declaration it meant where the callee was written. The binders around a
+/// call site are those of the declaration being lowered and of every body
+/// already substituted into it, so a callee that reads a name one of them
+/// binds is not substituted. The caller then keeps an ordinary call, which
+/// resolves the callee's names in its own scope. A binder the reader cannot
+/// decode is treated as capturing.
+fn inlining_would_capture(program: &HostLoweringSession<'_>, callee: &str) -> bool {
+    let Some((_, body)) = program.def_named(callee) else {
+        return false;
+    };
+    let free = chelis_types::linearity::free_runtime_variables(body);
+    if free.is_empty() {
+        return false;
+    }
+    let mut enclosing = HOST_DECLARATION_STACK.with(|stack| stack.borrow().clone());
+    enclosing.extend(INLINING_STACK.with(|stack| {
+        stack
+            .borrow()
+            .to_sorted()
+            .into_iter()
+            .cloned()
+            .collect::<Vec<_>>()
+    }));
+    enclosing
+        .into_iter()
+        .any(|name| match def_binders(program, &name) {
+            Some(binders) => free.iter().any(|name| binders.contains(name)),
+            None => true,
+        })
+}
+
+/// Every name top-level `name`'s definition binds anywhere in its body, its
+/// parameters included, or `None` when a binder cannot be read.
+fn def_binders(program: &HostLoweringSession<'_>, name: &str) -> Option<Arc<UnordSet<String>>> {
+    let (canonical, body) = program.def_named(name)?;
+    if let Some(cached) = program.facts.def_binders.borrow().get(canonical) {
+        return cached.clone();
+    }
+    let mut binders = UnordSet::new();
+    let binders = names_bound_in(body, &mut binders)
+        .ok()
+        .map(|()| Arc::new(binders));
+    program
+        .facts
+        .def_binders
+        .borrow_mut()
+        .insert(canonical.to_string(), binders.clone());
+    binders
+}
+
+/// Whether a kernel for this definition would have to read a top-level name
+/// that one of its own parameters also spells (chelis#2588). A kernel names
+/// both by one `Load` name, so such a definition stays in the host lane,
+/// where each callee resolves its names in its own scope.
+fn kernel_params_shadow_callee_reads(
+    program: &HostLoweringSession<'_>,
+    signature: &HostDefSignature,
+) -> bool {
+    let params = signature
+        .params
+        .iter()
+        .map(|param| param.name.as_str())
+        .collect::<UnordSet<_>>();
+    let definitions = cached_program_defs(program);
+    let mut pending = chelis_types::linearity::free_runtime_variables(&signature.body_expr);
+    let mut visited = UnordSet::new();
+    while let Some(name) = pending.pop() {
+        if !visited.insert(name.clone()) {
+            continue;
+        }
+        let Some(body) = lookup_program_def(&definitions, &name) else {
+            continue;
+        };
+        for read in chelis_types::linearity::free_runtime_variables(body) {
+            if params.contains(read.as_str()) {
+                return true;
+            }
+            pending.push(read);
+        }
+    }
+    false
+}
+
 /// Each top-level fn's directly called top-level fns.
 type CallGraph = BTreeMap<String, BTreeSet<String>>;
 
@@ -277,6 +389,9 @@ struct DefLaneFacts {
     dropout_reaching_defs: RefCell<Option<Arc<UnordSet<String>>>>,
     /// Program-wide: which definitions reach a runtime-shaped `to_tensor`.
     dynamic_to_tensor_def_summaries: RefCell<Option<Arc<BTreeMap<String, bool>>>>,
+    /// Per def: every name its body binds, or `None` when a binder cannot be
+    /// read (chelis#2588).
+    def_binders: RefCell<UnordMap<String, Option<Arc<UnordSet<String>>>>>,
 }
 
 /// One host-lowering session: a checked program, plus the facts host lowering
@@ -2972,6 +3087,7 @@ fn lower_host_program_with_execution(
             // before host lowering — same rationale as in
             // `lower_host_function`.
             global_tensor_helpers.declaration_name = Some(name.to_string());
+            let _declaration = HostDeclarationGuard::enter(name);
             let inlined_body = inline_local_callable_lets(body);
             let mut value = lower_host_expr(
                 &inlined_body,
@@ -5052,6 +5168,9 @@ fn def_body_decision(
     if body_form_the_dag_cannot_carry(program, body_expr, &signature.params, true).is_some() {
         return Ok(DefBodyDecision::Host);
     }
+    if kernel_params_shadow_callee_reads(program, signature) {
+        return Ok(DefBodyDecision::Host);
+    }
     // The callee summary probe is asked LAST of the host-lane predicates, and
     // only after the declared result type, the effect row and the body form
     // have each had their chance to answer. It is the only one that lowers a
@@ -5419,6 +5538,7 @@ fn lower_host_function(
     let Some(signature) = host_def_signature(name, body, ty_expr, program) else {
         return Ok(None);
     };
+    let _declaration = HostDeclarationGuard::enter(name);
     let mut tensor_helpers = TensorHelperSink::for_declaration(collect_trace, name);
     // The preflight facts are keyed by the body expression's address, so the
     // guard opens on the signature's own copy, which is not moved until the
@@ -13237,7 +13357,7 @@ fn lower_named_retained_host_invocation(
     tensor_helpers: &mut TensorHelperSink,
     actualize_polymorphic_contract: bool,
 ) -> Result<Option<(HostExpr, Option<TensorType>)>, crate::lower::LowerDiagnostic> {
-    if is_inlining(name) {
+    if is_inlining(name) || inlining_would_capture(program, name) {
         return Ok(None);
     }
     let Some((canonical, body)) = program.def_named(name) else {
@@ -13518,7 +13638,7 @@ fn inline_top_level_host_call(expr: &Expr, program: &HostLoweringSession<'_>) ->
         .and_then(as_node)
         .filter(|callee| callee.tag() == DeepTag::Var)
         .and_then(|callee| callee.children_slice().first().and_then(symbol_name))?;
-    if is_inlining(callee_name) {
+    if is_inlining(callee_name) || inlining_would_capture(program, callee_name) {
         return None;
     }
     let defs = cached_program_defs(program);
