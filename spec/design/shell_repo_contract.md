@@ -110,6 +110,34 @@ School exemplar: [`school/AGENTS.md`](https://github.com/Chelis-Lang/school/blob
   Never vendor or build the compiler inside a shell; never hand-symlink;
   consume the released tarball (CI auth via a `CHELIS_RELEASE_TOKEN`-style
   PAT with `contents: read` on every private dep the shell consumes).
+- **Optional Nix verification job (MAY).** A shell MAY add one CI job that
+  rebuilds the shell with atoll's
+  [`chelis2nix`](https://github.com/Chelis-Lang/atoll/tree/main/pkgs/by-name/chelis2nix)
+  and compares the result with its chelisup lane. The released-tarball rule
+  above yields to this job only while the job meets every condition:
+  - The chelisup lane stays and remains the gate. The job runs only on
+    `push` to `main` and is never a required check.
+  - The job takes the compiler only by substitution from the CProof mesh
+    cache, signed by that cache, and fails rather than build it. The
+    compiler is the Chelis flake's `packages.<system>.chelis` at the pinned
+    release tag's commit, as atoll's reviewed toolchain table records it.
+  - The `<name>-<version>.tar.zst` and `<name>-<version>.chb` it builds equal,
+    byte for byte, the files that the chelisup lane's `chelis reef build`
+    wrote in the same workflow run. Otherwise the job fails and names both
+    hashes.
+  - It reads private repositories only through short-lived tokens limited to
+    `contents: read` on the repositories each step reads. No credential
+    enters a Nix build or the Nix store.
+  - Its workflow carries the `CHELIS_TAG`/`CHELIS_VERSION` pair above. Before
+    the shell bumps its pin, atoll's toolchain table gains the new version.
+  - The shell lists the job under its `AGENTS.md` Scaffolding Drift Rule
+    section as a recorded per-repo divergence (§10), with a link to this
+    clause. Other shells need not mirror it.
+
+  Rationale: the Nix-built compiler is not the released binary, yet Nix
+  builds of published shell releases reproduced them byte for byte, and
+  atoll's tests check those rebuilds on every push. The comparison on every
+  merge extends that evidence to the shell's own code.
 - **Per-repo toolchain resolution; installs have no machine-global side
   effects.** Toolchains install side-by-side in a version-keyed store
   (first-party: `$CHELIS_HOME/toolchains/<ver>`, default `~/.chelis/`;

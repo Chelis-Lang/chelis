@@ -336,20 +336,21 @@ ordered = to_json(parse_json("{\"b\":2,\"a\":1}"))
         .filter(|path| path.ends_with(".a"))
         .collect();
     assert_eq!(archives.len(), 1);
-    let runtime = app.join("instrumented-runtime");
-    fs::create_dir(&runtime).unwrap();
-    fs::copy(archives[0], runtime.join("libchelis_runtime.a")).unwrap();
     let out = app.join("out");
     Command::cargo_bin("chelis")
         .unwrap()
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .env("CHELIS_REEF_HOME", &reef_home)
-        .env("CHELIS_RUNTIME_DIR", &runtime)
         .current_dir(&app)
         .args(["build", "src/main.ch", "--target", "c", "--output"])
         .arg(&out)
         .assert()
         .success();
+    // `chelis build` stages the product runtime it carries, which records no
+    // ownership ledger. This receipt links the generated code against the exact
+    // instrumented runtime artifact built above instead; the runtime ABI is the
+    // same with or without `ownership-ledger`.
+    fs::copy(archives[0], out.join("libchelis_runtime.a")).unwrap();
     let generated = fs::read_to_string(out.join("main.c")).unwrap();
     assert_eq!(generated.matches("int main(void) {").count(), 1);
     // Keep the actual emitted helper, and give it a caller whose ownership is
@@ -365,8 +366,7 @@ int main(void) {
                 chelis_value_take_string(chelis_string_from_cstr("value"))
             };
             chelis_value pair = chelis_value_take_tuple(chelis_tuple_from_values(fields, 2));
-            chelis_list_push(pairs, pair);
-            chelis_value_release(pair);
+            chelis_list_push_moved(pairs, pair);
             chelis_value_release(fields[0]);
             chelis_value_release(fields[1]);
         }
@@ -390,7 +390,7 @@ int main(void) {
 }
 "#;
     let emitted = generated.replace("int main(void) {", "int json_fixture_main(void) {") + driver;
-    let anchor = "        chelis_value_release(entry);";
+    let anchor = "        chelis_list_push_moved(result, entry);";
     assert_eq!(
         emitted.matches(anchor).count(),
         1,

@@ -288,6 +288,13 @@ one successor owner to the back-edge or result. Source rebindings are display
 names only and cannot overwrite the accumulator's provenance. This removes
 [#1346]'s double-target representation.
 
+A list-building loop's step (`list_push` for `map` and `scan`, `list_extend`
+for `flat_map`, `filter_step`, `partition_step`) moves its item into the
+accumulator. The emitter's accumulator ABI therefore declares only consuming
+entry points, `chelis_list_push_moved` and `chelis_list_extend_moved`, so the
+move cannot be realized as a retaining copy that leaves the moved owner live
+(chelis#2508). A `filter` step releases the item its predicate rejects.
+
 ### Manifested roots
 
 After [#912]'s root manifest exists, ownership lowering appends one terminal

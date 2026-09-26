@@ -75,10 +75,10 @@ let
     rootFeatures = [ ];
   };
   compilerCrate = cargoGraph.workspaceMembers."chelis-cli".build.override {
-    features = [ "smt" ];
-  };
-  runtimeCrate = cargoGraph.workspaceMembers."chelis-runtime".build.override {
-    features = [ ];
+    features = [
+      "smt"
+      "sealed-runtime"
+    ];
   };
   chelisupCrate = cargoGraph.workspaceMembers."chelisup".build.override {
     features = [ ];
@@ -87,13 +87,19 @@ let
     test -x ${compilerCrate}/bin/chelis
     install -Dm755 ${compilerCrate}/bin/chelis $out/bin/chelis
   '';
-  runtime = pkgs.runCommand "chelis-runtime-${version}" { } ''
-    artifact="$(find ${runtimeCrate.lib}/lib -type f -name 'libchelis_runtime-*.a' -print -quit)"
-    test -n "$artifact"
-    install -Dm444 "$artifact" $out/lib/libchelis_runtime.a
+  # The runtime the compiler carries (spec/08-backends.md §2.1): `chelis-runtime`
+  # and `chelis` ship the compiler's export, never a separately built crate.
+  runtime = pkgs.runCommand "chelis-runtime-${version}" { nativeBuildInputs = [ pkgs.jq ]; } ''
+    export_dir="$TMPDIR/runtime-export"
+    ${compiler}/bin/chelis runtime export "$export_dir"
+    receipt="$export_dir/chelis_runtime.receipt.json"
+    test "$(jq -r .mode "$receipt")" = sealed
+    install -Dm444 "$export_dir/libchelis_runtime.a" $out/lib/libchelis_runtime.a
+    archive_sha256="$(sha256sum $out/lib/libchelis_runtime.a | cut -d ' ' -f 1)"
+    test "$archive_sha256" = "$(jq -r .archive_sha256 "$receipt")"
     mkdir -p $out/include
     ${lib.concatMapStringsSep "\n" (header: ''
-      install -Dm444 ${source}/crates/chelis-runtime/include/${header} $out/include/${header}
+      install -Dm444 "$export_dir/${header}" $out/include/${header}
     '') (import ./contracts.nix).publicRuntimeHeaders}
   '';
   chelisup = pkgs.runCommand "chelisup-${version}" { } ''
@@ -245,7 +251,6 @@ in
     crate2nixVersion
     generatedCargoNix
     runtime
-    runtimeCrate
     source
     toolchain
     version

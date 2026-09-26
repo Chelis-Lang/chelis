@@ -1,1 +1,0 @@
-Add a data-only runtime artifact identity core with canonical descriptor derivation, exact compatibility comparison, explicit provenance encoding, and strict ELF/Mach-O archive record decoding. This does not change runtime production or selection; #2394 and #1354 remain open.

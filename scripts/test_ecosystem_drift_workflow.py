@@ -10,8 +10,10 @@ WORKFLOW = REPO_ROOT / ".github" / "workflows" / "ecosystem-drift.yml"
 RUNTIME_INCLUDE = REPO_ROOT / "crates" / "chelis-runtime" / "include"
 NIX_CONTRACTS = REPO_ROOT / "nix" / "contracts.nix"
 LOCAL_INCLUDE = re.compile(r'^\s*#include\s+"(chelis_[^"]+\.h)"', re.MULTILINE)
+# The toolchain ships the headers of the runtime its chelis carries, taken from
+# `chelis runtime export`, never from the source tree (spec/08-backends.md §2.1).
 COPY_HEADER = re.compile(
-    r"cp crates/chelis-runtime/include/(chelis_[^\s/]+\.h) "
+    r'cp "\$runtime_export/(chelis_[^\s/"]+\.h)" '
     r'"\$staging/include/"'
 )
 REEF_BUILD_COMMAND = re.compile(
@@ -236,7 +238,7 @@ class EcosystemDriftWorkflowTests(unittest.TestCase):
     def test_deleting_a_runtime_header_copy_is_rejected(self) -> None:
         workflow = WORKFLOW.read_text(encoding="utf-8")
         mutated = workflow.replace(
-            '          cp crates/chelis-runtime/include/chelis_runtime_views.h "$staging/include/"\n',
+            '          cp "$runtime_export/chelis_runtime_views.h" "$staging/include/"\n',
             "",
             1,
         )

@@ -480,7 +480,7 @@ The compile command printed by `cmd_build_metal`:
 
 ```sh
 clang++ -std=c++17 -fobjc-arc -O2 <func>_metal.mm \
-  -L<runtime_dir> -lchelis_runtime \
+  <output_dir>/libchelis_runtime.a \
   -framework Metal -framework Foundation \
   -o <func>
 ```

@@ -27,7 +27,7 @@ ROOT = phase0.REPO_ROOT
 OracleFailure = phase0.OracleFailure
 PROFILE = 'runtime-representation'
 MANIFEST = ROOT / 'spec/design/runtime_representation_phase1_tests.json'
-MANIFEST_SHA256 = '7f8390d4660d8562f75ba01785b7917a5db008d044e0809e1a32fbdfeb3bf85f'
+MANIFEST_SHA256 = 'cea2e2c137ed6cd1e51971445b3f5564ad8aaa4f5ea1ce35aed7c05e3d025b85'
 MANUAL_TEST = 'an_allocation_above_int32_elements_reports_its_true_extent'
 
 
@@ -173,6 +173,15 @@ def runtime_artifact(output):
 
 @contextmanager
 def runtime_pin(directory):
+    """Name one current instrumented archive for harnesses that link it themselves.
+
+    Only `CHELIS_RUNTIME_LIB`, an exact regular file, carries the pin. `chelis
+    build` stages the runtime carried by its own Cargo build and rejects
+    `CHELIS_RUNTIME_DIR`, so no process started under the pin may inherit it.
+    """
+    if 'CHELIS_RUNTIME_DIR' in os.environ:
+        raise OracleFailure('CHELIS_RUNTIME_DIR is set, but chelis build rejects it and this oracle never '
+                            'takes a runtime from a directory. Unset CHELIS_RUNTIME_DIR')
     output = command(['cargo', 'build', '--locked', '-p', 'chelis-runtime', '--lib',
                       '--features', 'ownership-ledger', '--message-format=json'],
                      ROOT, directory, 'build-runtime')
@@ -185,19 +194,13 @@ def runtime_pin(directory):
     hashes = artifact_hashes([copied])
     if next(iter(original.values())) != next(iter(hashes.values())):
         raise OracleFailure('runtime artifact changed during pinning')
-    old_directory = os.environ.get('CHELIS_RUNTIME_DIR')
     old_library = os.environ.get('CHELIS_RUNTIME_LIB')
-    os.environ['CHELIS_RUNTIME_DIR'] = str(pinned)
     os.environ['CHELIS_RUNTIME_LIB'] = str(copied)
     try:
         yield {'cargo_artifact': original, 'pinned_artifact': hashes,
                'features': ['ownership-ledger']}
         verify_artifacts(hashes)
     finally:
-        if old_directory is None:
-            os.environ.pop('CHELIS_RUNTIME_DIR', None)
-        else:
-            os.environ['CHELIS_RUNTIME_DIR'] = old_directory
         if old_library is None:
             os.environ.pop('CHELIS_RUNTIME_LIB', None)
         else:
@@ -374,9 +377,11 @@ def managed_python_environment(root: Path):
     return {'PYO3_PYTHON': str(candidate), 'VIRTUAL_ENV': prefix}
 
 
-def command(argv, root, directory: Path, label: str, *, expected_exit=0):
+def command(argv, root, directory: Path, label: str, *, expected_exit=0, scoped_environment=None):
+    """Run one evidence process; `scoped_environment` reaches only this child."""
     directory.mkdir(parents=True, exist_ok=True)
-    environment = {**os.environ, **managed_python_environment(Path(root))}
+    scoped = dict(scoped_environment or {})
+    environment = {**os.environ, **managed_python_environment(Path(root)), **scoped}
     with (directory / f'{label}.stdout').open('w') as stdout, (directory / f'{label}.stderr').open('w') as stderr:
         result = subprocess.run(argv, cwd=root, env=environment, stdout=stdout, stderr=stderr, check=False)
     (directory / f'{label}.process.json').write_text(json.dumps({
@@ -385,6 +390,7 @@ def command(argv, root, directory: Path, label: str, *, expected_exit=0):
         'returncode': result.returncode,
         'PYO3_PYTHON': environment['PYO3_PYTHON'],
         'VIRTUAL_ENV': environment['VIRTUAL_ENV'],
+        'scoped_environment': scoped,
     }, indent=2) + '\n')
     if result.returncode != expected_exit:
         raise OracleFailure(f'{label} failed ({result.returncode}); see {directory}')
@@ -435,24 +441,29 @@ def execute_leg(name, args, required, directory):
 
 def native_controls():
     # One real native compile/run witness per independent archive consumer.
-    # An empty valid archive must reach the linker and fail, even with a warm
-    # target containing older complete libraries. JSON's ownership-ledger
-    # witness independently selects its instrumented current Cargo artifact.
+    # A harness that links the pinned archive itself must reach the linker and
+    # fail when `CHELIS_RUNTIME_LIB` names an empty valid archive, even with a
+    # warm target containing older complete libraries. `chelis build` stages
+    # the runtime its own Cargo build carries, so no archive can be substituted
+    # for its consumer; that consumer instead proves a runtime directory is
+    # rejected before staging, neither honored (a linker failure) nor ignored
+    # (a pass). JSON's ownership-ledger witness independently selects its
+    # instrumented current Cargo artifact.
     consumers = [
-        ('chelis-backend-c', None, 'tests::checked_c_metadata_dag_reshape_executes_under_ubsan'),
-        ('chelis-backend-c', 'exec_compile', 'checked_literals_preserve_every_storage_width_and_reject_count_mismatch'),
-        ('chelis-backend-c', 'dtype_matrix_bf16_f16', 'bf16_add_agrees_with_evaluator'),
-        ('chelis-backend-c', 'fused_in_place_exec', 'fused_in_place_compile_run_reuses_program_owned_storage'),
-        ('chelis-cli', 'cbackend_cast_memcpy', 'cbackend_cast_tensor_f32_to_f64'),
-        ('chelis-cli', 'cbackend_cast_arithmetic_composition', 'cbackend_add_of_two_casts_f64_from_f32'),
-        ('chelis-cli', 'cbackend_reshape_memcpy', 'cbackend_reshape_tensor_f64'),
-        ('chelis-cli', 'issue_616_runtime_movement_c_parity', 'issue_616_multi_axis_runtime_pad_matches_c'),
+        ('empty-runtime-archive', 'chelis-backend-c', None, 'tests::checked_c_metadata_dag_reshape_executes_under_ubsan'),
+        ('empty-runtime-archive', 'chelis-backend-c', 'exec_compile', 'checked_literals_preserve_every_storage_width_and_reject_count_mismatch'),
+        ('empty-runtime-archive', 'chelis-backend-c', 'dtype_matrix_bf16_f16', 'bf16_add_agrees_with_evaluator'),
+        ('empty-runtime-archive', 'chelis-backend-c', 'fused_in_place_exec', 'fused_in_place_compile_run_reuses_program_owned_storage'),
+        ('empty-runtime-archive', 'chelis-cli', 'cbackend_cast_memcpy', 'cbackend_cast_tensor_f32_to_f64'),
+        ('empty-runtime-archive', 'chelis-cli', 'cbackend_cast_arithmetic_composition', 'cbackend_add_of_two_casts_f64_from_f32'),
+        ('empty-runtime-archive', 'chelis-cli', 'cbackend_reshape_memcpy', 'cbackend_reshape_tensor_f64'),
+        ('runtime-directory-rejected', 'chelis-cli', 'issue_616_runtime_movement_c_parity', 'issue_616_multi_axis_runtime_pad_matches_c'),
     ]
     controls = []
-    for package, binary, test in consumers:
+    for kind, package, binary, test in consumers:
         args = ['-p', package, *(['--test', binary] if binary else ['--lib']), '-E', f'test(={test})']
         identity = f'{package}::{binary}::{test}' if binary else f'{package}::{test}'
-        controls.append({'kind': 'empty-runtime-archive', 'args': args, 'required': [identity]})
+        controls.append({'kind': kind, 'args': args, 'required': [identity]})
     for binary, test in [(None, 'tests::generated_code_compiles_with_platform_parallelism'),
                          (None, 'tests::canonical_matmul_numerics_ignore_blas_hint'),
                          ('dtype_matrix_bf16_f16', 'bf16_matmul_agrees_with_evaluator'),
@@ -467,16 +478,22 @@ def native_controls():
 def execute_native_controls(directory):
     bad = directory / 'empty-runtime'
     bad.mkdir(parents=True)
-    (bad / 'libchelis_runtime.a').write_bytes(b'!<arch>\n')
+    empty = bad / 'libchelis_runtime.a'
+    empty.write_bytes(b'!<arch>\n')
+    perturbations = {
+        'empty-runtime-archive': ('CHELIS_RUNTIME_LIB', empty),
+        'runtime-directory-rejected': ('CHELIS_RUNTIME_DIR', bad),
+        'missing-c-compiler': ('CHELIS_TEST_CC', directory / 'missing-compiler'),
+    }
     receipts = []
     for index, control in enumerate(native_controls()):
         evidence = directory / str(index)
         args = control['args']
         listed = command([*nextest_command('list', args), '--message-format', 'json'], ROOT, evidence, 'list')
         selected, artifacts = selection(load_json(listed), ROOT, control['required'])
-        variable = 'CHELIS_RUNTIME_DIR' if control['kind'] == 'empty-runtime-archive' else 'CHELIS_TEST_CC'
+        variable, value = perturbations[control['kind']]
         previous = os.environ.get(variable)
-        os.environ[variable] = str(bad if variable == 'CHELIS_RUNTIME_DIR' else directory / 'missing-compiler')
+        os.environ[variable] = str(value)
         junit = junit_path()
         junit.unlink(missing_ok=True)
         try:
@@ -486,10 +503,15 @@ def execute_native_controls(directory):
             else: os.environ[variable] = previous
         xml = junit.read_text()
         (evidence / 'execution.xml').write_text(xml)
+        linked = 'undefined reference' in xml.lower() or 'undefined symbols' in xml.lower()
         if control['kind'] == 'empty-runtime-archive':
             execution(xml, selected, failure_text='chelis_')
-            if 'undefined reference' not in xml.lower() and 'undefined symbols' not in xml.lower():
+            if not linked:
                 raise OracleFailure('empty runtime did not fail at the native linker')
+        elif control['kind'] == 'runtime-directory-rejected':
+            execution(xml, selected, failure_text=f'CHELIS_RUNTIME_DIR is set ({bad})')
+            if linked:
+                raise OracleFailure('runtime directory reached the native linker instead of being rejected')
         else:
             execution(xml, selected, failure_text='No such file or directory')
         verify_artifacts(artifacts)

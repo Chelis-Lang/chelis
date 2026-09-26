@@ -197,13 +197,34 @@ def python_suite():
     )
 
 
-def execute_leg(name, args, required, directory):
+def leg_environment(args, archive: Path):
+    """Name the pinned runtime directory for every leg that runs no chelis-cli tests.
+
+    The Python extension and the HIP harnesses still select their runtime
+    through `CHELIS_RUNTIME_DIR` and otherwise search for one (#1354). chelis-cli
+    tests may run `chelis build`, which rejects the variable, so their legs never
+    receive it, and a leg cannot mix them with a package that needs the pin. The
+    export goes away when those consumers carry or name their runtime.
+    """
+    packages = [value for flag, value in zip(args, args[1:]) if flag == "-p"]
+    if "chelis-cli" not in packages:
+        return {"CHELIS_RUNTIME_DIR": str(archive.parent)}
+    if set(packages) != {"chelis-cli"}:
+        raise OracleFailure(
+            "a leg that runs chelis-cli tests cannot also run a package that needs "
+            "the pinned runtime directory"
+        )
+    return {}
+
+
+def execute_leg(name, args, required, directory, *, environment=None):
     print(f"+ {name}: list and execute {len(required)} required tests", flush=True)
     listed = phase1.command(
         [*phase1.nextest_command("list", args), "--message-format", "json"],
         ROOT,
         directory,
         "list",
+        scoped_environment=environment,
     )
     include_ignored = args[-2:] == ("--run-ignored", "only")
     selected, artifacts = phase1.selection(
@@ -228,6 +249,7 @@ def execute_leg(name, args, required, directory):
         ROOT,
         directory,
         "run",
+        scoped_environment=environment,
     )
     if not junit.is_file():
         raise OracleFailure("nextest produced no fresh Phase 2 execution receipt")
@@ -257,6 +279,7 @@ def run() -> Path:
     phase1_receipt = phase1.run()
     executions = []
     with phase1.runtime_pin(directory / "runtime-build") as runtime_receipt:
+        (archive,) = map(Path, runtime_receipt["pinned_artifact"])
         for index, (row, (name, args)) in enumerate(
             zip(packet["legs"], phase2_legs(), strict=True)
         ):
@@ -266,6 +289,7 @@ def run() -> Path:
                     args,
                     row["required"],
                     directory / str(index),
+                    environment=leg_environment(args, archive),
                 )
             )
     if source_identity(ROOT) != identity:
