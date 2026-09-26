@@ -11,8 +11,9 @@ now decided when it binds, by the rule a direct source gets, and rejected at the
 declaration boundary if it never binds.
 
 A `let`-bound lambda whose operand check is still waiting (a `cast`, `copy`,
-`gather`, `scatter`, `trace` or host-slot operand) now stays monomorphic until
-its first application binds the operand ([04-INF-1]). It used to generalize, so
+`gather`, `scatter`, `trace` or host-slot operand) now stays monomorphic, as a
+whole, until its first application binds the operand ([04-INF-1]); every later
+use has that instantiation, including an unchecked second parameter. It used to generalize, so
 each application bound a fresh copy and the check was left on a variable nothing
 bound: `g = fn (y) -> cast(y, f64)` followed by `g(x)` was rejected with
 `got ?N`, and a lambda over `gather` or `trace` lost the direct form's verdict.

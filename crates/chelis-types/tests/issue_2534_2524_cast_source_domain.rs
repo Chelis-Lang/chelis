@@ -169,3 +169,29 @@ fn a_let_bound_concrete_target_cast_lambda_is_decided_at_its_application() {
         &["cast requires a numeric or bool source, got string"],
     );
 }
+
+/// REGRESSION TEST (chelis#2584 round 2, P3). [04-INF-1] keeps the whole
+/// lambda monomorphic while it carries a deferred obligation, not only the
+/// checked operand: every later use has the first application's
+/// instantiation. An unchecked second parameter used at `i32` and then at
+/// `string` was polymorphic beside the checked one.
+#[test]
+fn a_lambda_carrying_a_pending_cast_is_monomorphic_as_a_whole() {
+    rejects_with(
+        "def f(a: f32) -> (f64, i32, string) = {\n  g = fn (y, z) -> (cast(y, f64), z)\n  \
+         (u, i) = g(a, 1)\n  (v, s) = g(a, \"s\")\n  (add(u, v), i, s)\n}\n",
+        &["precision mismatch: expected i32, got string"],
+    );
+    rejects_with(
+        "def f(a: f32) -> (f64, i32, string) = {\n  mk = fn (k) -> fn (y) -> (cast(y, f64), k)\n  \
+         g1 = mk(1i32)\n  g2 = mk(\"s\")\n  (g1(a).0, g1(a).1, g2(a).1)\n}\n",
+        &["precision mismatch: expected i32, got string"],
+    );
+    // One instantiation throughout checks, and a lambda with no pending
+    // obligation still generalizes.
+    accepts(
+        "def f(a: f32) -> (f64, i32) = {\n  g = fn (y, z) -> (cast(y, f64), z)\n  \
+         (u, i) = g(a, 1)\n  (v, j) = g(a, 2)\n  (add(u, v), add(i, j))\n}\n",
+    );
+    accepts("def f(a: f32) -> (i32, string) = {\n  id = fn (z) -> z\n  (id(1i32), id(\"s\"))\n}\n");
+}

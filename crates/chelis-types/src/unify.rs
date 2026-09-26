@@ -1403,6 +1403,31 @@ impl Subst {
         (tvars, dvars, rvars)
     }
 
+    /// chelis#2584, [04-INF-1]: whether a pending gate waits on or hands out a
+    /// variable of `ty` that generalization at the current level would
+    /// quantify. A `let`-bound lambda for which this holds carries a deferred
+    /// obligation, so the whole lambda stays monomorphic until its first
+    /// application, and every later use has that same instantiation; an
+    /// unchecked second parameter does not become polymorphic beside a
+    /// checked one.
+    pub(crate) fn has_generalizable_pending_gate(&self, ty: &Type) -> bool {
+        let (tvars, dvars, rvars) = self.pending_gate_vars();
+        if tvars.is_empty() && dvars.is_empty() && rvars.is_empty() {
+            return false;
+        }
+        let ty = self.apply(ty);
+        let level = self.current_level();
+        crate::env::free_tvars(&ty)
+            .iter()
+            .any(|v| tvars.contains(v) && self.level_of_tvar(*v) > level)
+            || crate::env::free_dvars(&ty)
+                .iter()
+                .any(|v| dvars.contains(v) && self.level_of_dvar(*v) > level)
+            || crate::env::free_rvars(&ty)
+                .iter()
+                .any(|v| rvars.contains(v) && self.level_of_rvar(*v) > level)
+    }
+
     /// Record one fresh use of a checked collection-operation contract.
     pub(crate) fn record_collection_contract(
         &self,
