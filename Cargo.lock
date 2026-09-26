@@ -626,6 +626,7 @@ dependencies = [
  "proptest",
  "serde",
  "serde_json",
+ "stacker",
  "thiserror 2.0.18",
 ]
 
