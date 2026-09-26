@@ -6,8 +6,17 @@ both `chelis eval` and compiled C; it now traps with
 `numeric trap: domain in load at i64`, naming the binder and the parameter axis
 that declares it. A literal result claim on a block-bodied pass-through of a
 wildcard parameter, which both lanes also dropped, now traps at the parameter.
+
+A tensor that `map`, `flat_map`, `filter`, `scan`, `fold` or `append` returns,
+or that is nested in the list or tuple one of them returns, now has that
+combinator as its producer for a declared-result check (spec/04 §4.7). A valid
+program that indexes such a result no longer aborts with an internal provenance
+error, and a wrong extent traps as, for example,
+`numeric trap: domain in map at i64` on both lanes.
+
 In a hand-built tensor graph, an operation that forwards an input axis under
 another binder's name now checks the two extents itself and traps in that
 operation. See [#2608](https://github.com/Chelis-Lang/chelis/issues/2608),
-[#1900](https://github.com/Chelis-Lang/chelis/issues/1900) and
+[#1900](https://github.com/Chelis-Lang/chelis/issues/1900),
+[#2598](https://github.com/Chelis-Lang/chelis/issues/2598) and
 [#2512](https://github.com/Chelis-Lang/chelis/issues/2512).
