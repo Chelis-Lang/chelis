@@ -206,10 +206,9 @@ use crate::host_abi::{
 };
 use chelis_ir::dag::{DimInfo, RiscOp, TensorType};
 use chelis_ir::ownership::{
-    HostSiteId, VerifiedApplyKind, VerifiedBlockId, VerifiedDagView, VerifiedEdgeView,
-    VerifiedHostAction, VerifiedHostOperation, VerifiedHostTensorHelperView,
-    VerifiedHostTerminator, VerifiedOperationId, VerifiedOwnerId, VerifiedOwnershipUse,
-    VerifiedTerminalView,
+    HostSiteId, VerifiedApplyKind, VerifiedBlockId, VerifiedEdgeView, VerifiedHostAction,
+    VerifiedHostOperation, VerifiedHostTensorHelperView, VerifiedHostTerminator,
+    VerifiedOperationId, VerifiedOwnerId, VerifiedOwnershipUse, VerifiedTerminalView,
 };
 use chelis_types::manifest::{RootManifest, RootPathStep};
 use chelis_types::types::{Lane, Prim};
@@ -329,7 +328,7 @@ pub(crate) fn emit_host_abi_program(
     }
 
     let global_entry_coverage = entry::global_helper_coverage(program);
-    for (index, helper) in program.global_tensor_helpers.iter().enumerate() {
+    for index in 0..program.global_tensor_helpers.len() {
         let helper_name = global_tensor_helper_name(program_name, index);
         if external_helpers.contains(&helper_name) {
             append_external_helper_declaration(&mut body, &helper_name);
@@ -337,7 +336,6 @@ pub(crate) fn emit_host_abi_program(
             for (variant, coverage) in global_entry_coverage.variants[index].iter().enumerate() {
                 helper_requirements.merge(append_helper(
                     &mut body,
-                    helper,
                     projected
                         .global_tensor_helper(index)
                         .expect("projected global helper retains verified child"),
@@ -446,7 +444,7 @@ pub(crate) fn emit_host_abi_program(
             })
             .collect::<Vec<_>>();
         let entry_coverage = entry::helper_coverage_with_verified(function, &verified_helpers);
-        for (index, helper) in function.tensor_helpers.iter().enumerate() {
+        for index in 0..function.tensor_helpers.len() {
             let function_name = emitted_names
                 .get(&function.name)
                 .expect("host function emitted name");
@@ -457,7 +455,6 @@ pub(crate) fn emit_host_abi_program(
                 for (variant, coverage) in entry_coverage.variants[index].iter().enumerate() {
                     helper_requirements.merge(append_helper(
                         &mut body,
-                        helper,
                         projected
                             .function_tensor_helper(function_index, index)
                             .expect("projected function helper retains verified child"),
@@ -1767,13 +1764,12 @@ impl HelperRequirements {
 /// so each one is emitted exactly once at file scope.
 fn append_helper(
     out: &mut Vec<String>,
-    helper: &HostTensorHelper,
     verified: VerifiedHostTensorHelperView<'_>,
     helper_name: &str,
     entry_coverage: &[chelis_ir::axis_sources::EntryExtentGuard],
 ) -> Result<HelperRequirements, Unsupported> {
     let helper_name = private_helper_name(helper_name);
-    if let Some((_input_name, _input_ty)) = verified_identity_helper_input(helper, verified.dag()) {
+    if verified.identity_input().is_some() {
         out.push(format!(
             "static void {}({}) {{",
             helper_name,
@@ -1915,25 +1911,6 @@ fn append_invocation_origin_context(out: &mut Vec<String>) {
         "    __chelis_host_result_origin_arena *__chelis_origin_arena = &__chelis_origin_arena_storage;"
             .to_string(),
     );
-}
-
-fn verified_identity_helper_input(
-    helper: &HostTensorHelper,
-    dag: VerifiedDagView<'_>,
-) -> Option<(String, chelis_ir::dag::TensorType)> {
-    if dag.roots().len() != 1 || helper.inputs.len() != 1 {
-        return None;
-    }
-    let root = dag.roots()[0];
-    let node = dag.get(root)?;
-    match &node.op {
-        RiscOp::Load { name } if node.output_type == helper.output => helper
-            .inputs
-            .iter()
-            .find(|input| input.name == *name)
-            .map(|input| (input.name.clone(), input.ty.clone())),
-        _ => None,
-    }
 }
 
 /// chelis#730 Phase 1: the branded self-naming abort stub emitted for an

@@ -1090,6 +1090,12 @@ impl<'a> VerifiedHostTensorHelperView<'a> {
         self.helper.specialization.as_ref()
     }
 
+    /// The input this helper returns unchanged, by the one definition the
+    /// ownership lowering read ([`crate::host::HostTensorHelper::identity_input`]).
+    pub fn identity_input(self) -> Option<&'a HostTensorInput> {
+        self.helper.identity_input()
+    }
+
     pub fn summary_rejection(self) -> Option<&'a crate::host::HelperSummaryRejection> {
         self.helper.summary_rejection.as_ref()
     }

@@ -6508,6 +6508,34 @@ struct TrappingInitializer {
     scope: LexicalScope,
 }
 
+/// The map [`LowerCtx::program_value_verdicts`] holds.
+type ProgramValueVerdicts = UnordMap<String, Option<Arc<TrappingInitializer>>>;
+
+/// The top-level value declaration a reference inlines
+/// ([`TrappingInitializer`]).
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord)]
+enum InlinedValue {
+    /// A declaration this context lowers or composes
+    /// ([`LowerCtx::top_level_values`]).
+    Declaration(DeclId),
+    /// A definition of [`LowerCtx::program_defs`], named by a context that
+    /// does not lower the program's declarations
+    /// ([`LowerCtx::inline_program_value`]).
+    Program(String),
+}
+
+/// Where a copy of a trapping initializer is lowered: the value, the owner
+/// its nodes take ([`LowerCtx::owner`]), and the branch path its guards read
+/// ([`LowerCtx::branch_path_condition`], which the owner's activation
+/// conjoins). Every reference at one site reads one copy
+/// ([`LowerCtx::inlined_values`]).
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct InlinedValueSite {
+    value: InlinedValue,
+    owner: Owner,
+    branch_path: Option<NodeId>,
+}
+
 /// A tuple whose every leaf is a key (spec/04 §8.4.1), such as the pair
 /// `split_key` returns. The graph carries each key as a key node and a tuple
 /// of them as a lowered tuple, so a staged host region never takes one as an
@@ -7080,7 +7108,15 @@ struct LowerCtx<'program> {
     lowers_declarations: bool,
     /// [`Self::inline_program_value`]'s verdicts, by definition name: the
     /// initializer to inline, or `None` for a total or unlowerable one.
-    program_value_verdicts: UnordMap<String, Option<Arc<TrappingInitializer>>>,
+    program_value_verdicts: ProgramValueVerdicts,
+    /// The copies of trapping initializers this context has lowered, one per
+    /// site ([`InlinedValueSite`]). A second reference at a site reads the
+    /// first one's copy, and so does a reference from inside another value's
+    /// copy at that site, so a value read along several paths of a chain of
+    /// values is lowered once per owner rather than once per path. The keys
+    /// name this context's own nodes, so a sub-context or a scratch context
+    /// starts with none.
+    inlined_values: UnordMap<InlinedValueSite, LoweredValue>,
     /// The declaration being lowered: every node this context adds belongs
     /// to it ([`Self::decl`]). `lower_top_level` registers and sets it for
     /// each top-level item before lowering its body; a context that lowers a
@@ -7207,6 +7243,7 @@ impl<'program> LowerCtx<'program> {
             top_level_values: UnordMap::new(),
             lowers_declarations: false,
             program_value_verdicts: UnordMap::new(),
+            inlined_values: UnordMap::new(),
             decl: None,
             dim_substitutions: UnordMap::new(),
             prec_substitutions: UnordMap::new(),
@@ -8372,7 +8409,32 @@ impl<'program> LowerCtx<'program> {
             return None;
         }
         let initializer = value.trapping.clone()?;
-        Some(self.lower_initializer(&initializer))
+        let value = InlinedValue::Declaration(value.decl);
+        Some(self.inline_initializer(value, &initializer))
+    }
+
+    /// `initializer`, `value`'s, as a reference at this site reads it: the
+    /// one copy lowered at this site ([`InlinedValueSite`]), lowered here on
+    /// the first reference. A later reference at the site, including one
+    /// from inside another value's copy lowered here, reads that copy, and
+    /// records its own span on it as a reference to a binding does.
+    fn inline_initializer(
+        &mut self,
+        value: InlinedValue,
+        initializer: &TrappingInitializer,
+    ) -> LoweredValue {
+        let site = InlinedValueSite {
+            value,
+            owner: self.owner(),
+            branch_path: self.branch_path_condition,
+        };
+        if let Some(copy) = self.inlined_values.get(&site).cloned() {
+            self.append_current_span_to_lowered_value(&copy);
+            return copy;
+        }
+        let copy = self.lower_initializer(initializer);
+        self.inlined_values.insert(site, copy.clone());
+        copy
     }
 
     /// The value a reference to `name`, bound here to `bound`, reads when it
@@ -8408,17 +8470,34 @@ impl<'program> LowerCtx<'program> {
             // Recorded before the scratch lowering, so an initializer that
             // names itself (an input declaration) reads as total.
             self.program_value_verdicts.insert(name.to_owned(), None);
-            let verdict = self.program_value_verdict(name);
+            let (verdict, reached) = self.program_value_verdict(name);
+            // The verdicts the scratch lowering reached for the values the
+            // initializer reads, each a function of the program's
+            // definitions alone. Keeping them judges each value of a chain
+            // once, where discarding them judged a value again on every path
+            // to it.
+            for (other, other_verdict) in reached.into_sorted() {
+                self.program_value_verdicts
+                    .entry(other)
+                    .or_insert(other_verdict);
+            }
             self.program_value_verdicts.insert(name.to_owned(), verdict);
         }
         let initializer = self.program_value_verdicts.get(name)?.clone()?;
-        Some(self.lower_initializer(&initializer))
+        Some(self.inline_initializer(InlinedValue::Program(name.to_owned()), &initializer))
     }
 
-    fn program_value_verdict(&self, name: &str) -> Option<Arc<TrappingInitializer>> {
-        let initializer = self.program_defs.get(name)?;
+    /// `name`'s verdict ([`Self::program_value_verdicts`]), with the verdicts
+    /// its scratch lowering reached on the way.
+    fn program_value_verdict(
+        &self,
+        name: &str,
+    ) -> (Option<Arc<TrappingInitializer>>, ProgramValueVerdicts) {
+        let Some(initializer) = self.program_defs.get(name) else {
+            return (None, UnordMap::new());
+        };
         if matches!(stamped_parts(initializer), Some((DeepTag::Fn, _, _))) {
-            return None;
+            return (None, UnordMap::new());
         }
         let initializer = Arc::new(TrappingInitializer {
             expr: initializer.clone(),
@@ -8438,16 +8517,19 @@ impl<'program> LowerCtx<'program> {
         let suppressed = SUPPRESS_LOWERING_PANIC_OUTPUT.with(Cell::get);
         let lowered = catch_lowering(std::panic::AssertUnwindSafe(|| {
             scratch.lower_initializer(&initializer);
-            scratch.dag
+            (scratch.dag, scratch.program_value_verdicts)
         }));
         SUPPRESS_LOWERING_PANIC_OUTPUT.with(|cell| cell.set(suppressed));
-        let lowered = lowered.ok()?;
+        let Ok((lowered, reached)) = lowered else {
+            return (None, UnordMap::new());
+        };
         let seeds = lowered.trap_seeds();
-        lowered
+        let verdict = lowered
             .nodes()
             .iter()
             .any(|node| seeds.is_observable_root(node))
-            .then_some(initializer)
+            .then_some(initializer);
+        (verdict, reached)
     }
 
     /// Lower `initializer` here, in its declaration's scope and under this
@@ -20241,7 +20323,7 @@ mod declaration_attribution_tests {
     //! those of the declarations its roots enter.
     use super::*;
 
-    fn lowered(source: &str) -> LoweredLibrary {
+    fn checked(source: &str) -> CheckedProgram {
         let declarations = chelis_surf::parser::parse_str(source).unwrap();
         let checked = chelis_types::check_typed_program(
             &chelis_surf::desugar::desugar_program(&declarations)
@@ -20249,8 +20331,11 @@ mod declaration_attribution_tests {
         )
         .unwrap();
         let checked = chelis_effects::check_program(&checked).unwrap();
-        let checked = chelis_types::check_linearity(&checked).unwrap();
-        try_lower_program_to_library(&checked).unwrap()
+        chelis_types::check_linearity(&checked).unwrap()
+    }
+
+    fn lowered(source: &str) -> LoweredLibrary {
+        try_lower_program_to_library(&checked(source)).unwrap()
     }
 
     /// `selected` names `sampled` only in a dead binding and calls `h`,
@@ -20399,6 +20484,128 @@ mod declaration_attribution_tests {
             )),
             ["shared", "f", "first", "second"]
         );
+    }
+
+    /// Round 1b's `geny.py`: `h0` to `h{depth}`, scalar integers each read
+    /// four times by the next, the last read by `g` and, through the call,
+    /// by `main`.
+    fn scalar_chain(depth: usize) -> String {
+        let mut source = String::from("h0 = 2i32\n");
+        for level in 1..=depth {
+            let last = format!("h{}", level - 1);
+            source.push_str(&format!(
+                "h{level} = ((({last} * {last}) - ({last} * {last})) + 2i32)\n"
+            ));
+        }
+        source.push_str(&format!(
+            "def g(x: tensor[f32]) -> tensor[f32] = mul(x, scalar_to_tensor(cast(h{depth}, f32)))\ndef main() -> tensor[f32] = g(scalar_to_tensor(1.0f32))\n"
+        ));
+        source
+    }
+
+    /// Round 1b's `genx.py`: `v0`, an integer `cast` that can trap, and `v1`
+    /// to `v{depth}`, tensors each reading the last twice, the last read in
+    /// a dead binding of `g` and, through the call, of `main`.
+    fn tensor_chain(depth: usize) -> String {
+        let mut source = String::from("v0 = cast(scalar_to_tensor(3.0f32), i32)\n");
+        for level in 1..=depth {
+            let last = format!("v{}", level - 1);
+            source.push_str(&format!("v{level} = sub(copy({last}), copy({last}))\n"));
+        }
+        source.push_str(&format!(
+            "def g(x: tensor[f32]) -> tensor[f32] = {{\n  dead = copy(v{depth})\n  x\n}}\ndef main() -> tensor[f32] = g(scalar_to_tensor(1.0f32))\n"
+        ));
+        source
+    }
+
+    /// How many nodes of `dag` are of `op` and of an integer dtype, by the
+    /// name of the declaration that owns them.
+    fn integer_ops(dag: &Dag, op: fn(&RiscOp) -> bool) -> BTreeMap<String, usize> {
+        let mut owners = BTreeMap::new();
+        for node in dag.nodes() {
+            if op(&node.op) && node.output_type.precision.is_integer() {
+                *owners.entry(declaration_name(dag, node)).or_default() += 1;
+            }
+        }
+        owners
+    }
+
+    /// Round 1b's P1-1 (decisions §12): a reference to a trapping value lowers
+    /// its initializer once per declaration, owner and branch path, and every
+    /// other reference there reads that copy, including one from inside
+    /// another value's copy. So in a chain whose each value reads the last
+    /// several times, every owner holds one copy of each value it reaches,
+    /// and a selected entry grows linearly in the chain's depth. In the
+    /// whole-program graph each value declaration also holds one copy of
+    /// each value below it, so that graph grows with the square of the depth:
+    /// section 12 gives no declaration a node of another that can trap.
+    ///
+    /// Evidentiary status: REGRESSION TEST. Red at b47fdd7d3, where every
+    /// reference lowered its own copy, so the copies multiplied along the
+    /// paths through the chain: `v4` owned sixteen casts, and `main`'s entry
+    /// for the scalar chain of depth 4 held 128 integer multiplications.
+    #[test]
+    fn a_chain_of_trapping_values_holds_one_copy_per_value_and_owner() {
+        let cast = |op: &RiscOp| matches!(op, RiscOp::Cast { .. });
+        let sub = |op: &RiscOp| matches!(op, RiscOp::Sub);
+        let mul = |op: &RiscOp| matches!(op, RiscOp::Mul);
+        let mut entry_nodes = BTreeMap::<&str, Vec<usize>>::new();
+        for depth in [4, 8, 16] {
+            // The whole-program graph: `v0`'s cast once per owner, and each
+            // owner's copy of `v1`..`v{i}` once.
+            let library = lowered(&tensor_chain(depth));
+            let dag = library.dag();
+            let mut owners = (0..=depth)
+                .map(|level| (format!("v{level}"), level))
+                .collect::<BTreeMap<_, _>>();
+            owners.insert("g".into(), depth);
+            owners.insert("main".into(), depth);
+            assert_eq!(
+                integer_ops(dag, cast),
+                owners.keys().map(|owner| (owner.clone(), 1)).collect(),
+                "casts by owner, tensor chain of depth {depth}"
+            );
+            owners.remove("v0");
+            assert_eq!(
+                integer_ops(dag, sub),
+                owners,
+                "subtractions by owner, tensor chain of depth {depth}"
+            );
+
+            // `main`'s selected entry, as `chelis build` compiles it.
+            for (form, source, op, per_level) in [
+                ("tensor", tensor_chain(depth), sub as fn(&RiscOp) -> bool, 1),
+                ("scalar", scalar_chain(depth), mul, 2),
+            ] {
+                let entry = crate::host::lower_named_tensor_entry_dag(&checked(&source), "main")
+                    .unwrap_or_else(|| panic!("{form} chain of depth {depth}: no entry"));
+                assert_eq!(
+                    integer_ops(&entry, op).into_values().sum::<usize>(),
+                    per_level * depth,
+                    "{form} chain of depth {depth}"
+                );
+                if form == "scalar" {
+                    // `h0 = 2i32` holds no node that can trap, so it is not
+                    // inlined: the one copy of `h1` reads the input its
+                    // declaration supplies, four times.
+                    let h0 = entry
+                        .nodes()
+                        .iter()
+                        .filter(|node| {
+                            matches!(&node.op, RiscOp::Load { name } if name.as_str() == "h0")
+                        })
+                        .count();
+                    assert_eq!(h0, 4, "scalar chain of depth {depth}");
+                }
+                entry_nodes.entry(form).or_default().push(entry.len());
+            }
+        }
+        for (form, counts) in entry_nodes {
+            let [four, eight, sixteen] = counts[..] else {
+                unreachable!("three depths")
+            };
+            assert_eq!(sixteen - eight, 2 * (eight - four), "{form}: {counts:?}");
+        }
     }
 }
 
