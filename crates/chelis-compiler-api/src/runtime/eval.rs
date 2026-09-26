@@ -5933,7 +5933,7 @@ mod legacy_capture_order_tests {
                 report
                     .errors
                     .iter()
-                    .any(|error| error.message.contains("arity mismatch")),
+                    .any(|error| error.message.contains("is the retired counter-stream spelling")),
                 "{source}: {}",
                 messages(&report.errors)
             );
