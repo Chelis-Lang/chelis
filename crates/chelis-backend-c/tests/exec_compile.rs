@@ -11007,7 +11007,8 @@ int main(void) {{
 
 /// `f` of `source` (one input `x: tensor[n, f32]` of ones, a rank-0 `f32`
 /// result) lowered as a tensor entry, run by the DAG evaluator and by its
-/// compiled C: each lane's value, or its trap text.
+/// compiled C: each lane's value, or its trap text (for C, the emitter's
+/// refusal where it refuses the graph).
 fn tensor_entry_lanes(source: &str, n: usize) -> (Result<f64, String>, Result<f64, String>) {
     let decls = chelis_surf::parser::parse_str(source).expect("Surf parse");
     let checked = chelis_types::check_ir_program(
@@ -11026,7 +11027,10 @@ fn tensor_entry_lanes(source: &str, n: usize) -> (Result<f64, String>, Result<f6
     );
     let root = *dag.roots().last().expect("a root");
     let eval = eval_tensor(&dag, &values).map(|result| result[&root].to_f64_lossy_vec()[0]);
-    let generated = codegen(&dag, "claim_arm").expect("codegen");
+    let generated = match codegen(&dag, "claim_arm") {
+        Ok(generated) => generated,
+        Err(refusal) => return (eval, Err(format!("codegen refused: {refusal:?}"))),
+    };
     assert_eq!(generated.input_labels, ["x"]);
     let harness = format!(
         r#"
@@ -11095,6 +11099,173 @@ fn a_callees_result_claim_checks_only_in_a_taken_arm_in_eval_and_c() {
         let taken = tensor_entry_lanes(&source.replace("{c}", "-5.0f32"), n);
         if !matches!(&taken, (Err(eval), Err(c)) if eval.contains(trap) && c.contains(trap)) {
             failures.push(format!("taken {kind}: {taken:?}"));
+        }
+    }
+    assert!(failures.is_empty(), "\n{}", failures.join("\n"));
+}
+
+/// One kind [`a_dead_let_of_each_newly_seeded_kind_traps_in_eval_and_c`]
+/// covers: the declarations before `f`, the dead `let` (with `{v}` for the
+/// value that decides the check), the value that traps and the one that
+/// does not, `x`'s extent, and each lane's trap.
+struct DeadLetKind {
+    name: &'static str,
+    callee: &'static str,
+    dead: &'static str,
+    traps: &'static str,
+    total: &'static str,
+    n: usize,
+    eval_trap: &'static str,
+    c_trap: &'static str,
+}
+
+/// The kinds the trap seed gained on this branch (decisions sections 6.2
+/// and 11: a potentially trapping node of an entered declaration is seeded,
+/// so a discarded `let` initializer runs its check): an integer sum and
+/// product, an empty reduced axis, runtime `shrink`, `stride` and `pad`
+/// bounds, a call's named extent claim, and a callee's named and literal
+/// result claims. The integer sum row is the spec/03 section 4.4 oracle
+/// (`dead_sum`).
+const DEAD_LET_KINDS: [DeadLetKind; 10] = [
+    DeadLetKind {
+        name: "integer sum (dead_sum)",
+        callee: "",
+        dead: "dead = sum(to_tensor([{v}]), 0i32)",
+        traps: "2000000000i32, 2000000000i32",
+        total: "2i32, 2i32",
+        n: 1,
+        eval_trap: "numeric trap: overflow in sum at i32",
+        c_trap: "numeric trap: overflow in sum at i32",
+    },
+    DeadLetKind {
+        name: "integer product",
+        callee: "",
+        dead: "dead = prod_reduce(to_tensor([{v}]), 0i32)",
+        traps: "100000i32, 100000i32",
+        total: "2i32, 3i32",
+        n: 4,
+        eval_trap: "numeric trap: overflow in prod_reduce at i32",
+        // The C DAG emitter refuses an integer product outright (#729).
+        c_trap: "`i32` tensors in the C DAG emitter",
+    },
+    DeadLetKind {
+        name: "empty max_reduce",
+        callee: "",
+        dead: "e = insert(scalar_to_tensor(2.0f32), 0i32, sub(shape(&x, 0i32), {v}))\n  dead = max_reduce(e, 0i32)",
+        traps: "4i64",
+        total: "3i64",
+        n: 4,
+        eval_trap: "numeric trap: domain in max_reduce at f32",
+        c_trap: "numeric trap: domain in max_reduce at f32",
+    },
+    DeadLetKind {
+        name: "empty argmax_reduce",
+        callee: "",
+        dead: "e = insert(scalar_to_tensor(2.0f32), 0i32, sub(shape(&x, 0i32), {v}))\n  dead = argmax_reduce(e, 0i32)",
+        traps: "4i64",
+        total: "3i64",
+        n: 4,
+        eval_trap: "numeric trap: domain in argmax_reduce at i64",
+        c_trap: "numeric trap: domain in argmax_reduce at i64",
+    },
+    DeadLetKind {
+        name: "shrink past the end",
+        callee: "",
+        dead: "dead = shrink(&x, [[1i64, add(shape(&x, 0i32), {v})]])",
+        traps: "3i64",
+        total: "0i64",
+        n: 4,
+        eval_trap: "numeric trap: domain in shrink at i64",
+        c_trap: "numeric trap: domain in shrink at i64",
+    },
+    DeadLetKind {
+        name: "stride of zero",
+        callee: "",
+        dead: "dead = stride(&x, sub(shape(&x, 0i32), {v}))",
+        traps: "4i64",
+        total: "3i64",
+        n: 4,
+        eval_trap: "numeric trap: domain in stride at i64",
+        c_trap: "numeric trap: domain in stride at i64",
+    },
+    DeadLetKind {
+        name: "negative pad",
+        callee: "",
+        dead: "dead = pad(&x, [[sub(shape(&x, 0i32), {v}), 0i64]], 0.0f32)",
+        traps: "5i64",
+        total: "3i64",
+        n: 4,
+        eval_trap: "must be a non-negative integer",
+        c_trap: "numeric trap: domain in pad at i64",
+    },
+    DeadLetKind {
+        name: "call's named extent claim",
+        callee: "def g[n](a: tensor[n, f32], b: tensor[n, f32]) -> tensor[f32] = sum(a, 0i32)\n\n",
+        dead: "dead = g(shrink(&x, [[0i64, sub(shape(&x, 0i32), {v})]]), copy(x))",
+        traps: "1i64",
+        total: "0i64",
+        n: 4,
+        eval_trap: "numeric trap: domain in load at i64",
+        c_trap: "numeric trap: domain in load at i64",
+    },
+    DeadLetKind {
+        name: "callee's named result claim",
+        callee: "def g[n](x: tensor[n, f32]) -> tensor[n, f32] = shrink(x, [[{v}, shape(x, 0i32)]])\n\n",
+        dead: "dead = g(copy(x))",
+        traps: "1i64",
+        total: "0i64",
+        n: 4,
+        eval_trap: "numeric trap: domain in shrink at i64",
+        c_trap: "numeric trap: domain in shrink at i64",
+    },
+    DeadLetKind {
+        name: "callee's literal result claim",
+        callee: "def g[n](y: tensor[n, f32]) -> tensor[{v}, 2, f32] = reshape(y, [floor_div(shape(y, 0i32), 2i64), 2i64])\n\n",
+        dead: "dead = g(copy(x))",
+        traps: "3",
+        total: "2",
+        n: 4,
+        eval_trap: "numeric trap: domain in reshape at i64",
+        c_trap: "numeric trap: domain in reshape at i64",
+    },
+];
+
+/// Decisions sections 6.2 and 11 for every kind the trap seed gained: a
+/// discarded `let` whose initializer can trap runs its check, in the DAG
+/// evaluator and in compiled C of the same lowered graph, and its total
+/// twin (the same program with a value the check accepts) returns `sum(x)`.
+/// The C emitter refuses an integer `prod_reduce` (#729), so that row's C
+/// lane pins the refusal, for both twins.
+/// `chelis-cli`'s `issue_2563_untaken_arm_eval_file` has the
+/// `chelis eval --file` rows of the same sources.
+///
+/// Evidentiary status: per row, in the report of ks5-h2f (REGRESSION TEST
+/// where the trapping row returns at 224414e1f, DISPOSITION LOCK where it
+/// traps there); the total twins are a disposition lock.
+#[test]
+fn a_dead_let_of_each_newly_seeded_kind_traps_in_eval_and_c() {
+    let mut failures = Vec::new();
+    for kind in &DEAD_LET_KINDS {
+        let source = |v: &str| {
+            format!(
+                "{}def f(x: tensor[{}, f32]) -> tensor[f32] = {{\n  {}\n  sum(x, 0i32)\n}}\n",
+                kind.callee.replace("{v}", v),
+                kind.n,
+                kind.dead.replace("{v}", v)
+            )
+        };
+        let dead = tensor_entry_lanes(&source(kind.traps), kind.n);
+        if !matches!(&dead, (Err(eval), Err(c)) if eval.contains(kind.eval_trap) && c.contains(kind.c_trap))
+        {
+            failures.push(format!("dead {}: {dead:?}", kind.name));
+        }
+        let total = tensor_entry_lanes(&source(kind.total), kind.n);
+        let expected = kind.n as f64;
+        let c_refused = kind.c_trap.starts_with('`');
+        if !matches!(&total, (Ok(eval), Ok(c)) if *eval == expected && *c == expected)
+            && !matches!(&total, (Ok(eval), Err(c)) if c_refused && *eval == expected && c.contains(kind.c_trap))
+        {
+            failures.push(format!("total {}: {total:?}", kind.name));
         }
     }
     assert!(failures.is_empty(), "\n{}", failures.join("\n"));
