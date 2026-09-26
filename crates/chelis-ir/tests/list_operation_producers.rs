@@ -27,7 +27,10 @@ fn the_producer_set_is_the_registered_list_operation_category() {
         else {
             continue;
         };
-        if !matches!(atom.trim_end_matches(" |").trim(), "[05-OP-54]" | "[05-OP-55]") {
+        if !matches!(
+            atom.trim_end_matches(" |").trim(),
+            "[05-OP-54]" | "[05-OP-55]"
+        ) {
             continue;
         }
         let name = identity
