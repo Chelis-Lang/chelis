@@ -421,13 +421,14 @@ fn arm_client(taken: bool) -> String {
     )
 }
 
-/// (a) A taken arm's dead reference to a trapping value declaration enters
-/// it, so its initializer traps: in the DAG evaluator (the value beside
-/// the selected def) and in the in-context C entry (the value in a
-/// dependency). The valid twin returns `x` from the Tensor lane.
+/// (a) A taken arm's dead reference to a trapping value declaration runs its
+/// initializer, inlined at the reference under the arm's activation, so it
+/// traps: in the DAG evaluator (the value beside the selected def) and in
+/// the in-context C entry (the value in a dependency). The valid twin
+/// returns `x` from the Tensor lane.
 ///
-/// Evidentiary status: DISPOSITION LOCK. Both lanes trapped at b003b1610;
-/// the reference is recorded by lowering and entered unconditionally.
+/// Evidentiary status: DISPOSITION LOCK. Both lanes trapped at b003b1610,
+/// where the reference entered the value's declaration unconditionally.
 #[test]
 fn a_taken_arms_dead_reference_to_a_value_declaration_traps_in_the_evaluator_and_c() {
     let mut rows = Rows::default();
@@ -468,12 +469,13 @@ fn a_taken_arms_dead_reference_to_a_value_declaration_traps_in_the_evaluator_and
 /// Rule D enters the value, so both trap. The valid twin returns `x` from
 /// the Host lane.
 ///
-/// Evidentiary status: RED at b003b1610, left red: the host runs the body
-/// as a DAG kernel, which never demands the dead value, and initializes
-/// beforehand only the values the body reaches on every path
+/// Evidentiary status: REGRESSION TEST. Red at ad0abe6a9: the host runs the
+/// body as a DAG kernel, which never demanded the dead value, and
+/// initializes beforehand only the values the body reaches on every path
 /// (`ProgramScope::reached_by_call` skips `if` and `match` arms), so the
-/// taken arm's value is never initialized. Closing it needs the arm's
-/// activation on the reference, which is held for phase 2.
+/// taken arm's value was never initialized. The kernel's lowering now
+/// inlines a trapping initializer at the reference, under the arm's
+/// activation.
 #[test]
 fn a_taken_arms_dead_reference_to_a_value_declaration_traps_in_the_host_lane() {
     let mut rows = Rows::default();
@@ -515,10 +517,11 @@ fn a_taken_arms_dead_reference_to_a_value_declaration_traps_in_the_host_lane() {
 /// (b) The untaken twin of (a): the arm's activation is false, so its dead
 /// reference checks nothing ([05-RNG-1]) and the selection returns `x`.
 ///
-/// Evidentiary status: HELD RED at b003b1610 in both lanes: lowering records
-/// the arm's reference without its activation, so the value is entered
-/// unconditionally and traps. The expectation is Rule D's; the fix is the
-/// activation-carrying reference (phase 2).
+/// Evidentiary status: REGRESSION TEST. Red at ad0abe6a9 in both lanes:
+/// lowering recorded the arm's reference without its activation, so the
+/// value was entered unconditionally and trapped. The reference now inlines
+/// the initializer under the arm's activation, and the value's own nodes run
+/// only when it is selected.
 #[test]
 fn an_untaken_arms_dead_reference_to_a_value_declaration_runs_nothing_in_the_evaluator_and_c() {
     let mut rows = Rows::default();
@@ -552,9 +555,9 @@ fn an_untaken_arms_dead_reference_to_a_value_declaration_runs_nothing_in_the_eva
 /// (b) in the host interpreter: the untaken arm's value is not initialized,
 /// in a Host-lane `main` and in a context whose dependency exports it.
 ///
-/// Evidentiary status: DISPOSITION LOCK (green at b003b1610, for the reason
-/// the taken-arm host test is red); it keeps the phase-2 fix of that test
-/// from initializing an untaken arm's value.
+/// Evidentiary status: DISPOSITION LOCK (green at b003b1610, because the
+/// host never initialized an arm's value); it keeps the fix of the taken-arm
+/// host test from initializing an untaken arm's value.
 #[test]
 fn an_untaken_arms_dead_reference_to_a_value_declaration_runs_nothing_in_the_host_lane() {
     let mut rows = Rows::default();

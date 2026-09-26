@@ -110,24 +110,23 @@ impl From<DeclId> for Owner {
 /// graph, whether or not anything calls it, and a function's parameters are
 /// `Load`s built exactly like an entry's inputs. Selecting roots is a scoping
 /// decision, so the graph records which declaration owns each node: a seed (an
-/// abort, or a draw that can trap) runs only when the selection enters its
-/// declaration ([`Dag::entered_declarations`]), and a parameter is its
+/// abort, or a draw that can trap) runs only when a selected root belongs to
+/// its declaration ([`Dag::entered_declarations`]), and a parameter is its
 /// declaration and its name, never its name alone. A graph built outside
 /// program lowering (a backend helper kernel, a runtime transform, a test)
 /// registers its own named declaration.
+///
+/// Another declaration runs a declaration's work only inlined into its own
+/// nodes: a function's body where it calls it, and a value's initializer
+/// where it reads the value when that initializer may trap. It reads a
+/// value declaration's own nodes only when none of them can trap, which the
+/// verifier checks.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Declaration {
     /// The declaration's name; empty for an unnamed top-level expression.
     pub name: String,
-    /// A value declaration's activation runs where it is referenced. A
-    /// function's body runs inlined in each caller's own activation, so its
-    /// standalone nodes run only when it is itself selected.
+    /// Whether it declares a value rather than a function.
     pub value: bool,
-    /// The value declarations this one's lowering named, read or not:
-    /// directly, inside a function body inlined where this one calls it, or
-    /// inside a `grad` or `vmap` body spliced into it. A call names no
-    /// declaration, and neither does a function named without being applied.
-    pub references: Vec<DeclId>,
 }
 
 /// Tensor type carried on each DAG node.
@@ -2661,8 +2660,9 @@ impl Dag {
         self.push_declaration(name.into(), false)
     }
 
-    /// Register a value declaration named `name`: its nodes run wherever a
-    /// declaration the selection enters references it.
+    /// Register a value declaration named `name`: its own nodes run only
+    /// when a selected root belongs to it, and another declaration reads
+    /// them only when none of them can trap.
     pub fn declare_value(&mut self, name: impl Into<String>) -> DeclId {
         self.push_declaration(name.into(), true)
     }
@@ -2670,18 +2670,8 @@ impl Dag {
     fn push_declaration(&mut self, name: String, value: bool) -> DeclId {
         let id = u32::try_from(self.declarations.len())
             .expect("a graph has fewer than 2^32 declarations");
-        self.declarations.push(Declaration {
-            name,
-            value,
-            references: Vec::new(),
-        });
+        self.declarations.push(Declaration { name, value });
         DeclId(id)
-    }
-
-    /// Set the value declarations `decl`'s lowering named
-    /// ([`Declaration::references`]).
-    pub fn set_declaration_references(&mut self, decl: DeclId, references: Vec<DeclId>) {
-        self.declarations[decl.0 as usize].references = references;
     }
 
     /// Take `source`'s declarations, for a pass that rebuilds `source` node
@@ -2722,30 +2712,15 @@ impl Dag {
     }
 
     /// The declarations an activation of the `selected` roots enters, as a
-    /// mask over [`Self::declarations`]: each selected root's declaration,
-    /// and every value declaration an entered declaration names
-    /// ([`Declaration::references`]), transitively. A function's own nodes
-    /// are entered only when it is selected: a call runs the function inlined
-    /// in the caller's own nodes, and the value declarations its body names
-    /// there are the caller's references.
+    /// mask over [`Self::declarations`]: each selected root's declaration.
+    /// Another declaration's work runs only inlined into an entered one's
+    /// own nodes ([`Declaration`]): a call runs the function's body in the
+    /// caller, and a reference to a value whose initializer may trap runs
+    /// that initializer where the reference is.
     pub fn entered_declarations(&self, selected: &[NodeId]) -> Vec<bool> {
         let mut entered = vec![false; self.declarations.len()];
-        let mut pending = Vec::new();
         for root in selected {
-            let decl = self.nodes[root.0].owner.decl;
-            if !entered[decl.0 as usize] {
-                entered[decl.0 as usize] = true;
-                pending.push(decl);
-            }
-        }
-        while let Some(decl) = pending.pop() {
-            for reference in &self.declarations[decl.0 as usize].references {
-                let index = reference.0 as usize;
-                if self.declarations[index].value && !entered[index] {
-                    entered[index] = true;
-                    pending.push(*reference);
-                }
-            }
+            entered[self.nodes[root.0].owner.decl.0 as usize] = true;
         }
         entered
     }

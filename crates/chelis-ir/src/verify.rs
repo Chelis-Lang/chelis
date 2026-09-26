@@ -3820,6 +3820,7 @@ fn verify_with_dangling_policy(dag: &Dag, reject_dangling: bool) -> Vec<String> 
 
     verify_random_operands(dag, &mut errors);
     verify_key_rules(dag, &mut errors);
+    verify_declaration_sharing(dag, &mut errors);
 
     // chelis#1277 C4.1: every realized output axis has one checked extent
     // source. `verify` is one of the production paths this runs on, not the
@@ -3832,6 +3833,46 @@ fn verify_with_dangling_policy(dag: &Dag, reject_dangling: bool) -> Vec<String> 
     }
 
     errors
+}
+
+/// #2413 (spec/10 section 3.2): a node reads a node of another declaration
+/// only when none of that declaration's nodes can trap
+/// ([`Dag::is_observable_root`]). A reference to a value declaration whose
+/// initializer may trap lowers the initializer again at the reference site,
+/// under that site's owner, so its checks run exactly where and when the
+/// reference is reached. A shared node of such a declaration would instead
+/// run its declaration's checks wherever any reader is evaluated, in no
+/// reader's activation.
+pub fn verify_declaration_sharing(dag: &Dag, errors: &mut Vec<String>) {
+    let mut may_trap = vec![false; dag.declarations().len()];
+    for node in dag.nodes() {
+        if dag.is_observable_root(node)
+            && let Some(flag) = may_trap.get_mut(node.owner.decl.0 as usize)
+        {
+            *flag = true;
+        }
+    }
+    for node in dag.nodes() {
+        for dependency in node.dependencies() {
+            let Some(source) = dag.get(dependency) else {
+                continue;
+            };
+            if source.owner.decl != node.owner.decl
+                && may_trap
+                    .get(source.owner.decl.0 as usize)
+                    .copied()
+                    .unwrap_or(false)
+            {
+                errors.push(format!(
+                    "{} reads {}, but {} has a node that can trap: another declaration reads \
+                     it only inlined at the reference, never shared",
+                    dag.describe_node(node.id),
+                    dag.describe_node(dependency),
+                    dag.describe_declaration(source.owner.decl)
+                ));
+            }
+        }
+    }
 }
 
 /// Shared structural verification for replace-scatter and scatter-add.
@@ -4275,6 +4316,64 @@ mod tests {
         assert!(
             same[0].starts_with("parameter `x` of `keep` has inconsistent tensor types"),
             "{same:?}"
+        );
+    }
+
+    /// #2413 (spec/10 section 3.2): a node reads another declaration's node
+    /// only when none of that declaration's nodes can trap. `s` reads `d`'s
+    /// value; the verifier accepts it while `d` is a total `mul` and rejects
+    /// it once `d` holds an integer `cast`, which can trap, naming both
+    /// declarations. A reference to such a value is its initializer inlined
+    /// at the reference, so lowering never builds the second graph.
+    ///
+    /// Evidentiary status: REGRESSION TEST. At ad0abe6a9 no rule read a
+    /// node's declaration against its readers', so the trapping row
+    /// verified.
+    #[test]
+    fn a_node_that_can_trap_is_never_shared_with_another_declaration() {
+        let sharing = |trapping: bool| {
+            let mut dag = Dag::new();
+            let d = dag.declare_value("d");
+            let s = dag.declare("s");
+            let x = dag.add_node(
+                d,
+                RiscOp::Load { name: "x".into() },
+                vec![],
+                tensor_ty(&[4], Prim::F32),
+                None,
+            );
+            let value = if trapping {
+                dag.add_node(
+                    d,
+                    RiscOp::Cast {
+                        new_precision: Prim::Int32,
+                    },
+                    vec![x],
+                    tensor_ty(&[4], Prim::Int32),
+                    None,
+                )
+            } else {
+                dag.add_node(d, RiscOp::Mul, vec![x, x], tensor_ty(&[4], Prim::F32), None)
+            };
+            let read = dag.add_node(
+                s,
+                RiscOp::Copy,
+                vec![value],
+                dag.get(value).unwrap().output_type.clone(),
+                None,
+            );
+            dag.add_root(read);
+            verify(&dag)
+                .into_iter()
+                .filter(|error| error.contains("has a node that can trap"))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(sharing(false), Vec::<String>::new());
+        let shared = sharing(true);
+        assert_eq!(shared.len(), 1, "{shared:?}");
+        assert!(
+            shared[0].starts_with("node 2 of `s` reads node 1 of `d`, but `d` has a node"),
+            "{shared:?}"
         );
     }
 

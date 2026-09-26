@@ -111,9 +111,11 @@ impl CachePayload for crate::StdLibContext {
     // counter stream, so bincode variant indices shift again, and every DAG
     // node carries its declaration as a required field (chelis#2476). V29
     // and V30 were intermediate states of the same change and never shipped.
-    // V32 (chelis#2413): every DAG node's required declaration widens into an
-    // owner, its declaration and its activation.
-    const FORMAT_VERSION: u32 = 32;
+    // V33 (chelis#2413): every DAG node's required declaration widens into an
+    // owner, its declaration and its activation, and a declaration no longer
+    // records the value declarations it references. V32 was an intermediate
+    // state of the same change and never shipped.
+    const FORMAT_VERSION: u32 = 33;
     const KEY_DOMAIN: &'static [u8] = b"chelis_std_typecheck_v";
 }
 

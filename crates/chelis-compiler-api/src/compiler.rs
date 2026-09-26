@@ -2956,8 +2956,9 @@ fn eval_compiled(
     let active_dag = &compiled.dag;
     // The evaluator admits exactly the graphs the compiled lanes admit
     // (spec/10 section 3.2): a lowered program whose keys break the key
-    // rules is rejected here as it is by the wire codec and by ownership
-    // lowering for C, rather than evaluated.
+    // rules, or that shares a node that can trap across declarations, is
+    // rejected here as ownership lowering for C rejects it, rather than
+    // evaluated. The wire codec runs the key rules too.
     let mut key_rule_errors = Vec::new();
     chelis_ir::verify::verify_random_operands(active_dag, &mut key_rule_errors);
     if key_rule_errors.is_empty() {
@@ -2969,6 +2970,18 @@ fn eval_compiled(
             format!(
                 "the lowered program breaks the key rules: {}",
                 key_rule_errors.join("; ")
+            ),
+            GeneralKind::LowerError,
+        ));
+    }
+    let mut sharing_errors = Vec::new();
+    chelis_ir::verify::verify_declaration_sharing(active_dag, &mut sharing_errors);
+    if !sharing_errors.is_empty() {
+        return Err(stage_error(
+            "eval",
+            format!(
+                "the lowered program shares a node that can trap: {}",
+                sharing_errors.join("; ")
             ),
             GeneralKind::LowerError,
         ));

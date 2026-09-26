@@ -903,7 +903,6 @@ fn lower_program_to_library_inner(
             }
         }
     });
-    ctx.resolve_declaration_references();
     log_sub("lower_top_level_loop", &mut sub_t);
 
     // Collect the pre-DCE name -> NodeId mapping from the lowering ctx's
@@ -1284,7 +1283,19 @@ fn lower_program_with_context_inner(
     }
     // The library's value declarations stay visible to new code by name, as
     // the values the symbol table binds; the latest declaration of a name
-    // wins, as it does for the binding.
+    // wins, as it does for the binding. One whose lowered form may trap is
+    // inlined where new code reads it, from the library's own definition
+    // and in the library's top-level scope.
+    let mut may_trap = vec![false; ctx.dag.declarations().len()];
+    for node in ctx.dag.nodes() {
+        if ctx.dag.is_observable_root(node) {
+            may_trap[node.owner.decl.0 as usize] = true;
+        }
+    }
+    let library_scope = DeclarationScope {
+        bindings: ctx.bindings.clone(),
+        ..DeclarationScope::default()
+    };
     let library_values = ctx
         .dag
         .declarations()
@@ -1297,8 +1308,25 @@ fn lower_program_with_context_inner(
         })
         .collect::<Vec<_>>();
     for (name, decl) in library_values {
+        let trapping = library
+            .program_defs
+            .get(&name)
+            .filter(|_| may_trap[decl.0 as usize])
+            .map(|initializer| {
+                Arc::new(TrappingInitializer {
+                    expr: initializer.clone(),
+                    scope: library_scope.clone(),
+                })
+            });
         let bound = ctx.bindings.get(&name).cloned();
-        ctx.top_level_values.insert(name, (decl, bound));
+        ctx.top_level_values.insert(
+            name,
+            TopLevelValue {
+                decl,
+                bound,
+                trapping,
+            },
+        );
     }
 
     for_each_top_level_item(new_program.exprs(), &mut |expr| {
@@ -1309,7 +1337,6 @@ fn lower_program_with_context_inner(
             ctx.lower_top_level(expr);
         }
     });
-    ctx.resolve_declaration_references();
 
     // Skip DCE on the composed DAG: the library DAG was already DCE'd by
     // `lower_program_to_library`, and re-DCE'ing here could prune library
@@ -6395,6 +6422,49 @@ fn names_top_level_value(bound: Option<&LoweredValue>, declared: Option<&Lowered
     }
 }
 
+/// A top-level value declaration visible to a lowering context.
+#[derive(Clone)]
+struct TopLevelValue {
+    /// The declaration.
+    decl: DeclId,
+    /// The value its binding holds here, `None` when nothing binds the name
+    /// here ([`names_top_level_value`]).
+    bound: Option<LoweredValue>,
+    /// The initializer, when its lowered form holds a potentially trapping
+    /// node ([`Dag::is_observable_root`]). `None` for a total one, whose one
+    /// node set every reference shares.
+    trapping: Option<Arc<TrappingInitializer>>,
+}
+
+/// A value declaration's initializer whose lowered form may trap, with the
+/// scope it was lowered in (#2413).
+///
+/// A reference to it from another declaration lowers the initializer again
+/// at the reference site, under that site's owner, exactly as a call inlines
+/// a function under its caller. Its checks then run where and when the
+/// reference is reached, gated by the site's activation, and no other
+/// declaration reads a node that can trap: the verifier rejects that
+/// sharing. The declaration's own nodes run only when it is selected.
+struct TrappingInitializer {
+    expr: Expr,
+    scope: DeclarationScope,
+}
+
+/// The lexical state a top-level declaration's initializer is lowered in:
+/// the top-level names bound before it, and no enclosing function's
+/// witnesses or type substitutions. Lowering an initializer again in this
+/// state resolves every name it reads as its declaration did, whatever the
+/// reference site binds.
+#[derive(Clone, Default)]
+struct DeclarationScope {
+    bindings: UnordMap<String, LoweredValue>,
+    list_bindings: UnordMap<String, Expr>,
+    shape_bindings: UnordMap<String, Expr>,
+    static_size_bindings: UnordMap<String, i64>,
+    local_callables: UnordMap<String, CallableExpr>,
+    fn_typed_params: UnordSet<String>,
+}
+
 /// A tuple whose every leaf is a key (spec/04 §8.4.1), such as the pair
 /// `split_key` returns. The graph carries each key as a key node and a tuple
 /// of them as a lowered tuple, so a staged host region never takes one as an
@@ -6944,21 +7014,21 @@ struct LowerCtx<'program> {
     /// subtracts these from the declared root names before aligning them
     /// against `dag.roots()`.
     rootless_defs: BTreeSet<String>,
-    /// chelis#2476, #2413: the value declarations lowering has seen each
-    /// declaration name, as (naming declaration, named value declaration).
-    /// A name is recorded where lowering resolves it, so a reference inside a
-    /// called function's body belongs to the caller that inlines it, one
-    /// inside a `grad` or `vmap` body to the declaration that body is spliced
-    /// into, and a function named without being applied records nothing.
-    /// [`LowerCtx::resolve_declaration_references`] writes them onto the
-    /// graph's declarations.
-    value_references: BTreeSet<(DeclId, DeclId)>,
-    /// Each top-level value declaration visible to this context, by name: its
-    /// declaration and the value its binding holds here (`None` when nothing
-    /// binds the name here). A name lookup that finds that same value, or
-    /// finds the name unbound, names the declaration; a local binding of the
-    /// same name holds another value, so shadowing names nothing.
-    top_level_values: UnordMap<String, (DeclId, Option<LoweredValue>)>,
+    /// Each top-level value declaration visible to this context, by name
+    /// ([`TopLevelValue`]). A reference from another declaration to one whose
+    /// initializer may trap lowers that initializer again where it is
+    /// reached ([`Self::inline_trapping_value`]).
+    top_level_values: UnordMap<String, TopLevelValue>,
+    /// Whether this context lowers the program's top-level declarations
+    /// itself, so [`Self::top_level_values`] lists every value declaration
+    /// it can name. A context that lowers one expression against the
+    /// program's definitions (a host kernel, a transform target) does not:
+    /// a name it leaves unbound may be a top-level value declaration it finds
+    /// in [`Self::program_defs`] ([`Self::inline_program_value`]).
+    lowers_declarations: bool,
+    /// [`Self::inline_program_value`]'s verdicts, by definition name: the
+    /// initializer to inline, or `None` for a total or unlowerable one.
+    program_value_verdicts: UnordMap<String, Option<Arc<TrappingInitializer>>>,
     /// The declaration being lowered: every node this context adds belongs
     /// to it ([`Self::decl`]). `lower_top_level` registers and sets it for
     /// each top-level item before lowering its body; a context that lowers a
@@ -7080,8 +7150,9 @@ impl<'program> LowerCtx<'program> {
             fn_typed_params: UnordSet::new(),
             callable_dependency_state: CallableDependencyState::default(),
             rootless_defs: BTreeSet::new(),
-            value_references: BTreeSet::new(),
             top_level_values: UnordMap::new(),
+            lowers_declarations: false,
+            program_value_verdicts: UnordMap::new(),
             decl: None,
             dim_substitutions: UnordMap::new(),
             prec_substitutions: UnordMap::new(),
@@ -7486,16 +7557,76 @@ impl<'program> LowerCtx<'program> {
         // A top-level value declaration the body names is named by the
         // declaration this body is spliced into. The sub-context sees it as
         // the Load that stands for it, or unbound when it is not a single
-        // node, and records the name for this context to absorb.
-        for (name, (declaration, declared)) in self.top_level_values.to_sorted() {
-            if names_top_level_value(self.bindings.get(name), declared.as_ref())
-                && !shadowed.contains(name)
-            {
-                subctx.top_level_values.insert(
-                    name.clone(),
-                    (*declaration, subctx.bindings.get(name).cloned()),
-                );
+        // node. One whose initializer may trap is inlined where the body
+        // reads it, in its declaration's scope, whose nodes the sub-context
+        // reads through Loads as well: the ones above where they capture the
+        // same node, and fresh ones where the body's scope shadows a name.
+        subctx.lowers_declarations = self.lowers_declarations;
+        subctx.program_value_verdicts = self.program_value_verdicts.clone();
+        let mut loads = UnordMap::<NodeId, NodeId>::new();
+        for (name, captured) in captures.to_sorted() {
+            if let Some(LoweredValue::Node(load)) = subctx.bindings.get(name) {
+                loads.entry(*captured).or_insert(*load);
             }
+        }
+        for (name, value) in self.top_level_values.to_sorted() {
+            if !names_top_level_value(self.bindings.get(name), value.bound.as_ref())
+                || shadowed.contains(name)
+            {
+                continue;
+            }
+            let trapping = value.trapping.as_ref().map(|initializer| {
+                let mut scope = initializer.scope.clone();
+                scope.bindings = initializer
+                    .scope
+                    .bindings
+                    .to_sorted()
+                    .into_iter()
+                    .filter_map(|(bound, value)| {
+                        let LoweredValue::Node(node_id) = value else {
+                            return None;
+                        };
+                        let load = *loads.entry(*node_id).or_insert_with(|| {
+                            let load_name = (0usize..)
+                                .map(|suffix| format!("__chelis_declaration_scope_{suffix}"))
+                                .find(|candidate| {
+                                    !captures.contains_key(candidate)
+                                        && !shadowed.contains(candidate)
+                                })
+                                .expect("an unused capture name");
+                            let ty = self
+                                .dag
+                                .get(*node_id)
+                                .map(|node| node.output_type.clone())
+                                .unwrap_or_else(Self::default_type);
+                            let load = subctx.dag.add_node(
+                                subctx.owner(),
+                                RiscOp::Load {
+                                    name: load_name.as_str().into(),
+                                },
+                                vec![],
+                                ty,
+                                subctx.current_span_id.clone(),
+                            );
+                            captures.insert(load_name, *node_id);
+                            load
+                        });
+                        Some((bound.clone(), LoweredValue::Node(load)))
+                    })
+                    .collect();
+                Arc::new(TrappingInitializer {
+                    expr: initializer.expr.clone(),
+                    scope,
+                })
+            });
+            subctx.top_level_values.insert(
+                name.clone(),
+                TopLevelValue {
+                    decl: value.decl,
+                    bound: subctx.bindings.get(name).cloned(),
+                    trapping,
+                },
+            );
         }
         subctx.local_callables.extend(
             self.local_callables
@@ -7905,62 +8036,210 @@ impl<'program> LowerCtx<'program> {
         }
 
         // chelis#2476: every node this declaration's lowering adds is its
-        // own, including the roots and the `Store`s below. A value
-        // declaration runs where it is referenced; a function runs inlined in
-        // each caller, so its standalone nodes are its own activation only.
+        // own, including the roots and the `Store`s below. A declaration's
+        // own nodes run only when it is selected: a call runs a function
+        // inlined in its caller, and a reference to a value whose
+        // initializer may trap runs that initializer inlined at the
+        // reference ([`Self::inline_trapping_value`]).
         let declared = stamped_parts(expr).and_then(|(tag, _, kids)| match tag {
             DeepTag::Def => kids.first().and_then(|expr| match expr {
                 Expr::Atom(Atom::Name(name), _) => Some((
                     name.as_str(),
-                    !matches!(
-                        kids.get(1).and_then(stamped_parts),
-                        Some((DeepTag::Fn, _, _))
-                    ),
+                    kids.get(1).filter(|initializer| {
+                        !matches!(stamped_parts(initializer), Some((DeepTag::Fn, _, _)))
+                    }),
                 )),
                 _ => None,
             }),
             _ => None,
         });
-        let (declaration_name, is_value) = declared.unwrap_or(("", false));
-        let decl = if is_value {
+        let (declaration_name, initializer) = declared.unwrap_or(("", None));
+        let decl = if initializer.is_some() {
             self.dag.declare_value(declaration_name)
         } else {
             self.dag.declare(declaration_name)
         };
+        self.lowers_declarations = true;
+        let scope = initializer.map(|_| self.declaration_scope());
+        let first_node = self.dag.len();
         let enclosing = self.decl.replace(decl);
         self.lower_top_level_body(expr);
         self.decl = enclosing;
-        if is_value
+        if let (Some(initializer), Some(scope)) = (initializer, scope)
             && !declaration_name.is_empty()
             && let Some(value) = self.bindings.get(declaration_name)
         {
-            self.top_level_values
-                .insert(declaration_name.to_owned(), (decl, Some(value.clone())));
+            let may_trap = self.dag.nodes()[first_node..]
+                .iter()
+                .any(|node| self.dag.is_observable_root(node));
+            let trapping = may_trap.then(|| {
+                Arc::new(TrappingInitializer {
+                    expr: initializer.clone(),
+                    scope,
+                })
+            });
+            self.top_level_values.insert(
+                declaration_name.to_owned(),
+                TopLevelValue {
+                    decl,
+                    bound: Some(value.clone()),
+                    trapping,
+                },
+            );
         }
     }
 
-    /// Record that the declaration being lowered names `name`, which this
-    /// context binds to `bound` (`None` when unbound here): when `name` is a
-    /// visible top-level value declaration and `bound` is its binding's
-    /// value, the declaration being lowered enters it (Rule D; spec/03 §4.4:
-    /// a referenced declaration's initializer runs whether or not its value
-    /// is read). A local binding of the same name, a function name, and a
-    /// name no top-level value declares record nothing.
-    fn record_value_reference(&mut self, name: &str, bound: Option<&LoweredValue>) {
-        let (Some(current), Some((declaration, declared))) =
-            (self.decl, self.top_level_values.get(name))
-        else {
-            return;
-        };
-        if names_top_level_value(bound, declared.as_ref()) && *declaration != current {
-            self.value_references.insert((current, *declaration));
+    /// This context's current lexical state as a [`DeclarationScope`]: at
+    /// the top level, the names every earlier declaration bound.
+    fn declaration_scope(&self) -> DeclarationScope {
+        DeclarationScope {
+            bindings: self.bindings.clone(),
+            list_bindings: self.list_bindings.clone(),
+            shape_bindings: self.shape_bindings.clone(),
+            static_size_bindings: self.static_size_bindings.clone(),
+            local_callables: self.local_callables.clone(),
+            fn_typed_params: self.fn_typed_params.clone(),
         }
     }
 
-    /// Take the references a `grad` or `vmap` sub-context recorded while
-    /// lowering a body this context splices into its own declaration.
-    fn absorb_value_references(&mut self, subctx: &mut LowerCtx) {
-        self.value_references.append(&mut subctx.value_references);
+    /// The value a reference to `name`, bound here to `bound` (`None` when
+    /// unbound), reads when it names a top-level value declaration whose
+    /// initializer may trap: that initializer lowered again here, under this
+    /// position's owner ([`TrappingInitializer`]). `None` when the reference
+    /// reads `bound` itself: a local binding of the name, a total
+    /// declaration, and the declaration's own initializer.
+    fn inline_trapping_value(
+        &mut self,
+        name: &str,
+        bound: Option<&LoweredValue>,
+    ) -> Option<LoweredValue> {
+        let current = self.decl?;
+        let value = self.top_level_values.get(name)?;
+        if value.decl == current || !names_top_level_value(bound, value.bound.as_ref()) {
+            return None;
+        }
+        let initializer = value.trapping.clone()?;
+        Some(self.lower_initializer(&initializer))
+    }
+
+    /// The value a reference to `name`, bound here to `bound`, reads when it
+    /// names a top-level value declaration whose initializer may trap: the
+    /// initializer inlined here ([`Self::inline_trapping_value`],
+    /// [`Self::inline_program_value`]). `None` when it reads `bound`, or the
+    /// free input an unbound name is.
+    fn inline_value_reference(
+        &mut self,
+        name: &str,
+        bound: Option<&LoweredValue>,
+    ) -> Option<LoweredValue> {
+        self.inline_trapping_value(name, bound).or_else(|| {
+            bound
+                .is_none()
+                .then(|| self.inline_program_value(name))
+                .flatten()
+        })
+    }
+
+    /// [`Self::inline_trapping_value`] for a context that does not lower the
+    /// program's declarations ([`Self::lowers_declarations`]): `name`,
+    /// unbound here, read as the top-level value declaration
+    /// [`Self::program_defs`] holds under it. Its verdict comes from
+    /// lowering the initializer in a scratch context: a lowered form with a
+    /// potentially trapping node is inlined here, and a total or unlowerable
+    /// one stays the free input the caller supplies.
+    fn inline_program_value(&mut self, name: &str) -> Option<LoweredValue> {
+        if self.lowers_declarations {
+            return None;
+        }
+        if !self.program_value_verdicts.contains_key(name) {
+            // Recorded before the scratch lowering, so an initializer that
+            // names itself (an input declaration) reads as total.
+            self.program_value_verdicts.insert(name.to_owned(), None);
+            let verdict = self.program_value_verdict(name);
+            self.program_value_verdicts.insert(name.to_owned(), verdict);
+        }
+        let initializer = self.program_value_verdicts.get(name)?.clone()?;
+        Some(self.lower_initializer(&initializer))
+    }
+
+    fn program_value_verdict(&self, name: &str) -> Option<Arc<TrappingInitializer>> {
+        let initializer = self.program_defs.get(name)?;
+        if matches!(stamped_parts(initializer), Some((DeepTag::Fn, _, _))) {
+            return None;
+        }
+        let initializer = Arc::new(TrappingInitializer {
+            expr: initializer.clone(),
+            scope: DeclarationScope::default(),
+        });
+        let mut scratch = LowerCtx::new(
+            self.program_types.clone(),
+            self.program_defs.clone(),
+            self.program_signatures.clone(),
+            LinearityInfo::default(),
+        );
+        scratch.decl = Some(scratch.dag.declare(name));
+        scratch.local_tensor_ascriptions = self.local_tensor_ascriptions.clone();
+        scratch.program_value_verdicts = self.program_value_verdicts.clone();
+        // `catch_lowering` clears the panic-output suppression on exit; an
+        // enclosing lowering that set it keeps it.
+        let suppressed = SUPPRESS_LOWERING_PANIC_OUTPUT.with(Cell::get);
+        let lowered = catch_lowering(std::panic::AssertUnwindSafe(|| {
+            scratch.lower_initializer(&initializer);
+            scratch.dag
+        }));
+        SUPPRESS_LOWERING_PANIC_OUTPUT.with(|cell| cell.set(suppressed));
+        let lowered = lowered.ok()?;
+        lowered
+            .nodes()
+            .iter()
+            .any(|node| lowered.is_observable_root(node))
+            .then_some(initializer)
+    }
+
+    /// Lower `initializer` here, in its declaration's scope and under this
+    /// position's owner, and return its value.
+    fn lower_initializer(&mut self, initializer: &TrappingInitializer) -> LoweredValue {
+        let scope = &initializer.scope;
+        let bindings = std::mem::replace(&mut self.bindings, scope.bindings.clone());
+        let list_bindings = std::mem::replace(&mut self.list_bindings, scope.list_bindings.clone());
+        let shape_bindings =
+            std::mem::replace(&mut self.shape_bindings, scope.shape_bindings.clone());
+        let static_size_bindings = std::mem::replace(
+            &mut self.static_size_bindings,
+            scope.static_size_bindings.clone(),
+        );
+        let local_callables =
+            std::mem::replace(&mut self.local_callables, scope.local_callables.clone());
+        let fn_typed_params =
+            std::mem::replace(&mut self.fn_typed_params, scope.fn_typed_params.clone());
+        let binding_witnesses = std::mem::take(&mut self.binding_witnesses);
+        let signature_witnesses = std::mem::take(&mut self.signature_witnesses);
+        let activation_witnesses = std::mem::take(&mut self.activation_witnesses);
+        let local_unit_refinements = std::mem::take(&mut self.local_unit_refinements);
+        let signature_is_authored = std::mem::replace(&mut self.signature_is_authored, false);
+        let local_ascription_tokens = std::mem::take(&mut self.local_ascription_tokens);
+        let dim_substitutions = std::mem::take(&mut self.dim_substitutions);
+        let prec_substitutions = std::mem::take(&mut self.prec_substitutions);
+        let rank_substitutions = std::mem::take(&mut self.rank_substitutions);
+        let dim_axis_positions = std::mem::take(&mut self.dim_axis_positions);
+        let value = self.lower_expr(&initializer.expr);
+        self.bindings = bindings;
+        self.list_bindings = list_bindings;
+        self.shape_bindings = shape_bindings;
+        self.static_size_bindings = static_size_bindings;
+        self.local_callables = local_callables;
+        self.fn_typed_params = fn_typed_params;
+        self.binding_witnesses = binding_witnesses;
+        self.signature_witnesses = signature_witnesses;
+        self.activation_witnesses = activation_witnesses;
+        self.local_unit_refinements = local_unit_refinements;
+        self.signature_is_authored = signature_is_authored;
+        self.local_ascription_tokens = local_ascription_tokens;
+        self.dim_substitutions = dim_substitutions;
+        self.prec_substitutions = prec_substitutions;
+        self.rank_substitutions = rank_substitutions;
+        self.dim_axis_positions = dim_axis_positions;
+        value
     }
 
     /// A unit test's context: one declaration, `test`, owns every node it
@@ -7990,17 +8269,6 @@ impl<'program> LowerCtx<'program> {
     /// only when its arm is selected (spec/10 section 3.2).
     fn owner(&self) -> Owner {
         Owner::new(self.decl(), self.draw_activation())
-    }
-
-    /// Write the recorded value references onto the graph's declarations.
-    fn resolve_declaration_references(&mut self) {
-        let mut references = BTreeMap::<DeclId, Vec<DeclId>>::new();
-        for (declaration, referenced) in std::mem::take(&mut self.value_references) {
-            references.entry(declaration).or_default().push(referenced);
-        }
-        for (declaration, referenced) in references {
-            self.dag.set_declaration_references(declaration, referenced);
-        }
     }
 
     fn lower_top_level_body(&mut self, expr: &Expr) {
@@ -8264,9 +8532,10 @@ impl<'program> LowerCtx<'program> {
             .set(crate::host::staged::StagingStatus::HasSources);
         let mut captures = Vec::new();
         for name in referenced.into_sorted() {
-            let bound = self.bindings.get(&name).cloned();
-            self.record_value_reference(&name, bound.as_ref());
-            if let Some(value) = bound {
+            // A top-level value this context does not bind is the host's to
+            // read: evaluating the staged source initializes it where the
+            // source reaches it.
+            if let Some(value) = self.bindings.get(&name).cloned() {
                 let captured = match &value {
                     LoweredValue::Node(id) => StageValue::Tensor(*id),
                     LoweredValue::Host { id, .. } => StageValue::Host(*id),
@@ -8818,7 +9087,9 @@ impl<'program> LowerCtx<'program> {
         match atom {
             Atom::Name(name) => {
                 let bound = self.bindings.get(name).cloned();
-                self.record_value_reference(name, bound.as_ref());
+                if let Some(inlined) = self.inline_value_reference(name, bound.as_ref()) {
+                    return inlined;
+                }
                 if let Some(cached) = bound {
                     // N→1 lowering collapse per
                     // spec/design/chelis_span_survival.md §2.3 rule (b):
@@ -9715,7 +9986,9 @@ impl<'program> LowerCtx<'program> {
 
         if let Some(Expr::Atom(Atom::Name(name), _)) = kids.first() {
             let bound = self.bindings.get(name).cloned();
-            self.record_value_reference(name, bound.as_ref());
+            if let Some(inlined) = self.inline_value_reference(name, bound.as_ref()) {
+                return inlined;
+            }
             if let Some(cached) = bound {
                 // N→1 lowering collapse per
                 // spec/design/chelis_span_survival.md §2.3 rule (b):
@@ -10604,7 +10877,6 @@ impl<'program> LowerCtx<'program> {
         }
         let wrt: Vec<_> = targets.iter().map(|target| target.formal).collect();
         let lowered_output = subctx.lower_resolved_body(fn_expr, &param_names, body);
-        self.absorb_value_references(&mut subctx);
         let output = lowered_output.expect_node("grad requires a scalar floating output");
         if subctx
             .callable_dependency_state
@@ -11871,7 +12143,6 @@ impl<'program> LowerCtx<'program> {
             (load_name, activation)
         });
         let root_value = subctx.lower_resolved_body(fn_expr, &param_names, body);
-        self.absorb_value_references(&mut subctx);
         for root in root_value.flatten_nodes() {
             subctx.dag.add_root(root);
         }
@@ -12171,7 +12442,6 @@ impl<'program> LowerCtx<'program> {
         let output = subctx
             .lower_resolved_body(fn_expr, &param_names, body)
             .expect_node("vmap(grad(...)) requires a scalar floating output");
-        self.absorb_value_references(&mut subctx);
         if subctx
             .callable_dependency_state
             .output_depends_on_unresolved(&subctx.dag, output)
@@ -19825,17 +20095,21 @@ mod declaration_attribution_tests {
                 ("selected", true)
             ]
         );
-        let named = |name: &str| {
-            DeclId(u32::try_from(declared.iter().position(|(n, _)| *n == name).unwrap()).unwrap())
-        };
-        let mut references = dag.declarations()[named("selected").0 as usize]
-            .references
-            .clone();
-        references.sort_unstable();
-        // The value declarations `selected` names; calling `h` names none.
-        assert_eq!(references, [named("x"), named("sampled")]);
-        // `h`'s own draw, and the copy inlined where `selected` calls it.
-        assert_eq!(draws(dag), ["sampled", "h", "selected"]);
+        // `sampled`'s and `h`'s own draws, then the copies inlined where
+        // `selected` reads `sampled`, whose initializer may trap, and calls
+        // `h`.
+        assert_eq!(draws(dag), ["sampled", "h", "selected", "selected"]);
+        // `selected` reads the input declaration `x`, which cannot trap, and
+        // no node of `sampled`.
+        let owned_by = |id: NodeId| declaration_name(dag, dag.get(id).unwrap());
+        let read = dag
+            .nodes()
+            .iter()
+            .filter(|node| declaration_name(dag, node) == "selected")
+            .flat_map(|node| node.dependencies().map(owned_by))
+            .filter(|owner| owner != "selected")
+            .collect::<BTreeSet<_>>();
+        assert_eq!(read, BTreeSet::from(["x".to_owned()]));
         // A discarded value's `Drop` is its declaration's, not no one's.
         for node in dag.nodes() {
             if matches!(node.op, RiscOp::Drop) {
@@ -19845,10 +20119,11 @@ mod declaration_attribution_tests {
         }
     }
 
-    /// Selecting `selected` enters `sampled` through the dead binding and
-    /// runs `h` only inlined, so `h`'s own draw, and the parameter it reads,
-    /// are not the selection's: the evaluator does not seed that draw, and
-    /// an entry sliced to `selected` keeps neither.
+    /// Selecting `selected` runs `sampled`'s initializer and `h`'s body only
+    /// inlined into `selected`, so `sampled`'s and `h`'s own draws, and the
+    /// parameter `h` reads, are not the selection's: the evaluator does not
+    /// seed those draws, and an entry sliced to `selected` keeps none of
+    /// them.
     ///
     /// Evidentiary status: REGRESSION TEST for chelis#2486's residual: the
     /// discarded draw in `h`'s own body sat under an unrooted `Drop`, owned
@@ -19865,7 +20140,7 @@ mod declaration_attribution_tests {
             .filter(|node| matches!(node.op, RiscOp::Dropout) && outside[node.id.0])
             .map(|node| declaration_name(dag, node))
             .collect::<Vec<_>>();
-        assert_eq!(outside_draws, ["h"]);
+        assert_eq!(outside_draws, ["sampled", "h"]);
         assert!(
             dag.outside_selection(dag.roots()).iter().all(|out| !out),
             "selecting every root enters every declaration of this program"
@@ -19874,11 +20149,63 @@ mod declaration_attribution_tests {
         let mut sliced = dag.clone();
         sliced.set_roots(vec![root("selected")]);
         let sliced = crate::optimize::dead_code_eliminate(&sliced);
-        assert_eq!(draws(&sliced), ["sampled", "selected"]);
+        assert_eq!(draws(&sliced), ["selected", "selected"]);
         assert!(!sliced.nodes().iter().any(|node| matches!(
             &node.op,
             RiscOp::Load { name } if name.as_str() == "v"
         )));
+    }
+
+    /// #2413 (decisions §12): a value declaration whose lowered initializer
+    /// has no node that can trap is one node set every reference shares,
+    /// while one whose initializer can trap is lowered again at each
+    /// reference, under the referencing declaration: in `f`'s own body, in
+    /// the copy of `f` inlined where `first` calls it, and in `second`.
+    /// Either way no declaration reads a node of another that can trap.
+    ///
+    /// Evidentiary status: the total row is a DISPOSITION LOCK (at
+    /// ad0abe6a9 every reference shared the value); the trapping row is a
+    /// REGRESSION TEST, since at ad0abe6a9 the three references shared
+    /// `shared`'s one integer `cast`.
+    #[test]
+    fn a_total_value_is_shared_and_a_trapping_value_is_inlined_at_each_reference() {
+        let program = |initializer: &str| {
+            format!(
+                "x: tensor[4, f32] = x\nshared = {initializer}\ndef f(v: tensor[4, f32]) -> tensor[4, f32] = add(v, copy(shared))\nfirst = f(copy(x))\nsecond = add(copy(shared), copy(x))\n"
+            )
+        };
+        let owners = |source: &str, op: fn(&RiscOp) -> bool| {
+            let library = lowered(source);
+            let dag = library.dag();
+            assert_eq!(
+                crate::verify::verify(dag)
+                    .into_iter()
+                    .filter(|error| error.contains("has a node that can trap"))
+                    .collect::<Vec<_>>(),
+                Vec::<String>::new()
+            );
+            dag.nodes()
+                .iter()
+                .filter(|node| op(&node.op))
+                .map(|node| declaration_name(dag, node))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            owners(&program("mul(copy(x), copy(x))"), |op| matches!(
+                op,
+                RiscOp::Mul
+            )),
+            ["shared"]
+        );
+        assert_eq!(
+            owners(&program("cast(cast(copy(x), i32), f32)"), |op| matches!(
+                op,
+                RiscOp::Cast {
+                    new_precision: Prim::Int32
+                }
+            )),
+            ["shared", "f", "first", "second"]
+        );
     }
 }
 

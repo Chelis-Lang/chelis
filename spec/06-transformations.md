@@ -644,10 +644,13 @@ activation is false it computes a value and checks nothing. Purity alone does
 not make a possible trap dead.
 
 Liveness is scoped to the program the evaluation runs. An evaluation of
-selected roots enters each selected root's declaration and every value
-declaration that a declaration it enters names, whether or not the name is
-read. A call is not such a reference: a function runs inlined in its caller,
-so a function's own nodes are entered only when the function is selected. A
+selected roots enters each selected root's declaration. Another declaration's
+work runs only inlined into the nodes of the declaration that reaches it: a
+call runs the function's body in its caller, and a reference to a top-level
+value declaration whose initializer has a potentially trapping node runs that
+initializer at the reference, within the reference's activation, whether or
+not the reference is read (spec/03 §4.4). A value declaration with no
+potentially trapping node is one set of nodes that every reference reads. A
 node of a declaration the evaluation does not enter is not part of that
 program, and a node whose activation is false checks nothing ([05-RNG-1]).
 
