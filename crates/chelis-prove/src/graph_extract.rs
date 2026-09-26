@@ -78,6 +78,9 @@ pub(crate) fn scalar_root_closure(wire: &WireDag, root: u64) -> Result<(WireDag,
                 return Err("scalar closure requires dense IDs and no shape dependencies".into());
             }
             pending.extend(node.inputs.iter().copied());
+            // The activation decides whether the node checks; it is part
+            // of the closure like an input.
+            pending.extend(node.activation);
         }
     }
     let mapping: std::collections::BTreeMap<_, _> = retained
@@ -92,6 +95,7 @@ pub(crate) fn scalar_root_closure(wire: &WireDag, root: u64) -> Result<(WireDag,
             let mut node = wire.nodes[*id as usize].clone();
             node.id = mapping[id];
             node.inputs = node.inputs.iter().map(|input| mapping[input]).collect();
+            node.activation = node.activation.map(|activation| mapping[&activation]);
             node
         })
         .collect();

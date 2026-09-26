@@ -20,6 +20,7 @@ fn ty(dims: &[i64], precision: &str) -> WireTensorType {
 fn load(id: u64, name: &str, dims: &[i64], precision: &str) -> WireDagNode {
     WireDagNode {
         declaration: 0,
+        activation: None,
         shape_deps: vec![],
         span_id: None,
         merged_spans: vec![],
@@ -41,6 +42,7 @@ fn expand_dag(size: WireRtDim, bound: WireDagNode) -> WireDag {
             bound,
             WireDagNode {
                 declaration: 0,
+                activation: None,
                 shape_deps: vec![],
                 span_id: None,
                 merged_spans: vec![],
@@ -176,6 +178,7 @@ fn v7_movement_ops_reject_unowned_runtime_extent_inputs() {
             load(2, "unowned", &[], "int64"),
             WireDagNode {
                 declaration: 0,
+                activation: None,
                 shape_deps: vec![],
                 span_id: None,
                 merged_spans: vec![],
@@ -220,6 +223,7 @@ fn v7_input_axis_rejects_negative_or_out_of_range_axes_and_forbidden_owners() {
             load(1, "witness", &[4], "f32"),
             WireDagNode {
                 declaration: 0,
+                activation: None,
                 shape_deps: vec![],
                 span_id: None,
                 merged_spans: vec![],
@@ -252,7 +256,7 @@ fn v7_input_axis_rejects_negative_or_out_of_range_axes_and_forbidden_owners() {
 
 #[test]
 fn v6_display_string_expand_payload_is_rejected_before_op_decode() {
-    let old = r#"{"schema_version":6,"nodes":[{"shape_deps":[],"span_id":null,"merged_spans":[],"declaration":0,"id":0,"op":{"kind":"expand","axis":0,"size":"4"},"inputs":[],"output_type":{"dims":[],"precision":"f32"}}],"roots":[0]}"#;
+    let old = r#"{"schema_version":6,"nodes":[{"shape_deps":[],"span_id":null,"merged_spans":[],"declaration":0,"activation":null,"id":0,"op":{"kind":"expand","axis":0,"size":"4"},"inputs":[],"output_type":{"dims":[],"precision":"f32"}}],"roots":[0]}"#;
     assert!(matches!(
         WireDag::from_validated_json(old),
         Err(WireDagDecodeError::Schema(
@@ -287,6 +291,7 @@ fn v7_shrink_rejects_a_to_end_end_over_a_non_zero_start() {
             load(0, "value", &[4], "f32"),
             WireDagNode {
                 declaration: 0,
+                activation: None,
                 shape_deps: vec![],
                 span_id: None,
                 merged_spans: vec![],
@@ -325,6 +330,7 @@ fn v7_shrink_rejects_a_to_end_end_over_a_non_zero_start() {
                 load(0, "value", &[4], "f32"),
                 WireDagNode {
                     declaration: 0,
+                    activation: None,
                     shape_deps: vec![],
                     span_id: None,
                     merged_spans: vec![],

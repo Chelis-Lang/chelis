@@ -487,6 +487,18 @@ pub(super) fn validate(dag: &WireDag) -> Result<()> {
                 "shape dependencies must resolve to earlier nodes in the owning DAG",
             ));
         }
+        if let Some(activation) = node.activation {
+            let bool_node = usize::try_from(activation)
+                .ok()
+                .filter(|_| activation < host_index(index))
+                .and_then(|activation| dag.nodes.get(activation))
+                .is_some_and(|activation| activation.output_type.precision == "bool");
+            if !bool_node {
+                return Err(reject(
+                    "a node's activation must be an earlier bool node of the owning DAG",
+                ));
+            }
+        }
         for dependency in &node.shape_deps {
             let required = &dag.nodes[*dependency as usize];
             if let WireRiscOp::ExtentWitness {

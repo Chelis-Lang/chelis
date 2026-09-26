@@ -22,6 +22,7 @@ fn fixture() -> WireDag {
         nodes: vec![
             WireDagNode {
                 declaration: 0,
+                activation: None,
                 id: 0,
                 op: WireRiscOp::Load { name: "x".into() },
                 inputs: vec![],
@@ -38,6 +39,7 @@ fn fixture() -> WireDag {
             },
             WireDagNode {
                 declaration: 0,
+                activation: None,
                 id: 1,
                 op: WireRiscOp::ExtentWitness {
                     site: WireExtentWitnessSite::Caller,
@@ -57,6 +59,7 @@ fn fixture() -> WireDag {
             },
             WireDagNode {
                 declaration: 0,
+                activation: None,
                 id: 2,
                 op: WireRiscOp::Const { value: integer(9) },
                 inputs: vec![],
@@ -80,6 +83,7 @@ fn local_ascription_with_activation_fixture() -> WireDag {
         nodes: vec![
             WireDagNode {
                 declaration: 0,
+                activation: None,
                 id: 0,
                 op: WireRiscOp::Load { name: "x".into() },
                 inputs: vec![],
@@ -96,6 +100,7 @@ fn local_ascription_with_activation_fixture() -> WireDag {
             },
             WireDagNode {
                 declaration: 0,
+                activation: None,
                 id: 1,
                 op: WireRiscOp::ExtentWitness {
                     site: WireExtentWitnessSite::LocalAscriptionClaim {
@@ -120,6 +125,7 @@ fn local_ascription_with_activation_fixture() -> WireDag {
             },
             WireDagNode {
                 declaration: 0,
+                activation: None,
                 id: 2,
                 op: WireRiscOp::Const {
                     value: boolean(true),
@@ -135,6 +141,7 @@ fn local_ascription_with_activation_fixture() -> WireDag {
             },
             WireDagNode {
                 declaration: 0,
+                activation: None,
                 id: 3,
                 op: WireRiscOp::Pad {
                     padding: vec![(
@@ -180,6 +187,7 @@ fn result_claim_role_roundtrips_exact_witness_identity_and_rejects_malformed_tra
     dag.nodes.push(token);
     dag.nodes.push(WireDagNode {
         declaration: 0,
+        activation: None,
         id: 3,
         op: WireRiscOp::Const { value: integer(7) },
         inputs: vec![],
@@ -193,6 +201,7 @@ fn result_claim_role_roundtrips_exact_witness_identity_and_rejects_malformed_tra
     });
     dag.nodes.push(WireDagNode {
         declaration: 0,
+        activation: None,
         id: 4,
         op: WireRiscOp::Expand {
             axis: 0,
@@ -451,6 +460,7 @@ fn named_local_ascription_site_requires_its_exact_declaring_witness_and_owner() 
     dag.nodes.push(token);
     dag.nodes.push(WireDagNode {
         declaration: 0,
+        activation: None,
         id: 3,
         op: WireRiscOp::Copy,
         inputs: vec![0],
@@ -602,6 +612,7 @@ fn checked_fixture() -> WireDag {
     for id in [3, 4] {
         dag.nodes.push(WireDagNode {
             declaration: 0,
+            activation: None,
             id,
             op: WireRiscOp::Const { value: integer(2) },
             inputs: vec![],
@@ -616,6 +627,7 @@ fn checked_fixture() -> WireDag {
     }
     dag.nodes.push(WireDagNode {
         declaration: 0,
+        activation: None,
         id: 5,
         op: WireRiscOp::CheckedReshapeExtent {
             claims: vec!["rows".into()],
@@ -781,6 +793,7 @@ fn named_claim_fixture() -> WireDag {
         |id: u64, op: WireRiscOp, inputs: Vec<u64>, dims, precision: &str, shape_deps: Vec<u64>| {
             WireDagNode {
                 declaration: 0,
+                activation: None,
                 id,
                 op,
                 inputs,
@@ -934,6 +947,7 @@ fn literal_result_role_roundtrips_without_an_observing_input_and_rejects_malform
         nodes: vec![
             WireDagNode {
                 declaration: 0,
+                activation: None,
                 id: 0,
                 op: WireRiscOp::ExtentWitness {
                     site: WireExtentWitnessSite::LiteralResultClaim,
@@ -953,6 +967,7 @@ fn literal_result_role_roundtrips_without_an_observing_input_and_rejects_malform
             },
             WireDagNode {
                 declaration: 0,
+                activation: None,
                 id: 1,
                 op: WireRiscOp::Load { name: "x".into() },
                 inputs: vec![],
@@ -963,6 +978,7 @@ fn literal_result_role_roundtrips_without_an_observing_input_and_rejects_malform
             },
             WireDagNode {
                 declaration: 0,
+                activation: None,
                 id: 2,
                 op: WireRiscOp::Add,
                 inputs: vec![1, 1],
@@ -999,6 +1015,7 @@ fn literal_result_role_roundtrips_without_an_observing_input_and_rejects_malform
     unsupported.nodes.push(rhs);
     unsupported.nodes.push(WireDagNode {
         declaration: 0,
+        activation: None,
         id: 3,
         op: WireRiscOp::BlasMatmul {
             batch_dims: vec![],

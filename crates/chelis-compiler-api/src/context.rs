@@ -870,7 +870,10 @@ const CACHE_MAGIC: &[u8] = b"CHELIS_CTX_V23\n";
 /// so bincode variant indices shift again, and every DAG node carries its
 /// declaration as a required field (chelis#2476). V31 and V32 were
 /// intermediate states of the same change and never shipped.
-const CACHE_FORMAT_VERSION: u32 = 33;
+/// V34 (chelis#2413): every DAG node's required declaration widens into an
+/// owner, its declaration and its activation, so each node's bincode shape
+/// changes.
+const CACHE_FORMAT_VERSION: u32 = 34;
 
 /// On-disk envelope for the Phase I cache. The full file layout is:
 ///
@@ -1581,7 +1584,7 @@ mod tests {
     #[test]
     fn cache_format_version_tracks_the_key_operand_random_nodes() {
         assert_eq!(CACHE_MAGIC, b"CHELIS_CTX_V23\n");
-        assert_eq!(CACHE_FORMAT_VERSION, 33);
+        assert_eq!(CACHE_FORMAT_VERSION, 34);
     }
 
     /// chelis#1156: the cache identity must distinguish two BUILDS, not

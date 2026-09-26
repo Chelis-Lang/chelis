@@ -6645,6 +6645,10 @@ fn wire_dag(dag: &Dag) -> WireResult<WireDag> {
 fn wire_dag_node(node: &chelis_ir::dag::DagNode, declaration: u64) -> WireResult<WireDagNode> {
     Ok(WireDagNode {
         declaration,
+        activation: node
+            .owner
+            .activation
+            .map(|id| crate::schema::host_index(id.0)),
         shape_deps: node
             .shape_deps
             .iter()

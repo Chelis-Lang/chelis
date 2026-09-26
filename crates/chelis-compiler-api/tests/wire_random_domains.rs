@@ -143,7 +143,7 @@ fn a_key_is_consumed_once_and_only_by_a_key_consumer() {
     let nodes = foreign["nodes"].as_array_mut().unwrap();
     let id = nodes.len();
     nodes.push(
-        json!({"shape_deps":[],"span_id":null,"merged_spans":[],"declaration":0,"id":id,
+        json!({"shape_deps":[],"span_id":null,"merged_spans":[],"declaration":0,"activation":null,"id":id,
         "op":{"kind":"neg"},"inputs":[dropout_key],
         "output_type":{"dims":[],"precision":"key"}}),
     );
@@ -166,7 +166,7 @@ fn a_key_is_consumed_once_and_only_by_a_key_consumer() {
     let mut derived = dag.clone();
     let id = derived["nodes"].as_array().unwrap().len();
     derived["nodes"].as_array_mut().unwrap().push(
-        json!({"shape_deps":[],"span_id":null,"merged_spans":[],"declaration":0,"id":id,
+        json!({"shape_deps":[],"span_id":null,"merged_spans":[],"declaration":0,"activation":null,"id":id,
         "op":{"kind":"split","branch":"left"},"inputs":[dropout_key],
         "output_type":{"dims":[],"precision":"key"}}),
     );
@@ -288,7 +288,7 @@ fn a_key_may_be_loaded_or_rooted_and_is_never_a_dependency_or_a_constant() {
     let mut loaded = dag.clone();
     let id = loaded["nodes"].as_array().unwrap().len();
     loaded["nodes"].as_array_mut().unwrap().push(
-        json!({"shape_deps":[],"span_id":null,"merged_spans":[],"declaration":0,"id":id,
+        json!({"shape_deps":[],"span_id":null,"merged_spans":[],"declaration":0,"activation":null,"id":id,
         "op":{"kind":"load","name":"unused"},"inputs":[],
         "output_type":{"dims":[],"precision":"key"}}),
     );
@@ -312,7 +312,7 @@ fn a_key_may_be_loaded_or_rooted_and_is_never_a_dependency_or_a_constant() {
     let mut constant = dag.clone();
     let id = constant["nodes"].as_array().unwrap().len();
     constant["nodes"].as_array_mut().unwrap().push(
-        json!({"shape_deps":[],"span_id":null,"merged_spans":[],"declaration":0,"id":id,
+        json!({"shape_deps":[],"span_id":null,"merged_spans":[],"declaration":0,"activation":null,"id":id,
         "op":{"kind":"const","value":{"dtype":"int64","value":7}},"inputs":[],
         "output_type":{"dims":[],"precision":"key"}}),
     );
@@ -321,7 +321,7 @@ fn a_key_may_be_loaded_or_rooted_and_is_never_a_dependency_or_a_constant() {
 }
 
 fn wire_node(id: usize, op: Value, inputs: &[usize], dims: &[u64], precision: &str) -> Value {
-    json!({"shape_deps":[],"span_id":null,"merged_spans":[],"declaration":0,"id":id,"op":op,
+    json!({"shape_deps":[],"span_id":null,"merged_spans":[],"declaration":0,"activation":null,"id":id,"op":op,
         "inputs":inputs,
         "output_type":{"dims":dims.iter().map(|size| json!({"kind":"lit","size":size})).collect::<Vec<_>>(),
         "precision":precision}})
@@ -1213,7 +1213,8 @@ fn wire_of(dag: &Dag) -> Value {
                 })
                 .collect::<Vec<_>>();
             let declaration = row_of[&node.owner.decl];
-            json!({"shape_deps":[],"span_id":null,"merged_spans":[],"declaration":declaration,"id":node.id.0,"op":op,
+            let activation = node.owner.activation.map(|activation| activation.0);
+            json!({"shape_deps":[],"span_id":null,"merged_spans":[],"declaration":declaration,"activation":activation,"id":node.id.0,"op":op,
                 "inputs":node.inputs.iter().map(|input| input.0).collect::<Vec<_>>(),
                 "output_type":{"dims":dims,"precision":node.output_type.precision.interchange_name()}})
         })

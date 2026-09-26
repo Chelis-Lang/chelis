@@ -156,6 +156,15 @@
     },
     {
       "authority": "TaggedTransport",
+      "contract": "earlier-activation",
+      "flags": [
+        "numeric-field"
+      ],
+      "id": "chelis_compiler_api::schema::WireDagNode.activation: u64",
+      "kind": "wire-schema-numeric-field"
+    },
+    {
+      "authority": "TaggedTransport",
       "contract": "declaration-row",
       "flags": [
         "numeric-field"
