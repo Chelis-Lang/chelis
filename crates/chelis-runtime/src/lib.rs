@@ -31,6 +31,7 @@ use metadata::{
     ShapeMetadata, SparseMetadata, StridedMetadata, WindowMetadata,
 };
 mod ownership_ledger;
+pub mod public_headers;
 
 #[cfg(test)]
 mod runtime_dtype_contract_tests;
@@ -1479,7 +1480,61 @@ unsafe fn finish_finalization(
     }
 }
 
+/// A container whose last strong owner was released inside a finalizer, with
+/// the release site the ledger records for it.
+type PendingFinalization = (ownership_ledger::Kind, *mut libc::c_void, &'static str);
+
+/// Finalize an allocation whose last strong owner was just released, and
+/// every container that release frees in turn.
+///
+/// [05-OP-44] runs each kind's finalizer exactly once, when its final owner is
+/// released. A finalizer releases its children, and a container child whose
+/// count reaches zero is queued here rather than finalized by recursion, so a
+/// deep chain (a recursive data type, a list of lists) is freed in bounded
+/// native stack (chelis#2522). Leaf kinds finalize directly: a string, a
+/// mapped file, or a tensor and its storage owns no further value.
 unsafe fn finalize_heap(kind: ownership_ledger::Kind, pointer: *mut libc::c_void, site: &str) {
+    let mut pending = Vec::new();
+    finalize_one(kind, pointer, site, &mut pending);
+    while let Some((kind, pointer, site)) = pending.pop() {
+        finalize_one(kind, pointer, site, &mut pending);
+    }
+}
+
+/// Release one child owner from inside a finalizer, queueing a container
+/// whose count reaches zero on `pending` instead of finalizing it here.
+unsafe fn release_child(value: chelis_value, pending: &mut Vec<PendingFinalization>) {
+    match value.tag {
+        CHELIS_VALUE_LIST => {
+            validate_value(value, "chelis_value_release");
+            release_list_ptr_into(value.payload.list, pending);
+        }
+        CHELIS_VALUE_TUPLE => {
+            validate_value(value, "chelis_value_release");
+            release_tuple_ptr_into(value.payload.tuple, pending);
+        }
+        CHELIS_VALUE_DICT => {
+            validate_value(value, "chelis_value_release");
+            release_dict_ptr_into(value.payload.dict, pending);
+        }
+        CHELIS_VALUE_ADT => {
+            validate_value(value, "chelis_value_release");
+            release_adt_ptr_into(value.payload.adt, pending);
+        }
+        CHELIS_VALUE_OPTION => {
+            validate_value(value, "chelis_value_release");
+            release_option_ptr_into(value.payload.option, pending);
+        }
+        _ => chelis_value_release(value),
+    }
+}
+
+unsafe fn finalize_one(
+    kind: ownership_ledger::Kind,
+    pointer: *mut libc::c_void,
+    site: &str,
+    pending: &mut Vec<PendingFinalization>,
+) {
     match kind {
         ownership_ledger::Kind::String => {
             finish_finalization(pointer, kind, site);
@@ -1503,7 +1558,7 @@ unsafe fn finalize_heap(kind: ownership_ledger::Kind, pointer: *mut libc::c_void
         ownership_ledger::Kind::List => {
             let list = Box::from_raw(pointer.cast::<chelis_list>());
             for value in list.live() {
-                chelis_value_release(*value);
+                release_child(*value, pending);
             }
             finish_finalization(pointer, kind, site);
             drop(list);
@@ -1511,7 +1566,7 @@ unsafe fn finalize_heap(kind: ownership_ledger::Kind, pointer: *mut libc::c_void
         ownership_ledger::Kind::Tuple => {
             let tuple = Box::from_raw(pointer.cast::<chelis_tuple>());
             for value in &tuple.items {
-                chelis_value_release(*value);
+                release_child(*value, pending);
             }
             finish_finalization(pointer, kind, site);
             drop(tuple);
@@ -1519,8 +1574,8 @@ unsafe fn finalize_heap(kind: ownership_ledger::Kind, pointer: *mut libc::c_void
         ownership_ledger::Kind::Dict => {
             let dict = Box::from_raw(pointer.cast::<chelis_dict>());
             for entry in &dict.entries {
-                chelis_value_release(entry.key);
-                chelis_value_release(entry.value);
+                release_child(entry.key, pending);
+                release_child(entry.value, pending);
             }
             finish_finalization(pointer, kind, site);
             drop(dict);
@@ -1529,7 +1584,7 @@ unsafe fn finalize_heap(kind: ownership_ledger::Kind, pointer: *mut libc::c_void
             let adt = Box::from_raw(pointer.cast::<chelis_adt>());
             chelis_string_release(adt.ctor);
             for field in &adt.fields {
-                chelis_value_release(*field);
+                release_child(*field, pending);
             }
             finish_finalization(pointer, kind, site);
             drop(adt);
@@ -1537,7 +1592,7 @@ unsafe fn finalize_heap(kind: ownership_ledger::Kind, pointer: *mut libc::c_void
         ownership_ledger::Kind::Option => {
             let option = Box::from_raw(pointer.cast::<chelis_option>());
             if let Some(value) = option.value {
-                chelis_value_release(value);
+                release_child(value, pending);
             }
             finish_finalization(pointer, kind, site);
             drop(option);
@@ -1562,6 +1617,36 @@ unsafe fn release_tensor_storage(storage: *mut TensorStorage, site: &str) {
 
 macro_rules! heap_ref_ops {
     ($retain:ident, $release:ident, $ty:ty, $kind:ident, $ledger_failure:literal) => {
+        heap_ref_ops!(@ $retain, $release, $ty, $kind, $ledger_failure);
+    };
+    (
+        $retain:ident,
+        $release:ident,
+        $release_into:ident,
+        $ty:ty,
+        $kind:ident,
+        $ledger_failure:literal
+    ) => {
+        heap_ref_ops!(@ $retain, $release, $ty, $kind, $ledger_failure);
+
+        /// Release one owner from inside a finalizer: a final release is
+        /// queued on `pending` rather than finalized by recursion.
+        unsafe fn $release_into(pointer: *mut $ty, pending: &mut Vec<PendingFinalization>) {
+            if release_header(
+                pointer.cast(),
+                ownership_ledger::Kind::$kind,
+                stringify!($release),
+                $ledger_failure,
+            ) {
+                pending.push((
+                    ownership_ledger::Kind::$kind,
+                    pointer.cast(),
+                    stringify!($release),
+                ));
+            }
+        }
+    };
+    (@ $retain:ident, $release:ident, $ty:ty, $kind:ident, $ledger_failure:literal) => {
         unsafe fn $retain(pointer: *mut $ty) {
             retain_header(
                 pointer.cast(),
@@ -1597,6 +1682,7 @@ heap_ref_ops!(
 heap_ref_ops!(
     retain_list_ptr,
     release_list_ptr,
+    release_list_ptr_into,
     chelis_list,
     List,
     "compiled ownership ledger detected invalid list release"
@@ -1604,6 +1690,7 @@ heap_ref_ops!(
 heap_ref_ops!(
     retain_tuple_ptr,
     release_tuple_ptr,
+    release_tuple_ptr_into,
     chelis_tuple,
     Tuple,
     "compiled ownership ledger detected invalid tuple release"
@@ -1611,6 +1698,7 @@ heap_ref_ops!(
 heap_ref_ops!(
     retain_dict_ptr,
     release_dict_ptr,
+    release_dict_ptr_into,
     chelis_dict,
     Dict,
     "compiled ownership ledger detected invalid dict release"
@@ -1618,6 +1706,7 @@ heap_ref_ops!(
 heap_ref_ops!(
     retain_adt_ptr,
     release_adt_ptr,
+    release_adt_ptr_into,
     chelis_adt,
     Adt,
     "compiled ownership ledger detected invalid adt release"
@@ -1625,6 +1714,7 @@ heap_ref_ops!(
 heap_ref_ops!(
     retain_option_ptr,
     release_option_ptr,
+    release_option_ptr_into,
     chelis_option,
     Option,
     "compiled ownership ledger detected invalid option release"
@@ -4839,32 +4929,40 @@ pub unsafe extern "C" fn chelis_list_with_capacity(capacity: i64) -> *mut chelis
     new_list(Vec::with_capacity(capacity), "chelis_list_with_capacity")
 }
 
+/// In-place amortized push for accumulator lists the emitted code
+/// exclusively owns (chelis#943), consuming `value` (chelis#2508).
+///
+/// The ownership verifier moves every loop step's item into its accumulator,
+/// so the one push the emitter can call takes the caller's owner of `value`
+/// instead of retaining a second one. A cloning push realized that move as a
+/// copy and left the moved owner live. Exclusivity is a hard contract:
+/// pushing into a shared list would mutate every other owner's view.
 #[no_mangle]
-pub unsafe extern "C" fn chelis_list_push(list: *mut chelis_list, value: chelis_value) {
-    // In-place amortized push for accumulator lists the emitted code
-    // exclusively owns (chelis#943). Exclusivity is a hard contract:
-    // pushing into a shared list would mutate every other owner's view.
+pub unsafe extern "C" fn chelis_list_push_moved(list: *mut chelis_list, value: chelis_value) {
     if list.is_null() {
-        runtime_fail!("chelis_list_push on a null list");
+        runtime_fail!("chelis_list_push_moved on a null list");
     }
     if (*list).header.strong.load(Ordering::Relaxed) != 1 {
-        runtime_fail!("chelis_list_push requires exclusive ownership (refcount 1)");
+        runtime_fail!("chelis_list_push_moved requires exclusive ownership (refcount 1)");
     }
-    (*list).push(chelis_value_clone(value));
-    resize_list_ledger(list, "chelis_list_push");
+    validate_value(value, "chelis_list_push_moved");
+    (*list).push(value);
+    resize_list_ledger(list, "chelis_list_push_moved");
 }
 
+/// In-place concat counterpart of `chelis_list_push_moved` (chelis#943),
+/// consuming `src` (chelis#2508): every item is retained into `list` and the
+/// caller's owner of `src` is released.
 #[no_mangle]
-pub unsafe extern "C" fn chelis_list_extend(list: *mut chelis_list, src: *const chelis_list) {
-    // In-place concat counterpart of chelis_list_push (chelis#943).
+pub unsafe extern "C" fn chelis_list_extend_moved(list: *mut chelis_list, src: *mut chelis_list) {
     if list.is_null() {
-        runtime_fail!("chelis_list_extend on a null list");
+        runtime_fail!("chelis_list_extend_moved on a null list");
     }
-    if std::ptr::eq(list as *const chelis_list, src) {
-        runtime_fail!("chelis_list_extend source aliases destination");
+    if std::ptr::eq(list, src) {
+        runtime_fail!("chelis_list_extend_moved source aliases destination");
     }
     if (*list).header.strong.load(Ordering::Relaxed) != 1 {
-        runtime_fail!("chelis_list_extend requires exclusive ownership (refcount 1)");
+        runtime_fail!("chelis_list_extend_moved requires exclusive ownership (refcount 1)");
     }
     if src.is_null() {
         return;
@@ -4872,7 +4970,8 @@ pub unsafe extern "C" fn chelis_list_extend(list: *mut chelis_list, src: *const 
     for &value in (*src).live() {
         (*list).push(chelis_value_clone(value));
     }
-    resize_list_ledger(list, "chelis_list_extend");
+    resize_list_ledger(list, "chelis_list_extend_moved");
+    release_list_ptr(src);
 }
 
 /// Consuming append (chelis#2205). Takes ownership of `list`: when this is
@@ -7591,9 +7690,9 @@ mod tests {
         unsafe {
             let list = chelis_list_with_capacity(2);
             assert!((*list).buffer_capacity() >= 2);
-            chelis_list_push(list, internal_value_from_i64(1));
-            chelis_list_push(list, internal_value_from_i64(2));
-            chelis_list_push(list, internal_value_from_i64(3));
+            chelis_list_push_moved(list, internal_value_from_i64(1));
+            chelis_list_push_moved(list, internal_value_from_i64(2));
+            chelis_list_push_moved(list, internal_value_from_i64(3));
             assert_eq!(chelis_list_len(list), 3);
             assert!((*list).buffer_capacity() >= 3);
             let item = chelis_list_index(list, 2);
@@ -7604,12 +7703,12 @@ mod tests {
     }
 
     #[test]
-    fn list_push_retains_heap_values_like_append() {
+    fn list_push_moved_takes_the_callers_owner() {
         unsafe {
             let list = chelis_list_with_capacity(1);
             let value = internal_value_from_string(runtime_str("owned"));
-            chelis_list_push(list, value);
-            chelis_value_release(value);
+            // The list now holds the only owner; no release is owed here.
+            chelis_list_push_moved(list, value);
             let item = chelis_list_index(list, 0);
             assert_eq!(string_text(chelis_string_borrow_value(item)), "owned");
             chelis_value_release(item);
@@ -7621,14 +7720,14 @@ mod tests {
     fn list_extend_appends_all_source_items() {
         unsafe {
             let dst = chelis_list_with_capacity(0);
-            chelis_list_push(dst, internal_value_from_i64(1));
+            chelis_list_push_moved(dst, internal_value_from_i64(1));
             let value = internal_value_from_string(runtime_str("retained"));
             let items = [internal_value_from_i64(7), value];
             let src = chelis_list_from_values(items.as_ptr(), 2);
             chelis_value_release(value);
-            chelis_list_extend(dst, src);
+            // `src` is consumed: its owner is released by the extend.
+            chelis_list_extend_moved(dst, src);
             assert_eq!(chelis_list_len(dst), 3);
-            chelis_list_release(src);
             let last = chelis_list_index(dst, 2);
             assert_eq!(string_text(chelis_string_borrow_value(last)), "retained");
             chelis_value_release(last);
@@ -7858,7 +7957,7 @@ mod tests {
     /// must not become an in-place push.
     ///
     /// `chelis_list_append` takes `*const chelis_list` precisely because
-    /// `List[T]` is immutable, and `chelis_list_push` (chelis#943) is the
+    /// `List[T]` is immutable, and `chelis_list_push_moved` (chelis#943) is the
     /// separate in-place mutator that is only sound at `refcount == 1`.
     /// A reservation that grew the *source* buffer instead of a fresh one
     /// would still satisfy every length assertion above while silently
@@ -7867,8 +7966,8 @@ mod tests {
     fn append_leaves_the_source_list_untouched() {
         unsafe {
             let source = chelis_list_empty();
-            chelis_list_push(source, internal_value_from_i64(10));
-            chelis_list_push(source, internal_value_from_i64(20));
+            chelis_list_push_moved(source, internal_value_from_i64(10));
+            chelis_list_push_moved(source, internal_value_from_i64(20));
             let source_len_before = chelis_list_len(source);
             let source_buffer_before = (*source).live().as_ptr();
 
@@ -7910,7 +8009,7 @@ mod tests {
     fn append_retains_elements_and_release_balances() {
         unsafe {
             let element = chelis_list_empty();
-            chelis_list_push(element, internal_value_from_i64(7));
+            chelis_list_push_moved(element, internal_value_from_i64(7));
             assert_eq!(
                 (*element).header.strong.load(Ordering::Relaxed),
                 1,

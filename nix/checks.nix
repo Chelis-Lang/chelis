@@ -141,7 +141,6 @@ let
       }
       ''
         export HOME="$TMPDIR/home"
-        export CHELIS_RUNTIME_DIR="${packages.chelis}/lib"
         mkdir -p "$HOME"
 
         version_output="$(${packages.chelis}/bin/chelis --version 2>&1)"

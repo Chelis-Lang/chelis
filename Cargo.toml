@@ -7,7 +7,8 @@ members = [
     "crates/chelis-abi",
     "crates/chelis-prove",
     "crates/chelis-runtime",
-    "crates/chelis-runtime-identity",
+    "crates/chelis-runtime-bundle-macro",
+    "crates/chelis-runtime-bundle",
     "crates/chelis-compiler-api",
     "crates/chelis-pipeline-core",
     "crates/chelis-version",
@@ -62,7 +63,8 @@ chelis-image-id = { path = "crates/chelis-image-id" }
 chelis-deep = { path = "crates/chelis-deep" }
 chelis-pred = { path = "crates/chelis-pred" }
 chelis-runtime = { path = "crates/chelis-runtime" }
-chelis-runtime-identity = { path = "crates/chelis-runtime-identity" }
+chelis-runtime-bundle-macro = { path = "crates/chelis-runtime-bundle-macro" }
+chelis-runtime-bundle = { path = "crates/chelis-runtime-bundle" }
 chelis-compiler-api = { path = "crates/chelis-compiler-api" }
 chelis-pipeline-core = { path = "crates/chelis-pipeline-core" }
 chelis-shell = { path = "crates/chelis-shell" }

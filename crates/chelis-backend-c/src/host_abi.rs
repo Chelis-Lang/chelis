@@ -242,6 +242,36 @@ impl HostAbiType {
         }
     }
 
+    /// Return the C value a local of this ABI holds once the owner it
+    /// aliased has been released, so the alias never carries a freed handle.
+    ///
+    /// `None` for an ABI whose C value carries no handle. The match names
+    /// every variant so a new heap ABI must choose its cleared spelling: a
+    /// `string` is a struct, and a pointer `NULL` does not convert to it.
+    pub(crate) fn c_released_value(&self) -> Option<&'static str> {
+        match self {
+            Self::Int8
+            | Self::Int16
+            | Self::Int32
+            | Self::Int64
+            | Self::Float16
+            | Self::BFloat16
+            | Self::Float32
+            | Self::Float64
+            | Self::Bool
+            | Self::Unit
+            | Self::Callback(_, _) => None,
+            Self::String => Some("(chelis_string){ NULL }"),
+            Self::Adt(_, _)
+            | Self::List(_)
+            | Self::Dict(_, _)
+            | Self::Tuple(_)
+            | Self::Tensor(_)
+            | Self::MappedFile
+            | Self::Option(_) => Some("NULL"),
+        }
+    }
+
     fn try_callback_signature(ty: &ConcreteHostType) -> Result<Self, Unsupported> {
         let ConcreteHostType::Function(params, ret) = ty else {
             return Err(invalid_callback_shape(format!(

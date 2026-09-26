@@ -229,6 +229,23 @@ pub fn run_program(source: &GeneratedProgram) -> (Value, String) {
     execute_program(source, &[], "")
 }
 
+/// Run a program and also count the ledger's rows per event name, for
+/// oracles that bound how often an operation runs rather than timing it.
+#[allow(dead_code)]
+pub fn run_program_counting_events(
+    source: &GeneratedProgram,
+) -> (Value, String, std::collections::BTreeMap<String, usize>) {
+    let (_dir, binary) = compile_program(source, &[], "");
+    let (summary, stdout, rows) = execute_binary(&binary);
+    let mut counts = std::collections::BTreeMap::new();
+    for row in &rows {
+        if let Some(event) = row["event"].as_str() {
+            *counts.entry(event.to_string()).or_insert(0) += 1;
+        }
+    }
+    (summary, stdout, counts)
+}
+
 pub fn run_with_peers(source: &GeneratedProgram, peers: &[String], driver: &str) -> Value {
     execute_program(source, peers, driver).0
 }
@@ -265,6 +282,11 @@ pub fn run_failure_stderr(source: &GeneratedProgram, driver: &str) -> String {
 
 fn execute_program(source: &GeneratedProgram, peers: &[String], driver: &str) -> (Value, String) {
     let (_dir, binary) = compile_program(source, peers, driver);
+    let (summary, stdout, _) = execute_binary(&binary);
+    (summary, stdout)
+}
+
+fn execute_binary(binary: &Path) -> (Value, String, Vec<Value>) {
     let ledger = binary.with_file_name("ledger.jsonl");
     let output = Command::new(binary)
         .env("CHELIS_OWNERSHIP_LEDGER_PATH", &ledger)
@@ -289,6 +311,7 @@ fn execute_program(source: &GeneratedProgram, peers: &[String], driver: &str) ->
     (
         summary,
         String::from_utf8(output.stdout).expect("utf-8 stdout"),
+        rows,
     )
 }
 

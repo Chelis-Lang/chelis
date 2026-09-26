@@ -855,34 +855,136 @@ impl WireExpr {
             ),
         }
     }
-    pub(crate) fn from_ast(expr: &Expr) -> Self {
-        match expr {
-            Expr::Atom(a, span) => Self::Atom(a.clone(), *span),
-            Expr::Map(v, span) => Self::Map(WireMetadata::from_metadata(v), *span),
-            Expr::MetaExpr(v, span) => Self::MetaExpr(
-                WireMetaExpr {
-                    entries: WireMetadata::from_metadata(&v.metadata).entries,
-                    expr: Box::new(Self::from_ast(&v.expr)),
+    /// Convert a Deep expression to its wire shadow without recursing once per
+    /// nesting level: the spine (`MetaExpr` bodies, `Node`, `BareList` and
+    /// `UnknownForm` children) is walked on a heap stack, so the checker's
+    /// canonical printing cannot overflow the native stack on a deeply nested
+    /// program (chelis#2424). Metadata values still convert through
+    /// [`WireExpr::from_value`], whose recursion follows metadata nesting, not
+    /// the depth of the tree.
+    pub(crate) fn from_ast(root: &Expr) -> Self {
+        /// A carrier whose children are being converted.
+        enum Pending {
+            MetaExpr(Vec<(String, WireExpr)>, Span),
+            Node(DeepTag, WireMetadata, usize, Span),
+            BareList(usize, Span),
+            UnknownForm(String, WireMetadata, usize, Span),
+        }
+        enum Step<'a> {
+            Enter(&'a Expr),
+            Finish(Pending),
+        }
+
+        let mut steps = vec![Step::Enter(root)];
+        let mut values: Vec<Self> = Vec::new();
+        while let Some(step) = steps.pop() {
+            match step {
+                Step::Enter(expr) => match expr {
+                    Expr::Atom(a, span) => values.push(Self::Atom(a.clone(), *span)),
+                    Expr::Map(v, span) => {
+                        values.push(Self::Map(WireMetadata::from_metadata(v), *span));
+                    }
+                    Expr::MetaExpr(v, span) => {
+                        let entries = WireMetadata::from_metadata(&v.metadata).entries;
+                        steps.push(Step::Finish(Pending::MetaExpr(entries, *span)));
+                        steps.push(Step::Enter(&v.expr));
+                    }
+                    Expr::Node(v, span) => {
+                        let children = v.children_slice();
+                        let meta = WireMetadata::from_metadata(v.meta());
+                        steps.push(Step::Finish(Pending::Node(
+                            v.tag(),
+                            meta,
+                            children.len(),
+                            *span,
+                        )));
+                        steps.extend(children.iter().rev().map(Step::Enter));
+                    }
+                    Expr::BareList(v, span) => {
+                        steps.push(Step::Finish(Pending::BareList(v.len(), *span)));
+                        steps.extend(v.iter().rev().map(Step::Enter));
+                    }
+                    Expr::UnknownForm(v) => {
+                        let meta = WireMetadata::from_metadata(&v.meta);
+                        steps.push(Step::Finish(Pending::UnknownForm(
+                            v.head.clone(),
+                            meta,
+                            v.children.len(),
+                            v.span,
+                        )));
+                        steps.extend(v.children.iter().rev().map(Step::Enter));
+                    }
                 },
-                *span,
-            ),
-            Expr::Node(v, span) => Self::Node(
-                Box::new(WireNode {
-                    tag: v.tag(),
-                    meta: WireMetadata::from_metadata(v.meta()),
-                    children: v.children_slice().iter().map(Self::from_ast).collect(),
-                }),
-                *span,
-            ),
-            Expr::BareList(v, span) => {
-                Self::BareList(v.iter().map(Self::from_ast).collect(), *span)
+                Step::Finish(pending) => {
+                    let value = match pending {
+                        Pending::MetaExpr(entries, span) => {
+                            let expr = values.pop().expect("a MetaExpr body was converted");
+                            Self::MetaExpr(
+                                WireMetaExpr {
+                                    entries,
+                                    expr: Box::new(expr),
+                                },
+                                span,
+                            )
+                        }
+                        Pending::Node(tag, meta, len, span) => {
+                            let children = values.split_off(values.len() - len);
+                            Self::Node(
+                                Box::new(WireNode {
+                                    tag,
+                                    meta,
+                                    children,
+                                }),
+                                span,
+                            )
+                        }
+                        Pending::BareList(len, span) => {
+                            Self::BareList(values.split_off(values.len() - len), span)
+                        }
+                        Pending::UnknownForm(head, meta, len, span) => {
+                            let children = values.split_off(values.len() - len);
+                            Self::UnknownForm(Box::new(WireUnknown {
+                                head,
+                                meta,
+                                children,
+                                span,
+                            }))
+                        }
+                    };
+                    values.push(value);
+                }
             }
-            Expr::UnknownForm(v) => Self::UnknownForm(Box::new(WireUnknown {
-                head: v.head.clone(),
-                meta: WireMetadata::from_metadata(&v.meta),
-                children: v.children.iter().map(Self::from_ast).collect(),
-                span: v.span,
-            })),
+        }
+        values
+            .pop()
+            .expect("from_ast converts exactly one expression")
+    }
+
+    /// Drop a wire tree without recursing once per nesting level, as the
+    /// derived drop glue would. Every nested value is moved onto a heap stack
+    /// before its parent is dropped, so each drop is shallow (chelis#2424).
+    pub(crate) fn dispose(self) {
+        let mut pending = vec![self];
+        while let Some(expr) = pending.pop() {
+            match expr {
+                Self::Map(map, _) => pending.extend(map.entries.into_iter().map(|(_, v)| v)),
+                Self::MetaExpr(meta, _) => {
+                    pending.extend(meta.entries.into_iter().map(|(_, v)| v));
+                    pending.push(*meta.expr);
+                }
+                Self::Node(node, _) => {
+                    let WireNode { meta, children, .. } = *node;
+                    pending.extend(meta.entries.into_iter().map(|(_, v)| v));
+                    pending.extend(children);
+                }
+                Self::BareList(items, _) => pending.extend(items),
+                Self::UnknownForm(form) => {
+                    let WireUnknown { meta, children, .. } = *form;
+                    pending.extend(meta.entries.into_iter().map(|(_, v)| v));
+                    pending.extend(children);
+                }
+                Self::Atom(..) | Self::ExtensionData(_) => {}
+            }
         }
     }
 }

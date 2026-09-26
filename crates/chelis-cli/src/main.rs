@@ -34,30 +34,6 @@ use std::sync::{
 use std::thread;
 use std::time::{Duration, Instant};
 
-const RUNTIME_H: &str = include_str!(concat!(
-    env!("CARGO_MANIFEST_DIR"),
-    "/../chelis-runtime/include/chelis_runtime.h"
-));
-const RUNTIME_VIEWS_H: &str = include_str!(concat!(
-    env!("CARGO_MANIFEST_DIR"),
-    "/../chelis-runtime/include/chelis_runtime_views.h"
-));
-const RUNTIME_DTYPE_H: &str = include_str!(concat!(
-    env!("CARGO_MANIFEST_DIR"),
-    "/../chelis-runtime/include/chelis_runtime_dtype.h"
-));
-const BLAS_H: &str = include_str!(concat!(
-    env!("CARGO_MANIFEST_DIR"),
-    "/../chelis-runtime/include/chelis_blas.h"
-));
-const SIMD_H: &str = include_str!(concat!(
-    env!("CARGO_MANIFEST_DIR"),
-    "/../chelis-runtime/include/chelis_simd.h"
-));
-const MATH_H: &str = include_str!(concat!(
-    env!("CARGO_MANIFEST_DIR"),
-    "/../chelis-runtime/include/chelis_math.h"
-));
 const HIP_RUNTIME_H: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/../chelis-backend-hip/runtime/chelis_hip_runtime.h"
@@ -79,103 +55,19 @@ const METAL_RUNTIME_H: &str = include_str!(concat!(
     "/../chelis-backend-metal/runtime/chelis_metal_runtime.h"
 ));
 
-fn find_runtime_library() -> Result<PathBuf, Box<dyn std::error::Error>> {
-    const LIB_NAME: &str = "libchelis_runtime.a";
-    const LIB_PREFIX: &str = "libchelis_runtime";
-
-    fn find_in_dir(dir: &Path) -> Option<PathBuf> {
-        let mut hashed_matches = Vec::new();
-        let exact = dir.join(LIB_NAME);
-        let entries = fs::read_dir(dir).ok()?;
-        for entry in entries.flatten() {
-            let path = entry.path();
-            let name = path.file_name()?.to_str()?;
-            if name.starts_with(LIB_PREFIX) && name.ends_with(".a") {
-                if name == LIB_NAME {
-                    continue;
-                }
-                hashed_matches.push(path);
-            }
-        }
-        hashed_matches
-            .into_iter()
-            .max_by_key(|path| fs::metadata(path).and_then(|meta| meta.modified()).ok())
-            .or_else(|| exact.exists().then_some(exact))
-    }
-
-    if let Ok(dir) = env::var("CHELIS_RUNTIME_DIR") {
-        if let Some(candidate) = find_in_dir(&PathBuf::from(&dir)) {
-            return Ok(candidate);
-        }
-        return Err(format!(
-            "cannot find {LIB_NAME} in CHELIS_RUNTIME_DIR; set CHELIS_RUNTIME_DIR to the directory containing the chelis runtime static library"
-        )
-        .into());
-    }
-
-    let exe = env::current_exe()?;
-    let exe_dir = exe
-        .parent()
-        .ok_or("cannot determine chelis executable directory")?;
-    for candidate_dir in [
-        exe_dir.join("deps"),
-        exe_dir.to_path_buf(),
-        exe_dir.join("lib"),
-        exe_dir.parent().map(|p| p.join("deps")).unwrap_or_default(),
-        exe_dir
-            .parent()
-            .map(|p| p.to_path_buf())
-            .unwrap_or_default(),
-        exe_dir.parent().map(|p| p.join("lib")).unwrap_or_default(),
-    ] {
-        if !candidate_dir.as_os_str().is_empty()
-            && let Some(found) = find_in_dir(&candidate_dir)
-        {
-            return Ok(found);
-        }
-    }
-
-    Err(format!(
-        "cannot find {LIB_NAME}; set CHELIS_RUNTIME_DIR or install chelis so {LIB_NAME} is available relative to the chelis executable"
-    )
-    .into())
-}
-
 #[derive(Clone, Copy, Default)]
 struct ExtraRuntimeArtifacts {
     hip: bool,
     metal: bool,
 }
 
-fn make_existing_copy_destination_writable(path: &Path) -> std::io::Result<()> {
-    let mut permissions = match fs::metadata(path) {
-        Ok(metadata) => metadata.permissions(),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        Err(error) => return Err(error),
-    };
-    if !permissions.readonly() {
-        return Ok(());
-    }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        permissions.set_mode(permissions.mode() | 0o200);
-    }
-    #[cfg(not(unix))]
-    permissions.set_readonly(false);
-    fs::set_permissions(path, permissions)
-}
-
-fn copy_runtime_artifacts(
+/// Stage the runtime this chelis build carries, plus the backend support files
+/// `extras` requests, into `runtime_dir` (spec/08-backends.md §2.1).
+fn stage_runtime_artifacts(
     runtime_dir: &Path,
     extras: ExtraRuntimeArtifacts,
-) -> Result<PathBuf, Box<dyn std::error::Error>> {
-    fs::write(runtime_dir.join("chelis_runtime.h"), RUNTIME_H)?;
-    fs::write(runtime_dir.join("chelis_runtime_views.h"), RUNTIME_VIEWS_H)?;
-    fs::write(runtime_dir.join("chelis_runtime_dtype.h"), RUNTIME_DTYPE_H)?;
-    fs::write(runtime_dir.join("chelis_blas.h"), BLAS_H)?;
-    fs::write(runtime_dir.join("chelis_simd.h"), SIMD_H)?;
-    fs::write(runtime_dir.join("chelis_math.h"), MATH_H)?;
+) -> Result<chelis_runtime_bundle::StagedRuntime, Box<dyn std::error::Error>> {
+    let staged = chelis_runtime_bundle::stage(runtime_dir)?;
     if extras.hip {
         fs::write(runtime_dir.join("chelis_hip_runtime.h"), HIP_RUNTIME_H)?;
         fs::write(
@@ -191,14 +83,30 @@ fn copy_runtime_artifacts(
     if extras.metal {
         fs::write(runtime_dir.join("chelis_metal_runtime.h"), METAL_RUNTIME_H)?;
     }
-    let source = find_runtime_library()?;
-    let dest = runtime_dir.join("libchelis_runtime.a");
-    // Rust static-library artifacts are read-only on some hosts, and
-    // `fs::copy` preserves that mode. Restore owner-write before replacing a
-    // previous build's staged archive so rebuilding into one directory works.
-    make_existing_copy_destination_writable(&dest)?;
-    fs::copy(&source, &dest)?;
-    Ok(dest)
+    Ok(staged)
+}
+
+/// Report the staged runtime archive and its SHA-256 on stdout.
+fn print_staged_runtime(staged: &chelis_runtime_bundle::StagedRuntime) {
+    println!(
+        "Staged runtime {} (sha256 {})",
+        staged.archive.display(),
+        staged.archive_sha256
+    );
+}
+
+/// `chelis runtime export <dir>`: write the runtime this chelis build carries
+/// so packaging ships exactly those bytes (spec/08-backends.md §2.1).
+fn cmd_runtime(command: RuntimeCommand) -> Result<(), Box<dyn std::error::Error>> {
+    match command {
+        RuntimeCommand::Export { dir } => {
+            chelis_runtime_bundle::reject_runtime_dir()?;
+            fs::create_dir_all(&dir)?;
+            let staged = chelis_runtime_bundle::stage(&dir)?;
+            print_staged_runtime(&staged);
+            Ok(())
+        }
+    }
 }
 
 #[derive(Parser)]
@@ -352,6 +260,11 @@ enum Command {
         /// Emergency use only; CI must not pass this flag.
         #[arg(long, action = ArgAction::SetTrue)]
         allow_style_violations: bool,
+    },
+    /// Write the runtime this chelis build carries
+    Runtime {
+        #[command(subcommand)]
+        command: RuntimeCommand,
     },
     /// Interactive REPL, HTTP API, and MCP server
     Tide {
@@ -530,6 +443,16 @@ enum MigrateCommand {
         inplace: bool,
         #[arg(required = true)]
         paths: Vec<PathBuf>,
+    },
+}
+
+#[derive(Subcommand)]
+enum RuntimeCommand {
+    /// Write the carried runtime archive, public runtime headers, and staging
+    /// receipt to a directory, creating it when missing
+    Export {
+        /// Output directory
+        dir: PathBuf,
     },
 }
 
@@ -1007,6 +930,7 @@ fn main() {
             allow_style_violations,
         ),
         Some(Command::Reef { command }) => cmd_reef(command),
+        Some(Command::Runtime { command }) => cmd_runtime(command),
         Some(Command::Tide { command }) => run_tide(command),
         Some(Command::Cove { file }) => cmd_cove(file),
         Some(Command::InternalTestFile {
@@ -3807,6 +3731,10 @@ fn cmd_build_dispatch(
     allow_style_violations: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let target = BuildTarget::try_from(target).map_err(boxed_string_error)?;
+    // Every build target stages the runtime this chelis carries; a runtime
+    // location variable is an error, reported before any output is written
+    // (spec/08-backends.md §2.1).
+    chelis_runtime_bundle::reject_runtime_dir()?;
     let extension_is_dp = file
         .extension()
         .and_then(|s| s.to_str())
@@ -10405,26 +10333,27 @@ fn cmd_build_c_result(
     fs::write(&h_path, &result.h_header)?;
 
     let runtime_dir = c_path.parent().unwrap_or(std::path::Path::new("."));
-    copy_runtime_artifacts(runtime_dir, ExtraRuntimeArtifacts::default())?;
+    let staged = stage_runtime_artifacts(runtime_dir, ExtraRuntimeArtifacts::default())?;
 
     println!("Wrote {} and {}", c_path.display(), h_path.display());
     println!(
         "Wrote {}, {}, and {}",
         runtime_dir.join("chelis_runtime.h").display(),
         runtime_dir.join("chelis_blas.h").display(),
-        runtime_dir.join("libchelis_runtime.a").display()
+        staged.archive.display()
     );
+    print_staged_runtime(&staged);
     if !symbolic_dims.is_empty() {
         println!("Symbolic dims: {}", symbolic_dims.join(", "));
     }
     let toolchain = chelis_backend_c::toolchain::runtime_toolchain(result.requirements);
     if requires_main {
         println!(
-            "Compile: {} -O2 {} {} -L{} -lchelis_runtime {} -o {}",
+            "Compile: {} -O2 {} {} {} {} -o {}",
             toolchain.compiler,
             toolchain.compile_flags.join(" "),
             c_path.display(),
-            runtime_dir.display(),
+            staged.archive.display(),
             toolchain.link_flags.join(" "),
             c_path.with_extension("").display()
         );
@@ -10471,7 +10400,7 @@ fn cmd_build_hip_host(
         fs::write(&helper_path, &helper.result.c_source)?;
         helper_paths.push(helper_path);
     }
-    copy_runtime_artifacts(
+    let staged = stage_runtime_artifacts(
         runtime_dir,
         ExtraRuntimeArtifacts {
             hip: true,
@@ -10487,9 +10416,10 @@ fn cmd_build_hip_host(
         "Wrote runtime: {}, {}, {}, {}",
         runtime_dir.join("chelis_runtime.h").display(),
         runtime_dir.join("chelis_blas.h").display(),
-        runtime_dir.join("libchelis_runtime.a").display(),
+        staged.archive.display(),
         runtime_dir.join("chelis_hip_runtime.h").display()
     );
+    print_staged_runtime(&staged);
 
     let cpu_toolchain = chelis_backend_c::toolchain::runtime_toolchain(result.host.requirements);
     let mut compile_flags = cpu_toolchain.compile_flags;
@@ -10521,11 +10451,11 @@ fn cmd_build_hip_host(
     let support_sources = support_sources.join(" ");
     if requires_main {
         println!(
-            "Compile: hipcc {} {} {} -L{} -lchelis_runtime -lpthread -ldl {} -o {}",
+            "Compile: hipcc {} {} {} {} -lpthread -ldl {} -o {}",
             compile_flags.join(" "),
             c_path.display(),
             support_sources,
-            runtime_dir.display(),
+            staged.archive.display(),
             link_flags.join(" "),
             c_path.with_extension("").display()
         );
@@ -10571,7 +10501,7 @@ fn cmd_build_metal_host(
         fs::write(&helper_path, &helper.result.mm_source)?;
         helper_paths.push(helper_path);
     }
-    copy_runtime_artifacts(
+    let staged = stage_runtime_artifacts(
         runtime_dir,
         ExtraRuntimeArtifacts {
             hip: false,
@@ -10586,9 +10516,10 @@ fn cmd_build_metal_host(
     println!(
         "Wrote runtime: {}, {}, {}",
         runtime_dir.join("chelis_runtime.h").display(),
-        runtime_dir.join("libchelis_runtime.a").display(),
+        staged.archive.display(),
         runtime_dir.join("chelis_metal_runtime.h").display()
     );
+    print_staged_runtime(&staged);
 
     let cpu_toolchain = chelis_backend_c::toolchain::runtime_toolchain(result.host.requirements);
     let mut compile_flags = cpu_toolchain.compile_flags;
@@ -10619,11 +10550,11 @@ fn cmd_build_metal_host(
         .join(" ");
     if requires_main {
         println!(
-            "Compile: clang++ {} -O2 {} {} -L{} -lchelis_runtime {} -o {}",
+            "Compile: clang++ {} -O2 {} {} {} {} -o {}",
             compile_flags.join(" "),
             mm_path.display(),
             helper_sources,
-            runtime_dir.display(),
+            staged.archive.display(),
             link_flags.join(" "),
             mm_path.with_extension("").display()
         );
@@ -10830,7 +10761,7 @@ fn cmd_build_hip(
 
     // HIP runtime includes the CPU runtime (for chelis_tensor host struct)
     let runtime_dir = c_path.parent().unwrap_or(std::path::Path::new("."));
-    copy_runtime_artifacts(
+    let staged = stage_runtime_artifacts(
         runtime_dir,
         ExtraRuntimeArtifacts {
             hip: true,
@@ -10842,9 +10773,10 @@ fn cmd_build_hip(
     println!(
         "Wrote runtime: {}, {}, {}",
         runtime_dir.join("chelis_runtime.h").display(),
-        runtime_dir.join("libchelis_runtime.a").display(),
+        staged.archive.display(),
         runtime_dir.join("chelis_hip_runtime.h").display()
     );
+    print_staged_runtime(&staged);
     let symbolic_dims = if result.symbolic_dims.is_empty() {
         symbolic_dims
     } else {
@@ -10870,11 +10802,11 @@ fn cmd_build_hip(
     flags.dedup();
     if requires_main {
         println!(
-            "Compile: hipcc {} {} {} -L{} -lchelis_runtime -lpthread -ldl -o {}",
+            "Compile: hipcc {} {} {} {} -lpthread -ldl -o {}",
             flags.join(" "),
             c_path.display(),
             runtime_dir.join("chelis_device_owner.cpp").display(),
-            runtime_dir.display(),
+            staged.archive.display(),
             c_path.with_extension("").display()
         );
     } else {
@@ -10921,7 +10853,7 @@ fn cmd_build_metal(
 
     // Metal runtime header includes the CPU runtime (for chelis_tensor host struct)
     let runtime_dir = mm_path.parent().unwrap_or(std::path::Path::new("."));
-    copy_runtime_artifacts(
+    let staged = stage_runtime_artifacts(
         runtime_dir,
         ExtraRuntimeArtifacts {
             hip: false,
@@ -10933,9 +10865,10 @@ fn cmd_build_metal(
     println!(
         "Wrote runtime: {}, {}, {}",
         runtime_dir.join("chelis_runtime.h").display(),
-        runtime_dir.join("libchelis_runtime.a").display(),
+        staged.archive.display(),
         runtime_dir.join("chelis_metal_runtime.h").display()
     );
+    print_staged_runtime(&staged);
     let symbolic_dims = if result.symbolic_dims.is_empty() {
         symbolic_dims
     } else {
@@ -10961,10 +10894,10 @@ fn cmd_build_metal(
         .map(|s| s.as_str())
         .collect();
     println!(
-        "Compile: clang++ {} -O2 {} -L{} -lchelis_runtime -o {}",
+        "Compile: clang++ {} -O2 {} {} -o {}",
         flags.join(" "),
         mm_path.display(),
-        runtime_dir.display(),
+        staged.archive.display(),
         mm_path.with_extension("").display()
     );
     Ok(())

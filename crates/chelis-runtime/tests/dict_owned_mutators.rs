@@ -13,7 +13,7 @@ use chelis_runtime::{
     chelis_dict, chelis_dict_contains, chelis_dict_get, chelis_dict_insert,
     chelis_dict_insert_owned, chelis_dict_len, chelis_dict_merge, chelis_dict_merge_owned,
     chelis_dict_release, chelis_dict_remove, chelis_dict_remove_owned, chelis_dict_retain,
-    chelis_list_empty, chelis_list_len, chelis_list_push, chelis_option_is_some,
+    chelis_list_empty, chelis_list_len, chelis_list_push_moved, chelis_option_is_some,
     chelis_option_release, chelis_option_unwrap, chelis_scalar_from_bits, chelis_string_from_utf8,
     chelis_value, chelis_value_release, chelis_value_take_list, chelis_value_take_string,
     chelis_value_unbox_scalar, CHELIS_DTYPE_I64,
@@ -148,7 +148,7 @@ fn shared_insert_owned_clones_and_leaves_the_shared_view_untouched() {
 fn insert_owned_clones_the_incoming_value_before_releasing_the_replaced_one() {
     unsafe {
         let inner = chelis_list_empty();
-        chelis_list_push(inner, int_value(42));
+        chelis_list_push_moved(inner, int_value(42));
         let key = int_value(7);
         // The cloning insert retains `inner`, so the dictionary and this
         // frame each hold one count.
@@ -375,7 +375,7 @@ fn string_keyed_entries_survive_the_consuming_entries_release_paths() {
         let key = text_value("alpha");
         let other = text_value("beta");
         let inner = chelis_list_empty();
-        chelis_list_push(inner, int_value(5));
+        chelis_list_push_moved(inner, int_value(5));
         let payload = chelis_value_take_list(inner);
 
         let dict = chelis_dict_insert(std::ptr::null(), key, payload);

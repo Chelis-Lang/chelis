@@ -499,8 +499,8 @@ Shipped.
   contract cleanup, not a language-semantics phase
 - make `chelis build` emit and reference `libchelis_runtime.a` plus `chelis_runtime.h`
   instead of copying `chelis_runtime.c`
-- runtime discovery order for `chelis build`: `CHELIS_RUNTIME_DIR`, then path relative
-  to `current_exe()`, then a hard actionable error
+- `chelis build` stages the runtime the CLI carries instead of discovering one
+  (`spec/08-backends.md` §2.1; chelis#1354 replaced the original discovery order)
 - block all remaining runtime-heavy Phase 3 work on this rewrite so `3g`/`3i`/shells
   land on Rust infrastructure rather than the old C runtime
 - acceptance oracle: `cargo test -p chelis-cli phase3m_rust_runtime_acceptance_oracle -- --nocapture`

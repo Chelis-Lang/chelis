@@ -2051,7 +2051,7 @@
       ]
     },
     {
-      "kind": "empty-runtime-archive",
+      "kind": "runtime-directory-rejected",
       "args": [
         "-p",
         "chelis-cli",
