@@ -1166,7 +1166,7 @@ fn wire_of(dag: &Dag) -> Value {
     let used = dag
         .nodes()
         .iter()
-        .map(|node| node.decl)
+        .map(|node| node.owner.decl)
         .collect::<std::collections::BTreeSet<_>>();
     let row_of = used
         .iter()
@@ -1212,7 +1212,7 @@ fn wire_of(dag: &Dag) -> Value {
                     other => panic!("no wire form here for {other:?}"),
                 })
                 .collect::<Vec<_>>();
-            let declaration = row_of[&node.decl];
+            let declaration = row_of[&node.owner.decl];
             json!({"shape_deps":[],"span_id":null,"merged_spans":[],"declaration":declaration,"id":node.id.0,"op":op,
                 "inputs":node.inputs.iter().map(|input| input.0).collect::<Vec<_>>(),
                 "output_type":{"dims":dims,"precision":node.output_type.precision.interchange_name()}})

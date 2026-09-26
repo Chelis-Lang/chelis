@@ -2084,7 +2084,7 @@ int main(void) {{
             scalar_f32(),
             None,
         );
-        let relu = tier2::lower_relu(decl, &mut dag, x, &scalar_f32(), None);
+        let relu = tier2::lower_relu(decl.into(), &mut dag, x, &scalar_f32(), None);
         let out = compile_and_run(&dag, "test_relu");
         assert_float_eq(&out, 0.0);
         assert!(matches!(dag.get(relu).unwrap().op, RiscOp::Relu));
@@ -2101,7 +2101,7 @@ int main(void) {{
             scalar_f32(),
             None,
         );
-        let _ = tier2::lower_sigmoid(decl, &mut dag, x, &scalar_f32(), None);
+        let _ = tier2::lower_sigmoid(decl.into(), &mut dag, x, &scalar_f32(), None);
         let out = compile_and_run(&dag, "test_sigmoid");
         assert_float_eq(&out, 0.5);
     }
@@ -2974,7 +2974,7 @@ int main(void) {{
             b_ty.clone(),
             None,
         );
-        let out = tier2::lower_matmul(decl, &mut dag, a, b, &a_ty, &b_ty, None);
+        let out = tier2::lower_matmul(decl.into(), &mut dag, a, b, &a_ty, &b_ty, None);
         dag.add_root(out);
 
         let result = codegen(&dag, "test_symbolic_matmul").unwrap();
@@ -3045,7 +3045,7 @@ int main(void) {{
             b_ty.clone(),
             None,
         );
-        let out = tier2::lower_matmul(decl, &mut dag, a, b, &a_ty, &b_ty, None);
+        let out = tier2::lower_matmul(decl.into(), &mut dag, a, b, &a_ty, &b_ty, None);
         dag.add_root(out);
 
         let result = codegen_with_options(
@@ -3123,7 +3123,7 @@ int main(void) {{
             b_ty.clone(),
             None,
         );
-        let out = tier2::lower_matmul(decl, &mut dag, a, b, &a_ty, &b_ty, None);
+        let out = tier2::lower_matmul(decl.into(), &mut dag, a, b, &a_ty, &b_ty, None);
         dag.add_root(out);
 
         let result = codegen_with_options(

@@ -995,7 +995,7 @@ fn add_named_store(dag: &mut Dag, name: &str, input: NodeId) {
     let source = dag
         .get(input)
         .unwrap_or_else(|| panic!("missing node for store `{name}`"));
-    let (decl, ty) = (source.decl, source.output_type.clone());
+    let (decl, ty) = (source.owner, source.output_type.clone());
     dag.add_node(
         decl,
         RiscOp::Store { name: name.into() },
@@ -1005,12 +1005,13 @@ fn add_named_store(dag: &mut Dag, name: &str, input: NodeId) {
     );
 }
 
+/// An id-preserving copy, so every owner stands.
 fn dag_without_roots(dag: &Dag) -> Dag {
     let mut out = Dag::new();
     out.inherit_declarations(dag);
     for node in dag.nodes() {
         out.add_node(
-            node.decl,
+            node.owner,
             node.op.clone(),
             node.inputs.clone(),
             node.output_type.clone(),

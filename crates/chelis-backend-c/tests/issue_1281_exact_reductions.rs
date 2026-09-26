@@ -402,7 +402,7 @@ fn mean_dag(input_ty: TensorType) -> (Dag, chelis_ir::NodeId) {
         input_ty.clone(),
         None,
     );
-    let mean = tier2::lower_mean(decl, &mut dag, x, 0, &input_ty, None);
+    let mean = tier2::lower_mean(decl.into(), &mut dag, x, 0, &input_ty, None);
     dag.add_root(mean);
     (dag, mean)
 }

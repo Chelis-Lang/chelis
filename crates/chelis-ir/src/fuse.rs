@@ -57,6 +57,12 @@ fn build_consumer_counts(dag: &Dag) -> Vec<usize> {
         for &input in &node.inputs {
             counts[input.0] += 1;
         }
+        // An activation is read by the node it owns, so a node that is some
+        // node's activation stays materialized rather than being absorbed
+        // into a chain as an intermediate.
+        if let Some(activation) = node.owner.activation {
+            counts[activation.0] += 1;
+        }
     }
     // Roots count as consumers (they must be materialized).
     for &root in dag.roots() {
@@ -67,6 +73,12 @@ fn build_consumer_counts(dag: &Dag) -> Vec<usize> {
 
 /// Returns true if the op is an elementwise op that can participate in fusion.
 fn is_fusible_elementwise(node: &DagNode) -> bool {
+    // A checking operation under an activation substitutes operands its
+    // checks accept where the activation is false (spec/10 section 3.2);
+    // it stays its own kernel, where both lanes substitute them.
+    if node.owner.activation.is_some() && node.inactive_operand(0).is_some() {
+        return false;
+    }
     // chelis#729 Phase 3 / chelis#699: the typed backends now have trapping
     // direct integer Abs/Sub/extrema kernels, while their general fused
     // integer kernels are still deliberately unavailable. Keep those integer
@@ -179,7 +191,14 @@ fn find_chains(dag: &Dag, consumer_count: &[usize]) -> Vec<Chain> {
                 .iter()
                 .find(|n| n.inputs.contains(&current) && !in_chain[n.id.0]);
             match consumer {
-                Some(c) if is_fusible_elementwise(c) && !is_claim_barrier(c) => {
+                // One fused kernel runs under one owner: a node under another
+                // activation checks under that activation, so it starts its
+                // own chain (spec/10 section 3.2).
+                Some(c)
+                    if is_fusible_elementwise(c)
+                        && !is_claim_barrier(c)
+                        && c.owner == node.owner =>
+                {
                     // Check all of this consumer's inputs: only fuse if the
                     // consumer's chain-internal inputs are all single-consumer.
                     // (Other inputs are external and fine.)
@@ -253,8 +272,12 @@ fn rebuild_with_fusion(dag: &Dag, chains: &[Chain]) -> (Dag, UnordMap<NodeId, No
             // span_id; merged_spans = sort_dedup(rest contributors'
             // spans ∪ each contributor's pre-existing merged_spans).
             let first = dag.get(chain.nodes[0]).expect("chain head exists");
+            // Every chain member has the same owner (see `find_chains`).
             let new_id = new_dag.add_node(
-                dag.get(chain_out).expect("chain output exists").decl,
+                dag.get(chain_out)
+                    .expect("chain output exists")
+                    .owner
+                    .remap_with(|old| id_map.get(&old.0).copied()),
                 fused_op,
                 remapped_inputs,
                 output_type,
@@ -309,7 +332,7 @@ fn rebuild_with_fusion(dag: &Dag, chains: &[Chain]) -> (Dag, UnordMap<NodeId, No
                 })
                 .collect();
             let new_id = new_dag.add_node(
-                node.decl,
+                node.owner.remap_with(|old| id_map.get(&old.0).copied()),
                 node.op.clone(),
                 new_inputs,
                 node.output_type.clone(),

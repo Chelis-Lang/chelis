@@ -4306,7 +4306,7 @@ impl<'a> EvalContext<'a> {
                 let axis = expect_int_arg(args, 1)?;
                 let axis = normalize_axis(tensor.value.shape.len(), axis, "mean")?;
                 eval_composed_unary(&tensor, |dag, decl, x, ty| {
-                    tier2::lower_mean(decl, dag, x, axis, ty, None)
+                    tier2::lower_mean(decl.into(), dag, x, axis, ty, None)
                 })
                 .map(RuntimeValue::Tensor)
             }
@@ -4345,7 +4345,7 @@ impl<'a> EvalContext<'a> {
                             None,
                         );
                         tier2::lower_layer_norm(
-                            decl, dag, x_id, gamma_id, beta_id, tys.0, tys.1, tys.2, epsilon_id,
+                            decl.into(), dag, x_id, gamma_id, beta_id, tys.0, tys.1, tys.2, epsilon_id,
                             None,
                         )
                     },

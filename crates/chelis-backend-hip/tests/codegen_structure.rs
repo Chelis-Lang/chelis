@@ -2250,7 +2250,7 @@ fn s15_batched_matmul_emits_hipblas_strided_batched_helper_and_link_flag() {
         b_ty.clone(),
         None,
     );
-    let out = chelis_ir::tier2::lower_matmul(decl, &mut dag, a, b, &a_ty, &b_ty, None);
+    let out = chelis_ir::tier2::lower_matmul(decl.into(), &mut dag, a, b, &a_ty, &b_ty, None);
     dag.add_root(out);
     let result = codegen_hip(&dag, "test_hipblas_batched_matmul").unwrap();
 

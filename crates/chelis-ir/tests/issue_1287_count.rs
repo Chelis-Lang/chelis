@@ -209,7 +209,7 @@ fn count_is_a_fusion_barrier() {
 #[test]
 fn grad_rejects_a_live_count_with_a_structured_reason() {
     let mut dag = count_dag(&[2, 3], vec![1, 0], &[]);
-    let decl = dag.nodes()[0].decl;
+    let decl = dag.nodes()[0].owner.decl;
     let count = dag.roots()[0];
     let output = dag.add_node(
         decl,

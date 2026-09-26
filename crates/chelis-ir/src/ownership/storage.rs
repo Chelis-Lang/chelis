@@ -625,7 +625,12 @@ fn hip_emission_literals(dag: VerifiedDagView<'_>) -> Vec<NodeId> {
             };
             read(*input, literal);
         }
-        for dependency in node.shape_deps.iter().chain(&node.result_claim_deps) {
+        for dependency in node
+            .shape_deps
+            .iter()
+            .chain(&node.result_claim_deps)
+            .chain(&node.owner.activation)
+        {
             read(*dependency, false);
         }
     }
@@ -878,6 +883,8 @@ fn extend_lifetimes(
         // reusing its allocation earlier changes the obligation itself.
         effective_inputs.extend(node.shape_deps.iter().copied());
         effective_inputs.extend(node.result_claim_deps.iter().copied());
+        // A node reads its activation to decide whether it checks.
+        effective_inputs.extend(node.owner.activation);
         for input in effective_inputs {
             if let Some(owner) = owner_of[input.0]
                 && let Some(requirement) = requirements.get_mut(&owner)

@@ -1200,11 +1200,11 @@ impl KeyGraph for Dag {
     }
 
     fn declaration(&self, node: usize) -> &str {
-        &self.declaration(self.nodes()[node].decl).name
+        &self.declaration(self.nodes()[node].owner.decl).name
     }
 
     fn same_declaration(&self, left: usize, right: usize) -> bool {
-        self.nodes()[left].decl == self.nodes()[right].decl
+        self.nodes()[left].owner.decl == self.nodes()[right].owner.decl
     }
 
     fn dims(&self, node: usize) -> Option<std::borrow::Cow<'_, [DimInfo]>> {
@@ -1695,10 +1695,31 @@ fn verify_with_dangling_policy(dag: &Dag, reject_dangling: bool) -> Vec<String> 
                 consumers[dep.0] += 1;
             }
         }
+        // spec/10 section 3.2: a node's activation is an earlier Bool node of
+        // the graph, and the node reads it to decide whether it checks.
+        if let Some(activation) = node.owner.activation {
+            match dag.get(activation) {
+                Some(source) if activation < node.id => {
+                    consumers[activation.0] += 1;
+                    if source.output_type.precision != chelis_types::types::Prim::Bool {
+                        errors.push(format!(
+                            "{}'s activation {} is not a Bool",
+                            dag.describe_node(node.id),
+                            dag.describe_node(activation)
+                        ));
+                    }
+                }
+                _ => errors.push(format!(
+                    "{}'s activation {} is not an earlier node of the graph",
+                    dag.describe_node(node.id),
+                    activation.0
+                )),
+            }
+        }
 
         if let RiscOp::Load { name } = &node.op {
             let prev_ty = *load_types
-                .entry((node.decl, name.as_str().to_string()))
+                .entry((node.owner.decl, name.as_str().to_string()))
                 .or_insert(&node.output_type);
             if prev_ty != &node.output_type {
                 errors.push(format!(

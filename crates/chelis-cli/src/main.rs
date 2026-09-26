@@ -12704,7 +12704,7 @@ mod runtime_dim_reject_tests {
     #[test]
     fn hip_seam_rejects_node_valued_reshape_target() {
         let (mut dag, x, m) = dag_with_scalar();
-        let decl = dag.nodes()[0].decl;
+        let decl = dag.nodes()[0].owner.decl;
         dag.add_node(
             decl,
             RiscOp::Reshape {

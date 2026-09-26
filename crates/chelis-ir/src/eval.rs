@@ -463,6 +463,148 @@ fn rank0_bool(value: &TensorValue, what: &str) -> Result<bool, String> {
     }
 }
 
+/// Where a node checks (`spec/10-serialization.md` §3.2): a node whose
+/// activation is false is still computed, since a `Where` may read its value,
+/// but checks nothing.
+enum Activity {
+    /// The node has no activation, or its activation holds in every row.
+    All,
+    /// The activation holds in no row: the node checks nothing.
+    Inactive,
+    /// A per-row activation (a `vmap`ped `if`): row `r` of the activation's
+    /// shape checks exactly when `rows[r]`.
+    Rows { shape: Vec<usize>, rows: Vec<bool> },
+}
+
+/// The run-time [`Activity`] of `node`, read from its owner's activation.
+fn node_activity(
+    node: &DagNode,
+    values: &UnordMap<NodeId, TensorValue>,
+) -> Result<Activity, String> {
+    let Some(activation) = node.owner.activation else {
+        return Ok(Activity::All);
+    };
+    let value = values.get(&activation).ok_or_else(|| {
+        format!(
+            "node {}'s activation {} is not available",
+            node.id.0, activation.0
+        )
+    })?;
+    if value.prim() != Prim::Bool {
+        return Err(format!(
+            "node {}'s activation {} is not a Bool",
+            node.id.0, activation.0
+        ));
+    }
+    let rows = value
+        .storage()
+        .to_i64_exact_vec()
+        .expect("sealed bool storage has an exact integer view")
+        .into_iter()
+        .map(|bit| bit != 0)
+        .collect::<Vec<_>>();
+    Ok(if rows.iter().all(|row| *row) {
+        Activity::All
+    } else if !rows.iter().any(|row| *row) {
+        Activity::Inactive
+    } else {
+        Activity::Rows {
+            shape: value.shape.clone(),
+            rows,
+        }
+    })
+}
+
+/// `value` with the elements of the rows its node checks nothing in
+/// replaced by `neutral`; `value`'s leading axes are the activation's `shape`.
+fn neutral_rows(
+    value: &TensorValue,
+    rows: &[bool],
+    neutral: i64,
+) -> Result<TensorValue, String> {
+    let len = value.len();
+    let per_row = if rows.is_empty() { 0 } else { len / rows.len() };
+    let mask = (0..len)
+        .map(|index| i64::from(rows[index / per_row.max(1)]))
+        .collect::<Vec<_>>();
+    let mask = finalize_wide_int("activation", Prim::Bool, value.shape.clone(), mask)?;
+    let fill = finalize_wide(
+        "activation",
+        value.prim(),
+        value.shape.clone(),
+        vec![neutral as f64; len],
+    )?;
+    where_elementwise(&mask, value, &fill)
+}
+
+/// Replace the operands of a checking `node` whose activation is false, in
+/// the rows where it is false, with values its checks accept
+/// ([`DagNode::inactive_operand`]), so the node computes a value and reports
+/// nothing.
+/// Returns the replaced values, which the caller restores once the node has
+/// run: its operands' other consumers read them unchanged.
+fn neutralize_inactive_operands(
+    node: &DagNode,
+    values: &mut UnordMap<NodeId, TensorValue>,
+) -> Result<Vec<(NodeId, TensorValue)>, String> {
+    if node.owner.activation.is_none() || node.inactive_operand(0).is_none() {
+        return Ok(Vec::new());
+    }
+    let activity = node_activity(node, values)?;
+    if matches!(activity, Activity::All) {
+        return Ok(Vec::new());
+    }
+    // One operand may fill several slots (`x / x`); the larger neutral
+    // (one) is accepted in every slot.
+    let mut neutrals = Vec::<(NodeId, i64)>::new();
+    for (slot, input) in node.inputs.iter().enumerate() {
+        let neutral = node.inactive_operand(slot).unwrap_or(0);
+        match neutrals.iter_mut().find(|(id, _)| id == input) {
+            Some((_, existing)) => *existing = (*existing).max(neutral),
+            None => neutrals.push((*input, neutral)),
+        }
+    }
+    // Under a per-row activation, a rank-0 operand is the same scalar in
+    // every row; it takes each row's shape so each row decides on its own.
+    let carrier = match &activity {
+        Activity::Rows { shape, .. } => neutrals
+            .iter()
+            .filter_map(|(id, _)| values.get(id))
+            .find(|value| !value.shape.is_empty() && value.shape.starts_with(shape))
+            .map(|value| value.shape.clone()),
+        _ => None,
+    };
+    let mut replaced = Vec::new();
+    for (id, neutral) in neutrals {
+        let original = values
+            .get(&id)
+            .ok_or_else(|| format!("node {} reads missing operand {}", node.id.0, id.0))?;
+        let neutralized = match &activity {
+            Activity::All => continue,
+            Activity::Inactive => finalize_wide(
+                "activation",
+                original.prim(),
+                original.shape.clone(),
+                vec![neutral as f64; original.len()],
+            )?,
+            Activity::Rows { shape, rows } => {
+                if !original.shape.is_empty() && original.shape.starts_with(shape) {
+                    neutral_rows(original, rows, neutral)?
+                } else if let Some(carrier) = carrier.as_ref().filter(|_| original.shape.is_empty())
+                {
+                    neutral_rows(&splat_rank0(original, carrier), rows, neutral)?
+                } else {
+                    // An operand no row indexes: some row checks it.
+                    continue;
+                }
+            }
+        };
+        let original = values.insert(id, neutralized).expect("operand present");
+        replaced.push((id, original));
+    }
+    Ok(replaced)
+}
+
 /// The keys a key-operand random primitive draws with
 /// (`spec/10-serialization.md` §3.2).
 enum KeyOperand<'a> {
@@ -2840,6 +2982,8 @@ fn live_mask_from(dag: &Dag, mut stack: Vec<NodeId>, unselected: &[bool]) -> Vec
             // its extent (the consumer reads the dim, not the value).
             stack.extend(node.shape_deps.iter().copied());
             stack.extend(node.result_claim_deps.iter().copied());
+            // A node reads its activation to decide whether it checks.
+            stack.extend(node.owner.activation);
         }
     }
     live
@@ -2983,6 +3127,9 @@ fn value_free_schedule(
             }
             for dep in &node.result_claim_deps {
                 read(*dep);
+            }
+            if let Some(activation) = node.owner.activation {
+                read(activation);
             }
             if let Some(sites) = local_guard_sites.get(&node.id) {
                 for (_, claim) in sites {
@@ -3522,6 +3669,9 @@ where
             }
         }
 
+        // spec/10 §3.2: a node under a false activation computes a value
+        // from operands its checks accept, and checks nothing.
+        let inactive_operands = neutralize_inactive_operands(node, &mut values)?;
         let out_prim = node.output_type.precision;
         let value = match &node.op {
             RiscOp::Const { value } => {
@@ -4379,6 +4529,9 @@ where
                 *axis,
             ),
         };
+        for (id, original) in inactive_operands {
+            values.insert(id, original);
+        }
         // chelis#616: bind this node's op-declared runtime dims from the
         // value's actual extents. A disagreement with an existing binding
         // (Load-bound or an earlier declarer for the same symbol) is a real

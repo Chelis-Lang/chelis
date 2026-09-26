@@ -66,7 +66,7 @@ pub fn eliminate_closed_list_noops(dag: &Dag) -> Dag {
         }
 
         let new_id = out.add_node(
-            node.decl,
+            node.owner.remap(&id_map),
             node.op.clone(),
             remapped_inputs,
             node.output_type.clone(),
@@ -168,7 +168,7 @@ fn replace_matmul_patterns(dag: &Dag) -> Dag {
             // accumulator pinned on the source `Sum` node so the WS-A0
             // §5.7.1 default propagates through specialization.
             let new_id = out.add_node(
-                node.decl,
+                node.owner.remap(&id_map),
                 RiscOp::BlasMatmul {
                     batch_dims: info.batch_dims.clone(),
                     m: info.m.clone(),
@@ -189,7 +189,7 @@ fn replace_matmul_patterns(dag: &Dag) -> Dag {
 
         let remapped_inputs: Vec<NodeId> = node.inputs.iter().map(|id| id_map[id]).collect();
         let new_id = out.add_node(
-            node.decl,
+            node.owner.remap(&id_map),
             node.op.clone(),
             remapped_inputs,
             node.output_type.clone(),
@@ -232,7 +232,7 @@ fn replace_dense_gather_patterns(dag: &Dag) -> Dag {
             let values = id_map[&info.values];
             let indices = id_map[&info.indices];
             let new_id = out.add_node(
-                node.decl,
+                node.owner.remap(&id_map),
                 RiscOp::Gather { axis: 0 },
                 vec![values, indices],
                 node.output_type.clone(),
@@ -247,7 +247,7 @@ fn replace_dense_gather_patterns(dag: &Dag) -> Dag {
 
         let remapped_inputs: Vec<NodeId> = node.inputs.iter().map(|id| id_map[id]).collect();
         let new_id = out.add_node(
-            node.decl,
+            node.owner.remap(&id_map),
             node.op.clone(),
             remapped_inputs,
             node.output_type.clone(),
@@ -285,7 +285,7 @@ fn lower_unmatched_one_hot(dag: &Dag) -> Dag {
     for node in dag.nodes() {
         if let RiscOp::OneHot { vocab } = node.op {
             let indices = id_map[&node.inputs[0]];
-            let new_id = lower_one_hot_node(&mut out, indices, node, vocab);
+            let new_id = lower_one_hot_node(&mut out, node.owner.remap(&id_map), indices, node, vocab);
             out.preserve_shape_deps(new_id, &node.shape_deps, &id_map);
             out.preserve_result_claim_deps(new_id, &node.result_claim_deps, &id_map);
             id_map.insert(node.id, new_id);
@@ -294,7 +294,7 @@ fn lower_unmatched_one_hot(dag: &Dag) -> Dag {
 
         let remapped_inputs: Vec<NodeId> = node.inputs.iter().map(|id| id_map[id]).collect();
         let new_id = out.add_node(
-            node.decl,
+            node.owner.remap(&id_map),
             node.op.clone(),
             remapped_inputs,
             node.output_type.clone(),
@@ -324,7 +324,13 @@ fn lower_unmatched_one_hot(dag: &Dag) -> Dag {
     out
 }
 
-fn lower_one_hot_node(out: &mut Dag, indices: NodeId, source: &DagNode, vocab: usize) -> NodeId {
+fn lower_one_hot_node(
+    out: &mut Dag,
+    owner: crate::dag::Owner,
+    indices: NodeId,
+    source: &DagNode,
+    vocab: usize,
+) -> NodeId {
     assert!(vocab > 0, "one_hot vocab must be nonzero");
     let indices_ty = out
         .get(indices)
@@ -349,21 +355,21 @@ fn lower_one_hot_node(out: &mut Dag, indices: NodeId, source: &DagNode, vocab: u
 
     for class in 0..vocab {
         let class_id = out.add_node(
-            source.decl,
+            owner,
             RiscOp::synth_const(indices_ty.precision, class as f64),
             vec![],
             indices_ty.clone(),
             source.span_id.clone(),
         );
         let eq_bool = out.add_node(
-            source.decl,
+            owner,
             RiscOp::Compare(crate::dag::ComparisonKind::Eq),
             vec![indices, class_id],
             bool_ty.clone(),
             source.span_id.clone(),
         );
         let eq_f32 = out.add_node(
-            source.decl,
+            owner,
             RiscOp::Cast {
                 new_precision: Prim::F32,
             },
@@ -375,7 +381,7 @@ fn lower_one_hot_node(out: &mut Dag, indices: NodeId, source: &DagNode, vocab: u
             source.span_id.clone(),
         );
         let col = out.add_node(
-            source.decl,
+            owner,
             RiscOp::Expand {
                 axis: vocab_axis,
                 size: RtDim::Lit(1),
@@ -385,7 +391,7 @@ fn lower_one_hot_node(out: &mut Dag, indices: NodeId, source: &DagNode, vocab: u
             source.span_id.clone(),
         );
         let padded = out.add_node(
-            source.decl,
+            owner,
             RiscOp::zero_pad(
                 source.output_type.precision,
                 indices_ty
@@ -402,7 +408,7 @@ fn lower_one_hot_node(out: &mut Dag, indices: NodeId, source: &DagNode, vocab: u
         append_node_provenance(out, padded, source);
         accumulated = Some(match accumulated {
             Some(prev) => out.add_node(
-                source.decl,
+                owner,
                 RiscOp::Add,
                 vec![prev, padded],
                 source.output_type.clone(),
@@ -1218,7 +1224,7 @@ mod tests {
             b_ty.clone(),
             None,
         );
-        let result = crate::tier2::lower_matmul(decl, &mut dag, a, b, &a_ty, &b_ty, None);
+        let result = crate::tier2::lower_matmul(decl.into(), &mut dag, a, b, &a_ty, &b_ty, None);
         dag.add_shape_dep(result, claim);
         dag.add_root(result);
         assert!(crate::verify::verify(&dag).is_empty());
@@ -1424,7 +1430,7 @@ mod tests {
             b_ty.clone(),
             None,
         );
-        let out = crate::tier2::lower_matmul(decl, &mut dag, a, b, &a_ty, &b_ty, None);
+        let out = crate::tier2::lower_matmul(decl.into(), &mut dag, a, b, &a_ty, &b_ty, None);
         dag.add_root(out);
 
         let specialized = specialize_for_blas(&dag);
@@ -1472,7 +1478,7 @@ mod tests {
             b_ty.clone(),
             None,
         );
-        let out = crate::tier2::lower_matmul(decl, &mut dag, a, b, &a_ty, &b_ty, None);
+        let out = crate::tier2::lower_matmul(decl.into(), &mut dag, a, b, &a_ty, &b_ty, None);
         let mul = dag
             .nodes()
             .iter()

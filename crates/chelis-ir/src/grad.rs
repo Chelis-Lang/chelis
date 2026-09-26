@@ -7,7 +7,7 @@ use chelis_unord::UnordMap;
 use std::fmt;
 
 use crate::dag::{
-    ComparisonKind, Dag, DagNode, DeclId, DimInfo, ExtremaKind, ExtremaOperand, NodeId, RiscOp,
+    ComparisonKind, Dag, DagNode, DimInfo, ExtremaKind, ExtremaOperand, NodeId, Owner, RiscOp,
     RtDim, TensorType,
 };
 use crate::tier2;
@@ -647,7 +647,7 @@ fn grad_dag_result(forward: &Dag, output: NodeId, wrt: &[NodeId]) -> Result<Grad
     let output_node = forward.get(output).unwrap().clone();
     let dag_before_seed = dag.len();
     let seed = dag.add_node(
-        output_node.decl,
+        output_node.owner,
         RiscOp::synth_const(output_ty.precision, 1.0),
         vec![],
         output_ty,
@@ -764,7 +764,7 @@ fn balanced_adjoint_sum(
     let ty = forward_node.output_type.clone();
     let before_zero = dag.len();
     let zero = dag.add_node(
-        forward_node.decl,
+        forward_node.owner,
         RiscOp::synth_const(ty.precision, 0.0),
         vec![],
         ty.clone(),
@@ -782,7 +782,7 @@ fn balanced_adjoint_sum(
             if let [left, right] = pair {
                 let before_add = dag.len();
                 let sum = dag.add_node(
-                    forward_node.decl,
+                    forward_node.owner,
                     RiscOp::Add,
                     vec![*left, *right],
                     ty.clone(),
@@ -845,6 +845,11 @@ fn prune_to_requested_outputs(
             for &dep in &dag.nodes()[i].result_claim_deps {
                 live[dep.0] = true;
             }
+            // A node's activation is a dependency: the rebuilt node reads it
+            // to decide whether it checks anything.
+            if let Some(activation) = dag.nodes()[i].owner.activation {
+                live[activation.0] = true;
+            }
         }
     }
 
@@ -864,7 +869,8 @@ fn prune_to_requested_outputs(
             // drift. Without this the AD seed/backward nodes would lose
             // their `__synthesized_grad__` markers post-prune.
             let new_id = new_dag.add_node(
-                node.decl,
+                node.owner
+                    .remap_with(|old| id_map.get(&old.0).copied()),
                 node.op.clone(),
                 new_inputs,
                 node.output_type.clone(),
@@ -946,7 +952,7 @@ fn compute_adjoints(
             let a = node.inputs[0];
             let b = node.inputs[1];
             let ty = forward.get(a).unwrap().output_type.clone();
-            let neg_g = dag.add_node(node.decl, RiscOp::Neg, vec![g], ty, None);
+            let neg_g = dag.add_node(node.owner, RiscOp::Neg, vec![g], ty, None);
             Some(vec![(a, g), (b, neg_g)])
         }
         RiscOp::Mul => {
@@ -954,8 +960,8 @@ fn compute_adjoints(
             let b = node.inputs[1];
             let ty = forward.get(a).unwrap().output_type.clone();
             // da = g * b, db = g * a  (referencing forward nodes directly)
-            let da = dag.add_node(node.decl, RiscOp::Mul, vec![g, b], ty.clone(), None);
-            let db = dag.add_node(node.decl, RiscOp::Mul, vec![g, a], ty, None);
+            let da = dag.add_node(node.owner, RiscOp::Mul, vec![g, b], ty.clone(), None);
+            let db = dag.add_node(node.owner, RiscOp::Mul, vec![g, a], ty, None);
             Some(vec![(a, da), (b, db)])
         }
         RiscOp::Div => {
@@ -965,12 +971,12 @@ fn compute_adjoints(
             let a = node.inputs[0];
             let b = node.inputs[1];
             let ty = forward.get(a).unwrap().output_type.clone();
-            let da = dag.add_node(node.decl, RiscOp::Div, vec![g, b], ty.clone(), None);
+            let da = dag.add_node(node.owner, RiscOp::Div, vec![g, b], ty.clone(), None);
             let g_times_y =
-                dag.add_node(node.decl, RiscOp::Mul, vec![g, node.id], ty.clone(), None);
+                dag.add_node(node.owner, RiscOp::Mul, vec![g, node.id], ty.clone(), None);
             let g_y_over_b =
-                dag.add_node(node.decl, RiscOp::Div, vec![g_times_y, b], ty.clone(), None);
-            let db = dag.add_node(node.decl, RiscOp::Neg, vec![g_y_over_b], ty, None);
+                dag.add_node(node.owner, RiscOp::Div, vec![g_times_y, b], ty.clone(), None);
+            let db = dag.add_node(node.owner, RiscOp::Neg, vec![g_y_over_b], ty, None);
             Some(vec![(a, da), (b, db)])
         }
         RiscOp::Compare(_) => {
@@ -979,14 +985,14 @@ fn compute_adjoints(
             let ty_a = forward.get(a).unwrap().output_type.clone();
             let ty_b = forward.get(b).unwrap().output_type.clone();
             let za = dag.add_node(
-                node.decl,
+                node.owner,
                 RiscOp::synth_const(ty_a.precision, 0.0),
                 vec![],
                 ty_a,
                 None,
             );
             let zb = dag.add_node(
-                node.decl,
+                node.owner,
                 RiscOp::synth_const(ty_b.precision, 0.0),
                 vec![],
                 ty_b,
@@ -1026,28 +1032,28 @@ fn compute_adjoints(
             let condition_ty = forward.get(condition).unwrap().output_type.clone();
             let branch_ty = forward.get(then_value).unwrap().output_type.clone();
             let zero_condition = dag.add_node(
-                node.decl,
+                node.owner,
                 RiscOp::synth_const(condition_ty.precision, 0.0),
                 vec![],
                 condition_ty,
                 None,
             );
             let zero_branch = dag.add_node(
-                node.decl,
+                node.owner,
                 RiscOp::synth_const(branch_ty.precision, 0.0),
                 vec![],
                 branch_ty.clone(),
                 None,
             );
             let then_grad = dag.add_node(
-                node.decl,
+                node.owner,
                 RiscOp::Where,
                 vec![condition, g, zero_branch],
                 branch_ty.clone(),
                 None,
             );
             let else_grad = dag.add_node(
-                node.decl,
+                node.owner,
                 RiscOp::Where,
                 vec![condition, zero_branch, g],
                 branch_ty,
@@ -1069,7 +1075,7 @@ fn compute_adjoints(
                 ExtremaKind::Min
             };
             let da = dag.add_node(
-                node.decl,
+                node.owner,
                 RiscOp::ExtremaAdjoint {
                     kind,
                     operand: ExtremaOperand::Left,
@@ -1079,7 +1085,7 @@ fn compute_adjoints(
                 None,
             );
             let db = dag.add_node(
-                node.decl,
+                node.owner,
                 RiscOp::ExtremaAdjoint {
                     kind,
                     operand: ExtremaOperand::Right,
@@ -1098,21 +1104,21 @@ fn compute_adjoints(
             let ty_b = forward.get(b).unwrap().output_type.clone();
             let ty_g = forward.get(cotangent).unwrap().output_type.clone();
             let zero_a = dag.add_node(
-                node.decl,
+                node.owner,
                 RiscOp::synth_const(ty_a.precision, 0.0),
                 vec![],
                 ty_a,
                 None,
             );
             let zero_b = dag.add_node(
-                node.decl,
+                node.owner,
                 RiscOp::synth_const(ty_b.precision, 0.0),
                 vec![],
                 ty_b,
                 None,
             );
             let dg = dag.add_node(
-                node.decl,
+                node.owner,
                 RiscOp::ExtremaAdjoint {
                     kind: *kind,
                     operand: *operand,
@@ -1126,7 +1132,7 @@ fn compute_adjoints(
         RiscOp::Relu => {
             let x = node.inputs[0];
             let ty = forward.get(x).unwrap().output_type.clone();
-            let dx = dag.add_node(node.decl, RiscOp::ReluAdjoint, vec![x, g], ty, None);
+            let dx = dag.add_node(node.owner, RiscOp::ReluAdjoint, vec![x, g], ty, None);
             Some(vec![(x, dx)])
         }
         RiscOp::ReluAdjoint => {
@@ -1135,13 +1141,13 @@ fn compute_adjoints(
             let ty_x = forward.get(x).unwrap().output_type.clone();
             let ty_g = forward.get(cotangent).unwrap().output_type.clone();
             let zero_x = dag.add_node(
-                node.decl,
+                node.owner,
                 RiscOp::synth_const(ty_x.precision, 0.0),
                 vec![],
                 ty_x,
                 None,
             );
-            let dg = dag.add_node(node.decl, RiscOp::ReluAdjoint, vec![x, g], ty_g, None);
+            let dg = dag.add_node(node.owner, RiscOp::ReluAdjoint, vec![x, g], ty_g, None);
             Some(vec![(x, zero_x), (cotangent, dg)])
         }
 
@@ -1149,7 +1155,7 @@ fn compute_adjoints(
         RiscOp::Neg => {
             let x = node.inputs[0];
             let ty = forward.get(x).unwrap().output_type.clone();
-            let dg = dag.add_node(node.decl, RiscOp::Neg, vec![g], ty, None);
+            let dg = dag.add_node(node.owner, RiscOp::Neg, vec![g], ty, None);
             Some(vec![(x, dg)])
         }
         RiscOp::Recip => {
@@ -1157,28 +1163,28 @@ fn compute_adjoints(
             let x = node.inputs[0];
             let ty = forward.get(x).unwrap().output_type.clone();
             let y_sq = dag.add_node(
-                node.decl,
+                node.owner,
                 RiscOp::Mul,
                 vec![node.id, node.id],
                 ty.clone(),
                 None,
             );
-            let g_y_sq = dag.add_node(node.decl, RiscOp::Mul, vec![g, y_sq], ty.clone(), None);
-            let dx = dag.add_node(node.decl, RiscOp::Neg, vec![g_y_sq], ty, None);
+            let g_y_sq = dag.add_node(node.owner, RiscOp::Mul, vec![g, y_sq], ty.clone(), None);
+            let dx = dag.add_node(node.owner, RiscOp::Neg, vec![g_y_sq], ty, None);
             Some(vec![(x, dx)])
         }
         RiscOp::Exp => {
             // d/dx exp(x) = exp(x). Reuse the forward exp node.
             let x = node.inputs[0];
             let ty = forward.get(x).unwrap().output_type.clone();
-            let dx = dag.add_node(node.decl, RiscOp::Mul, vec![g, node.id], ty, None);
+            let dx = dag.add_node(node.owner, RiscOp::Mul, vec![g, node.id], ty, None);
             Some(vec![(x, dx)])
         }
         RiscOp::Log => {
             // d/dx log(x) = 1/x = div(g, x)
             let x = node.inputs[0];
             let ty = forward.get(x).unwrap().output_type.clone();
-            let dx = tier2::lower_div(node.decl, dag, g, x, &ty, None);
+            let dx = tier2::lower_div(node.owner, dag, g, x, &ty, None);
             Some(vec![(x, dx)])
         }
         RiscOp::Sin => {
@@ -1186,15 +1192,15 @@ fn compute_adjoints(
             let x = node.inputs[0];
             let ty = forward.get(x).unwrap().output_type.clone();
             let half_pi = dag.add_node(
-                node.decl,
+                node.owner,
                 RiscOp::synth_const(ty.precision, std::f64::consts::FRAC_PI_2),
                 vec![],
                 ty.clone(),
                 None,
             );
-            let shifted = dag.add_node(node.decl, RiscOp::Add, vec![x, half_pi], ty.clone(), None);
-            let cos_x = dag.add_node(node.decl, RiscOp::Sin, vec![shifted], ty.clone(), None);
-            let dx = dag.add_node(node.decl, RiscOp::Mul, vec![g, cos_x], ty, None);
+            let shifted = dag.add_node(node.owner, RiscOp::Add, vec![x, half_pi], ty.clone(), None);
+            let cos_x = dag.add_node(node.owner, RiscOp::Sin, vec![shifted], ty.clone(), None);
+            let dx = dag.add_node(node.owner, RiscOp::Mul, vec![g, cos_x], ty, None);
             Some(vec![(x, dx)])
         }
         RiscOp::Sqrt => {
@@ -1202,33 +1208,33 @@ fn compute_adjoints(
             let x = node.inputs[0];
             let ty = forward.get(x).unwrap().output_type.clone();
             let two = dag.add_node(
-                node.decl,
+                node.owner,
                 RiscOp::synth_const(ty.precision, 2.0),
                 vec![],
                 ty.clone(),
                 None,
             );
             let two_sqrt =
-                dag.add_node(node.decl, RiscOp::Mul, vec![two, node.id], ty.clone(), None);
-            let dx = tier2::lower_div(node.decl, dag, g, two_sqrt, &ty, None);
+                dag.add_node(node.owner, RiscOp::Mul, vec![two, node.id], ty.clone(), None);
+            let dx = tier2::lower_div(node.owner, dag, g, two_sqrt, &ty, None);
             Some(vec![(x, dx)])
         }
         RiscOp::Cos => {
             // d/dx cos(x) = -sin(x)
             let x = node.inputs[0];
             let ty = forward.get(x).unwrap().output_type.clone();
-            let sin_x = dag.add_node(node.decl, RiscOp::Sin, vec![x], ty.clone(), None);
-            let neg_sin_x = dag.add_node(node.decl, RiscOp::Neg, vec![sin_x], ty.clone(), None);
-            let dx = dag.add_node(node.decl, RiscOp::Mul, vec![g, neg_sin_x], ty, None);
+            let sin_x = dag.add_node(node.owner, RiscOp::Sin, vec![x], ty.clone(), None);
+            let neg_sin_x = dag.add_node(node.owner, RiscOp::Neg, vec![sin_x], ty.clone(), None);
+            let dx = dag.add_node(node.owner, RiscOp::Mul, vec![g, neg_sin_x], ty, None);
             Some(vec![(x, dx)])
         }
         RiscOp::Tan => {
             // d/dx tan(x) = 1 / cos²(x) = g / (cos(x) * cos(x))
             let x = node.inputs[0];
             let ty = forward.get(x).unwrap().output_type.clone();
-            let cos_x = dag.add_node(node.decl, RiscOp::Cos, vec![x], ty.clone(), None);
-            let cos_sq = dag.add_node(node.decl, RiscOp::Mul, vec![cos_x, cos_x], ty.clone(), None);
-            let dx = tier2::lower_div(node.decl, dag, g, cos_sq, &ty, None);
+            let cos_x = dag.add_node(node.owner, RiscOp::Cos, vec![x], ty.clone(), None);
+            let cos_sq = dag.add_node(node.owner, RiscOp::Mul, vec![cos_x, cos_x], ty.clone(), None);
+            let dx = tier2::lower_div(node.owner, dag, g, cos_sq, &ty, None);
             Some(vec![(x, dx)])
         }
         RiscOp::Atan => {
@@ -1236,15 +1242,15 @@ fn compute_adjoints(
             let x = node.inputs[0];
             let ty = forward.get(x).unwrap().output_type.clone();
             let one = dag.add_node(
-                node.decl,
+                node.owner,
                 RiscOp::synth_const(ty.precision, 1.0),
                 vec![],
                 ty.clone(),
                 None,
             );
-            let x_sq = dag.add_node(node.decl, RiscOp::Mul, vec![x, x], ty.clone(), None);
-            let denom = dag.add_node(node.decl, RiscOp::Add, vec![one, x_sq], ty.clone(), None);
-            let dx = tier2::lower_div(node.decl, dag, g, denom, &ty, None);
+            let x_sq = dag.add_node(node.owner, RiscOp::Mul, vec![x, x], ty.clone(), None);
+            let denom = dag.add_node(node.owner, RiscOp::Add, vec![one, x_sq], ty.clone(), None);
+            let dx = tier2::lower_div(node.owner, dag, g, denom, &ty, None);
             Some(vec![(x, dx)])
         }
         RiscOp::Abs => {
@@ -1258,7 +1264,7 @@ fn compute_adjoints(
                 precision: chelis_types::types::Prim::Bool,
             };
             let zero = dag.add_node(
-                node.decl,
+                node.owner,
                 RiscOp::synth_const(ty.precision, 0.0),
                 vec![],
                 ty.clone(),
@@ -1266,14 +1272,14 @@ fn compute_adjoints(
             );
             // positive mask: x > 0  i.e. cmplt(0, x)
             let pos_bool = dag.add_node(
-                node.decl,
+                node.owner,
                 RiscOp::Compare(ComparisonKind::CmpLt),
                 vec![zero, x],
                 bool_ty.clone(),
                 None,
             );
             let pos = dag.add_node(
-                node.decl,
+                node.owner,
                 RiscOp::Cast {
                     new_precision: ty.precision,
                 },
@@ -1283,14 +1289,14 @@ fn compute_adjoints(
             );
             // negative mask: x < 0  i.e. cmplt(x, 0)
             let neg_bool = dag.add_node(
-                node.decl,
+                node.owner,
                 RiscOp::Compare(ComparisonKind::CmpLt),
                 vec![x, zero],
                 bool_ty,
                 None,
             );
             let neg_cast = dag.add_node(
-                node.decl,
+                node.owner,
                 RiscOp::Cast {
                     new_precision: ty.precision,
                 },
@@ -1299,8 +1305,8 @@ fn compute_adjoints(
                 None,
             );
             // sign = pos - neg_cast (direct Tier-1 Sub)
-            let sign = tier2::lower_sub(node.decl, dag, pos, neg_cast, &ty, None);
-            let dx = dag.add_node(node.decl, RiscOp::Mul, vec![sign, g], ty, None);
+            let sign = tier2::lower_sub(node.owner, dag, pos, neg_cast, &ty, None);
+            let dx = dag.add_node(node.owner, RiscOp::Mul, vec![sign, g], ty, None);
             Some(vec![(x, dx)])
         }
         RiscOp::Floor => {
@@ -1309,7 +1315,7 @@ fn compute_adjoints(
             let x = node.inputs[0];
             let ty = forward.get(x).unwrap().output_type.clone();
             let zero = dag.add_node(
-                node.decl,
+                node.owner,
                 RiscOp::synth_const(ty.precision, 0.0),
                 vec![],
                 ty,
@@ -1323,7 +1329,7 @@ fn compute_adjoints(
             let x = node.inputs[0];
             let ty = forward.get(x).unwrap().output_type.clone();
             let zero = dag.add_node(
-                node.decl,
+                node.owner,
                 RiscOp::synth_const(ty.precision, 0.0),
                 vec![],
                 ty,
@@ -1337,7 +1343,7 @@ fn compute_adjoints(
             let x = node.inputs[0];
             let ty = forward.get(x).unwrap().output_type.clone();
             let zero = dag.add_node(
-                node.decl,
+                node.owner,
                 RiscOp::synth_const(ty.precision, 0.0),
                 vec![],
                 ty,
@@ -1355,14 +1361,14 @@ fn compute_adjoints(
             let ty_a = forward.get(a).unwrap().output_type.clone();
             let ty_b = forward.get(b).unwrap().output_type.clone();
             let za = dag.add_node(
-                node.decl,
+                node.owner,
                 RiscOp::synth_const(ty_a.precision, 0.0),
                 vec![],
                 ty_a,
                 None,
             );
             let zb = dag.add_node(
-                node.decl,
+                node.owner,
                 RiscOp::synth_const(ty_b.precision, 0.0),
                 vec![],
                 ty_b,
@@ -1379,7 +1385,7 @@ fn compute_adjoints(
             let mut inputs = vec![g, node.inputs[1], node.inputs[2]];
             inputs.extend(node.inputs.get(3).copied());
             let replay = dag.add_node(
-                node.decl,
+                node.owner,
                 RiscOp::DropoutReplay,
                 inputs,
                 node.output_type.clone(),
@@ -1395,7 +1401,7 @@ fn compute_adjoints(
             let template = node.inputs[0];
             let template_ty = forward.get(template).unwrap().output_type.clone();
             let zero = dag.add_node(
-                node.decl,
+                node.owner,
                 RiscOp::synth_const(template_ty.precision, 0.0),
                 vec![],
                 template_ty,
@@ -1412,7 +1418,7 @@ fn compute_adjoints(
                 // The adjoint has its bound's shape: rank 0, or one value per
                 // key row when a batched draw's rows have their own bounds.
                 let adjoint = dag.add_node(
-                    node.decl,
+                    node.owner,
                     RiscOp::UniformBoundAdjoint { bound },
                     inputs,
                     TensorType {
@@ -1425,7 +1431,7 @@ fn compute_adjoints(
                     adjoint
                 } else {
                     dag.add_node(
-                        node.decl,
+                        node.owner,
                         RiscOp::Cast {
                             new_precision: bound_ty.precision,
                         },
@@ -1481,7 +1487,7 @@ fn compute_adjoints(
                     precision: input_ty.precision,
                 };
                 dag.add_node(
-                    node.decl,
+                    node.owner,
                     RiscOp::Cast {
                         new_precision: input_ty.precision,
                     },
@@ -1491,7 +1497,7 @@ fn compute_adjoints(
                 )
             };
             let dx = dag.add_node(
-                node.decl,
+                node.owner,
                 RiscOp::Expand {
                     axis: *axis,
                     size: original_size.clone(),
@@ -1567,7 +1573,7 @@ fn compute_adjoints(
                     })
                     .collect();
                 let s = dag.add_node(
-                    node.decl,
+                    node.owner,
                     RiscOp::Shrink { bounds },
                     vec![x],
                     slice_ty.clone(),
@@ -1578,7 +1584,7 @@ fn compute_adjoints(
 
             // Prefix products: prefix[i] = prod_{j<i} slices[j], with prefix[0] = 1.
             let one = dag.add_node(
-                node.decl,
+                node.owner,
                 RiscOp::synth_const(slice_ty.precision, 1.0),
                 vec![],
                 slice_ty.clone(),
@@ -1588,7 +1594,7 @@ fn compute_adjoints(
             prefix.push(one);
             for i in 1..axis_size {
                 let p = dag.add_node(
-                    node.decl,
+                    node.owner,
                     RiscOp::Mul,
                     vec![prefix[i - 1], slices[i - 1]],
                     slice_ty.clone(),
@@ -1602,7 +1608,7 @@ fn compute_adjoints(
             if axis_size >= 2 {
                 for i in (0..axis_size - 1).rev() {
                     suffix[i] = dag.add_node(
-                        node.decl,
+                        node.owner,
                         RiscOp::Mul,
                         vec![suffix[i + 1], slices[i + 1]],
                         slice_ty.clone(),
@@ -1616,7 +1622,7 @@ fn compute_adjoints(
             let mut acc: Option<NodeId> = None;
             for i in 0..axis_size {
                 let local = dag.add_node(
-                    node.decl,
+                    node.owner,
                     RiscOp::Mul,
                     vec![prefix[i], suffix[i]],
                     slice_ty.clone(),
@@ -1632,7 +1638,7 @@ fn compute_adjoints(
                     })
                     .collect();
                 let padded = dag.add_node(
-                    node.decl,
+                    node.owner,
                     RiscOp::zero_pad(input_ty.precision, padding),
                     vec![local],
                     input_ty.clone(),
@@ -1641,7 +1647,7 @@ fn compute_adjoints(
                 acc = Some(match acc {
                     None => padded,
                     Some(prev) => dag.add_node(
-                        node.decl,
+                        node.owner,
                         RiscOp::Add,
                         vec![prev, padded],
                         input_ty.clone(),
@@ -1654,7 +1660,7 @@ fn compute_adjoints(
 
             // Upstream gradient expanded back to input shape, multiplied by local.
             let expanded_g = dag.add_node(
-                node.decl,
+                node.owner,
                 RiscOp::Expand {
                     axis: *axis,
                     size: original_size,
@@ -1664,7 +1670,7 @@ fn compute_adjoints(
                 None,
             );
             let dx = dag.add_node(
-                node.decl,
+                node.owner,
                 RiscOp::Mul,
                 vec![expanded_g, local_grad],
                 input_ty,
@@ -1688,9 +1694,9 @@ fn compute_adjoints(
             // explicit Shape read of the forward input.
             let mut inputs = vec![g];
             let original_shape =
-                restore_target(dag, node.decl, forward, x, &input_ty.dims, &mut inputs);
+                restore_target(dag, node.owner, forward, x, &input_ty.dims, &mut inputs);
             let dx = dag.add_node(
-                node.decl,
+                node.owner,
                 RiscOp::Reshape {
                     new_shape: original_shape,
                 },
@@ -1705,7 +1711,7 @@ fn compute_adjoints(
             let input_ty = forward.get(x).unwrap().output_type.clone();
             let inv = inverse_permutation(axes);
             let dx = dag.add_node(
-                node.decl,
+                node.owner,
                 RiscOp::Permute { axes: inv },
                 vec![g],
                 input_ty,
@@ -1769,7 +1775,7 @@ fn compute_adjoints(
                 source_ty.dims.clone()
             };
             let summed = dag.add_node(
-                node.decl,
+                node.owner,
                 RiscOp::Sum {
                     axis: *axis,
                     accumulator: acc,
@@ -1790,7 +1796,7 @@ fn compute_adjoints(
                 summed
             } else {
                 dag.add_node(
-                    node.decl,
+                    node.owner,
                     RiscOp::Cast {
                         new_precision: source_ty.precision,
                     },
@@ -1809,9 +1815,9 @@ fn compute_adjoints(
                 // source shape `[..., 1, ...]`.
                 let mut inputs = vec![summed_in_source_prec];
                 let new_shape =
-                    restore_target(dag, node.decl, forward, x, &source_ty.dims, &mut inputs);
+                    restore_target(dag, node.owner, forward, x, &source_ty.dims, &mut inputs);
                 let dx = dag.add_node(
-                    node.decl,
+                    node.owner,
                     RiscOp::Reshape { new_shape },
                     inputs,
                     source_ty,
@@ -1860,16 +1866,16 @@ fn compute_adjoints(
                     // forward input.
                     let start = reslot_bound(node, before, &mut shrink_inputs);
                     let before_scalar = bound_scalar(dag, node, before);
-                    let extent = shape_scalar(dag, node.decl, x, axis);
+                    let extent = shape_scalar(dag, node.owner, x, axis);
                     let end_scalar =
-                        int_scalar_binary(dag, node.decl, RiscOp::Add, before_scalar, extent);
+                        int_scalar_binary(dag, node.owner, RiscOp::Add, before_scalar, extent);
                     let slot = shrink_inputs.len();
                     shrink_inputs.push(end_scalar);
                     bounds.push((start, RtDim::Node(slot)));
                 }
             }
             let dx = dag.add_node(
-                node.decl,
+                node.owner,
                 RiscOp::Shrink { bounds },
                 shrink_inputs,
                 input_ty,
@@ -1911,24 +1917,24 @@ fn compute_adjoints(
                     // forward input.
                     let before = reslot_bound(node, start, &mut pad_inputs);
                     let end_scalar = bound_scalar(dag, node, end);
-                    let extent = shape_scalar(dag, node.decl, x, axis);
+                    let extent = shape_scalar(dag, node.owner, x, axis);
                     let precision = dag.get(end_scalar).unwrap().output_type.precision;
                     let neg_end = dag.add_node(
-                        node.decl,
+                        node.owner,
                         RiscOp::Neg,
                         vec![end_scalar],
                         scalar_int(precision),
                         None,
                     );
                     let after_scalar =
-                        int_scalar_binary(dag, node.decl, RiscOp::Add, extent, neg_end);
+                        int_scalar_binary(dag, node.owner, RiscOp::Add, extent, neg_end);
                     let slot = pad_inputs.len();
                     pad_inputs.push(after_scalar);
                     padding.push((before, RtDim::Node(slot)));
                 }
             }
             let dx = dag.add_node(
-                node.decl,
+                node.owner,
                 RiscOp::zero_pad(input_ty.precision, padding),
                 pad_inputs,
                 input_ty,
@@ -2019,7 +2025,7 @@ fn compute_adjoints(
                         match static_dim(dim) {
                             Some(n) => targets.push(RtDim::Lit(n)),
                             None => {
-                                let read = shape_scalar(dag, node.decl, cur, src_axis);
+                                let read = shape_scalar(dag, node.owner, cur, src_axis);
                                 let slot = inputs.len();
                                 inputs.push(read);
                                 targets.push(RtDim::Node(slot));
@@ -2031,7 +2037,7 @@ fn compute_adjoints(
                     (reshape_target(&split_dims), vec![cur])
                 };
                 let split = dag.add_node(
-                    node.decl,
+                    node.owner,
                     RiscOp::Reshape {
                         new_shape: split_targets,
                     },
@@ -2049,7 +2055,7 @@ fn compute_adjoints(
                 let mut padded_dims = split_dims.clone();
                 padded_dims[axis + 1] = DimInfo::Lit(step);
                 let padded = dag.add_node(
-                    node.decl,
+                    node.owner,
                     RiscOp::zero_pad(precision, padding),
                     vec![split],
                     TensorType {
@@ -2063,16 +2069,16 @@ fn compute_adjoints(
                 // size m_a * step.
                 let mut merged_dims = cur_dims.clone();
                 let (merged_targets, merged_inputs) = if runtime_axis {
-                    let m_a_read = shape_scalar(dag, node.decl, cur, axis);
+                    let m_a_read = shape_scalar(dag, node.owner, cur, axis);
                     let step_const = dag.add_node(
-                        node.decl,
+                        node.owner,
                         RiscOp::synth_const(scalar_int(Prim::Int32).precision, step as f64),
                         vec![],
                         scalar_int(Prim::Int32),
                         None,
                     );
                     let merged_scalar =
-                        int_scalar_binary(dag, node.decl, RiscOp::Mul, m_a_read, step_const);
+                        int_scalar_binary(dag, node.owner, RiscOp::Mul, m_a_read, step_const);
                     merged_dims[axis] =
                         DimInfo::Named(format!("_rt_dim_{}_{axis}", merged_scalar.0), None);
                     let mut targets = Vec::with_capacity(merged_dims.len());
@@ -2089,7 +2095,7 @@ fn compute_adjoints(
                             None => {
                                 // Bystander runtime axis: same extent as the
                                 // pre-split cotangent's axis `j`.
-                                let read = shape_scalar(dag, node.decl, cur, j);
+                                let read = shape_scalar(dag, node.owner, cur, j);
                                 let slot = inputs.len();
                                 inputs.push(read);
                                 targets.push(RtDim::Node(slot));
@@ -2103,7 +2109,7 @@ fn compute_adjoints(
                     (reshape_target(&merged_dims), vec![padded])
                 };
                 let merged = dag.add_node(
-                    node.decl,
+                    node.owner,
                     RiscOp::Reshape {
                         new_shape: merged_targets,
                     },
@@ -2135,14 +2141,14 @@ fn compute_adjoints(
                     bounds[axis] = (RtDim::Lit(0), RtDim::Lit(n_a));
                     trimmed_dims[axis] = DimInfo::Lit(n_a);
                 } else {
-                    let n_a_read = shape_scalar(dag, node.decl, x, axis);
+                    let n_a_read = shape_scalar(dag, node.owner, x, axis);
                     let slot = shrink_inputs.len();
                     shrink_inputs.push(n_a_read);
                     bounds[axis] = (RtDim::Lit(0), RtDim::Node(slot));
                     trimmed_dims[axis] = input_ty.dims[axis].clone();
                 }
                 let trimmed = dag.add_node(
-                    node.decl,
+                    node.owner,
                     RiscOp::Shrink { bounds },
                     shrink_inputs,
                     TensorType {
@@ -2201,7 +2207,7 @@ fn compute_adjoints(
             let x = node.inputs[0];
             let input_ty = forward.get(x).unwrap().output_type.clone();
             let zero = dag.add_node(
-                node.decl,
+                node.owner,
                 RiscOp::synth_const(input_ty.precision, 0.0),
                 vec![],
                 input_ty,
@@ -2229,7 +2235,7 @@ fn compute_adjoints(
             let input_ty = forward.get(x).unwrap().output_type.clone();
             if input_ty.precision.is_float() && node.output_type.precision.is_float() {
                 let dx = dag.add_node(
-                    node.decl,
+                    node.owner,
                     RiscOp::Cast {
                         new_precision: input_ty.precision,
                     },
@@ -2240,7 +2246,7 @@ fn compute_adjoints(
                 Some(vec![(x, dx)])
             } else {
                 let zero = dag.add_node(
-                    node.decl,
+                    node.owner,
                     RiscOp::synth_const(input_ty.precision, 0.0),
                     vec![],
                     input_ty,
@@ -2272,7 +2278,7 @@ fn compute_adjoints(
                 .clone();
             let mut inputs = vec![g];
             let mut new_shape =
-                restore_target(dag, node.decl, forward, input, &input_ty.dims, &mut inputs);
+                restore_target(dag, node.owner, forward, input, &input_ty.dims, &mut inputs);
             // Restore the parameter's shape through the checked witness. A
             // known bad caller must reach the primal Domain check, rather
             // than make a literal-sized cotangent fail graph verification.
@@ -2280,7 +2286,7 @@ fn compute_adjoints(
             inputs.push(node.inputs[1]);
             new_shape[*axis as usize] = RtDim::Node(slot);
             let gradient = dag.add_node(
-                node.decl,
+                node.owner,
                 RiscOp::Reshape { new_shape },
                 inputs,
                 input_ty,
@@ -2295,14 +2301,14 @@ fn compute_adjoints(
             let indices = node.inputs[1];
             let values_ty = forward.get(values).unwrap().output_type.clone();
             let zero = dag.add_node(
-                node.decl,
+                node.owner,
                 RiscOp::synth_const(values_ty.precision, 0.0),
                 vec![],
                 values_ty.clone(),
                 None,
             );
             let dvalues = dag.add_node(
-                node.decl,
+                node.owner,
                 RiscOp::ScatterAdd { axis: *axis },
                 vec![zero, indices, g],
                 values_ty,
@@ -2322,7 +2328,7 @@ fn compute_adjoints(
             let updates = node.inputs[2];
             let updates_ty = forward.get(updates).unwrap().output_type.clone();
             let dupdates = dag.add_node(
-                node.decl,
+                node.owner,
                 RiscOp::Gather { axis: *axis },
                 vec![g, indices],
                 updates_ty,
@@ -2348,7 +2354,7 @@ fn compute_adjoints(
             let x = node.inputs[0];
             let input_ty = forward.get(x).unwrap().output_type.clone();
             let din = dag.add_node(
-                node.decl,
+                node.owner,
                 RiscOp::ReduceWindowGrad {
                     reducer: *reducer,
                     window_shape: window_shape.clone(),
@@ -2437,7 +2443,7 @@ fn compute_adjoints(
                 precision: operand_prim,
             };
             let b_transposed = dag.add_node(
-                node.decl,
+                node.owner,
                 RiscOp::Permute { axes: bt_axes },
                 vec![b_id],
                 bt_ty,
@@ -2457,7 +2463,7 @@ fn compute_adjoints(
                 "adjoint matmul accumulator must be valid for the operand precision \
                  (spec/04-type-system.md §5.7.1 default for non-integer operand)",
             );
-            let da = dag.add_node(node.decl, da_op, vec![g, b_transposed], da_ty, None);
+            let da = dag.add_node(node.owner, da_op, vec![g, b_transposed], da_ty, None);
 
             // --- dB = A^T @ g ---
             //
@@ -2471,7 +2477,7 @@ fn compute_adjoints(
                 precision: operand_prim,
             };
             let a_transposed = dag.add_node(
-                node.decl,
+                node.owner,
                 RiscOp::Permute { axes: at_axes },
                 vec![a_id],
                 at_ty,
@@ -2490,7 +2496,7 @@ fn compute_adjoints(
                 "adjoint matmul accumulator must be valid for the operand precision \
                  (spec/04-type-system.md §5.7.1 default for non-integer operand)",
             );
-            let db = dag.add_node(node.decl, db_op, vec![a_transposed, g], db_ty, None);
+            let db = dag.add_node(node.owner, db_op, vec![a_transposed, g], db_ty, None);
 
             Some(vec![(a_id, da), (b_id, db)])
         }
@@ -2522,7 +2528,7 @@ fn extrema_reduce_adjoint(
     };
     let expand = |dag: &mut Dag, value: NodeId, output_type: TensorType| {
         dag.add_node(
-            node.decl,
+            node.owner,
             RiscOp::Expand {
                 axis,
                 size: original_size.clone(),
@@ -2535,16 +2541,16 @@ fn extrema_reduce_adjoint(
 
     let expanded_extreme = expand(dag, node.id, input_ty.clone());
     let expanded_g = expand(dag, g, input_ty.clone());
-    let tie_mask = tier2::lower_eq(node.decl, dag, x, expanded_extreme, &input_ty, None);
+    let tie_mask = tier2::lower_eq(node.owner, dag, x, expanded_extreme, &input_ty, None);
     let tie_count = dag.add_node(
-        node.decl,
+        node.owner,
         RiscOp::Count { axes: vec![axis] },
         vec![tie_mask],
         reduced_i64.clone(),
         None,
     );
     let tie_count_float = dag.add_node(
-        node.decl,
+        node.owner,
         RiscOp::Cast {
             new_precision: input_ty.precision,
         },
@@ -2554,14 +2560,14 @@ fn extrema_reduce_adjoint(
     );
     let expanded_tie_count = expand(dag, tie_count_float, input_ty.clone());
     let tie_share = dag.add_node(
-        node.decl,
+        node.owner,
         RiscOp::Div,
         vec![expanded_g, expanded_tie_count],
         input_ty.clone(),
         None,
     );
     let zero = dag.add_node(
-        node.decl,
+        node.owner,
         RiscOp::synth_const(input_ty.precision, 0.0),
         vec![],
         input_ty.clone(),
@@ -2569,16 +2575,16 @@ fn extrema_reduce_adjoint(
     );
     dag.add_shape_dep(zero, x);
     let non_nan_dx = dag.add_node(
-        node.decl,
+        node.owner,
         RiscOp::Where,
         vec![tie_mask, tie_share, zero],
         input_ty.clone(),
         None,
     );
 
-    let nan_mask = tier2::lower_neq(node.decl, dag, x, x, &input_ty, None);
+    let nan_mask = tier2::lower_neq(node.owner, dag, x, x, &input_ty, None);
     let nan_f32 = dag.add_node(
-        node.decl,
+        node.owner,
         RiscOp::Cast {
             new_precision: Prim::F32,
         },
@@ -2590,7 +2596,7 @@ fn extrema_reduce_adjoint(
         None,
     );
     let first_nan_index = dag.add_node(
-        node.decl,
+        node.owner,
         RiscOp::Argmax { axis },
         vec![nan_f32],
         reduced_i64.clone(),
@@ -2599,7 +2605,7 @@ fn extrema_reduce_adjoint(
     let mut slice_dims = input_ty.dims.clone();
     slice_dims[axis] = DimInfo::Lit(1);
     let first_nan_index = dag.add_node(
-        node.decl,
+        node.owner,
         RiscOp::Expand {
             axis,
             size: RtDim::Lit(1),
@@ -2612,7 +2618,7 @@ fn extrema_reduce_adjoint(
         None,
     );
     let nan_g = dag.add_node(
-        node.decl,
+        node.owner,
         RiscOp::Expand {
             axis,
             size: RtDim::Lit(1),
@@ -2625,14 +2631,14 @@ fn extrema_reduce_adjoint(
         None,
     );
     let nan_count = dag.add_node(
-        node.decl,
+        node.owner,
         RiscOp::Count { axes: vec![axis] },
         vec![nan_mask],
         reduced_i64.clone(),
         None,
     );
     let zero_count = dag.add_node(
-        node.decl,
+        node.owner,
         RiscOp::synth_const(Prim::Int64, 0.0),
         vec![],
         reduced_i64,
@@ -2640,7 +2646,7 @@ fn extrema_reduce_adjoint(
     );
     dag.add_shape_dep(zero_count, nan_count);
     let has_nan = dag.add_node(
-        node.decl,
+        node.owner,
         RiscOp::Compare(ComparisonKind::Gt),
         vec![nan_count, zero_count],
         reduced_bool,
@@ -2655,14 +2661,14 @@ fn extrema_reduce_adjoint(
         },
     );
     let nan_dx = dag.add_node(
-        node.decl,
+        node.owner,
         RiscOp::ScatterElements { axis },
         vec![zero, first_nan_index, nan_g],
         input_ty.clone(),
         None,
     );
     let dx = dag.add_node(
-        node.decl,
+        node.owner,
         RiscOp::Where,
         vec![expanded_has_nan, nan_dx, non_nan_dx],
         input_ty,
@@ -2715,9 +2721,9 @@ fn scalar_int(precision: Prim) -> TensorType {
 
 /// chelis#616: a fresh `Shape(x, axis)` read — the runtime extent of `x`
 /// along `axis` as a rank-0 exact i64 scalar ([05-DIM-2]).
-fn shape_scalar(dag: &mut Dag, decl: DeclId, x: NodeId, axis: usize) -> NodeId {
+fn shape_scalar(dag: &mut Dag, owner: Owner, x: NodeId, axis: usize) -> NodeId {
     dag.add_node(
-        decl,
+        owner,
         RiscOp::Shape { axis },
         vec![x],
         scalar_int(Prim::Int64),
@@ -2726,13 +2732,13 @@ fn shape_scalar(dag: &mut Dag, decl: DeclId, x: NodeId, axis: usize) -> NodeId {
 }
 
 /// chelis#616: cast a rank-0 integer scalar to `precision` if needed.
-fn cast_scalar(dag: &mut Dag, decl: DeclId, scalar: NodeId, precision: Prim) -> NodeId {
+fn cast_scalar(dag: &mut Dag, owner: Owner, scalar: NodeId, precision: Prim) -> NodeId {
     let current = dag.get(scalar).unwrap().output_type.precision;
     if current == precision {
         return scalar;
     }
     dag.add_node(
-        decl,
+        owner,
         RiscOp::Cast {
             new_precision: precision,
         },
@@ -2745,7 +2751,7 @@ fn cast_scalar(dag: &mut Dag, decl: DeclId, scalar: NodeId, precision: Prim) -> 
 /// chelis#616: a rank-0 integer binary op over two scalars, unified to the
 /// wider of the two integer precisions (explicit casts; no implicit
 /// promotion).
-fn int_scalar_binary(dag: &mut Dag, decl: DeclId, op: RiscOp, a: NodeId, b: NodeId) -> NodeId {
+fn int_scalar_binary(dag: &mut Dag, owner: Owner, op: RiscOp, a: NodeId, b: NodeId) -> NodeId {
     let pa = dag.get(a).unwrap().output_type.precision;
     let pb = dag.get(b).unwrap().output_type.precision;
     let precision = if pa == Prim::Int64 || pb == Prim::Int64 {
@@ -2753,9 +2759,9 @@ fn int_scalar_binary(dag: &mut Dag, decl: DeclId, op: RiscOp, a: NodeId, b: Node
     } else {
         Prim::Int32
     };
-    let a = cast_scalar(dag, decl, a, precision);
-    let b = cast_scalar(dag, decl, b, precision);
-    dag.add_node(decl, op, vec![a, b], scalar_int(precision), None)
+    let a = cast_scalar(dag, owner, a, precision);
+    let b = cast_scalar(dag, owner, b, precision);
+    dag.add_node(owner, op, vec![a, b], scalar_int(precision), None)
 }
 
 /// chelis#616: materialize a forward movement bound as a rank-0 integer
@@ -2767,7 +2773,7 @@ fn bound_scalar(dag: &mut Dag, forward_node: &DagNode, bound: &RtDim) -> NodeId 
     match bound {
         RtDim::Node(i) => forward_node.inputs[*i],
         RtDim::Lit(n) => dag.add_node(
-            forward_node.decl,
+            forward_node.owner,
             RiscOp::synth_const(scalar_int(Prim::Int32).precision, *n as f64),
             vec![],
             scalar_int(Prim::Int32),
@@ -2813,7 +2819,7 @@ fn load_declares(forward: &Dag, name: &str) -> bool {
 /// `source`, appended to `inputs` and referenced as `Node`.
 fn restore_target(
     dag: &mut Dag,
-    decl: DeclId,
+    owner: Owner,
     forward: &Dag,
     source: NodeId,
     dims: &[DimInfo],
@@ -2825,7 +2831,7 @@ fn restore_target(
             DimInfo::Lit(n) | DimInfo::Named(_, Some(n)) => RtDim::Lit(*n),
             DimInfo::Named(name, None) if load_declares(forward, name) => RtDim::Sym(name.clone()),
             DimInfo::Named(_, None) => {
-                let read = shape_scalar(dag, decl, source, axis);
+                let read = shape_scalar(dag, owner, source, axis);
                 let slot = inputs.len();
                 inputs.push(read);
                 RtDim::Node(slot)
@@ -2858,42 +2864,42 @@ mod tests {
 
     /// Build a unary DAG: Load("x") -> op -> output.
     fn build_unary_dag(
-        op_fn: impl FnOnce(&mut Dag, DeclId, NodeId, &TensorType) -> NodeId,
+        op_fn: impl FnOnce(&mut Dag, Owner, NodeId, &TensorType) -> NodeId,
     ) -> (Dag, NodeId, NodeId) {
         let mut dag = Dag::new();
-        let decl = dag.declare("test");
+        let owner = Owner::from(dag.declare("test"));
         let x = dag.add_node(
-            decl,
+            owner,
             RiscOp::Load { name: "x".into() },
             vec![],
             scalar_f64(),
             None,
         );
-        let y = op_fn(&mut dag, decl, x, &scalar_f64());
+        let y = op_fn(&mut dag, owner, x, &scalar_f64());
         (dag, x, y)
     }
 
     /// Build a binary DAG: Load("x"), Load("y") -> op -> output.
     fn build_binary_dag(
-        op_fn: impl FnOnce(&mut Dag, DeclId, NodeId, NodeId, &TensorType) -> NodeId,
+        op_fn: impl FnOnce(&mut Dag, Owner, NodeId, NodeId, &TensorType) -> NodeId,
     ) -> (Dag, NodeId, NodeId, NodeId) {
         let mut dag = Dag::new();
-        let decl = dag.declare("test");
+        let owner = Owner::from(dag.declare("test"));
         let x = dag.add_node(
-            decl,
+            owner,
             RiscOp::Load { name: "x".into() },
             vec![],
             scalar_f64(),
             None,
         );
         let y = dag.add_node(
-            decl,
+            owner,
             RiscOp::Load { name: "y".into() },
             vec![],
             scalar_f64(),
             None,
         );
-        let out = op_fn(&mut dag, decl, x, y, &scalar_f64());
+        let out = op_fn(&mut dag, owner, x, y, &scalar_f64());
         (dag, x, y, out)
     }
 
@@ -2939,8 +2945,8 @@ mod tests {
 
     #[test]
     fn grad_add() {
-        let (dag, x, _y, out) = build_binary_dag(|dag, decl, a, b, ty| {
-            dag.add_node(decl, RiscOp::Add, vec![a, b], ty.clone(), None)
+        let (dag, x, _y, out) = build_binary_dag(|dag, owner, a, b, ty| {
+            dag.add_node(owner, RiscOp::Add, vec![a, b], ty.clone(), None)
         });
         let (a, n) = finite_diff(&dag, out, x, "x", &[("y", 3.0)], 2.0, 1e-5);
         assert_grad_close(a, n);
@@ -2949,8 +2955,8 @@ mod tests {
 
     #[test]
     fn grad_mul() {
-        let (dag, x, _y, out) = build_binary_dag(|dag, decl, a, b, ty| {
-            dag.add_node(decl, RiscOp::Mul, vec![a, b], ty.clone(), None)
+        let (dag, x, _y, out) = build_binary_dag(|dag, owner, a, b, ty| {
+            dag.add_node(owner, RiscOp::Mul, vec![a, b], ty.clone(), None)
         });
         let (a, n) = finite_diff(&dag, out, x, "x", &[("y", 3.0)], 2.0, 1e-5);
         assert_grad_close(a, n);
@@ -2959,8 +2965,8 @@ mod tests {
 
     #[test]
     fn grad_div_lhs() {
-        let (dag, x, _y, out) = build_binary_dag(|dag, decl, a, b, ty| {
-            dag.add_node(decl, RiscOp::Div, vec![a, b], ty.clone(), None)
+        let (dag, x, _y, out) = build_binary_dag(|dag, owner, a, b, ty| {
+            dag.add_node(owner, RiscOp::Div, vec![a, b], ty.clone(), None)
         });
         let (a, n) = finite_diff(&dag, out, x, "x", &[("y", 4.0)], 2.0, 1e-5);
         assert_grad_close(a, n);
@@ -2972,8 +2978,8 @@ mod tests {
 
     #[test]
     fn grad_div_rhs() {
-        let (dag, _x, y, out) = build_binary_dag(|dag, decl, a, b, ty| {
-            dag.add_node(decl, RiscOp::Div, vec![a, b], ty.clone(), None)
+        let (dag, _x, y, out) = build_binary_dag(|dag, owner, a, b, ty| {
+            dag.add_node(owner, RiscOp::Div, vec![a, b], ty.clone(), None)
         });
         let (a, n) = finite_diff(&dag, out, y, "y", &[("x", 2.0)], 4.0, 1e-5);
         assert_grad_close(a, n);
@@ -2985,8 +2991,8 @@ mod tests {
 
     #[test]
     fn grad_recip() {
-        let (dag, x, out) = build_unary_dag(|dag, decl, a, ty| {
-            dag.add_node(decl, RiscOp::Recip, vec![a], ty.clone(), None)
+        let (dag, x, out) = build_unary_dag(|dag, owner, a, ty| {
+            dag.add_node(owner, RiscOp::Recip, vec![a], ty.clone(), None)
         });
         let (a, n) = finite_diff(&dag, out, x, "x", &[], 2.0, 1e-5);
         assert_grad_close(a, n);
@@ -2998,8 +3004,8 @@ mod tests {
 
     #[test]
     fn grad_neg() {
-        let (dag, x, out) = build_unary_dag(|dag, decl, a, ty| {
-            dag.add_node(decl, RiscOp::Neg, vec![a], ty.clone(), None)
+        let (dag, x, out) = build_unary_dag(|dag, owner, a, ty| {
+            dag.add_node(owner, RiscOp::Neg, vec![a], ty.clone(), None)
         });
         let (a, n) = finite_diff(&dag, out, x, "x", &[], 2.0, 1e-5);
         assert_grad_close(a, n);
@@ -3008,8 +3014,8 @@ mod tests {
 
     #[test]
     fn grad_exp() {
-        let (dag, x, out) = build_unary_dag(|dag, decl, a, ty| {
-            dag.add_node(decl, RiscOp::Exp, vec![a], ty.clone(), None)
+        let (dag, x, out) = build_unary_dag(|dag, owner, a, ty| {
+            dag.add_node(owner, RiscOp::Exp, vec![a], ty.clone(), None)
         });
         let (a, n) = finite_diff(&dag, out, x, "x", &[], 1.0, 1e-5);
         assert_grad_close(a, n);
@@ -3019,8 +3025,8 @@ mod tests {
 
     #[test]
     fn grad_log() {
-        let (dag, x, out) = build_unary_dag(|dag, decl, a, ty| {
-            dag.add_node(decl, RiscOp::Log, vec![a], ty.clone(), None)
+        let (dag, x, out) = build_unary_dag(|dag, owner, a, ty| {
+            dag.add_node(owner, RiscOp::Log, vec![a], ty.clone(), None)
         });
         let (a, n) = finite_diff(&dag, out, x, "x", &[], 2.0, 1e-5);
         assert_grad_close(a, n);
@@ -3029,8 +3035,8 @@ mod tests {
 
     #[test]
     fn grad_sin() {
-        let (dag, x, out) = build_unary_dag(|dag, decl, a, ty| {
-            dag.add_node(decl, RiscOp::Sin, vec![a], ty.clone(), None)
+        let (dag, x, out) = build_unary_dag(|dag, owner, a, ty| {
+            dag.add_node(owner, RiscOp::Sin, vec![a], ty.clone(), None)
         });
         let x0 = 1.0;
         let (a, n) = finite_diff(&dag, out, x, "x", &[], x0, 1e-5);
@@ -3041,8 +3047,8 @@ mod tests {
 
     #[test]
     fn grad_sqrt() {
-        let (dag, x, out) = build_unary_dag(|dag, decl, a, ty| {
-            dag.add_node(decl, RiscOp::Sqrt, vec![a], ty.clone(), None)
+        let (dag, x, out) = build_unary_dag(|dag, owner, a, ty| {
+            dag.add_node(owner, RiscOp::Sqrt, vec![a], ty.clone(), None)
         });
         let x0 = 4.0;
         let (a, n) = finite_diff(&dag, out, x, "x", &[], x0, 1e-5);
@@ -3055,15 +3061,15 @@ mod tests {
     fn grad_x_squared() {
         // f(x) = x * x, df/dx = 2x (tests accumulation: x used twice)
         let mut dag = Dag::new();
-        let decl = dag.declare("test");
+        let owner = Owner::from(dag.declare("test"));
         let x = dag.add_node(
-            decl,
+            owner,
             RiscOp::Load { name: "x".into() },
             vec![],
             scalar_f64(),
             None,
         );
-        let x_sq = dag.add_node(decl, RiscOp::Mul, vec![x, x], scalar_f64(), None);
+        let x_sq = dag.add_node(owner, RiscOp::Mul, vec![x, x], scalar_f64(), None);
 
         let (a, n) = finite_diff(&dag, x_sq, x, "x", &[], 3.0, 1e-5);
         assert_grad_close(a, n);
@@ -3073,8 +3079,8 @@ mod tests {
     #[test]
     fn grad_relu_positive() {
         // [05-OP-43]: d/dx relu(x) = 1 when x > 0.
-        let (dag, x, out) = build_unary_dag(|dag, decl, a, ty| {
-            dag.add_node(decl, RiscOp::Relu, vec![a], ty.clone(), None)
+        let (dag, x, out) = build_unary_dag(|dag, owner, a, ty| {
+            dag.add_node(owner, RiscOp::Relu, vec![a], ty.clone(), None)
         });
         let (a, n) = finite_diff(&dag, out, x, "x", &[], 2.0, 1e-5);
         assert_grad_close(a, n);
@@ -3084,8 +3090,8 @@ mod tests {
     #[test]
     fn grad_relu_negative() {
         // [05-OP-43]: d/dx relu(x) = 0 when x < 0.
-        let (dag, x, out) = build_unary_dag(|dag, decl, a, ty| {
-            dag.add_node(decl, RiscOp::Relu, vec![a], ty.clone(), None)
+        let (dag, x, out) = build_unary_dag(|dag, owner, a, ty| {
+            dag.add_node(owner, RiscOp::Relu, vec![a], ty.clone(), None)
         });
         let (a, n) = finite_diff(&dag, out, x, "x", &[], -2.0, 1e-5);
         assert_grad_close(a, n);
@@ -3095,9 +3101,9 @@ mod tests {
     #[test]
     fn grad_chain_exp_neg() {
         // f(x) = exp(-x), df/dx = -exp(-x)
-        let (dag, x, out) = build_unary_dag(|dag, decl, a, ty| {
-            let neg = dag.add_node(decl, RiscOp::Neg, vec![a], ty.clone(), None);
-            dag.add_node(decl, RiscOp::Exp, vec![neg], ty.clone(), None)
+        let (dag, x, out) = build_unary_dag(|dag, owner, a, ty| {
+            let neg = dag.add_node(owner, RiscOp::Neg, vec![a], ty.clone(), None);
+            dag.add_node(owner, RiscOp::Exp, vec![neg], ty.clone(), None)
         });
         let x0 = 1.0;
         let (a, n) = finite_diff(&dag, out, x, "x", &[], x0, 1e-5);
@@ -3110,30 +3116,30 @@ mod tests {
     fn grad_multi_input() {
         // f(x, y, z) = x*y + z
         let mut dag = Dag::new();
-        let decl = dag.declare("test");
+        let owner = Owner::from(dag.declare("test"));
         let x = dag.add_node(
-            decl,
+            owner,
             RiscOp::Load { name: "x".into() },
             vec![],
             scalar_f64(),
             None,
         );
         let y = dag.add_node(
-            decl,
+            owner,
             RiscOp::Load { name: "y".into() },
             vec![],
             scalar_f64(),
             None,
         );
         let z = dag.add_node(
-            decl,
+            owner,
             RiscOp::Load { name: "z".into() },
             vec![],
             scalar_f64(),
             None,
         );
-        let xy = dag.add_node(decl, RiscOp::Mul, vec![x, y], scalar_f64(), None);
-        let out = dag.add_node(decl, RiscOp::Add, vec![xy, z], scalar_f64(), None);
+        let xy = dag.add_node(owner, RiscOp::Mul, vec![x, y], scalar_f64(), None);
+        let out = dag.add_node(owner, RiscOp::Add, vec![xy, z], scalar_f64(), None);
 
         let grad_result = grad_dag(&dag, out, &[x, y, z]).unwrap();
         let mut inputs = UnordMap::new();
@@ -3154,16 +3160,16 @@ mod tests {
     fn grad_accumulation_3x() {
         // f(x) = x + x + x, df/dx = 3
         let mut dag = Dag::new();
-        let decl = dag.declare("test");
+        let owner = Owner::from(dag.declare("test"));
         let x = dag.add_node(
-            decl,
+            owner,
             RiscOp::Load { name: "x".into() },
             vec![],
             scalar_f64(),
             None,
         );
-        let sum1 = dag.add_node(decl, RiscOp::Add, vec![x, x], scalar_f64(), None);
-        let out = dag.add_node(decl, RiscOp::Add, vec![sum1, x], scalar_f64(), None);
+        let sum1 = dag.add_node(owner, RiscOp::Add, vec![x, x], scalar_f64(), None);
+        let out = dag.add_node(owner, RiscOp::Add, vec![sum1, x], scalar_f64(), None);
 
         let grad_result = grad_dag(&dag, out, &[x]).unwrap();
         let mut inputs = UnordMap::new();
@@ -3180,10 +3186,10 @@ mod tests {
         // computes ((+0 + c1) + (c2 + c3)) + c4 = 1 at f32. The historical
         // reverse-consumer left fold computes (((c4 + c3) + c2) + c1) = 0.
         let mut dag = Dag::new();
-        let decl = dag.declare("test");
+        let owner = Owner::from(dag.declare("test"));
         let ty = scalar_f32();
         let x = dag.add_node(
-            decl,
+            owner,
             RiscOp::Load { name: "x".into() },
             vec![],
             ty.clone(),
@@ -3193,17 +3199,17 @@ mod tests {
         let mut uses = Vec::new();
         for coefficient in coefficients {
             let constant = dag.add_node(
-                decl,
+                owner,
                 RiscOp::synth_const(Prim::F32, coefficient),
                 vec![],
                 ty.clone(),
                 None,
             );
-            uses.push(dag.add_node(decl, RiscOp::Mul, vec![x, constant], ty.clone(), None));
+            uses.push(dag.add_node(owner, RiscOp::Mul, vec![x, constant], ty.clone(), None));
         }
-        let left = dag.add_node(decl, RiscOp::Add, vec![uses[0], uses[1]], ty.clone(), None);
-        let right = dag.add_node(decl, RiscOp::Add, vec![uses[2], uses[3]], ty.clone(), None);
-        let output = dag.add_node(decl, RiscOp::Add, vec![left, right], ty, None);
+        let left = dag.add_node(owner, RiscOp::Add, vec![uses[0], uses[1]], ty.clone(), None);
+        let right = dag.add_node(owner, RiscOp::Add, vec![uses[2], uses[3]], ty.clone(), None);
+        let output = dag.add_node(owner, RiscOp::Add, vec![left, right], ty, None);
 
         let grad_result = grad_dag(&dag, output, &[x]).expect("gradient");
         let values = eval_scalar(&grad_result.dag, &UnordMap::from([("x".to_string(), 0.0)]));
@@ -3220,9 +3226,9 @@ mod tests {
             precision: Prim::F32,
         };
         let mut dag = Dag::new();
-        let decl = dag.declare("test");
+        let owner = Owner::from(dag.declare("test"));
         let source = dag.add_node(
-            decl,
+            owner,
             RiscOp::Load { name: "x".into() },
             vec![],
             concrete_ty.clone(),
@@ -3233,8 +3239,8 @@ mod tests {
             precision: Prim::F32,
         };
         let contribution_1 =
-            dag.add_node(decl, RiscOp::Copy, vec![source], concrete_ty.clone(), None);
-        let contribution_2 = dag.add_node(decl, RiscOp::Copy, vec![source], concrete_ty, None);
+            dag.add_node(owner, RiscOp::Copy, vec![source], concrete_ty.clone(), None);
+        let contribution_2 = dag.add_node(owner, RiscOp::Copy, vec![source], concrete_ty, None);
         let mut symbolic_forward = dag.get(source).expect("source exists").clone();
         symbolic_forward.output_type = symbolic_ty;
         let accumulated = balanced_adjoint_sum(
@@ -3264,9 +3270,9 @@ mod tests {
             dims: vec![],
             precision: Prim::Bool,
         };
-        let (dag, x, _y, out) = build_binary_dag(|dag, decl, a, b, _ty| {
+        let (dag, x, _y, out) = build_binary_dag(|dag, owner, a, b, _ty| {
             dag.add_node(
-                decl,
+                owner,
                 RiscOp::Compare(ComparisonKind::CmpLt),
                 vec![a, b],
                 bool_ty.clone(),
@@ -3282,22 +3288,22 @@ mod tests {
     #[test]
     fn grad_const_no_gradient() {
         let mut dag = Dag::new();
-        let decl = dag.declare("test");
+        let owner = Owner::from(dag.declare("test"));
         let c = dag.add_node(
-            decl,
+            owner,
             RiscOp::synth_const(scalar_f64().precision, 5.0),
             vec![],
             scalar_f64(),
             None,
         );
         let x = dag.add_node(
-            decl,
+            owner,
             RiscOp::Load { name: "x".into() },
             vec![],
             scalar_f64(),
             None,
         );
-        let out = dag.add_node(decl, RiscOp::Mul, vec![x, c], scalar_f64(), None);
+        let out = dag.add_node(owner, RiscOp::Mul, vec![x, c], scalar_f64(), None);
 
         let grad_result = grad_dag(&dag, out, &[x]).unwrap();
         assert!(!grad_result.grad_nodes.contains_key(&c));
@@ -3314,16 +3320,16 @@ mod tests {
             precision: chelis_types::types::Prim::F32,
         };
         let mut dag = Dag::new();
-        let decl = dag.declare("test");
+        let owner = Owner::from(dag.declare("test"));
         let x = dag.add_node(
-            decl,
+            owner,
             RiscOp::Load { name: "x".into() },
             vec![],
             vec3_ty.clone(),
             None,
         );
         let out = dag.add_node(
-            decl,
+            owner,
             RiscOp::Sum {
                 axis: 0,
                 accumulator: chelis_types::types::Prim::F32,
@@ -3348,15 +3354,15 @@ mod tests {
     fn grad_second_order() {
         // f(x) = x*x, f'(x) = 2x, f''(x) = 2
         let mut dag = Dag::new();
-        let decl = dag.declare("test");
+        let owner = Owner::from(dag.declare("test"));
         let x = dag.add_node(
-            decl,
+            owner,
             RiscOp::Load { name: "x".into() },
             vec![],
             scalar_f64(),
             None,
         );
-        let x_sq = dag.add_node(decl, RiscOp::Mul, vec![x, x], scalar_f64(), None);
+        let x_sq = dag.add_node(owner, RiscOp::Mul, vec![x, x], scalar_f64(), None);
 
         // First derivative
         let first = grad_dag(&dag, x_sq, &[x]).unwrap();
@@ -3376,17 +3382,17 @@ mod tests {
     #[test]
     fn grad_store_passthrough() {
         let mut dag = Dag::new();
-        let decl = dag.declare("test");
+        let owner = Owner::from(dag.declare("test"));
         let x = dag.add_node(
-            decl,
+            owner,
             RiscOp::Load { name: "x".into() },
             vec![],
             scalar_f64(),
             None,
         );
-        let exp_x = dag.add_node(decl, RiscOp::Exp, vec![x], scalar_f64(), None);
+        let exp_x = dag.add_node(owner, RiscOp::Exp, vec![x], scalar_f64(), None);
         let out = dag.add_node(
-            decl,
+            owner,
             RiscOp::Store { name: "out".into() },
             vec![exp_x],
             scalar_f64(),
@@ -3400,9 +3406,9 @@ mod tests {
     #[test]
     fn grad_cast_passthrough() {
         let mut dag = Dag::new();
-        let decl = dag.declare("test");
+        let owner = Owner::from(dag.declare("test"));
         let x = dag.add_node(
-            decl,
+            owner,
             RiscOp::Load { name: "x".into() },
             vec![],
             scalar_f64(),
@@ -3413,7 +3419,7 @@ mod tests {
             precision: chelis_types::types::Prim::F64,
         };
         let casted = dag.add_node(
-            decl,
+            owner,
             RiscOp::Cast {
                 new_precision: chelis_types::types::Prim::F64,
             },
@@ -3421,7 +3427,7 @@ mod tests {
             f64_ty,
             None,
         );
-        let out = dag.add_node(decl, RiscOp::Exp, vec![casted], scalar_f64(), None);
+        let out = dag.add_node(owner, RiscOp::Exp, vec![casted], scalar_f64(), None);
 
         let grad_result = grad_dag(&dag, out, &[x]).unwrap();
         let mut inputs = UnordMap::new();
@@ -3435,9 +3441,9 @@ mod tests {
     #[test]
     fn grad_cast_to_int_is_zero() {
         let mut dag = Dag::new();
-        let decl = dag.declare("test");
+        let owner = Owner::from(dag.declare("test"));
         let x = dag.add_node(
-            decl,
+            owner,
             RiscOp::Load { name: "x".into() },
             vec![],
             scalar_f32(),
@@ -3448,7 +3454,7 @@ mod tests {
             precision: Prim::Int32,
         };
         let casted = dag.add_node(
-            decl,
+            owner,
             RiscOp::Cast {
                 new_precision: Prim::Int32,
             },
@@ -3457,7 +3463,7 @@ mod tests {
             None,
         );
         let recast = dag.add_node(
-            decl,
+            owner,
             RiscOp::Cast {
                 new_precision: Prim::F32,
             },
@@ -3465,7 +3471,7 @@ mod tests {
             scalar_f32(),
             None,
         );
-        let out = dag.add_node(decl, RiscOp::Add, vec![recast, recast], scalar_f32(), None);
+        let out = dag.add_node(owner, RiscOp::Add, vec![recast, recast], scalar_f32(), None);
 
         let grad_result = grad_dag(&dag, out, &[x]).unwrap();
         let mut inputs = UnordMap::new();
@@ -3492,16 +3498,16 @@ mod tests {
         };
 
         let mut dag = Dag::new();
-        let decl = dag.declare("test");
+        let owner = Owner::from(dag.declare("test"));
         let x = dag.add_node(
-            decl,
+            owner,
             RiscOp::Load { name: "x".into() },
             vec![],
             vec6_ty.clone(),
             None,
         );
         let reshaped = dag.add_node(
-            decl,
+            owner,
             RiscOp::Reshape {
                 new_shape: reshape_target(&mat23_ty.dims),
             },
@@ -3511,7 +3517,7 @@ mod tests {
         );
         // Sum all elements to get a scalar
         let sum0 = dag.add_node(
-            decl,
+            owner,
             RiscOp::Sum {
                 axis: 0,
                 accumulator: chelis_types::types::Prim::F32,
@@ -3524,7 +3530,7 @@ mod tests {
             None,
         );
         let out = dag.add_node(
-            decl,
+            owner,
             RiscOp::Sum {
                 axis: 0,
                 accumulator: chelis_types::types::Prim::F32,
@@ -3561,16 +3567,16 @@ mod tests {
         };
 
         let mut dag = Dag::new();
-        let decl = dag.declare("test");
+        let owner = Owner::from(dag.declare("test"));
         let x = dag.add_node(
-            decl,
+            owner,
             RiscOp::Load { name: "x".into() },
             vec![],
             mat23_ty.clone(),
             None,
         );
         let transposed = dag.add_node(
-            decl,
+            owner,
             RiscOp::Permute { axes: vec![1, 0] },
             vec![x],
             mat32_ty.clone(),
@@ -3578,7 +3584,7 @@ mod tests {
         );
         // Sum all elements for a scalar output
         let sum0 = dag.add_node(
-            decl,
+            owner,
             RiscOp::Sum {
                 axis: 0,
                 accumulator: chelis_types::types::Prim::F32,
@@ -3591,7 +3597,7 @@ mod tests {
             None,
         );
         let out = dag.add_node(
-            decl,
+            owner,
             RiscOp::Sum {
                 axis: 0,
                 accumulator: chelis_types::types::Prim::F32,
@@ -3631,9 +3637,9 @@ mod tests {
             precision: Prim::Int64,
         };
         let mut dag = Dag::new();
-        let decl = dag.declare("test");
+        let owner = Owner::from(dag.declare("test"));
         let target = dag.add_node(
-            decl,
+            owner,
             RiscOp::Load {
                 name: "target".into(),
             },
@@ -3642,7 +3648,7 @@ mod tests {
             None,
         );
         let indices = dag.add_node(
-            decl,
+            owner,
             RiscOp::Load {
                 name: "indices".into(),
             },
@@ -3651,7 +3657,7 @@ mod tests {
             None,
         );
         let updates = dag.add_node(
-            decl,
+            owner,
             RiscOp::Load {
                 name: "updates".into(),
             },
@@ -3660,28 +3666,28 @@ mod tests {
             None,
         );
         let scattered = dag.add_node(
-            decl,
+            owner,
             RiscOp::ScatterAdd { axis: 0 },
             vec![target, indices, updates],
             vec4_ty.clone(),
             None,
         );
         let coefficients = dag.add_node(
-            decl,
+            owner,
             RiscOp::synth_const_tensor(Prim::F32, vec![2.0, 3.0, 5.0, 7.0]),
             vec![],
             vec4_ty.clone(),
             None,
         );
         let weighted = dag.add_node(
-            decl,
+            owner,
             RiscOp::Mul,
             vec![scattered, coefficients],
             vec4_ty,
             None,
         );
         let output = dag.add_node(
-            decl,
+            owner,
             RiscOp::Sum {
                 axis: 0,
                 accumulator: Prim::F32,
@@ -3735,16 +3741,16 @@ mod tests {
         };
 
         let mut dag = Dag::new();
-        let decl = dag.declare("test");
+        let owner = Owner::from(dag.declare("test"));
         let x = dag.add_node(
-            decl,
+            owner,
             RiscOp::Load { name: "x".into() },
             vec![],
             vec3_ty.clone(),
             None,
         );
         let expanded = dag.add_node(
-            decl,
+            owner,
             RiscOp::Expand {
                 axis: 0,
                 size: crate::dag::RtDim::Lit(2),
@@ -3755,7 +3761,7 @@ mod tests {
         );
         // Sum back to scalar
         let sum0 = dag.add_node(
-            decl,
+            owner,
             RiscOp::Sum {
                 axis: 0,
                 accumulator: chelis_types::types::Prim::F32,
@@ -3765,7 +3771,7 @@ mod tests {
             None,
         );
         let out = dag.add_node(
-            decl,
+            owner,
             RiscOp::Sum {
                 axis: 0,
                 accumulator: chelis_types::types::Prim::F32,
@@ -3827,16 +3833,16 @@ mod tests {
         };
 
         let mut dag = Dag::new();
-        let decl = dag.declare("test");
+        let owner = Owner::from(dag.declare("test"));
         let x = dag.add_node(
-            decl,
+            owner,
             RiscOp::Load { name: "x".into() },
             vec![],
             col_ty.clone(),
             None,
         );
         let broadcast = dag.add_node(
-            decl,
+            owner,
             RiscOp::Expand {
                 axis: 1,
                 size: crate::dag::RtDim::Lit(3),
@@ -3846,7 +3852,7 @@ mod tests {
             None,
         );
         let per_row = dag.add_node(
-            decl,
+            owner,
             RiscOp::Sum {
                 axis: 1,
                 accumulator: chelis_types::types::Prim::F32,
@@ -3856,7 +3862,7 @@ mod tests {
             None,
         );
         let out = dag.add_node(
-            decl,
+            owner,
             RiscOp::Sum {
                 axis: 0,
                 accumulator: chelis_types::types::Prim::F32,
@@ -3887,22 +3893,22 @@ mod tests {
     fn grad_mul_by_const() {
         // f(x) = 5 * x, df/dx = 5
         let mut dag = Dag::new();
-        let decl = dag.declare("test");
+        let owner = Owner::from(dag.declare("test"));
         let x = dag.add_node(
-            decl,
+            owner,
             RiscOp::Load { name: "x".into() },
             vec![],
             scalar_f64(),
             None,
         );
         let five = dag.add_node(
-            decl,
+            owner,
             RiscOp::synth_const(scalar_f64().precision, 5.0),
             vec![],
             scalar_f64(),
             None,
         );
-        let out = dag.add_node(decl, RiscOp::Mul, vec![five, x], scalar_f64(), None);
+        let out = dag.add_node(owner, RiscOp::Mul, vec![five, x], scalar_f64(), None);
 
         let (a, n) = finite_diff(&dag, out, x, "x", &[], 3.0, 1e-5);
         assert_grad_close(a, n);
@@ -3913,16 +3919,16 @@ mod tests {
     fn grad_log_chain() {
         // f(x) = log(x^2) = 2*log(x), df/dx = 2/x
         let mut dag = Dag::new();
-        let decl = dag.declare("test");
+        let owner = Owner::from(dag.declare("test"));
         let x = dag.add_node(
-            decl,
+            owner,
             RiscOp::Load { name: "x".into() },
             vec![],
             scalar_f64(),
             None,
         );
-        let x_sq = dag.add_node(decl, RiscOp::Mul, vec![x, x], scalar_f64(), None);
-        let out = dag.add_node(decl, RiscOp::Log, vec![x_sq], scalar_f64(), None);
+        let x_sq = dag.add_node(owner, RiscOp::Mul, vec![x, x], scalar_f64(), None);
+        let out = dag.add_node(owner, RiscOp::Log, vec![x_sq], scalar_f64(), None);
 
         let x0 = 3.0;
         let (a, n) = finite_diff(&dag, out, x, "x", &[], x0, 1e-5);
@@ -3935,16 +3941,16 @@ mod tests {
     fn grad_sin_chain() {
         // f(x) = sin(x^2), df/dx = 2x * cos(x^2)
         let mut dag = Dag::new();
-        let decl = dag.declare("test");
+        let owner = Owner::from(dag.declare("test"));
         let x = dag.add_node(
-            decl,
+            owner,
             RiscOp::Load { name: "x".into() },
             vec![],
             scalar_f64(),
             None,
         );
-        let x_sq = dag.add_node(decl, RiscOp::Mul, vec![x, x], scalar_f64(), None);
-        let out = dag.add_node(decl, RiscOp::Sin, vec![x_sq], scalar_f64(), None);
+        let x_sq = dag.add_node(owner, RiscOp::Mul, vec![x, x], scalar_f64(), None);
+        let out = dag.add_node(owner, RiscOp::Sin, vec![x_sq], scalar_f64(), None);
 
         let x0 = 1.5;
         let (a, n) = finite_diff(&dag, out, x, "x", &[], x0, 1e-5);
@@ -3954,8 +3960,8 @@ mod tests {
     #[test]
     fn grad_max_elem_symmetric() {
         // f(x, y) = max(x, y), test that d/dy = 1 when y > x
-        let (dag, _x, y, out) = build_binary_dag(|dag, decl, a, b, ty| {
-            dag.add_node(decl, RiscOp::MaxElem, vec![a, b], ty.clone(), None)
+        let (dag, _x, y, out) = build_binary_dag(|dag, owner, a, b, ty| {
+            dag.add_node(owner, RiscOp::MaxElem, vec![a, b], ty.clone(), None)
         });
         let (a, n) = finite_diff(&dag, out, y, "y", &[("x", 1.0)], 5.0, 1e-5);
         assert_grad_close(a, n);
@@ -3964,8 +3970,8 @@ mod tests {
 
     #[test]
     fn grad_no_wrt_returns_empty() {
-        let (dag, _x, out) = build_unary_dag(|dag, decl, a, ty| {
-            dag.add_node(decl, RiscOp::Exp, vec![a], ty.clone(), None)
+        let (dag, _x, out) = build_unary_dag(|dag, owner, a, ty| {
+            dag.add_node(owner, RiscOp::Exp, vec![a], ty.clone(), None)
         });
         // Ask for gradient wrt a node that doesn't exist
         let grad_result = grad_dag(&dag, out, &[NodeId(999)]).unwrap();
@@ -3981,8 +3987,8 @@ mod tests {
 
     #[test]
     fn grad_result_is_verified_and_rooted() {
-        let (dag, x, out) = build_unary_dag(|dag, decl, a, ty| {
-            dag.add_node(decl, RiscOp::Exp, vec![a], ty.clone(), None)
+        let (dag, x, out) = build_unary_dag(|dag, owner, a, ty| {
+            dag.add_node(owner, RiscOp::Exp, vec![a], ty.clone(), None)
         });
         let grad_result = grad_dag(&dag, out, &[x]).unwrap();
         assert!(grad_result.dag.is_root(out));
@@ -4012,9 +4018,9 @@ mod tests {
     #[test]
     fn adv_output_node_doesnt_exist() {
         let mut dag = Dag::new();
-        let decl = dag.declare("test");
+        let owner = Owner::from(dag.declare("test"));
         let _x = dag.add_node(
-            decl,
+            owner,
             RiscOp::Load { name: "x".into() },
             vec![],
             scalar_f64(),
@@ -4034,15 +4040,15 @@ mod tests {
             precision: Prim::F32,
         };
         let mut dag = Dag::new();
-        let decl = dag.declare("test");
+        let owner = Owner::from(dag.declare("test"));
         let x = dag.add_node(
-            decl,
+            owner,
             RiscOp::Load { name: "x".into() },
             vec![],
             vec2_ty.clone(),
             None,
         );
-        let y = dag.add_node(decl, RiscOp::Exp, vec![x], vec2_ty, None);
+        let y = dag.add_node(owner, RiscOp::Exp, vec![x], vec2_ty, None);
         assert!(
             grad_dag(&dag, y, &[x]).is_none(),
             "non-scalar outputs should be rejected without an explicit seed gradient"
@@ -4053,23 +4059,23 @@ mod tests {
     fn adv_wrt_non_leaf_node() {
         // Ask for gradient wrt a non-leaf node (e.g., an Add node)
         let mut dag = Dag::new();
-        let decl = dag.declare("test");
+        let owner = Owner::from(dag.declare("test"));
         let x = dag.add_node(
-            decl,
+            owner,
             RiscOp::Load { name: "x".into() },
             vec![],
             scalar_f64(),
             None,
         );
         let y = dag.add_node(
-            decl,
+            owner,
             RiscOp::Load { name: "y".into() },
             vec![],
             scalar_f64(),
             None,
         );
-        let add_node = dag.add_node(decl, RiscOp::Add, vec![x, y], scalar_f64(), None);
-        let out = dag.add_node(decl, RiscOp::Exp, vec![add_node], scalar_f64(), None);
+        let add_node = dag.add_node(owner, RiscOp::Add, vec![x, y], scalar_f64(), None);
+        let out = dag.add_node(owner, RiscOp::Exp, vec![add_node], scalar_f64(), None);
 
         // wrt the Add node, not a leaf
         let grad_result = grad_dag(&dag, out, &[add_node]).unwrap();
@@ -4092,8 +4098,8 @@ mod tests {
     #[test]
     fn adv_exp_at_2() {
         // d(exp(x))/dx at x=2.0 should be exp(2) ≈ 7.389
-        let (dag, x, out) = build_unary_dag(|dag, decl, a, ty| {
-            dag.add_node(decl, RiscOp::Exp, vec![a], ty.clone(), None)
+        let (dag, x, out) = build_unary_dag(|dag, owner, a, ty| {
+            dag.add_node(owner, RiscOp::Exp, vec![a], ty.clone(), None)
         });
         let (a, n) = finite_diff(&dag, out, x, "x", &[], 2.0, 1e-5);
         assert_grad_close(a, n);
@@ -4107,8 +4113,8 @@ mod tests {
     #[test]
     fn adv_log_at_0_5() {
         // d(log(x))/dx at x=0.5 should be 2.0
-        let (dag, x, out) = build_unary_dag(|dag, decl, a, ty| {
-            dag.add_node(decl, RiscOp::Log, vec![a], ty.clone(), None)
+        let (dag, x, out) = build_unary_dag(|dag, owner, a, ty| {
+            dag.add_node(owner, RiscOp::Log, vec![a], ty.clone(), None)
         });
         let (a, n) = finite_diff(&dag, out, x, "x", &[], 0.5, 1e-5);
         assert_grad_close(a, n);
@@ -4121,8 +4127,8 @@ mod tests {
     #[test]
     fn adv_sin_at_1() {
         // d(sin(x))/dx at x=1.0 should be cos(1) ≈ 0.5403
-        let (dag, x, out) = build_unary_dag(|dag, decl, a, ty| {
-            dag.add_node(decl, RiscOp::Sin, vec![a], ty.clone(), None)
+        let (dag, x, out) = build_unary_dag(|dag, owner, a, ty| {
+            dag.add_node(owner, RiscOp::Sin, vec![a], ty.clone(), None)
         });
         let (a, n) = finite_diff(&dag, out, x, "x", &[], 1.0, 1e-5);
         assert_grad_close(a, n);
@@ -4136,8 +4142,8 @@ mod tests {
     #[test]
     fn adv_sqrt_at_4() {
         // d(sqrt(x))/dx at x=4.0 should be 0.25
-        let (dag, x, out) = build_unary_dag(|dag, decl, a, ty| {
-            dag.add_node(decl, RiscOp::Sqrt, vec![a], ty.clone(), None)
+        let (dag, x, out) = build_unary_dag(|dag, owner, a, ty| {
+            dag.add_node(owner, RiscOp::Sqrt, vec![a], ty.clone(), None)
         });
         let (a, n) = finite_diff(&dag, out, x, "x", &[], 4.0, 1e-5);
         assert_grad_close(a, n);
@@ -4150,8 +4156,8 @@ mod tests {
     #[test]
     fn adv_max_x_gt_y() {
         // d(max(x,y))/dx at x=3, y=1 should be 1.0
-        let (dag, x, _y, out) = build_binary_dag(|dag, decl, a, b, ty| {
-            dag.add_node(decl, RiscOp::MaxElem, vec![a, b], ty.clone(), None)
+        let (dag, x, _y, out) = build_binary_dag(|dag, owner, a, b, ty| {
+            dag.add_node(owner, RiscOp::MaxElem, vec![a, b], ty.clone(), None)
         });
         let (a, n) = finite_diff(&dag, out, x, "x", &[("y", 1.0)], 3.0, 1e-5);
         assert_grad_close(a, n);
@@ -4164,8 +4170,8 @@ mod tests {
     #[test]
     fn adv_max_x_lt_y() {
         // d(max(x,y))/dx at x=1, y=3 should be 0.0
-        let (dag, x, _y, out) = build_binary_dag(|dag, decl, a, b, ty| {
-            dag.add_node(decl, RiscOp::MaxElem, vec![a, b], ty.clone(), None)
+        let (dag, x, _y, out) = build_binary_dag(|dag, owner, a, b, ty| {
+            dag.add_node(owner, RiscOp::MaxElem, vec![a, b], ty.clone(), None)
         });
         let (a, n) = finite_diff(&dag, out, x, "x", &[("y", 3.0)], 1.0, 1e-5);
         assert_grad_close(a, n);
@@ -4178,8 +4184,8 @@ mod tests {
     #[test]
     fn adv_max_equal_inputs() {
         // Phase 0 tie-break convention routes the gradient to the left-hand side.
-        let (dag, x, y, out) = build_binary_dag(|dag, decl, a, b, ty| {
-            dag.add_node(decl, RiscOp::MaxElem, vec![a, b], ty.clone(), None)
+        let (dag, x, y, out) = build_binary_dag(|dag, owner, a, b, ty| {
+            dag.add_node(owner, RiscOp::MaxElem, vec![a, b], ty.clone(), None)
         });
         let grad_result = grad_dag(&dag, out, &[x, y]).unwrap();
         let mut inputs = UnordMap::new();
@@ -4200,9 +4206,9 @@ mod tests {
     #[test]
     fn adv_exp_log_identity() {
         // d(exp(log(x)))/dx should be 1.0 (since exp(log(x)) = x)
-        let (dag, x, out) = build_unary_dag(|dag, decl, a, ty| {
-            let log_x = dag.add_node(decl, RiscOp::Log, vec![a], ty.clone(), None);
-            dag.add_node(decl, RiscOp::Exp, vec![log_x], ty.clone(), None)
+        let (dag, x, out) = build_unary_dag(|dag, owner, a, ty| {
+            let log_x = dag.add_node(owner, RiscOp::Log, vec![a], ty.clone(), None);
+            dag.add_node(owner, RiscOp::Exp, vec![log_x], ty.clone(), None)
         });
         let x0 = 2.7;
         let (a, n) = finite_diff(&dag, out, x, "x", &[], x0, 1e-5);
@@ -4216,9 +4222,9 @@ mod tests {
     #[test]
     fn adv_x_times_exp_x() {
         // d(x * exp(x))/dx = (1+x) * exp(x)
-        let (dag, x, out) = build_unary_dag(|dag, decl, a, ty| {
-            let exp_x = dag.add_node(decl, RiscOp::Exp, vec![a], ty.clone(), None);
-            dag.add_node(decl, RiscOp::Mul, vec![a, exp_x], ty.clone(), None)
+        let (dag, x, out) = build_unary_dag(|dag, owner, a, ty| {
+            let exp_x = dag.add_node(owner, RiscOp::Exp, vec![a], ty.clone(), None);
+            dag.add_node(owner, RiscOp::Mul, vec![a, exp_x], ty.clone(), None)
         });
         let x0 = 1.5;
         let (a, n) = finite_diff(&dag, out, x, "x", &[], x0, 1e-5);
@@ -4233,9 +4239,9 @@ mod tests {
     #[test]
     fn adv_sin_x_squared() {
         // d(sin(x^2))/dx = 2x * cos(x^2)
-        let (dag, x, out) = build_unary_dag(|dag, decl, a, ty| {
-            let x_sq = dag.add_node(decl, RiscOp::Mul, vec![a, a], ty.clone(), None);
-            dag.add_node(decl, RiscOp::Sin, vec![x_sq], ty.clone(), None)
+        let (dag, x, out) = build_unary_dag(|dag, owner, a, ty| {
+            let x_sq = dag.add_node(owner, RiscOp::Mul, vec![a, a], ty.clone(), None);
+            dag.add_node(owner, RiscOp::Sin, vec![x_sq], ty.clone(), None)
         });
         let x0 = 1.5;
         let (a, n) = finite_diff(&dag, out, x, "x", &[], x0, 1e-5);
@@ -4252,19 +4258,19 @@ mod tests {
         // sigmoid(x) = 1 / (1 + exp(-x))
         // Lowered as: div(1, add(1, exp(neg(x))))
         // d(sigmoid)/dx = sigmoid * (1 - sigmoid)
-        let (dag, x, out) = build_unary_dag(|dag, decl, a, ty| {
-            let neg_x = dag.add_node(decl, RiscOp::Neg, vec![a], ty.clone(), None);
-            let exp_neg_x = dag.add_node(decl, RiscOp::Exp, vec![neg_x], ty.clone(), None);
+        let (dag, x, out) = build_unary_dag(|dag, owner, a, ty| {
+            let neg_x = dag.add_node(owner, RiscOp::Neg, vec![a], ty.clone(), None);
+            let exp_neg_x = dag.add_node(owner, RiscOp::Exp, vec![neg_x], ty.clone(), None);
             let one = dag.add_node(
-                decl,
+                owner,
                 RiscOp::synth_const(ty.precision, 1.0),
                 vec![],
                 ty.clone(),
                 None,
             );
-            let denom = dag.add_node(decl, RiscOp::Add, vec![one, exp_neg_x], ty.clone(), None);
+            let denom = dag.add_node(owner, RiscOp::Add, vec![one, exp_neg_x], ty.clone(), None);
             // div(1, denom) = 1 * recip(denom) = exp(-log(denom))
-            crate::tier2::lower_div(decl, dag, one, denom, ty, None)
+            crate::tier2::lower_div(owner, dag, one, denom, ty, None)
         });
         let x0 = -0.3;
         let (a, n) = finite_diff(&dag, out, x, "x", &[], x0, 1e-5);
@@ -4284,16 +4290,16 @@ mod tests {
         // If grad_out is Const(0) everywhere (degenerate), gradient should still compute.
         // This happens when the output doesn't depend on x but we ask for dx anyway.
         let mut dag = Dag::new();
-        let decl = dag.declare("test");
+        let owner = Owner::from(dag.declare("test"));
         let x = dag.add_node(
-            decl,
+            owner,
             RiscOp::Load { name: "x".into() },
             vec![],
             scalar_f64(),
             None,
         );
         let c = dag.add_node(
-            decl,
+            owner,
             RiscOp::synth_const(scalar_f64().precision, 42.0),
             vec![],
             scalar_f64(),
@@ -4319,18 +4325,18 @@ mod tests {
     fn adv_node_used_5_times() {
         // add(add(add(add(x, x), x), x), x) = 5x, gradient should be 5
         let mut dag = Dag::new();
-        let decl = dag.declare("test");
+        let owner = Owner::from(dag.declare("test"));
         let x = dag.add_node(
-            decl,
+            owner,
             RiscOp::Load { name: "x".into() },
             vec![],
             scalar_f64(),
             None,
         );
-        let s1 = dag.add_node(decl, RiscOp::Add, vec![x, x], scalar_f64(), None);
-        let s2 = dag.add_node(decl, RiscOp::Add, vec![s1, x], scalar_f64(), None);
-        let s3 = dag.add_node(decl, RiscOp::Add, vec![s2, x], scalar_f64(), None);
-        let out = dag.add_node(decl, RiscOp::Add, vec![s3, x], scalar_f64(), None);
+        let s1 = dag.add_node(owner, RiscOp::Add, vec![x, x], scalar_f64(), None);
+        let s2 = dag.add_node(owner, RiscOp::Add, vec![s1, x], scalar_f64(), None);
+        let s3 = dag.add_node(owner, RiscOp::Add, vec![s2, x], scalar_f64(), None);
+        let out = dag.add_node(owner, RiscOp::Add, vec![s3, x], scalar_f64(), None);
 
         let grad_result = grad_dag(&dag, out, &[x]).unwrap();
         let mut inputs = UnordMap::new();
@@ -4346,11 +4352,11 @@ mod tests {
     #[test]
     fn adv_deep_neg_chain_even() {
         // neg(neg(neg(neg(x)))) = x, gradient = 1.0
-        let (dag, x, out) = build_unary_dag(|dag, decl, a, ty| {
-            let n1 = dag.add_node(decl, RiscOp::Neg, vec![a], ty.clone(), None);
-            let n2 = dag.add_node(decl, RiscOp::Neg, vec![n1], ty.clone(), None);
-            let n3 = dag.add_node(decl, RiscOp::Neg, vec![n2], ty.clone(), None);
-            dag.add_node(decl, RiscOp::Neg, vec![n3], ty.clone(), None)
+        let (dag, x, out) = build_unary_dag(|dag, owner, a, ty| {
+            let n1 = dag.add_node(owner, RiscOp::Neg, vec![a], ty.clone(), None);
+            let n2 = dag.add_node(owner, RiscOp::Neg, vec![n1], ty.clone(), None);
+            let n3 = dag.add_node(owner, RiscOp::Neg, vec![n2], ty.clone(), None);
+            dag.add_node(owner, RiscOp::Neg, vec![n3], ty.clone(), None)
         });
         let (a, n) = finite_diff(&dag, out, x, "x", &[], 2.7, 1e-5);
         assert_grad_close(a, n);
@@ -4363,10 +4369,10 @@ mod tests {
     #[test]
     fn adv_deep_neg_chain_odd() {
         // neg(neg(neg(x))) = -x, gradient = -1.0
-        let (dag, x, out) = build_unary_dag(|dag, decl, a, ty| {
-            let n1 = dag.add_node(decl, RiscOp::Neg, vec![a], ty.clone(), None);
-            let n2 = dag.add_node(decl, RiscOp::Neg, vec![n1], ty.clone(), None);
-            dag.add_node(decl, RiscOp::Neg, vec![n2], ty.clone(), None)
+        let (dag, x, out) = build_unary_dag(|dag, owner, a, ty| {
+            let n1 = dag.add_node(owner, RiscOp::Neg, vec![a], ty.clone(), None);
+            let n2 = dag.add_node(owner, RiscOp::Neg, vec![n1], ty.clone(), None);
+            dag.add_node(owner, RiscOp::Neg, vec![n2], ty.clone(), None)
         });
         let (a, n) = finite_diff(&dag, out, x, "x", &[], 2.7, 1e-5);
         assert_grad_close(a, n);
@@ -4394,23 +4400,23 @@ mod tests {
         };
 
         let mut dag = Dag::new();
-        let decl = dag.declare("test");
+        let owner = Owner::from(dag.declare("test"));
         let x = dag.add_node(
-            decl,
+            owner,
             RiscOp::Load { name: "x".into() },
             vec![],
             mat23_ty.clone(),
             None,
         );
         let maxr = dag.add_node(
-            decl,
+            owner,
             RiscOp::MaxReduce { axis: 0 },
             vec![x],
             vec3_ty.clone(),
             None,
         );
         let out = dag.add_node(
-            decl,
+            owner,
             RiscOp::Sum {
                 axis: 0,
                 accumulator: chelis_types::types::Prim::F64,
@@ -4501,23 +4507,23 @@ mod tests {
         };
 
         let mut dag = Dag::new();
-        let decl = dag.declare("test");
+        let owner = Owner::from(dag.declare("test"));
         let x = dag.add_node(
-            decl,
+            owner,
             RiscOp::Load { name: "x".into() },
             vec![],
             mat22_ty.clone(),
             None,
         );
         let maxr = dag.add_node(
-            decl,
+            owner,
             RiscOp::MaxReduce { axis: 0 },
             vec![x],
             vec2_ty.clone(),
             None,
         );
         let out = dag.add_node(
-            decl,
+            owner,
             RiscOp::Sum {
                 axis: 0,
                 accumulator: chelis_types::types::Prim::F32,
@@ -4557,23 +4563,23 @@ mod tests {
         };
 
         let mut dag = Dag::new();
-        let decl = dag.declare("test");
+        let owner = Owner::from(dag.declare("test"));
         let x = dag.add_node(
-            decl,
+            owner,
             RiscOp::Load { name: "x".into() },
             vec![],
             mat23_ty.clone(),
             None,
         );
         let maxr = dag.add_node(
-            decl,
+            owner,
             RiscOp::MaxReduce { axis: 1 },
             vec![x],
             vec2_ty.clone(),
             None,
         );
         let out = dag.add_node(
-            decl,
+            owner,
             RiscOp::Sum {
                 axis: 0,
                 accumulator: chelis_types::types::Prim::F64,
@@ -4651,8 +4657,8 @@ mod tests {
     fn adv_log_at_negative_input() {
         // log(x) at x=-1 is NaN. What does the gradient look like?
         // This shouldn't crash.
-        let (dag, x, out) = build_unary_dag(|dag, decl, a, ty| {
-            dag.add_node(decl, RiscOp::Log, vec![a], ty.clone(), None)
+        let (dag, x, out) = build_unary_dag(|dag, owner, a, ty| {
+            dag.add_node(owner, RiscOp::Log, vec![a], ty.clone(), None)
         });
         let grad_result = grad_dag(&dag, out, &[x]).unwrap();
         let mut inputs = UnordMap::new();
@@ -4668,8 +4674,8 @@ mod tests {
     fn adv_sqrt_at_zero() {
         // d(sqrt(x))/dx = 1/(2*sqrt(x)), at x=0 this is infinity.
         // Just verify no crash.
-        let (dag, x, out) = build_unary_dag(|dag, decl, a, ty| {
-            dag.add_node(decl, RiscOp::Sqrt, vec![a], ty.clone(), None)
+        let (dag, x, out) = build_unary_dag(|dag, owner, a, ty| {
+            dag.add_node(owner, RiscOp::Sqrt, vec![a], ty.clone(), None)
         });
         let grad_result = grad_dag(&dag, out, &[x]).unwrap();
         let mut inputs = UnordMap::new();
@@ -4686,22 +4692,22 @@ mod tests {
         // a / b is the forward output). At a=6, b=3 the expected
         // gradients are d/da = 1/3, d/db = -6/9 = -2/3.
         let mut dag = Dag::new();
-        let decl = dag.declare("test");
+        let owner = Owner::from(dag.declare("test"));
         let a = dag.add_node(
-            decl,
+            owner,
             RiscOp::Load { name: "a".into() },
             vec![],
             scalar_f64(),
             None,
         );
         let b = dag.add_node(
-            decl,
+            owner,
             RiscOp::Load { name: "b".into() },
             vec![],
             scalar_f64(),
             None,
         );
-        let out = crate::tier2::lower_div(decl, &mut dag, a, b, &scalar_f64(), None);
+        let out = crate::tier2::lower_div(owner, &mut dag, a, b, &scalar_f64(), None);
 
         // Test d/da
         let (ana_a, num_a) = finite_diff(&dag, out, a, "a", &[("b", 3.0)], 6.0, 1e-5);
@@ -4737,16 +4743,16 @@ mod tests {
         };
 
         let mut dag = Dag::new();
-        let decl = dag.declare("test");
+        let owner = Owner::from(dag.declare("test"));
         let x = dag.add_node(
-            decl,
+            owner,
             RiscOp::Load { name: "x".into() },
             vec![],
             vec3_ty.clone(),
             None,
         );
         let padded = dag.add_node(
-            decl,
+            owner,
             RiscOp::zero_pad(
                 chelis_types::types::Prim::F32,
                 vec![(RtDim::Lit(1), RtDim::Lit(1))],
@@ -4756,7 +4762,7 @@ mod tests {
             None,
         );
         let out = dag.add_node(
-            decl,
+            owner,
             RiscOp::Sum {
                 axis: 0,
                 accumulator: chelis_types::types::Prim::F32,
@@ -4793,16 +4799,16 @@ mod tests {
         };
 
         let mut dag = Dag::new();
-        let decl = dag.declare("test");
+        let owner = Owner::from(dag.declare("test"));
         let x = dag.add_node(
-            decl,
+            owner,
             RiscOp::Load { name: "x".into() },
             vec![],
             vec5_ty.clone(),
             None,
         );
         let shrunk = dag.add_node(
-            decl,
+            owner,
             RiscOp::Shrink {
                 bounds: vec![(RtDim::Lit(1), RtDim::Lit(4))],
             },
@@ -4811,7 +4817,7 @@ mod tests {
             None,
         );
         let out = dag.add_node(
-            decl,
+            owner,
             RiscOp::Sum {
                 axis: 0,
                 accumulator: chelis_types::types::Prim::F32,
@@ -4840,8 +4846,8 @@ mod tests {
 
     #[test]
     fn adv_max_elem_spec_compliance() {
-        let (dag, x, _y, out) = build_binary_dag(|dag, decl, a, b, ty| {
-            dag.add_node(decl, RiscOp::MaxElem, vec![a, b], ty.clone(), None)
+        let (dag, x, _y, out) = build_binary_dag(|dag, owner, a, b, ty| {
+            dag.add_node(owner, RiscOp::MaxElem, vec![a, b], ty.clone(), None)
         });
         let grad_result = grad_dag(&dag, out, &[x]).unwrap();
         let mut inputs = UnordMap::new();
@@ -4869,15 +4875,15 @@ mod tests {
         // f(x) = log(x), f'(x) = 1/x, f''(x) = -1/x^2
         // At x=2: f''(2) = -0.25
         let mut dag = Dag::new();
-        let decl = dag.declare("test");
+        let owner = Owner::from(dag.declare("test"));
         let x = dag.add_node(
-            decl,
+            owner,
             RiscOp::Load { name: "x".into() },
             vec![],
             scalar_f64(),
             None,
         );
-        let out = dag.add_node(decl, RiscOp::Log, vec![x], scalar_f64(), None);
+        let out = dag.add_node(owner, RiscOp::Log, vec![x], scalar_f64(), None);
 
         let first = grad_dag(&dag, out, &[x]).unwrap();
         let dx_node = first.grad_nodes[&x];
@@ -4914,16 +4920,16 @@ mod tests {
         };
 
         let mut dag = Dag::new();
-        let decl = dag.declare("test");
+        let owner = Owner::from(dag.declare("test"));
         let x = dag.add_node(
-            decl,
+            owner,
             RiscOp::Load { name: "x".into() },
             vec![],
             vec4_ty.clone(),
             None,
         );
         let strided = dag.add_node(
-            decl,
+            owner,
             RiscOp::Stride {
                 strides: vec![RtDim::Lit(2)],
             },
@@ -4932,7 +4938,7 @@ mod tests {
             None,
         );
         let out = dag.add_node(
-            decl,
+            owner,
             RiscOp::Sum {
                 axis: 0,
                 accumulator: chelis_types::types::Prim::F32,
@@ -4964,29 +4970,29 @@ mod tests {
         // to catch any issues with specific values.
 
         // exp at 2.7
-        let (dag, x, out) = build_unary_dag(|dag, decl, a, ty| {
-            dag.add_node(decl, RiscOp::Exp, vec![a], ty.clone(), None)
+        let (dag, x, out) = build_unary_dag(|dag, owner, a, ty| {
+            dag.add_node(owner, RiscOp::Exp, vec![a], ty.clone(), None)
         });
         let (a, n) = finite_diff(&dag, out, x, "x", &[], 2.7, 1e-5);
         assert_grad_close(a, n);
 
         // log at 1.5
-        let (dag, x, out) = build_unary_dag(|dag, decl, a, ty| {
-            dag.add_node(decl, RiscOp::Log, vec![a], ty.clone(), None)
+        let (dag, x, out) = build_unary_dag(|dag, owner, a, ty| {
+            dag.add_node(owner, RiscOp::Log, vec![a], ty.clone(), None)
         });
         let (a, n) = finite_diff(&dag, out, x, "x", &[], 1.5, 1e-5);
         assert_grad_close(a, n);
 
         // sin at -0.3
-        let (dag, x, out) = build_unary_dag(|dag, decl, a, ty| {
-            dag.add_node(decl, RiscOp::Sin, vec![a], ty.clone(), None)
+        let (dag, x, out) = build_unary_dag(|dag, owner, a, ty| {
+            dag.add_node(owner, RiscOp::Sin, vec![a], ty.clone(), None)
         });
         let (a, n) = finite_diff(&dag, out, x, "x", &[], -0.3, 1e-5);
         assert_grad_close(a, n);
 
         // sqrt at 2.7
-        let (dag, x, out) = build_unary_dag(|dag, decl, a, ty| {
-            dag.add_node(decl, RiscOp::Sqrt, vec![a], ty.clone(), None)
+        let (dag, x, out) = build_unary_dag(|dag, owner, a, ty| {
+            dag.add_node(owner, RiscOp::Sqrt, vec![a], ty.clone(), None)
         });
         let (a, n) = finite_diff(&dag, out, x, "x", &[], 2.7, 1e-5);
         assert_grad_close(a, n);
@@ -5014,17 +5020,17 @@ mod tests {
         };
 
         let mut dag = Dag::new();
-        let decl = dag.declare("test");
+        let owner = Owner::from(dag.declare("test"));
         let x = dag.add_node(
-            decl,
+            owner,
             RiscOp::Load { name: "x".into() },
             vec![],
             mat23.clone(),
             None,
         );
-        let minr = dag.add_node(decl, RiscOp::MinReduce { axis: 0 }, vec![x], vec3, None);
+        let minr = dag.add_node(owner, RiscOp::MinReduce { axis: 0 }, vec![x], vec3, None);
         let out = dag.add_node(
-            decl,
+            owner,
             RiscOp::Sum {
                 axis: 0,
                 accumulator: chelis_types::types::Prim::F32,
@@ -5068,10 +5074,10 @@ mod tests {
             precision: Prim::F32,
         };
         let mut dag = Dag::new();
-        let decl = dag.declare("test");
-        let x = dag.add_node(decl, RiscOp::Load { name: "x".into() }, vec![], vec4, None);
+        let owner = Owner::from(dag.declare("test"));
+        let x = dag.add_node(owner, RiscOp::Load { name: "x".into() }, vec![], vec4, None);
         let p = dag.add_node(
-            decl,
+            owner,
             RiscOp::ProdReduce { axis: 0 },
             vec![x],
             scalar_f32(),
@@ -5120,10 +5126,10 @@ mod tests {
             precision: Prim::F32,
         };
         let mut dag = Dag::new();
-        let decl = dag.declare("test");
-        let x = dag.add_node(decl, RiscOp::Load { name: "x".into() }, vec![], vec4, None);
+        let owner = Owner::from(dag.declare("test"));
+        let x = dag.add_node(owner, RiscOp::Load { name: "x".into() }, vec![], vec4, None);
         let p = dag.add_node(
-            decl,
+            owner,
             RiscOp::ProdReduce { axis: 0 },
             vec![x],
             scalar_f32(),
@@ -5169,11 +5175,11 @@ mod tests {
             precision: Prim::F32,
         };
         let mut dag = Dag::new();
-        let decl = dag.declare("test");
-        let x = dag.add_node(decl, RiscOp::Load { name: "x".into() }, vec![], mat23, None);
-        let am = dag.add_node(decl, RiscOp::Argmax { axis: 0 }, vec![x], vec3, None);
+        let owner = Owner::from(dag.declare("test"));
+        let x = dag.add_node(owner, RiscOp::Load { name: "x".into() }, vec![], mat23, None);
+        let am = dag.add_node(owner, RiscOp::Argmax { axis: 0 }, vec![x], vec3, None);
         let out = dag.add_node(
-            decl,
+            owner,
             RiscOp::Sum {
                 axis: 0,
                 accumulator: chelis_types::types::Prim::F32,
@@ -5211,11 +5217,11 @@ mod tests {
             precision: Prim::F32,
         };
         let mut dag = Dag::new();
-        let decl = dag.declare("test");
-        let x = dag.add_node(decl, RiscOp::Load { name: "x".into() }, vec![], mat23, None);
-        let am = dag.add_node(decl, RiscOp::Argmin { axis: 1 }, vec![x], vec3, None);
+        let owner = Owner::from(dag.declare("test"));
+        let x = dag.add_node(owner, RiscOp::Load { name: "x".into() }, vec![], mat23, None);
+        let am = dag.add_node(owner, RiscOp::Argmin { axis: 1 }, vec![x], vec3, None);
         let out = dag.add_node(
-            decl,
+            owner,
             RiscOp::Sum {
                 axis: 0,
                 accumulator: chelis_types::types::Prim::F32,
@@ -5248,8 +5254,8 @@ mod tests {
     fn grad_cos() {
         // d/dx cos(x) = -sin(x)
         // At x=0.5: -sin(0.5) ≈ -0.4794
-        let (dag, x, out) = build_unary_dag(|dag, decl, a, ty| {
-            dag.add_node(decl, RiscOp::Cos, vec![a], ty.clone(), None)
+        let (dag, x, out) = build_unary_dag(|dag, owner, a, ty| {
+            dag.add_node(owner, RiscOp::Cos, vec![a], ty.clone(), None)
         });
         let (a, n) = finite_diff(&dag, out, x, "x", &[], 0.5, 1e-5);
         assert_grad_close(a, n);
@@ -5264,8 +5270,8 @@ mod tests {
     fn grad_tan() {
         // d/dx tan(x) = 1 / cos²(x)
         // At x=0.5: 1/cos²(0.5) ≈ 1.298
-        let (dag, x, out) = build_unary_dag(|dag, decl, a, ty| {
-            dag.add_node(decl, RiscOp::Tan, vec![a], ty.clone(), None)
+        let (dag, x, out) = build_unary_dag(|dag, owner, a, ty| {
+            dag.add_node(owner, RiscOp::Tan, vec![a], ty.clone(), None)
         });
         let (a, n) = finite_diff(&dag, out, x, "x", &[], 0.5, 1e-5);
         assert_grad_close(a, n);
@@ -5275,8 +5281,8 @@ mod tests {
     fn grad_atan() {
         // d/dx atan(x) = 1 / (1 + x²)
         // At x=1.0: 1 / (1+1) = 0.5
-        let (dag, x, out) = build_unary_dag(|dag, decl, a, ty| {
-            dag.add_node(decl, RiscOp::Atan, vec![a], ty.clone(), None)
+        let (dag, x, out) = build_unary_dag(|dag, owner, a, ty| {
+            dag.add_node(owner, RiscOp::Atan, vec![a], ty.clone(), None)
         });
         let (a, n) = finite_diff(&dag, out, x, "x", &[], 1.0, 1e-5);
         assert_grad_close(a, n);
@@ -5289,8 +5295,8 @@ mod tests {
     #[test]
     fn grad_abs_positive() {
         // d/dx abs(x) = 1 for x > 0
-        let (dag, x, out) = build_unary_dag(|dag, decl, a, ty| {
-            dag.add_node(decl, RiscOp::Abs, vec![a], ty.clone(), None)
+        let (dag, x, out) = build_unary_dag(|dag, owner, a, ty| {
+            dag.add_node(owner, RiscOp::Abs, vec![a], ty.clone(), None)
         });
         let (a, n) = finite_diff(&dag, out, x, "x", &[], 2.0, 1e-5);
         assert_grad_close(a, n);
@@ -5303,8 +5309,8 @@ mod tests {
     #[test]
     fn grad_abs_negative() {
         // d/dx abs(x) = -1 for x < 0
-        let (dag, x, out) = build_unary_dag(|dag, decl, a, ty| {
-            dag.add_node(decl, RiscOp::Abs, vec![a], ty.clone(), None)
+        let (dag, x, out) = build_unary_dag(|dag, owner, a, ty| {
+            dag.add_node(owner, RiscOp::Abs, vec![a], ty.clone(), None)
         });
         let (a, n) = finite_diff(&dag, out, x, "x", &[], -2.0, 1e-5);
         assert_grad_close(a, n);
@@ -5317,8 +5323,8 @@ mod tests {
     #[test]
     fn floor_on_grad_path_errors_cleanly() {
         // floor is non-differentiable: grad_dag_checked must return a clean error.
-        let (dag, x, out) = build_unary_dag(|dag, decl, a, ty| {
-            dag.add_node(decl, RiscOp::Floor, vec![a], ty.clone(), None)
+        let (dag, x, out) = build_unary_dag(|dag, owner, a, ty| {
+            dag.add_node(owner, RiscOp::Floor, vec![a], ty.clone(), None)
         });
         let err = match grad_dag_checked(&dag, out, &[x]) {
             Err(e) => e,
@@ -5340,8 +5346,8 @@ mod tests {
     #[test]
     fn ceil_on_grad_path_errors_cleanly() {
         // ceil is non-differentiable: grad_dag_checked must return a clean error.
-        let (dag, x, out) = build_unary_dag(|dag, decl, a, ty| {
-            dag.add_node(decl, RiscOp::Ceil, vec![a], ty.clone(), None)
+        let (dag, x, out) = build_unary_dag(|dag, owner, a, ty| {
+            dag.add_node(owner, RiscOp::Ceil, vec![a], ty.clone(), None)
         });
         let err = match grad_dag_checked(&dag, out, &[x]) {
             Err(e) => e,
@@ -5363,8 +5369,8 @@ mod tests {
     #[test]
     fn round_on_grad_path_errors_cleanly() {
         // round is non-differentiable: grad_dag_checked must return a clean error.
-        let (dag, x, out) = build_unary_dag(|dag, decl, a, ty| {
-            dag.add_node(decl, RiscOp::Round, vec![a], ty.clone(), None)
+        let (dag, x, out) = build_unary_dag(|dag, owner, a, ty| {
+            dag.add_node(owner, RiscOp::Round, vec![a], ty.clone(), None)
         });
         let err = match grad_dag_checked(&dag, out, &[x]) {
             Err(e) => e,
@@ -5389,8 +5395,8 @@ mod tests {
     /// This is NOT covered by grad_abs_positive (x=2.0) or grad_abs_negative (x=-2.0).
     #[test]
     fn adv_grad_abs_at_zero_is_zero() {
-        let (dag, x, out) = build_unary_dag(|dag, decl, a, ty| {
-            dag.add_node(decl, RiscOp::Abs, vec![a], ty.clone(), None)
+        let (dag, x, out) = build_unary_dag(|dag, owner, a, ty| {
+            dag.add_node(owner, RiscOp::Abs, vec![a], ty.clone(), None)
         });
         let grad_result = grad_dag(&dag, out, &[x]).unwrap();
         let mut inputs = UnordMap::new();
@@ -5407,8 +5413,8 @@ mod tests {
     /// Spec says: abs(x) at x=-2.7 → -1.0.
     #[test]
     fn adv_grad_abs_at_neg2_7_is_neg1() {
-        let (dag, x, out) = build_unary_dag(|dag, decl, a, ty| {
-            dag.add_node(decl, RiscOp::Abs, vec![a], ty.clone(), None)
+        let (dag, x, out) = build_unary_dag(|dag, owner, a, ty| {
+            dag.add_node(owner, RiscOp::Abs, vec![a], ty.clone(), None)
         });
         let grad_result = grad_dag(&dag, out, &[x]).unwrap();
         let mut inputs = UnordMap::new();
@@ -5425,8 +5431,8 @@ mod tests {
     /// Spec asks for this point; existing test only covers x=1.0.
     #[test]
     fn adv_grad_atan_at_1_5() {
-        let (dag, x, out) = build_unary_dag(|dag, decl, a, ty| {
-            dag.add_node(decl, RiscOp::Atan, vec![a], ty.clone(), None)
+        let (dag, x, out) = build_unary_dag(|dag, owner, a, ty| {
+            dag.add_node(owner, RiscOp::Atan, vec![a], ty.clone(), None)
         });
         let (a, n) = finite_diff(&dag, out, x, "x", &[], 1.5, 1e-5);
         assert_grad_close(a, n);
@@ -5441,8 +5447,8 @@ mod tests {
     /// Spec asks for this exact point with exact value; existing test uses x=0.5 with no exact check.
     #[test]
     fn adv_grad_tan_at_0_3_exact() {
-        let (dag, x, out) = build_unary_dag(|dag, decl, a, ty| {
-            dag.add_node(decl, RiscOp::Tan, vec![a], ty.clone(), None)
+        let (dag, x, out) = build_unary_dag(|dag, owner, a, ty| {
+            dag.add_node(owner, RiscOp::Tan, vec![a], ty.clone(), None)
         });
         let (a, n) = finite_diff(&dag, out, x, "x", &[], 0.3, 1e-5);
         assert_grad_close(a, n);
@@ -5457,23 +5463,23 @@ mod tests {
     #[test]
     fn adv_grad_cos_of_add_composition() {
         let mut dag = Dag::new();
-        let decl = dag.declare("test");
+        let owner = Owner::from(dag.declare("test"));
         let x = dag.add_node(
-            decl,
+            owner,
             RiscOp::Load { name: "x".into() },
             vec![],
             scalar_f64(),
             None,
         );
         let half = dag.add_node(
-            decl,
+            owner,
             RiscOp::synth_const(scalar_f64().precision, 0.5),
             vec![],
             scalar_f64(),
             None,
         );
-        let xp = dag.add_node(decl, RiscOp::Add, vec![x, half], scalar_f64(), None);
-        let out = dag.add_node(decl, RiscOp::Cos, vec![xp], scalar_f64(), None);
+        let xp = dag.add_node(owner, RiscOp::Add, vec![x, half], scalar_f64(), None);
+        let out = dag.add_node(owner, RiscOp::Cos, vec![xp], scalar_f64(), None);
 
         let x0 = 0.7_f64;
         let (a, n) = finite_diff(&dag, out, x, "x", &[], x0, 1e-5);
@@ -5489,8 +5495,8 @@ mod tests {
     /// Pattern-matches on the AdError enum, not the rendered string.
     #[test]
     fn adv_floor_grad_dag_checked_error_is_not_silent_zero() {
-        let (dag, x, out) = build_unary_dag(|dag, decl, a, ty| {
-            dag.add_node(decl, RiscOp::Floor, vec![a], ty.clone(), None)
+        let (dag, x, out) = build_unary_dag(|dag, owner, a, ty| {
+            dag.add_node(owner, RiscOp::Floor, vec![a], ty.clone(), None)
         });
         // grad_dag (unchecked) returns a zero gradient silently — that is the safety net.
         // grad_dag_checked must be the gate that rejects it.
@@ -5516,8 +5522,8 @@ mod tests {
     /// ceil must give a CLEAN structured error, not succeed.
     #[test]
     fn adv_ceil_grad_dag_checked_error_is_not_silent_zero() {
-        let (dag, x, out) = build_unary_dag(|dag, decl, a, ty| {
-            dag.add_node(decl, RiscOp::Ceil, vec![a], ty.clone(), None)
+        let (dag, x, out) = build_unary_dag(|dag, owner, a, ty| {
+            dag.add_node(owner, RiscOp::Ceil, vec![a], ty.clone(), None)
         });
         let result = grad_dag_checked(&dag, out, &[x]);
         match result {
@@ -5541,8 +5547,8 @@ mod tests {
     /// cos(x) at x=0.5: exact value check. Spec requires -sin(0.5) ≈ -0.4794.
     #[test]
     fn adv_grad_cos_at_0_5_exact_value() {
-        let (dag, x, out) = build_unary_dag(|dag, decl, a, ty| {
-            dag.add_node(decl, RiscOp::Cos, vec![a], ty.clone(), None)
+        let (dag, x, out) = build_unary_dag(|dag, owner, a, ty| {
+            dag.add_node(owner, RiscOp::Cos, vec![a], ty.clone(), None)
         });
         let grad_result = grad_dag(&dag, out, &[x]).unwrap();
         let mut inputs = UnordMap::new();
@@ -5570,9 +5576,9 @@ mod tests {
     /// Reduce `node` (rank-2 `[batch, k]`) to a scalar via two Sums, so the
     /// DAG has the scalar-loss output `grad_dag` requires.
     fn reduce_rank2_to_scalar(dag: &mut Dag, node: NodeId, mid_dims: Vec<DimInfo>) -> NodeId {
-        let decl = dag.get(node).unwrap().decl;
+        let owner = dag.get(node).unwrap().owner;
         let mid = dag.add_node(
-            decl,
+            owner,
             RiscOp::Sum {
                 axis: 0,
                 accumulator: chelis_types::types::Prim::F32,
@@ -5585,7 +5591,7 @@ mod tests {
             None,
         );
         dag.add_node(
-            decl,
+            owner,
             RiscOp::Sum {
                 axis: 0,
                 accumulator: chelis_types::types::Prim::F32,
@@ -5603,16 +5609,16 @@ mod tests {
     #[test]
     fn stride_adjoint_symbolic_bystander_axis_uses_sentinel_trim() {
         let mut dag = Dag::new();
-        let decl = dag.declare("test");
+        let owner = Owner::from(dag.declare("test"));
         let x = dag.add_node(
-            decl,
+            owner,
             RiscOp::Load { name: "x".into() },
             vec![],
             sym_batch_ty(&[4]),
             None,
         );
         let strided = dag.add_node(
-            decl,
+            owner,
             RiscOp::Stride {
                 strides: vec![RtDim::Lit(1), RtDim::Lit(2)],
             },
@@ -5647,9 +5653,9 @@ mod tests {
     #[test]
     fn stride_adjoint_symbolic_strided_axis_builds_runtime_trim() {
         let mut dag = Dag::new();
-        let decl = dag.declare("test");
+        let owner = Owner::from(dag.declare("test"));
         let x = dag.add_node(
-            decl,
+            owner,
             RiscOp::Load { name: "x".into() },
             vec![],
             TensorType {
@@ -5659,7 +5665,7 @@ mod tests {
             None,
         );
         let strided = dag.add_node(
-            decl,
+            owner,
             RiscOp::Stride {
                 strides: vec![RtDim::Lit(2)],
             },
@@ -5671,7 +5677,7 @@ mod tests {
             None,
         );
         let out = dag.add_node(
-            decl,
+            owner,
             RiscOp::Sum {
                 axis: 0,
                 accumulator: chelis_types::types::Prim::F32,
@@ -5723,16 +5729,16 @@ mod tests {
     #[test]
     fn prod_reduce_adjoint_symbolic_bystander_axis_uses_sentinel_slices() {
         let mut dag = Dag::new();
-        let decl = dag.declare("test");
+        let owner = Owner::from(dag.declare("test"));
         let x = dag.add_node(
-            decl,
+            owner,
             RiscOp::Load { name: "x".into() },
             vec![],
             sym_batch_ty(&[3]),
             None,
         );
         let prod = dag.add_node(
-            decl,
+            owner,
             RiscOp::ProdReduce { axis: 1 },
             vec![x],
             TensorType {
@@ -5742,7 +5748,7 @@ mod tests {
             None,
         );
         let out = dag.add_node(
-            decl,
+            owner,
             RiscOp::Sum {
                 axis: 0,
                 accumulator: chelis_types::types::Prim::F32,
@@ -5778,9 +5784,9 @@ mod tests {
     #[should_panic(expected = "prod_reduce adjoint requires a concrete axis size")]
     fn prod_reduce_adjoint_symbolic_reduced_axis_fails_loud() {
         let mut dag = Dag::new();
-        let decl = dag.declare("test");
+        let owner = Owner::from(dag.declare("test"));
         let x = dag.add_node(
-            decl,
+            owner,
             RiscOp::Load { name: "x".into() },
             vec![],
             TensorType {
@@ -5790,7 +5796,7 @@ mod tests {
             None,
         );
         let prod = dag.add_node(
-            decl,
+            owner,
             RiscOp::ProdReduce { axis: 0 },
             vec![x],
             scalar_f64(),
@@ -5806,16 +5812,16 @@ mod tests {
     #[test]
     fn shrink_adjoint_full_axis_sentinel_pads_zero() {
         let mut dag = Dag::new();
-        let decl = dag.declare("test");
+        let owner = Owner::from(dag.declare("test"));
         let x = dag.add_node(
-            decl,
+            owner,
             RiscOp::Load { name: "x".into() },
             vec![],
             sym_batch_ty(&[3]),
             None,
         );
         let shrunk = dag.add_node(
-            decl,
+            owner,
             RiscOp::Shrink {
                 bounds: vec![
                     (RtDim::Lit(0), RtDim::ToEnd),
@@ -5850,9 +5856,9 @@ mod tests {
     #[should_panic(expected = "malformed ToEnd sentinel")]
     fn shrink_adjoint_malformed_sentinel_fails_loud() {
         let mut dag = Dag::new();
-        let decl = dag.declare("test");
+        let owner = Owner::from(dag.declare("test"));
         let x = dag.add_node(
-            decl,
+            owner,
             RiscOp::Load { name: "x".into() },
             vec![],
             TensorType {
@@ -5862,7 +5868,7 @@ mod tests {
             None,
         );
         let shrunk = dag.add_node(
-            decl,
+            owner,
             RiscOp::Shrink {
                 bounds: vec![(RtDim::Lit(1), RtDim::ToEnd)],
             },
@@ -5874,7 +5880,7 @@ mod tests {
             None,
         );
         let out = dag.add_node(
-            decl,
+            owner,
             RiscOp::Sum {
                 axis: 0,
                 accumulator: chelis_types::types::Prim::F32,
