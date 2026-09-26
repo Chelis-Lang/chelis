@@ -1423,6 +1423,9 @@ fn lower_program_with_context_inner(
         if let Some(mapped) = library_remap.get(node_id).copied() {
             ctx.bindings
                 .insert(name.clone(), LoweredValue::Node(mapped));
+            ctx.top_level
+                .bindings
+                .insert(name.clone(), LoweredValue::Node(mapped));
         }
     }
 
@@ -2175,6 +2178,7 @@ pub(crate) fn try_lower_staged_host_region(
                     ty.clone(),
                     None,
                 );
+                ctx.interface_loads.insert(param.name.clone());
                 ctx.bindings
                     .insert(param.name.clone(), LoweredValue::Node(load));
                 ctx.host_value_types.insert(load, param.ty.clone());
@@ -2303,6 +2307,7 @@ fn lower_subexpr_program_inner_impl(
             tensor_ty,
             ctx.current_span_id.clone(),
         );
+        ctx.interface_loads.insert(name.clone());
         ctx.bindings.insert(name, LoweredValue::Node(load));
     }
     ctx.prepare_parameter_witnesses(
@@ -6392,6 +6397,45 @@ struct ResolvedFunction {
     /// Travels with the resolved callable through lexical aliases and AD.
     /// It is a claim, never evidence of the body's actual result extent.
     signature: Option<std::sync::Arc<Expr>>,
+    /// The scope the body's free names resolve in, wherever it is inlined.
+    scope: CallableScope,
+}
+
+/// Where a callable's body resolves its free names (chelis#2588).
+///
+/// Inlining lowers a body at its call site, but lexical scoping gives the
+/// body's free names the meaning they have where the function was written.
+/// Every inliner lowers the body in this scope in place of the caller's, so a
+/// caller's local can never capture a name the callee reads.
+#[derive(Clone)]
+enum CallableScope {
+    /// A top-level declaration: its free names are top-level names.
+    Declaration,
+    /// A function literal: the scope it was written in.
+    Lexical(std::sync::Arc<LexicalScope>),
+}
+
+/// Every name-keyed table of one lexical scope. [`LowerCtx`] keeps these as
+/// separate fields; `capture_scope` and `replace_scope` move them together.
+#[derive(Clone, Default)]
+struct LexicalScope {
+    bindings: UnordMap<String, LoweredValue>,
+    list_bindings: UnordMap<String, Expr>,
+    shape_bindings: UnordMap<String, Expr>,
+    static_size_bindings: UnordMap<String, i64>,
+    binding_witnesses: UnordMap<String, (NodeId, Vec<NodeId>)>,
+    local_callables: UnordMap<String, CallableExpr>,
+    fn_typed_params: UnordSet<String>,
+}
+
+/// Parent-to-sub-context translation state for one transform's captured
+/// scopes: each parent node gets one `Load`, and each captured scope is
+/// rebased once however many callables share it.
+#[derive(Default)]
+struct ScopeRebase {
+    captures: UnordMap<String, NodeId>,
+    loads: UnordMap<NodeId, NodeId>,
+    scopes: UnordMap<usize, std::sync::Arc<LexicalScope>>,
 }
 
 struct VectorizedParameterInstantiation {
@@ -6894,6 +6938,13 @@ struct LowerCtx<'program> {
     #[cfg(feature = "lowering-trace")]
     trace: Option<crate::lowering_trace::Collector>,
     dag: Dag,
+    /// The top-level entries of the name-keyed tables below: the declaring
+    /// scope of every top-level function (chelis#2588). A subexpression
+    /// lowering has none; its free top-level names lower to `Load`s.
+    top_level: LexicalScope,
+    /// `Load` names this graph already gives a kernel input or a transform
+    /// formal. A top-level reference cannot take one of them (chelis#2588).
+    interface_loads: UnordSet<String>,
     bindings: UnordMap<String, LoweredValue>,
     list_bindings: UnordMap<String, Expr>,
     /// chelis#369: `let`-bound names whose value is a `shape(operand,
@@ -7125,6 +7176,8 @@ impl<'program> LowerCtx<'program> {
             #[cfg(feature = "lowering-trace")]
             trace: None,
             dag: Dag::new(),
+            top_level: LexicalScope::default(),
+            interface_loads: UnordSet::new(),
             bindings: UnordMap::new(),
             list_bindings: UnordMap::new(),
             shape_bindings: UnordMap::new(),
@@ -7161,6 +7214,79 @@ impl<'program> LowerCtx<'program> {
             allow_host_list_ad_rewrites: false,
             runtime_list_checks: Vec::new(),
             current_span_id: None,
+        }
+    }
+
+    /// The `Load` for a name no enclosing scope binds, which its consumer
+    /// resolves as a top-level declaration. Loads are identified by name, so
+    /// when this graph already gives the name to a kernel input or transform
+    /// formal the reference has no faithful spelling here: the lowering
+    /// declines it rather than let the input capture it (chelis#2588).
+    fn free_name_load(&mut self, name: &str, ty: TensorType, span: Option<Span>) -> NodeId {
+        if self.interface_loads.contains(name) {
+            raise_lowering_error(
+                format!(
+                    "the name `{name}` that an inlined body reads from its own scope shares its \
+                     spelling with an input of this tensor graph, which names both `{name}` \
+                     (chelis#2588)"
+                ),
+                span,
+                self.current_span_id.clone(),
+            );
+        }
+        self.dag.add_node(
+            RiscOp::Load { name: name.into() },
+            vec![],
+            ty,
+            self.current_span_id.clone(),
+        )
+    }
+
+    /// The current lexical scope, for a function literal to close over.
+    fn capture_scope(&self) -> LexicalScope {
+        LexicalScope {
+            bindings: self.bindings.clone(),
+            list_bindings: self.list_bindings.clone(),
+            shape_bindings: self.shape_bindings.clone(),
+            static_size_bindings: self.static_size_bindings.clone(),
+            binding_witnesses: self.binding_witnesses.clone(),
+            local_callables: self.local_callables.clone(),
+            fn_typed_params: self.fn_typed_params.clone(),
+        }
+    }
+
+    /// Install `scope` as the current lexical scope, returning the scope it
+    /// replaces so the caller can restore it.
+    fn replace_scope(&mut self, scope: LexicalScope) -> LexicalScope {
+        let LexicalScope {
+            bindings,
+            list_bindings,
+            shape_bindings,
+            static_size_bindings,
+            binding_witnesses,
+            local_callables,
+            fn_typed_params,
+        } = scope;
+        LexicalScope {
+            bindings: std::mem::replace(&mut self.bindings, bindings),
+            list_bindings: std::mem::replace(&mut self.list_bindings, list_bindings),
+            shape_bindings: std::mem::replace(&mut self.shape_bindings, shape_bindings),
+            static_size_bindings: std::mem::replace(
+                &mut self.static_size_bindings,
+                static_size_bindings,
+            ),
+            binding_witnesses: std::mem::replace(&mut self.binding_witnesses, binding_witnesses),
+            local_callables: std::mem::replace(&mut self.local_callables, local_callables),
+            fn_typed_params: std::mem::replace(&mut self.fn_typed_params, fn_typed_params),
+        }
+    }
+
+    /// The scope `function`'s body resolves its free names in (chelis#2588),
+    /// never the scope of the site that applies it.
+    fn declaring_scope(&self, function: &ResolvedFunction) -> LexicalScope {
+        match &function.scope {
+            CallableScope::Declaration => self.top_level.clone(),
+            CallableScope::Lexical(scope) => scope.as_ref().clone(),
         }
     }
 
@@ -7510,56 +7636,173 @@ impl<'program> LowerCtx<'program> {
         remap_tensor_dim_symbols(dag, formal_params, actual_args)
     }
 
-    fn seed_subctx_with_lexical_scope(
+    /// Seed a transform sub-context with `function`'s declaring scope, minus
+    /// the names its parameters shadow (chelis#2588). The sub-context has its
+    /// own graph, so every captured value enters it as a fresh `Load`; the
+    /// returned map sends each such `Load` back to the parent node it stands
+    /// for when the transformed graph is spliced in.
+    fn seed_subctx_with_declaring_scope(
         &self,
         subctx: &mut LowerCtx,
+        function: &ResolvedFunction,
         shadowed: &[String],
     ) -> UnordMap<String, NodeId> {
         subctx.local_tensor_ascriptions = self.local_tensor_ascriptions.clone();
+        // A free `Load` the transformed body keeps is spliced into this graph
+        // unchanged, so it must not take one of this graph's input names.
+        subctx
+            .interface_loads
+            .extend(self.interface_loads.to_sorted().into_iter().cloned());
         let shadowed = shadowed.iter().cloned().collect::<UnordSet<_>>();
-        let mut captures = UnordMap::new();
-        for (name, value) in self
+        let mut rebase = ScopeRebase::default();
+        // A top-level callee reached inside the body resolves in the
+        // parent's top level, as it would outside the transform.
+        subctx.top_level = self.rebase_scope(subctx, &self.top_level, &mut rebase);
+        let scope = match &function.scope {
+            CallableScope::Declaration => subctx.top_level.clone(),
+            CallableScope::Lexical(captured) => {
+                match self.rebase_callable_scope(subctx, &function.scope, &mut rebase) {
+                    CallableScope::Lexical(rebased) => rebased.as_ref().clone(),
+                    CallableScope::Declaration => unreachable!(
+                        "a captured scope {:p} rebases to a captured scope",
+                        captured.as_ref()
+                    ),
+                }
+            }
+        };
+        for (name, value) in scope
             .bindings
-            .to_sorted()
+            .into_sorted()
             .into_iter()
-            .filter(|(name, _)| !shadowed.contains(*name))
+            .filter(|(name, _)| !shadowed.contains(name))
         {
-            let LoweredValue::Node(node_id) = value else {
-                continue;
-            };
-            let ty = self
-                .dag
-                .get(*node_id)
-                .map(|node| node.output_type.clone())
-                .unwrap_or_else(Self::default_type);
-            let load = subctx.dag.add_node(
-                RiscOp::Load {
-                    name: name.as_str().into(),
-                },
-                vec![],
-                ty,
-                subctx.current_span_id.clone(),
-            );
-            subctx
-                .bindings
-                .insert(name.clone(), LoweredValue::Node(load));
-            captures.insert(name.clone(), *node_id);
+            subctx.bindings.insert(name, value);
         }
-        subctx.local_callables.extend(
-            self.local_callables
-                .to_sorted()
-                .into_iter()
-                .filter(|(name, _)| !shadowed.contains(*name))
-                .map(|(name, value)| (name.clone(), value.clone())),
-        );
+        for (name, callable) in scope
+            .local_callables
+            .into_sorted()
+            .into_iter()
+            .filter(|(name, _)| !shadowed.contains(name))
+        {
+            subctx.local_callables.insert(name, callable);
+        }
         subctx.fn_typed_params.extend(
-            self.fn_typed_params
-                .to_sorted()
+            scope
+                .fn_typed_params
+                .into_sorted()
                 .into_iter()
-                .filter(|name| !shadowed.contains(*name))
-                .cloned(),
+                .filter(|name| !shadowed.contains(name)),
         );
-        captures
+        rebase.captures
+    }
+
+    /// `scope` as a sub-context sees it: its tensor values become `Load`s
+    /// and its function literals' captured scopes are rebased the same way.
+    fn rebase_scope(
+        &self,
+        subctx: &mut LowerCtx,
+        scope: &LexicalScope,
+        rebase: &mut ScopeRebase,
+    ) -> LexicalScope {
+        let mut rebased = LexicalScope {
+            static_size_bindings: scope.static_size_bindings.clone(),
+            fn_typed_params: scope.fn_typed_params.clone(),
+            ..LexicalScope::default()
+        };
+        for (name, value) in scope.bindings.to_sorted() {
+            if let Some(load) = self.rebase_binding(subctx, value, rebase) {
+                rebased.bindings.insert(name.clone(), load);
+            }
+        }
+        for (name, callable) in scope.local_callables.to_sorted() {
+            let callable = self.rebase_callable(subctx, callable, rebase);
+            rebased.local_callables.insert(name.clone(), callable);
+        }
+        rebased
+    }
+
+    /// The sub-context `Load` standing for one captured parent tensor value.
+    /// Load names are fresh, so two captured scopes that bind one spelling to
+    /// different values can never share a splice entry.
+    fn rebase_binding(
+        &self,
+        subctx: &mut LowerCtx,
+        value: &LoweredValue,
+        rebase: &mut ScopeRebase,
+    ) -> Option<LoweredValue> {
+        let LoweredValue::Node(node_id) = value else {
+            return None;
+        };
+        if let Some(load) = rebase.loads.get(node_id) {
+            return Some(LoweredValue::Node(*load));
+        }
+        let ty = self
+            .dag
+            .get(*node_id)
+            .map(|node| node.output_type.clone())
+            .unwrap_or_else(Self::default_type);
+        let name = format!("__chelis_capture_{}", rebase.captures.len());
+        let load = subctx.dag.add_node(
+            RiscOp::Load {
+                name: name.as_str().into(),
+            },
+            vec![],
+            ty,
+            subctx.current_span_id.clone(),
+        );
+        rebase.captures.insert(name, *node_id);
+        rebase.loads.insert(*node_id, load);
+        Some(LoweredValue::Node(load))
+    }
+
+    /// A parent callable as the sub-context sees it: a function literal's
+    /// captured scope is rebased onto sub-context `Load`s.
+    fn rebase_callable(
+        &self,
+        subctx: &mut LowerCtx,
+        callable: &CallableExpr,
+        rebase: &mut ScopeRebase,
+    ) -> CallableExpr {
+        let mut function = |function: &ResolvedFunction| ResolvedFunction {
+            scope: self.rebase_callable_scope(subctx, &function.scope, rebase),
+            ..function.clone()
+        };
+        match callable {
+            CallableExpr::Plain(fn_expr) => CallableExpr::Plain(function(fn_expr)),
+            CallableExpr::Vmap { fn_expr, axis } => CallableExpr::Vmap {
+                fn_expr: function(fn_expr),
+                axis: *axis,
+            },
+            CallableExpr::VmapGrad { fn_expr, wrt, axis } => CallableExpr::VmapGrad {
+                fn_expr: function(fn_expr),
+                wrt: wrt.clone(),
+                axis: *axis,
+            },
+            CallableExpr::Grad { fn_expr, wrt } => CallableExpr::Grad {
+                fn_expr: function(fn_expr),
+                wrt: wrt.clone(),
+            },
+            CallableExpr::Parameter { name } => CallableExpr::Parameter { name: name.clone() },
+        }
+    }
+
+    fn rebase_callable_scope(
+        &self,
+        subctx: &mut LowerCtx,
+        scope: &CallableScope,
+        rebase: &mut ScopeRebase,
+    ) -> CallableScope {
+        let CallableScope::Lexical(captured) = scope else {
+            // Resolves in the sub-context's top level, rebased on entry.
+            return CallableScope::Declaration;
+        };
+        let key = std::sync::Arc::as_ptr(captured) as usize;
+        if let Some(rebased) = rebase.scopes.get(&key) {
+            return CallableScope::Lexical(rebased.clone());
+        }
+        let rebased = std::sync::Arc::new(self.rebase_scope(subctx, captured, rebase));
+        rebase.scopes.insert(key, rebased.clone());
+        CallableScope::Lexical(rebased)
     }
 
     fn type_from_type_expr(expr: &Expr) -> TensorType {
@@ -8763,14 +9006,7 @@ impl<'program> LowerCtx<'program> {
                     self.append_current_span_to_lowered_value(&cached);
                     cached
                 } else {
-                    LoweredValue::Node(self.dag.add_node(
-                        RiscOp::Load {
-                            name: name.as_str().into(),
-                        },
-                        vec![],
-                        Self::default_type(),
-                        self.current_span_id.clone(),
-                    ))
+                    LoweredValue::Node(self.free_name_load(name, Self::default_type(), None))
                 }
             }
             // BARE atoms reach here only from synthetic Deep (tests,
@@ -9008,23 +9244,26 @@ impl<'program> LowerCtx<'program> {
             self.dag.replace_node(id, op, Vec::new(), declared);
         }
         if !name.is_empty() {
+            // A `def` is a top-level declaration: each entry it makes is also
+            // part of the scope every top-level function body resolves in.
             if self.is_host_list_expr(&kids[1]) {
                 self.list_bindings.insert(name.clone(), kids[1].clone());
+                self.top_level
+                    .list_bindings
+                    .insert(name.clone(), kids[1].clone());
             }
             self.bindings.insert(name.clone(), body_id.clone());
-            if let Some(mut callable) = self.callable_binding_expr(&kids[1]) {
+            self.top_level
+                .bindings
+                .insert(name.clone(), body_id.clone());
+            if let Some(mut callable) = self.resolve_declaration_callable(&kids[1]) {
                 if let CallableExpr::Plain(function) = &mut callable
                     && let Some(signature) = self.program_signatures.get(&name)
                 {
                     function.signature = Some(std::sync::Arc::new(signature.clone()));
                 }
-                self.local_callables.insert(
-                    match &kids[0] {
-                        Expr::Atom(Atom::Name(s), _) => s.clone(),
-                        _ => String::new(),
-                    },
-                    callable,
-                );
+                self.local_callables.insert(name.clone(), callable.clone());
+                self.top_level.local_callables.insert(name, callable);
             }
         }
         body_id
@@ -9711,14 +9950,7 @@ impl<'program> LowerCtx<'program> {
             } else {
                 explicit_ty
             };
-            return LoweredValue::Node(self.dag.add_node(
-                RiscOp::Load {
-                    name: name.as_str().into(),
-                },
-                vec![],
-                ty,
-                self.current_span_id.clone(),
-            ));
+            return LoweredValue::Node(self.free_name_load(name, ty, Some(span)));
         }
         raise_malformed_deep(
             "a var form with no usable name",
@@ -9962,14 +10194,23 @@ impl<'program> LowerCtx<'program> {
         }
     }
 
+    /// Resolve a callable written in the current scope. A function literal
+    /// closes over that scope.
     fn resolve_callable_expr(&self, expr: &Expr) -> Option<CallableExpr> {
-        self.resolve_callable_expr_inner(expr, &mut UnordSet::new())
+        self.resolve_callable_expr_inner(expr, &mut UnordSet::new(), false)
+    }
+
+    /// Resolve a top-level declaration's callable body. Its function literal
+    /// resolves free names at top level, whatever scope is current.
+    fn resolve_declaration_callable(&self, expr: &Expr) -> Option<CallableExpr> {
+        self.resolve_callable_expr_inner(expr, &mut UnordSet::new(), true)
     }
 
     fn resolve_callable_expr_inner(
         &self,
         expr: &Expr,
         visited: &mut UnordSet<String>,
+        declaration: bool,
     ) -> Option<CallableExpr> {
         let (tag, _, kids) = stamped_parts(expr)?;
         match tag {
@@ -9977,6 +10218,11 @@ impl<'program> LowerCtx<'program> {
                 expression: std::sync::Arc::new(expr.clone()),
                 declaration_name: None,
                 signature: None,
+                scope: if declaration {
+                    CallableScope::Declaration
+                } else {
+                    CallableScope::Lexical(std::sync::Arc::new(self.capture_scope()))
+                },
             })),
             DeepTag::Var => {
                 let name = kids.first().and_then(|expr| match expr {
@@ -10007,11 +10253,22 @@ impl<'program> LowerCtx<'program> {
                 // unresolved helper forwarding preserves the parameter until
                 // its eventual application. See
                 // `docs/investigations/pipe_fn_param_stage_diagnosis.md`.
-                if let Some(callable) = self.local_callables.get(&name) {
+                // A declaration's body names only top-level callables
+                // (chelis#2588): the current scope's locals and function
+                // parameters are the applying site's, not the declaration's.
+                let (local_callables, fn_typed_params) = if declaration {
+                    (
+                        &self.top_level.local_callables,
+                        &self.top_level.fn_typed_params,
+                    )
+                } else {
+                    (&self.local_callables, &self.fn_typed_params)
+                };
+                if let Some(callable) = local_callables.get(&name) {
                     return Some(callable.clone());
                 }
                 if let Some(body) = self.program_defs.get(&name) {
-                    let mut callable = self.resolve_callable_expr_inner(body, visited)?;
+                    let mut callable = self.resolve_callable_expr_inner(body, visited, true)?;
                     if let CallableExpr::Plain(function) = &mut callable {
                         function.declaration_name = Some(name.clone());
                         if let Some(signature) = self
@@ -10024,7 +10281,7 @@ impl<'program> LowerCtx<'program> {
                     }
                     return Some(callable);
                 }
-                if self.fn_typed_params.contains(&name) {
+                if fn_typed_params.contains(&name) {
                     return Some(CallableExpr::Parameter { name });
                 }
                 None
@@ -10062,7 +10319,7 @@ impl<'program> LowerCtx<'program> {
                 {
                     let wrt = self.extract_grad_wrt_indices(grad_expr);
                     return self
-                        .resolve_callable_expr_inner(grad_kids.first()?, visited)
+                        .resolve_callable_expr_inner(grad_kids.first()?, visited, declaration)
                         .and_then(|inner| match inner {
                             CallableExpr::Plain(fn_expr) => {
                                 Some(CallableExpr::VmapGrad { fn_expr, wrt, axis })
@@ -10074,7 +10331,7 @@ impl<'program> LowerCtx<'program> {
                             _ => None,
                         });
                 }
-                self.resolve_callable_expr_inner(kids.first()?, visited)
+                self.resolve_callable_expr_inner(kids.first()?, visited, declaration)
                     .and_then(|inner| match inner {
                         CallableExpr::Plain(fn_expr) => Some(CallableExpr::Vmap { fn_expr, axis }),
                         CallableExpr::Vmap { .. } => None,
@@ -10087,7 +10344,7 @@ impl<'program> LowerCtx<'program> {
                     })
             }
             DeepTag::Grad => self
-                .resolve_callable_expr_inner(kids.first()?, visited)
+                .resolve_callable_expr_inner(kids.first()?, visited, declaration)
                 .and_then(|inner| match inner {
                     CallableExpr::Plain(fn_expr) => Some(CallableExpr::Grad {
                         fn_expr,
@@ -10340,7 +10597,8 @@ impl<'program> LowerCtx<'program> {
             );
             subctx.random_path_condition = Some(random_path_true);
         }
-        let captured_bindings = self.seed_subctx_with_lexical_scope(&mut subctx, &param_names);
+        let captured_bindings =
+            self.seed_subctx_with_declaring_scope(&mut subctx, fn_expr, &param_names);
         // Generated structured-leaf Loads share one name-keyed splice map
         // with ordinary parameters and captured values. Keep a fresh-name
         // set over that complete namespace: deriving a load name from an
@@ -10476,6 +10734,7 @@ impl<'program> LowerCtx<'program> {
                     if let Some(value) = self.static_i64_from_node(*actual) {
                         subctx.static_size_bindings.insert(name.clone(), value);
                     }
+                    subctx.interface_loads.insert(name.clone());
                     let load = subctx.dag.add_node(
                         RiscOp::Load {
                             name: name.as_str().into(),
@@ -11024,6 +11283,10 @@ impl<'program> LowerCtx<'program> {
                 (static_size, callable, value)
             })
             .collect::<Vec<_>>();
+        // chelis#2588: the body sees its own declaring scope, never the
+        // caller's. The saved tables above restore the caller's scope below.
+        let declaring_scope = self.declaring_scope(fn_expr);
+        self.replace_scope(declaring_scope);
         for (
             (((name, (static_size, callable, value)), param_ty), formal_expr),
             authored_formal_expr,
@@ -11473,12 +11736,10 @@ impl<'program> LowerCtx<'program> {
                 expr_diagnostic_location(fn_expr),
             );
         };
-        let saved = self.bindings.clone();
-        let saved_list_bindings = self.list_bindings.clone();
-        let saved_shape_bindings = self.shape_bindings.clone();
-        let saved_static_size_bindings = self.static_size_bindings.clone();
-        let saved_callables = self.local_callables.clone();
-        let saved_fn_typed_params = self.fn_typed_params.clone();
+        // chelis#2588: the body sees its own declaring scope, never the
+        // caller's, which is restored below.
+        let declaring_scope = self.declaring_scope(fn_expr);
+        let caller_scope = self.replace_scope(declaring_scope);
         for (name, arg_id) in param_names.iter().zip(args.iter().cloned()) {
             // Same shadowing rationale as `lower_plain_callable_app`.
             self.fn_typed_params.remove(name);
@@ -11501,12 +11762,7 @@ impl<'program> LowerCtx<'program> {
             );
             self.repair_output_type_if_default(&result, &ret_ty);
         }
-        self.bindings = saved;
-        self.list_bindings = saved_list_bindings;
-        self.shape_bindings = saved_shape_bindings;
-        self.static_size_bindings = saved_static_size_bindings;
-        self.local_callables = saved_callables;
-        self.fn_typed_params = saved_fn_typed_params;
+        self.replace_scope(caller_scope);
         result
     }
 
@@ -11736,6 +11992,7 @@ impl<'program> LowerCtx<'program> {
         // for vmap's parameters carry the vmap-call's span.
         subctx.current_span_id = self.current_span_id.clone();
         for (name, param_expr) in param_names.iter().zip(param_types.iter().cloned()) {
+            subctx.interface_loads.insert(name.clone());
             let load = subctx.dag.add_node(
                 RiscOp::Load {
                     name: name.as_str().into(),
@@ -11751,7 +12008,8 @@ impl<'program> LowerCtx<'program> {
         // Keep mapped formal Loads before capture Loads in canonical order.
         // A symbolic batch lift can then read a formal's axis as its explicit
         // runtime extent witness.
-        let captured_bindings = self.seed_subctx_with_lexical_scope(&mut subctx, &param_names);
+        let captured_bindings =
+            self.seed_subctx_with_declaring_scope(&mut subctx, fn_expr, &param_names);
         let root_value = subctx.lower_resolved_body(fn_expr, &param_names, body);
         reject_vmap_over_draws(&subctx.dag, "vmap", body);
         for root in root_value.flatten_nodes() {
@@ -12021,6 +12279,7 @@ impl<'program> LowerCtx<'program> {
             .zip(param_types.iter().cloned())
             .enumerate()
         {
+            subctx.interface_loads.insert(name.clone());
             let load = subctx.dag.add_node(
                 RiscOp::Load {
                     name: name.as_str().into(),
@@ -12039,7 +12298,8 @@ impl<'program> LowerCtx<'program> {
         }
         // As in ordinary vmap, mapped formal Loads precede invariant capture
         // Loads so a symbolic capture lift can name a real batch witness.
-        let captured_bindings = self.seed_subctx_with_lexical_scope(&mut subctx, &param_names);
+        let captured_bindings =
+            self.seed_subctx_with_declaring_scope(&mut subctx, fn_expr, &param_names);
 
         let output = subctx
             .lower_resolved_body(fn_expr, &param_names, body)
