@@ -87,6 +87,8 @@ The following are unchanged by the switch: the scalar-key kernels, the random no
 
 A lowered program holds every top-level declaration's activation in one graph, so each node records the declaration whose lowering created it (2026-09-25, chelis#2476). Selecting roots enters their declarations. A function they call runs inlined in them, and a value declaration they name whose initializer may trap is lowered again at the reference, under the reference's activation (2026-09-25), so its draws and aborts run exactly where and when the reference is reached; a total value is one node set every reference shares, and the verifier rejects a node that can trap shared across declarations. A draw or abort of any other declaration does not run, and its parameters never become the selection's inputs. Two declarations' key parameters of one name are two keys, in the graph and on the wire.
 
+Some trapping operations are not yet seeded or gated (chelis#2440): an unused float `mean` over an empty axis, and an unused runtime `reshape` or `expand` target or `gather`, `scatter`, `scatter_add`, `scatter_elements` or `one_hot` index, may still be removed, and those index and target checks still run in an untaken arm. [05-OP-68] and spec/03 §4.4 carry a one-line note linking chelis#2440.
+
 The bridge exists to give the IR rewrite a bit-identical oracle. Phase 3 states which programs keep identical bits.
 
 ## 5. What changes
