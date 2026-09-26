@@ -1483,16 +1483,11 @@ impl CEmitter {
                         unreachable!("literal role handled above")
                     }
                 };
-                for required in requirements
-                    .iter()
-                    .chain(
-                        &self
-                            .literal_result_witness_requirements
-                            .get(&node.id)
-                            .cloned()
-                            .unwrap_or_default(),
-                    )
-                {
+                let literal = self
+                    .literal_result_witness_requirements
+                    .get(&node.id)
+                    .cloned();
+                for required in requirements.iter().chain(literal.iter().flatten()) {
                     let required = required.as_i64_exact().expect("verified i64 requirement");
                     let differs = self.gated_check(&format!(
                         "chelis_tensor_shape(t{input}, {axis}) != {required}"
