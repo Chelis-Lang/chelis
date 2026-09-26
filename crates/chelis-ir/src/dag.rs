@@ -2244,7 +2244,7 @@ impl Dag {
     ///
     /// `owner` is required for the same reason: every node belongs to a
     /// declaration this graph registered ([`Self::declare`]) and runs under
-    /// an activation, an earlier Bool node of this graph or none. A bare
+    /// an activation, an earlier node of this graph or none. A bare
     /// [`DeclId`] is an unconditional owner.
     pub fn add_node(
         &mut self,
@@ -2300,12 +2300,12 @@ impl Dag {
             self.declarations.len()
         );
         let id = NodeId(self.nodes.len());
+        // The verifier also requires the activation to be a Bool; a graph
+        // lowered without type checking may hold another scalar there.
         if let Some(activation) = owner.activation {
-            let precision = self.nodes.get(activation.0).map(|node| node.output_type.precision);
             assert!(
-                precision == Some(Prim::Bool),
-                "node {id:?}'s activation {activation:?} is not an earlier Bool node of this graph \
-                 ({precision:?})"
+                activation.0 < id.0,
+                "node {id:?}'s activation {activation:?} is not an earlier node of this graph"
             );
         }
         self.nodes.push(DagNode {
