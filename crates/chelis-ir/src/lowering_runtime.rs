@@ -330,16 +330,37 @@ impl LoweringRuntime {
         self.raise_lowering_diagnostic(fatal)
     }
 
-    /// Catch lowering failures and native lowering unwinds.
-    ///
-    /// An explicit [`LoweringFailure`] maps to the diagnostic its former panic
-    /// payload produced; an unexpected native panic maps as before.
+    /// Catch lowering failures and native lowering unwinds
+    /// ([`Self::catch_lowering_with`] without state).
     pub fn catch_lowering<R>(
         &mut self,
         f: impl FnOnce(&mut LoweringRuntime) -> LowerResult<R> + std::panic::UnwindSafe,
     ) -> Result<R, LowerDiagnostic> {
+        self.catch_lowering_with(&mut (), move |runtime, _| f(runtime))
+    }
+
+    /// Catch lowering failures and native lowering unwinds, with explicit
+    /// `state` threaded through the catch.
+    ///
+    /// An explicit [`LoweringFailure`] maps to the diagnostic its former panic
+    /// payload produced; an unexpected native panic maps as before.
+    ///
+    /// `f` receives the catch's runtime borrow and `state`; its other captures
+    /// must still be unwind safe. After a caught unwind `state` is the
+    /// caller's again, so callers pass state that every mutating scope exits
+    /// on unwind (see [`scoped`]) or that an unwind leaves otherwise valid,
+    /// such as native services whose next outermost entry resets them.
+    ///
+    /// Model: `f runtime state`, a [`LoweringFailure`] mapped to its
+    /// diagnostic.
+    pub fn catch_lowering_with<S, R>(
+        &mut self,
+        state: &mut S,
+        f: impl FnOnce(&mut LoweringRuntime, &mut S) -> LowerResult<R> + std::panic::UnwindSafe,
+    ) -> Result<R, LowerDiagnostic> {
         self.catch_native_unwind(
-            move |runtime| f(runtime).map_err(LoweringFailure::into_diagnostic),
+            state,
+            move |runtime, state| f(runtime, state).map_err(LoweringFailure::into_diagnostic),
             unrepresentable_diagnostic,
             |message| {
                 LowerDiagnostic::new(
@@ -351,30 +372,8 @@ impl LoweringRuntime {
         )
     }
 
-    /// [`Self::catch_lowering`] with explicit `state` threaded through the
-    /// catch.
-    ///
-    /// `f` receives the catch's runtime borrow and `state`; its other captures
-    /// must still be unwind safe. After a caught unwind `state` is the
-    /// caller's again, so callers pass state that every mutating scope exits
-    /// on unwind (see [`scoped`]) or that an unwind leaves otherwise valid,
-    /// such as native services whose next outermost entry resets them.
-    ///
-    /// Model: `f runtime state`, mapped as [`Self::catch_lowering`] maps it.
-    pub fn catch_lowering_with<S, R>(
-        &mut self,
-        state: &mut S,
-        f: impl FnOnce(&mut LoweringRuntime, &mut S) -> LowerResult<R> + std::panic::UnwindSafe,
-    ) -> Result<R, LowerDiagnostic> {
-        let state = std::panic::AssertUnwindSafe(state);
-        self.catch_lowering(move |runtime| {
-            // Move the whole wrapper; a field pattern would capture `&mut S`.
-            let wrapped = state;
-            f(runtime, wrapped.0)
-        })
-    }
-
-    /// Primitive. Run `f` quietly on the grown lowering stack.
+    /// Primitive. Run `f` on explicit `state`, quietly on the grown lowering
+    /// stack.
     ///
     /// The grown stack covers lowering and its recursive consumers (AD, DCE,
     /// verification), not just the AST walk. An unexpected native unwind is
@@ -382,12 +381,15 @@ impl LoweringRuntime {
     /// typed `D` payload by cloning it, and a `String`/`&str` message (or
     /// `None` for any other payload) by `message`. Quiet output stays enabled
     /// through that conversion and the payload's destruction, then clears.
+    /// After a caught unwind `state` is the caller's again (see
+    /// [`Self::catch_lowering_with`]).
     ///
-    /// Model: `o := true; let r := f self; o := false; r` (an unexpected
-    /// native panic is outside the modeled domain).
-    fn catch_native_unwind<T, D: Clone + 'static>(
+    /// Model: `o := true; let r := f self state; o := false; r` (an
+    /// unexpected native panic is outside the modeled domain).
+    fn catch_native_unwind<S, T, D: Clone + 'static>(
         &mut self,
-        f: impl FnOnce(&mut Self) -> Result<T, D> + std::panic::UnwindSafe,
+        state: &mut S,
+        f: impl FnOnce(&mut Self, &mut S) -> Result<T, D> + std::panic::UnwindSafe,
         marker: impl FnOnce() -> D,
         message: impl FnOnce(Option<String>) -> D,
     ) -> Result<T, D> {
@@ -400,10 +402,12 @@ impl LoweringRuntime {
         install_chelis_panic_hook();
         self.set_output_suppressed(true);
         let _clear = ClearQuietOutput;
-        let runtime = std::panic::AssertUnwindSafe(self);
+        let borrowed = std::panic::AssertUnwindSafe((self, state));
         match std::panic::catch_unwind(move || {
-            let wrapped = runtime;
-            stacker::grow(LOWERING_GROW_SEGMENT_BYTES, move || f(wrapped.0))
+            // Move the whole wrapper; a field pattern would capture the borrows.
+            let wrapped = borrowed;
+            let (runtime, state) = wrapped.0;
+            stacker::grow(LOWERING_GROW_SEGMENT_BYTES, move || f(runtime, state))
         }) {
             Ok(result) => result,
             Err(payload) => Err(if payload.is::<UnrepresentableDag>() {
