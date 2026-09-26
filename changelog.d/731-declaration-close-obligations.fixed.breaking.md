@@ -41,16 +41,31 @@ these checked with score 1:
   declared contract is now checked after the last such replay.
 
 Two routes decide on the types a recursive group determines rather than
-before them. A declared header whose result or parameter type is omitted is
-typed, inside its recursive group, at the one type its body determines
-([04-INF-5], [04-INF-2]); each recursive call used to see a fresh variable in
-place of the omitted type, so `def step(n: i32) = ... step(n - 1).0` over an
-`i32` result checked with score 1 and failed in `eval`. And a group member's
-open obligations are decided when the whole group has been inferred, so a
-sibling declared later can still determine the type they wait on. Recursive
-definitions with annotated parameters and an omitted result keep checking when
-they read their own result's tuple or record fields or pass it to `take`,
-and the ill-typed `step(n - 1).0` is rejected with the access's own diagnostic.
-An `eq` over a list reached through such a recursive call is now rejected by
-`eq`'s own rule, as the direct `eq([1i32], [1i32])` already was; previously the
-check was dropped.
+before them. A group member whose declared header omits a type, such as its
+result, is typed inside its group at one provisional monomorphic instantiation,
+its authored binders and omitted types together ([04-INF-5], [04-INF-2]). Each
+recursive call used to see a fresh variable in place of the omitted type, so
+`def step(n: i32) = ... step(n - 1).0` over an `i32` result checked with score 1
+and failed in `eval`. And a group member's open obligations are decided when the
+whole group has been inferred, so a sibling declared later can still determine
+the type they wait on.
+
+- Now accepted: recursive definitions with annotated parameters and an omitted
+  result that read their own result's tuple or record fields or pass it to
+  `take`; members with authored binders and an omitted result that were
+  rejected as polymorphic recursion, across two or three members, over
+  named-dimension tensors and under `grad`; a literal pattern on a sibling's
+  omitted result; and a `cast` of a sibling's omitted result to a bounded
+  binder. Omitted types still generalize when the group completes.
+- Now rejected: a call inside the group that instantiates such a member's
+  binders at other types, for example `f(y, x, n - 1)` inside
+  `def f[a, b](x: a, y: b, n: i32) = ...`. It identifies two authored binders
+  ([04-INF-6]), and the diagnostic names the repair: write the omitted types,
+  after which the call is polymorphic recursion. Some of these checked with
+  score 1 before and failed in `eval`; others, such as a swapped `swap[a, b]`
+  with its result omitted, checked and ran. A member whose every type is
+  written is still referenced at its declared scheme.
+- The ill-typed `step(n - 1).0` is rejected with the access's own diagnostic,
+  and an `eq` over a list reached through such a recursive call is rejected by
+  `eq`'s own rule, as the direct `eq([1i32], [1i32])` already was; previously
+  the check was dropped.

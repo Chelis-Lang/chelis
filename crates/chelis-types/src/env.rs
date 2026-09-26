@@ -216,6 +216,16 @@ pub struct Env {
     /// receiving lexical permission without declaration-owned identity.
     #[serde(skip)]
     declared_binder_identities: UnordMap<String, DeclarationBinderIdentities>,
+    /// Members of the recursive group being inferred that are bound at their
+    /// provisional monomorphic type ([`Self::bind_monomorphic_group_member`]).
+    #[serde(skip)]
+    monomorphic_group_members: UnordSet<String>,
+    /// The declared dtype-family bound of each binder variable those members
+    /// share, read from the header when it was bound. A sibling's call can
+    /// identify the variable before the member's own body is inferred, and
+    /// the binding then carries the merged family, not the declared one.
+    #[serde(skip)]
+    monomorphic_declared_bounds: UnordMap<TypeVar, Option<TypeVarRestriction>>,
     /// The composed `fresh TypeVar -> source name` map for the definition
     /// currently being inferred.
     ///
@@ -629,23 +639,27 @@ impl Env {
         }
     }
 
-    /// chelis#2584, [04-INF-5]: stop quantifying the inference holes of
-    /// `name`'s declared header while its recursive group is inferred.
+    /// chelis#2584, [04-INF-5]: bind `name`, a member of the recursive group
+    /// being inferred whose declared header omits a type, at its provisional
+    /// monomorphic type. Returns whether the header had an omitted type.
     ///
-    /// A hole is not a binder, and [04-INF-5] makes its type whatever the body
-    /// determines: no reference may observe it before the body fills it, and
-    /// an in-group reference is typed at the member's provisional monomorphic
-    /// type, as [04-INF-2] provides for a recursive call. The header scheme
-    /// quantified every variable, holes included, so each in-group call
-    /// instantiated a fresh hole that nothing ever tied to the body:
-    /// `step(n - 1).0` in a `step` whose result is a hole was typed at a
-    /// variable no binding reached. The holes are renamed once here, to fresh
-    /// variables minted inside the component's level, and left free, so the
-    /// member's own body and every in-group reference share them, and the
-    /// component's completion generalizes whatever the bodies leave open. The
-    /// authored binders stay quantified; [04-INF-2] governs their in-group
-    /// instantiations. Returns whether the header had a hole.
-    pub(crate) fn share_declared_holes(
+    /// [04-INF-5] makes an omitted type whatever the body determines, and
+    /// "inside a group of declarations inferred as one unit ... an in-group
+    /// reference is typed at the member's provisional monomorphic type, as
+    /// [04-INF-2] provides for a recursive call". The header is instantiated
+    /// once, its authored binders and its omitted types alike, at fresh
+    /// variables minted inside the component's level, and bound unquantified,
+    /// so the member's own body and every in-group reference share one
+    /// instantiation. A call that swaps two authored binders then identifies
+    /// them, which [04-INF-6] rejects; the component's completion generalizes
+    /// the body-determined scheme. A header that omits nothing is the member's
+    /// scheme already, and keeps it: polymorphic recursion stays available to
+    /// a declaration whose every type is written.
+    ///
+    /// The declaration's binder identities are re-pointed at the shared
+    /// instantiation, which is how the body's annotations and its rigidity
+    /// check name the same variables its in-group callers bind.
+    pub(crate) fn bind_monomorphic_group_member(
         &mut self,
         name: &str,
         var_gen: &mut VarGen,
@@ -654,8 +668,9 @@ impl Env {
         let Some(header) = self.lookup(name).cloned() else {
             return false;
         };
-        let binders = self.declared_binder_identities.get(name);
+        let binders = self.declared_binder_identities.get(name).cloned();
         let binder_tvars = binders
+            .as_ref()
             .map(|b| {
                 b.type_vars
                     .to_sorted()
@@ -665,6 +680,7 @@ impl Env {
             })
             .unwrap_or_default();
         let binder_dvars = binders
+            .as_ref()
             .map(|b| {
                 b.dim_vars
                     .to_sorted()
@@ -674,6 +690,7 @@ impl Env {
             })
             .unwrap_or_default();
         let binder_rvars = binders
+            .as_ref()
             .map(|b| {
                 b.rank_vars
                     .to_sorted()
@@ -682,37 +699,30 @@ impl Env {
                     .collect::<Vec<_>>()
             })
             .unwrap_or_default();
-        let (binder_t, hole_t): (Vec<TypeVar>, Vec<TypeVar>) =
-            header.tvars.iter().partition(|v| binder_tvars.contains(v));
-        let (binder_d, hole_d): (Vec<DimVar>, Vec<DimVar>) =
-            header.dvars.iter().partition(|v| binder_dvars.contains(v));
-        let (binder_r, hole_r): (Vec<RankVar>, Vec<RankVar>) =
-            header.rvars.iter().partition(|v| binder_rvars.contains(v));
-        if hole_t.is_empty() && hole_d.is_empty() && hole_r.is_empty() {
+        let omits_a_type = header.tvars.iter().any(|v| !binder_tvars.contains(v))
+            || header.dvars.iter().any(|v| !binder_dvars.contains(v))
+            || header.rvars.iter().any(|v| !binder_rvars.contains(v));
+        if !omits_a_type {
             return false;
         }
-        // The one instantiation mechanism renames the holes and carries any
-        // dtype bound or dimension label to the fresh variable. It records no
-        // obligation, because the header's constraints are not passed to it.
-        let holes_only = Scheme {
-            tvars: hole_t.clone(),
-            tvar_restrictions: header
-                .tvar_restrictions
-                .iter()
-                .filter(|(v, _)| hole_t.contains(v))
-                .copied()
-                .collect(),
-            dvars: hole_d,
-            rvars: hole_r,
-            constraints: Vec::new(),
-            body: header.body.clone(),
-        };
-        let shared = self.instantiate_scheme(&holes_only, var_gen, inference_subst);
+        // The one instantiation mechanism mints the shared variables and
+        // carries each binder's dtype bound and dimension label to them. It
+        // records no obligation, because the header's constraints are not
+        // passed to it; they are renamed onto the provisional scheme instead,
+        // which each in-group use then owes.
+        let shared = self.instantiate_scheme(
+            &Scheme {
+                constraints: Vec::new(),
+                ..header.clone()
+            },
+            var_gen,
+            inference_subst,
+        );
         let mut renaming = Subst::new();
         for (from, to) in &shared.tvars {
             renaming
                 .insert_type(*from, to.clone())
-                .expect("a fresh hole renaming is valid");
+                .expect("a fresh provisional renaming is valid");
         }
         for (from, to) in &shared.dvars {
             renaming.insert_dim(*from, Dim::Var(*to));
@@ -720,25 +730,73 @@ impl Env {
         for (from, to) in &shared.rvars {
             renaming.insert_rank(*from, vec![Dim::Rank(*to)]);
         }
-        let scheme = Scheme {
-            tvars: binder_t.clone(),
-            tvar_restrictions: header
-                .tvar_restrictions
-                .iter()
-                .filter(|(v, _)| binder_t.contains(v))
-                .copied()
-                .collect(),
-            dvars: binder_d,
-            rvars: binder_r,
+        let provisional = Scheme {
             constraints: header
                 .constraints
                 .iter()
                 .map(|constraint| constraint.map_types(|ty| renaming.apply(ty)))
                 .collect(),
-            body: shared.ty,
+            ..Scheme::mono(shared.ty.clone())
         };
-        self.bind(name.to_string(), scheme);
+        self.bind(name.to_string(), provisional);
+        if let Some(original) = binders {
+            let mut repointed = DeclarationBinderIdentities::default();
+            for (source_name, var) in original.type_vars.to_sorted() {
+                if let Some((_, Type::Var(fresh))) =
+                    shared.tvars.iter().find(|(from, _)| from == var)
+                {
+                    repointed.type_vars.insert(source_name.clone(), *fresh);
+                    let declared = header
+                        .tvar_restrictions
+                        .iter()
+                        .find(|(restricted, _)| restricted == var)
+                        .map(|(_, restriction)| *restriction);
+                    self.monomorphic_declared_bounds.insert(*fresh, declared);
+                }
+            }
+            for (source_name, var) in original.dim_vars.to_sorted() {
+                if let Some((_, fresh)) = shared.dvars.iter().find(|(from, _)| from == var) {
+                    repointed.dim_vars.insert(source_name.clone(), *fresh);
+                }
+            }
+            for (source_name, var) in original.rank_vars.to_sorted() {
+                if let Some((_, fresh)) = shared.rvars.iter().find(|(from, _)| from == var) {
+                    repointed.rank_vars.insert(source_name.clone(), *fresh);
+                }
+            }
+            self.declared_binder_identities
+                .insert(name.to_string(), repointed);
+        }
+        self.monomorphic_group_members.insert(name.to_string());
         true
+    }
+
+    /// Whether `name` is bound at its provisional monomorphic type by
+    /// [`Self::bind_monomorphic_group_member`] while its group is inferred.
+    pub(crate) fn is_monomorphic_group_member(&self, name: &str) -> bool {
+        self.monomorphic_group_members.contains(name)
+    }
+
+    /// The group is complete or aborted: its members' provisional bindings
+    /// are replaced, and their binder identities are the shared variables the
+    /// completed schemes quantify.
+    pub(crate) fn end_monomorphic_group(&mut self) {
+        self.monomorphic_group_members = UnordSet::default();
+        self.monomorphic_declared_bounds = UnordMap::default();
+    }
+
+    /// The declared dtype-family bound of the authored binder variable `var`:
+    /// the header's, for a binder a monomorphic group member shares, and
+    /// otherwise the bound it carries now, before its body runs.
+    pub(crate) fn declared_binder_bound(
+        &self,
+        var: TypeVar,
+        subst: &Subst,
+    ) -> Option<TypeVarRestriction> {
+        match self.monomorphic_declared_bounds.get(&var) {
+            Some(declared) => *declared,
+            None => subst.tvar_restriction(var),
+        }
     }
 
     /// Build the declaration-owned identity object used by every ordinary
@@ -758,7 +816,13 @@ impl Env {
         var_gen: &mut VarGen,
     ) -> DeclarationBinderIdentities {
         let mut resolved = DeclarationBinderIdentities::default();
-        if let (Some(original), Some(instantiation)) =
+        if self.monomorphic_group_members.contains(name)
+            && let Some(shared) = self.declared_binder_identities.get(name)
+        {
+            // The provisional binding quantifies nothing, so its identities
+            // are the shared variables themselves.
+            resolved = shared.clone();
+        } else if let (Some(original), Some(instantiation)) =
             (self.declared_binder_identities.get(name), instantiation)
         {
             for (source_name, original_var) in original.type_vars.to_sorted() {

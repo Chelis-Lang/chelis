@@ -328,3 +328,136 @@ fn a_recursive_group_decides_its_obligations_on_the_bodies_it_infers() {
         &["expected tuple type, got i32"],
     );
 }
+
+/// Diagnostics of a program that is rejected, empty when it checks.
+fn verdict(source: &str) -> Vec<String> {
+    agreed_diagnostics(source)
+}
+
+/// The repair a rejection names when a recursive call reaches a member that
+/// omits a type at an instantiation other than its own.
+const POLYMORPHIC_RECURSION_REPAIR: &str =
+    "Write the omitted types to allow a call at another instantiation (polymorphic recursion)";
+
+/// Suggestions of every diagnostic, on the typed ingress.
+fn suggestions(source: &str) -> Vec<String> {
+    match check_typed_program(&desugared(source)) {
+        Ok(_) => Vec::new(),
+        Err(result) => result
+            .errors
+            .iter()
+            .flat_map(|e| e.suggestions.clone())
+            .collect(),
+    }
+}
+
+/// REGRESSION TEST (chelis#2584 round 2). [04-INF-5]: inside a group
+/// inferred as one unit, an in-group reference is typed at the member's
+/// provisional monomorphic type. A member that omits a type is typed at one
+/// instantiation of its authored binders and omitted types together, so a
+/// recursive call that swaps two of its binders identifies them, which
+/// [04-INF-6] rejects. Round 1 shared only the omitted types and instantiated
+/// the binders afresh at each call, so these checked with score 1 and failed
+/// in `eval`: the omitted type never followed the call's instantiation.
+#[test]
+fn a_group_member_that_omits_a_type_is_referenced_at_one_instantiation() {
+    for program in [
+        "def f[a, b](x: a, y: b, n: i32) = if eq(n, 0) then (x, n) else f(y, x, n - 1)\n",
+        "def f[n, m](x: tensor[n, f32], y: tensor[m, f32], k: i32) = if eq(k, 0) then x else f(y, x, k - 1)\n",
+        "def f[a](x: a, n: i32) = if eq(n, 0) then (x, n) else g(x, x, n - 1)\n\
+         def g[b, c](y: b, z: c, n: i32) = if eq(n, 0) then (z, n) else f(y, n - 1)\n",
+        "def g[b, c](y: b, z: c, n: i32) = if eq(n, 0) then (z, n) else f(y, n - 1)\n\
+         def f[a](x: a, n: i32) = if eq(n, 0) then (x, n) else g(x, x, n - 1)\n",
+    ] {
+        rejects_with(program, &["were unified by the function body"]);
+        assert!(
+            suggestions(program)
+                .iter()
+                .any(|suggestion| suggestion.contains(POLYMORPHIC_RECURSION_REPAIR)),
+            "the rejection must name the repair that allows polymorphic recursion:\n{program}"
+        );
+    }
+    // A member whose every type is written is referenced at its declared
+    // scheme, so its recursive calls may instantiate it afresh.
+    accepts(
+        "def swap[a, b](x: a, y: b, n: i32) -> (a, b) = if eq(n, 0) then (x, y) else {\n  \
+         (u, v) = swap(y, x, n - 1)\n  (v, u)\n}\n",
+    );
+    // Omitted types still generalize once the group is complete.
+    accepts(
+        "def up[a](x: a, y, n: i32) = if eq(n, 0) then y else down(x, y, n - 1)\n\
+         def down[b](x: b, y, n: i32) = if eq(n, 0) then y else up(x, y, n - 1)\n\
+         def main() -> (string, f32) = (up(1i32, \"s\", 2), down(\"t\", 1.5f32, 1))\n",
+    );
+}
+
+/// ORACLE (chelis#2584 round 2): a recursive-group fixture that omits a type
+/// and its twin with the body-determined type written out get the same
+/// verdict, except where the omission is what makes a call's instantiation
+/// the member's own: then the written twin checks, and the omitted form is
+/// rejected naming the polymorphic-recursion repair ([04-INF-5]).
+#[test]
+fn an_omitted_type_and_its_written_twin_differ_only_by_polymorphic_recursion() {
+    let mut differing = 0;
+    for (omitted, written) in [
+        // Self-recursion reading its own result.
+        (
+            "def step(n: i32) = if eq(n, 0) then (0i32, 1i32) else {\n  (x, y) = step(n - 1)\n  (y, x + y)\n}\n",
+            "def step(n: i32) -> (i32, i32) = if eq(n, 0) then (0i32, 1i32) else {\n  (x, y) = step(n - 1)\n  (y, x + y)\n}\n",
+        ),
+        (
+            "def step(n: i32) = if eq(n, 0) then 5i32 else step(n - 1).0\n",
+            "def step(n: i32) -> i32 = if eq(n, 0) then 5i32 else step(n - 1).0\n",
+        ),
+        // Mutual recursion through a sibling's omitted result.
+        (
+            "def a(n: i32) -> bool = if eq(n, 0) then true else eq(b(n - 1), b(n - 1))\ndef b(n: i32) = if a(n) then 0 else 1\n",
+            "def a(n: i32) -> bool = if eq(n, 0) then true else eq(b(n - 1), b(n - 1))\ndef b(n: i32) -> i32 = if a(n) then 0 else 1\n",
+        ),
+        // Authored binders across three members, at one instantiation.
+        (
+            "def f[a](x: a, n: i32) = if eq(n, 0) then (x, n) else g(x, n - 1)\n\
+             def g[b](y: b, n: i32) = if eq(n, 0) then (y, n) else h(y, n - 1)\n\
+             def h[c](z: c, n: i32) = if eq(n, 0) then (z, n) else f(z, n - 1)\n",
+            "def f[a](x: a, n: i32) -> (a, i32) = if eq(n, 0) then (x, n) else g(x, n - 1)\n\
+             def g[b](y: b, n: i32) -> (b, i32) = if eq(n, 0) then (y, n) else h(y, n - 1)\n\
+             def h[c](z: c, n: i32) -> (c, i32) = if eq(n, 0) then (z, n) else f(z, n - 1)\n",
+        ),
+        // A swapped call: the written twin types it by polymorphic recursion
+        // only when the call's result is written.
+        (
+            "def f[a, b](x: a, y: b, n: i32) = if eq(n, 0) then (x, n) else f(y, x, n - 1)\n",
+            "def f[a, b](x: a, y: b, n: i32) -> (a, i32) = if eq(n, 0) then (x, n) else f(y, x, n - 1)\n",
+        ),
+        (
+            "def swap[a, b](x: a, y: b, n: i32) = if eq(n, 0) then (x, y) else {\n  (u, v) = swap(y, x, n - 1)\n  (v, u)\n}\n",
+            "def swap[a, b](x: a, y: b, n: i32) -> (a, b) = if eq(n, 0) then (x, y) else {\n  (u, v) = swap(y, x, n - 1)\n  (v, u)\n}\n",
+        ),
+        (
+            "def f[a, b](x: a, y: b, n: i32) = if eq(n, 0) then (x, y) else (g(x, n - 1), g(y, n - 1))\n\
+             def g[c](z: c, n: i32) = if eq(n, 0) then z else f(z, z, n - 1).0\n",
+            "def f[a, b](x: a, y: b, n: i32) -> (a, b) = if eq(n, 0) then (x, y) else (g(x, n - 1), g(y, n - 1))\n\
+             def g[c](z: c, n: i32) -> c = if eq(n, 0) then z else f(z, z, n - 1).0\n",
+        ),
+    ] {
+        let omitted_verdict = verdict(omitted);
+        let written_verdict = verdict(written);
+        if omitted_verdict.is_empty() == written_verdict.is_empty() {
+            continue;
+        }
+        differing += 1;
+        assert!(
+            written_verdict.is_empty(),
+            "only the omitted form may be the stricter one:\n{omitted}\n{written}\n{written_verdict:#?}"
+        );
+        assert!(
+            suggestions(omitted)
+                .iter()
+                .any(|suggestion| suggestion.contains(POLYMORPHIC_RECURSION_REPAIR)),
+            "the only admissible difference is the polymorphic-recursion rule:\n{omitted}\n{omitted_verdict:#?}"
+        );
+    }
+    // The two swapped forms whose written twins check are the pairs that
+    // exercise the difference; without them the oracle would be vacuous.
+    assert_eq!(differing, 2, "the swapped `swap` and `f`/`g` pairs differ");
+}

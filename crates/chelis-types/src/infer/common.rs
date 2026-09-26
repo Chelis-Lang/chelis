@@ -2340,7 +2340,7 @@ pub(super) fn infer_top_level(
             declared_type_names
                 .to_sorted()
                 .into_iter()
-                .map(|(variable, _)| (*variable, subst.tvar_restriction(*variable)))
+                .map(|(variable, _)| (*variable, env.declared_binder_bound(*variable, subst)))
                 .collect();
         env.set_active_declared_type_bounds(declared_dtype_bounds.clone());
         let mut body_env = env.clone();
@@ -2640,7 +2640,8 @@ pub(super) fn infer_top_level(
         };
 
         let binder_contract =
-            AuthoredBinderContract::new(name.clone(), declared_type_names, declared_dtype_bounds);
+            AuthoredBinderContract::new(name.clone(), declared_type_names, declared_dtype_bounds)
+                .in_monomorphic_group(env.is_monomorphic_group_member(&name));
         product.record_authored_binder_contract(match binder_rigidity {
             Some((decl_ty, dim_names, rank_names)) => {
                 binder_contract.with_rigidity(decl_ty, dim_names, rank_names)
