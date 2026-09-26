@@ -49,31 +49,6 @@ use pyo3::types::{PyAny, PyDict, PyModule, PyTuple};
 use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 
-const RUNTIME_H: &str = include_str!(concat!(
-    env!("CARGO_MANIFEST_DIR"),
-    "/../chelis-runtime/include/chelis_runtime.h"
-));
-const RUNTIME_VIEWS_H: &str = include_str!(concat!(
-    env!("CARGO_MANIFEST_DIR"),
-    "/../chelis-runtime/include/chelis_runtime_views.h"
-));
-const RUNTIME_DTYPE_H: &str = include_str!(concat!(
-    env!("CARGO_MANIFEST_DIR"),
-    "/../chelis-runtime/include/chelis_runtime_dtype.h"
-));
-const BLAS_H: &str = include_str!(concat!(
-    env!("CARGO_MANIFEST_DIR"),
-    "/../chelis-runtime/include/chelis_blas.h"
-));
-const SIMD_H: &str = include_str!(concat!(
-    env!("CARGO_MANIFEST_DIR"),
-    "/../chelis-runtime/include/chelis_simd.h"
-));
-const MATH_H: &str = include_str!(concat!(
-    env!("CARGO_MANIFEST_DIR"),
-    "/../chelis-runtime/include/chelis_math.h"
-));
-
 const CHELIS_DTYPE_F32: i32 = RuntimeDType::F32.id();
 const CHELIS_DTYPE_F64: i32 = RuntimeDType::F64.id();
 const DLPACK_CPU_DEVICE_TYPE: i32 = 1;
@@ -758,12 +733,24 @@ fn load_artifact(
     library_path: &Path,
     tempdir: Option<TempDir>,
 ) -> PyResult<NativeCompiledModel> {
-    let library_path = library_path.to_path_buf();
+    // One resolved path for the metadata, the digest check and the loader. For
+    // a bare file name the Linux loader searches `LD_LIBRARY_PATH` and the
+    // system directories, never the working directory the digest check reads
+    // (spec/11 §1.4). A macOS `DYLD_LIBRARY_PATH` set at launch still replaces
+    // any library by leaf name, as it does for every library the process loads.
+    let library_path = std::path::absolute(library_path).map_err(|err| {
+        ChelisError::new_err(format!(
+            "resolve artifact path {} failed: {err}",
+            library_path.display()
+        ))
+    })?;
     let manifest_path = library_path.with_extension("json");
     let manifest_text = fs::read_to_string(&manifest_path)
         .map_err(|err| ChelisError::new_err(format!("read manifest failed: {err}")))?;
-    let manifest: ArtifactManifest = serde_json::from_str(&manifest_text)
-        .map_err(|err| ChelisError::new_err(format!("parse manifest failed: {err}")))?;
+    let manifest: ArtifactManifest = serde_json::from_str(&manifest_text).map_err(|err| {
+        ChelisError::new_err(format!("parse manifest failed: {err}; {RECOMPILE_REMEDY}"))
+    })?;
+    admit_artifact(&manifest, &library_path)?;
     warn_if_stale_source(py, &manifest)?;
     let library = Arc::new(
         open_compiled_library(&library_path)
@@ -777,6 +764,40 @@ fn load_artifact(
             _tempdir: tempdir,
         },
     })
+}
+
+/// What a refused persisted artifact asks of its user (spec/11 §1.4).
+const RECOMPILE_REMEDY: &str = "recompile it with chelis.compile_and_load";
+
+/// Admit a persisted artifact only beside the runtime it was linked with and
+/// only with the library bytes its metadata recorded (spec/11 §1.4). Both
+/// checks run before the library is opened.
+fn admit_artifact(manifest: &ArtifactManifest, library_path: &Path) -> PyResult<()> {
+    let carried = chelis_runtime_bundle::carried_sha256()
+        .map_err(|err| ChelisError::new_err(err.to_string()))?;
+    if manifest.runtime_sha256 != carried {
+        return Err(ChelisError::new_err(format!(
+            "{} was linked with runtime {}, but this chelis carries runtime {carried}; \
+             {RECOMPILE_REMEDY}",
+            library_path.display(),
+            manifest.runtime_sha256
+        )));
+    }
+    let library = fs::read(library_path).map_err(|err| {
+        ChelisError::new_err(format!(
+            "read {} failed: {err}; {RECOMPILE_REMEDY}",
+            library_path.display()
+        ))
+    })?;
+    let library_sha256 = sha256_hex(&library);
+    if manifest.library_sha256 != library_sha256 {
+        return Err(ChelisError::new_err(format!(
+            "{} has SHA-256 {library_sha256}, but its metadata records {}; {RECOMPILE_REMEDY}",
+            library_path.display(),
+            manifest.library_sha256
+        )));
+    }
+    Ok(())
 }
 
 fn parse_source_kind(value: &str) -> PyResult<SourceKind> {
@@ -834,6 +855,11 @@ fn compile_and_load_error(err: CompileAndLoadError) -> PyErr {
         CompileAndLoadError::Compiler(err) => compiler_error(err),
         CompileAndLoadError::Message(message) => ChelisError::new_err(message),
     }
+}
+
+/// A staging failure of the carried runtime; Python sees it as `ChelisError`.
+fn runtime_error(err: chelis_runtime_bundle::RuntimeError) -> CompileAndLoadError {
+    CompileAndLoadError::Message(err.to_string())
 }
 
 /// `reef_home` sourced exactly as the CLI does at its
@@ -960,6 +986,9 @@ fn run_eval_in_context_job(
 fn run_compile_and_load_job(
     job: CompileAndLoadJob,
 ) -> Result<CompileAndLoadOutput, CompileAndLoadError> {
+    // The extension links the runtime its own build carries (spec/08 §2.1): a
+    // set runtime directory is refused before any work, never honored.
+    chelis_runtime_bundle::reject_runtime_dir().map_err(runtime_error)?;
     let source = fs::read_to_string(&job.source_path)
         .map_err(|err| CompileAndLoadError::Message(format!("read source failed: {err}")))?;
     let reef_root = resolve_compile_reef_root(&job, &source)?;
@@ -1038,18 +1067,21 @@ fn run_compile_and_load_job(
     })?;
 
     write_generated_files_inner(&artifact_root, &artifact).map_err(CompileAndLoadError::Message)?;
-    write_runtime_headers_inner(&artifact_root).map_err(CompileAndLoadError::Message)?;
-    let runtime_library =
-        stage_runtime_library_inner(&artifact_root).map_err(CompileAndLoadError::Message)?;
-    let lib_path = compile_shared_library_inner(
-        &artifact_root,
-        &job.source_path,
-        &artifact,
-        &runtime_library,
-    )
-    .map_err(CompileAndLoadError::Message)?;
+    let staged = chelis_runtime_bundle::stage(&artifact_root).map_err(runtime_error)?;
+    let lib_path =
+        compile_shared_library_inner(&artifact_root, &job.source_path, &artifact, &staged.archive)
+            .map_err(CompileAndLoadError::Message)?;
+    let library = fs::read(&lib_path).map_err(|err| {
+        CompileAndLoadError::Message(format!("read {} failed: {err}", lib_path.display()))
+    })?;
     let manifest_path = lib_path.with_extension("json");
-    let manifest = artifact_manifest_inner(&job.source_path, &source, &artifact);
+    let manifest = artifact_manifest_inner(
+        &job.source_path,
+        &source,
+        &artifact,
+        staged.archive_sha256,
+        sha256_hex(&library),
+    );
     write_manifest_inner(&manifest_path, &manifest).map_err(CompileAndLoadError::Message)?;
 
     Ok(CompileAndLoadOutput { lib_path, tempdir })
@@ -1179,6 +1211,8 @@ fn artifact_manifest_inner(
     source_path: &Path,
     source: &str,
     artifact: &CompiledExecutionArtifact,
+    runtime_sha256: String,
+    library_sha256: String,
 ) -> ArtifactManifest {
     let canonical_source = source_path
         .canonicalize()
@@ -1193,6 +1227,8 @@ fn artifact_manifest_inner(
         symbolic_dims: artifact.symbolic_dims.clone(),
         source_path: canonical_source.display().to_string(),
         source_hash: sha256_hex(source.as_bytes()),
+        runtime_sha256,
+        library_sha256,
     }
 }
 
@@ -1206,126 +1242,6 @@ fn write_generated_files_inner(
             .map_err(|err| format!("write {} failed: {err}", path.display()))?;
     }
     Ok(())
-}
-
-fn write_runtime_headers_inner(root: &Path) -> Result<(), String> {
-    for (name, content) in [
-        ("chelis_runtime.h", RUNTIME_H),
-        ("chelis_runtime_views.h", RUNTIME_VIEWS_H),
-        ("chelis_runtime_dtype.h", RUNTIME_DTYPE_H),
-        ("chelis_blas.h", BLAS_H),
-        ("chelis_simd.h", SIMD_H),
-        ("chelis_math.h", MATH_H),
-    ] {
-        let path = root.join(name);
-        fs::write(&path, content).map_err(|err| format!("write {name} failed: {err}"))?;
-    }
-    Ok(())
-}
-
-fn find_runtime_library_inner() -> Result<PathBuf, String> {
-    const LIB_NAME: &str = "libchelis_runtime.a";
-    const LIB_PREFIX: &str = "libchelis_runtime";
-
-    fn find_in_dir(dir: &Path) -> Option<PathBuf> {
-        let mut hashed_matches = Vec::new();
-        let exact = dir.join(LIB_NAME);
-        let entries = fs::read_dir(dir).ok()?;
-        for entry in entries.flatten() {
-            let path = entry.path();
-            let name = path.file_name()?.to_str()?;
-            if name.starts_with(LIB_PREFIX) && name.ends_with(".a") {
-                if name == LIB_NAME {
-                    continue;
-                }
-                hashed_matches.push(path);
-            }
-        }
-        hashed_matches
-            .into_iter()
-            .max_by_key(|path| fs::metadata(path).and_then(|meta| meta.modified()).ok())
-            .or_else(|| exact.exists().then_some(exact))
-    }
-
-    if let Ok(dir) = std::env::var("CHELIS_RUNTIME_DIR") {
-        if let Some(candidate) = find_in_dir(&PathBuf::from(&dir)) {
-            return Ok(candidate);
-        }
-        return Err(format!(
-            "cannot find {LIB_NAME} in CHELIS_RUNTIME_DIR; set CHELIS_RUNTIME_DIR to the directory containing the chelis runtime static library"
-        ));
-    }
-
-    let exe = std::env::current_exe()
-        .map_err(|err| format!("cannot determine current executable path: {err}"))?;
-    let exe_dir = exe
-        .parent()
-        .ok_or_else(|| "cannot determine executable directory".to_string())?;
-    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    for candidate_dir in [
-        exe_dir.join("deps"),
-        exe_dir.to_path_buf(),
-        exe_dir.join("lib"),
-        exe_dir.parent().map(|p| p.join("deps")).unwrap_or_default(),
-        exe_dir
-            .parent()
-            .map(|p| p.to_path_buf())
-            .unwrap_or_default(),
-        exe_dir.parent().map(|p| p.join("lib")).unwrap_or_default(),
-    ] {
-        if !candidate_dir.as_os_str().is_empty()
-            && let Some(found) = find_in_dir(&candidate_dir)
-        {
-            return Ok(found);
-        }
-    }
-
-    // Honor an external `CARGO_TARGET_DIR` (e.g. a concurrent agent building
-    // into `target/agents/<name>`) before the `CARGO_MANIFEST_DIR`-relative
-    // fallbacks below, which assume the default `target/` beside the workspace.
-    // `current_exe()` cannot resolve this for the Python extension — its exe is
-    // the interpreter, not a chelis build artifact. A relative value resolves
-    // against the workspace root. See chelis#747.
-    if let Some(raw) = std::env::var_os("CARGO_TARGET_DIR") {
-        let raw = PathBuf::from(raw);
-        let target_dir = if raw.is_absolute() {
-            raw
-        } else {
-            manifest_dir.join("../..").join(raw)
-        };
-        for candidate_dir in [
-            target_dir.join("debug/deps"),
-            target_dir.join("release/deps"),
-            target_dir.join("debug"),
-            target_dir.join("release"),
-        ] {
-            if let Some(found) = find_in_dir(&candidate_dir) {
-                return Ok(found);
-            }
-        }
-    }
-
-    for candidate_dir in [
-        manifest_dir.join("../../target/debug/deps"),
-        manifest_dir.join("../../target/release/deps"),
-        manifest_dir.join("../../target/debug"),
-        manifest_dir.join("../../target/release"),
-    ] {
-        if let Some(found) = find_in_dir(&candidate_dir) {
-            return Ok(found);
-        }
-    }
-
-    Err(format!(
-        "cannot find {LIB_NAME}; set CHELIS_RUNTIME_DIR or install chelis so {LIB_NAME} is available relative to the chelis executable"
-    ))
-}
-
-fn stage_runtime_library_inner(root: &Path) -> Result<PathBuf, String> {
-    let source = find_runtime_library_inner()?;
-    let dest = root.join("libchelis_runtime.a");
-    fs::copy(&source, &dest).map_err(|err| format!("copy {} failed: {err}", dest.display()))?;
-    Ok(dest)
 }
 
 fn compile_shared_library_inner(
@@ -2159,26 +2075,51 @@ loss = (mean(x, 0) : tensor[f32])
         }
     }
 
+    /// Bytes that are not a shared library: any attempt to open them fails as
+    /// "load shared library failed", so a different error proves that the check
+    /// producing it ran before the library was opened.
+    const NOT_A_LIBRARY: &[u8] = b"not a shared library";
+
+    /// Version-2 metadata that `load` admits beside a library holding
+    /// `library_bytes`: this build's carried runtime and those bytes' digest.
+    fn admitted_manifest(library_bytes: &[u8]) -> serde_json::Value {
+        serde_json::json!({
+            "abi_version": 2, "target": "c", "host_entry_name": "chelis_main",
+            "inputs": [], "outputs": [], "source_path": "", "source_hash": "",
+            "runtime_sha256": chelis_runtime_bundle::carried_sha256().expect("carried runtime"),
+            "library_sha256": sha256_hex(library_bytes),
+        })
+    }
+
+    /// Write `manifest` beside a library file holding `library_bytes`, load it,
+    /// and return the refusal.
+    fn load_error(manifest: &serde_json::Value, library_bytes: &[u8]) -> String {
+        let dir = tempdir().expect("tempdir");
+        let library = dir.path().join("model.so");
+        fs::write(&library, library_bytes).expect("write library");
+        fs::write(
+            library.with_extension("json"),
+            serde_json::to_vec(manifest).expect("encode manifest"),
+        )
+        .expect("write manifest");
+        Python::with_gil(|py| match load_artifact(py, &library, None) {
+            Ok(_) => panic!("load must refuse {manifest}"),
+            Err(error) => error.to_string(),
+        })
+    }
+
     #[test]
     fn compiled_manifest_version_admission_precedes_metadata_and_library_use() {
-        let valid = serde_json::json!({
-            "abi_version": 2, "target": "c", "host_entry_name": "chelis_main",
-            "inputs": [], "outputs": [], "source_path": "", "source_hash": ""
-        });
+        let valid = admitted_manifest(NOT_A_LIBRARY);
         let manifest: ArtifactManifest = serde_json::from_value(valid.clone()).unwrap();
         assert_eq!(serde_json::to_value(manifest).unwrap(), valid);
+        // Admitted metadata reaches the library open, which these bytes fail.
+        let error = load_error(&valid, NOT_A_LIBRARY);
+        assert!(error.contains("load shared library failed"), "{error}");
         let dir = tempdir().unwrap();
         let library = dir.path().join("not-a-library.so");
         let path = library.with_extension("json");
-        fs::write(&path, serde_json::to_vec(&valid).unwrap()).unwrap();
         Python::with_gil(|py| {
-            let error = load_artifact(py, &library, None)
-                .err()
-                .expect("no library exists");
-            assert!(
-                error.to_string().contains("load shared library failed"),
-                "{error}"
-            );
             for header in [
                 "",
                 ",\"abi_version\":0",
@@ -2560,6 +2501,179 @@ loss = (mean(x, 0) : tensor[f32])
         let library = open_compiled_library(&output.lib_path)
             .expect("shared library should load without unresolved runtime symbols");
         drop(library);
+    }
+
+    const RELU4_SOURCE: &str = "def relu4(x: tensor[4, f32]) -> tensor[4, f32] = relu(x)\n";
+
+    /// Compile `source` as `model.ch` into a retained artifact directory, so
+    /// its library is that directory's `model.so`.
+    fn compile_model_artifact(source: &str) -> (TempDir, CompileAndLoadOutput) {
+        let dir = tempdir().expect("tempdir");
+        let source_path = dir.path().join("model.ch");
+        fs::write(&source_path, source).expect("write source");
+        let output = run_compile_and_load_job(CompileAndLoadJob {
+            source_path,
+            source_kind: SourceKind::Surf,
+            target: CompileTarget::C,
+            entry_name: None,
+            artifact_dir: Some(PathBuf::from(dir.path())),
+            project_root: None,
+            force_bare: false,
+        })
+        .expect("compile and load job");
+        (dir, output)
+    }
+
+    /// spec/08 §2.1 and spec/11 §1.4: compiling stages the runtime this build
+    /// carries, links it, and records both the carried runtime's digest and the
+    /// linked library's digest in the artifact metadata.
+    #[test]
+    fn compile_and_load_job_stages_the_carried_runtime_and_records_both_digests() {
+        let (dir, output) = compile_model_artifact(RELU4_SOURCE);
+        let carried = chelis_runtime_bundle::carried_sha256().expect("carried runtime");
+        let staged = fs::read(dir.path().join("libchelis_runtime.a")).expect("staged archive");
+        assert_eq!(
+            sha256_hex(&staged),
+            carried,
+            "staging writes the carried bytes"
+        );
+        let receipt: serde_json::Value = serde_json::from_slice(
+            &fs::read(dir.path().join("chelis_runtime.receipt.json")).expect("staging receipt"),
+        )
+        .expect("receipt JSON");
+        assert_eq!(receipt["archive_sha256"], carried.as_str());
+        let manifest: ArtifactManifest = serde_json::from_slice(
+            &fs::read(output.lib_path.with_extension("json")).expect("read manifest"),
+        )
+        .expect("parse manifest");
+        assert_eq!(manifest.runtime_sha256, carried);
+        assert_eq!(
+            manifest.library_sha256,
+            sha256_hex(&fs::read(&output.lib_path).expect("read library"))
+        );
+    }
+
+    /// spec/11 §1.4: the extension that built an artifact reloads it from disk,
+    /// and its entry computes exact values.
+    #[test]
+    fn a_persisted_artifact_reloads_and_computes_exact_values() {
+        let (_dir, output) = compile_model_artifact(RELU4_SOURCE);
+        Python::with_gil(|py| {
+            let model =
+                load_artifact(py, &output.lib_path, None).expect("admit the artifact it built");
+            let outputs = call_host_entry(
+                &model.loaded.library,
+                &model.loaded.manifest,
+                &[(vec![-1.0, 0.0, 2.5, -3.0], vec![4])],
+            );
+            assert_eq!(outputs, vec![vec![0.0, 0.0, 2.5, 0.0]]);
+        });
+    }
+
+    /// spec/11 §1.4: `load` opens the library whose bytes it admitted. A bare
+    /// file name is checked in the working directory, so the loader must not
+    /// resolve it on its search path, which here names another library of the
+    /// same name first. The Linux loader searches `LD_LIBRARY_PATH` for a bare
+    /// name and never the working directory; macOS searches the working
+    /// directory, so the two can diverge only on Linux. The loader reads its
+    /// path at process start, so the load runs in a child test process.
+    #[cfg(unix)]
+    #[test]
+    fn load_of_a_bare_name_executes_the_library_it_admitted() {
+        const WORKER: &str = "CHELIS_BARE_NAME_LOAD_TEST_WORKER";
+        if env::var_os(WORKER).is_some() {
+            Python::with_gil(|py| {
+                let model =
+                    load_artifact(py, Path::new("model.so"), None).expect("admit ./model.so");
+                let outputs = call_host_entry(
+                    &model.loaded.library,
+                    &model.loaded.manifest,
+                    &[(vec![-1.0, 0.0, 2.5, -3.0], vec![4])],
+                );
+                assert_eq!(
+                    outputs,
+                    vec![vec![0.0, 0.0, 2.5, 0.0]],
+                    "executed a library other than the admitted ./model.so"
+                );
+            });
+            return;
+        }
+        let (admitted, _) = compile_model_artifact(RELU4_SOURCE);
+        let (other, _) =
+            compile_model_artifact("def neg4(x: tensor[4, f32]) -> tensor[4, f32] = neg(x)\n");
+        // Prepend, keeping the inherited entries: CI finds libpython through them.
+        let search_path = env::join_paths(
+            std::iter::once(other.path().to_path_buf()).chain(
+                env::var_os("LD_LIBRARY_PATH")
+                    .iter()
+                    .flat_map(env::split_paths),
+            ),
+        )
+        .expect("join LD_LIBRARY_PATH");
+        let child = Command::new(env::current_exe().expect("current test binary"))
+            .args([
+                "--exact",
+                "tests::load_of_a_bare_name_executes_the_library_it_admitted",
+                "--nocapture",
+            ])
+            .current_dir(admitted.path())
+            .env(WORKER, "1")
+            .env("LD_LIBRARY_PATH", search_path)
+            .output()
+            .expect("run the bare-name load child");
+        assert!(
+            child.status.success(),
+            "bare-name load child failed ({}): {}\n{}",
+            child.status,
+            String::from_utf8_lossy(&child.stdout),
+            String::from_utf8_lossy(&child.stderr)
+        );
+    }
+
+    /// spec/11 §1.4: metadata naming another runtime is refused before the
+    /// library is opened, with recompilation as the remedy.
+    #[test]
+    fn load_refuses_an_artifact_linked_with_another_runtime_before_opening_it() {
+        let mut manifest = admitted_manifest(NOT_A_LIBRARY);
+        manifest["runtime_sha256"] = "0".repeat(64).into();
+        let error = load_error(&manifest, NOT_A_LIBRARY);
+        assert!(
+            error.contains("but this chelis carries runtime") && error.contains(RECOMPILE_REMEDY),
+            "{error}"
+        );
+        assert!(!error.contains("load shared library"), "{error}");
+    }
+
+    /// spec/11 §1.4: library bytes that differ from the recorded digest are
+    /// refused before they are opened.
+    #[test]
+    fn load_refuses_changed_library_bytes_before_opening_them() {
+        let manifest = admitted_manifest(b"the bytes that were compiled");
+        let error = load_error(&manifest, NOT_A_LIBRARY);
+        assert!(
+            error.contains("but its metadata records") && error.contains(RECOMPILE_REMEDY),
+            "{error}"
+        );
+        assert!(!error.contains("load shared library"), "{error}");
+    }
+
+    /// spec/11 §1.4: neither digest has a missing-field default.
+    #[test]
+    fn load_refuses_metadata_without_either_digest_before_opening_the_library() {
+        for field in ["runtime_sha256", "library_sha256"] {
+            let mut manifest = admitted_manifest(NOT_A_LIBRARY);
+            manifest
+                .as_object_mut()
+                .expect("manifest object")
+                .remove(field);
+            let error = load_error(&manifest, NOT_A_LIBRARY);
+            assert!(
+                error.contains(&format!("missing field `{field}`"))
+                    && error.contains(RECOMPILE_REMEDY),
+                "{field}: {error}"
+            );
+            assert!(!error.contains("load shared library"), "{field}: {error}");
+        }
     }
 
     /// chelis#963: unloading an artifact whose kernel has *run* must not
@@ -3087,42 +3201,56 @@ loss = (mean(x, 0) : tensor[f32])
         assert_eq!(supported_execution_dtypes(CompileTarget::Hip), &["f32"]);
     }
 
-    // chelis#747 red-team: `CHELIS_RUNTIME_DIR` is the first-priority override in
-    // `find_runtime_library_inner`. When the staticlib is absent there it MUST
-    // fail loud (naming the env var), never silently fall through to the
-    // `CARGO_TARGET_DIR` branch or the manifest-relative fallbacks. A valid
-    // `CARGO_TARGET_DIR` set simultaneously must NOT rescue it: the documented
-    // precedence is CHELIS_RUNTIME_DIR-wins-or-errors, then exe-relative, then
-    // CARGO_TARGET_DIR, then manifest. Env is process-global; save/restore and
-    // rely on nextest's process-per-test isolation (matches the repo pattern in
-    // reef_install_from_github.rs).
+    // spec/08 §2.1: the extension links the runtime its build carries. A set
+    // `CHELIS_RUNTIME_DIR` is refused before anything is written, even when it
+    // names a directory holding a real runtime archive. Env is process-global;
+    // save/restore and rely on nextest's process-per-test isolation (matches
+    // the repo pattern in reef_install_from_github.rs).
     #[test]
-    fn find_runtime_library_bogus_chelis_runtime_dir_is_loud_error_even_with_valid_target_dir() {
-        let empty_runtime_dir = tempdir().expect("tempdir");
-        let valid_target_dir = tempdir().expect("tempdir");
+    fn compile_and_load_rejects_a_set_runtime_dir_before_staging() {
+        let offered = tempdir().expect("tempdir");
+        chelis_runtime_bundle::stage(offered.path()).expect("stage a real runtime to offer");
+        let dir = tempdir().expect("tempdir");
+        let source_path = dir.path().join("model.ch");
+        fs::write(
+            &source_path,
+            "def relu4(x: tensor[4, f32]) -> tensor[4, f32] = relu(x)\n",
+        )
+        .expect("write source");
+        let artifact_dir = dir.path().join("artifact");
         let prior_runtime = std::env::var_os("CHELIS_RUNTIME_DIR");
-        let prior_target = std::env::var_os("CARGO_TARGET_DIR");
         unsafe {
-            std::env::set_var("CHELIS_RUNTIME_DIR", empty_runtime_dir.path());
-            std::env::set_var("CARGO_TARGET_DIR", valid_target_dir.path());
+            std::env::set_var("CHELIS_RUNTIME_DIR", offered.path());
         }
-        let result = find_runtime_library_inner();
+        let result = run_compile_and_load_job(CompileAndLoadJob {
+            source_path,
+            source_kind: SourceKind::Surf,
+            target: CompileTarget::C,
+            entry_name: None,
+            artifact_dir: Some(artifact_dir.clone()),
+            project_root: None,
+            force_bare: false,
+        });
         unsafe {
             match prior_runtime {
                 Some(v) => std::env::set_var("CHELIS_RUNTIME_DIR", v),
                 None => std::env::remove_var("CHELIS_RUNTIME_DIR"),
             }
-            match prior_target {
-                Some(v) => std::env::set_var("CARGO_TARGET_DIR", v),
-                None => std::env::remove_var("CARGO_TARGET_DIR"),
-            }
         }
-        let err =
-            result.expect_err("bogus CHELIS_RUNTIME_DIR must be a loud error, not a fall-through");
+        let message = match result {
+            Err(CompileAndLoadError::Message(message)) => message,
+            Err(other) => panic!("expected the runtime-directory refusal, got {other:?}"),
+            Ok(output) => panic!(
+                "a set CHELIS_RUNTIME_DIR was honored: {}",
+                output.lib_path.display()
+            ),
+        };
         assert!(
-            err.contains("CHELIS_RUNTIME_DIR"),
-            "error must name CHELIS_RUNTIME_DIR, got: {err}"
+            message.contains("CHELIS_RUNTIME_DIR is set")
+                && message.contains("Unset CHELIS_RUNTIME_DIR"),
+            "{message}"
         );
+        assert!(!artifact_dir.exists(), "nothing may be staged or written");
     }
 
     fn run_job_manifest(source: &str, entry: Option<&str>) -> ArtifactManifest {
@@ -3223,13 +3351,25 @@ def main(a: tensor[1, f32], b: tensor[1, f32]) -> tensor[2, f32] = {
         );
 
         let library = unsafe { Library::new(&output.lib_path) }.expect("load shared library");
+        let results = call_host_entry(&library, &manifest, inputs);
+        drop(library);
+        results
+    }
+
+    /// Call `manifest`'s host entry in the opened `library` with f32 `inputs`
+    /// (each a `(data, shape)` pair), returning the numeric outputs.
+    fn call_host_entry(
+        library: &Library,
+        manifest: &ArtifactManifest,
+        inputs: &[(Vec<f32>, Vec<usize>)],
+    ) -> Vec<Vec<f32>> {
         let symbol = nul_terminated(&manifest.host_entry_name);
         let entry_fn = unsafe {
             library
                 .get::<HostEntry>(symbol.as_bytes())
                 .expect("host entry symbol resolves via dlsym")
         };
-        let api = unsafe { load_host_runtime_api(&library).expect("resolve host runtime API") };
+        let api = unsafe { load_host_runtime_api(library).expect("resolve host runtime API") };
 
         // Keep input buffers alive across the call.
         let mut buffers: Vec<Vec<f32>> = inputs.iter().map(|(data, _)| data.clone()).collect();
@@ -3269,7 +3409,6 @@ def main(a: tensor[1, f32], b: tensor[1, f32]) -> tensor[2, f32] = {
             .collect::<Vec<_>>();
         drop(input_tensors);
         drop(buffers);
-        drop(library);
         results
     }
 

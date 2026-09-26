@@ -6,6 +6,7 @@ use pyo3::{
     prelude::*,
     types::{PyDict, PyModule},
 };
+use sha2::{Digest, Sha256};
 use std::{ffi::CString, process::Command};
 const SOURCE: &str = r#"
 #include <stdint.h>
@@ -116,7 +117,10 @@ fn run_outputs(shape: Vec<i64>, output_count: usize, body: &str) {
         String::from_utf8_lossy(&result.stderr)
     );
     let spec = |name: &str| serde_json::json!({"name":name,"dtype":"f32","dims":shape.iter().map(|n|serde_json::json!({"size":n})).collect::<Vec<_>>()});
-    let manifest = serde_json::json!({"abi_version":2,"target":"hip","host_entry_name":"unused_host","device_entry_name":"fixture_entry","inputs":[spec("x")],"outputs":(0..output_count).map(|index| spec(if output_count == 1 {"result"} else if index == 0 {"left"} else {"right"})).collect::<Vec<_>>(),"source_path":dir.path().join("absent.ch"),"source_hash":"fixture"});
+    let runtime_sha256 =
+        chelis_runtime_bundle::carried_sha256().expect("this test build carries a runtime");
+    let library_sha256 = format!("{:x}", Sha256::digest(std::fs::read(&library).unwrap()));
+    let manifest = serde_json::json!({"abi_version":2,"target":"hip","host_entry_name":"unused_host","device_entry_name":"fixture_entry","inputs":[spec("x")],"outputs":(0..output_count).map(|index| spec(if output_count == 1 {"result"} else if index == 0 {"left"} else {"right"})).collect::<Vec<_>>(),"source_path":dir.path().join("absent.ch"),"source_hash":"fixture","runtime_sha256":runtime_sha256,"library_sha256":library_sha256});
     std::fs::write(
         library.with_extension("json"),
         serde_json::to_vec(&manifest).unwrap(),

@@ -9,6 +9,7 @@ use std::process::Command;
 
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyModule};
+use sha2::{Digest, Sha256};
 
 const SOURCE: &str = r#"
 #include <stdint.h>
@@ -132,11 +133,15 @@ fn run_case(outputs: &[&str], body: &str) {
             "name": name, "dtype": "f32", "dims": [{"size": 2}]
         })
     };
+    let runtime_sha256 =
+        chelis_runtime_bundle::carried_sha256().expect("this test build carries a runtime");
+    let library_sha256 = format!("{:x}", Sha256::digest(std::fs::read(&library).unwrap()));
     let manifest = serde_json::json!({
         "abi_version": 2, "target": "c", "host_entry_name": "fixture_entry",
         "inputs": [tensor_spec("x")],
         "outputs": outputs.iter().map(|name| tensor_spec(name)).collect::<Vec<_>>(),
-        "source_path": directory.path().join("absent.ch"), "source_hash": "fixture"
+        "source_path": directory.path().join("absent.ch"), "source_hash": "fixture",
+        "runtime_sha256": runtime_sha256, "library_sha256": library_sha256
     });
     std::fs::write(
         library.with_extension("json"),

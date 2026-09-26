@@ -102,6 +102,17 @@ metadata is decoded or the library is opened. This discriminant selects the
 callable ABI and is distinct from execution-value and DAG schema versions. Tensor
 metadata retains the exact extent and dtype contracts above.
 
+The metadata also records `runtime_sha256`, the lowercase hexadecimal SHA-256
+digest of the runtime archive the writing extension carried and linked
+(spec/08 §2.1), and `library_sha256`, the digest of the compiled library's
+bytes. After admitting the ABI version, `load` requires both fields and admits
+the artifact only when `runtime_sha256` equals the digest of the runtime the
+loading extension carries and `library_sha256` equals the digest of the
+library's bytes; otherwise it raises `ChelisError` naming recompilation, before
+opening the library. Neither field has a missing-field default. The digests bind
+the artifact's provenance rather than the callable interface and do not change
+`abi_version: 2`.
+
 `project_root` supplies Reef dependency context. `compile_and_load` discovers
 a root from an importing Surf source unless explicitly disabled; an explicit
 nonempty root selects that context. Evaluation from raw text requires an

@@ -5,6 +5,7 @@ use pyo3::{
     types::{PyDict, PyModule},
 };
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 use std::{ffi::CString, process::Command};
 const SOURCE: &str = r#"
 #include <stdint.h>
@@ -71,7 +72,10 @@ fn run_case(inputs: Value, outputs: Value, body: &str) {
         "{}",
         String::from_utf8_lossy(&compiled.stderr)
     );
-    let manifest = json!({"abi_version":2,"target":"c","host_entry_name":"fixture_entry","inputs":inputs,"outputs":outputs,"source_path":directory.path().join("absent.ch"),"source_hash":"fixture"});
+    let runtime_sha256 =
+        chelis_runtime_bundle::carried_sha256().expect("this test build carries a runtime");
+    let library_sha256 = format!("{:x}", Sha256::digest(std::fs::read(&library).unwrap()));
+    let manifest = json!({"abi_version":2,"target":"c","host_entry_name":"fixture_entry","inputs":inputs,"outputs":outputs,"source_path":directory.path().join("absent.ch"),"source_hash":"fixture","runtime_sha256":runtime_sha256,"library_sha256":library_sha256});
     std::fs::write(
         library.with_extension("json"),
         serde_json::to_vec(&manifest).unwrap(),

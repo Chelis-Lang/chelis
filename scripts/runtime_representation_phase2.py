@@ -197,22 +197,29 @@ def python_suite():
     )
 
 
-def leg_environment(args, archive: Path):
-    """Name the pinned runtime directory for every leg that runs no chelis-cli tests.
+RUNTIME_DIR_REJECTING_PACKAGES = frozenset({"chelis-cli", "chelis-python"})
 
-    The Python extension and the HIP harnesses still select their runtime
-    through `CHELIS_RUNTIME_DIR` and otherwise search for one (#1354). chelis-cli
-    tests may run `chelis build`, which rejects the variable, so their legs never
-    receive it, and a leg cannot mix them with a package that needs the pin. The
-    export goes away when those consumers carry or name their runtime.
+
+def leg_environment(args, archive: Path):
+    """Name the pinned runtime directory for every leg whose packages still read it.
+
+    The CLI and the Python extension carry their runtime and reject
+    `CHELIS_RUNTIME_DIR`, so legs that run chelis-cli or chelis-python tests
+    never receive it. The HIP harnesses still select their runtime through it
+    and otherwise search for one (#1354), so every other leg receives the pin's
+    directory. A leg cannot mix the two kinds of package. The export goes away
+    when the HIP harnesses carry or name their runtime.
     """
-    packages = [value for flag, value in zip(args, args[1:]) if flag == "-p"]
-    if "chelis-cli" not in packages:
+    packages = {value for flag, value in zip(args, args[1:]) if flag == "-p"}
+    rejecting = packages & RUNTIME_DIR_REJECTING_PACKAGES
+    if not rejecting:
         return {"CHELIS_RUNTIME_DIR": str(archive.parent)}
-    if set(packages) != {"chelis-cli"}:
+    if packages - RUNTIME_DIR_REJECTING_PACKAGES:
         raise OracleFailure(
-            "a leg that runs chelis-cli tests cannot also run a package that needs "
-            "the pinned runtime directory"
+            f"a leg that runs {', '.join(sorted(rejecting))} tests, which reject "
+            "CHELIS_RUNTIME_DIR, cannot also run "
+            f"{', '.join(sorted(packages - RUNTIME_DIR_REJECTING_PACKAGES))}, "
+            "which needs the pinned runtime directory"
         )
     return {}
 

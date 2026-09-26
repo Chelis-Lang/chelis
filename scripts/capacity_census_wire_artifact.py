@@ -40,6 +40,8 @@ def artifact_cases():
         "outputs": [],
         "source_path": "model.chelis",
         "source_hash": "digest",
+        "runtime_sha256": "runtime-digest",
+        "library_sha256": "library-digest",
     }
     for size in (0, 1, 9007199254740993, 9223372036854775807):
         expected = {
@@ -69,6 +71,15 @@ def artifact_cases():
     )
     optional = {**base, "device_entry_name": "device", "symbolic_dims": ["n"]}
     add("CompiledArtifactManifest", "json", "optional", canonical(optional), optional)
+    for field in ("runtime_sha256", "library_sha256"):
+        add(
+            "CompiledArtifactManifest",
+            "json",
+            f"missing-{field}",
+            canonical({key: value for key, value in base.items() if key != field}),
+            None,
+            f"missing field `{field}`",
+        )
     for version in (0, 1, 3, 4294967295):
         add(
             "CompiledArtifactManifest",

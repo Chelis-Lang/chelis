@@ -17,7 +17,7 @@ same venv the cargo driver in crates/chelis-python/tests/manual_reef_context.rs
 installs into and asserts):
 
     export DYLD_LIBRARY_PATH="$(py/.venv/bin/python -c 'import sysconfig; print(sysconfig.get_config_var("LIBDIR"))')"
-    export CHELIS_RUNTIME_DIR="$PWD/target/agents/<name>/debug"   # dir with libchelis_runtime.a
+    unset CHELIS_RUNTIME_DIR                                       # the extension carries its runtime
     export CHELIS_ORACLE_COMPILER_PIN="=<workspace version>"      # the cargo driver sets this
     py/.venv/bin/python bindings/python/tests/manual_reef_context.py
 """

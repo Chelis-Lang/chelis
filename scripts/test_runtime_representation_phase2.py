@@ -71,15 +71,18 @@ class ContractTests(unittest.TestCase):
         self.assertNotIn("compiled_host_outputs_have_no_runtime_metadata_leaks", args[-1])
         self.assertNotIn("manual_", args[-1])
 
-    def test_pinned_runtime_directory_never_reaches_a_leg_that_can_run_the_cli(self):
+    def test_pinned_runtime_directory_reaches_only_legs_that_still_read_it(self):
         archive = Path("/pinned/runtime/libchelis_runtime.a")
         self.assertEqual(oracle.leg_environment(("-p", "chelis-cli"), archive), {})
+        self.assertEqual(oracle.leg_environment(("-p", "chelis-python"), archive), {})
         self.assertEqual(
             oracle.leg_environment(("-p", "chelis-backend-hip"), archive),
             {"CHELIS_RUNTIME_DIR": "/pinned/runtime"},
         )
         with self.assertRaises(oracle.OracleFailure):
-            oracle.leg_environment(("-p", "chelis-python", "-p", "chelis-cli"), archive)
+            oracle.leg_environment(("-p", "chelis-backend-hip", "-p", "chelis-cli"), archive)
+        with self.assertRaises(oracle.OracleFailure):
+            oracle.leg_environment(("-p", "chelis-python", "-p", "chelis-backend-hip"), archive)
 
     def test_phase_two_execute_leg_reports_and_executes_an_added_test(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -242,13 +245,17 @@ class ReceiptTests(unittest.TestCase):
 
             runtime_pin.assert_called_once_with(root / "target/runtime-representation-phase2/run-id/runtime-build")
             self.assertEqual(events, ["phase1", *[name for name, _ in legs]])
-            # Every leg that runs no chelis-cli tests receives runtime_pin's
-            # exclusive directory: its Python and HIP consumers still select
-            # their runtime through CHELIS_RUNTIME_DIR. chelis-cli legs never do.
+            # Legs that run chelis-cli or chelis-python tests never receive a
+            # runtime directory: both carry their runtime and reject
+            # CHELIS_RUNTIME_DIR. Every other leg receives runtime_pin's
+            # exclusive directory: the HIP harnesses still select theirs
+            # through it.
             self.assertEqual(
                 environments,
                 {
-                    name: {} if "chelis-cli" in args else {"CHELIS_RUNTIME_DIR": str(root / "runtime")}
+                    name: {}
+                    if {"chelis-cli", "chelis-python"} & set(args)
+                    else {"CHELIS_RUNTIME_DIR": str(root / "runtime")}
                     for name, args in legs
                 },
             )

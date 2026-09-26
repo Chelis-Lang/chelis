@@ -975,6 +975,13 @@ prefix = "spec/04-type-system.md"
 disposition = "packages"
 packages = ["chelis-types", "chelis-compiler-api"]
 
+# The Python package that maturin ships with the chelis-python extension;
+# chelis-python's execution-wire facade tests import it.
+[[path_rule]]
+prefix = "bindings/python/chelis/"
+disposition = "packages"
+packages = ["chelis-python"]
+
 [[path_rule]]
 prefix = "bindings/python/tests/"
 disposition = "packages"
@@ -1202,6 +1209,15 @@ job = "script-unit"
 cadence = "pull_request and push"
 reason = "the materialization-case selection and expectations are imported by PR script-unit census controls"
 tracking_issue = "chelis#1592"
+
+[[path_rule]]
+prefix = "scripts/capacity_census_wire_artifact.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "the compiled-artifact manifest codec cases are executed by PR script-unit census controls and the nightly schema-codec census"
+tracking_issue = "chelis#1354"
 
 [[path_rule]]
 prefix = "scripts/capacity_census_wire_operations.py"
