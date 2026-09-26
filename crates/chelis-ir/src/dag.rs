@@ -625,9 +625,11 @@ impl KeyBranch {
 /// How a key-operand random primitive's inputs relate to its key batch
 /// (spec/10 §3.2, rule V5). Every lane checks their runtime extents in this
 /// order before it reads one: the data's leading axes against the key's
-/// shape, then each present per-row input's axes against the key's leading
-/// ones. The DAG evaluator and the C lane both read this one table, so they
-/// check the same inputs in the same order and report the same line.
+/// shape, then each per-row input's axes against the key's leading ones,
+/// then the node's own activation's ([`Owner::activation`]), which is shaped
+/// like a leading part of the key's shape too. The DAG evaluator and the C
+/// lane both read this one table, so they check the same inputs in the same
+/// order and report the same line.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DrawBatchLayout {
     /// The operation its traps name.
@@ -637,8 +639,8 @@ pub struct DrawBatchLayout {
     /// The input whose leading axes are the key's shape: the data, the
     /// template, or a bound adjoint's cotangent.
     pub data_input: usize,
-    /// The controls' and the activation's slots, each shaped like a leading
-    /// part of the key's shape; an absent activation is skipped.
+    /// The controls' slots, each shaped like a leading part of the key's
+    /// shape. The activation is the node's owner's, not an input.
     pub per_row: &'static [usize],
 }
 
@@ -831,31 +833,32 @@ pub enum RiscOp {
     /// that would NaN on non-positive inputs. Backends emit
     /// `1.0f / x` (or the f64 / mixed-precision analog).
     Recip,
-    /// `[05-OP-8]` with operand controls. Inputs are `[template, low, high,
-    /// key]`, optionally followed by one Bool activation. The template
-    /// supplies only the shape and dtype `p`; `low` and `high` are floats of
-    /// dtype `p`, or f32 while the checker's bound signature is f32
-    /// (chelis#1295); `key` is this draw's `Prim::Key`, consumed here. Under
-    /// spec/10 §3.2's rule V5 the key's shape is the template's leading axes
-    /// and the bounds and activation are shaped like leading parts of the
-    /// key's shape. An inactive draw validates nothing and produces positive
+    /// `[05-OP-8]` with operand controls. Inputs are exactly `[template, low,
+    /// high, key]`. The template supplies only the shape and dtype `p`; `low`
+    /// and `high` are floats of dtype `p`, or f32 while the checker's bound
+    /// signature is f32 (chelis#1295); `key` is this draw's `Prim::Key`,
+    /// consumed here. Under spec/10 §3.2's rule V5 the key's shape is the
+    /// template's leading axes and the bounds and the node's activation
+    /// ([`Owner::activation`]) are shaped like leading parts of the key's
+    /// shape. An inactive draw validates nothing and produces positive
     /// zeros.
     UniformLike,
-    /// `[05-OP-37]` with an operand rate. Inputs are `[x, rate, key]`,
-    /// optionally followed by one Bool activation, shaped as for
-    /// `UniformLike`; `rate` is a value of `x`'s dtype and `key` is consumed
-    /// here. An inactive draw validates nothing and produces positive zeros.
+    /// `[05-OP-37]` with an operand rate. Inputs are exactly `[x, rate,
+    /// key]`, shaped as for `UniformLike`; `rate` is a value of `x`'s dtype
+    /// and `key` is consumed here. An inactive draw validates nothing and
+    /// produces positive zeros.
     Dropout,
-    /// AD-only `[05-OP-37]` pathwise input adjoint. Inputs are `[g, rate,
-    /// key]`, optionally followed by the forward draw's activation. It reads
-    /// its forward `Dropout`'s key and rate without consuming the key, and
-    /// applies the same saved mask and finalized sub/div to the cotangent.
+    /// AD-only `[05-OP-37]` pathwise input adjoint. Inputs are exactly `[g,
+    /// rate, key]`, and its owner is its forward draw's, activation included.
+    /// It reads its forward `Dropout`'s key and rate without consuming the
+    /// key, and applies the same saved mask and finalized sub/div to the
+    /// cotangent.
     DropoutReplay,
-    /// AD-only `[05-OP-8]` bound adjoint. Inputs are `[template, g, key]`,
-    /// optionally followed by the forward draw's activation; the result is a
-    /// value of the template's dtype shaped like a leading part of the key's
-    /// shape (rule V5). It reads its forward `UniformLike`'s key without
-    /// consuming it.
+    /// AD-only `[05-OP-8]` bound adjoint. Inputs are exactly `[template, g,
+    /// key]`, and its owner is its forward draw's, activation included; the
+    /// result is a value of the template's dtype shaped like a leading part
+    /// of the key's shape (rule V5). It reads its forward `UniformLike`'s key
+    /// without consuming it.
     UniformBoundAdjoint {
         bound: UniformBound,
     },
@@ -863,25 +866,26 @@ pub enum RiscOp {
     /// the `tensor[D, key]` of each seed's two's-complement bits. Pure and
     /// never constant-folded, so an exported key stays symbolic.
     KeyFromSeed,
-    /// One half of `[05-OP-70]` `split_key`: input `[k: tensor[D, key]]`,
-    /// optionally followed by one Bool activation shaped like a leading part
-    /// of `D`, output the `tensor[D, key]` of `derive(k, 0)` (`Left`) or
-    /// `derive(k, 1)` (`Right`). A parent feeds at most one `Split` of each
-    /// branch, and nothing else, unless rule V3 admits the sharing through
-    /// exclusive activations (spec/10 §3.2). The activation changes no key.
+    /// One half of `[05-OP-70]` `split_key`: input exactly `[k: tensor[D,
+    /// key]]`, output the `tensor[D, key]` of `derive(k, 0)` (`Left`) or
+    /// `derive(k, 1)` (`Right`). The node's activation ([`Owner::activation`])
+    /// is shaped like a leading part of `D`. A parent feeds at most one
+    /// `Split` of each branch, and nothing else, unless rule V3 admits the
+    /// sharing through exclusive activations (spec/10 §3.2). The activation
+    /// changes no key.
     Split {
         branch: KeyBranch,
     },
-    /// `[05-OP-72]` `fold_in`: inputs `[k: tensor[D, key], n: tensor[D, i64]]`
-    /// of exactly equal shape, optionally followed by one Bool activation
-    /// shaped like a leading part of `D`; output `derive(derive(k, 2), n)`
-    /// element-wise. The activation changes no key.
+    /// `[05-OP-72]` `fold_in`: inputs exactly `[k: tensor[D, key], n:
+    /// tensor[D, i64]]` of equal shape; output `derive(derive(k, 2), n)`
+    /// element-wise. The node's activation is shaped like a leading part of
+    /// `D` and changes no key.
     FoldIn,
     /// `[05-OP-71]` `split_keys`: input `[k: tensor[D, key]]`, then the
-    /// rank-0 exact i64 count node when `count` is `RtDim::Node(1)`, then
-    /// optionally one Bool activation shaped like a leading part of `D`. The
-    /// output is `tensor[D ++ [count], key]`, the new axis last; row `j` is
-    /// `derive(derive(k, 2), j)`. A negative runtime count traps before
+    /// rank-0 exact i64 count node when `count` is `RtDim::Node(1)`, and
+    /// nothing else; the node's activation is shaped like a leading part of
+    /// `D`. The output is `tensor[D ++ [count], key]`, the new axis last; row
+    /// `j` is `derive(derive(k, 2), j)`. A negative runtime count traps before
     /// allocation, as a negative movement bound does. Where the activation
     /// holds in no row the count is not read: the count axis takes the extent
     /// the output type declares where another node or a literal fixes it, and
@@ -895,11 +899,13 @@ pub enum RiscOp {
     /// two keys of the result's exact type, then the two arms' Bool
     /// activations, each shaped like a leading part of the key's shape.
     /// Input 0 is consumed under `then_active` and input 1 under
-    /// `else_active`. The activations are the two arms of one branch, so
-    /// where the enclosing activation holds exactly one of them does. Element
-    /// `i` is `then_key[i]` where `then_active` holds for its row, and
-    /// `else_key[i]` elsewhere. The result is a fresh key under the enclosing
-    /// activation; the join derives nothing and changes no key.
+    /// `else_active`. The two are the join's own activation
+    /// ([`Owner::activation`], the enclosing one) conjoined with the branch's
+    /// condition and with its negation, so where the join's activation holds
+    /// exactly one of them does. Element `i` is `then_key[i]` where
+    /// `then_active` holds for its row, and `else_key[i]` elsewhere. The
+    /// result is a fresh key under the join's activation; the join derives
+    /// nothing and changes no key.
     KeySelect,
 
     // --- Reduction ---
@@ -1473,33 +1479,23 @@ pub enum RiscAtomDisposition {
 }
 
 impl RiscOp {
-    /// The number of operands a key-consuming key operation (`Split`,
-    /// `FoldIn`, `SplitN`, `KeySelect`) reads before its activation, which is
-    /// therefore the activation's input slot (a join's then activation, its
-    /// else activation following); `None` for any other operation.
-    pub fn key_operation_operand_count(&self) -> Option<usize> {
+    /// The exact number of inputs a key-operand random primitive, its replay
+    /// or bound adjoint, a key operation or a join reads; `None` for any
+    /// other operation. None of them reads an activation from an input: a
+    /// draw's and a key operation's activation is its own
+    /// ([`Owner::activation`]), and a join's two slot activations are its
+    /// last two inputs. So a stale trailing activation operand is an arity
+    /// error (spec/10 §3.2).
+    pub fn key_operand_arity(&self) -> Option<usize> {
         match self {
-            Self::Split { .. } => Some(1),
-            Self::FoldIn | Self::KeySelect => Some(2),
+            Self::KeyFromSeed | Self::Split { .. } => Some(1),
+            Self::FoldIn => Some(2),
             Self::SplitN {
-                count: RtDim::Node(_),
-            } => Some(2),
+                count: RtDim::Node(slot),
+            } => Some(slot + 1),
             Self::SplitN { .. } => Some(1),
-            _ => None,
-        }
-    }
-
-    /// The input slot where a draw, a draw's replay or a key-consuming key
-    /// operation reads its own activation when it has one, after its
-    /// operands; `None` for any other operation. A join's two activations are
-    /// its keys' consumption activations, not its own, so it has none.
-    pub fn own_activation_slot(&self) -> Option<usize> {
-        match self {
             Self::Dropout | Self::DropoutReplay | Self::UniformBoundAdjoint { .. } => Some(3),
-            Self::UniformLike => Some(4),
-            Self::Split { .. } | Self::FoldIn | Self::SplitN { .. } => {
-                self.key_operation_operand_count()
-            }
+            Self::UniformLike | Self::KeySelect => Some(4),
             _ => None,
         }
     }
@@ -1508,9 +1504,9 @@ impl RiscOp {
     /// other operation.
     pub fn draw_batch_layout(&self) -> Option<DrawBatchLayout> {
         let (op, key, data_input, per_row): (_, _, _, &'static [usize]) = match self {
-            Self::Dropout | Self::DropoutReplay => ("dropout", 2, 0, &[1, 3]),
-            Self::UniformLike => ("uniform_like", 3, 0, &[1, 2, 4]),
-            Self::UniformBoundAdjoint { .. } => ("uniform_like", 2, 1, &[3]),
+            Self::Dropout | Self::DropoutReplay => ("dropout", 2, 0, &[1]),
+            Self::UniformLike => ("uniform_like", 3, 0, &[1, 2]),
+            Self::UniformBoundAdjoint { .. } => ("uniform_like", 2, 1, &[]),
             _ => return None,
         };
         Some(DrawBatchLayout {
@@ -2484,20 +2480,17 @@ impl Dag {
         } else {
             Vec::new()
         };
-        let mut owner = owner.into();
-        // One fact, one carrier (spec/10 section 3.2): the activation a draw
-        // or key operation reads after its operands is the node's own, so the
-        // owner takes it, and an owner that names another one is a defect of
-        // the constructing pass.
-        if let Some(slot) = op.own_activation_slot() {
-            let operand = inputs.get(slot).copied();
-            match (owner.activation, operand) {
-                (None, Some(activation)) => owner.activation = Some(activation),
-                (own, operand) => assert!(
-                    own == operand,
-                    "a {op:?} node's activation operand {operand:?} is not its own activation {own:?}"
-                ),
-            }
+        let owner = owner.into();
+        // One fact, one carrier (spec/10 section 3.2): a draw's or key
+        // operation's activation is its owner's and never an input, so a
+        // pass that still appends one is a defect caught here, at the site
+        // that built it.
+        if let Some(arity) = op.key_operand_arity() {
+            assert!(
+                inputs.len() == arity,
+                "a {op:?} node reads exactly {arity} inputs, not {}; its activation is its owner's",
+                inputs.len()
+            );
         }
         let decl = owner.decl;
         assert!(
@@ -2840,9 +2833,10 @@ impl Dag {
 
     /// Whether the draw `node`'s key batch statically indexes its operands:
     /// a rank-0 key, or a key whose dims are all literal and equal to the
-    /// literal leading dims of its data and of every per-row operand (its
-    /// controls and activation), the static form of the evaluator's extent
-    /// check. A symbolic extent on either side may disagree at run time.
+    /// literal leading dims of its data, of every per-row operand (its
+    /// controls) and of its activation, the static form of the evaluator's
+    /// extent check. A symbolic extent on either side may disagree at run
+    /// time.
     fn draw_key_batch_is_literal(&self, node: &DagNode) -> bool {
         let Some(layout) = node.op.draw_batch_layout() else {
             return false;
@@ -2868,11 +2862,21 @@ impl Dag {
         let Some(data) = dims_of(layout.data_input) else {
             return false;
         };
+        let activation = node
+            .owner
+            .activation
+            .and_then(|activation| self.get(activation))
+            .map(|activation| activation.output_type.dims.as_slice());
         literal_prefix(data, key.len())
-            && layout.per_row.iter().all(|slot| match dims_of(*slot) {
-                Some(dims) => dims.len() <= key.len() && literal_prefix(dims, dims.len()),
-                None => true,
-            })
+            && layout
+                .per_row
+                .iter()
+                .map(|slot| dims_of(*slot))
+                .chain(std::iter::once(activation))
+                .all(|dims| match dims {
+                    Some(dims) => dims.len() <= key.len() && literal_prefix(dims, dims.len()),
+                    None => true,
+                })
     }
 
     pub fn set_roots(&mut self, roots: Vec<NodeId>) {

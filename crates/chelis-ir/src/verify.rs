@@ -667,17 +667,21 @@ pub(crate) fn verify_mapped_gradient_closure(
 ///   template's exact type, and its result has that dtype.
 /// - V5: a random primitive's key has any rank `r`, and its dims are its
 ///   data's leading `r` dims (a bound adjoint's data is its cotangent). Each
-///   control, the activation and a bound adjoint's result has the dims of
-///   the key's leading `c` axes for some `c <= r`. Row `b` of the data, the
-///   elements whose leading `r` indices are key index `b` in row-major
-///   order, draws with `key[b]` and reads the element of each such operand
-///   that its leading `c` indices name.
+///   control, the node's own activation and a bound adjoint's result has the
+///   dims of the key's leading `c` axes for some `c <= r`. Row `b` of the
+///   data, the elements whose leading `r` indices are key index `b` in
+///   row-major order, draws with `key[b]` and reads the element of each such
+///   operand that its leading `c` indices name.
+/// - Every one of them reads exactly its operands. A draw's, a replay's and
+///   a key operation's activation is its own ([`KeyGraph::activation`]),
+///   never an input, and a key-consuming key operation's is shaped like a
+///   leading part of its key's shape; a join's two activations are its last
+///   two inputs.
 ///
 /// Dims compare exactly, name and extent alike. The messages are the wire
 /// decoder's, each naming its node.
 pub fn verify_random_operands(graph: &impl KeyGraph, errors: &mut Vec<String>) {
     for node in 0..graph.node_count() {
-        own_activation_operand(graph, node, errors);
         match graph.role(node) {
             role @ (KeyRole::KeyFromSeed
             | KeyRole::Split { .. }
@@ -693,45 +697,15 @@ pub fn verify_random_operands(graph: &impl KeyGraph, errors: &mut Vec<String>) {
     }
 }
 
-/// The input slot where a draw, a draw's replay or a key-consuming key
-/// operation may read an activation after its operands, or `None` for a
-/// node that reads none. A join's two activations are the consumption
-/// activations of its two keys, not its own, so it has no such slot.
-fn own_activation_slot(graph: &impl KeyGraph, node: usize) -> Option<usize> {
-    match graph.role(node) {
-        KeyRole::Dropout | KeyRole::DropoutReplay | KeyRole::UniformBoundAdjoint => Some(3),
-        KeyRole::UniformLike => Some(4),
-        KeyRole::Split { .. }
-        | KeyRole::SplitN {
-            count: SplitCount::Lit(_) | SplitCount::Other,
-        } => Some(1),
-        KeyRole::FoldIn
-        | KeyRole::SplitN {
-            count: SplitCount::Input(_),
-        } => Some(2),
-        _ => None,
-    }
-}
-
-/// One carrier for a node's activation (spec/10 §3.2): the activation
-/// operand a draw, its replay or a key operation reads is exactly the
-/// node's own activation, and it has one exactly when the node does. A
-/// replay's activation is its forward draw's, which is also the owner the
-/// replay inherits.
-fn own_activation_operand(graph: &impl KeyGraph, node: usize, errors: &mut Vec<String>) {
-    let Some(slot) = own_activation_slot(graph, node) else {
-        return;
-    };
-    let operand = graph.input(node, slot);
-    let own = graph.activation(node);
-    if operand != own {
-        errors.push(format!(
-            "{}'s activation operand {} is not its own activation {}",
-            graph.describe_node(node),
-            operand.map_or_else(|| "(none)".to_owned(), |id| format!("node {id}")),
-            own.map_or_else(|| "(none)".to_owned(), |id| format!("node {id}")),
-        ));
-    }
+/// Whether `node`'s own activation, if it has one, is a Bool shaped like a
+/// leading part of `batch`, the key shape it consumes or reads (rule V5).
+fn own_activation_is_per_row(graph: &impl KeyGraph, node: usize, batch: &[DimInfo]) -> bool {
+    graph.activation(node).is_none_or(|active| {
+        graph.dtype(active) == Some(Prim::Bool)
+            && graph
+                .dims(active)
+                .is_some_and(|active| batch.starts_with(&active))
+    })
 }
 
 /// A join's operands: two keys of its own exact type, then two Bool
@@ -790,9 +764,8 @@ fn key_operation_operands(
     let inputs = (0..)
         .map_while(|slot| graph.input(node, slot))
         .collect::<Vec<_>>();
-    // A key-consuming operation may end with one activation (rule V3).
-    let activated = role.consumes() && inputs.len() == arity + 1;
-    if inputs.len() != arity && !activated {
+    // Its activation is its own, never an input (spec/10 §3.2).
+    if inputs.len() != arity {
         errors.push(format!(
             "{at}: key operation has the wrong number of inputs"
         ));
@@ -807,14 +780,9 @@ fn key_operation_operands(
         errors.push(format!("{at}: key operation has an operand without dims"));
         return;
     };
-    if activated
-        && !(graph.dtype(inputs[arity]) == Some(Prim::Bool)
-            && graph
-                .dims(inputs[arity])
-                .is_some_and(|active| key.starts_with(&active)))
-    {
+    if role.consumes() && !own_activation_is_per_row(graph, node, &key) {
         errors.push(format!(
-            "{at}: key operation may end with exactly one Bool activation, shaped like a leading part of its key's shape"
+            "{at}: key operation's activation must be a Bool shaped like a leading part of its key's shape"
         ));
     }
     let valid = match role {
@@ -864,6 +832,13 @@ fn random_node_operands(
         errors.push(format!("{at}: random operation is missing an input"));
         return;
     }
+    // Its activation is its own, never an input (spec/10 §3.2).
+    if arity > fixed {
+        errors.push(format!(
+            "{at}: random operation has the wrong number of inputs"
+        ));
+        return;
+    }
     let input = |slot: usize| graph.input(node, slot);
     let dtype = |slot: usize| input(slot).and_then(|input| graph.dtype(input));
     let dims = |slot: usize| input(slot).and_then(|input| graph.dims(input));
@@ -881,14 +856,9 @@ fn random_node_operands(
     let per_row = |value: Option<std::borrow::Cow<'_, [DimInfo]>>| {
         value.is_some_and(|value| batch.starts_with(&value))
     };
-    let active_ok = match arity - fixed {
-        0 => true,
-        1 => dtype(fixed) == Some(Prim::Bool) && per_row(dims(fixed)),
-        _ => false,
-    };
-    if !active_ok {
+    if !own_activation_is_per_row(graph, node, &batch) {
         errors.push(format!(
-            "{at}: random operation may end with exactly one Bool activation, shaped like a leading part of its key's shape"
+            "{at}: random operation's activation must be a Bool shaped like a leading part of its key's shape"
         ));
     }
     if let Some(slot) = key_slot {
@@ -1082,24 +1052,6 @@ impl KeyRole {
     /// reads its forward draw's key without consuming it.
     fn consumes(self) -> bool {
         self.is_draw() || self.derives() || self == Self::KeySelect
-    }
-
-    /// The input slot of a key consumer's optional activation: after a
-    /// draw's key, or after a key operation's operands (a split's runtime
-    /// count among them).
-    fn activation_slot(self) -> Option<usize> {
-        match self {
-            Self::Split { .. }
-            | Self::SplitN {
-                count: SplitCount::Lit(_) | SplitCount::Other,
-            } => Some(1),
-            Self::FoldIn
-            | Self::SplitN {
-                count: SplitCount::Input(_),
-            } => Some(2),
-            _ if self.is_draw() => self.key_slot().map(|slot| slot + 1),
-            _ => None,
-        }
     }
 }
 
@@ -1323,11 +1275,12 @@ fn activations_exclusive(graph: &impl KeyGraph, left: usize, right: usize) -> bo
 ///   other than one `Split` of each branch, may share it only when each
 ///   consumes it under an activation and the two activations are
 ///   structurally exclusive: one implies `X` and the other `Not(X)`, or
-///   either implies `false`. A join consumes input 0 under input 2 and input
-///   1 under input 3, and those are the two arms of one branch
-///   ([`join_arms`]). Rule S: a key derived under such sharing is consumed
-///   only under that activation, or by the join of its branch
-///   ([`verify_confinement`]).
+///   either implies `false`. A draw or key operation consumes its key under
+///   its own activation ([`KeyGraph::activation`]). A join consumes input 0
+///   under input 2 and input 1 under input 3, and those are its own
+///   activation conjoined with the two arms of one branch ([`join_arms`]).
+///   Rule S: a key derived under such sharing is consumed only under that
+///   activation, or by the join of its branch ([`verify_confinement`]).
 /// - V4: a key reaching any other operation or slot, or a dependency list,
 ///   is rejected; replays read their forward draw's key without consuming
 ///   it.
@@ -1388,11 +1341,22 @@ pub fn verify_key_rules(graph: &impl KeyGraph, errors: &mut Vec<String>) {
                 consumers[identity(input)].push(KeyUse { node, slot });
             }
         }
-        if role == KeyRole::KeySelect && join_arms(graph, node).is_none() {
-            errors.push(format!(
-                "{} joins keys under activations that are not the two arms of one branch",
-                graph.describe_node(node)
-            ));
+        if role == KeyRole::KeySelect {
+            let arms = join_decompositions(graph, node);
+            if arms.is_empty() {
+                errors.push(format!(
+                    "{} joins keys under activations that are not the two arms of one branch",
+                    graph.describe_node(node)
+                ));
+            } else if !arms
+                .iter()
+                .any(|enclosing| join_encloses_own(graph, node, enclosing))
+            {
+                errors.push(format!(
+                    "{} joins keys under two arms that are not its own activation conjoined with a condition and with its negation",
+                    graph.describe_node(node)
+                ));
+            }
         }
     }
     let mut exclusive = vec![false; graph.node_count()];
@@ -1423,7 +1387,8 @@ pub fn verify_key_rules(graph: &impl KeyGraph, errors: &mut Vec<String>) {
     }
     verify_confinement(graph, identity, &consumers, &exclusive, &rooted, errors);
     // Replay reads: each must read a key that a forward draw of the matching
-    // kind consumes under the same rate or template type and activation.
+    // kind consumes under the same rate or template type and under the same
+    // activation, its own.
     for node in 0..graph.node_count() {
         let forward_role = match graph.role(node) {
             KeyRole::DropoutReplay => KeyRole::Dropout,
@@ -1454,15 +1419,12 @@ pub fn verify_key_rules(graph: &impl KeyGraph, errors: &mut Vec<String>) {
                     KeyRole::Dropout => {
                         graph.input(node, 1) == graph.input(forward, 1)
                             && graph.same_type(node, forward)
-                            && graph.input(node, 3) == graph.input(forward, 3)
                     }
-                    _ => {
-                        graph
-                            .input(node, 0)
-                            .is_some_and(|template| graph.same_type(template, forward))
-                            && graph.input(node, 3) == graph.input(forward, 4)
-                    }
+                    _ => graph
+                        .input(node, 0)
+                        .is_some_and(|template| graph.same_type(template, forward)),
                 }
+                && graph.activation(node) == graph.activation(forward)
         };
         if !forwards.iter().any(|forward| matches(*forward)) {
             errors.push(format!(
@@ -1529,28 +1491,20 @@ fn verify_shared_key(
     }
 }
 
-/// A key consumer's activation, if it carries one.
-fn activation(graph: &impl KeyGraph, node: usize) -> Option<usize> {
-    graph
-        .role(node)
-        .activation_slot()
-        .and_then(|slot| graph.input(node, slot))
-}
-
 /// The activation a use consumes its key under: a join's slot 0 under its
-/// input 2 and slot 1 under its input 3, and any other consumer under its
-/// own activation, if it carries one.
+/// input 2 and slot 1 under its input 3, and a draw or key operation under
+/// its own activation, if it has one.
 fn consuming_activation(graph: &impl KeyGraph, key_use: KeyUse) -> Option<usize> {
     match graph.role(key_use.node) {
         KeyRole::KeySelect => graph.input(key_use.node, key_use.slot + 2),
-        _ => activation(graph, key_use.node),
+        _ => graph.activation(key_use.node),
     }
 }
 
 /// The nodes a conjunction implies at its top level: through every `And`,
 /// both conjuncts, transitively, stopping at `atom` and at every node that
 /// is not an `And`.
-fn conjunction_atoms(graph: &impl KeyGraph, activation: usize, atom: usize) -> Vec<usize> {
+fn conjunction_atoms(graph: &impl KeyGraph, activation: usize, atom: Option<usize>) -> Vec<usize> {
     let mut atoms = Vec::new();
     let mut seen = Vec::new();
     let mut stack = vec![activation];
@@ -1559,7 +1513,7 @@ fn conjunction_atoms(graph: &impl KeyGraph, activation: usize, atom: usize) -> V
             continue;
         }
         seen.push(node);
-        if node != atom && graph.role(node) == KeyRole::And {
+        if Some(node) != atom && graph.role(node) == KeyRole::And {
             stack.extend((0..2).filter_map(|slot| graph.input(node, slot)));
         } else {
             atoms.push(node);
@@ -1568,16 +1522,20 @@ fn conjunction_atoms(graph: &impl KeyGraph, activation: usize, atom: usize) -> V
     atoms
 }
 
-/// A join's two activations as the two arms of one branch, or `None` when
-/// they are not: the then activation is a conjunction `S And X` and the else
-/// activation `S And Not(X)` (either way round, `S` possibly empty), for one
-/// node `X` and one set `S` of conjuncts, or `X` and `Not(X)` are the
-/// constants `true` and `false` that folding leaves of them. Then where the
-/// enclosing activation `S` holds exactly one arm does, which makes the
-/// join's result a key under `S`. Returns `S`, the atoms of the enclosing
-/// activation.
-fn join_arms(graph: &impl KeyGraph, node: usize) -> Option<Vec<usize>> {
-    let (then_active, else_active) = (graph.input(node, 2)?, graph.input(node, 3)?);
+/// A join's two activations as the two arms of one branch: the then
+/// activation is a conjunction `S And X` and the else activation `S And
+/// Not(X)` (either way round, `S` possibly empty), for one node `X` and one
+/// set `S` of conjuncts, or `X` and `Not(X)` are the constants `true` and
+/// `false` that folding leaves of them. Then where the enclosing activation
+/// `S` holds exactly one arm does, which makes the join's result a key under
+/// `S`. Returns the atoms of every such `S`, sorted, without repeats; empty
+/// when the activations are not two arms of one branch.
+fn join_decompositions(graph: &impl KeyGraph, node: usize) -> Vec<Vec<usize>> {
+    let mut decompositions = Vec::<Vec<usize>>::new();
+    let (Some(then_active), Some(else_active)) = (graph.input(node, 2), graph.input(node, 3))
+    else {
+        return decompositions;
+    };
     let then_conjuncts = activation_conjuncts(graph, then_active);
     let else_conjuncts = activation_conjuncts(graph, else_active);
     let negates = |node: usize, other: usize| {
@@ -1593,18 +1551,52 @@ fn join_arms(graph: &impl KeyGraph, node: usize) -> Option<Vec<usize>> {
             if !complementary(then_atom, else_atom) {
                 continue;
             }
-            let mut enclosing = conjunction_atoms(graph, then_active, then_atom);
+            let mut enclosing = conjunction_atoms(graph, then_active, Some(then_atom));
             enclosing.retain(|atom| *atom != then_atom);
             enclosing.sort_unstable();
-            let mut other = conjunction_atoms(graph, else_active, else_atom);
+            let mut other = conjunction_atoms(graph, else_active, Some(else_atom));
             other.retain(|atom| *atom != else_atom);
             other.sort_unstable();
-            if enclosing == other {
-                return Some(enclosing);
+            if enclosing == other && !decompositions.contains(&enclosing) {
+                decompositions.push(enclosing);
             }
         }
     }
-    None
+    decompositions
+}
+
+/// Whether `enclosing`, the atoms of an enclosing activation that
+/// [`join_decompositions`] finds for the join `node`, is the join's own
+/// activation ([`KeyGraph::activation`]): the same atoms through every
+/// `And`, and none when it has no activation. The constant `true`, which
+/// folding may leave of a conjunct, implies nothing and is set aside on both
+/// sides. So the two slot activations are the join's own activation
+/// conjoined with a condition and with its negation, and exactly one of
+/// them holds wherever the join's own does (spec/10 §3.2).
+fn join_encloses_own(graph: &impl KeyGraph, node: usize, enclosing: &[usize]) -> bool {
+    let informative = |atoms: &mut Vec<usize>| {
+        atoms.retain(|atom| graph.role(*atom) != KeyRole::ConstTrue);
+        atoms.sort_unstable();
+    };
+    let mut own = graph
+        .activation(node)
+        .map_or_else(Vec::new, |active| conjunction_atoms(graph, active, None));
+    informative(&mut own);
+    let mut enclosing = enclosing.to_vec();
+    informative(&mut enclosing);
+    own == enclosing
+}
+
+/// The enclosing activation of the join `node` ([`join_decompositions`]):
+/// the one that is its own activation where one is, and otherwise the first,
+/// or `None` when its activations are not two arms of one branch.
+fn join_arms(graph: &impl KeyGraph, node: usize) -> Option<Vec<usize>> {
+    let decompositions = join_decompositions(graph, node);
+    decompositions
+        .iter()
+        .find(|enclosing| join_encloses_own(graph, node, enclosing))
+        .or(decompositions.first())
+        .cloned()
 }
 
 /// Rule S. A key operation that shares its key with an exclusive consumer
@@ -1650,7 +1642,7 @@ fn verify_confinement(
             // operand rules' error, and derives nothing these rules follow.
             let mut under = inherited(&required, 0, node);
             if exclusive[node]
-                && let Some(active) = activation(graph, node)
+                && let Some(active) = graph.activation(node)
                 && !under.contains(&active)
             {
                 under.push(active);
@@ -5932,12 +5924,9 @@ mod tests {
             None,
         );
         dag.add_node(
-            decl,
+            crate::dag::Owner::new(decl, activation),
             RiscOp::UniformLike,
-            [template, low, high, key]
-                .into_iter()
-                .chain(activation)
-                .collect(),
+            vec![template, low, high, key],
             ty,
             None,
         );
@@ -5996,7 +5985,7 @@ mod tests {
         assert!(
             verify(&dag)
                 .iter()
-                .any(|error| error.contains("exactly one Bool activation"))
+                .any(|error| error.contains("random operation's activation must be a Bool"))
         );
     }
 

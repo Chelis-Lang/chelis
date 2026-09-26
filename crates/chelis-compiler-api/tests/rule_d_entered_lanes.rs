@@ -1242,6 +1242,76 @@ fn a_vmap_in_an_untaken_arm_checks_nothing_in_the_evaluator() {
     rows.assert_empty();
 }
 
+/// `selected` inlines `h`, whose runtime `if` arm applies `vmap(grad(f))`
+/// to `xs = [-3.0]` (the evaluator's binding and the C driver's input) and
+/// whose else arm is the total `xs`. `f`'s body discards a checking node
+/// that traps on the row: the row scaled by 1e30 cast to `i32` (overflow),
+/// or, when `integer`, 7 floor-divided by the zero the row gives scaled by
+/// 0. `selected` itself names no transform, so the compiled-execution lane
+/// takes it as its entry (chelis#1138 refuses an entry whose own body does).
+fn vmap_grad_in_arm(condition: &str, integer: bool) -> String {
+    let dead = if integer {
+        "floor_div(scalar_to_tensor(7i32), cast(mul(&x, scalar_to_tensor(0.0f32)), i32))"
+    } else {
+        "cast(mul(&x, scalar_to_tensor(1e30f32)), i32)"
+    };
+    format!(
+        "def f(x: tensor[f32]) -> tensor[f32] = {{\n  dead = {dead}\n  mul(&x, &x)\n}}\n\ndef h(xs: tensor[1, f32]) -> tensor[1, f32] = {{\n  s = tensor_to_scalar(sum(copy(xs), 0i32))\n  if {condition} then vmap(grad(f))(xs) else xs\n}}\n\ndef selected(xs: tensor[1, f32]) -> tensor[1, f32] = h(xs)\n"
+    )
+}
+
+/// The `vmap(grad(...))` call site (spec/10 §3): the differentiated,
+/// vmapped body spliced into an arm runs under the arm's activation, so
+/// when the arm is not taken no row checks, for a float `cast` and for an
+/// integer `floor_div`, in the DAG evaluator and the selected C entry. An
+/// `lt` condition keeps `selected` in the Tensor lane and a `gt` one puts
+/// it in the Host lane, whose `h` lowers the same `if`; both are asserted.
+/// The taken twins trap in both lanes.
+///
+/// Evidentiary status: REGRESSION TEST for the untaken rows. At 224414e1f
+/// every untaken row traps with its taken twin's trap, in both lanes. The
+/// taken rows are a disposition lock (green at 224414e1f).
+#[test]
+fn a_vmap_of_grad_in_an_untaken_arm_checks_nothing_in_the_evaluator_and_c() {
+    let mut rows = Rows::default();
+    for (lane, untaken, taken) in [
+        (Lane::Tensor, "lt(0.0f32, s)", "lt(s, 0.0f32)"),
+        (Lane::Host, "gt(s, 0.0f32)", "gt(s, -5.0f32)"),
+    ] {
+        // The C runtime words an integer division by zero its own way.
+        for (kind, integer, trap, c_trap) in [
+            ("cast", false, CAST_OVERFLOW, CAST_OVERFLOW),
+            ("floor_div", true, FLOOR_DIV_ZERO, "division"),
+        ] {
+            let untaken = vmap_grad_in_arm(untaken, integer);
+            let taken = vmap_grad_in_arm(taken, integer);
+            rows.returns(
+                &format!("E untaken arm, {kind}, {lane:?} lane"),
+                select(&untaken, "selected", xs(&[-3.0])),
+                "selected",
+                &[-3.0],
+                Some(lane),
+            );
+            rows.c(
+                &format!("C untaken arm, {kind}, {lane:?} lane"),
+                run_c(&compile_c(&untaken, "selected"), "selected", 0),
+                Ok(()),
+            );
+            rows.traps(
+                &format!("E taken arm, {kind}, {lane:?} lane"),
+                select(&taken, "selected", xs(&[-3.0])),
+                trap,
+            );
+            rows.c(
+                &format!("C taken arm, {kind}, {lane:?} lane"),
+                run_c(&compile_c(&taken, "selected"), "selected", 0),
+                Err(c_trap),
+            );
+        }
+    }
+    rows.assert_empty();
+}
+
 /// An integer chain the fusion pass would join, `add(mul(d, d), d)`, in a
 /// runtime `if` arm: `d = 100000` overflows `mul` at `i32`.
 fn integer_chain_arm(condition: &str) -> String {

@@ -1392,17 +1392,16 @@ fn compute_adjoints(
             Some(vec![(a, za), (b, zb)])
         }
         // [05-OP-37]: the input's pathwise adjoint replays the forward mask
-        // through the key edge. The key and activation are discrete and the
-        // rate's exact zero cotangent is omitted, as `GuardedFail` omits its
+        // through the key edge, under the forward draw's owner and so its
+        // activation. The key and activation are discrete and the rate's
+        // exact zero cotangent is omitted, as `GuardedFail` omits its
         // predicate: queuing a zero would walk the rate's producers.
         RiscOp::Dropout | RiscOp::DropoutReplay => {
             let data = node.inputs[0];
-            let mut inputs = vec![g, node.inputs[1], node.inputs[2]];
-            inputs.extend(node.inputs.get(3).copied());
             let replay = dag.add_node(
                 node.owner,
                 RiscOp::DropoutReplay,
-                inputs,
+                vec![g, node.inputs[1], node.inputs[2]],
                 node.output_type.clone(),
                 None,
             );
@@ -1427,8 +1426,8 @@ fn compute_adjoints(
                 (1, crate::dag::UniformBound::Low),
                 (2, crate::dag::UniformBound::High),
             ] {
-                let mut inputs = vec![template, g, node.inputs[3]];
-                inputs.extend(node.inputs.get(4).copied());
+                // Under the forward draw's owner, so its activation.
+                let inputs = vec![template, g, node.inputs[3]];
                 let bound_ty = forward.get(node.inputs[slot]).unwrap().output_type.clone();
                 // The adjoint has its bound's shape: rank 0, or one value per
                 // key row when a batched draw's rows have their own bounds.

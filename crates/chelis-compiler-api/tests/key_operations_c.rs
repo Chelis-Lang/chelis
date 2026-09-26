@@ -92,15 +92,17 @@ fn ty(dims: &[usize], prim: Prim) -> TensorType {
     }
 }
 
+/// A node under `owner`: a bare declaration, or `Owner::new(decl,
+/// Some(active))` for a node under the activation `active`.
 fn node(
     dag: &mut Dag,
-    decl: chelis_ir::dag::DeclId,
+    owner: impl Into<chelis_ir::dag::Owner>,
     op: RiscOp,
     inputs: Vec<NodeId>,
     dims: &[usize],
     prim: Prim,
 ) -> NodeId {
-    dag.add_node(decl, op, inputs, ty(dims, prim), None)
+    dag.add_node(owner, op, inputs, ty(dims, prim), None)
 }
 
 fn i64_const(dag: &mut Dag, decl: chelis_ir::dag::DeclId, value: i64) -> NodeId {
@@ -396,6 +398,99 @@ fn float_bits(prim: Prim, values: &[f64]) -> Vec<u64> {
     input_bits(&Input::Floats(prim, vec![values.len()], values.to_vec()))
 }
 
+// ---- one activation carrier (spec/10 section 3.2) ----
+
+/// `slice2_ref.py`'s f32 `uniform_like(0, 1)` over two elements under
+/// `key_ref.py`'s `key(7)` and `fold_in(key(7), 3)`
+/// (`briefs/ks5-h1-probes/owner_ref.py`).
+const UNIFORM_KEY7: [u64; 2] = [0x3e01_9516, 0x3f56_526f];
+const UNIFORM_FOLD_7_3: [u64; 2] = [0x3f1a_dc1d, 0x3ef0_37a9];
+
+/// A draw's and a key operation's activation is its node's own, carried by
+/// its owner and by no input. `fold_in(key(7), 3)` and a uniform draw of it
+/// run under `c`, and a uniform draw of `key(7)` itself under `Not(c)`, so
+/// the two arms share `key(7)` and each execution consumes it in the
+/// selected arm only. With `c` false the `c` arm draws nothing (positive
+/// zeros) and the other arm draws `key(7)`'s reference bits; with `c` true
+/// the `c` arm draws `fold_in(key(7), 3)`'s and the other nothing. The DAG
+/// evaluator and C agree bit for bit.
+///
+/// Evidentiary status: REGRESSION TEST and mutation check. At 224414e1f the
+/// graph cannot be built: the constructor requires the activation as a
+/// trailing operand equal to the owner's. On this tree, making the
+/// evaluator's `draw_keys` or C's draw read the activation from a trailing
+/// input again (the owner's being unread) turns the `c` false rows nonzero.
+#[test]
+fn a_draw_and_a_fold_run_under_their_owners_activation_in_c_and_eval() {
+    let prim = Prim::F32;
+    let mut dag = Dag::new();
+    let decl = dag.declare("test");
+    let seed = i64_const(&mut dag, decl, 7);
+    let key = node(
+        &mut dag,
+        decl,
+        RiscOp::KeyFromSeed,
+        vec![seed],
+        &[],
+        Prim::Key,
+    );
+    let c = load(&mut dag, decl, "c", &[], Prim::Bool);
+    let not_c = node(
+        &mut dag,
+        decl,
+        RiscOp::Logical(chelis_ir::dag::LogicalKind::Not),
+        vec![c],
+        &[],
+        Prim::Bool,
+    );
+    let under = |active| chelis_ir::dag::Owner::new(decl, Some(active));
+    let three = i64_const(&mut dag, decl, 3);
+    let folded = node(
+        &mut dag,
+        under(c),
+        RiscOp::FoldIn,
+        vec![key, three],
+        &[],
+        Prim::Key,
+    );
+    let template = load(&mut dag, decl, "t", &[2], prim);
+    let low = float_const(&mut dag, decl, prim, 0.0);
+    let high = float_const(&mut dag, decl, prim, 1.0);
+    let selected = node(
+        &mut dag,
+        under(c),
+        RiscOp::UniformLike,
+        vec![template, low, high, folded],
+        &[2],
+        prim,
+    );
+    let other = node(
+        &mut dag,
+        under(not_c),
+        RiscOp::UniformLike,
+        vec![template, low, high, key],
+        &[2],
+        prim,
+    );
+    dag.add_root(selected);
+    dag.add_root(other);
+    for (taken, expected) in [
+        (false, vec![vec![0, 0], UNIFORM_KEY7.to_vec()]),
+        (true, vec![UNIFORM_FOLD_7_3.to_vec(), vec![0, 0]]),
+    ] {
+        let inputs = [
+            ("c", Input::Bools(vec![], vec![i64::from(taken)])),
+            ("t", Input::Floats(prim, vec![2], vec![0.0; 2])),
+        ];
+        assert_eq!(
+            run_eval(&dag, &inputs),
+            Ok(expected.clone()),
+            "eval, c = {taken}"
+        );
+        assert_eq!(run_c(dag.clone(), &inputs), expected, "C, c = {taken}");
+    }
+}
+
 // ---- oracle (b), C lane ----
 
 #[test]
@@ -503,18 +598,18 @@ fn per_row_controls_activations_and_bound_adjoints_agree_in_c_and_eval() {
         let active = load(&mut dag, decl, "active", &[3], Prim::Bool);
         let dropped = node(
             &mut dag,
-            decl,
+            chelis_ir::dag::Owner::new(decl, Some(active)),
             RiscOp::Dropout,
-            vec![x, rates, chain.rows, active],
+            vec![x, rates, chain.rows],
             &[3, 5],
             prim,
         );
         let g = load(&mut dag, decl, "g", &[3, 5], prim);
         let replay = node(
             &mut dag,
-            decl,
+            chelis_ir::dag::Owner::new(decl, Some(active)),
             RiscOp::DropoutReplay,
-            vec![g, rates, chain.rows, active],
+            vec![g, rates, chain.rows],
             &[3, 5],
             prim,
         );
@@ -556,30 +651,30 @@ fn per_row_controls_activations_and_bound_adjoints_agree_in_c_and_eval() {
             };
             let forward = node(
                 &mut dag,
-                decl,
+                chelis_ir::dag::Owner::new(decl, Some(active)),
                 RiscOp::UniformLike,
-                vec![template, low, high, chain.rows, active],
+                vec![template, low, high, chain.rows],
                 &[3, 5],
                 prim,
             );
             let out_dims: &[usize] = if per_row { &[3] } else { &[] };
             let low_adjoint = node(
                 &mut dag,
-                decl,
+                chelis_ir::dag::Owner::new(decl, Some(active)),
                 RiscOp::UniformBoundAdjoint {
                     bound: UniformBound::Low,
                 },
-                vec![template, g, chain.rows, active],
+                vec![template, g, chain.rows],
                 out_dims,
                 prim,
             );
             let high_adjoint = node(
                 &mut dag,
-                decl,
+                chelis_ir::dag::Owner::new(decl, Some(active)),
                 RiscOp::UniformBoundAdjoint {
                     bound: UniformBound::High,
                 },
-                vec![template, g, chain.rows, active],
+                vec![template, g, chain.rows],
                 out_dims,
                 prim,
             );
@@ -685,9 +780,9 @@ fn a_rank_two_key_batch_agrees_in_c_and_eval() {
     let active = load(&mut dag, decl, "active", &[2], Prim::Bool);
     let dropped = node(
         &mut dag,
-        decl,
+        chelis_ir::dag::Owner::new(decl, Some(active)),
         RiscOp::Dropout,
-        vec![x, rates, dropout_keys, active],
+        vec![x, rates, dropout_keys],
         &[2, 3, 4],
         prim,
     );
@@ -884,11 +979,11 @@ fn gated_split(batch: &[usize], declared: DimInfo) -> Dag {
         .collect::<Vec<_>>();
     dims.push(declared.clone());
     let rows = dag.add_node(
-        decl,
+        chelis_ir::dag::Owner::new(decl, Some(active)),
         RiscOp::SplitN {
             count: RtDim::Node(1),
         },
-        vec![key, n, active],
+        vec![key, n],
         TensorType {
             dims,
             precision: Prim::Key,
@@ -1196,16 +1291,15 @@ fn a_batched_draw_validates_each_active_rows_controls_in_c_and_eval() {
                             inputs.push(batched_operand(&mut dag, decl, "rate", prim, control));
                         }
                         inputs.push(keys);
-                        if let Some(shape) = activation {
-                            inputs.push(batched_operand(&mut dag, decl, "on", Prim::Bool, shape));
-                        }
+                        let on = activation
+                            .map(|shape| batched_operand(&mut dag, decl, "on", Prim::Bool, shape));
                         let op = if uniform {
                             RiscOp::UniformLike
                         } else {
                             RiscOp::Dropout
                         };
                         let drawn = dag.add_node(
-                            decl,
+                            chelis_ir::dag::Owner::new(decl, on),
                             op,
                             inputs,
                             TensorType {
@@ -1479,13 +1573,16 @@ fn short_operand_draw(short: Short) -> Dag {
             add(&mut dag, RiscOp::Dropout, vec![data, first, keys], drawn_ty);
         }
         Short::DropoutActivation => {
+            // The activation is the draw's own, its owner's.
             let on = second.unwrap();
-            add(
-                &mut dag,
+            let id = dag.add_node(
+                chelis_ir::dag::Owner::new(decl, Some(on)),
                 RiscOp::Dropout,
-                vec![data, first, keys, on],
+                vec![data, first, keys],
                 drawn_ty,
+                None,
             );
+            dag.add_root(id);
         }
         Short::UniformTemplate | Short::UniformHigh => {
             let inputs = vec![data, first, second.unwrap(), keys];
@@ -1573,7 +1670,7 @@ fn a_draw_whose_operand_rows_disagree_with_its_keys_traps_in_c_as_in_eval() {
         ),
         (
             Short::DropoutActivation,
-            "extent `m`: claimed = 3, dropout input 3 axis 0 = 2",
+            "extent `m`: claimed = 3, dropout activation axis 0 = 2",
             "dropout",
         ),
         (
@@ -2373,8 +2470,9 @@ fn hip_key_graph(how: HipKey, prim: Prim) -> Dag {
         HipKey::Parameter => (load(&mut dag, decl, "k", &[], Prim::Key), None),
         HipKey::Result => unreachable!("built above"),
     };
-    let inputs = [like, low, high, key].into_iter().chain(active).collect();
-    let drawn = node(&mut dag, decl, RiscOp::UniformLike, inputs, &rows, prim);
+    let inputs = vec![like, low, high, key];
+    let owner = chelis_ir::dag::Owner::new(decl, active);
+    let drawn = node(&mut dag, owner, RiscOp::UniformLike, inputs, &rows, prim);
     dag.add_root(drawn);
     dag
 }

@@ -1679,9 +1679,9 @@ fn logical_random_activation_is_control_only_during_grad() {
         None,
     );
     let output = dag.add_node(
-        decl,
+        chelis_ir::dag::Owner::new(decl, Some(activation)),
         RiscOp::UniformLike,
-        vec![template, low, high, key, activation],
+        vec![template, low, high, key],
         scalar_f64,
         None,
     );

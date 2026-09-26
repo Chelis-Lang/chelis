@@ -1,7 +1,8 @@
-//! chelis#2413 B3: `Split`, `FoldIn` and `SplitN` take an optional path
-//! activation, so rule V3 (spec/10 §3.2) admits a key shared by exclusive
-//! consumers of every kind, not only by two draws, and confines the keys a key
-//! operation derives under that sharing to its activation. On hand-built
+//! chelis#2413 B3: `Split`, `FoldIn` and `SplitN` consume their key under
+//! their node's own activation (its owner's, never an input), so rule V3
+//! (spec/10 §3.2) admits a key shared by exclusive consumers of every kind,
+//! not only by two draws, and confines the keys a key operation derives under
+//! that sharing to its activation. On hand-built
 //! graphs: the verifier's operand and key rules, the evaluator's inactive
 //! `SplitN`, and `vmap` and `grad` carrying the activation.
 //!
@@ -9,7 +10,9 @@
 //! `slice2_ref.py` (independent transcriptions of [05-RNG-2] and [05-OP-8]),
 //! through `briefs/keys-b-b3-probes/b3_ref.py`, never from an evaluator.
 
-use chelis_ir::dag::{Dag, DimInfo, KeyBranch, LogicalKind, NodeId, RiscOp, RtDim, TensorType};
+use chelis_ir::dag::{
+    Dag, DimInfo, KeyBranch, LogicalKind, NodeId, Owner, RiscOp, RtDim, TensorType,
+};
 use chelis_ir::eval::{TensorValue, eval_tensor_roots_exact};
 use chelis_ir::grad::grad_dag_checked;
 use chelis_ir::verify::verify;
@@ -150,7 +153,7 @@ fn and(dag: &mut Dag, decl: chelis_ir::dag::DeclId, left: NodeId, right: NodeId)
     )
 }
 
-/// A rank-0 key operation over `key`, with `active` appended when present.
+/// A rank-0 key operation over `key`, under the activation `active`.
 fn key_op(
     dag: &mut Dag,
     decl: chelis_ir::dag::DeclId,
@@ -172,8 +175,13 @@ fn key_op(
         },
         _ => &[],
     };
-    inputs.extend(active);
-    node(dag, decl, op, inputs, dims, Prim::Key)
+    dag.add_node(
+        Owner::new(decl, active),
+        op,
+        inputs,
+        ty(dims, Prim::Key),
+        None,
+    )
 }
 
 fn left() -> RiscOp {
@@ -219,11 +227,13 @@ fn draw(
     );
     let low = f32_const(dag, decl, 0.0);
     let high = f32_const(dag, decl, 1.0);
-    let inputs = [template, low, high, key]
-        .into_iter()
-        .chain(active)
-        .collect();
-    dag.add_node(decl, RiscOp::UniformLike, inputs, data, None)
+    dag.add_node(
+        Owner::new(decl, active),
+        RiscOp::UniformLike,
+        vec![template, low, high, key],
+        data,
+        None,
+    )
 }
 
 fn assert_accepted(dag: &Dag) {
@@ -548,8 +558,9 @@ fn an_activation_on_an_unshared_key_changes_no_key() {
     assert_eq!(key_bits(&out[&r]), [RIGHT_7]);
 }
 
-/// A key operation ends with at most one Bool activation shaped like a
-/// leading part of its key's shape. Negative parity for the operand rule.
+/// A key operation's own activation is a Bool shaped like a leading part of
+/// its key's shape, and no input carries one: a trailing activation operand
+/// is an arity error. Negative parity for the operand rule.
 #[test]
 fn a_key_operation_activation_is_one_bool_shaped_like_its_keys_leading_axes() {
     let reject = |active_dims: &[usize], prim: Prim, extra: bool, needle: &str| {
@@ -565,20 +576,27 @@ fn a_key_operation_activation_is_one_bool_shaped_like_its_keys_leading_axes() {
             Prim::Key,
         );
         let active = load(&mut dag, decl, "c", active_dims, prim);
-        let mut inputs = vec![keys, active];
+        let half = dag.add_node(
+            Owner::new(decl, Some(active)),
+            left(),
+            vec![keys],
+            ty(&[2], Prim::Key),
+            None,
+        );
         if extra {
-            inputs.push(active);
+            // The constructor refuses a stale activation operand, so the
+            // malformed graph is built by editing a well-formed one.
+            dag.node_mut(half).unwrap().inputs.push(active);
         }
-        let half = node(&mut dag, decl, left(), inputs, &[2], Prim::Key);
         dag.add_root(half);
         assert_rejected(&dag, needle);
     };
-    let shape = "exactly one Bool activation, shaped like a leading part";
+    let shape = "activation must be a Bool shaped like a leading part of its key's shape";
     reject(&[], Prim::Int64, false, shape);
     reject(&[3], Prim::Bool, false, shape);
     reject(&[2, 1], Prim::Bool, false, shape);
     reject(&[], Prim::Bool, true, "wrong number of inputs");
-    // A key from a seed consumes no key and takes no activation.
+    // A key from a seed takes no activation operand either.
     let mut dag = Dag::new();
     let decl = dag.declare("test");
     let seed = i64_const(&mut dag, decl, 7);
@@ -587,10 +605,11 @@ fn a_key_operation_activation_is_one_bool_shaped_like_its_keys_leading_axes() {
         &mut dag,
         decl,
         RiscOp::KeyFromSeed,
-        vec![seed, active],
+        vec![seed],
         &[],
         Prim::Key,
     );
+    dag.node_mut(key).unwrap().inputs.push(active);
     dag.add_root(key);
     assert_rejected(&dag, "wrong number of inputs");
     // Accepted: rank 0 and the key's own shape.
@@ -607,7 +626,13 @@ fn a_key_operation_activation_is_one_bool_shaped_like_its_keys_leading_axes() {
             Prim::Key,
         );
         let active = load(&mut dag, decl, "c", dims, Prim::Bool);
-        let half = node(&mut dag, decl, left(), vec![keys, active], &[2], Prim::Key);
+        let half = dag.add_node(
+            Owner::new(decl, Some(active)),
+            left(),
+            vec![keys],
+            ty(&[2], Prim::Key),
+            None,
+        );
         dag.add_root(half);
         assert_accepted(&dag);
     }
@@ -632,11 +657,11 @@ fn gated_split(declared: DimInfo, active_dims: &[usize]) -> (Dag, NodeId) {
     let mut dims = ty(active_dims, Prim::Key).dims;
     dims.push(declared);
     let rows = dag.add_node(
-        decl,
+        Owner::new(decl, Some(active)),
         RiscOp::SplitN {
             count: RtDim::Node(1),
         },
-        vec![keys, n, active],
+        vec![keys, n],
         TensorType {
             dims,
             precision: Prim::Key,
@@ -729,7 +754,7 @@ fn vmap_batches_a_key_operations_activation() {
         .iter()
         .filter(|node| matches!(node.op, RiscOp::Split { .. }))
     {
-        let active = batched.get(split.inputs[1]).unwrap();
+        let active = batched.get(split.owner.activation.unwrap()).unwrap();
         assert_eq!(active.output_type, ty(&[2], Prim::Bool));
     }
     // A key's bits are its seed's two's-complement bits ([05-OP-69]).
@@ -791,9 +816,9 @@ fn grad_carries_a_key_operations_activation() {
     let high = f32_const(&mut dag, decl, 1.0);
     let uniform = |dag: &mut Dag, key: NodeId, active: NodeId| {
         dag.add_node(
-            decl,
+            Owner::new(decl, Some(active)),
             RiscOp::UniformLike,
-            vec![x, low, high, key, active],
+            vec![x, low, high, key],
             ty(&[2], Prim::F32),
             None,
         )
@@ -847,8 +872,8 @@ fn grad_carries_a_key_operations_activation() {
             .nodes()
             .iter()
             .filter(|node| matches!(node.op, RiscOp::Split { .. }))
-            .all(|split| split.inputs.len() == 2),
-        "every split keeps its activation"
+            .all(|split| split.owner.activation.is_some() && split.inputs.len() == 1),
+        "every split keeps its activation, as its owner's"
     );
     let gradient = grad.grad_nodes[&x];
     for (selected, expected) in [(true, GRAD_THEN), (false, GRAD_ELSE)] {
@@ -873,20 +898,20 @@ const FOLD_OF_ROW1: u64 = 0x6047_718a_f0e7_fea6;
 const DROP_FOLD_7_3: [u64; 2] = [0x4000_0000, 0x0000_0000];
 const DROP_LEFT_7: [u64; 2] = [0x4000_0000, 0x4000_0000];
 
-/// A branch's join of two rank-0 keys.
+/// A branch's join of two rank-0 keys under its own activation `under`.
 fn join(
     dag: &mut Dag,
     decl: chelis_ir::dag::DeclId,
     keys: [NodeId; 2],
     actives: [NodeId; 2],
+    under: Option<NodeId>,
 ) -> NodeId {
-    node(
-        dag,
-        decl,
+    dag.add_node(
+        Owner::new(decl, under),
         RiscOp::KeySelect,
         vec![keys[0], keys[1], actives[0], actives[1]],
-        &[],
-        Prim::Key,
+        ty(&[], Prim::Key),
+        None,
     )
 }
 
@@ -897,7 +922,7 @@ fn joined_arms(dag: &mut Dag, decl: chelis_ir::dag::DeclId, key: NodeId, c: Node
     let not_c = not(dag, decl, c);
     let folded = key_op(dag, decl, RiscOp::FoldIn, key, Some(c));
     let half = key_op(dag, decl, left(), key, Some(not_c));
-    join(dag, decl, [folded, half], [c, not_c])
+    join(dag, decl, [folded, half], [c, not_c], None)
 }
 
 /// Rule S (spec/10 §3.2): a key derived in a branch arm leaves it through
@@ -926,7 +951,7 @@ fn a_branch_join_is_the_taken_arms_key() {
     let c = load(&mut dag, decl, "c", &[], Prim::Bool);
     let not_c = not(&mut dag, decl, c);
     let folded = key_op(&mut dag, decl, RiscOp::FoldIn, key, Some(c));
-    let joined = join(&mut dag, decl, [folded, key], [c, not_c]);
+    let joined = join(&mut dag, decl, [folded, key], [c, not_c], None);
     let drawn = draw(&mut dag, decl, joined, None);
     dag.set_roots(vec![drawn]);
     assert_accepted(&dag);
@@ -941,7 +966,13 @@ fn a_branch_join_is_the_taken_arms_key() {
     let else_arm = and(&mut dag, decl, q, not_x);
     let folded = key_op(&mut dag, decl, RiscOp::FoldIn, key, Some(then_arm));
     let half = key_op(&mut dag, decl, left(), key, Some(else_arm));
-    let joined = join(&mut dag, decl, [folded, half], [then_arm, else_arm]);
+    let joined = join(
+        &mut dag,
+        decl,
+        [folded, half],
+        [then_arm, else_arm],
+        Some(q),
+    );
     let drawn = draw(&mut dag, decl, joined, Some(q));
     dag.set_roots(vec![drawn]);
     assert_accepted(&dag);
@@ -962,7 +993,7 @@ fn a_join_consumes_each_key_under_its_arm_and_stays_under_its_branch() {
     let c = load(&mut dag, decl, "c", &[], Prim::Bool);
     let not_c = not(&mut dag, decl, c);
     let folded = key_op(&mut dag, decl, RiscOp::FoldIn, key, Some(c));
-    let joined = join(&mut dag, decl, [folded, key], [c, not_c]);
+    let joined = join(&mut dag, decl, [folded, key], [c, not_c], None);
     dag.set_roots(vec![joined, joined]);
     assert_rejected(
         &dag,
@@ -986,7 +1017,7 @@ fn a_join_consumes_each_key_under_its_arm_and_stays_under_its_branch() {
         } else {
             (c, y)
         };
-        let joined = join(&mut dag, decl, [first, second], [then_arm, else_arm]);
+        let joined = join(&mut dag, decl, [first, second], [then_arm, else_arm], None);
         dag.set_roots(vec![joined]);
         assert_rejected(
             &dag,
@@ -1005,7 +1036,7 @@ fn a_join_consumes_each_key_under_its_arm_and_stays_under_its_branch() {
     let confined = key_op(&mut dag, decl, RiscOp::FoldIn, key, Some(y));
     let twin = key_op(&mut dag, decl, RiscOp::FoldIn, key, Some(not_y));
     let kept = draw(&mut dag, decl, twin, Some(not_y));
-    let joined = join(&mut dag, decl, [confined, other], [c, not_c]);
+    let joined = join(&mut dag, decl, [confined, other], [c, not_c], None);
     let drawn = draw(&mut dag, decl, joined, None);
     dag.set_roots(vec![drawn, kept]);
     assert_rejected(
@@ -1032,7 +1063,13 @@ fn a_join_consumes_each_key_under_its_arm_and_stays_under_its_branch() {
         let folded = key_op(&mut dag, decl, RiscOp::FoldIn, key, Some(else_arm));
         let twin = key_op(&mut dag, decl, RiscOp::FoldIn, key, Some(not_q));
         let kept = draw(&mut dag, decl, twin, Some(not_q));
-        let joined = join(&mut dag, decl, [fresh, folded], [then_arm, else_arm]);
+        let joined = join(
+            &mut dag,
+            decl,
+            [fresh, folded],
+            [then_arm, else_arm],
+            Some(q),
+        );
         let escaped = draw(&mut dag, decl, joined, (!escape).then_some(q));
         dag.set_roots(vec![escaped, kept]);
         (dag, [escaped, kept])
@@ -1058,6 +1095,72 @@ fn a_join_consumes_each_key_under_its_arm_and_stays_under_its_branch() {
     )
     .unwrap();
     assert_eq!(stored_bits(&out[&escaped]), stored_bits(&out[&kept]));
+}
+
+/// One carrier for a join's enclosing activation (spec/10 §3.2): its two
+/// slot activations are its own activation conjoined with a condition and
+/// with that condition's negation, as `lower_if` builds them. Arms under an
+/// enclosing activation the join's own does not name, a join under an
+/// activation its arms do not carry, and arms with a conjunct besides the
+/// two are rejected; a constant `true` conjunct, which folding may leave, is
+/// set aside.
+///
+/// Evidentiary status: REGRESSION TEST. At 224414e1f each rejected graph
+/// below verifies: the join's own activation is not compared with its arms.
+#[test]
+fn a_joins_arms_are_its_own_activation_conjoined_with_a_condition() {
+    let untied = "joins keys under two arms that are not its own activation conjoined with a condition and with its negation";
+    // `under(dag, decl, q)` names the join's own activation; the arms are
+    // `q And x` and `q And Not(x)`. The joined key is drawn under the join's
+    // own activation.
+    type Under = dyn Fn(&mut Dag, chelis_ir::dag::DeclId, NodeId) -> Option<NodeId>;
+    let build = |under: &Under| {
+        let mut dag = Dag::new();
+        let decl = dag.declare("test");
+        let first = load(&mut dag, decl, "first", &[], Prim::Key);
+        let second = load(&mut dag, decl, "second", &[], Prim::Key);
+        let q = load(&mut dag, decl, "q", &[], Prim::Bool);
+        let x = load(&mut dag, decl, "x", &[], Prim::Bool);
+        let not_x = not(&mut dag, decl, x);
+        let then_arm = and(&mut dag, decl, q, x);
+        let else_arm = and(&mut dag, decl, q, not_x);
+        let own = under(&mut dag, decl, q);
+        let joined = join(&mut dag, decl, [first, second], [then_arm, else_arm], own);
+        let drawn = draw(&mut dag, decl, joined, own);
+        dag.set_roots(vec![drawn]);
+        dag
+    };
+    let other = |dag: &mut Dag, decl, _| Some(load(dag, decl, "r", &[], Prim::Bool));
+    let wider = |dag: &mut Dag, decl, q| {
+        let r = load(dag, decl, "r", &[], Prim::Bool);
+        Some(and(dag, decl, q, r))
+    };
+    assert_accepted(&build(&|_, _, q| Some(q)));
+    assert_rejected(&build(&|_, _, _| None), untied);
+    assert_rejected(&build(&other), untied);
+    assert_rejected(&build(&wider), untied);
+    // A join under `q` whose arms are the bare condition and its negation.
+    let mut dag = Dag::new();
+    let decl = dag.declare("test");
+    let first = load(&mut dag, decl, "first", &[], Prim::Key);
+    let second = load(&mut dag, decl, "second", &[], Prim::Key);
+    let q = load(&mut dag, decl, "q", &[], Prim::Bool);
+    let x = load(&mut dag, decl, "x", &[], Prim::Bool);
+    let not_x = not(&mut dag, decl, x);
+    let joined = join(&mut dag, decl, [first, second], [x, not_x], Some(q));
+    dag.set_roots(vec![joined]);
+    assert_rejected(&dag, untied);
+    // A join under the constant `true` is a join under no activation.
+    let mut dag = Dag::new();
+    let decl = dag.declare("test");
+    let first = load(&mut dag, decl, "first", &[], Prim::Key);
+    let second = load(&mut dag, decl, "second", &[], Prim::Key);
+    let on = bool_const(&mut dag, decl, true);
+    let x = load(&mut dag, decl, "x", &[], Prim::Bool);
+    let not_x = not(&mut dag, decl, x);
+    let joined = join(&mut dag, decl, [first, second], [x, not_x], Some(on));
+    dag.set_roots(vec![joined]);
+    assert_accepted(&dag);
 }
 
 /// `vmap` batches a join elementwise: each row's activations select that

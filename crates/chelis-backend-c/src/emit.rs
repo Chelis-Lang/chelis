@@ -4373,8 +4373,8 @@ impl CEmitter {
         }
     }
 
-    /// A random node's optional activation, read as its stored Bool byte; the
-    /// verifier admits only a rank-0 Bool there. No activation is active.
+    /// A random node's own activation ([`chelis_ir::dag::Owner::activation`])
+    /// when rank 0, read as its stored Bool byte. No activation is active.
     fn rank0_bool_expr(input: Option<&NodeId>) -> String {
         match input {
             Some(input) => format!(
@@ -4520,16 +4520,17 @@ impl CEmitter {
         }
     }
 
-    /// Check input `slot`, `input`, against `reference`, whose declared axes
-    /// are `reference_dims`, on its first `axes` runtime extents: a mismatch
-    /// reports the reference's claim in the DAG evaluator's
+    /// Check `input`, which the report calls `what` (its input slot, `input
+    /// 1`, or the node's `activation`), against `reference`, whose declared
+    /// axes are `reference_dims`, on its first `axes` runtime extents: a
+    /// mismatch reports the reference's claim in the DAG evaluator's
     /// `check_operand_extents` form and traps `Domain` in `op` at i64.
     fn emit_operand_extent_guards(
         &mut self,
         op: &'static str,
         reference: NodeId,
         reference_dims: &[DimInfo],
-        slot: usize,
+        what: &str,
         input: NodeId,
         axes: usize,
     ) {
@@ -4545,7 +4546,7 @@ impl CEmitter {
             self.line(&format!("if (({claimed}) != ({observed})) {{"));
             self.indent += 1;
             self.line(&format!(
-                "fprintf(stderr, \"extent `{claim}`: claimed = %lld, {op} input {slot} axis {axis} = %lld\\n\", (long long)({claimed}), (long long)({observed}));"
+                "fprintf(stderr, \"extent `{claim}`: claimed = %lld, {op} {what} axis {axis} = %lld\\n\", (long long)({claimed}), (long long)({observed}));"
             ));
             self.line(&format!("chelis_numeric_trap({trap:?});"));
             self.indent -= 1;
@@ -4557,8 +4558,8 @@ impl CEmitter {
     /// allocates its result or reads an operand. First its key batch against
     /// its operands, in [`RiscOp::draw_batch_layout`]'s order and with the
     /// DAG evaluator's report (spec/10 §3.2, rule V5): a key batch's shape is
-    /// its data's leading axes, and each per-row control and activation is a
-    /// leading part of it. Then every extent the result's type declares,
+    /// its data's leading axes, and each per-row control, then the node's own
+    /// activation, is a leading part of it. Then every extent the result's type declares,
     /// from which this lane allocates the result, against the data's (a bound
     /// adjoint's, against the key's leading axes), with the local extent
     /// guard's report; the evaluator builds each result from its data and
@@ -4582,15 +4583,19 @@ impl CEmitter {
                 .len()
         };
         if !key_dims.is_empty() {
-            let operands = std::iter::once((layout.data_input, data, key_dims.len())).chain(
-                layout.per_row.iter().filter_map(|slot| {
-                    node.inputs
-                        .get(*slot)
-                        .map(|input| (*slot, *input, rank(*input)))
-                }),
-            );
-            for (slot, input, axes) in operands.collect::<Vec<_>>() {
-                self.emit_operand_extent_guards(op, key, key_dims, slot, input, axes);
+            let data_input = format!("input {}", layout.data_input);
+            let operands =
+                std::iter::once((data_input, data, key_dims.len()))
+                    .chain(layout.per_row.iter().filter_map(|slot| {
+                        node.inputs
+                            .get(*slot)
+                            .map(|input| (format!("input {slot}"), *input, rank(*input)))
+                    }))
+                    .chain(node.owner.activation.map(|activation| {
+                        ("activation".to_string(), activation, rank(activation))
+                    }));
+            for (what, input, axes) in operands.collect::<Vec<_>>() {
+                self.emit_operand_extent_guards(op, key, key_dims, &what, input, axes);
             }
         }
         let source = if matches!(node.op, RiscOp::UniformBoundAdjoint { .. }) {
@@ -4653,7 +4658,7 @@ impl CEmitter {
         let binary32 = Self::prim_elem_type(Prim::F32);
         let storage = Self::elem_type(ty);
         let rate = Self::row_float_expr(dag, node.inputs[1], id);
-        let active = Self::row_bool_expr(dag, node.inputs.get(3), id);
+        let active = Self::row_bool_expr(dag, node.owner.activation.as_ref(), id);
         let trap = NumericTrap::Domain {
             op: "dropout",
             prim,
@@ -4726,7 +4731,7 @@ impl CEmitter {
         let storage = Self::elem_type(ty);
         let low = Self::row_float_expr(dag, node.inputs[1], id);
         let high = Self::row_float_expr(dag, node.inputs[2], id);
-        let active = Self::row_bool_expr(dag, node.inputs.get(4), id);
+        let active = Self::row_bool_expr(dag, node.owner.activation.as_ref(), id);
         let trap = NumericTrap::Domain {
             op: "uniform_like",
             prim,
@@ -4806,7 +4811,7 @@ impl CEmitter {
         let prim = ty.precision;
         let cotangent = node.inputs[1].0;
         let key = node.inputs[2];
-        let active = Self::row_bool_expr(dag, node.inputs.get(3), id);
+        let active = Self::row_bool_expr(dag, node.owner.activation.as_ref(), id);
         let arithmetic_ty = TensorType {
             dims: vec![],
             precision: if prim == Prim::F64 {
@@ -4921,9 +4926,9 @@ impl CEmitter {
     /// then every extent the result declares against the first operand's,
     /// with the local extent guard's report; the evaluator builds the result
     /// from its operands and reads no declared extent. Every index below the
-    /// result's size is then in bounds for every operand. A `Split`'s or
-    /// `FoldIn`'s trailing activation is not an operand: it changes no key,
-    /// so this lane never reads it.
+    /// result's size is then in bounds for every operand. A join's two
+    /// activations are not operands, and a key operation's own activation
+    /// changes no key, so this lane never reads it here.
     fn emit_key_operation_extent_guards(
         &mut self,
         op: &'static str,
@@ -4936,12 +4941,19 @@ impl CEmitter {
             .expect("verified key operand")
             .output_type
             .dims;
-        let operands = node
-            .op
-            .key_operation_operand_count()
-            .unwrap_or(node.inputs.len());
+        let operands = match node.op {
+            RiscOp::KeySelect => 2,
+            _ => node.inputs.len(),
+        };
         for (slot, input) in node.inputs.iter().enumerate().take(operands).skip(1) {
-            self.emit_operand_extent_guards(op, first, dims, slot, *input, dims.len());
+            self.emit_operand_extent_guards(
+                op,
+                first,
+                dims,
+                &format!("input {slot}"),
+                *input,
+                dims.len(),
+            );
         }
         self.emit_declared_extent_guards(op, &node.output_type.dims, |axis| {
             format!("chelis_tensor_shape(t{}, {axis})", first.0)
@@ -5070,11 +5082,7 @@ impl CEmitter {
         }
         .to_string();
         self.line(&format!("{index} t{id}_count = ({index})({extent});"));
-        if let Some(active) = node
-            .op
-            .key_operation_operand_count()
-            .and_then(|slot| node.inputs.get(slot))
-        {
+        if let Some(active) = node.owner.activation {
             let inactive = if self.runtime_dim_sites.contains_key(&(id, last)) {
                 "0".to_string()
             } else {
@@ -9758,9 +9766,9 @@ mod tests {
             None,
         );
         let draw = dag.add_node(
-            decl,
+            chelis_ir::dag::Owner::new(decl, Some(activation)),
             RiscOp::UniformLike,
-            vec![template, low, high, key, activation],
+            vec![template, low, high, key],
             vec_f32(2),
             None,
         );

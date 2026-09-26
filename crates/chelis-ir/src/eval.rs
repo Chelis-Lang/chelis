@@ -647,17 +647,18 @@ fn leading_row(row: usize, rows: usize, len: usize) -> usize {
     row / (rows / len)
 }
 
-/// A key-operand random primitive's keys. A key that has no value under an
+/// A key-operand random primitive's keys, under the node's own activation
+/// ([`crate::dag::Owner::activation`]). A key that has no value under an
 /// active primitive is a malformed graph.
 fn draw_keys<'a>(
     node: &DagNode,
     key_slot: usize,
     values: &'a UnordMap<NodeId, TensorValue>,
 ) -> Result<KeyOperand<'a>, String> {
-    let activation = match node.inputs.get(key_slot + 1) {
+    let activation = match node.owner.activation {
         Some(activation) => Some(
             values
-                .get(activation)
+                .get(&activation)
                 .ok_or("random primitive activation is not available")?,
         ),
         None => None,
@@ -724,8 +725,8 @@ fn row_control(
 /// A key-operand random primitive's key batch against its operands, checked
 /// before it reads one, in [`RiscOp::draw_batch_layout`]'s order and with
 /// the C lane's report (spec/10 §3.2, rule V5): a key batch's shape is its
-/// data's leading axes, and each per-row control and activation is a
-/// leading part of that shape. The verifier relates the declared dims; this
+/// data's leading axes, and each per-row control, then the node's own
+/// activation, is a leading part of that shape. The verifier relates the declared dims; this
 /// relates the values, so no row index rests on an extent nothing has
 /// checked. A key an inactive draw key withheld is rank 0, so it batches
 /// nothing. This lane builds each result from its data's shape, so it reads
@@ -764,12 +765,27 @@ fn check_draw_extents(
                 key.shape.len()
             ));
         }
-        check_operand_extents(op, key_dims, key, slot, operand, axes)?;
+        check_operand_extents(op, key_dims, key, &format!("input {slot}"), operand, axes)?;
+    }
+    if let Some(activation) = node
+        .owner
+        .activation
+        .and_then(|activation| values.get(&activation))
+    {
+        let axes = activation.shape.len();
+        if axes > key.shape.len() {
+            return Err(format!(
+                "{op} activation has rank {axes}, which its rank-{} key batch does not index",
+                key.shape.len()
+            ));
+        }
+        check_operand_extents(op, key_dims, key, "activation", activation, axes)?;
     }
     Ok(())
 }
 
-/// Input `slot`, `operand`, against `reference`, whose declared axes are
+/// `operand`, which the report calls `what` (its input slot, `input 1`, or
+/// the node's `activation`), against `reference`, whose declared axes are
 /// `reference_dims`, on its first `axes` extents: the first that disagrees
 /// reports the reference's claim and traps `Domain` in `op` at i64, the C
 /// lane's operand extent guard's report.
@@ -777,7 +793,7 @@ fn check_operand_extents(
     op: &'static str,
     reference_dims: &[DimInfo],
     reference: &TensorValue,
-    slot: usize,
+    what: &str,
     operand: &TensorValue,
     axes: usize,
 ) -> Result<(), String> {
@@ -790,7 +806,7 @@ fn check_operand_extents(
                 None => claimed.to_string(),
             };
             return Err(format!(
-                "extent `{claim}`: claimed = {claimed}, {op} input {slot} axis {axis} = {observed}\n\
+                "extent `{claim}`: claimed = {claimed}, {op} {what} axis {axis} = {observed}\n\
                  {}",
                 NumericTrap::Domain {
                     op,
@@ -4042,7 +4058,7 @@ where
                     .ok_or("fold_in key is not in its graph")?
                     .output_type
                     .dims;
-                check_operand_extents("fold_in", key_dims, keys, 1, ns, keys.shape.len())?;
+                check_operand_extents("fold_in", key_dims, keys, "input 1", ns, keys.shape.len())?;
                 key_value(keys, fold_in_storage(keys.storage(), ns.storage()))?
             }
             RiscOp::KeySelect => {
@@ -4065,7 +4081,7 @@ where
                     "if",
                     key_dims,
                     then_keys,
-                    1,
+                    "input 1",
                     else_keys,
                     then_keys.shape.len(),
                 )?;
@@ -4868,22 +4884,19 @@ fn eval_key_select(
     ))
 }
 
-/// Whether a key operation's optional activation (spec/10 §3.2) holds in some
-/// row: absent, or a Bool with at least one true element. A key operation
-/// whose activation holds in no row reads no count.
+/// Whether a key operation's own activation (spec/10 §3.2,
+/// [`crate::dag::Owner::activation`]) holds in some row: absent, or a Bool
+/// with at least one true element. A key operation whose activation holds in
+/// no row reads no count.
 fn key_operation_is_live(
     node: &DagNode,
     values: &UnordMap<NodeId, TensorValue>,
 ) -> Result<bool, String> {
-    let Some(input) = node
-        .op
-        .key_operation_operand_count()
-        .and_then(|slot| node.inputs.get(slot))
-    else {
+    let Some(input) = node.owner.activation else {
         return Ok(true);
     };
     let active = values
-        .get(input)
+        .get(&input)
         .ok_or("key operation activation is not available")?;
     if active.prim() != Prim::Bool {
         return Err("key operation activation is not a Bool".into());

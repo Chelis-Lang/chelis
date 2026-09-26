@@ -7336,10 +7336,10 @@ impl<'program> LowerCtx<'program> {
 
     /// Lower one draw of a key-operand random primitive ([05-OP-8],
     /// [05-OP-37]): the primitive consuming `key`, the lowered source key
-    /// operand. The draw carries the position's [`Self::draw_activation`]
-    /// when it has one, so a draw in a where-lowered arm validates its
-    /// controls only when its arm is selected, and two draws in exclusive
-    /// arms may share one key (spec/10 section 3.2, rule V3).
+    /// operand. Its owner carries the position's [`Self::draw_activation`],
+    /// so a draw in a where-lowered arm validates its controls only when its
+    /// arm is selected, and two draws in exclusive arms may share one key
+    /// (spec/10 section 3.2, rule V3).
     fn lower_keyed_draw(
         &mut self,
         op: RiscOp,
@@ -7349,18 +7349,17 @@ impl<'program> LowerCtx<'program> {
         ty: TensorType,
     ) -> NodeId {
         let span = self.current_span_id.clone();
-        let activation = self.draw_activation();
         let inputs = std::iter::once(data)
             .chain(controls.iter().copied())
             .chain(std::iter::once(key))
-            .chain(activation)
             .collect();
         self.dag.add_node(self.owner(), op, inputs, ty, span)
     }
 
     /// `[05-OP-70]` `split_key(k)`: two IR nodes, `Split{Left}` and
     /// `Split{Right}`, because an IR node has one output. Each half has the
-    /// key's shape and carries the position's [`Self::draw_activation`].
+    /// key's shape, and its owner carries the position's
+    /// [`Self::draw_activation`].
     fn lower_split_key(&mut self, key_expr: &Expr) -> LoweredValue {
         let key = self.lower_expr_node(key_expr, "split_key key");
         let key_ty = self.key_operand_type(key);
@@ -7379,15 +7378,14 @@ impl<'program> LowerCtx<'program> {
 
     /// Lower one key-consuming operation (`Split`, `FoldIn` or `SplitN`) over
     /// its `operands`, the parent key first. Like a draw
-    /// ([`Self::lower_keyed_draw`]) it carries the position's
-    /// [`Self::draw_activation`] when it has one, so a key operation in a
-    /// where-lowered arm and a consumer of the same key in the exclusive arm
-    /// share it under rule V3 (spec/10 section 3.2), and a `SplitN` in an
-    /// unselected arm does not trap on its count.
+    /// ([`Self::lower_keyed_draw`]) its owner carries the position's
+    /// [`Self::draw_activation`], so a key operation in a where-lowered arm
+    /// and a consumer of the same key in the exclusive arm share it under
+    /// rule V3 (spec/10 section 3.2), and a `SplitN` in an unselected arm
+    /// does not trap on its count.
     fn lower_key_operation(&mut self, op: RiscOp, operands: Vec<NodeId>, ty: TensorType) -> NodeId {
         let span = self.current_span_id.clone();
-        let inputs = operands.into_iter().chain(self.draw_activation()).collect();
-        self.dag.add_node(self.owner(), op, inputs, ty, span)
+        self.dag.add_node(self.owner(), op, operands, ty, span)
     }
 
     /// The type of a lowered key operand: its own shape at dtype `key`.
@@ -7415,6 +7413,43 @@ impl<'program> LowerCtx<'program> {
     /// subcontext's entry, so it is the stronger of the two.
     fn draw_activation(&self) -> Option<NodeId> {
         self.random_path_condition.or(self.branch_path_condition)
+    }
+
+    /// Pass a call site's `activation` ([`Self::draw_activation`]) into the
+    /// transform body `subctx` lowers for splicing back at that site. A
+    /// fresh rank-0 bool `Load`, named `prefix` plus the first index whose
+    /// name `taken` does not claim, becomes the body's path condition, so
+    /// every node the body lowers runs under it; the returned
+    /// `(name, activation)` pair goes into the splice's argument map, which
+    /// resolves the `Load` to the call site's activation. A body spliced
+    /// into a runtime `if` arm therefore checks nothing when the arm is not
+    /// taken (spec/10 section 3.2). `None` when every execution enters the
+    /// site.
+    fn pass_call_site_activation(
+        activation: Option<NodeId>,
+        subctx: &mut LowerCtx,
+        prefix: &str,
+        mut taken: impl FnMut(&str) -> bool,
+    ) -> Option<(String, NodeId)> {
+        let activation = activation?;
+        let load_name = (0usize..)
+            .map(|suffix| format!("{prefix}{suffix}"))
+            .find(|candidate| !taken(candidate))
+            .expect("an unbounded index sequence has an unclaimed name");
+        let load = subctx.dag.add_node(
+            subctx.owner(),
+            RiscOp::Load {
+                name: load_name.as_str().into(),
+            },
+            vec![],
+            TensorType {
+                dims: Vec::new(),
+                precision: Prim::Bool,
+            },
+            subctx.current_span_id.clone(),
+        );
+        subctx.random_path_condition = Some(load);
+        Some((load_name, activation))
     }
 
     fn attach_reuse_hint(
@@ -10704,30 +10739,12 @@ impl<'program> LowerCtx<'program> {
                     .map(|(name, _)| name.clone()),
             )
             .collect::<UnordSet<_>>();
-        let caller_activation_arg = caller_draw_activation.map(|activation| {
-            let mut suffix = 0usize;
-            let load_name = loop {
-                let candidate = format!("__chelis_grad_draw_activation_{suffix}");
-                if used_load_names.insert(candidate.clone()) {
-                    break candidate;
-                }
-                suffix += 1;
-            };
-            let load = subctx.dag.add_node(
-                subctx.owner(),
-                RiscOp::Load {
-                    name: load_name.as_str().into(),
-                },
-                vec![],
-                TensorType {
-                    dims: Vec::new(),
-                    precision: Prim::Bool,
-                },
-                subctx.current_span_id.clone(),
-            );
-            subctx.random_path_condition = Some(load);
-            (load_name, activation)
-        });
+        let caller_activation_arg = Self::pass_call_site_activation(
+            caller_draw_activation,
+            &mut subctx,
+            "__chelis_grad_draw_activation_",
+            |candidate| !used_load_names.insert(candidate.to_string()),
+        );
         // One record owns each selected formal, actual and ordered
         // geometry from selection through AD and result packing.
         struct GradientTarget {
@@ -12117,31 +12134,15 @@ impl<'program> LowerCtx<'program> {
         // the position's activation: a call in a runtime `if` arm reads the
         // arm's activation through a captured Load the splice resolves, which
         // the batching lifts to every row (spec/10 section 3.2).
-        let caller_activation_arg = self.draw_activation().map(|activation| {
-            let mut suffix = 0usize;
-            let load_name = loop {
-                let candidate = format!("__chelis_vmap_activation_{suffix}");
-                if !param_names.contains(&candidate) && !captured_bindings.contains_key(&candidate)
-                {
-                    break candidate;
-                }
-                suffix += 1;
-            };
-            let load = subctx.dag.add_node(
-                subctx.owner(),
-                RiscOp::Load {
-                    name: load_name.as_str().into(),
-                },
-                vec![],
-                TensorType {
-                    dims: Vec::new(),
-                    precision: Prim::Bool,
-                },
-                subctx.current_span_id.clone(),
-            );
-            subctx.random_path_condition = Some(load);
-            (load_name, activation)
-        });
+        let caller_activation_arg = Self::pass_call_site_activation(
+            self.draw_activation(),
+            &mut subctx,
+            "__chelis_vmap_activation_",
+            |candidate| {
+                param_names.iter().any(|name| name == candidate)
+                    || captured_bindings.contains_key(candidate)
+            },
+        );
         let root_value = subctx.lower_resolved_body(fn_expr, &param_names, body);
         for root in root_value.flatten_nodes() {
             subctx.dag.add_root(root);
@@ -12438,6 +12439,17 @@ impl<'program> LowerCtx<'program> {
         // As in ordinary vmap, mapped formal Loads precede invariant capture
         // Loads so a symbolic capture lift can name a real batch witness.
         let captured_bindings = self.seed_subctx_with_lexical_scope(&mut subctx, &param_names);
+        // As for `vmap` and `grad`, the differentiated, vmapped body is
+        // spliced back at this position and runs under its activation.
+        let caller_activation_arg = Self::pass_call_site_activation(
+            self.draw_activation(),
+            &mut subctx,
+            "__chelis_vmap_grad_activation_",
+            |candidate| {
+                param_names.iter().any(|name| name == candidate)
+                    || captured_bindings.contains_key(candidate)
+            },
+        );
 
         let output = subctx
             .lower_resolved_body(fn_expr, &param_names, body)
@@ -12521,6 +12533,7 @@ impl<'program> LowerCtx<'program> {
             arg_map.insert(name.clone(), actual);
         }
         arg_map.merge(captured_bindings);
+        arg_map.extend(caller_activation_arg);
 
         let remap = self
             .splice_dag(&vmapped, &arg_map)

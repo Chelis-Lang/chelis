@@ -126,6 +126,25 @@ pub struct HipEmitter {
     /// entry point's walk is one activation, so [`Self::begin_activation`]
     /// resets it per entry.
     draw_keys: BTreeMap<NodeId, chelis_types::RandomKey>,
+    /// The activation gate of the checking node being emitted, until its
+    /// kernel launch consumes it ([`Self::activation_gate`]).
+    gate: Option<HipActivationGate>,
+}
+
+/// How a checking node under an activation (spec/10 section 3.2) reads it:
+/// where the activation is false the node computes but checks nothing, so
+/// its kernel reads each operand through a [`kernels::OperandGate`]. The
+/// checked set is [`DagNode::inactive_operand`]'s, the one the evaluator
+/// and the C lane substitute from.
+#[derive(Debug, Clone)]
+struct HipActivationGate {
+    /// The node's activation, a bool tensor.
+    activation: NodeId,
+    /// Whether the activation indexes the node's output rows (its rank is
+    /// at most the node's); otherwise an element is active when any row is.
+    per_row: bool,
+    /// Each operand slot's value where the element is inactive.
+    operands: kernels::OperandGate,
 }
 
 #[derive(Debug, Clone)]
@@ -229,6 +248,113 @@ impl HipEmitter {
             ));
         }
         Ok(())
+    }
+
+    /// The activation gate of `node` (spec/10 section 3.2), as the C lane's
+    /// `emit_activation_gate` derives it: a node under an activation whose
+    /// operation checks its operands' values reads every operand through
+    /// the gate, taking [`DagNode::inactive_operand`]'s value for its slot
+    /// where the activation is false. `None` for a node every execution
+    /// checks, or one whose operation checks nothing of its operands.
+    fn activation_gate(node: &DagNode, dag: VerifiedDagView<'_>) -> Option<HipActivationGate> {
+        let activation = node.owner.activation?;
+        node.inactive_operand(0)?;
+        let rank = dag
+            .get(activation)
+            .expect("verified activation")
+            .output_type
+            .dims
+            .len();
+        Some(HipActivationGate {
+            activation,
+            per_row: rank <= node.output_type.dims.len(),
+            operands: kernels::OperandGate {
+                inactive: (0..node.inputs.len())
+                    .map(|slot| {
+                        node.inactive_operand(slot)
+                            .expect("a checking operation names each operand's inactive value")
+                    })
+                    .collect(),
+            },
+        })
+    }
+
+    /// The name of `name`'s kernel read through `gate`: each slot's
+    /// inactive value is part of the kernel's source, so it is part of its
+    /// name, and two gated kernels share a name only when they share it.
+    fn gated_kernel_name(name: String, gate: &kernels::OperandGate) -> String {
+        gate.inactive
+            .iter()
+            .fold(format!("{name}_gated"), |name, value| {
+                format!("{name}_{}", value.to_string().replace('-', "m"))
+            })
+    }
+
+    /// A checking node under an activation whose HIP emitter reads its
+    /// operands without the activation gate: compiled, it would check where
+    /// its activation is false (spec/10 section 3.2), so it is refused.
+    fn ungated_check_unsupported(node: &DagNode, detail: &str) -> Unsupported {
+        Unsupported::new(
+            UnsupportedKind::Op(chelis_ir::grad::risc_op_name(&node.op).to_string()),
+            format!(
+                "a checking operation under an activation at HIP DAG node {}: {detail}",
+                node.id.0
+            ),
+            Stage::Codegen("hip"),
+            chelis_types::unimplemented_rejection!(
+                2413,
+                "this HIP emitter has no activation gate, so it would check where the \
+                 activation is false (spec/10 section 3.2); use `--target c`"
+            ),
+        )
+    }
+
+    /// Set [`Self::gate`] for `node` before its emitter runs.
+    fn begin_node_gate(&mut self, node: &DagNode, dag: VerifiedDagView<'_>) {
+        self.gate = Self::activation_gate(node, dag);
+    }
+
+    /// End `node`'s emission: its launch must have consumed the gate.
+    fn end_node_gate(&mut self, node: &DagNode) -> Result<(), Unsupported> {
+        match self.gate.take() {
+            Some(_) => Err(Self::ungated_check_unsupported(
+                node,
+                "its HIP emitter reads its operands without the gate",
+            )),
+            None => Ok(()),
+        }
+    }
+
+    /// Consume the node's gate at its launch: bind the activation's layout
+    /// (it may be a view, such as a call site's activation expanded to every
+    /// row), its element count and its row width beside the launch's other
+    /// metadata, and return the extra kernel arguments, empty for an ungated
+    /// launch.
+    fn emit_gate_launch_args(&mut self, id: usize) -> String {
+        let Some(gate) = self.gate.take() else {
+            return String::new();
+        };
+        let act = gate.activation.0;
+        self.emit_shape_vars(id, "act", act);
+        self.emit_stride_vars(id, "act", act);
+        self.line(&format!(
+            "chelis_device_metadata t{id}_act_ndim = d_t{act}->rank;"
+        ));
+        self.line(&format!(
+            "chelis_device_metadata t{id}_act_count = d_t{act}->count;"
+        ));
+        if gate.per_row {
+            self.line(&format!(
+                "chelis_device_metadata t{id}_act_row = t{id}_act_count > 0 ? t{id}_size / t{id}_act_count : 0;"
+            ));
+        } else {
+            self.line(&format!("chelis_device_metadata t{id}_act_row = 0;"));
+        }
+        format!(
+            ", &p_t{act}, {}, {}, &t{id}_act_ndim, &t{id}_act_count, &t{id}_act_row",
+            self.shape_arg_refs(id, "act"),
+            self.stride_arg_refs(id, "act"),
+        )
     }
 
     fn invalid_count(node: &DagNode, detail: String) -> Unsupported {
@@ -438,6 +564,7 @@ impl HipEmitter {
             extra_peak_device_bytes_estimate: 0,
             device_entrypoint_mode: false,
             draw_keys: BTreeMap::new(),
+            gate: None,
             kernel_rank: match dag
                 .nodes()
                 .iter()
@@ -1322,7 +1449,22 @@ impl HipEmitter {
         })
     }
 
+    /// The kernel `node` launches: its operation's kernel, read through the
+    /// node's activation gate when it has one ([`Self::activation_gate`]).
     fn kernel_name_for_op(
+        &self,
+        op: &RiscOp,
+        node: &DagNode,
+        dag: VerifiedDagView<'_>,
+    ) -> Result<Option<String>, Unsupported> {
+        let name = self.ungated_kernel_name_for_op(op, node, dag)?;
+        Ok(match Self::activation_gate(node, dag) {
+            Some(gate) => name.map(|name| Self::gated_kernel_name(name, &gate.operands)),
+            None => name,
+        })
+    }
+
+    fn ungated_kernel_name_for_op(
         &self,
         op: &RiscOp,
         node: &DagNode,
@@ -1640,7 +1782,17 @@ impl HipEmitter {
         let elem_for_unary =
             || -> Result<kernels::ElemKind, Unsupported> { Self::elem_kind(&node.output_type) };
         let operand_prec = || dag.get(node.inputs[0]).unwrap().output_type.precision;
-        Ok(match op {
+        // The node's activation gate. Exactly the arms whose templates read
+        // their operands through it take it; a gate left untaken is refused
+        // below rather than compiled into a kernel that checks where the
+        // activation is false (spec/10 section 3.2).
+        let gate = Self::activation_gate(node, dag).map(|gate| gate.operands);
+        let gate_taken = std::cell::Cell::new(false);
+        let take_gate = || {
+            gate_taken.set(true);
+            gate.as_ref()
+        };
+        let source = match op {
             // WS-A4: Add / Mul dispatch on operand precision so each
             // dtype gets its own kernel source. f32/f64 route through
             // the WS-A2 `ElemKind` template (which now also handles
@@ -1648,11 +1800,12 @@ impl HipEmitter {
             RiscOp::Add => {
                 let prec = operand_prec();
                 if matches!(prec, Prim::F32 | Prim::F64) {
-                    kernels::binary_elementwise(
+                    kernels::binary_elementwise_typed(
                         self.kernel_rank,
                         name,
                         "+",
-                        Self::elem_kind(&dag.get(node.inputs[0]).unwrap().output_type)?,
+                        Self::elem_kind(&dag.get(node.inputs[0]).unwrap().output_type)?.c_type(),
+                        take_gate(),
                     )
                 } else {
                     kernels::binary_elementwise_typed(
@@ -1660,6 +1813,7 @@ impl HipEmitter {
                         name,
                         "+",
                         Self::dtype_c_type(prec),
+                        take_gate(),
                     )
                 }
             }
@@ -1673,26 +1827,29 @@ impl HipEmitter {
                         Self::dtype_c_type(precision),
                         minimum,
                         maximum,
+                        take_gate(),
                     )
                 } else if let Some(kind) = Self::reduced_float_kind(precision) {
                     kernels::binary_sub_reduced(self.kernel_rank, name, kind)
                 } else {
-                    kernels::binary_elementwise(
+                    kernels::binary_elementwise_typed(
                         self.kernel_rank,
                         name,
                         "-",
-                        Self::elem_kind(&dag.get(node.inputs[0]).unwrap().output_type)?,
+                        Self::elem_kind(&dag.get(node.inputs[0]).unwrap().output_type)?.c_type(),
+                        take_gate(),
                     )
                 }
             }
             RiscOp::Mul => {
                 let prec = operand_prec();
                 if matches!(prec, Prim::F32 | Prim::F64) {
-                    kernels::binary_elementwise(
+                    kernels::binary_elementwise_typed(
                         self.kernel_rank,
                         name,
                         "*",
-                        Self::elem_kind(&dag.get(node.inputs[0]).unwrap().output_type)?,
+                        Self::elem_kind(&dag.get(node.inputs[0]).unwrap().output_type)?.c_type(),
+                        take_gate(),
                     )
                 } else {
                     kernels::binary_elementwise_typed(
@@ -1700,6 +1857,7 @@ impl HipEmitter {
                         name,
                         "*",
                         Self::dtype_c_type(prec),
+                        take_gate(),
                     )
                 }
             }
@@ -1719,11 +1877,12 @@ impl HipEmitter {
                      codegen; the type checker should reject this at \
                      spec/04-type-system.md \u{00a7}5.4 before lowering"
                 );
-                kernels::binary_elementwise(
+                kernels::binary_elementwise_typed(
                     self.kernel_rank,
                     name,
                     "/",
-                    Self::elem_kind(&dag.get(node.inputs[0]).unwrap().output_type)?,
+                    Self::elem_kind(&dag.get(node.inputs[0]).unwrap().output_type)?.c_type(),
+                    take_gate(),
                 )
             }
             // chelis#178: floor division (round toward -inf). Integer
@@ -1736,6 +1895,7 @@ impl HipEmitter {
                     name,
                     Self::dtype_c_type(prec),
                     prec.is_integer(),
+                    take_gate(),
                 )
             }
             // chelis#178: truncating (round-toward-zero) division. Integer
@@ -1755,6 +1915,7 @@ impl HipEmitter {
                     name,
                     "/",
                     Self::dtype_c_type(prec),
+                    take_gate(),
                 )
             }
             RiscOp::Compare(kind) => {
@@ -1937,7 +2098,7 @@ impl HipEmitter {
                     .expect("verified numeric representation")
                     .byte_width(),
             ),
-            RiscOp::Cast { .. } => self.cast_kernel_source(name, node, dag)?,
+            RiscOp::Cast { .. } => self.cast_kernel_source(name, node, dag, take_gate())?,
             RiscOp::CastTrunc { .. } => {
                 return Err(Self::cast_trunc_unsupported(node));
             }
@@ -1954,7 +2115,7 @@ impl HipEmitter {
                     Self::dtype_c_type(node.output_type.precision),
                 )
             }
-            RiscOp::Copy => self.cast_kernel_source(name, node, dag)?,
+            RiscOp::Copy => self.cast_kernel_source(name, node, dag, None)?,
             RiscOp::FusedElem { ops } => {
                 let aliased_ext = self.fused_reuse.get(&node.id).map(|reuse| {
                     let reusable = reuse.mechanics(node.id).reusable_input;
@@ -2063,7 +2224,14 @@ impl HipEmitter {
                 Self::dtype_c_type(node.output_type.precision),
             ),
             _ => unreachable!("no kernel for op: {op:?}"),
-        })
+        };
+        if gate.is_some() && !gate_taken.get() {
+            return Err(Self::ungated_check_unsupported(
+                node,
+                "its HIP kernel reads its operands without the gate",
+            ));
+        }
+        Ok(source)
     }
 
     /// Cast / Realize / Copy kernel source: in-precision identity when
@@ -2073,12 +2241,13 @@ impl HipEmitter {
         name: &str,
         node: &DagNode,
         dag: VerifiedDagView<'_>,
+        gate: Option<&kernels::OperandGate>,
     ) -> Result<String, Unsupported> {
         let (src_kind, dst_kind) = Self::cast_elem_kinds(node, dag)?;
         Ok(if src_kind == dst_kind {
-            kernels::cast(self.kernel_rank, name, dst_kind)
+            kernels::cast(self.kernel_rank, name, dst_kind, gate)
         } else {
-            kernels::cast_convert(self.kernel_rank, name, src_kind, dst_kind)
+            kernels::cast_convert(self.kernel_rank, name, src_kind, dst_kind, gate)
         })
     }
 
@@ -2126,6 +2295,10 @@ impl HipEmitter {
 
     fn emit_node(&mut self, node: &DagNode, dag: VerifiedDagView<'_>) -> Result<(), Unsupported> {
         let id = node.id.0;
+        // A checking node under an activation checks nothing where it is
+        // false (spec/10 section 3.2): its launch consumes the gate, and
+        // `end_node_gate` refuses a node whose emitter did not.
+        self.begin_node_gate(node, dag);
         // Resolve the precision-suffixed kernel name once, so the launch
         // shims agree with the kernel-source emitter on the symbol the
         // host references (e.g. `kernel_add_f32` vs `kernel_add_f64`).
@@ -2566,7 +2739,7 @@ impl HipEmitter {
                 self.emit_scatter_elements_launch(id, *axis, &node.inputs, &node.output_type, dag)
             }
         }
-        Ok(())
+        self.end_node_gate(node)
     }
 
     // ------------------------------------------------------------------
@@ -2916,11 +3089,12 @@ impl HipEmitter {
         self.line(&format!(
             "chelis_device_metadata t{id}_out_ndim = d_t{id}->rank;"
         ));
+        let gate_args = self.emit_gate_launch_args(id);
         // Build args array
         self.line(&format!(
             "void *args[] = {{ &p_t{a}, {a_stride_refs}, &t{id}_a_ndim, &t{id}_a_size, \
              &p_t{b}, {b_stride_refs}, &t{id}_b_ndim, &t{id}_b_size, \
-             &p_t{id}, {out_shape_refs}, &t{id}_out_ndim, &t{id}_size }};",
+             &p_t{id}, {out_shape_refs}, &t{id}_out_ndim, &t{id}_size{gate_args} }};",
             a_stride_refs = self.stride_arg_refs(id, "a"),
             b_stride_refs = self.stride_arg_refs(id, "b"),
             out_shape_refs = self.shape_arg_refs(id, "out"),
@@ -3026,9 +3200,10 @@ impl HipEmitter {
         self.line(&format!(
             "chelis_device_metadata t{id}_out_ndim = d_t{id}->rank;"
         ));
+        let gate_args = self.emit_gate_launch_args(id);
         self.line(&format!(
             "void *args[] = {{ &p_t{a}, {a_stride_refs}, &t{id}_a_ndim, &t{id}_a_size, \
-             &p_t{id}, {out_shape_refs}, &t{id}_out_ndim, &t{id}_size }};",
+             &p_t{id}, {out_shape_refs}, &t{id}_out_ndim, &t{id}_size{gate_args} }};",
             a_stride_refs = self.stride_arg_refs(id, "a"),
             out_shape_refs = self.shape_arg_refs(id, "out"),
         ));
@@ -3158,7 +3333,9 @@ impl HipEmitter {
                 ),
             )
         };
-        if node.inputs.len() != 4 {
+        // Whether a draw under an activation draws is decided when the graph
+        // runs, which this lane does not do yet.
+        if node.owner.activation.is_some() {
             return Err(unsupported());
         }
         let bound = |input: NodeId| match dag.get(input).map(|node| &node.op) {
@@ -6101,9 +6278,9 @@ mod tests {
             None,
         );
         let draw = dag.add_node(
-            decl,
+            chelis_ir::dag::Owner::new(decl, Some(active)),
             RiscOp::UniformLike,
-            vec![like, low, high, key, active],
+            vec![like, low, high, key],
             vec_f32(8),
             None,
         );

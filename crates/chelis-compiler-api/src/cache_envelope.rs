@@ -115,7 +115,12 @@ impl CachePayload for crate::StdLibContext {
     // owner, its declaration and its activation, and a declaration no longer
     // records the value declarations it references. V32 was an intermediate
     // state of the same change and never shipped.
-    const FORMAT_VERSION: u32 = 33;
+    // V34 (chelis#2413): a draw's and a key operation's activation is its
+    // node's owner's and no longer a trailing input, so a cached lowered
+    // library's draw and key-operation inputs change meaning while their
+    // bincode shape does not. V33 was an intermediate state of the same
+    // change and never shipped.
+    const FORMAT_VERSION: u32 = 34;
     const KEY_DOMAIN: &'static [u8] = b"chelis_std_typecheck_v";
 }
 
