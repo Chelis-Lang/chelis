@@ -1134,6 +1134,12 @@ impl Subst {
         self.lower_type_to(ty, self.current_level);
     }
 
+    /// Lower every variable reachable through `ty` to the enclosing `level`,
+    /// so no scope entered since generalizes over it.
+    pub(crate) fn lower_type_to_level(&mut self, ty: &Type, level: u32) {
+        self.lower_type_to(ty, level);
+    }
+
     #[cfg(test)]
     pub(crate) fn level_metadata_counts(&self) -> (usize, usize, usize, usize) {
         (

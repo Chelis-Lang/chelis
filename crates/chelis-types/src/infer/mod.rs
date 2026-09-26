@@ -124,6 +124,7 @@ mod expr_pattern;
 pub(crate) mod expr_record;
 mod expr_transform;
 mod grad_selector;
+mod group_link;
 mod literal_width;
 mod operand_deferral;
 mod program;
@@ -171,6 +172,7 @@ use grad_selector::validate_grad_selector_identity;
 pub(crate) use grad_selector::{
     SelectorCallableContext, extend_selector_callable_context, selector_callable_context_digest,
 };
+use group_link::*;
 use operand_deferral::*;
 use program::*;
 use rigid::*;

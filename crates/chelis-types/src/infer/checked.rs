@@ -100,6 +100,12 @@ pub(super) struct InferenceProduct {
     /// The declaration that owns the ledger entry being replayed, so an entry
     /// the replay registers again keeps its owner (chelis#2584).
     replaying_owner: Option<String>,
+    /// chelis#2590: the in-group references to recursive-group members whose
+    /// header omits a type, and each such member's own instance of its
+    /// provisional scheme, decided when the component completes
+    /// (`group_link::link_group_references`).
+    group_references: Vec<GroupReference>,
+    group_member_types: Vec<(String, Type)>,
 }
 
 struct InferredAdmissionContract {
@@ -364,6 +370,39 @@ impl InferenceProduct {
 
     pub(super) fn take_authored_binder_contracts(&mut self) -> Vec<AuthoredBinderContract> {
         std::mem::take(&mut self.authored_binder_contracts)
+    }
+
+    /// chelis#2590: an in-group reference to `callee`, a member whose header
+    /// omits a type, at the instance `ty` of its provisional scheme.
+    pub(super) fn record_group_reference(
+        &mut self,
+        callee: &str,
+        ty: Type,
+        span_id: Option<String>,
+        span_offset: Option<usize>,
+    ) {
+        self.group_references.push(GroupReference {
+            caller: self.active_declaration_name.clone(),
+            callee: callee.to_string(),
+            ty,
+            span_id,
+            span_offset,
+        });
+    }
+
+    /// chelis#2590: the instance of `name`'s provisional scheme that its own
+    /// body is inferred against.
+    pub(super) fn record_group_member_type(&mut self, name: &str, ty: Type) {
+        self.group_member_types.push((name.to_string(), ty));
+    }
+
+    /// The component's in-group references and member types, taken for its
+    /// completion.
+    pub(super) fn take_group_links(&mut self) -> (Vec<GroupReference>, Vec<(String, Type)>) {
+        (
+            std::mem::take(&mut self.group_references),
+            std::mem::take(&mut self.group_member_types),
+        )
     }
 
     /// The authored-binder contracts still to decide, without taking them.

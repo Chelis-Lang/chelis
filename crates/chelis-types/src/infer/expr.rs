@@ -844,7 +844,7 @@ pub(super) fn infer_var(
     node: &DeepNode,
     env: &mut Env,
     vg: &mut VarGen,
-    subst: &Subst,
+    subst: &mut Subst,
     adt_reg: &AdtRegistry,
     errors: &mut DiagnosticSink<'_>,
     product: &mut InferenceProduct,
@@ -900,6 +900,19 @@ pub(super) fn infer_var(
             // which of THIS call's fresh dimension variables denote a
             // runtime extent they met (spec/04-type-system.md section 3.2).
             product.record_instantiation_dvars(instantiated.dvars.iter().map(|(_, fresh)| *fresh));
+            if env.is_holed_group_reference(name, &scheme) {
+                // chelis#2590: an in-group reference to a member whose header
+                // omits a type is decided against the member's body when its
+                // component completes (`group_link`). Until then its instance
+                // belongs to the group's level, so a `let` inside a member
+                // cannot generalize over it and escape that decision.
+                if let Some(level) = env.holed_group_level() {
+                    subst.lower_type_to_level(&instantiated.ty, level);
+                }
+                let span_id = node_span_id(node).map(str::to_string);
+                let span_offset = span_id.as_deref().and_then(parse_span_offset);
+                product.record_group_reference(name, instantiated.ty.clone(), span_id, span_offset);
+            }
             if super::recursion::should_record_occurrence(name, &scheme) {
                 // spec/04 section 3.1.1: inside a recursive binding group,
                 // record the instantiation minted for an in-group reference

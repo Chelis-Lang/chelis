@@ -2320,6 +2320,14 @@ pub(super) fn infer_top_level(
             vg,
             subst,
         );
+        // chelis#2590: a member whose header omits a type is inferred against
+        // its own instance of its provisional scheme, and its component's
+        // completion decides each in-group reference against this one.
+        if env.is_holed_group_member(&name)
+            && let Some(ty) = &declared_ty
+        {
+            product.record_group_member_type(&name, ty.clone());
+        }
         let declared_dim_names = declared_binder_identities.dim_names();
         let declared_type_names = declared_binder_identities.type_names();
         let declared_rank_names = declared_binder_identities.rank_names();
@@ -2641,7 +2649,7 @@ pub(super) fn infer_top_level(
 
         let binder_contract =
             AuthoredBinderContract::new(name.clone(), declared_type_names, declared_dtype_bounds)
-                .in_monomorphic_group(env.is_monomorphic_group_member(&name));
+                .in_holed_group(env.is_holed_group_member(&name));
         product.record_authored_binder_contract(match binder_rigidity {
             Some((decl_ty, dim_names, rank_names)) => {
                 binder_contract.with_rigidity(decl_ty, dim_names, rank_names)

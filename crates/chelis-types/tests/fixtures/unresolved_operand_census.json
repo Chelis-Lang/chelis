@@ -985,6 +985,30 @@
       "reason": "publishes a fresh variable that commits to nothing, which is what the checker does with an unresolved input elsewhere; chelis#874 R4 / [04-TOT-1] documents the arm"
     },
     {
+      "file": "group_link.rs",
+      "function": "instance",
+      "ordinal": 1,
+      "pattern": "Type::Var(fresh)",
+      "disposition": "not_a_route",
+      "reason": "reads the fresh variable an instantiation minted for a quantified parameter; no operand is admitted"
+    },
+    {
+      "file": "group_link.rs",
+      "function": "renamed",
+      "ordinal": 1,
+      "pattern": "Type::Var(var)",
+      "disposition": "not_a_route",
+      "reason": "renames variables for a shape comparison or a diagnostic; no operand is admitted"
+    },
+    {
+      "file": "group_link.rs",
+      "function": "resolve",
+      "ordinal": 1,
+      "pattern": "Type::Var(representative)",
+      "disposition": "not_a_route",
+      "reason": "classifies what a signature variable resolves to for the in-group instantiation rule; no operand is admitted"
+    },
+    {
       "file": "recursion.rs",
       "function": "begin_caller",
       "ordinal": 1,

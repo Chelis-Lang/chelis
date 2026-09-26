@@ -31,8 +31,9 @@ pub(super) struct AuthoredBinderContract {
     /// the body could narrow it.
     dtype_bounds: UnordMap<TypeVar, Option<TypeVarRestriction>>,
     /// The declaration omits a type and belongs to a recursive group, so every
-    /// in-group call to it is typed at its own instantiation ([04-INF-5]).
-    monomorphic_group_member: bool,
+    /// in-group call to it takes its authored binders at its own
+    /// instantiation ([04-INF-5], [04-INF-2]).
+    holed_group_member: bool,
 }
 
 struct BinderRigidity {
@@ -52,7 +53,7 @@ impl AuthoredBinderContract {
             rigidity: None,
             type_names,
             dtype_bounds,
-            monomorphic_group_member: false,
+            holed_group_member: false,
         }
     }
 
@@ -71,11 +72,11 @@ impl AuthoredBinderContract {
         self
     }
 
-    /// Mark a member of a recursive group bound at its provisional monomorphic
-    /// type, so a rigidity violation names the repair that allows polymorphic
-    /// recursion.
-    pub(super) fn in_monomorphic_group(mut self, member: bool) -> Self {
-        self.monomorphic_group_member = member;
+    /// Mark a member of a recursive group whose header omits a type, so a
+    /// rigidity violation names the repair that allows a call at another
+    /// instantiation of its binders.
+    pub(super) fn in_holed_group(mut self, member: bool) -> Self {
+        self.holed_group_member = member;
         self
     }
 
@@ -90,7 +91,7 @@ impl AuthoredBinderContract {
             check_declared_rvars_rigid(name, &rigidity.rank_names, subst, errors);
         }
         check_declared_dtype_bounds(name, &self.type_names, &self.dtype_bounds, subst, errors);
-        if self.monomorphic_group_member {
+        if self.holed_group_member {
             // chelis#2584: a call in its own recursive group that instantiates
             // the binders at other types is what identified them here.
             let raised: Vec<CheckError> = errors.iter_since(checkpoint).cloned().collect();
@@ -98,7 +99,7 @@ impl AuthoredBinderContract {
             for mut error in raised {
                 error.suggestions.push(format!(
                     "`{name}` omits a type in its signature, so every call to it inside its \
-                     recursive group is typed at `{name}`'s own instantiation \
+                     recursive group takes its authored binders at `{name}`'s own instantiation \
                      (spec/04-type-system.md §3.1.3 [04-INF-5], §3.1.1 [04-INF-2]). Write the \
                      omitted types to allow a call at another instantiation of its own \
                      binders ([04-INF-2])."
@@ -185,6 +186,7 @@ pub(super) fn close_component(
     }
     env.set_active_declared_type_names(names);
     env.set_active_declared_type_bounds(bounds);
+    link_group_references(product, env, vg, subst, adt_reg, errors);
     decide_open_obligations(product, env, vg, subst, adt_reg, errors);
     report_substitution_ledgers(env, subst, adt_reg, errors);
 }

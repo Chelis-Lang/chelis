@@ -352,12 +352,14 @@ fn suggestions(source: &str) -> Vec<String> {
 
 /// REGRESSION TEST (chelis#2584 round 2). [04-INF-5]: inside a group
 /// inferred as one unit, an in-group reference is typed at the member's
-/// provisional monomorphic type. A member that omits a type is typed at one
-/// instantiation of its authored binders and omitted types together, so a
-/// recursive call that swaps two of its binders identifies them, which
-/// [04-INF-6] rejects. Round 1 shared only the omitted types and instantiated
-/// the binders afresh at each call, so these checked with score 1 and failed
-/// in `eval`: the omitted type never followed the call's instantiation.
+/// provisional monomorphic type, as [04-INF-2] provides, and an authored
+/// binder admits no substitute. So every in-group reference to a member that
+/// omits a type shares that member's authored binders, and a recursive call
+/// that swaps two of them identifies them, which [04-INF-6] rejects (its
+/// omitted types are chelis#2590's, in `issue_2590_recursive_group_holes`).
+/// Round 1 shared only the omitted types and instantiated the binders afresh
+/// at each call, so these checked with score 1 and failed in `eval`: the
+/// omitted type never followed the call's instantiation.
 #[test]
 fn a_group_member_that_omits_a_type_is_referenced_at_one_instantiation() {
     for program in [
@@ -390,73 +392,183 @@ fn a_group_member_that_omits_a_type_is_referenced_at_one_instantiation() {
     );
 }
 
-/// ORACLE (chelis#2584 round 2): a recursive-group fixture that omits a type
-/// and its twin with the body-determined type written out get the same
-/// verdict, except where the omission is what makes a call's instantiation
-/// the member's own: then the written twin checks, and the omitted form is
-/// rejected naming the polymorphic-recursion repair ([04-INF-5]).
+/// How a fixture that omits a type may differ from its twin with the
+/// body-determined type written out as authored binders ([04-INF-2]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TwinDifference {
+    /// Both forms get the same verdict.
+    None,
+    /// An in-group call instantiates an omitted type at a fully concrete
+    /// type, which an inference-introduced variable admits and an authored
+    /// binder does not: only the omitted form checks.
+    ConcreteArgument,
+    /// An in-group call instantiates the member's own type parameters at one
+    /// another (swapped or merged), which a fully written member's
+    /// polymorphic recursion admits and a member that omits a type does not:
+    /// only the written form checks.
+    OwnParametersPermuted,
+}
+
+/// ORACLE (chelis#2584 round 2, made bidirectional for chelis#2590): a
+/// recursive-group fixture that omits a type and its twin with the
+/// body-determined type written out get the same verdict, except in the two
+/// directions [04-INF-2] creates. The exact set of differing pairs is
+/// asserted, so neither direction can grow or vanish unnoticed.
 #[test]
-fn an_omitted_type_and_its_written_twin_differ_only_by_polymorphic_recursion() {
-    let mut differing = 0;
-    for (omitted, written) in [
-        // Self-recursion reading its own result.
+fn an_omitted_type_and_its_written_twin_differ_only_where_the_instantiation_rule_does() {
+    use TwinDifference::*;
+    let pairs: [(&str, &str, &str, TwinDifference); 14] = [
         (
+            "self-recursion reading its own result",
             "def step(n: i32) = if eq(n, 0) then (0i32, 1i32) else {\n  (x, y) = step(n - 1)\n  (y, x + y)\n}\n",
             "def step(n: i32) -> (i32, i32) = if eq(n, 0) then (0i32, 1i32) else {\n  (x, y) = step(n - 1)\n  (y, x + y)\n}\n",
+            None,
         ),
         (
+            "an access on a non-tuple result",
             "def step(n: i32) = if eq(n, 0) then 5i32 else step(n - 1).0\n",
             "def step(n: i32) -> i32 = if eq(n, 0) then 5i32 else step(n - 1).0\n",
+            None,
         ),
-        // Mutual recursion through a sibling's omitted result.
         (
+            "mutual recursion through a sibling's omitted result",
             "def a(n: i32) -> bool = if eq(n, 0) then true else eq(b(n - 1), b(n - 1))\ndef b(n: i32) = if a(n) then 0 else 1\n",
             "def a(n: i32) -> bool = if eq(n, 0) then true else eq(b(n - 1), b(n - 1))\ndef b(n: i32) -> i32 = if a(n) then 0 else 1\n",
+            None,
         ),
-        // Authored binders across three members, at one instantiation.
         (
+            "authored binders across three members, at one instantiation",
             "def f[a](x: a, n: i32) = if eq(n, 0) then (x, n) else g(x, n - 1)\n\
              def g[b](y: b, n: i32) = if eq(n, 0) then (y, n) else h(y, n - 1)\n\
              def h[c](z: c, n: i32) = if eq(n, 0) then (z, n) else f(z, n - 1)\n",
             "def f[a](x: a, n: i32) -> (a, i32) = if eq(n, 0) then (x, n) else g(x, n - 1)\n\
              def g[b](y: b, n: i32) -> (b, i32) = if eq(n, 0) then (y, n) else h(y, n - 1)\n\
              def h[c](z: c, n: i32) -> (c, i32) = if eq(n, 0) then (z, n) else f(z, n - 1)\n",
+            None,
         ),
-        // A swapped call: the written twin types it by polymorphic recursion
-        // only when the call's result is written.
         (
+            "omitted types flowing around a ring",
+            "def a(x, n: i32) = if eq(n, 0) then x else b(x, n - 1)\n\
+             def b(y, n: i32) = if eq(n, 0) then y else a(y, n - 1)\n",
+            "def a[t](x: t, n: i32) -> t = if eq(n, 0) then x else b(x, n - 1)\n\
+             def b[u](y: u, n: i32) -> u = if eq(n, 0) then y else a(y, n - 1)\n",
+            None,
+        ),
+        (
+            "a swapped call whose result the body joins with its own",
             "def f[a, b](x: a, y: b, n: i32) = if eq(n, 0) then (x, n) else f(y, x, n - 1)\n",
             "def f[a, b](x: a, y: b, n: i32) -> (a, i32) = if eq(n, 0) then (x, n) else f(y, x, n - 1)\n",
+            None,
         ),
         (
+            "a variable embedded in a larger type",
+            "def f(x, n: i32) = if eq(n, 0) then 0i32 else f([x], n - 1)\n",
+            "def f[a](x: a, n: i32) -> i32 = if eq(n, 0) then 0i32 else f([x], n - 1)\n",
+            None,
+        ),
+        (
+            "round 3's mk3: the member's own call at a concrete type",
+            "def pick(x, n: i32) = if eq(n, 0) then x else {\n  k = pick(3i32, n - 1)\n  x\n}\n",
+            "def pick[a](x: a, n: i32) -> a = if eq(n, 0) then x else {\n  k = pick(3i32, n - 1)\n  x\n}\n",
+            ConcreteArgument,
+        ),
+        (
+            "round 3's mk5: a sibling's call at a concrete type",
+            "def show(x, n: i32) = if eq(n, 0) then x else {\n  k = helper(n - 1)\n  x\n}\n\
+             def helper(n: i32) -> i32 = if eq(n, 0) then 0i32 else show(1i32, n - 1)\n",
+            "def show[a](x: a, n: i32) -> a = if eq(n, 0) then x else {\n  k = helper(n - 1)\n  x\n}\n\
+             def helper(n: i32) -> i32 = if eq(n, 0) then 0i32 else show(1i32, n - 1)\n",
+            ConcreteArgument,
+        ),
+        (
+            "round 3's mk11: a concrete list",
+            "def total(xs, n: i32) = if eq(n, 0) then xs else {\n  k = total([1i32], n - 1)\n  xs\n}\n",
+            "def total[a](xs: a, n: i32) -> a = if eq(n, 0) then xs else {\n  k = total([1i32], n - 1)\n  xs\n}\n",
+            ConcreteArgument,
+        ),
+        (
+            "round 3's mk10: a concrete omitted slot beside an authored binder",
+            "def f[a](x: a, y, n: i32) = if eq(n, 0) then (x, y) else {\n  k = f(x, 3i32, n - 1)\n  (x, y)\n}\n",
+            "def f[a, b](x: a, y: b, n: i32) -> (a, b) = if eq(n, 0) then (x, y) else {\n  k = f(x, 3i32, n - 1)\n  (x, y)\n}\n",
+            ConcreteArgument,
+        ),
+        (
+            "round 2's r10: swapped authored binders",
             "def swap[a, b](x: a, y: b, n: i32) = if eq(n, 0) then (x, y) else {\n  (u, v) = swap(y, x, n - 1)\n  (v, u)\n}\n",
             "def swap[a, b](x: a, y: b, n: i32) -> (a, b) = if eq(n, 0) then (x, y) else {\n  (u, v) = swap(y, x, n - 1)\n  (v, u)\n}\n",
+            OwnParametersPermuted,
         ),
         (
+            "round 2's r9: authored binders merged through a sibling",
             "def f[a, b](x: a, y: b, n: i32) = if eq(n, 0) then (x, y) else (g(x, n - 1), g(y, n - 1))\n\
              def g[c](z: c, n: i32) = if eq(n, 0) then z else f(z, z, n - 1).0\n",
             "def f[a, b](x: a, y: b, n: i32) -> (a, b) = if eq(n, 0) then (x, y) else (g(x, n - 1), g(y, n - 1))\n\
              def g[c](z: c, n: i32) -> c = if eq(n, 0) then z else f(z, z, n - 1).0\n",
+            OwnParametersPermuted,
         ),
-    ] {
-        let omitted_verdict = verdict(omitted);
-        let written_verdict = verdict(written);
-        if omitted_verdict.is_empty() == written_verdict.is_empty() {
-            continue;
+        (
+            "swapped omitted types",
+            "def swap(x, y, n: i32) = if eq(n, 0) then (x, y) else {\n  (u, v) = swap(y, x, n - 1)\n  (v, u)\n}\n",
+            "def swap[a, b](x: a, y: b, n: i32) -> (a, b) = if eq(n, 0) then (x, y) else {\n  (u, v) = swap(y, x, n - 1)\n  (v, u)\n}\n",
+            OwnParametersPermuted,
+        ),
+    ];
+    let mut differing = Vec::new();
+    for (label, omitted, written, expected) in pairs {
+        let omitted_checks = verdict(omitted).is_empty();
+        let written_checks = verdict(written).is_empty();
+        let found = match (omitted_checks, written_checks) {
+            (true, true) | (false, false) => None,
+            (true, false) => ConcreteArgument,
+            (false, true) => OwnParametersPermuted,
+        };
+        assert_eq!(
+            found,
+            expected,
+            "{label}:\n{omitted}\n{written}\nomitted: {:#?}\nwritten: {:#?}",
+            verdict(omitted),
+            verdict(written)
+        );
+        match found {
+            None => {}
+            ConcreteArgument => {
+                // The written form's rejection is the authored binder's.
+                assert!(
+                    verdict(written)
+                        .iter()
+                        .any(|message| message.contains("polymorphic recursion")
+                            || message.contains("[04-INF-6]")),
+                    "{label}: {:#?}",
+                    verdict(written)
+                );
+                differing.push(label);
+            }
+            OwnParametersPermuted => {
+                // The omitted form's rejection is the instantiation rule's.
+                assert!(
+                    verdict(omitted)
+                        .iter()
+                        .any(|message| message.contains("polymorphic recursion"))
+                        || suggestions(omitted)
+                            .iter()
+                            .any(|suggestion| suggestion.contains(POLYMORPHIC_RECURSION_REPAIR)),
+                    "{label}: {:#?}",
+                    verdict(omitted)
+                );
+                differing.push(label);
+            }
         }
-        differing += 1;
-        assert!(
-            written_verdict.is_empty(),
-            "only the omitted form may be the stricter one:\n{omitted}\n{written}\n{written_verdict:#?}"
-        );
-        assert!(
-            suggestions(omitted)
-                .iter()
-                .any(|suggestion| suggestion.contains(POLYMORPHIC_RECURSION_REPAIR)),
-            "the only admissible difference is the polymorphic-recursion rule:\n{omitted}\n{omitted_verdict:#?}"
-        );
     }
-    // The two swapped forms whose written twins check are the pairs that
-    // exercise the difference; without them the oracle would be vacuous.
-    assert_eq!(differing, 2, "the swapped `swap` and `f`/`g` pairs differ");
+    assert_eq!(
+        differing,
+        [
+            "round 3's mk3: the member's own call at a concrete type",
+            "round 3's mk5: a sibling's call at a concrete type",
+            "round 3's mk11: a concrete list",
+            "round 3's mk10: a concrete omitted slot beside an authored binder",
+            "round 2's r10: swapped authored binders",
+            "round 2's r9: authored binders merged through a sibling",
+            "swapped omitted types",
+        ]
+    );
 }

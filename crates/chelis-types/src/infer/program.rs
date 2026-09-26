@@ -132,7 +132,7 @@ impl ComponentLevelScope {
     /// bindings: completed generalized member schemes replace them below.
     fn complete(mut self, env: &mut Env, var_gen: &VarGen, subst: &mut Subst) {
         self.remove_temporary_bindings(env);
-        env.end_monomorphic_group();
+        env.end_holed_group();
         let _finished_component = env
             .replace_active_top_level_component(std::mem::take(&mut self.prior_active_component));
         subst.leave_level(self.level, var_gen);
@@ -143,7 +143,7 @@ impl ComponentLevelScope {
         let prior_members = self.members.clone();
         super::recursion::abort_group();
         self.remove_temporary_bindings(env);
-        env.end_monomorphic_group();
+        env.end_holed_group();
         for (name, prior) in self.members {
             if let Some(scheme) = prior {
                 env.bind(name, scheme);
@@ -2260,10 +2260,10 @@ pub(super) fn prebind_cyclic_component_schemes(
             continue;
         }
         // A declared header is the member's scheme already, unless it omits a
-        // type: then the group types the member at its provisional
-        // monomorphic type ([04-INF-5], chelis#2584).
+        // type: then the group types the member at its provisional type
+        // ([04-INF-5], [04-INF-2], chelis#2590).
         if declared_signatures.contains_key(name) {
-            env.bind_monomorphic_group_member(name, vg, subst);
+            env.bind_holed_group_member(name, vg, subst);
             continue;
         }
         let ty = match tagged_children(body, DeepTag::Fn) {

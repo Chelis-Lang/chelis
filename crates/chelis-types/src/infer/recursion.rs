@@ -196,6 +196,12 @@ struct MemberSnapshot {
     /// inference-introduced variables additionally admit fully concrete
     /// arguments, which cannot grow the instantiation set (spec/04 §3.1.1).
     authored_generic: bool,
+    /// The member's header omits a type, so its in-group references share its
+    /// authored binders and instantiate only its holes, and the component's
+    /// completion decides each reference against the body
+    /// (`super::group_link`, chelis#2590). Its references are pinned here but
+    /// not validated by [`finish_group`].
+    holed: bool,
 }
 
 struct Caller {
@@ -252,6 +258,7 @@ pub(super) fn begin_group<'a>(member_names: impl Iterator<Item = (&'a str, bool)
                 constraints: scheme.constraints.clone(),
                 body: scheme.body.clone(),
                 authored_generic,
+                holed: env.is_holed_group_member(name),
             },
         );
     }
@@ -372,10 +379,13 @@ pub(super) fn record_occurrence(
                 c.pinned.insert(*v);
             }
         }
-        let callee_authored_generic = c
-            .members
-            .get(callee)
-            .is_some_and(|member| member.authored_generic);
+        let Some(member) = c.members.get(callee) else {
+            return;
+        };
+        if member.holed {
+            return;
+        }
+        let callee_authored_generic = member.authored_generic;
         c.occurrences.push(Occurrence {
             caller: caller.name.clone(),
             caller_binder_names: caller.binder_names.clone(),
