@@ -259,6 +259,8 @@ impl HostAbiType {
             | Self::Float32
             | Self::Float64
             | Self::Bool
+            // A `chelis_key` is its 64 bits by value and owns no heap handle.
+            | Self::Key
             | Self::Unit
             | Self::Callback(_, _) => None,
             Self::String => Some("(chelis_string){ NULL }"),

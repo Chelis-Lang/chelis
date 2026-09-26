@@ -107,21 +107,31 @@ fn a_definition_whose_parameters_are_dag_inputs_stays_a_dag_entry() {
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
-/// The rule leaves a definition that inherits Random on its lane: as the only
-/// definition it is still a public tensor entry, which refuses the inherited
-/// draw rather than drawing from seed zero.
+/// The rule leaves a keyed definition on its lane. A scalar `key` parameter
+/// is a DAG input like any other scalar, a rank-0 key tensor (spec/08), so a
+/// definition that only threads a key stays the four-argument direct entry.
+/// A definition that draws keeps chelis#1872's own host wrapper, whose key
+/// crosses the host ABI as a `chelis_key`. Both are locks: the rule must not
+/// count a key as a parameter the DAG entry cannot carry.
 #[test]
-fn an_inherited_random_definition_is_still_refused_at_its_public_entry() {
-    let error = compile(CompileRequest {
-        source_kind: SourceKind::Surf,
-        source: "def keep(x: tensor[4, f32], rate: f32) -> tensor[4, f32] = dropout(x, rate)\n"
-            .to_string(),
-        target: CompileTarget::C,
-        entry_name: Some("fixture".into()),
-    })
-    .expect_err("an inherited draw has no handler at a public entry");
+fn a_keyed_definition_keeps_its_lane() {
+    let threaded = header("def f(k: key, x: tensor[3, f32]) -> tensor[3, f32] = x\n");
     assert!(
-        format!("{error:?}").contains("public tensor entry cannot receive inherited Random"),
-        "{error:?}"
+        threaded.declaration("f").is_none(),
+        "a key parameter moved a DAG entry to a host wrapper"
     );
+    let direct = threaded
+        .declaration("fixture")
+        .map(|declaration| declaration.declaration().to_string());
+    assert!(
+        direct
+            .as_deref()
+            .is_some_and(|direct| direct.contains("chelis_tensor **inputs, int n_in")),
+        "no four-argument direct entry: {direct:?}"
+    );
+    let drawing = authored_declaration(
+        "def f(k: key, x: tensor[4, f32], rate: f32) -> tensor[4, f32] = dropout(k, x, rate)\n",
+    )
+    .unwrap_or_else(|error| panic!("{error}"));
+    assert!(drawing.contains("chelis_key k"), "{drawing}");
 }

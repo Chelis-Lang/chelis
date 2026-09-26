@@ -2838,15 +2838,11 @@ fn lower_host_program_with_execution(
         // Such a def always gets its host wrapper. A tensor or numeric/bool
         // scalar parameter stays a DAG input (chelis#1294's scalar kernel
         // inputs); non-f32/bool tensors are the rule above, and callable and
-        // still-polymorphic parameters keep theirs. A def that inherits
-        // Random keeps its lane: the DAG entry refuses an inherited draw at
-        // build time, while a host public entry has no handler to give it and
-        // aborts only when it draws (chelis#1872).
-        let inherits_random = cached_def_effect_rows(program)
-            .get(name)
-            .is_some_and(|row| row.contains(&chelis_types::types::Effect::Random));
-        let has_param_outside_dag_entry = !inherits_random
-            && lookup_declared_fn_type(program, name).is_some_and(|(params, _)| {
+        // still-polymorphic parameters keep theirs. A scalar `key` parameter
+        // is a rank-0 key tensor input like any other scalar (spec/08), so a
+        // keyed draw's definition keeps its lane.
+        let has_param_outside_dag_entry =
+            lookup_declared_fn_type(program, name).is_some_and(|(params, _)| {
                 params.iter().any(|ty| match ty {
                     HostTypeTerm::Fn(..) | HostTypeTerm::PolymorphicTensor(_) => false,
                     other => tensor_type_from_host_input(other).is_none(),
