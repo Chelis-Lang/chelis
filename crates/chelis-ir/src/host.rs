@@ -1955,26 +1955,26 @@ pub struct HostExpr<T = HostTypeTerm> {
     pub merged_spans: Vec<String>,
 }
 
-/// The List operations of [05-OP-54] and [05-OP-55] that produce every
-/// tensor held in the aggregate they return (spec/04 section 4.7). The
-/// selections `index`, `take` and `skip` are projections instead, and `len`
-/// returns no aggregate. `tests/list_operation_producers.rs` reconciles this
-/// set with the semantic-identity registry.
-pub const LIST_OPERATION_PRODUCERS: &[&str] = &[
-    "append",
-    "chunk",
-    "concat",
-    "enumerate",
-    "filter",
-    "flat_map",
-    "flatten",
-    "fold",
-    "map",
-    "partition",
-    "range",
-    "scan",
-    "zip",
-];
+/// The `Container` operations that return one contiguous part of their input
+/// selected by an `i64` index or count. They project rather than produce
+/// (spec/04 section 4.7), so a tensor they return keeps its producer.
+pub const CONTAINER_PROJECTIONS: &[&str] = &["index", "skip", "take"];
+
+/// Whether builtin `name` produces every tensor it returns, directly or held
+/// in its aggregate result (spec/04 section 4.7): every `Container`-domain
+/// operation of the semantic-identity registry except the projections. The
+/// set is derived from the builtin catalogue that the registry mirrors, so a
+/// new `Container` operation is covered without editing a list;
+/// `tests/container_result_producers.rs` reconciles it with the registry.
+pub fn produces_container_result(name: &str) -> bool {
+    !CONTAINER_PROJECTIONS.contains(&name)
+        && chelis_types::builtin_decl(name).is_some_and(|decl| {
+            decl.capability
+                .sibling_cases
+                .iter()
+                .any(|case| case.domain == chelis_types::BuiltinSemanticDomain::Container)
+        })
+}
 
 /// One invocation-local literal result obligation retained when host
 /// specialization inlines away the authored function boundary.

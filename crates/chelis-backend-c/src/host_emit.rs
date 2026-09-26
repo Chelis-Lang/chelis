@@ -5019,7 +5019,7 @@ impl<'a> HostEmitter<'a> {
             } => {
                 require_same_abi_type(ty, expr_ty, "builtin expression")?;
                 self.assign_builtin(target, name, args, ty, site, result_claims.as_deref())?;
-                if chelis_ir::host::LIST_OPERATION_PRODUCERS.contains(&name.as_str()) {
+                if chelis_ir::host::produces_container_result(name) {
                     self.stamp_combinator_result_origin(target, ty, name);
                 } else if !matches!(name.as_str(), "tuple-get" | "index") {
                     self.stamp_result_origin(target, ty, name);
@@ -5536,6 +5536,16 @@ impl<'a> HostEmitter<'a> {
     fn stamp_combinator_result_origin(&mut self, target: &str, ty: &HostType, op: &str) {
         if matches!(ty, HostType::Tensor(_)) {
             self.stamp_result_origin(target, ty, op);
+            return;
+        }
+        if !matches!(
+            ty,
+            HostType::List(_)
+                | HostType::Tuple(_)
+                | HostType::Option(_)
+                | HostType::Dict(..)
+                | HostType::Adt(..)
+        ) {
             return;
         }
         let origin = result_origin_name(target);

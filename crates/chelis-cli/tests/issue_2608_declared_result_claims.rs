@@ -369,9 +369,10 @@ fn declared_result_claims_are_checked_on_both_lanes() {
     );
 }
 
-/// chelis#2598, spec/04 section 4.7: a tensor a list combinator returns, or
-/// nests in its result, has that combinator as its producer. Each shape
-/// returns a three-element tensor, so `{n}` = 3 agrees and `{n}` = 2 traps.
+/// chelis#2598, spec/04 section 4.7: a tensor a Container operation returns,
+/// or holds in its aggregate result, has that operation as its producer. Each
+/// shape returns a three-element tensor, so `{n}` = 3 agrees and `{n}` = 2
+/// traps.
 struct Combinator {
     op: &'static str,
     source: &'static str,
@@ -459,6 +460,32 @@ const COMBINATORS: &[Combinator] = &[
         op: "concat",
         source: "def f(xs: List[tensor[*, f32]]) -> tensor[{n}, f32] = index(concat(xs, xs), 2i64)\n\
                  a = f({xs})\n",
+        value: "tensor(shape=[3], data=[1.0, 2.0, 3.0])",
+    },
+    // [05-OP-56]: a Dict operation is a Container operation too.
+    Combinator {
+        op: "dict_values",
+        source: "def f(t0: tensor[*, f32]) -> tensor[{n}, f32] = index(dict_values(dict_of([(\"a\", t0)])), 0i64)\n\
+                 a = f(to_tensor([1.0, 2.0, 3.0]))\n",
+        value: "tensor(shape=[3], data=[1.0, 2.0, 3.0])",
+    },
+    // [05-OP-56]: a Dict operation is a Container operation too.
+    Combinator {
+        op: "dict_get",
+        source: "def f(t0: tensor[*, f32]) -> tensor[{n}, f32] = match dict_get(dict_of([(\"a\", t0)]), \"a\") with {\n    \
+                 | Some(t) => t\n    \
+                 | None => to_tensor([0.0, 0.0])\n  \
+                 }\n\
+                 a = f(to_tensor([1.0, 2.0, 3.0]))\n",
+        value: "tensor(shape=[3], data=[1.0, 2.0, 3.0])",
+    },
+    // [05-OP-56]: a Dict operation is a Container operation too.
+    Combinator {
+        op: "dict_entries",
+        source: "def f(t0: tensor[*, f32]) -> tensor[{n}, f32] = match index(dict_entries(dict_of([(\"a\", t0)])), 0i64) with {\n    \
+                 | (k, v) => v\n  \
+                 }\n\
+                 a = f(to_tensor([1.0, 2.0, 3.0]))\n",
         value: "tensor(shape=[3], data=[1.0, 2.0, 3.0])",
     },
 ];
@@ -587,7 +614,7 @@ fn check_combinator(shape: &Combinator) -> Result<(), String> {
     Ok(())
 }
 
-// REGRESSION TEST. With the source reverted to `7807ca4ff`, 19 of these 21
+// REGRESSION TEST. With the source reverted to `7807ca4ff`, 22 of these 24
 // fail: every mismatch ended in an internal provenance error, an abort or
 // another primitive's name on at least one lane, and the agreeing tuple `fold`
 // and `take` programs failed. `skip_keeps_the_element_producer` and
