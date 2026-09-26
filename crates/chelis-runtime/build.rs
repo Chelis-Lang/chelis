@@ -17,9 +17,17 @@
 //! or `include/` added later to one of those crates enters the record the next
 //! time the script runs.
 //!
+//! Each root is declared to Cargo relative to this package's directory, as
+//! `../../<path>`. A build-script execution cache, such as Kache from 0.26 on,
+//! replays a recorded run when the declared roots as spelled hold the same
+//! bytes. Only paths under the package directory are relocated to the checkout
+//! being built, so an absolute spelling of a root outside it would let the cache
+//! serve another checkout's record.
+//!
 //! A compilation outside the Chelis workspace, such as a per-crate Nix build,
-//! records the required roots it cannot find. A development compiler refuses
-//! to stage that runtime; a sealed compiler never reads the record.
+//! records the required roots it cannot find, and declares them all so a cache
+//! keys that record on their absence. A development compiler refuses to stage
+//! that runtime; a sealed compiler never reads the record.
 
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
@@ -30,6 +38,8 @@ use std::path::{Path, PathBuf};
 
 /// This crate's directory, relative to the workspace root.
 const RUNTIME_CRATE: &str = "crates/chelis-runtime";
+/// The workspace root, relative to this crate's directory.
+const TO_WORKSPACE_ROOT: &str = "../..";
 
 fn main() {
     let manifest_dir =
@@ -40,16 +50,21 @@ fn main() {
         crates.push("crates/chelis-unord");
     }
 
+    let required = required_roots(&crates);
     let record = match workspace_root(&manifest_dir) {
         Some(root) => {
-            let missing = missing_required_roots(root, &crates);
+            let missing = required
+                .iter()
+                .filter(|path| !root.join(path).exists())
+                .cloned()
+                .collect::<Vec<_>>();
             if missing.is_empty() {
                 available(root, &crates)
             } else {
-                unavailable(&missing)
+                unavailable(&required, &missing)
             }
         }
-        None => unavailable(&[RUNTIME_CRATE.to_owned()]),
+        None => unavailable(&required, &[RUNTIME_CRATE.to_owned()]),
     };
     let destination = out_dir.join("build_record.txt");
     fs::write(&destination, record)
@@ -65,21 +80,26 @@ fn workspace_root(manifest_dir: &Path) -> Option<&Path> {
 
 /// The roots every declared crate has: its manifest and `src/`, and the
 /// workspace lockfile.
-fn missing_required_roots(root: &Path, crates: &[&str]) -> Vec<String> {
+fn required_roots(crates: &[&str]) -> Vec<String> {
     let mut required = vec!["Cargo.lock".to_owned()];
     for krate in crates {
         required.push(format!("{krate}/Cargo.toml"));
         required.push(format!("{krate}/src"));
     }
     required
-        .into_iter()
-        .filter(|path| !root.join(path).exists())
-        .collect()
 }
 
-fn unavailable(missing: &[String]) -> String {
-    // Watching an absent path would rerun this script on every build.
-    println!("cargo:rerun-if-changed=build.rs");
+/// Tell Cargo to rerun this script when the workspace path `relative` changes.
+fn declare(relative: &str) {
+    println!("cargo:rerun-if-changed={TO_WORKSPACE_ROOT}/{relative}");
+}
+
+fn unavailable(required: &[String], missing: &[String]) -> String {
+    // Cargo reruns a script whose declared input is absent on every build; that
+    // cost falls only on a compilation outside the workspace.
+    for path in required {
+        declare(path);
+    }
     let mut record = String::new();
     for path in missing {
         writeln!(record, "unavailable {path}").expect("writing to a String succeeds");
@@ -109,7 +129,7 @@ fn available(root: &Path, crates: &[&str]) -> String {
 
     let mut record = String::new();
     for directory in &directories {
-        println!("cargo:rerun-if-changed={}", root.join(directory).display());
+        declare(directory);
         writeln!(record, "dir {directory}").expect("writing to a String succeeds");
     }
     for (path, digest) in &files {
@@ -117,7 +137,7 @@ fn available(root: &Path, crates: &[&str]) -> String {
             .iter()
             .any(|directory| path.starts_with(&format!("{directory}/")))
         {
-            println!("cargo:rerun-if-changed={}", root.join(path).display());
+            declare(path);
         }
         writeln!(record, "sha256 {digest} {path}").expect("writing to a String succeeds");
     }

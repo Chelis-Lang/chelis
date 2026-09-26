@@ -7,12 +7,15 @@
 //! Cargo watches to rerun the runtime's build script. Each such input must be a
 //! recorded file or a declared directory; each declared root must be watched,
 //! so that changing it reruns the script; and the declared crates must be
-//! exactly the workspace crates the build compiles.
+//! exactly the workspace crates the build compiles. The script must also declare
+//! every root relative to its package directory. A build-script execution cache
+//! relocates only that directory, so an absolute path outside it would let the
+//! cache serve another checkout's record.
 
 use serde_json::Value;
 use std::collections::BTreeSet;
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 
 /// A runtime build record: its declared directories, its recorded files, and
@@ -72,6 +75,35 @@ fn dep_info_inputs(text: &str) -> Vec<PathBuf> {
     inputs
 }
 
+/// The `rerun-if-changed` paths in a build script's recorded output, as the
+/// script spelled them.
+fn declarations(output: &str) -> Vec<&str> {
+    output
+        .lines()
+        .filter_map(|line| {
+            line.strip_prefix("cargo::")
+                .or_else(|| line.strip_prefix("cargo:"))
+        })
+        .filter_map(|directive| directive.strip_prefix("rerun-if-changed="))
+        .collect()
+}
+
+/// `path` with `.` and `..` folded lexically. Cargo writes a declared input as
+/// the package directory joined with the path the script declared.
+fn lexical(path: &Path) -> PathBuf {
+    let mut folded = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                folded.pop();
+            }
+            other => folded.push(other),
+        }
+    }
+    folded
+}
+
 /// Everything that keeps `record` from describing one runtime build whose
 /// dep-info names `inputs` and which compiled the workspace crate directories
 /// `compiled`. `record_file` is the build script's output, which rustc reads.
@@ -89,6 +121,7 @@ fn findings(
         .collect::<Vec<_>>();
     let mut watched = BTreeSet::new();
     for input in inputs {
+        let input = lexical(input);
         if input == record_file {
             continue;
         }
@@ -209,6 +242,20 @@ fn every_input_of_each_runtime_configuration_is_declared_and_watched() {
         );
         let record_file = Path::new(out_dirs[0]).join("build_record.txt");
         let record = parse_record(&fs::read_to_string(&record_file).expect("build record"));
+        let output_path = Path::new(out_dirs[0])
+            .parent()
+            .expect("a build script run directory")
+            .join("output");
+        let script_output = fs::read_to_string(&output_path)
+            .unwrap_or_else(|error| panic!("{}: {error}", output_path.display()));
+        let absolute = declarations(&script_output)
+            .into_iter()
+            .filter(|path| Path::new(path).is_absolute())
+            .collect::<Vec<_>>();
+        assert!(
+            absolute.is_empty(),
+            "{features:?}: declared inputs spelled as absolute paths: {absolute:#?}"
+        );
 
         let compiled = rows
             .iter()
@@ -238,10 +285,12 @@ fn agreeing() -> (Record, Vec<PathBuf>, PathBuf, PathBuf, BTreeSet<String>) {
          sha256 02 crates/runtime/src/lib.rs\n",
     );
     let record_file = PathBuf::from("/checkout/target/debug/build/runtime-1/out/build_record.txt");
+    // Cargo writes a watched root as the package directory joined with the
+    // `../../<path>` the build script declared.
     let inputs = [
-        "Cargo.lock",
-        "crates/runtime/Cargo.toml",
-        "crates/runtime/src",
+        "crates/runtime/../../Cargo.lock",
+        "crates/runtime/../../crates/runtime/Cargo.toml",
+        "crates/runtime/../../crates/runtime/src",
         "crates/runtime/src/lib.rs",
     ]
     .iter()
@@ -278,7 +327,7 @@ fn an_input_outside_the_declared_roots_is_reported() {
 #[test]
 fn a_declared_root_cargo_does_not_watch_is_reported() {
     let (record, mut inputs, workspace, record_file, compiled) = agreeing();
-    inputs.retain(|input| input != &workspace.join("Cargo.lock"));
+    inputs.retain(|input| input != &workspace.join("crates/runtime/../../Cargo.lock"));
     assert_eq!(
         findings(&record, &inputs, &workspace, &record_file, &compiled),
         ["declared root Cargo.lock is not watched by Cargo"]
