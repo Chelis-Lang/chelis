@@ -137,6 +137,7 @@ REJECTED_ROOTS = {
         "reject_extend_hint", "reject_wrapped_hint", "reject_result_hint",
         "reject_generic_collector", "reject_zip_consumer",
         "reject_borrowed_map_hint", "reject_mapped_vec_zip", "reject_drop_vec_zip",
+        "reject_dispatch_method", "reject_dispatch_impl",
     )),
     # A native-shell scope on a borrow of a borrow: its instance is not the model at
     # an extended state (a staged backward function, see ModelStateABI.threaded_fun_body).

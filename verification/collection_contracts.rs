@@ -86,6 +86,50 @@ pub fn reject_generic_collector<C: FromIterator<u8>>(input: One) -> C {
     input.collect()
 }
 
+// A collector in a trait method implementation, called through a generic
+// dictionary, which does not name the implementation: on the method's own
+// iterator parameter (rejected at the implementation), or on a clause of the
+// implementation (rejected where the dictionary of `Gathered<One>` is built).
+pub trait Gather {
+    fn gather<I: IntoIterator<Item = u8>>(items: I) -> Vec<u8>;
+}
+
+pub struct Plain;
+
+impl Gather for Plain {
+    fn gather<I: IntoIterator<Item = u8>>(items: I) -> Vec<u8> {
+        items.into_iter().collect()
+    }
+}
+
+fn gather_through<G: Gather>(items: One) -> Vec<u8> {
+    G::gather(items)
+}
+
+pub fn reject_dispatch_method() -> Vec<u8> {
+    gather_through::<Plain>(One(false))
+}
+
+pub trait Run {
+    fn run(self) -> Vec<u8>;
+}
+
+pub struct Gathered<I>(pub I);
+
+impl<I: IntoIterator<Item = u8>> Run for Gathered<I> {
+    fn run(self) -> Vec<u8> {
+        self.0.into_iter().collect()
+    }
+}
+
+fn run_through<R: Run>(r: R) -> Vec<u8> {
+    r.run()
+}
+
+pub fn reject_dispatch_impl() -> Vec<u8> {
+    run_through(Gathered(One(false)))
+}
+
 // Zip's trusted fold does not run an excess left mapping callback. Repeated
 // next is not a valid replacement even though both source hints are pure.
 pub fn reject_zip_consumer() -> (Vec<(u8, u8)>, u8) {
@@ -143,6 +187,8 @@ mod tests {
         assert!(
             std::panic::catch_unwind(|| reject_generic_collector::<Vec<_>>(One(false))).is_err()
         );
+        assert!(std::panic::catch_unwind(reject_dispatch_method).is_err());
+        assert!(std::panic::catch_unwind(reject_dispatch_impl).is_err());
     }
 
     #[test]
