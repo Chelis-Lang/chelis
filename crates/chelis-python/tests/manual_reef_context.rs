@@ -10,18 +10,20 @@
 //! rejection.
 //!
 //! Prerequisites (this workstation): a populated local reef registry
-//! (`~/.chelis/reef`) containing `chelis-std 0.4.0`, `uv`, `py/.venv`, and a C
-//! toolchain; `CHELIS_RUNTIME_DIR` must be unset (the extension carries its
-//! runtime). No installed toolchain or `CHELIS_TOOLCHAIN` is involved: the
-//! bindings embed the DEV compiler in-process, and the temp project pins the
-//! workspace version (see `CHELIS_ORACLE_COMPILER_PIN` below); the registry
-//! is the only artifact borrowed from a toolchain install.
+//! (`~/.chelis/reef`) containing `chelis-std 0.4.0`, `uv`, `py/.venv`, and a
+//! built `libchelis_runtime.a` discoverable via `CHELIS_RUNTIME_DIR`. No
+//! installed toolchain or `CHELIS_TOOLCHAIN` is involved: the bindings embed
+//! the DEV compiler in-process, and the temp project pins the workspace
+//! version (see `CHELIS_ORACLE_COMPILER_PIN` below); the registry is the only
+//! artifact borrowed from a toolchain install.
 //!
 //! Manual command (from the repo root; the first temp-project context compile
 //! takes tens of seconds):
 //!
 //! ```sh
-//! # bindings installed into py/.venv; CHELIS_RUNTIME_DIR unset
+//! # bindings installed into py/.venv, runtime staticlib on CHELIS_RUNTIME_DIR
+//! cargo build -p chelis-runtime --target-dir target/agents/<name>
+//! export CHELIS_RUNTIME_DIR="$PWD/target/agents/<name>/debug"
 //! export DYLD_LIBRARY_PATH="$(py/.venv/bin/python -c 'import sysconfig; print(sysconfig.get_config_var("LIBDIR"))')"
 //! cargo test -p chelis-python --test manual_reef_context -- --ignored
 //! ```
@@ -50,7 +52,7 @@ use std::path::PathBuf;
 use std::process::Command;
 
 #[test]
-#[ignore = "manual acceptance gate (#816): needs the 0.16.1 toolchain + reef registry, uv, and a C toolchain; builds a temp reef project (tens of seconds)"]
+#[ignore = "manual acceptance gate (#816): needs the 0.16.1 toolchain + reef registry, uv, and CHELIS_RUNTIME_DIR (libchelis_runtime.a); builds a temp reef project (tens of seconds)"]
 fn reef_context_manual_acceptance_oracle() {
     let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
     let python = repo_root.join("py/.venv/bin/python");
