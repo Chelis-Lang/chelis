@@ -733,7 +733,17 @@ fn load_artifact(
     library_path: &Path,
     tempdir: Option<TempDir>,
 ) -> PyResult<NativeCompiledModel> {
-    let library_path = library_path.to_path_buf();
+    // One resolved path for the metadata, the digest check and the loader. For
+    // a bare file name the Linux loader searches `LD_LIBRARY_PATH` and the
+    // system directories, never the working directory the digest check reads
+    // (spec/11 §1.4). A macOS `DYLD_LIBRARY_PATH` set at launch still replaces
+    // any library by leaf name, as it does for every library the process loads.
+    let library_path = std::path::absolute(library_path).map_err(|err| {
+        ChelisError::new_err(format!(
+            "resolve artifact path {} failed: {err}",
+            library_path.display()
+        ))
+    })?;
     let manifest_path = library_path.with_extension("json");
     let manifest_text = fs::read_to_string(&manifest_path)
         .map_err(|err| ChelisError::new_err(format!("read manifest failed: {err}")))?;
@@ -2493,15 +2503,14 @@ loss = (mean(x, 0) : tensor[f32])
         drop(library);
     }
 
-    /// Compile the single-def relu4 program into a retained artifact directory.
-    fn compile_relu4_artifact() -> (TempDir, CompileAndLoadOutput) {
+    const RELU4_SOURCE: &str = "def relu4(x: tensor[4, f32]) -> tensor[4, f32] = relu(x)\n";
+
+    /// Compile `source` as `model.ch` into a retained artifact directory, so
+    /// its library is that directory's `model.so`.
+    fn compile_model_artifact(source: &str) -> (TempDir, CompileAndLoadOutput) {
         let dir = tempdir().expect("tempdir");
         let source_path = dir.path().join("model.ch");
-        fs::write(
-            &source_path,
-            "def relu4(x: tensor[4, f32]) -> tensor[4, f32] = relu(x)\n",
-        )
-        .expect("write source");
+        fs::write(&source_path, source).expect("write source");
         let output = run_compile_and_load_job(CompileAndLoadJob {
             source_path,
             source_kind: SourceKind::Surf,
@@ -2520,7 +2529,7 @@ loss = (mean(x, 0) : tensor[f32])
     /// linked library's digest in the artifact metadata.
     #[test]
     fn compile_and_load_job_stages_the_carried_runtime_and_records_both_digests() {
-        let (dir, output) = compile_relu4_artifact();
+        let (dir, output) = compile_model_artifact(RELU4_SOURCE);
         let carried = chelis_runtime_bundle::carried_sha256().expect("carried runtime");
         let staged = fs::read(dir.path().join("libchelis_runtime.a")).expect("staged archive");
         assert_eq!(
@@ -2548,7 +2557,7 @@ loss = (mean(x, 0) : tensor[f32])
     /// and its entry computes exact values.
     #[test]
     fn a_persisted_artifact_reloads_and_computes_exact_values() {
-        let (_dir, output) = compile_relu4_artifact();
+        let (_dir, output) = compile_model_artifact(RELU4_SOURCE);
         Python::with_gil(|py| {
             let model =
                 load_artifact(py, &output.lib_path, None).expect("admit the artifact it built");
@@ -2559,6 +2568,66 @@ loss = (mean(x, 0) : tensor[f32])
             );
             assert_eq!(outputs, vec![vec![0.0, 0.0, 2.5, 0.0]]);
         });
+    }
+
+    /// spec/11 §1.4: `load` opens the library whose bytes it admitted. A bare
+    /// file name is checked in the working directory, so the loader must not
+    /// resolve it on its search path, which here names another library of the
+    /// same name first. The Linux loader searches `LD_LIBRARY_PATH` for a bare
+    /// name and never the working directory; macOS searches the working
+    /// directory, so the two can diverge only on Linux. The loader reads its
+    /// path at process start, so the load runs in a child test process.
+    #[cfg(unix)]
+    #[test]
+    fn load_of_a_bare_name_executes_the_library_it_admitted() {
+        const WORKER: &str = "CHELIS_BARE_NAME_LOAD_TEST_WORKER";
+        if env::var_os(WORKER).is_some() {
+            Python::with_gil(|py| {
+                let model =
+                    load_artifact(py, Path::new("model.so"), None).expect("admit ./model.so");
+                let outputs = call_host_entry(
+                    &model.loaded.library,
+                    &model.loaded.manifest,
+                    &[(vec![-1.0, 0.0, 2.5, -3.0], vec![4])],
+                );
+                assert_eq!(
+                    outputs,
+                    vec![vec![0.0, 0.0, 2.5, 0.0]],
+                    "executed a library other than the admitted ./model.so"
+                );
+            });
+            return;
+        }
+        let (admitted, _) = compile_model_artifact(RELU4_SOURCE);
+        let (other, _) =
+            compile_model_artifact("def neg4(x: tensor[4, f32]) -> tensor[4, f32] = neg(x)\n");
+        // Prepend, keeping the inherited entries: CI finds libpython through them.
+        let search_path = env::join_paths(
+            std::iter::once(other.path().to_path_buf()).chain(
+                env::var_os("LD_LIBRARY_PATH")
+                    .iter()
+                    .flat_map(env::split_paths),
+            ),
+        )
+        .expect("join LD_LIBRARY_PATH");
+        let child = Command::new(env::current_exe().expect("current test binary"))
+            .args([
+                "--exact",
+                "tests::load_of_a_bare_name_executes_the_library_it_admitted",
+                "--nocapture",
+            ])
+            .current_dir(admitted.path())
+            .env(WORKER, "1")
+            .env("LD_LIBRARY_PATH", search_path)
+            .output()
+            .expect("run the bare-name load child");
+        assert!(
+            child.status.success(),
+            "bare-name load child failed ({}): {}\n{}",
+            child.status,
+            String::from_utf8_lossy(&child.stdout),
+            String::from_utf8_lossy(&child.stderr)
+        );
     }
 
     /// spec/11 §1.4: metadata naming another runtime is refused before the

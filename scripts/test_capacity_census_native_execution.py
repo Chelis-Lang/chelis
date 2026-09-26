@@ -32,7 +32,7 @@ def replace_bytes(path: Path, content: bytes) -> None:
 def receipt_bytes(archive_sha256: str, archive: str = "libchelis_runtime.a") -> bytes:
     """A staging receipt shaped like the one chelis-runtime-bundle writes."""
     return json.dumps({"schema": "chelis-runtime-staging/1", "archive": archive,
-                       "archive_sha256": archive_sha256, "headers": ["chelis_runtime.h"],
+                       "archive_sha256": archive_sha256, "headers": {"chelis_runtime.h": "h" * 64},
                        "mode": "development", "chelis_version": "0.0.0"}).encode()
 
 
