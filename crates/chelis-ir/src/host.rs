@@ -6755,7 +6755,8 @@ fn lower_staged_host_plan(
                     .expect("kernel root")
                     .output_type
                     .clone();
-                let call = finish_tensor_helper_call(dag.clone(), program, &scope, helpers, expected);
+                let call =
+                    finish_tensor_helper_call(dag.clone(), program, &scope, helpers, expected);
                 let ty = host_expr_type(&call);
                 if outputs.len() == 1 {
                     bindings.push(HostBinding {
