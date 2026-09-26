@@ -638,10 +638,10 @@ After:  Const(0.0, shape_of(x), precision_of(x))    -- by algebraic simplificati
 
 **Rule:** Remove a node only when its result is not consumed by another live
 node and removing its execution preserves every effect and trap occurrence.
-Potentially effectful or trapping nodes are observable roots, and a potentially
-trapping node traps only within its activation (spec/10 §3): where its
-activation is false it computes a value and checks nothing. Purity alone does
-not make a possible trap dead.
+Potentially effectful or trapping nodes are observable roots; purity alone does
+not make a possible trap dead. A potentially trapping node traps only within
+its activation (spec/10 §3): where its activation is false it computes a value
+and checks nothing.
 
 Liveness is scoped to the program the evaluation runs. An evaluation of
 selected roots enters each selected root's declaration. Another declaration's
