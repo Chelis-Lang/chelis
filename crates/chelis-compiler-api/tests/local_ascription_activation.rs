@@ -492,28 +492,33 @@ fn a_vmapped_arms_local_ascription_checks_only_when_a_row_takes_the_arm() {
     rows.assert_empty();
 }
 
+/// One abort row: `(threshold, which arms or rows are taken, expected)`,
+/// where `expected` is the returned value or the abort's text.
+type AbortRow = (&'static str, &'static str, Result<Vec<f64>, &'static str>);
+
 /// `h` aborts on a negative input through its own runtime `if`
 /// ([05-OP-68]'s guarded abort).
 const ABORTS: &str = "def h(x: tensor[f32]) -> tensor[f32] = {\n  s = tensor_to_scalar(copy(x))\n  if lt(s, 0.0f32) then fail(\"negative row\") else mul(&x, &x)\n}\n";
 
 /// Where the abort sits: `selected` calls `g`, whose runtime `if` arm
-/// applies `grad(h)` or maps `h` with `vmap` (a rank-0 activation), or
-/// `selected` maps `r`, whose arm applies `grad(h)` or maps `h` (a per-row
-/// activation). An arm is taken when its input's sum is above `threshold`.
+/// applies `grad(h)` or maps `h` with `vmap` (`Grad`, `Vmap`: a rank-0
+/// activation), or `selected` maps `r`, whose arm does the same (`MappedGrad`,
+/// `MappedVmap`: a per-row activation). An arm is taken when its input's
+/// sum is above `threshold`.
 #[derive(Clone, Copy, Debug)]
 enum Abort {
-    GradInArm,
-    VmapInArm,
-    GradInMappedArm,
-    VmapInMappedArm,
+    Grad,
+    Vmap,
+    MappedGrad,
+    MappedVmap,
 }
 
 impl Abort {
     const ALL: [Abort; 4] = [
-        Abort::GradInArm,
-        Abort::VmapInArm,
-        Abort::GradInMappedArm,
-        Abort::VmapInMappedArm,
+        Abort::Grad,
+        Abort::Vmap,
+        Abort::MappedGrad,
+        Abort::MappedVmap,
     ];
 
     fn source(self, threshold: &str) -> String {
@@ -523,19 +528,19 @@ impl Abort {
             ) + &format!("def selected(xs: {ty}) -> {ty} = ")
         };
         match self {
-            Abort::GradInArm => format!(
+            Abort::Grad => format!(
                 "{ABORTS}def g(x: tensor[f32]) -> tensor[f32] = {{\n{}g(xs)\n",
                 arm("tensor[f32]", "copy(x)", "grad(h)(x)")
             ),
-            Abort::VmapInArm => format!(
+            Abort::Vmap => format!(
                 "{ABORTS}def g(x: tensor[2, f32]) -> tensor[2, f32] = {{\n{}g(xs)\n",
                 arm("tensor[2, f32]", "sum(copy(x), 0i32)", "vmap(h)(x)")
             ),
-            Abort::GradInMappedArm => format!(
+            Abort::MappedGrad => format!(
                 "{ABORTS}def r(x: tensor[f32]) -> tensor[f32] = {{\n{}vmap(r)(xs)\n",
                 arm("tensor[2, f32]", "copy(x)", "grad(h)(x)")
             ),
-            Abort::VmapInMappedArm => format!(
+            Abort::MappedVmap => format!(
                 "{ABORTS}def r(x: tensor[1, f32]) -> tensor[1, f32] = {{\n{}vmap(r)(xs)\n",
                 arm("tensor[2, 1, f32]", "sum(copy(x), 0i32)", "vmap(h)(x)")
             ),
@@ -547,10 +552,10 @@ impl Abort {
     /// not.
     fn inputs(self) -> Vec<Input> {
         let (shape, data) = match self {
-            Abort::GradInArm => (vec![], vec![-3.0]),
-            Abort::VmapInArm => (vec![2], vec![-3.0, 1.0]),
-            Abort::GradInMappedArm => (vec![2], vec![-3.0, 1.0]),
-            Abort::VmapInMappedArm => (vec![2, 1], vec![-3.0, 1.0]),
+            Abort::Grad => (vec![], vec![-3.0]),
+            Abort::Vmap => (vec![2], vec![-3.0, 1.0]),
+            Abort::MappedGrad => (vec![2], vec![-3.0, 1.0]),
+            Abort::MappedVmap => (vec![2, 1], vec![-3.0, 1.0]),
         };
         vec![Input {
             name: "xs",
@@ -563,22 +568,22 @@ impl Abort {
     /// alone taking the arm the abort's own predicate holds only in row 0,
     /// whose arm is not taken, so nothing fires; `grad(h)` at 1 is 2 and `h`
     /// at 1 is 1.
-    fn rows(self) -> Vec<(&'static str, &'static str, Result<Vec<f64>, &'static str>)> {
+    fn rows(self) -> Vec<AbortRow> {
         match self {
-            Abort::GradInArm => vec![
+            Abort::Grad => vec![
                 ("8.0f32", "untaken", Ok(vec![-3.0])),
                 ("-5.0f32", "taken", Err("negative row")),
             ],
-            Abort::VmapInArm => vec![
+            Abort::Vmap => vec![
                 ("8.0f32", "untaken", Ok(vec![-3.0, 1.0])),
                 ("-5.0f32", "taken", Err("negative row")),
             ],
-            Abort::GradInMappedArm => vec![
+            Abort::MappedGrad => vec![
                 ("8.0f32", "no row", Ok(vec![-3.0, 1.0])),
                 ("-2.0f32", "row 1", Ok(vec![-3.0, 2.0])),
                 ("-5.0f32", "both rows", Err("negative row")),
             ],
-            Abort::VmapInMappedArm => vec![
+            Abort::MappedVmap => vec![
                 ("8.0f32", "no row", Ok(vec![-3.0, 1.0])),
                 ("-2.0f32", "row 1", Ok(vec![-3.0, 1.0])),
                 ("-5.0f32", "both rows", Err("negative row")),
@@ -612,7 +617,7 @@ fn a_guarded_abort_in_a_transform_body_fires_only_where_its_arm_is_taken_in_the_
     rows.assert_empty();
 }
 
-/// The C rows of item 2, for every shape but `VmapInMappedArm`, whose
+/// The C rows of item 2, for every shape but `MappedVmap`, whose
 /// rank-2 abort condition the C lane's ownership lowering refuses ("must be
 /// rank-0, or rank-1 when mapped over a batch axis"). The C lane gates a
 /// guarded abort on its owner activation only once `emit_guarded_fail`
@@ -622,7 +627,7 @@ fn a_guarded_abort_in_a_transform_body_fires_only_where_its_arm_is_taken_in_the_
 #[test]
 fn a_guarded_abort_in_a_transform_body_fires_only_where_its_arm_is_taken_in_c() {
     let mut rows = Rows::default();
-    for shape in [Abort::GradInArm, Abort::VmapInArm, Abort::GradInMappedArm] {
+    for shape in [Abort::Grad, Abort::Vmap, Abort::MappedGrad] {
         for (threshold, which, expected) in shape.rows() {
             let source = shape.source(threshold);
             let row = format!("{shape:?}, {which}");
