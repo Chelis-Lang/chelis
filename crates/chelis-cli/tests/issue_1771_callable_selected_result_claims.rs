@@ -1350,7 +1350,7 @@ fn assert_direct_tail_list_projection(native: bool) {
     }
 }
 
-fn assert_projection_without_origin_fails_explicitly(native: bool) {
+fn assert_append_projection_is_attributed_to_append(native: bool) {
     let source = "def choose[n](x: tensor[n, 4, f32]) -> tensor[3, f32] = {\n\
                   empty: List[tensor[*, f32]] = []\n\
                   grown = append(empty, diagonal(x, 0i32, 1i32))\n\
@@ -1919,13 +1919,13 @@ fn c_direct_tail_list_projection_retains_selected_producer() {
 }
 
 #[test]
-fn eval_projection_without_origin_fails_instead_of_guessing_index() {
-    assert_projection_without_origin_fails_explicitly(false);
+fn eval_append_projection_is_attributed_to_append_not_index() {
+    assert_append_projection_is_attributed_to_append(false);
 }
 
 #[test]
-fn c_projection_without_origin_fails_instead_of_guessing_index() {
-    assert_projection_without_origin_fails_explicitly(true);
+fn c_append_projection_is_attributed_to_append_not_index() {
+    assert_append_projection_is_attributed_to_append(true);
 }
 
 #[test]

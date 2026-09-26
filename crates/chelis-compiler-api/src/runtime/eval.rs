@@ -1787,10 +1787,27 @@ impl<'a> EvalContext<'a> {
                     };
                     producer.filter(|producer| producer.matches_value(&value))
                 }
-                // spec/04 section 4.7: a list combinator produces every tensor
-                // it returns, directly or nested in its result.
-                "map" | "flat_map" | "filter" | "scan" | "fold" | "append"
-                    if !matches!(value, RuntimeValue::Tensor(_)) =>
+                // `take` is a selection: its prefix keeps each element's
+                // producer, as `skip`'s suffix does.
+                "take" => {
+                    let count = args.get(1).and_then(RuntimeValue::as_i64).ok_or_else(|| {
+                        "take count disappeared after successful builtin evaluation".to_string()
+                    })?;
+                    let producer = match usize::try_from(count) {
+                        Ok(count) => arg_producers
+                            .first()
+                            .and_then(Option::as_ref)
+                            .and_then(|producer| producer.aggregate_prefix(count)),
+                        // A count above every addressable length keeps the
+                        // whole List.
+                        Err(_) => arg_producers.first().cloned().flatten(),
+                    };
+                    producer.filter(|producer| producer.matches_value(&value))
+                }
+                // spec/04 section 4.7: a List operation produces every tensor
+                // held in the aggregate it returns.
+                _ if chelis_ir::host::LIST_OPERATION_PRODUCERS.contains(&name)
+                    && !matches!(value, RuntimeValue::Tensor(_)) =>
                 {
                     Some(ResultProducer::Uniform(name.to_string()))
                 }

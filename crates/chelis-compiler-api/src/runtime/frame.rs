@@ -61,6 +61,16 @@ impl ResultProducer {
         }
     }
 
+    pub(crate) fn aggregate_prefix(&self, count: usize) -> Option<Self> {
+        match self {
+            Self::Aggregate(children) => {
+                Self::aggregate(children.iter().take(count).cloned().collect())
+            }
+            Self::Uniform(_) => Some(self.clone()),
+            Self::Tensor(_) => None,
+        }
+    }
+
     pub(crate) fn aggregate_suffix(&self, start: usize) -> Option<Self> {
         match self {
             Self::Aggregate(children) => {

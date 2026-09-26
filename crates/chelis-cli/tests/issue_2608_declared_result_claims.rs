@@ -418,6 +418,48 @@ const COMBINATORS: &[Combinator] = &[
                  a = f({xs}, to_tensor([7.0, 8.0, 9.0]))\n",
         value: "tensor(shape=[3], data=[1.0, 2.0, 3.0])",
     },
+    Combinator {
+        op: "partition",
+        source: "def f(xs: List[tensor[*, f32]]) -> tensor[{n}, f32] = match partition(fn (x: tensor[*, f32]) -> true, xs) with {\n    \
+                 | (p, q) => index(p, 0i64)\n  \
+                 }\n\
+                 a = f({xs})\n",
+        value: "tensor(shape=[3], data=[1.0, 2.0, 3.0])",
+    },
+    Combinator {
+        op: "chunk",
+        source: "def f(xs: List[tensor[*, f32]]) -> tensor[{n}, f32] = index(index(chunk(xs, 1i64), 1i64), 0i64)\n\
+                 a = f({xs})\n",
+        value: "tensor(shape=[3], data=[4.0, 5.0, 6.0])",
+    },
+    Combinator {
+        op: "flatten",
+        source: "def f(xs: List[tensor[*, f32]]) -> tensor[{n}, f32] = index(flatten([xs, xs]), 3i64)\n\
+                 a = f({xs})\n",
+        value: "tensor(shape=[3], data=[4.0, 5.0, 6.0])",
+    },
+    Combinator {
+        op: "zip",
+        source: "def f(xs: List[tensor[*, f32]]) -> tensor[{n}, f32] = match index(zip(xs, xs), 1i64) with {\n    \
+                 | (p, q) => q\n  \
+                 }\n\
+                 a = f({xs})\n",
+        value: "tensor(shape=[3], data=[4.0, 5.0, 6.0])",
+    },
+    Combinator {
+        op: "enumerate",
+        source: "def f(xs: List[tensor[*, f32]]) -> tensor[{n}, f32] = match index(enumerate(xs), 0i64) with {\n    \
+                 | (i, t) => t\n  \
+                 }\n\
+                 a = f({xs})\n",
+        value: "tensor(shape=[3], data=[1.0, 2.0, 3.0])",
+    },
+    Combinator {
+        op: "concat",
+        source: "def f(xs: List[tensor[*, f32]]) -> tensor[{n}, f32] = index(concat(xs, xs), 2i64)\n\
+                 a = f({xs})\n",
+        value: "tensor(shape=[3], data=[1.0, 2.0, 3.0])",
+    },
 ];
 
 /// Projections that reach a combinator's tensor through a pattern rather
@@ -466,6 +508,41 @@ const COMBINATOR_CASES: &[Case] = &[
                  a = f(to_tensor([1.0, 2.0]), [to_tensor([1.0, 2.0, 3.0]), to_tensor([4.0, 5.0, 6.0])])\n",
         expect: Expect::Trap(
             "extent `n`: w axis 0 = 2, map axis 0 = 3",
+            "numeric trap: domain in map at i64",
+        ),
+    },
+    // The selections `take` and `skip` project: the element keeps its own
+    // producer, here the interface `load`.
+    Case {
+        name: "take_keeps_the_element_producer",
+        source: "def f(xs: List[tensor[*, f32]]) -> tensor[2, f32] = index(take(xs, 1i64), 0i64)\n\
+                 a = f([to_tensor([1.0, 2.0, 3.0]), to_tensor([4.0, 5.0, 6.0])])\n",
+        expect: Expect::Trap(
+            "extent `2`: claimed = 2, load axis 0 = 3",
+            "numeric trap: domain in load at i64",
+        ),
+    },
+    Case {
+        name: "take_agrees",
+        source: "def f(xs: List[tensor[*, f32]]) -> tensor[3, f32] = index(take(xs, 1i64), 0i64)\n\
+                 a = f([to_tensor([1.0, 2.0, 3.0]), to_tensor([4.0, 5.0, 6.0])])\n",
+        expect: Expect::Value("a = tensor(shape=[3], data=[1.0, 2.0, 3.0])"),
+    },
+    Case {
+        name: "skip_keeps_the_element_producer",
+        source: "def f(xs: List[tensor[*, f32]]) -> tensor[2, f32] = index(skip(xs, 1i64), 0i64)\n\
+                 a = f([to_tensor([1.0, 2.0, 3.0]), to_tensor([4.0, 5.0, 6.0])])\n",
+        expect: Expect::Trap(
+            "extent `2`: claimed = 2, load axis 0 = 3",
+            "numeric trap: domain in load at i64",
+        ),
+    },
+    Case {
+        name: "take_of_a_map_result_keeps_the_map_producer",
+        source: "def f(xs: List[tensor[*, f32]]) -> tensor[2, f32] = index(take(map(fn (x: tensor[*, f32]) -> x, xs), 1i64), 0i64)\n\
+                 a = f([to_tensor([1.0, 2.0, 3.0]), to_tensor([4.0, 5.0, 6.0])])\n",
+        expect: Expect::Trap(
+            "extent `2`: claimed = 2, map axis 0 = 3",
             "numeric trap: domain in map at i64",
         ),
     },

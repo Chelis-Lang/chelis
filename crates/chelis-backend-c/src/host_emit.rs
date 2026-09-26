@@ -2341,6 +2341,22 @@ static const __chelis_host_result_origin *__chelis_host_result_origin_list_suffi
     return suffix;
 }
 
+static const __chelis_host_result_origin *__chelis_host_result_origin_list_prefix(__chelis_host_result_origin_arena *arena, const __chelis_host_result_origin *origin, int64_t count) {
+    if (origin == NULL || origin->uniform) return origin;
+    // The runtime owns take's negative-count diagnostic.
+    if (count < 0) return origin;
+    if (origin->child_count < 0 || origin->child_view == NULL) {
+        fprintf(stderr, "host runtime: aggregate result producer provenance does not match the projected value\n");
+        abort();
+    }
+    if (count >= origin->child_count) return origin;
+    if (count == 0) return NULL;
+    __chelis_host_result_origin *prefix = __chelis_host_result_origin_alloc(arena, 0);
+    prefix->child_count = count;
+    prefix->child_view = origin->child_view;
+    return prefix;
+}
+
 static const __chelis_host_result_origin **__chelis_host_result_origin_children(int64_t count) {
     if (count <= 0) return NULL;
     if ((uint64_t)count > SIZE_MAX / sizeof(const __chelis_host_result_origin *)) {
@@ -5003,7 +5019,7 @@ impl<'a> HostEmitter<'a> {
             } => {
                 require_same_abi_type(ty, expr_ty, "builtin expression")?;
                 self.assign_builtin(target, name, args, ty, site, result_claims.as_deref())?;
-                if name == "append" {
+                if chelis_ir::host::LIST_OPERATION_PRODUCERS.contains(&name.as_str()) {
                     self.stamp_combinator_result_origin(target, ty, name);
                 } else if !matches!(name.as_str(), "tuple-get" | "index") {
                     self.stamp_result_origin(target, ty, name);
@@ -5381,6 +5397,7 @@ impl<'a> HostEmitter<'a> {
             HostExprKind::Partition { callback, list, ty } => {
                 let (_, body_block) = Self::loop_blocks(site)?;
                 self.assign_partition(target, callback, list, ty, site, body_block)?;
+                self.stamp_combinator_result_origin(target, ty, "partition");
                 self.emit_expression_site_excluding_block(site, target, Some(body_block))?;
                 return Ok(());
             }
@@ -6084,6 +6101,14 @@ impl<'a> HostEmitter<'a> {
                 return Ok(());
             }
             "take" => {
+                // A selection: the prefix keeps each element's producer.
+                self.lines.push(format!(
+                    "{}{} = __chelis_host_result_origin_list_prefix(__chelis_origin_arena, {}, {});",
+                    self.indent,
+                    result_origin_name(target),
+                    result_origin_name(&arg_vars[0].0),
+                    arg_vars[1].0
+                ));
                 self.lines.push(format!(
                     "{}{target} = chelis_list_take({}, {});",
                     self.indent, arg_vars[0].0, arg_vars[1].0
