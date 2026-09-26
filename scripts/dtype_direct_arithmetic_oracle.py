@@ -53,14 +53,21 @@ def source_contracts() -> tuple[SourceContract, ...]:
             "direct Sub lowering",
             "crates/chelis-ir/src/tier2.rs",
             (
-                "add_synth(dag, RiscOp::Sub, vec![a, b], ty.clone(), parent_span)",
+                "add_synth(owner, dag, RiscOp::Sub, vec![a, b], ty.clone(), parent_span)",
             ),
         ),
         SourceContract(
             "direct MinElem lowering",
             "crates/chelis-ir/src/tier2.rs",
             (
-                "add_synth(dag, RiscOp::MinElem, vec![a, b], ty.clone(), parent_span)",
+                "add_synth(\n"
+                "        owner,\n"
+                "        dag,\n"
+                "        RiscOp::MinElem,\n"
+                "        vec![a, b],\n"
+                "        ty.clone(),\n"
+                "        parent_span,\n"
+                "    )",
             ),
         ),
         SourceContract(

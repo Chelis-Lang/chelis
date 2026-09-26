@@ -104,8 +104,8 @@ class SourceContractMutationTests(unittest.TestCase):
     def test_sub_surrogate_mutation_fails(self) -> None:
         self.mutate(
             "crates/chelis-ir/src/tier2.rs",
-            "add_synth(dag, RiscOp::Sub, vec![a, b], ty.clone(), parent_span)",
-            "lower_add(dag, a, lower_neg(dag, b, ty, parent_span), ty, parent_span)",
+            "add_synth(owner, dag, RiscOp::Sub, vec![a, b], ty.clone(), parent_span)",
+            "lower_add(owner, dag, a, lower_neg(owner, dag, b, ty, parent_span), ty, parent_span)",
         )
         with self.assertRaisesRegex(oracle.OracleFailure, "direct Sub lowering"):
             oracle.validate_source_contracts(self.repo)
@@ -113,8 +113,8 @@ class SourceContractMutationTests(unittest.TestCase):
     def test_min_surrogate_mutation_fails(self) -> None:
         self.mutate(
             "crates/chelis-ir/src/tier2.rs",
-            "add_synth(dag, RiscOp::MinElem, vec![a, b], ty.clone(), parent_span)",
-            "add_synth(dag, RiscOp::MaxElem, vec![a, b], ty.clone(), parent_span)",
+            "add_synth(\n        owner,\n        dag,\n        RiscOp::MinElem,\n        vec![a, b],",
+            "add_synth(\n        owner,\n        dag,\n        RiscOp::MaxElem,\n        vec![a, b],",
         )
         with self.assertRaisesRegex(oracle.OracleFailure, "direct MinElem lowering"):
             oracle.validate_source_contracts(self.repo)
