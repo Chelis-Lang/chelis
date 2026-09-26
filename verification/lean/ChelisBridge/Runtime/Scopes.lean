@@ -23,8 +23,9 @@ Instantiation: `Runtime/ExtractedScopes.lean` takes `comb := fun body s => <crat
 s body` (adapting argument order / the backward-function pair convention through
 `ScopeSpecOn` below) with a `Lens` onto the relevant field, and proves the obligations against
 the extracted definitions: the suppression and install/restore obligations for the lowering
-runtime and the checker's diagnostic sink. The host scopes (`with_host_invocation`,
-`with_mono_probe`, `with_inlining`, preflight) are not yet extracted strictly (see there).
+runtime and the checker's diagnostic sink; `Runtime/ExtractedHostScopes.lean` those of the host
+scopes (`with_host_invocation`, `with_mono_probe`, and `with_inlining` in the restricted form
+`InliningObligationUnder`, with a counterexample to the unrestricted one).
 
 `scope_obligations_are_satisfiable` shows the obligations are not vacuous, `restore_ne_clear`
 records why restore and clear-to-false must stay separate obligations, and the `model_*`
@@ -105,6 +106,29 @@ def InstallRestoreObligation {M : Type → Type} {σ β γ : Type} (ok : M (σ �
 def InliningObligation {M : Type → Type} {σ S α γ : Type} (ok : M (σ × γ) → Option (σ × γ)) (L : Lens σ S)
     (mem : α → S → Bool) (ins del : α → S → S) (name : α) (comb : Combinator M σ γ) : Prop :=
   ScopeSpec ok (fun s => L.set (ins name (L.get s)) s)
+    (fun s s₁ => if mem name (L.get s) then s₁ else L.set (del name (L.get s₁)) s₁) comb
+
+/-- `ScopeSpec` restricted to entry states satisfying an invariant `Inv` and to bodies that
+re-establish it on every successful exit. For a representation invariant the model's
+collections need but cannot carry in their types (a sorted entry list, strings that fit in
+memory), this is the honest form of a scope specification: `ScopeSpec.under` shows it is
+implied by the unrestricted one, and an extracted scope that meets only this form must come with
+a counterexample to the unrestricted one. -/
+def ScopeSpecUnder {M : Type → Type} {σ γ : Type} (ok : M (σ × γ) → Option (σ × γ))
+    (Inv : σ → Prop) (enter : σ → σ) (exit : σ → σ → σ) (comb : Combinator M σ γ) : Prop :=
+  ∀ body s, Inv s → (∀ s₁ r, ok (body (enter s)) = some (s₁, r) → Inv s₁) →
+    ok (comb body s) = (ok (body (enter s))).map (fun x => (exit s x.1, x.2))
+
+theorem ScopeSpec.under {M : Type → Type} {σ γ : Type} {ok : M (σ × γ) → Option (σ × γ)}
+    {enter : σ → σ} {exit : σ → σ → σ} {comb : Combinator M σ γ} (Inv : σ → Prop)
+    (h : ScopeSpec ok enter exit comb) : ScopeSpecUnder ok Inv enter exit comb :=
+  fun body s _ _ => h body s
+
+/-- `InliningObligation` on the states satisfying `Inv`, for bodies that re-establish it. -/
+def InliningObligationUnder {M : Type → Type} {σ S α γ : Type} (ok : M (σ × γ) → Option (σ × γ))
+    (Inv : σ → Prop) (L : Lens σ S) (mem : α → S → Bool) (ins del : α → S → S) (name : α)
+    (comb : Combinator M σ γ) : Prop :=
+  ScopeSpecUnder ok Inv (fun s => L.set (ins name (L.get s)) s)
     (fun s s₁ => if mem name (L.get s) then s₁ else L.set (del name (L.get s₁)) s₁) comb
 
 /-- `TensorHelperPreflightGuard`: push this body's facts, pop at exit. -/

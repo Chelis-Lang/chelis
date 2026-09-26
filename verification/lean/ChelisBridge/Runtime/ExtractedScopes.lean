@@ -31,7 +31,11 @@ by their `Aeneas/Std/ChelisNative.lean` models, which are part of the trusted ba
     (`withOpacity_spec`, `withOpacity_obligation`: the literal `InstallRestoreObligation`);
   - `with_recursive_caller` with no caller is the body itself; with a caller it attributes the
     active group to it for the body and restores the enclosing caller
-    (`withRecursiveCaller_none`, `withRecursiveCaller_some`).
+    (`withRecursiveCaller_none`, `withRecursiveCaller_some`);
+  - `with_recursive_inference` runs the body in the fresh frame (the value the extracted
+    `RecursiveState::default` returns: no group, nothing pinned) and RESTORES the enclosing frame
+    (`withRecursiveInference_spec`, `withRecursiveInference_obligation`: the literal
+    `InstallRestoreObligation`).
 
 Every statement quantifies over every closure type and `FnOnce` instance (so over every body
 the production code can pass) and covers `Ok` and `Err` results alike; a failing or diverging
@@ -39,12 +43,10 @@ body (a native unwind is outside the modeled domain) makes the combinator fail t
 `*_obligation` theorems instantiate the `Scopes` obligations literally, with bodies given as
 state transformers through one canonical instance.
 
-Not yet in the model (strict extraction fails closed; blockers are toolchain/model items):
-`DiagnosticSink::with_recursive_inference` and `host::with_host_invocation` (no model of
-`core::mem::take` / `Option::default` yet), `host::with_mono_probe` (no model of
-`BTreeMap::clone`), all three host scopes (the `scoped` instance over `HostCx<'_>`, whose state
-holds mutable borrows, has no admitted model), and `host::with_preflight` (collection model of
-`collect::<Option<Vec<_>>>`).
+The host lowering scopes (`with_host_invocation`, `with_mono_probe`, `with_inlining`) are in
+`Runtime/ExtractedHostScopes.lean`. Not yet in the model (not extraction roots of the bridge
+model): `host::with_type_subst` (`ActiveTypeSubstGuard`, an `InstallRestoreObligation`) and
+`host::with_preflight` (`PreflightObligation`).
 -/
 
 open Aeneas.Std
@@ -358,5 +360,57 @@ theorem withRecursiveCaller_some {R T2 : Type} (inst) (c : chelis_types.infer.re
     simp [h, okSink, replaceCaller_eq, Aeneas.Std.core.option.Option.is_none]
   | fail e => simp [h, okSink, replaceCaller_eq, Aeneas.Std.core.option.Option.is_none]
   | div => simp [h, okSink, replaceCaller_eq, Aeneas.Std.core.option.Option.is_none]
+
+/-- The sink's recursive-inference frame. -/
+def recursiveLens : Lens Sink chelis_types.infer.recursion.RecursiveState :=
+  { get := (·.recursive), set := fun v s => { s with recursive := v } }
+
+theorem recursiveLens_lawful : recursiveLens.Lawful := ⟨fun _ _ => rfl, fun _ => rfl, fun _ _ _ => rfl⟩
+
+/-- The fresh frame: no active group, nothing pinned. -/
+def freshFrame : chelis_types.infer.recursion.RecursiveState :=
+  { group := none, pinned := ⟨⟨⟨[]⟩⟩⟩ }
+
+/-- The extracted `RecursiveState::default` (derived) returns the fresh frame. -/
+theorem recursiveState_default :
+    chelis_types.infer.recursion.RecursiveState.Insts.CoreDefaultDefault.default = .ok freshFrame :=
+  rfl
+
+/-- **`with_recursive_inference`, every instance**: the body runs in the fresh frame
+(`mem::take` of the enclosing one) and the enclosing frame is restored at exit (`mem::replace`,
+dropping the pass's own frame); every other effect of the body on the sink, e.g. its
+diagnostics, is kept. -/
+theorem withRecursiveInference_spec {R T2 : Type} (inst) :
+    ScopeSpecOn (fun (b : T2) s => okSink (γ := R) (inst.call_once b s))
+      (fun b s => okSink (chelis_types.session.DiagnosticSink.with_recursive_inference inst s b))
+      (recursiveLens.set freshFrame) (restoreExit recursiveLens) id := by
+  intro b s
+  unfold chelis_types.session.DiagnosticSink.with_recursive_inference
+  simp only [core.mem.take, recursiveState_default, bind_tc_ok, recursiveLens, restoreExit]
+  cases h : inst.call_once b { s with recursive := freshFrame } with
+  | ok x => obtain ⟨r, s₁, bk⟩ := x; simp [h, okSink]
+  | fail e => simp [h, okSink]
+  | div => simp [h, okSink]
+
+/-- The extracted `with_recursive_inference` as a `Scopes.Combinator` (state-transformer
+bodies). -/
+def recursiveComb (γ : Type) : Combinator Result Sink γ := fun body s =>
+  do
+    let (r, s', _) ←
+      chelis_types.session.DiagnosticSink.with_recursive_inference (T2 := Sink → Result (Sink × γ))
+        ⟨fun b s => do let (s', r) ← b s; .ok (r, s', fun _ => s')⟩ s body
+    .ok (s', r)
+
+/-- **The literal Section E `InstallRestoreObligation`** (`RecursiveInferenceScope`, fresh
+frame) for the extracted `with_recursive_inference`. -/
+theorem withRecursiveInference_obligation (γ : Type) :
+    InstallRestoreObligation okResult recursiveLens freshFrame (recursiveComb γ) := by
+  intro body s
+  unfold recursiveComb chelis_types.session.DiagnosticSink.with_recursive_inference
+  simp only [core.mem.take, recursiveState_default, bind_tc_ok, recursiveLens, restoreExit]
+  cases h : body { s with recursive := freshFrame } with
+  | ok x => obtain ⟨s₁, r⟩ := x; simp [h, okResult]
+  | fail e => simp [h, okResult]
+  | div => simp [h, okResult]
 
 end ChelisBridge.Runtime.ExtractedScopes

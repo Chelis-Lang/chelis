@@ -12,6 +12,10 @@ import ChelisBridge.Runtime.Ids
 import ChelisBridge.Runtime.Unwind
 import ChelisBridge.Runtime.Scopes
 import ChelisBridge.Runtime.ExtractedScopes
+import ChelisBridge.Runtime.CloneId
+import ChelisBridge.Runtime.ExtractedHostScopes
+import ChelisBridge.StrOrder
+import ChelisBridge.SuccessorEdgesHint
 import ChelisBridge.Numeric
 import ChelisBridge.Numeric.Flat
 import ChelisBridge.Numeric.Decode
@@ -250,6 +254,40 @@ def accepted : List Name := [
   ``ChelisBridge.Runtime.ExtractedScopes.replaceCaller_eq,
   ``ChelisBridge.Runtime.ExtractedScopes.withRecursiveCaller_none,
   ``ChelisBridge.Runtime.ExtractedScopes.withRecursiveCaller_some,
+  ``ChelisBridge.Runtime.ExtractedScopes.recursiveLens_lawful,
+  ``ChelisBridge.Runtime.ExtractedScopes.recursiveState_default,
+  ``ChelisBridge.Runtime.ExtractedScopes.withRecursiveInference_spec,
+  ``ChelisBridge.Runtime.ExtractedScopes.withRecursiveInference_obligation,
+  ``ChelisBridge.Runtime.CloneId.cid_host_MonoSpecializationState,
+  ``ChelisBridge.Runtime.ExtractedHostScopes.invocationLens_lawful,
+  ``ChelisBridge.Runtime.ExtractedHostScopes.monoLens_lawful,
+  ``ChelisBridge.Runtime.ExtractedHostScopes.inliningLens_lawful,
+  ``ChelisBridge.Runtime.ExtractedHostScopes.hostInvocationState_default,
+  ``ChelisBridge.Runtime.ExtractedHostScopes.withHostInvocation_spec,
+  ``ChelisBridge.Runtime.ExtractedHostScopes.withHostInvocation_obligation,
+  ``ChelisBridge.Runtime.ExtractedHostScopes.withMonoProbe_spec,
+  ``ChelisBridge.Runtime.ExtractedHostScopes.withMonoProbe_obligation,
+  ``ChelisBridge.Runtime.ExtractedHostScopes.withMonoProbe_restores,
+  ``ChelisBridge.Runtime.ExtractedHostScopes.withInlining_none,
+  ``ChelisBridge.Runtime.ExtractedHostScopes.withInlining_spec,
+  ``ChelisBridge.Runtime.ExtractedHostScopes.withInlining_obligation,
+  ``ChelisBridge.Runtime.ExtractedHostScopes.withInlining_restores_untouched,
+  ``ChelisBridge.Runtime.ExtractedHostScopes.withInlining_oversized_fails,
+  ``ChelisBridge.Runtime.ExtractedHostScopes.withInlining_obligation_false,
+  ``ChelisBridge.StrOrder.lexCmp_enc_ne,
+  ``ChelisBridge.StrOrder.lexCmp_bytesOf,
+  ``ChelisBridge.StrOrder.compare_eq_lexCmp,
+  ``ChelisBridge.StrOrder.ordStr_cmp,
+  ``ChelisBridge.StrOrder.toString_ofString,
+  ``ChelisBridge.StrOrder.to_string_ofString,
+  ``ChelisBridge.StrOrder.insertList_eq,
+  ``ChelisBridge.StrOrder.removeList_eq,
+  ``ChelisBridge.StrOrder.btreeSet_insert,
+  ``ChelisBridge.StrOrder.btreeSet_remove,
+  ``ChelisBridge.StrOrder.insList_pairwise,
+  ``ChelisBridge.StrOrder.delList_insList,
+  ``ChelisBridge.StrOrder.oversized_ofString,
+  ``ChelisBridge.SuccessorEdgesHint.successorEdges_size_hint_total,
   -- Numeric (BridgeNumeric)
   ``ChelisBridge.Numeric.pairLevelQ_sum,
   ``ChelisBridge.Numeric.pairLevel_length_le,
