@@ -23,6 +23,10 @@ import ChelisBridge.Protocol.FloatOrder
 import ChelisBridge.Protocol.Iter
 import ChelisBridge.Protocol.Random
 import ChelisBridge.Protocol.Dropout
+import ChelisBridge.Protocol.F16Widen
+import ChelisBridge.Protocol.BF16Widen
+import ChelisBridge.Protocol.NonF64
+import ChelisBridge.Protocol.RandomRun
 import ChelisBridge.EffectsModel
 import ChelisBridge.StartsWith
 import ChelisBridge.Resource
@@ -465,7 +469,61 @@ def accepted : List Name := [
   ``ChelisBridge.Resource.is_c_eq,
   ``ChelisBridge.Resource.c_accepts_cpu,
   ``ChelisBridge.Resource.c_accept_implies_reference,
-  ``ChelisBridge.Resource.c_reference_not_implies
+  ``ChelisBridge.Resource.c_reference_not_implies,
+  ``ChelisBridge.Protocol.f16_widen_all,
+  ``ChelisBridge.Protocol.bf16_widen_all,
+  ``ChelisBridge.Protocol.realize_f16_to_f64,
+  ``ChelisBridge.Protocol.realize_bf16_to_f64,
+  ``ChelisBridge.Random.nonf64_decision,
+  ``ChelisBridge.Random.err_bind_ne_ok,
+  ``ChelisBridge.Random.enter_forward_inv,
+  ``ChelisBridge.Random.enter_replay_inv,
+  ``ChelisBridge.Random.control_enter_inv,
+  ``ChelisBridge.Random.control_leave_inv,
+  ``ChelisBridge.Random.stackWF_root,
+  ``ChelisBridge.Random.accepted_run_simulates,
+  ``ChelisBridge.Random.accepted_run_checks,
+  ``ChelisBridge.Random.forward_records_key,
+  ``ChelisBridge.Random.accepted_run_keys_persist,
+  ``ChelisBridge.Random.replay_after_forward,
+  ``ChelisBridge.Random.f16_from_i64_zero,
+  ``ChelisBridge.Random.f16_from_i64_one,
+  ``ChelisBridge.Random.prim_eq_i64_f16,
+  ``ChelisBridge.Random.prim_eq_f16_f16,
+  ``ChelisBridge.Random.cast_raw_zero_f16,
+  ``ChelisBridge.Random.cast_raw_one_f16,
+  ``ChelisBridge.Random.float_binop_div_f16,
+  ``ChelisBridge.Random.float_binop_sub_f16,
+  ``ChelisBridge.Random.denominator_f16,
+  ``ChelisBridge.Random.as_f64_lossy_f16,
+  ``ChelisBridge.Random.scalar_at_f16,
+  ``ChelisBridge.Random.mapM_f16Payload,
+  ``ChelisBridge.Random.tensor_from_scalars_f16,
+  ``ChelisBridge.Random.arithUnit_f16,
+  ``ChelisBridge.Random.step_f16,
+  ``ChelisBridge.Random.apply_f16,
+  ``ChelisBridge.Random.mask_agrees_f16,
+  ``ChelisBridge.Random.value_halfF16,
+  ``ChelisBridge.Random.f16_naive_counterexample,
+  ``ChelisBridge.Random.bf16_from_i64_zero,
+  ``ChelisBridge.Random.bf16_from_i64_one,
+  ``ChelisBridge.Random.prim_eq_i64_bf16,
+  ``ChelisBridge.Random.prim_eq_bf16_bf16,
+  ``ChelisBridge.Random.cast_raw_zero_bf16,
+  ``ChelisBridge.Random.cast_raw_one_bf16,
+  ``ChelisBridge.Random.float_binop_div_bf16,
+  ``ChelisBridge.Random.float_binop_sub_bf16,
+  ``ChelisBridge.Random.denominator_bf16,
+  ``ChelisBridge.Random.as_f64_lossy_bf16,
+  ``ChelisBridge.Random.scalar_at_bf16,
+  ``ChelisBridge.Random.mapM_bf16Payload,
+  ``ChelisBridge.Random.tensor_from_scalars_bf16,
+  ``ChelisBridge.Random.arithUnit_bf16,
+  ``ChelisBridge.Random.step_bf16,
+  ``ChelisBridge.Random.apply_bf16,
+  ``ChelisBridge.Random.mask_agrees_bf16,
+  ``ChelisBridge.Random.value_halfBF16,
+  ``ChelisBridge.Random.bf16_naive_counterexample
 ]
 
 def allowedAxioms : List Name := [``propext, ``Classical.choice, ``Quot.sound]

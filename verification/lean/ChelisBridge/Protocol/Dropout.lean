@@ -119,7 +119,7 @@ theorem apply_loop_spec (self : chelis_types.dtype_semantics.PreparedDropout)
     · rw [hout, hout', hk', List.range'_succ, List.map_cons, List.append_assoc]; rfl
     · unfold chelis_types.dtype_semantics.PreparedDropout.apply_loop at hloop ⊢
       rw [loop.eq_def]
-      simp only [Function.uncurry_apply_pair]
+      simp only
       rw [hbody]
       exact hloop
 
