@@ -11841,6 +11841,35 @@ impl<'program> LowerCtx<'program> {
         // A symbolic batch lift can then read a formal's axis as its explicit
         // runtime extent witness.
         let captured_bindings = self.seed_subctx_with_lexical_scope(&mut subctx, &param_names);
+        // The vmapped body is spliced back at this position, so it runs under
+        // the position's activation: a call in a runtime `if` arm reads the
+        // arm's activation through a captured Load the splice resolves, which
+        // the batching lifts to every row (spec/10 section 3.2).
+        let caller_activation_arg = self.draw_activation().map(|activation| {
+            let mut suffix = 0usize;
+            let load_name = loop {
+                let candidate = format!("__chelis_vmap_activation_{suffix}");
+                if !param_names.contains(&candidate) && !captured_bindings.contains_key(&candidate)
+                {
+                    break candidate;
+                }
+                suffix += 1;
+            };
+            let load = subctx.dag.add_node(
+                subctx.owner(),
+                RiscOp::Load {
+                    name: load_name.as_str().into(),
+                },
+                vec![],
+                TensorType {
+                    dims: Vec::new(),
+                    precision: Prim::Bool,
+                },
+                subctx.current_span_id.clone(),
+            );
+            subctx.random_path_condition = Some(load);
+            (load_name, activation)
+        });
         let root_value = subctx.lower_resolved_body(fn_expr, &param_names, body);
         self.absorb_value_references(&mut subctx);
         for root in root_value.flatten_nodes() {
@@ -11896,7 +11925,8 @@ impl<'program> LowerCtx<'program> {
                 self.materialize_vmapped_arg(arg_id, param_ty, &batch_dim, batch_source),
             );
         }
-        arg_map.merge(captured_bindings);
+arg_map.merge(captured_bindings);
+        arg_map.extend(caller_activation_arg);
 
         // chelis#383: `vectorize_axis0` prepended the batch dim to EVERY
         // node type in `vmapped` (including the parameter Loads), so the
