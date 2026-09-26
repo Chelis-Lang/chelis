@@ -1019,3 +1019,180 @@ fn a_key_has_no_cast_to_any_target() {
         }
     }
 }
+
+/// [04-LIN-9]: a key inside a value is reached only by consuming that value,
+/// so an as-pattern cannot bind a key-carrying whole together with a
+/// key-carrying component, in any pattern form. A sub-pattern that binds no
+/// key, one that binds only a non-key field, and an as-pattern over a value
+/// with no key stay legal.
+///
+/// Evidentiary status: REGRESSION TEST. At `b47fdd7d3` every negative was
+/// accepted: the whole and its components were separate owners.
+#[test]
+fn an_as_pattern_never_binds_a_key_twice() {
+    let holder = "type Holder =\n  | Holder { k: key, n: i64 }\n";
+    for (name, source) in [
+        (
+            "an option whole and its key",
+            "def bad(o: Option[key]) -> (Option[key], key) = match o with {\n  | whole @ Some(j) \
+             => (whole, j)\n  | None => (None, key_from_seed(0i64))\n}\n"
+                .to_string(),
+        ),
+        (
+            "a tuple whole and a key component",
+            "def bad(k: key) -> ((key, key), key) = match split_key(k) with {\n  | whole @ (a, \
+             b) => (whole, a)\n}\n"
+                .to_string(),
+        ),
+        (
+            "one key bound under two names",
+            "def bad(k: key) -> (key, key) = match k with {\n  | a @ b => (a, b)\n}\n".to_string(),
+        ),
+        (
+            "a record whole and its key field",
+            format!(
+                "{holder}def bad(h: Holder) -> (Holder, key) = match h with {{\n  | whole @ \
+                 Holder {{ k, n }} => (whole, k)\n}}\n"
+            ),
+        ),
+        (
+            "a nested as-pattern",
+            "def bad(o: Option[(key, i64)]) -> (Option[(key, i64)], key) = match o with {\n  | \
+             Some(p @ (j, n)) => (Some(p), j)\n  | None => (None, key_from_seed(0i64))\n}\n"
+                .to_string(),
+        ),
+    ] {
+        let errors = rejects(name, &source, CheckErrorKind::KeyReuse);
+        assert!(
+            errors
+                .iter()
+                .any(|error| error.message.contains("as-pattern")
+                    && error.message.contains("[04-LIN-9]")
+                    && error
+                        .suggestions
+                        .iter()
+                        .all(|suggestion| !suggestion.contains("copy("))),
+            "{name}: expected the as-pattern diagnostic: {errors:?}"
+        );
+    }
+    for (name, source) in [
+        (
+            "a sub-pattern that binds no key",
+            "def good(o: Option[key]) -> Option[key] = match o with {\n  | whole @ Some(_) => \
+             whole\n  | None => None\n}\n"
+                .to_string(),
+        ),
+        (
+            "a sub-pattern that binds only a non-key field",
+            format!(
+                "{holder}def good(h: Holder) -> (Holder, i64) = match h with {{\n  | whole @ \
+                 Holder {{ k: _, n }} => (whole, n)\n}}\n"
+            ),
+        ),
+        (
+            "an as-pattern over a value with no key",
+            "def good(o: Option[i64]) -> (Option[i64], i64) = match o with {\n  | whole @ \
+             Some(j) => (whole, j)\n  | None => (None, 0i64)\n}\n"
+                .to_string(),
+        ),
+    ] {
+        accepts(name, &source);
+    }
+}
+
+/// [04-LIN-9] on every control-flow path: an arm's guard runs before its
+/// body and, when it fails, before every later arm, so a key the guard
+/// consumed is consumed on entry to each of them, whether it is an outer
+/// binding or a scrutinee component the arm's pattern bound. A later arm
+/// that binds a disjoint component, and a guard whose keys no later arm
+/// uses, stay legal.
+///
+/// Evidentiary status: REGRESSION TEST. At `b47fdd7d3` every negative was
+/// accepted: each arm started from the match-entry scope.
+#[test]
+fn a_guard_consumes_its_keys_on_every_later_arm() {
+    let pred = "def pred(k: key) -> bool = true\n";
+    let low = "def low(k: key, x: tensor[4, f32]) -> bool = lt(index(to_list(uniform_like(k, x, \
+               0.0f32, 1.0f32)), 0i64), 0.5f32)\n";
+    let two = "type Two =\n  | A(key)\n  | B(key)\n";
+    for (name, source) in [
+        (
+            "an outer key after the guard that consumed it",
+            format!(
+                "{pred}def bad(o: Option[i64], k: key) -> key = match o with {{\n  | Some(n) if \
+                 pred(k) => key_from_seed(0i64)\n  | _ => k\n}}\n"
+            ),
+        ),
+        (
+            "a draw in a guard, then a draw in a later arm",
+            format!(
+                "{low}def bad(k: key, x: tensor[4, f32], n: i64) -> tensor[4, f32] = match n with \
+                 {{\n  | 0 if low(k, copy(x)) => x\n  | _ => uniform_like(k, x, 0.0f32, \
+                 1.0f32)\n}}\n"
+            ),
+        ),
+        (
+            "a component the guard consumed, bound again by a later arm",
+            format!(
+                "{pred}def bad(o: Option[key]) -> key = match o with {{\n  | Some(j) if pred(j) \
+                 => key_from_seed(0i64)\n  | Some(j2) => j2\n  | None => \
+                 key_from_seed(1i64)\n}}\n"
+            ),
+        ),
+        (
+            "the whole scrutinee bound by a later arm",
+            format!(
+                "{pred}def bad(o: Option[key]) -> Option[key] = match o with {{\n  | Some(j) if \
+                 pred(j) => None\n  | other => other\n}}\n"
+            ),
+        ),
+        (
+            "a key component the guard projected, taken again by a later arm",
+            format!(
+                "{pred}def bad(o: Option[(key, key)]) -> key = match o with {{\n  | Some(p) if \
+                 pred(p.0) => key_from_seed(0i64)\n  | Some(q) => q.0\n  | None => \
+                 key_from_seed(1i64)\n}}\n"
+            ),
+        ),
+    ] {
+        let errors = rejects(&name.to_string(), &source, CheckErrorKind::KeyReuse);
+        assert!(
+            errors.iter().any(|error| error
+                .message
+                .contains("in the guard of an earlier arm, which falls through to this one")),
+            "{name}: the diagnostic must name the falling-through guard: {errors:?}"
+        );
+        rejects_reuse(name, &source);
+    }
+    for (name, source) in [
+        (
+            "a guard consuming a key no later arm uses",
+            format!(
+                "{pred}def good(o: Option[i64], k: key) -> key = match o with {{\n  | Some(n) if \
+                 pred(k) => key_from_seed(0i64)\n  | _ => key_from_seed(1i64)\n}}\n"
+            ),
+        ),
+        (
+            "a guard that reads no key",
+            "def good(o: Option[i64], k: key) -> key = match o with {\n  | Some(n) if gt(n, \
+             0i64) => fold_in(k, n)\n  | _ => k\n}\n"
+                .to_string(),
+        ),
+        (
+            "a later arm binding another constructor's key",
+            format!(
+                "{pred}{two}def good(t: Two) -> key = match t with {{\n  | A(j) if pred(j) => \
+                 key_from_seed(0i64)\n  | A(_) => key_from_seed(1i64)\n  | B(j2) => j2\n}}\n"
+            ),
+        ),
+        (
+            "a later arm taking the other tuple component",
+            format!(
+                "{pred}def good(p: (key, key)) -> key = match p with {{\n  | (a, b) if pred(a) \
+                 => b\n  | (c, d) => d\n}}\n"
+            ),
+        ),
+    ] {
+        accepts(name, &source);
+    }
+}

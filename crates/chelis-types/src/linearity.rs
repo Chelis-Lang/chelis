@@ -1514,8 +1514,15 @@ impl Checker {
 
         let visible_ids = scope.all_visible_ids();
         let mut arm_scopes = Vec::new();
+        // [04-LIN-9] on every control-flow path: an arm's guard runs before
+        // its body and, when it fails, before every later arm. `fallthrough`
+        // is the state on entry to the next arm, so a key a guard consumed
+        // is consumed there; `guard_paths` names the scrutinee components a
+        // guard consumed through the arm's own pattern bindings.
+        let mut fallthrough = scope.clone();
+        let mut guard_paths: Vec<(Vec<PatternStep>, ConsumeSite)> = Vec::new();
         for arm in children.iter().skip(1) {
-            let mut arm_scope = scope.clone();
+            let mut arm_scope = fallthrough.clone();
             // An arm, including one whose decoded shape is malformed, is a
             // distinct declaration region. Preserve every nested ownership
             // event in that branch before joining it back into the match.
@@ -1525,10 +1532,23 @@ impl Checker {
                 arm_scopes.push(arm_scope);
                 continue;
             };
-            let pattern_bindings = pattern_named_types(&arm_kids[0]);
+            self.reject_key_as_pattern_aliasing(&arm_kids[0]);
+            let pattern_bindings = pattern_bindings_with_paths(&arm_kids[0]);
             let mut pattern_ids = Vec::new();
-            for (name, ty) in &pattern_bindings {
-                pattern_ids.push(arm_scope.declare(name.clone(), ty.clone()));
+            for binding in &pattern_bindings {
+                let id = arm_scope.declare(binding.name.clone(), binding.ty.clone());
+                let holds_key = binding
+                    .ty
+                    .as_ref()
+                    .is_some_and(|ty| self.type_holds_key(ty));
+                if holds_key
+                    && let Some((_, site)) = guard_paths
+                        .iter()
+                        .find(|(path, _)| pattern_paths_overlap(path, &binding.path))
+                {
+                    arm_scope.consume_id(id, site.clone());
+                }
+                pattern_ids.push(id);
             }
             // The empty list in an arm's guard slot is the grammar's
             // explicit "no guard" sentinel, not a runtime expression.
@@ -1536,6 +1556,14 @@ impl Checker {
             // the same carrier when it actually occupies a runtime slot.
             if !is_absent_match_guard(&arm_kids[1]) {
                 self.check_expr(&arm_kids[1], &mut arm_scope);
+                self.carry_guard_key_consumes(
+                    &arm_scope,
+                    &mut fallthrough,
+                    &visible_ids,
+                    &pattern_bindings,
+                    &pattern_ids,
+                    &mut guard_paths,
+                );
             }
             self.check_expr(&arm_kids[2], &mut arm_scope);
             for id in pattern_ids.into_iter().rev() {
@@ -1544,6 +1572,121 @@ impl Checker {
             arm_scopes.push(arm_scope);
         }
         self.join_branch_states(scope, &visible_ids, &arm_scopes);
+    }
+
+    /// [04-LIN-9]: a guard that fails falls through to the next arm, so the
+    /// keys it consumed stay consumed on entry to every later arm. An outer
+    /// key holder the guard consumed is consumed in `fallthrough`; a key the
+    /// guard took through one of the arm's pattern bindings is recorded as
+    /// the scrutinee component that binding names, so a later arm binding an
+    /// overlapping component starts with it consumed. Only key holders carry
+    /// over: a tensor a guard consumes keeps the implicit-copy rules.
+    fn carry_guard_key_consumes(
+        &self,
+        arm_scope: &LinearScope,
+        fallthrough: &mut LinearScope,
+        visible_ids: &[BindingId],
+        pattern_bindings: &[PatternBinding],
+        pattern_ids: &[BindingId],
+        guard_paths: &mut Vec<(Vec<PatternStep>, ConsumeSite)>,
+    ) {
+        let fell_through = |site: &ConsumeSite| ConsumeSite {
+            description: format!(
+                "{} in the guard of an earlier arm, which falls through to this one",
+                site.description
+            ),
+            kind: ConsumeKind::Structural,
+        };
+        for id in visible_ids {
+            let Some(record) = arm_scope.record(*id) else {
+                continue;
+            };
+            if !record.ty.as_ref().is_some_and(|ty| self.type_holds_key(ty)) {
+                continue;
+            }
+            let moved = record.moved_key_components.clone();
+            if let BindingState::Consumed(site) = &record.state
+                && matches!(fallthrough.state(*id), Some(BindingState::Live { .. }))
+            {
+                fallthrough.consume_id(*id, fell_through(site));
+            }
+            if let Some(outer) = fallthrough.record_mut(*id) {
+                outer.moved_key_components.extend(moved);
+            }
+        }
+        for (binding, id) in pattern_bindings.iter().zip(pattern_ids) {
+            let Some(record) = arm_scope.record(*id) else {
+                continue;
+            };
+            if !record.ty.as_ref().is_some_and(|ty| self.type_holds_key(ty)) {
+                continue;
+            }
+            if let BindingState::Consumed(site) = &record.state {
+                guard_paths.push((binding.path.clone(), fell_through(site)));
+            }
+            for position in &record.moved_key_components {
+                let mut path = binding.path.clone();
+                path.push(PatternStep::Tuple(*position));
+                guard_paths.push((
+                    path,
+                    ConsumeSite {
+                        description: format!(
+                            "a projection of `{}` in the guard of an earlier arm, which falls \
+                             through to this one",
+                            binding.name
+                        ),
+                        kind: ConsumeKind::Structural,
+                    },
+                ));
+            }
+        }
+    }
+
+    /// [04-LIN-9]: a key inside a value is reached only by consuming that
+    /// value, so an as-pattern cannot bind a key-carrying whole together
+    /// with a sub-pattern that binds a key-carrying component: the whole
+    /// and the component would be two live owners of one key. A sub-pattern
+    /// that binds no key (`whole @ Some(_)`) stays legal.
+    fn reject_key_as_pattern_aliasing(&mut self, pattern: &Expr) {
+        let Some((tag, children)) = decoded_parts(pattern) else {
+            return;
+        };
+        if tag == DeepTag::PatAs
+            && let (Some(whole), Some(inner)) =
+                (children.first().and_then(symbol_name), children.get(1))
+        {
+            let component = pattern_bindings_with_paths(inner)
+                .into_iter()
+                .find(|binding| {
+                    binding
+                        .ty
+                        .as_ref()
+                        .is_some_and(|ty| self.type_holds_key(ty))
+                });
+            if let Some(component) = component {
+                self.push_diagnostic(CheckError::new(
+                    CheckErrorKind::KeyReuse,
+                    with_macro_provenance(
+                        pattern,
+                        format!(
+                            "as-pattern `{whole}` {} binds a key-carrying value together with \
+                             its key-carrying component `{}`; a key inside a value is reached \
+                             only by consuming that value, so the two names would use one key \
+                             twice ([04-LIN-9])",
+                            diag_site(pattern),
+                            component.name
+                        ),
+                    ),
+                    vec![format!(
+                        "Bind either `{whole}` or its key-carrying components, not both; derive \
+                         a second key with `split_key(k)` where both uses need one"
+                    )],
+                ));
+            }
+        }
+        for child in children {
+            self.reject_key_as_pattern_aliasing(child);
+        }
     }
 
     fn check_malformed_match_arm(&mut self, arm: &Expr, scope: &mut LinearScope) {
@@ -2473,45 +2616,155 @@ fn collect_pattern_names(expr: &Expr, names: &mut Vec<String>) {
 
 /// Like [`pattern_names`], but also returns each binding's resolved
 /// type expression when the inferencer stamped one onto the pattern
-/// node's metadata. Used by `check_match` to populate arm `LinearScope`
-/// entries with their concrete types — required for destructured
-/// fields whose type comes from the scrutinee's ADT instantiation
-/// rather than a `let`-style RHS. (closes #181)
+/// node's metadata. `check_match` populates arm `LinearScope` entries
+/// with these types — required for destructured fields whose type comes
+/// from the scrutinee's ADT instantiation rather than a `let`-style RHS
+/// (closes #181) — through [`pattern_bindings_with_paths`], of which
+/// this is the (name, type) projection.
+#[cfg(test)]
 fn pattern_named_types(expr: &Expr) -> Vec<(String, Option<Expr>)> {
-    let mut bindings = Vec::new();
-    collect_pattern_named_types(expr, &mut bindings);
-    bindings
+    pattern_bindings_with_paths(expr)
+        .into_iter()
+        .map(|binding| (binding.name, binding.ty))
+        .collect()
 }
 
-fn collect_pattern_named_types(expr: &Expr, bindings: &mut Vec<(String, Option<Expr>)>) {
-    let (tag, children) = match expr.carrier() {
-        ExprCarrier::DecodedNode(tag, _, children) => (tag, children),
+/// One step from a match scrutinee into the sub-value a pattern names.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum PatternStep {
+    /// A tuple position.
+    Tuple(usize),
+    /// A positional field of the named constructor.
+    Positional(String, usize),
+    /// A named field of the named constructor.
+    Field(String, String),
+}
+
+/// A name a pattern binds, its checked type, and the scrutinee component it
+/// names.
+#[derive(Debug, Clone)]
+struct PatternBinding {
+    name: String,
+    ty: Option<Expr>,
+    path: Vec<PatternStep>,
+}
+
+fn decoded_parts(expr: &Expr) -> Option<(DeepTag, &[Expr])> {
+    match expr.carrier() {
+        ExprCarrier::DecodedNode(tag, _, children) => Some((tag, children)),
         ExprCarrier::StructuralList(_)
         | ExprCarrier::UndecodableHead(_, _, _)
         | ExprCarrier::Atom(_)
         | ExprCarrier::MetadataMap(_)
-        | ExprCarrier::MetadataExpression(_) => return,
+        | ExprCarrier::MetadataExpression(_) => None,
+    }
+}
+
+/// Every binding `pattern` introduces, in source order, with the path from
+/// the scrutinee to the component it names.
+fn pattern_bindings_with_paths(pattern: &Expr) -> Vec<PatternBinding> {
+    let mut bindings = Vec::new();
+    collect_pattern_bindings_with_paths(pattern, &mut Vec::new(), &mut bindings);
+    bindings
+}
+
+fn collect_pattern_bindings_with_paths(
+    pattern: &Expr,
+    path: &mut Vec<PatternStep>,
+    bindings: &mut Vec<PatternBinding>,
+) {
+    let Some((tag, children)) = decoded_parts(pattern) else {
+        return;
     };
     match tag {
-        DeepTag::PatVar => {
+        DeepTag::PatVar | DeepTag::PatAs => {
             if let Some(name) = children.first().and_then(symbol_name) {
-                bindings.push((name.to_string(), type_metadata(expr).cloned()));
+                bindings.push(PatternBinding {
+                    name: name.to_string(),
+                    ty: type_metadata(pattern).cloned(),
+                    path: path.clone(),
+                });
+            }
+            if tag == DeepTag::PatAs
+                && let Some(inner) = children.get(1)
+            {
+                collect_pattern_bindings_with_paths(inner, path, bindings);
             }
         }
-        DeepTag::PatAs => {
-            if let Some(name) = children.first().and_then(symbol_name) {
-                bindings.push((name.to_string(), type_metadata(expr).cloned()));
-            }
-            if let Some(inner) = children.get(1) {
-                collect_pattern_named_types(inner, bindings);
+        DeepTag::PatTuple => {
+            for (index, child) in children.iter().enumerate() {
+                descend_pattern(PatternStep::Tuple(index), child, path, bindings);
             }
         }
+        DeepTag::PatCtor => {
+            let ctor = children.first().and_then(symbol_name).unwrap_or_default();
+            for (index, child) in children.iter().skip(1).enumerate() {
+                descend_pattern(
+                    PatternStep::Positional(ctor.to_string(), index),
+                    child,
+                    path,
+                    bindings,
+                );
+            }
+        }
+        DeepTag::PatRecord => {
+            let ctor = children.first().and_then(symbol_name).unwrap_or_default();
+            for field in children.iter().skip(1) {
+                if let Some([field_name, field_pattern]) = tagged_children(field, DeepTag::Kv)
+                    && let Some(field_name) = symbol_name(field_name)
+                {
+                    descend_pattern(
+                        PatternStep::Field(ctor.to_string(), field_name.to_string()),
+                        field_pattern,
+                        path,
+                        bindings,
+                    );
+                } else {
+                    collect_pattern_bindings_with_paths(field, path, bindings);
+                }
+            }
+        }
+        // Every other form binds nothing; a malformed node's children are
+        // still walked so a binder under it keeps its (conservative) path.
         _ => {
             for child in children {
-                collect_pattern_named_types(child, bindings);
+                collect_pattern_bindings_with_paths(child, path, bindings);
             }
         }
     }
+}
+
+fn descend_pattern(
+    step: PatternStep,
+    child: &Expr,
+    path: &mut Vec<PatternStep>,
+    bindings: &mut Vec<PatternBinding>,
+) {
+    path.push(step);
+    collect_pattern_bindings_with_paths(child, path, bindings);
+    path.pop();
+}
+
+/// Whether two components of one scrutinee can share storage: one path is a
+/// prefix of the other, step by step. A value has one constructor, so two
+/// different constructors, or two different positions or fields of one, are
+/// disjoint; steps that cannot be compared (a positional and a named field
+/// of one constructor) are treated as overlapping.
+fn pattern_paths_overlap(lhs: &[PatternStep], rhs: &[PatternStep]) -> bool {
+    for (left, right) in lhs.iter().zip(rhs) {
+        let disjoint = match (left, right) {
+            (PatternStep::Tuple(a), PatternStep::Tuple(b)) => a != b,
+            (PatternStep::Positional(ca, a), PatternStep::Positional(cb, b)) => ca != cb || a != b,
+            (PatternStep::Field(ca, a), PatternStep::Field(cb, b)) => ca != cb || a != b,
+            (PatternStep::Positional(ca, _), PatternStep::Field(cb, _))
+            | (PatternStep::Field(ca, _), PatternStep::Positional(cb, _)) => ca != cb,
+            (PatternStep::Tuple(_), _) | (_, PatternStep::Tuple(_)) => false,
+        };
+        if disjoint {
+            return false;
+        }
+    }
+    true
 }
 
 /// Free variables of `expr`, in a DETERMINISTIC (sorted) order.
