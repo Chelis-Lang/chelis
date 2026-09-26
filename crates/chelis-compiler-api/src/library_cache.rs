@@ -81,7 +81,8 @@ use std::path::{Path, PathBuf};
 use crate::cache_envelope;
 use crate::compiler::CompilerError;
 use crate::stdlib_cache::{
-    StdLibContext, TypecheckCacheLoad, cache_disabled, load_typecheck_cache, typecheck_cache_dir,
+    StdLibContext, TypecheckCacheLoad, cache_disabled, classify_typecheck_cache_load,
+    typecheck_cache_dir,
 };
 
 /// Internal struct-format version. Bumped when [`LibraryContext`]'s shape
@@ -367,7 +368,7 @@ pub fn load_or_build_library_context(
     };
     let cache_path = library_cache_path(&cache_dir, key);
 
-    match load_typecheck_cache::<LibraryContext>(&cache_path, key) {
+    match classify_typecheck_cache_load(cache_envelope::load::<LibraryContext>(&cache_path, key)) {
         TypecheckCacheLoad::Hit(ctx) => return Ok(Some(ctx)),
         TypecheckCacheLoad::Miss => {}
         TypecheckCacheLoad::Cancelled => {

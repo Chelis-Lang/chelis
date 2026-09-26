@@ -38,12 +38,11 @@
 //!
 //! ## Loader integration
 //!
-//! [`extract_into`] decompresses the embedded archive into a caller-
-//! supplied directory layout matching `load_registry_package`'s
-//! expected on-disk shape: `<root>/reef.toml`, `<root>/src/...`. The
-//! reef loader treats the result as if it had come from the local
-//! registry's cache, with the bundled bytes substituting for the
-//! filesystem-resident archive.
+//! The reef loader reads the runtime through [`archive_files`], which
+//! decompresses the embedded archive in memory into package-relative paths
+//! (`reef.toml`, `src/...`), so the bundled package has no filesystem
+//! location (chelis#2616). [`extract_into`] writes the same tree to a
+//! caller-supplied directory for callers that need the files on disk.
 
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;

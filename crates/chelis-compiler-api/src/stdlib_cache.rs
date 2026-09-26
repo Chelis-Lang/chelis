@@ -436,13 +436,17 @@ pub(crate) enum TypecheckCacheLoad<T> {
     Unusable(cache_envelope::CacheError),
 }
 
-/// Probe the typecheck cache at `path`, separating a load abandoned by
-/// cancellation from an unusable file.
-pub(crate) fn load_typecheck_cache<T: cache_envelope::CachePayload>(
-    path: &Path,
-    key: [u8; 32],
+/// Classify the result of a typecheck cache load, separating a load abandoned
+/// by cancellation from an unusable file.
+///
+/// Each cache site calls `cache_envelope::load` for its own payload type and
+/// passes the result here, so the serialization edge stays at the site that
+/// owns the payload (the capacity census attributes it there) and this
+/// classifier performs no serialization.
+pub(crate) fn classify_typecheck_cache_load<T>(
+    loaded: Result<Option<T>, cache_envelope::CacheError>,
 ) -> TypecheckCacheLoad<T> {
-    match cache_envelope::load::<T>(path, key) {
+    match loaded {
         Ok(Some(payload)) => TypecheckCacheLoad::Hit(payload),
         Ok(None) => TypecheckCacheLoad::Miss,
         Err(cache_envelope::CacheError::Decode(_)) if chelis_types::cancellation_requested() => {
@@ -484,7 +488,7 @@ pub fn load_or_build_stdlib_context(
     };
     let cache_path = stdlib_cache_path(&cache_dir, key);
 
-    match load_typecheck_cache::<StdLibContext>(&cache_path, key) {
+    match classify_typecheck_cache_load(cache_envelope::load::<StdLibContext>(&cache_path, key)) {
         TypecheckCacheLoad::Hit(ctx) => return Ok(ctx),
         TypecheckCacheLoad::Miss => {}
         TypecheckCacheLoad::Cancelled => {
