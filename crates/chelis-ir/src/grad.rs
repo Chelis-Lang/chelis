@@ -69,6 +69,12 @@ pub enum AdRejectionReason {
     /// The output node's type is not a scalar float — reverse-mode AD
     /// requires a scalar loss.
     NonScalarOutput,
+    /// A cotangent the op's adjoint sends out of a branch arm does not carry
+    /// the arm's activation on its leading axes, so the arm's untaken rows
+    /// cannot be selected away (spec/06 §2.10.1). An activation is rank zero
+    /// or shaped like its node's leading axes (spec/10 §3); the refusal keeps
+    /// a batched activation from masking along the wrong axis.
+    ActivationNotLeadingAxes,
     /// Catch-all for legacy free-text rejection reasons that have not
     /// yet been given a structured variant. Carries the original
     /// message verbatim. Adding a new structured variant should
@@ -153,6 +159,12 @@ impl fmt::Display for AdError {
                 AdRejectionReason::NonScalarOutput => {
                     write!(f, "grad: output of {op} must be a scalar float")
                 }
+                AdRejectionReason::ActivationNotLeadingAxes => write!(
+                    f,
+                    "grad: the cotangent {op} sends out of its branch arm does not carry the \
+                     arm's per-row activation on its leading axes, so the arm's untaken rows \
+                     cannot be selected away (spec/06 section 2.10.1)"
+                ),
                 AdRejectionReason::Other(msg) => write!(f, "{msg}"),
             },
         }
@@ -414,10 +426,27 @@ fn grad_dag_checked_impl(
         }
     }
 
-    grad_dag_result(forward, output, wrt).map_err(|why| AdError::NotSupported {
-        op: "<unknown>",
-        reason: AdRejectionReason::Other(format!("failed to construct backward DAG ({why})")),
+    grad_dag_result(forward, output, wrt).map_err(|failure| match failure {
+        BackwardFailure::Rejected(error) => error,
+        BackwardFailure::Construction(why) => AdError::NotSupported {
+            op: "<unknown>",
+            reason: AdRejectionReason::Other(format!("failed to construct backward DAG ({why})")),
+        },
     })
+}
+
+/// Why [`grad_dag_result`] built no backward graph: a typed rejection, which
+/// [`grad_dag_checked`] reports as it is, or a construction failure, which it
+/// wraps in [`AdRejectionReason::Other`].
+enum BackwardFailure {
+    Rejected(AdError),
+    Construction(String),
+}
+
+impl From<String> for BackwardFailure {
+    fn from(why: String) -> Self {
+        Self::Construction(why)
+    }
 }
 
 /// [05-OP-37]'s rate rejection. A parameter reaches a node when the node is
@@ -616,9 +645,13 @@ pub fn grad_dag(forward: &Dag, output: NodeId, wrt: &[NodeId]) -> Option<GradRes
 /// (`grad_dag_checked` and its user-facing lowering error) can report
 /// *why* the backward DAG could not be built rather than the legacy
 /// opaque "unsupported op or verification failure".
-fn grad_dag_result(forward: &Dag, output: NodeId, wrt: &[NodeId]) -> Result<GradResult, String> {
+fn grad_dag_result(
+    forward: &Dag,
+    output: NodeId,
+    wrt: &[NodeId],
+) -> Result<GradResult, BackwardFailure> {
     if forward.is_empty() {
-        return Err("grad: forward DAG is empty".to_string());
+        return Err("grad: forward DAG is empty".to_string().into());
     }
     let output_ty = forward
         .get(output)
@@ -626,9 +659,7 @@ fn grad_dag_result(forward: &Dag, output: NodeId, wrt: &[NodeId]) -> Result<Grad
         .output_type
         .clone();
     if !is_scalar_float(&output_ty) {
-        return Err(format!(
-            "grad: output node type {output_ty:?} is not a scalar float"
-        ));
+        return Err(format!("grad: output node type {output_ty:?} is not a scalar float").into());
     }
     // Forward nodes clone span_id + merged_spans unchanged via Dag::clone()
     // — `forward.clone()` deep-copies the DagNodes, and the existing
@@ -750,7 +781,8 @@ fn grad_dag_result(forward: &Dag, output: NodeId, wrt: &[NodeId]) -> Result<Grad
         return Err(format!(
             "grad: constructed backward DAG failed verification: {}",
             verify_errors.join("; ")
-        ));
+        )
+        .into());
     }
 
     Ok(GradResult {
@@ -784,7 +816,7 @@ fn mask_to_activation(
     consumer: &DagNode,
     input: &DagNode,
     contribution: NodeId,
-) -> Result<NodeId, String> {
+) -> Result<NodeId, BackwardFailure> {
     let Some(activation) = consumer.owner.activation else {
         return Ok(contribution);
     };
@@ -803,7 +835,9 @@ fn mask_to_activation(
     // An activation is rank zero, or under a batched branch shaped like its
     // node's leading axes (spec/10 §3), so it widens to the contribution's
     // shape by expanding the trailing axes, as `lower_if` widens a scalar
-    // condition.
+    // condition. A contribution that does not carry those axes cannot be
+    // masked row by row, and is a typed rejection rather than a mask along
+    // the wrong axis.
     let activation_dims = dag
         .get(activation)
         .expect("an activation is a node of the graph")
@@ -813,11 +847,10 @@ fn mask_to_activation(
     if activation_dims.len() > ty.dims.len()
         || activation_dims[..] != ty.dims[..activation_dims.len()]
     {
-        return Err(format!(
-            "grad: the cotangent of node {} for node {} leaves its activation (node {}), whose \
-             shape {activation_dims:?} is not a leading part of the cotangent's shape {:?}",
-            consumer.id.0, input.id.0, activation.0, ty.dims
-        ));
+        return Err(BackwardFailure::Rejected(AdError::not_supported(
+            risc_op_name(&consumer.op),
+            AdRejectionReason::ActivationNotLeadingAxes,
+        )));
     }
     let mut condition = activation;
     let mut dims = activation_dims.clone();
@@ -4204,8 +4237,10 @@ mod tests {
     }
 
     /// The mask widens an activation over its node's leading axes only; a
-    /// contribution that does not carry them is refused rather than masked
-    /// along the wrong axis.
+    /// contribution that does not carry them is a typed rejection, never a
+    /// panic and never an unmasked contribution. Surface programs do not
+    /// reach it (`vmap` batches every node an arm's activation covers), so
+    /// the graph is built directly: a `[2]` activation over a `[3]` negation.
     ///
     /// Evidentiary status: DISPOSITION LOCK.
     #[test]
@@ -4252,10 +4287,14 @@ mod tests {
             scalar_f64(),
             None,
         );
-        let Err(error) = grad_dag_result(&dag, out, &[x]) else {
-            panic!("a contribution without its activation's leading axes was masked");
-        };
-        assert!(error.contains("leaves its activation"), "{error}");
+        assert_eq!(
+            grad_dag_checked(&dag, out, &[x]).err(),
+            Some(AdError::NotSupported {
+                op: "neg",
+                reason: AdRejectionReason::ActivationNotLeadingAxes,
+            })
+        );
+        assert!(grad_dag(&dag, out, &[x]).is_none());
     }
 
     // ================================================================
