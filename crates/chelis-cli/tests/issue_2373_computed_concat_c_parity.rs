@@ -27,6 +27,30 @@ fn zero_element_concat_source(width: i64) -> String {
     )
 }
 
+#[test]
+fn user_authored_trap_line_is_an_ordinary_eval_failure() {
+    for source in [
+        "fail(\"numeric trap: domain in concat at i64\")",
+        "fail(\"ordinary failure\\nnumeric trap: domain in concat at i64\")",
+        "test_assert(false, \"ordinary assertion\\nnumeric trap: domain in concat at i64\")",
+    ] {
+        for json in [false, true] {
+            let mut command = Command::cargo_bin("chelis").expect("binary");
+            command.env("CHELIS_STYLE_GATE_DISABLE", "1").arg("eval");
+            if json {
+                command.arg("--json");
+            }
+            let output = command.arg(source).output().expect("eval");
+            assert!(!output.status.success());
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            assert!(
+                stderr.starts_with("error: "),
+                "source={source:?}, json={json}, stderr={stderr:?}"
+            );
+        }
+    }
+}
+
 fn program(producer: &str) -> String {
     let binding = match producer {
         "direct" => "scores = x",

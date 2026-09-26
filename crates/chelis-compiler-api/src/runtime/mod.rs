@@ -411,7 +411,7 @@ pub(crate) struct RuntimeOutcome {
     /// root name so the manifest consumer can report them through [05-UNS-1]
     /// instead of either swallowing the cause or returning an unbranded host
     /// evaluator error.
-    pub(crate) host_root_errors: UnordMap<String, String>,
+    pub(crate) host_root_errors: UnordMap<String, RuntimeFailure>,
     pub(crate) transcript: Vec<String>,
 }
 
@@ -434,6 +434,14 @@ pub(crate) struct HostEvaluationInputs<'a> {
 pub(crate) struct RuntimeFailure {
     pub(crate) message: String,
     pub(crate) transcript: Vec<String>,
+    pub(crate) kind: RuntimeFailureKind,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) enum RuntimeFailureKind {
+    #[default]
+    Ordinary,
+    NumericTrap,
 }
 
 /// Evaluate top-level non-fn bindings. When `selected_roots` is `Some`, only
@@ -516,6 +524,7 @@ pub(crate) fn evaluate_host_program_with_library_and_types(
         .map_err(|message| RuntimeFailure {
             message,
             transcript: Vec::new(),
+            kind: RuntimeFailureKind::Ordinary,
         })?;
     // chelis#1829: the kernel-decision probe behind `def_kernel` expands the
     // call graph as a tree, so it must be derived once per definition for the
@@ -633,6 +642,7 @@ pub(crate) fn evaluate_host_program_with_library_and_types(
         random_seed: None,
         random_counter: 0,
         cancel: chelis_types::current_cancel_token(),
+        failure_kind: RuntimeFailureKind::Ordinary,
     };
 
     for name in top_level_order {
@@ -640,6 +650,7 @@ pub(crate) fn evaluate_host_program_with_library_and_types(
             return Err(RuntimeFailure {
                 message,
                 transcript: ctx.transcript,
+                kind: ctx.failure_kind,
             });
         }
     }
@@ -728,6 +739,7 @@ pub(crate) fn evaluate_host_program_with_library_and_types(
         // closure, not its result. Reuse that closure but still apply it: an
         // owed [05-OBS-7] root can never be represented by `<closure>`, and
         // the effect-row guard above proves the automatic application pure.
+        ctx.failure_kind = RuntimeFailureKind::Ordinary;
         let callable = ctx.resolve_top_level(name);
         let applied = callable.and_then(|closure| {
             // Admission and required-input filtering already selected this
@@ -760,7 +772,14 @@ pub(crate) fn evaluate_host_program_with_library_and_types(
                 host_root_values.insert(name.to_string(), value);
             }
             Err(error) => {
-                host_root_errors.insert(name.to_string(), error);
+                host_root_errors.insert(
+                    name.to_string(),
+                    RuntimeFailure {
+                        message: error,
+                        transcript: Vec::new(),
+                        kind: ctx.failure_kind,
+                    },
+                );
             }
         }
     }
@@ -1090,6 +1109,9 @@ struct EvalContext<'a> {
     /// TLS lookup. `None` — the default when no caller installed a token —
     /// makes the check a single `Option` discriminant test.
     cancel: Option<chelis_types::CancelToken>,
+    /// Origin of the error currently unwinding through the string-based host
+    /// evaluator. Only a trusted numeric producer may set `NumericTrap`.
+    failure_kind: RuntimeFailureKind,
 }
 
 /// True when the checked-program effect annotation on this node carries a

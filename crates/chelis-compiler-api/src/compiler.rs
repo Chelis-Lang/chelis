@@ -3112,7 +3112,7 @@ fn eval_compiled(
         eval::eval_program_roots_with_strict(&compiled.dag, &roots, &entered, |name| {
             bindings.get(name).cloned()
         })
-        .map_err(eval_stage_error)?
+        .map_err(|message| eval_stage_error(message, true))?
     };
 
     let mut tensor_values_by_name = UnordMap::<String, RuntimeTensorValue>::new();
@@ -3193,7 +3193,10 @@ fn eval_compiled(
         )
     }
     .map_err(|failure| {
-        let mut error = eval_stage_error(failure.message);
+        let mut error = eval_stage_error(
+            failure.message,
+            failure.kind == crate::runtime::RuntimeFailureKind::NumericTrap,
+        );
         error.transcript = failure.transcript;
         error
     })?;
@@ -3210,7 +3213,10 @@ fn eval_compiled(
             // An executed root's failure is already the runtime diagnostic.
             // Wrapping it as missing output corrupts the required trap line.
             if let Some(error) = host_outcome.host_root_errors.get(entry.def_name.as_str()) {
-                return Err(eval_stage_error(error.clone()));
+                return Err(eval_stage_error(
+                    error.message.clone(),
+                    error.kind == crate::runtime::RuntimeFailureKind::NumericTrap,
+                ));
             }
             // A host-lane *zero-argument fn* root is the result of applying
             // the callable, never the closure stored in `host_bindings` when
@@ -3240,7 +3246,9 @@ fn eval_compiled(
                     let reason = host_outcome
                         .host_root_errors
                         .get(entry.def_name.as_str())
-                        .map(|error| format!("the Host-lane nullary root failed: {error}"))
+                        .map(|error| {
+                            format!("the Host-lane nullary root failed: {}", error.message)
+                        })
                         .unwrap_or_else(|| {
                             "the assigned lane returned no value for the owed root".to_string()
                         });
@@ -3265,7 +3273,8 @@ fn eval_compiled(
                 // dtype tags still exist; the wire `value` below cannot
                 // carry them (chelis#732 P1, [05-OBS-1]).
                 display: Some(crate::runtime::render_value(&value)),
-                value: runtime_value_to_schema(&value).map_err(eval_stage_error)?,
+                value: runtime_value_to_schema(&value)
+                    .map_err(|message| eval_stage_error(message, false))?,
             })
         })
         .collect::<Result<Vec<_>>>()
@@ -6012,12 +6021,13 @@ fn unknown_name_error(stage: &str, field: &str, name: &str) -> CompilerError {
 /// boundary where lane-internal text becomes a structured diagnostic.
 /// Cancellation gets its dedicated kind; genuine evaluation failures retain
 /// the recovery suggestions attached by their owning diagnostic rules.
-fn eval_stage_error(message: String) -> CompilerError {
+fn eval_stage_error(message: String, trusted_numeric_trap: bool) -> CompilerError {
     let kind = if chelis_types::is_cancellation(&message) {
         GeneralKind::Cancelled
-    } else if message
-        .lines()
-        .any(chelis_types::NumericTrap::is_canonical_line)
+    } else if trusted_numeric_trap
+        && message
+            .lines()
+            .any(chelis_types::NumericTrap::is_canonical_line)
     {
         GeneralKind::NumericTrap
     } else {
@@ -6042,7 +6052,8 @@ fn eval_stage_error(message: String) -> CompilerError {
         )
     })()
     .unwrap_or(false);
-    let cast_domain = !extent_cast && message.contains("numeric trap: domain in cast at");
+    let cast_domain =
+        trusted_numeric_trap && !extent_cast && message.contains("numeric trap: domain in cast at");
     let mut error = stage_error("eval", message, kind);
     if cast_domain && let Some(diagnostic) = error.errors.first_mut() {
         diagnostic.suggestions.push(
@@ -6066,7 +6077,7 @@ mod eval_trap_classification_tests {
             "numeric trap: overflow in concat at i64",
             "extent `3`: claimed = 3, concat axis 1 = 4\nnumeric trap: domain in concat at i64",
         ] {
-            let error = eval_stage_error(message.to_string());
+            let error = eval_stage_error(message.to_string(), true);
             assert_eq!(
                 error.errors[0].kind(),
                 chelis_vocab::DiagnosticKind::NumericTrap
@@ -6077,12 +6088,18 @@ mod eval_trap_classification_tests {
             "error: numeric trap: domain in concat at i64",
             "this failure mentions numeric trap: domain in concat at i64",
         ] {
-            let error = eval_stage_error(message.to_string());
+            let error = eval_stage_error(message.to_string(), true);
             assert_eq!(
                 error.errors[0].kind(),
                 chelis_vocab::DiagnosticKind::EvalError
             );
         }
+        let user_failure =
+            eval_stage_error("numeric trap: domain in concat at i64".to_string(), false);
+        assert_eq!(
+            user_failure.errors[0].kind(),
+            chelis_vocab::DiagnosticKind::EvalError
+        );
     }
 }
 

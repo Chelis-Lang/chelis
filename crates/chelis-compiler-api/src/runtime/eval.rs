@@ -1676,8 +1676,16 @@ impl<'a> EvalContext<'a> {
                     claim.shape_verdict(&[sequences.len(), width as usize], name)?;
                 }
             }
-            let value =
-                self.eval_builtin(name, &args, &arg_type_exprs, result_type_expr.as_ref())?;
+            let builtin_result =
+                self.eval_builtin(name, &args, &arg_type_exprs, result_type_expr.as_ref());
+            let trusted_numeric_source = name == "floor_div"
+                || (name == "concat"
+                    && matches!(args.first(), Some(RuntimeValue::List(parts)) if parts.iter().all(|part| matches!(part, RuntimeValue::Tensor(_)))));
+            let value = if trusted_numeric_source {
+                self.mark_numeric_trap_from_trusted_result(builtin_result)?
+            } else {
+                builtin_result?
+            };
             self.result_producer = match name {
                 "index" => args
                     .get(1)
@@ -2699,6 +2707,10 @@ impl<'a> EvalContext<'a> {
             kids.first()
                 .ok_or_else(|| "cast missing value".to_string())?,
         )?;
+        let numeric_input = matches!(
+            value,
+            RuntimeValue::Scalar(_) | RuntimeValue::Tensor(_) | RuntimeValue::Bool(_)
+        );
         let target = kids
             .get(1)
             .and_then(|ty| match ty.carrier() {
@@ -2727,7 +2739,7 @@ impl<'a> EvalContext<'a> {
             .map_err(|selector| format!("`{selector}` is not a recognized cast mode selector"))?
             == chelis_deep::CastMode::Trunc
         {
-            return match value {
+            let result = match value {
                 RuntimeValue::Scalar(payload) => {
                     chelis_types::cast_trunc_scalar("cast_trunc", payload.value(), target_prim)
                         .map(RuntimeValue::from_scalar_value)
@@ -2745,24 +2757,29 @@ impl<'a> EvalContext<'a> {
                     target_prim.name()
                 )),
             };
+            return if numeric_input {
+                self.mark_numeric_trap_from_trusted_result(result)
+            } else {
+                result
+            };
         }
         // The CHECKED default ladder (`chelis_types::cast_scalar`; the
         // chelis#759 one-rule-per-direction obligation), identical to
         // the tensor surfaces: out-of-range integer targets trap,
         // fractional-to-integer traps Domain instead of choosing an
         // implicit rounding rule, and a bool target requires exactly 0/1.
-        match (value, target_prim) {
+        let result = match (value, target_prim) {
             (RuntimeValue::Bool(value), Prim::Bool) => Ok(RuntimeValue::Bool(value)),
             (RuntimeValue::String(value), Prim::String) => Ok(RuntimeValue::String(value)),
             (RuntimeValue::Scalar(payload), dst_dtype)
                 if dst_dtype.is_integer() || dst_dtype.is_float() || dst_dtype == Prim::Bool =>
             {
-                let cast = chelis_types::cast_scalar("cast", payload.value(), dst_dtype)
-                    .map_err(|trap| trap.to_string())?;
-                match cast.as_bool_exact() {
-                    Some(flag) => Ok(RuntimeValue::Bool(flag)),
-                    None => Ok(RuntimeValue::from_scalar_value(cast)),
-                }
+                chelis_types::cast_scalar("cast", payload.value(), dst_dtype)
+                    .map(|cast| match cast.as_bool_exact() {
+                        Some(flag) => RuntimeValue::Bool(flag),
+                        None => RuntimeValue::from_scalar_value(cast),
+                    })
+                    .map_err(|trap| trap.to_string())
             }
             (RuntimeValue::Bool(value), dst_dtype)
                 if dst_dtype.is_integer() || dst_dtype.is_float() =>
@@ -2770,16 +2787,35 @@ impl<'a> EvalContext<'a> {
                 let source =
                     chelis_types::scalar_from_i64("cast", Prim::Bool, if value { 1 } else { 0 })
                         .expect("bool payload is always in the bool value set");
-                let cast = chelis_types::cast_scalar("cast", source, dst_dtype)
-                    .map_err(|trap| trap.to_string())?;
-                Ok(RuntimeValue::from_scalar_value(cast))
+                chelis_types::cast_scalar("cast", source, dst_dtype)
+                    .map(RuntimeValue::from_scalar_value)
+                    .map_err(|trap| trap.to_string())
             }
             (RuntimeValue::Tensor(tensor), _) => cast_tensor_value(tensor, target_prim),
             (other, _) => Err(format!(
                 "unsupported cast from {other:?} to {}",
                 target_prim.name()
             )),
+        };
+        if numeric_input {
+            self.mark_numeric_trap_from_trusted_result(result)
+        } else {
+            result
         }
+    }
+
+    fn mark_numeric_trap_from_trusted_result<T>(
+        &mut self,
+        result: Result<T, String>,
+    ) -> Result<T, String> {
+        if result.as_ref().err().is_some_and(|message| {
+            message
+                .lines()
+                .any(chelis_types::NumericTrap::is_canonical_line)
+        }) {
+            self.failure_kind = RuntimeFailureKind::NumericTrap;
+        }
+        result
     }
 
     /// The active handler's next [05-RNG-1] key, advancing its ordinal. A
@@ -4789,6 +4825,7 @@ mod legacy_capture_order_tests {
             random_seed: Some(42),
             random_counter: 5,
             cancel: None,
+            failure_kind: RuntimeFailureKind::Ordinary,
         }
     }
 

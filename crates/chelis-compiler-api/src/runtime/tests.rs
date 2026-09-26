@@ -160,6 +160,7 @@ fn issue_1125_eval_raw_expr(expr: &Expr) -> Result<RuntimeValue, String> {
         random_seed: None,
         random_counter: 0,
         cancel: None,
+        failure_kind: RuntimeFailureKind::Ordinary,
     };
     ctx.eval_expr(expr)
 }
@@ -210,6 +211,7 @@ fn issue_1125_eval_checked_root(
         random_seed: None,
         random_counter: 0,
         cancel: None,
+        failure_kind: RuntimeFailureKind::Ordinary,
     };
     ctx.resolve_top_level(root)
 }
@@ -1133,6 +1135,7 @@ fn dropout_entered_error_prefix_and_nested_handler_unwind_preserve_parent() {
         random_seed: Some(42),
         random_counter: 5,
         cancel: None,
+        failure_kind: RuntimeFailureKind::Ordinary,
     };
     let argument = RuntimeValue::Tensor(RuntimeTensorValue::new(IrTensorValue::from_storage(
         vec![0],
@@ -2018,6 +2021,7 @@ fn eval_deep_with_bindings(
         random_seed: None,
         random_counter: 0,
         cancel: None,
+        failure_kind: RuntimeFailureKind::Ordinary,
     };
     for (name, value) in args {
         ctx.bindings.insert((*name).to_string(), value.clone());
