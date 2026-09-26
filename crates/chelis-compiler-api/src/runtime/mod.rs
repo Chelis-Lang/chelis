@@ -149,7 +149,9 @@ impl ScalarPayload {
     }
 }
 
-#[derive(Debug, Clone)]
+/// `Clone` is written by hand below: it copies nested containers from a
+/// worklist (chelis#2567).
+#[derive(Debug)]
 pub enum RuntimeValue {
     Tensor(RuntimeTensorValue),
     /// First-class numeric scalar tagged with its source-level dtype.
@@ -230,6 +232,130 @@ pub enum RuntimeValue {
         invocation_contracts: Box<Vec<Expr>>,
     },
     Unit,
+}
+
+/// One pending step of [`RuntimeValue`]'s iterative clone.
+enum CloneStep<'a> {
+    /// Copy this value: a leaf directly, a container after its children.
+    Visit(&'a RuntimeValue),
+    /// Every child of this container has been copied onto the output stack.
+    Assemble(&'a RuntimeValue),
+}
+
+impl Clone for RuntimeValue {
+    /// A deep copy made from a worklist rather than by recursion, so copying
+    /// a value nested far deeper than the native stack (a data-type chain a
+    /// `fold` builds) uses bounded native depth (chelis#2567). Each copy is
+    /// still proportional to the value; making it a shared, copy-on-write
+    /// payload is chelis#2592.
+    fn clone(&self) -> Self {
+        let mut steps = vec![CloneStep::Visit(self)];
+        let mut copied: Vec<RuntimeValue> = Vec::new();
+        while let Some(step) = steps.pop() {
+            match step {
+                CloneStep::Visit(value) => match value {
+                    RuntimeValue::List(items)
+                    | RuntimeValue::Tuple(items)
+                    | RuntimeValue::Adt { fields: items, .. } => {
+                        steps.push(CloneStep::Assemble(value));
+                        steps.extend(items.iter().rev().map(CloneStep::Visit));
+                    }
+                    RuntimeValue::Dict(entries) => {
+                        steps.push(CloneStep::Assemble(value));
+                        for (key, entry) in entries.iter().rev() {
+                            steps.push(CloneStep::Visit(entry));
+                            steps.push(CloneStep::Visit(key));
+                        }
+                    }
+                    leaf => copied.push(leaf.clone_leaf()),
+                },
+                CloneStep::Assemble(value) => {
+                    let assembled = match value {
+                        RuntimeValue::List(items) => {
+                            RuntimeValue::List(copied.split_off(copied.len() - items.len()))
+                        }
+                        RuntimeValue::Tuple(items) => {
+                            RuntimeValue::Tuple(copied.split_off(copied.len() - items.len()))
+                        }
+                        RuntimeValue::Adt {
+                            ctor,
+                            fields,
+                            field_names,
+                        } => RuntimeValue::Adt {
+                            ctor: ctor.clone(),
+                            fields: copied.split_off(copied.len() - fields.len()),
+                            field_names: field_names.clone(),
+                        },
+                        RuntimeValue::Dict(entries) => {
+                            let mut flat = copied
+                                .split_off(copied.len() - 2 * entries.len())
+                                .into_iter();
+                            let mut pairs = Vec::with_capacity(entries.len());
+                            while let (Some(key), Some(entry)) = (flat.next(), flat.next()) {
+                                pairs.push((key, entry));
+                            }
+                            RuntimeValue::Dict(pairs)
+                        }
+                        _ => unreachable!("only containers are assembled"),
+                    };
+                    copied.push(assembled);
+                }
+            }
+        }
+        copied.pop().expect("the clone worklist copies its root")
+    }
+}
+
+impl RuntimeValue {
+    /// The copy of a value that holds no nested runtime value.
+    fn clone_leaf(&self) -> Self {
+        match self {
+            RuntimeValue::Tensor(tensor) => RuntimeValue::Tensor(tensor.clone()),
+            RuntimeValue::Scalar(payload) => RuntimeValue::Scalar(*payload),
+            RuntimeValue::Bool(value) => RuntimeValue::Bool(*value),
+            RuntimeValue::String(value) => RuntimeValue::String(value.clone()),
+            RuntimeValue::MappedFile(bytes) => RuntimeValue::MappedFile(bytes.clone()),
+            RuntimeValue::Closure {
+                checked_function,
+                params,
+                param_types,
+                return_type,
+                checked_signature,
+                invocation_contracts,
+                body,
+                env,
+                precision_env,
+                def_name,
+            } => RuntimeValue::Closure {
+                checked_function: checked_function.clone(),
+                params: params.clone(),
+                param_types: param_types.clone(),
+                return_type: return_type.clone(),
+                checked_signature: checked_signature.clone(),
+                invocation_contracts: invocation_contracts.clone(),
+                body: body.clone(),
+                env: env.clone(),
+                precision_env: precision_env.clone(),
+                def_name: def_name.clone(),
+            },
+            RuntimeValue::Transform {
+                kind,
+                transform_expr,
+                captured_env,
+                invocation_contracts,
+            } => RuntimeValue::Transform {
+                kind: kind.clone(),
+                transform_expr: transform_expr.clone(),
+                captured_env: captured_env.clone(),
+                invocation_contracts: invocation_contracts.clone(),
+            },
+            RuntimeValue::Unit => RuntimeValue::Unit,
+            RuntimeValue::List(_)
+            | RuntimeValue::Tuple(_)
+            | RuntimeValue::Adt { .. }
+            | RuntimeValue::Dict(_) => unreachable!("containers are copied by the worklist"),
+        }
+    }
 }
 
 impl RuntimeValue {
@@ -899,7 +1025,79 @@ fn collect_top_level_items<'a>(expr: &'a Expr, out: &mut Vec<&'a Expr>) {
     }
 }
 
+/// One pending step of [`runtime_value_to_schema`]'s walk.
+enum SchemaStep<'a> {
+    Visit(&'a RuntimeValue),
+    /// Every child of this container is on the output stack, in order.
+    Assemble(&'a RuntimeValue),
+}
+
+/// The machine-facing value of `value`, converted from a worklist so a value
+/// nested far deeper than the native stack converts with bounded native
+/// depth (chelis#2567). The first unconvertible leaf in depth-first,
+/// left-to-right order is the error, as in a recursive conversion.
 pub(crate) fn runtime_value_to_schema(value: &RuntimeValue) -> Result<ExecutionValue, String> {
+    let mut steps = vec![SchemaStep::Visit(value)];
+    let mut converted: Vec<ExecutionValue> = Vec::new();
+    while let Some(step) = steps.pop() {
+        match step {
+            SchemaStep::Visit(value) => match value {
+                RuntimeValue::List(items)
+                | RuntimeValue::Tuple(items)
+                | RuntimeValue::Adt { fields: items, .. } => {
+                    steps.push(SchemaStep::Assemble(value));
+                    steps.extend(items.iter().rev().map(SchemaStep::Visit));
+                }
+                RuntimeValue::Dict(entries) => {
+                    steps.push(SchemaStep::Assemble(value));
+                    for (key, entry) in entries.iter().rev() {
+                        steps.push(SchemaStep::Visit(entry));
+                        steps.push(SchemaStep::Visit(key));
+                    }
+                }
+                leaf => converted.push(leaf_to_schema(leaf)?),
+            },
+            SchemaStep::Assemble(value) => {
+                let assembled = match value {
+                    RuntimeValue::List(items) => ExecutionValue::List {
+                        value: converted.split_off(converted.len() - items.len()),
+                    },
+                    RuntimeValue::Tuple(items) => ExecutionValue::Tuple {
+                        value: converted.split_off(converted.len() - items.len()),
+                    },
+                    // De-mangle the reef-linked `Pkg__..__Ctor` form to the bare,
+                    // user-facing constructor name. This is the eval `--json` ABI
+                    // surface; decode (`decode_adt_value`) already keys on bare
+                    // constructor names, so emitting bare here makes the encode/decode
+                    // round-trip consistent and stops internal mangling leaking to
+                    // consumers (chelis#399).
+                    RuntimeValue::Adt { ctor, fields, .. } => ExecutionValue::Adt {
+                        ctor: chelis_types::demangle_ident(ctor),
+                        fields: converted.split_off(converted.len() - fields.len()),
+                    },
+                    RuntimeValue::Dict(entries) => {
+                        let mut flat = converted
+                            .split_off(converted.len() - 2 * entries.len())
+                            .into_iter();
+                        let mut pairs = Vec::with_capacity(entries.len());
+                        while let (Some(key), Some(value)) = (flat.next(), flat.next()) {
+                            pairs.push(DictEntryValue { key, value });
+                        }
+                        ExecutionValue::Dict { entries: pairs }
+                    }
+                    _ => unreachable!("only containers are assembled"),
+                };
+                converted.push(assembled);
+            }
+        }
+    }
+    Ok(converted
+        .pop()
+        .expect("the schema worklist converts its root"))
+}
+
+/// The wire value of a runtime value that holds no nested runtime value.
+fn leaf_to_schema(value: &RuntimeValue) -> Result<ExecutionValue, String> {
     Ok(match value {
         RuntimeValue::Tensor(tensor) => {
             let value = TensorValue {
@@ -924,42 +1122,6 @@ pub(crate) fn runtime_value_to_schema(value: &RuntimeValue) -> Result<ExecutionV
         RuntimeValue::String(value) => ExecutionValue::String {
             value: value.clone(),
         },
-        RuntimeValue::List(items) => ExecutionValue::List {
-            value: items
-                .iter()
-                .map(runtime_value_to_schema)
-                .collect::<Result<Vec<_>, _>>()?,
-        },
-        RuntimeValue::Dict(entries) => ExecutionValue::Dict {
-            entries: entries
-                .iter()
-                .map(|(key, value)| {
-                    Ok(DictEntryValue {
-                        key: runtime_value_to_schema(key)?,
-                        value: runtime_value_to_schema(value)?,
-                    })
-                })
-                .collect::<Result<Vec<_>, String>>()?,
-        },
-        RuntimeValue::Tuple(items) => ExecutionValue::Tuple {
-            value: items
-                .iter()
-                .map(runtime_value_to_schema)
-                .collect::<Result<Vec<_>, _>>()?,
-        },
-        RuntimeValue::Adt { ctor, fields, .. } => ExecutionValue::Adt {
-            // De-mangle the reef-linked `Pkg__..__Ctor` form to the bare,
-            // user-facing constructor name. This is the eval `--json` ABI
-            // surface; decode (`decode_adt_value`) already keys on bare
-            // constructor names, so emitting bare here makes the encode/decode
-            // round-trip consistent and stops internal mangling leaking to
-            // consumers (chelis#399).
-            ctor: chelis_types::demangle_ident(ctor),
-            fields: fields
-                .iter()
-                .map(runtime_value_to_schema)
-                .collect::<Result<Vec<_>, _>>()?,
-        },
         RuntimeValue::MappedFile(_) => {
             return Err(
                 "MappedFile values are not serializable on machine-facing APIs".to_string(),
@@ -975,6 +1137,10 @@ pub(crate) fn runtime_value_to_schema(value: &RuntimeValue) -> Result<ExecutionV
             },
         },
         RuntimeValue::Unit => ExecutionValue::Unit,
+        RuntimeValue::List(_)
+        | RuntimeValue::Tuple(_)
+        | RuntimeValue::Dict(_)
+        | RuntimeValue::Adt { .. } => unreachable!("containers are converted by the worklist"),
     })
 }
 

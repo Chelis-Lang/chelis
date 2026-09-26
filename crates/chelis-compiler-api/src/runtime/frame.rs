@@ -30,6 +30,13 @@ pub(crate) enum ResultProducer {
     Aggregate(Vec<Option<ResultProducer>>),
 }
 
+/// One pending step of [`ResultProducer::interface_load`]'s walk.
+enum InterfaceStep<'a> {
+    Visit(&'a RuntimeValue),
+    /// The last `usize` stamps are one aggregate's children, in order.
+    Assemble(usize),
+}
+
 impl ResultProducer {
     pub(crate) fn tensor(operation: impl Into<String>) -> Self {
         Self::Tensor(operation.into())
@@ -68,17 +75,30 @@ impl ResultProducer {
     /// Stamp a value crossing a genuine runtime interface. Every tensor leaf
     /// is observed through `load`; aggregate shape is retained so a later
     /// projection cannot lose the interface origin or borrow a sibling's.
+    /// The value is walked from a worklist, so a value nested far deeper than
+    /// the native stack is stamped with bounded native depth (chelis#2567).
     pub(crate) fn interface_load(value: &RuntimeValue) -> Option<Self> {
-        match value {
-            RuntimeValue::Tensor(_) => Some(Self::tensor("load")),
-            RuntimeValue::Tuple(values) | RuntimeValue::List(values) => {
-                Self::aggregate(values.iter().map(Self::interface_load).collect())
+        let mut steps = vec![InterfaceStep::Visit(value)];
+        let mut stamped: Vec<Option<Self>> = Vec::new();
+        while let Some(step) = steps.pop() {
+            match step {
+                InterfaceStep::Visit(value) => match value {
+                    RuntimeValue::Tensor(_) => stamped.push(Some(Self::tensor("load"))),
+                    RuntimeValue::Tuple(values)
+                    | RuntimeValue::List(values)
+                    | RuntimeValue::Adt { fields: values, .. } => {
+                        steps.push(InterfaceStep::Assemble(values.len()));
+                        steps.extend(values.iter().rev().map(InterfaceStep::Visit));
+                    }
+                    _ => stamped.push(None),
+                },
+                InterfaceStep::Assemble(count) => {
+                    let children = stamped.split_off(stamped.len() - count);
+                    stamped.push(Self::aggregate(children));
+                }
             }
-            RuntimeValue::Adt { fields, .. } => {
-                Self::aggregate(fields.iter().map(Self::interface_load).collect())
-            }
-            _ => None,
         }
+        stamped.pop().flatten()
     }
 
     pub(crate) fn matches_value(&self, value: &RuntimeValue) -> bool {

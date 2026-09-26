@@ -4668,3 +4668,49 @@ mod issue_2207_routing_lowering_context {
             .expect("the deep-stack evaluator thread completes");
     }
 }
+
+/// chelis#2567: the worklist `Clone` copies every container kind with its
+/// children in order, dict entries paired, and data-type names and field
+/// names intact, and the copy shares no container with the original.
+#[test]
+fn runtime_value_clone_copies_every_container_in_order() {
+    let original = RuntimeValue::Adt {
+        ctor: "Record".to_string(),
+        fields: vec![
+            RuntimeValue::List(vec![RuntimeValue::int64(1), RuntimeValue::int64(2)]),
+            RuntimeValue::Tuple(vec![RuntimeValue::Bool(true), RuntimeValue::Unit]),
+            RuntimeValue::Dict(vec![
+                (
+                    RuntimeValue::String("a".to_string()),
+                    RuntimeValue::int64(3),
+                ),
+                (
+                    RuntimeValue::String("b".to_string()),
+                    RuntimeValue::List(Vec::new()),
+                ),
+            ]),
+        ],
+        field_names: Some(vec!["xs".to_string(), "pair".to_string(), "d".to_string()]),
+    };
+    let mut copy = original.clone();
+    let names = |value: &RuntimeValue| match value {
+        RuntimeValue::Adt {
+            ctor, field_names, ..
+        } => (ctor.clone(), field_names.clone()),
+        _ => panic!("the copy of a data-type value is a data-type value"),
+    };
+    assert_eq!(names(&copy), names(&original));
+    assert_eq!(
+        render_value(&copy),
+        "Record([1, 2], (true, ()), dict(a: 3, b: []))"
+    );
+    if let RuntimeValue::Adt { fields, .. } = &mut copy
+        && let RuntimeValue::List(items) = &mut fields[0]
+    {
+        items.push(RuntimeValue::int64(9));
+    }
+    assert_eq!(
+        render_value(&original),
+        "Record([1, 2], (true, ()), dict(a: 3, b: []))"
+    );
+}
