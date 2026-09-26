@@ -626,6 +626,10 @@ package = "chelis-backend-hip"
 name = "logical_comparison_where"
 
 [[standing_target]]
+package = "chelis-backend-hip"
+name = "hip_activation_gate"
+
+[[standing_target]]
 package = "chelis-backend-metal"
 name = "logical_comparison_where_rejection"
 
