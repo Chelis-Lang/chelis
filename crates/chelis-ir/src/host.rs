@@ -5563,18 +5563,14 @@ fn kernel_dag_loads_builtin(
     dag: &crate::Dag,
     scope: &UnordMap<String, HostTypeTerm>,
 ) -> Option<String> {
-    dag.nodes().iter().find_map(|node| match &node.op {
-        crate::dag::RiscOp::Load { name }
-            if BUILTIN_NAMES.contains(&name.as_str())
-                && scope
-                    .get(name.as_str())
-                    .and_then(tensor_type_from_host_input)
-                    .is_none() =>
-        {
-            Some(name.as_str().to_string())
-        }
-        _ => None,
-    })
+    crate::lower::builtin_loads(dag)
+        .find(|name| {
+            scope
+                .get(*name)
+                .and_then(tensor_type_from_host_input)
+                .is_none()
+        })
+        .map(str::to_string)
 }
 
 /// The one kernel lowering: the body over its declared tensor scope, then

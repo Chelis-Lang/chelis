@@ -6467,6 +6467,16 @@ fn names_top_level_value(bound: Option<&LoweredValue>, declared: Option<&Lowered
     }
 }
 
+/// The host builtins `dag` reads as free inputs, by name: what the lowerer
+/// leaves for a host-lane builtin application it cannot express in a tensor
+/// graph.
+pub(crate) fn builtin_loads(dag: &Dag) -> impl Iterator<Item = &str> {
+    dag.nodes().iter().filter_map(|node| match &node.op {
+        RiscOp::Load { name } if BUILTIN_NAMES.contains(&name.as_str()) => Some(name.as_str()),
+        _ => None,
+    })
+}
+
 /// A top-level value declaration visible to a lowering context.
 #[derive(Clone)]
 struct TopLevelValue {
@@ -8523,6 +8533,14 @@ impl<'program> LowerCtx<'program> {
         let Ok((lowered, reached)) = lowered else {
             return (None, UnordMap::new());
         };
+        // A form that reads a host builtin as a free input is the lowerer's
+        // fallback for a host-lane application it cannot express, not a
+        // lowering of the initializer: no tensor input supplies it, and the
+        // host lane refuses a kernel holding one. The initializer is
+        // unlowerable here and stays the host-served input.
+        if builtin_loads(&lowered).any(|builtin| !self.program_defs.contains_key(builtin)) {
+            return (None, reached);
+        }
         let seeds = lowered.trap_seeds();
         let verdict = lowered
             .nodes()
@@ -20606,6 +20624,63 @@ mod declaration_attribution_tests {
             };
             assert_eq!(sixteen - eight, 2 * (eight - four), "{form}: {counts:?}");
         }
+    }
+
+    /// A top-level expression's tensor helper reads a value whose initializer
+    /// the tensor lane cannot express as that value's host-served input, even
+    /// when the initializer holds a node that can trap (decisions §15). `ids`'s
+    /// casts can trap, but `tokens = to_tensor(ids)` lowers only to a free
+    /// read of the `to_tensor` builtin, so `out`'s helper reads `tokens`. The
+    /// twin `offset` can trap and has a tensor form, so `shifted`'s helper
+    /// still lowers it again at the reference (§12).
+    ///
+    /// Evidentiary status: REGRESSION TEST. Red at 16b153c1e, where the
+    /// scratch lowering's builtin read counted as a lowering of `tokens`:
+    /// `out`'s helper held `Load("to_tensor")`, the host lane refused it, and
+    /// `out` fell back to a host `gather` with no tensor helper.
+    #[test]
+    fn an_initializer_with_no_tensor_form_stays_the_host_served_input() {
+        let source = "ids: List[i64] = [cast(0, i64), cast(1, i64)]\n\
+                      tokens = to_tensor(ids)\n\
+                      table = pad_sequences([[1.0, 2.0], [3.0, 4.0]], 0.0)\n\
+                      out = gather(table, tokens, 0)\n\
+                      offset = cast(scalar_to_tensor(3.0f32), i32)\n\
+                      shifted = add(copy(offset), copy(offset))\n";
+        let compiled = crate::host::try_lower_compiled_program(&checked(source)).unwrap();
+        let host = compiled.host.expect("the program has a host lane");
+        let helper = |global: &str| {
+            let binding = host
+                .globals
+                .iter()
+                .find(|binding| binding.name == global)
+                .unwrap_or_else(|| panic!("no global `{global}`"));
+            let crate::host::HostExprKind::TensorCall { helper, .. } = &binding.value.kind else {
+                panic!("`{global}` has no tensor helper: {:?}", binding.value.kind);
+            };
+            &host.global_tensor_helpers[*helper].dag
+        };
+        let loads = |dag: &Dag| {
+            dag.nodes()
+                .iter()
+                .filter_map(|node| match &node.op {
+                    RiscOp::Load { name } => Some(name.as_str().to_owned()),
+                    _ => None,
+                })
+                .collect::<BTreeSet<_>>()
+        };
+        assert_eq!(
+            loads(helper("out")),
+            BTreeSet::from(["table".to_owned(), "tokens".to_owned()])
+        );
+        let shifted = helper("shifted");
+        assert!(loads(shifted).is_empty(), "{:?}", loads(shifted));
+        assert!(
+            shifted
+                .nodes()
+                .iter()
+                .any(|node| matches!(node.op, RiscOp::Cast { .. })),
+            "`offset`'s cast is lowered again at the reference"
+        );
     }
 }
 
