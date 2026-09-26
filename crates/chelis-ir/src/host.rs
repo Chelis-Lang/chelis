@@ -274,26 +274,22 @@ impl Drop for HostDeclarationGuard {
 ///
 /// A substituted body is lowered, and emitted, inside the scope of the call
 /// site, where every free name it reads must still mean the top-level
-/// declaration it meant where the callee was written. The binders around a
-/// call site are those of the declaration being lowered and of every body
-/// already substituted into it, so a callee that reads a name one of them
-/// binds is not substituted. The caller then keeps an ordinary call, which
-/// resolves the callee's names in its own scope. A binder the reader cannot
-/// decode is treated as capturing.
-fn inlining_would_capture(program: &HostLoweringSession<'_>, callee: &str) -> bool {
+/// declaration it meant where the callee was written. A callee that reads a
+/// name `scope` binds at the site is therefore not substituted, unless that
+/// entry can only be the top-level value itself (a global binding's scope
+/// carries the globals). The caller then keeps an ordinary call, which
+/// resolves the callee's names in its own scope.
+fn inlining_would_capture(
+    program: &HostLoweringSession<'_>,
+    callee: &str,
+    scope: &UnordMap<String, HostTypeTerm>,
+) -> bool {
     let Some((_, body)) = program.def_named(callee) else {
         return false;
     };
-    let free = chelis_types::linearity::free_runtime_variables(body);
-    if free.is_empty() {
-        return false;
-    }
-    enclosing_bodies()
-        .into_iter()
-        .any(|name| match def_binders(program, &name) {
-            Some(binders) => free.iter().any(|name| binders.contains(name)),
-            None => true,
-        })
+    chelis_types::linearity::free_runtime_variables(body)
+        .iter()
+        .any(|name| scope.contains_key(name) && !is_unshadowed_top_level_value(program, name))
 }
 
 /// The top-level declarations whose bodies surround the current host
@@ -10976,7 +10972,8 @@ fn resolve_list_grad_shape_expr(
             continue;
         }
         if let Some(inlined) = beta_reduce_inline_host_call(&resolved)
-            .or_else(|| inline_top_level_host_call(&resolved, program))
+            // Shape evidence only: the walk has no lexical scope of its own.
+            .or_else(|| inline_top_level_host_call(&resolved, program, &UnordMap::new()))
         {
             resolved = inlined;
             continue;
@@ -12047,7 +12044,7 @@ fn lower_app_host_expr(
     // to the same bounded monomorphization the recursive path uses, which
     // keys on the checked type application instead of pasting syntax.
     if callee_is_nullary_generic_constructor_wrapper
-        && let Some(specialized) = inline_top_level_host_call(app_expr, program)
+        && let Some(specialized) = inline_top_level_host_call(app_expr, program, scope)
     {
         let pushed = push_inlining(&name);
         let definitions = adt_constructor_definitions(program);
@@ -12338,7 +12335,7 @@ fn lower_app_host_expr(
         && !top_level_fn_needs_host_lane_tensor_lowering(program, &name)
         && !helper_summary_rejects
         && !should_keep_tensor_expr_in_host_lane(app_expr)
-        && let Some(specialized) = inline_top_level_host_call(app_expr, program)
+        && let Some(specialized) = inline_top_level_host_call(app_expr, program, scope)
     {
         let pushed = push_inlining(&name);
         let lowered =
@@ -12398,7 +12395,7 @@ fn lower_app_host_expr(
         }
         // Recursive polymorphic forms cannot retain an inline body. Preserve
         // the existing bounded-specialization/fail-closed fallthrough below.
-        if let Some(specialized) = inline_top_level_host_call(app_expr, program) {
+        if let Some(specialized) = inline_top_level_host_call(app_expr, program, scope) {
             let _subst_guard = ActiveTypeSubstGuard::push(fallback_substitution);
             let pushed = push_inlining(&name);
             let lowered = lower_host_expr_with_expected(
@@ -12430,7 +12427,8 @@ fn lower_app_host_expr(
             declared_fn_sig.as_ref(),
         ));
     }
-    if has_callable_params && let Some(specialized) = inline_top_level_host_call(app_expr, program)
+    if has_callable_params
+        && let Some(specialized) = inline_top_level_host_call(app_expr, program, scope)
     {
         let pushed = push_inlining(&name);
         // PR #1215 review: thread the call's checked result type through the
@@ -13364,7 +13362,7 @@ fn lower_named_retained_host_invocation(
     tensor_helpers: &mut TensorHelperSink,
     actualize_polymorphic_contract: bool,
 ) -> Result<Option<(HostExpr, Option<TensorType>)>, crate::lower::LowerDiagnostic> {
-    if is_inlining(name) || inlining_would_capture(program, name) {
+    if is_inlining(name) || inlining_would_capture(program, name, scope) {
         return Ok(None);
     }
     let Some((canonical, body)) = program.def_named(name) else {
@@ -13636,7 +13634,13 @@ fn lower_retained_host_invocation(
     }))
 }
 
-fn inline_top_level_host_call(expr: &Expr, program: &HostLoweringSession<'_>) -> Option<Expr> {
+/// Substitute a top-level callee's body at a call site whose lexical scope is
+/// `scope`, or `None` when the callee must stay an ordinary call.
+fn inline_top_level_host_call(
+    expr: &Expr,
+    program: &HostLoweringSession<'_>,
+    scope: &UnordMap<String, HostTypeTerm>,
+) -> Option<Expr> {
     let Some((DeepTag::App, _, kids)) = stamped_parts(expr) else {
         return None;
     };
@@ -13645,7 +13649,7 @@ fn inline_top_level_host_call(expr: &Expr, program: &HostLoweringSession<'_>) ->
         .and_then(as_node)
         .filter(|callee| callee.tag() == DeepTag::Var)
         .and_then(|callee| callee.children_slice().first().and_then(symbol_name))?;
-    if is_inlining(callee_name) || inlining_would_capture(program, callee_name) {
+    if is_inlining(callee_name) || inlining_would_capture(program, callee_name, scope) {
         return None;
     }
     let defs = cached_program_defs(program);
@@ -13886,7 +13890,8 @@ fn lower_recursive_generic_call(
     // finds its own name, `inline_top_level_host_call` returns `None`, and
     // the edge falls through to the residue.
     let specializing = MONO_SPECIALIZATIONS.with(|state| !state.borrow().in_progress.is_empty());
-    if !specializing && let Some(specialized) = inline_top_level_host_call(app_expr, program) {
+    if !specializing && let Some(specialized) = inline_top_level_host_call(app_expr, program, scope)
+    {
         let pushed_canonical = push_inlining(&canonical_name);
         let pushed_spelled = name != canonical_name && push_inlining(name);
         let lowered = lower_host_expr_with_expected(

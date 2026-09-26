@@ -214,3 +214,26 @@ fn a_function_literal_keeps_the_binding_it_closed_over_after_a_rebinding() {
     let source = "def main() -> tensor[1, f32] = {\n  y = to_tensor([2.0f32])\n  g = fn (x: tensor[1, f32]) -> add(x, y)\n  y = to_tensor([10.0f32])\n  g(add(to_tensor([1.0f32]), y))\n}\n";
     assert_both_lanes(source, "main", "tensor(shape=[1], data=[13.0])");
 }
+
+/// A binder that is not in scope at the call site cannot capture there: a
+/// later local and a function literal's parameter each spell the callee's
+/// top-level `n`, and the host lane must still substitute the callee.
+const HIGHER_ORDER_CALLEE: &str = "n = to_tensor([2.0f32])\n\
+def apply(h: (tensor[1, f32]) -> tensor[1, f32], x: tensor[1, f32]) -> tensor[1, f32] = h(mul(x, n))\n\
+def dbl(v: tensor[1, f32]) -> tensor[1, f32] = add(v, v)\n";
+
+#[test]
+fn a_later_local_does_not_stop_a_callee_from_being_substituted() {
+    let source = format!(
+        "{HIGHER_ORDER_CALLEE}def main() -> tensor[1, f32] = {{\n  a = apply(dbl, to_tensor([1.0f32]))\n  n = to_tensor([10.0f32])\n  add(a, n)\n}}\n"
+    );
+    assert_both_lanes(&source, "main", "tensor(shape=[1], data=[14.0])");
+}
+
+#[test]
+fn a_function_literal_parameter_does_not_stop_a_callee_from_being_substituted() {
+    let source = format!(
+        "{HIGHER_ORDER_CALLEE}def main() -> tensor[1, f32] = {{\n  a = apply(dbl, to_tensor([1.0f32]))\n  apply(fn (n: tensor[1, f32]) -> add(n, a), to_tensor([1.0f32]))\n}}\n"
+    );
+    assert_both_lanes(&source, "main", "tensor(shape=[1], data=[6.0])");
+}
