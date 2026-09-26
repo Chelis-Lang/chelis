@@ -2657,13 +2657,17 @@ impl<'a> EvalContext<'a> {
                             unreachable!("entry actualization returns tensor arguments only");
                         };
                         let parameter = params[index].clone();
-                        for (axis, (dim, size)) in ty.dims.iter().zip(&tensor.value.shape).enumerate()
+                        for (axis, (dim, size)) in
+                            ty.dims.iter().zip(&tensor.value.shape).enumerate()
                         {
                             if let DimInfo::Named(name, _) = dim
                                 && name != "*"
                             {
                                 dimension_bindings.entry(name.clone()).or_insert(*size);
-                                if !named_result_witnesses.iter().any(|(seen, _, _)| seen == name) {
+                                if !named_result_witnesses
+                                    .iter()
+                                    .any(|(seen, _, _)| seen == name)
+                                {
                                     named_result_witnesses.push((
                                         name.clone(),
                                         NamedResultSource {

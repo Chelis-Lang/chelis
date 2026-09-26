@@ -172,9 +172,7 @@ const CASES: &[Case] = &[
         name: "issue_1900_agrees",
         source: "def probe[m, n](w: tensor[m, 3, f32], v: tensor[n, 3, f32]) -> tensor[m, 3, f32] = concat(append([v], v), 0i32)\n\
                  out = probe(to_tensor([[1.0, 2.0, 3.0], [1.0, 2.0, 3.0]]), to_tensor([[7.0, 8.0, 9.0]]))\n",
-        expect: Expect::Value(
-            "out = tensor(shape=[2, 3], data=[7.0, 8.0, 9.0, 7.0, 8.0, 9.0])",
-        ),
+        expect: Expect::Value("out = tensor(shape=[2, 3], data=[7.0, 8.0, 9.0, 7.0, 8.0, 9.0])"),
     },
     // A literal claim keeps its literal rendering.
     Case {
@@ -259,7 +257,10 @@ fn check(case: &Case) -> Result<(), String> {
         }
         Expect::Value(line) => {
             for (lane, ok, output) in [("C", c_ok, &compiled), ("eval", eval_ok, &evaluated)] {
-                if !ok || !output.lines().any(|printed| printed == line) || output.contains("numeric trap:") {
+                if !ok
+                    || !output.lines().any(|printed| printed == line)
+                    || output.contains("numeric trap:")
+                {
                     return Err(format!(
                         "{}: {lane} must print `{line}`\n{}\n{output}",
                         case.name, case.source

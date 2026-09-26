@@ -10138,7 +10138,10 @@ fn restamped_extent_dag(neg_first: bool, earlier_overflow: bool) -> Dag {
     } else {
         let loaded_z = load(&mut dag, "z", named("m"));
         let x = load(&mut dag, "x", named("n"));
-        (dag.add_node(RiscOp::Neg, vec![x], named("m"), None), loaded_z)
+        (
+            dag.add_node(RiscOp::Neg, vec![x], named("m"), None),
+            loaded_z,
+        )
     };
     roots.push(dag.add_node(RiscOp::Add, vec![negated, loaded_z], named("m"), None));
     dag.set_roots(roots);
@@ -10147,11 +10150,20 @@ fn restamped_extent_dag(neg_first: bool, earlier_overflow: bool) -> Dag {
 
 fn restamped_extent_eval(dag: &Dag, x: &[f64], z: &[f64]) -> Result<Vec<f64>, String> {
     let mut inputs = chelis_unord::UnordMap::new();
-    inputs.insert("x".to_string(), TensorValue::from_vec(vec![x.len()], x.to_vec()));
-    inputs.insert("z".to_string(), TensorValue::from_vec(vec![z.len()], z.to_vec()));
+    inputs.insert(
+        "x".to_string(),
+        TensorValue::from_vec(vec![x.len()], x.to_vec()),
+    );
+    inputs.insert(
+        "z".to_string(),
+        TensorValue::from_vec(vec![z.len()], z.to_vec()),
+    );
     inputs.insert(
         "w".to_string(),
-        typed_value(typed_storage(Prim::Int64, chelis_types::RawTensor::Int(vec![i64::MIN]))),
+        typed_value(typed_storage(
+            Prim::Int64,
+            chelis_types::RawTensor::Int(vec![i64::MIN]),
+        )),
     );
     let values = eval_tensor(dag, &inputs)?;
     Ok(values[dag.roots().last().expect("sum root")].to_f64_lossy_vec())
@@ -10159,12 +10171,7 @@ fn restamped_extent_eval(dag: &Dag, x: &[f64], z: &[f64]) -> Result<Vec<f64>, St
 
 fn restamped_extent_c(dag: &Dag, function: &str, x: &[f32], z: &[f32]) -> String {
     let result = codegen(dag, function).expect("restamped extent codegen");
-    let slot = |name: &str| {
-        result
-            .input_labels
-            .iter()
-            .position(|label| label == name)
-    };
+    let slot = |name: &str| result.input_labels.iter().position(|label| label == name);
     let values = |data: &[f32]| {
         data.iter()
             .map(|value| format!("{value:?}f"))
@@ -10236,7 +10243,11 @@ fn issue_2512_a_restamped_axis_is_guarded_by_the_restamping_operation() {
         ] {
             let dag = restamped_extent_dag(neg_first, false);
             let expected = vec![
-                format!("extent `m`: claimed = {}, neg axis 0 = {}", z.len(), x.len()),
+                format!(
+                    "extent `m`: claimed = {}, neg axis 0 = {}",
+                    z.len(),
+                    x.len()
+                ),
                 "numeric trap: domain in neg at i64".to_string(),
             ];
             let function = if neg_first {
@@ -10246,7 +10257,11 @@ fn issue_2512_a_restamped_axis_is_guarded_by_the_restamping_operation() {
             };
             let compiled = restamped_extent_c(&dag, function, x, z);
             if compiled.contains("completed") || extent_trap_lines(&compiled) != expected {
-                failures.push(format!("C, neg first {neg_first}, x {}, z {}: {compiled}", x.len(), z.len()));
+                failures.push(format!(
+                    "C, neg first {neg_first}, x {}, z {}: {compiled}",
+                    x.len(),
+                    z.len()
+                ));
             }
             let widen = |data: &[f32]| data.iter().map(|v| f64::from(*v)).collect::<Vec<_>>();
             match restamped_extent_eval(&dag, &widen(x), &widen(z)) {
@@ -10273,7 +10288,10 @@ fn issue_2512_an_agreeing_restamped_axis_runs() {
             "restamped_extent_ok_z_first"
         };
         let compiled = restamped_extent_c(&dag, function, &[1.0, 2.0, 3.0], &[10.0, 20.0, 30.0]);
-        assert!(compiled.contains("9 18 27 completed"), "neg first {neg_first}: {compiled}");
+        assert!(
+            compiled.contains("9 18 27 completed"),
+            "neg first {neg_first}: {compiled}"
+        );
         assert_eq!(
             restamped_extent_eval(&dag, &[1.0, 2.0, 3.0], &[10.0, 20.0, 30.0]),
             Ok(vec![9.0, 18.0, 27.0]),
@@ -10289,11 +10307,19 @@ fn issue_2512_an_agreeing_restamped_axis_runs() {
 fn issue_2512_an_earlier_independent_trap_precedes_the_restamp_guard() {
     let dag = restamped_extent_dag(true, true);
     let expected = vec!["numeric trap: overflow in neg at i64".to_string()];
-    let compiled = restamped_extent_c(&dag, "restamped_extent_after_overflow", &[1.0, 2.0], &[1.0, 2.0, 3.0]);
+    let compiled = restamped_extent_c(
+        &dag,
+        "restamped_extent_after_overflow",
+        &[1.0, 2.0],
+        &[1.0, 2.0, 3.0],
+    );
     assert_eq!(extent_trap_lines(&compiled), expected, "{compiled}");
     let evaluated = restamped_extent_eval(&dag, &[1.0, 2.0], &[1.0, 2.0, 3.0]);
     assert_eq!(
-        evaluated.as_ref().err().map(|error| extent_trap_lines(error)),
+        evaluated
+            .as_ref()
+            .err()
+            .map(|error| extent_trap_lines(error)),
         Some(expected),
         "{evaluated:?}"
     );

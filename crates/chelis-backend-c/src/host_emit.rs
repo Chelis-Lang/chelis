@@ -2076,7 +2076,10 @@ impl HostResultClaim {
                 let HostAbiType::Tensor(param_ty) = &param.ty else {
                     return None;
                 };
-                param_ty.dims.iter().position(|dim| matches!(dim, DimInfo::Named(name, _) if name == binder))
+                param_ty
+                    .dims
+                    .iter()
+                    .position(|dim| matches!(dim, DimInfo::Named(name, _) if name == binder))
                     .map(|axis| (param.name.clone(), axis))
             })
         };
@@ -2085,9 +2088,11 @@ impl HostResultClaim {
             .iter()
             .enumerate()
             .filter(|(axis, _)| {
-                !function.helper_result_claim_axes.contains(&chelis_ir::dag::RtAxis::Lit(
-                    i32::try_from(*axis).expect("rank fits i32"),
-                ))
+                !function
+                    .helper_result_claim_axes
+                    .contains(&chelis_ir::dag::RtAxis::Lit(
+                        i32::try_from(*axis).expect("rank fits i32"),
+                    ))
             })
             .filter_map(|(axis, dim)| match dim {
                 DimInfo::Lit(required) => Some((axis, HostResultRequirement::Literal(*required))),
