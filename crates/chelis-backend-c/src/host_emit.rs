@@ -4020,33 +4020,48 @@ impl<'a> HostEmitter<'a> {
     /// returning. Emitting the step from the verified action sequence, rather
     /// than ahead of every block action, makes that order the schedule's
     /// (chelis#2508).
+    ///
+    /// The step's result is the accumulator in `target`. Any other value the
+    /// block defines is the callback's result, which the loop wrote into
+    /// `callback_result`: a named callback's call is an action of this block,
+    /// and binding its result to `target` made the copy `scan` pushes retain
+    /// the output list instead of the state (chelis#2578).
     fn emit_loop_step_block_actions(
         &mut self,
         site: &ProjectedHostSite<'a>,
         block: VerifiedBlockId,
         target: &str,
+        callback_result: &str,
         step: &str,
         emit_step: impl FnOnce(&mut Self) -> Result<(), Unsupported>,
     ) -> Result<(), Unsupported> {
         let mut emit_step = Some(emit_step);
         for action in &site.directives {
-            if let VerifiedHostAction::Operation(VerifiedHostOperation::Apply {
-                block: owner_block,
-                label,
-                ..
-            }) = action
-                && *owner_block == block
-                && *label == step
-            {
-                let emit = emit_step.take().ok_or_else(|| {
-                    invalid_abi_shape(
-                        format!("verified loop body repeats its `{step}` step"),
-                        "verified C host ownership emission",
-                    )
-                })?;
-                emit(self)?;
-            }
-            self.emit_expression_block_action(site, block, target, action)?;
+            let binding = match action {
+                VerifiedHostAction::Operation(VerifiedHostOperation::Apply {
+                    block: owner_block,
+                    label,
+                    ..
+                }) if *owner_block == block && *label == step => {
+                    let emit = emit_step.take().ok_or_else(|| {
+                        invalid_abi_shape(
+                            format!("verified loop body repeats its `{step}` step"),
+                            "verified C host ownership emission",
+                        )
+                    })?;
+                    emit(self)?;
+                    target
+                }
+                VerifiedHostAction::Operation(VerifiedHostOperation::Apply {
+                    dest: Some(_),
+                    ..
+                })
+                | VerifiedHostAction::Operation(VerifiedHostOperation::Define { .. }) => {
+                    callback_result
+                }
+                _ => target,
+            };
+            self.emit_expression_block_action(site, block, binding, action)?;
         }
         if emit_step.is_some() {
             return Err(invalid_abi_shape(
@@ -5167,9 +5182,22 @@ impl<'a> HostEmitter<'a> {
                 list,
                 ty,
             } => {
-                let (_, body_block) = Self::loop_blocks(site)?;
-                self.assign_scan(target, callback, init, list, ty, site, body_block)?;
-                self.emit_expression_site_excluding_block(site, target, Some(body_block))?;
+                let (preheader_block, body_block) = Self::loop_blocks(site)?;
+                self.assign_scan(
+                    target,
+                    callback,
+                    init,
+                    list,
+                    ty,
+                    site,
+                    preheader_block,
+                    body_block,
+                )?;
+                self.emit_expression_site_excluding_blocks(
+                    site,
+                    target,
+                    &[preheader_block, body_block],
+                )?;
                 return Ok(());
             }
             HostExprKind::Partition { callback, list, ty } => {
@@ -8551,13 +8579,20 @@ impl<'a> HostEmitter<'a> {
         self.bind_loop_item(site, &arg_var)?;
         self.emit_callback_assign(callback, std::slice::from_ref(&arg_var), &result_var)?;
         let pushed = self.box_value_expr(&result_var, &callback.ret_ty)?;
-        self.emit_loop_step_block_actions(site, body_block, target, "list_push", |this| {
-            this.lines.push(format!(
-                "{}chelis_list_push_moved({target}, {pushed});",
-                this.indent
-            ));
-            Ok(())
-        })?;
+        self.emit_loop_step_block_actions(
+            site,
+            body_block,
+            target,
+            &result_var,
+            "list_push",
+            |this| {
+                this.lines.push(format!(
+                    "{}chelis_list_push_moved({target}, {pushed});",
+                    this.indent
+                ));
+                Ok(())
+            },
+        )?;
         self.indent = previous;
         self.lines.push(format!("{}}}", self.indent));
         self.emit_edge_terminals(site.id, &exit_edge)?;
@@ -8613,17 +8648,24 @@ impl<'a> HostEmitter<'a> {
         self.emit_callback_assign(callback, std::slice::from_ref(&arg_var), &keep_var)?;
         // `filter_step` moves the item: a kept item moves into the result
         // and a rejected one is released here.
-        self.emit_loop_step_block_actions(site, body_block, target, "filter_step", |this| {
-            let indent = &this.indent;
-            this.lines.extend([
-                format!("{indent}if ({keep_var}) {{"),
-                format!("{indent}    chelis_list_push_moved({target}, {item_value});"),
-                format!("{indent}}} else {{"),
-                format!("{indent}    chelis_value_release({item_value});"),
-                format!("{indent}}}"),
-            ]);
-            Ok(())
-        })?;
+        self.emit_loop_step_block_actions(
+            site,
+            body_block,
+            target,
+            &keep_var,
+            "filter_step",
+            |this| {
+                let indent = &this.indent;
+                this.lines.extend([
+                    format!("{indent}if ({keep_var}) {{"),
+                    format!("{indent}    chelis_list_push_moved({target}, {item_value});"),
+                    format!("{indent}}} else {{"),
+                    format!("{indent}    chelis_value_release({item_value});"),
+                    format!("{indent}}}"),
+                ]);
+                Ok(())
+            },
+        )?;
         self.indent = previous;
         self.lines.push(format!("{}}}", self.indent));
         self.emit_edge_terminals(site.id, &exit_edge)?;
@@ -8733,6 +8775,17 @@ impl<'a> HostEmitter<'a> {
         Ok(())
     }
 
+    /// Emit `scan` with the same accumulator discipline as
+    /// [`Self::assign_fold`]: the preheader's actions run before the loop,
+    /// and the state the body receives is a per-iteration copy of the C
+    /// variable the callback writes the next state into.
+    ///
+    /// The preheader holds the copy that pays for a seed the caller still
+    /// owns, so emitting it after the loop let the first consuming operation
+    /// on `acc` mutate the caller's value in place (chelis#2579). The body's
+    /// state owner names `acc_arg` rather than `acc_var`, so a release or
+    /// retain the schedule places after the callback names the old state,
+    /// not the result that has already overwritten it (chelis#2580).
     #[allow(clippy::too_many_arguments)]
     fn assign_scan(
         &mut self,
@@ -8742,6 +8795,7 @@ impl<'a> HostEmitter<'a> {
         list: &HostExpr,
         ty: &HostType,
         site: &ProjectedHostSite<'a>,
+        preheader_block: VerifiedBlockId,
         body_block: VerifiedBlockId,
     ) -> Result<(), Unsupported> {
         let HostType::List(inner_ty) = ty else {
@@ -8750,38 +8804,22 @@ impl<'a> HostEmitter<'a> {
             return Ok(());
         };
         let acc_ty = inner_ty.as_ref().clone();
+        let (body_edge, exit_edge) = Self::loop_edges(site)?;
+        let state_and_output = |edge: &VerifiedEdgeView<'a>, name: &str| match edge.params() {
+            [state, output] => Ok((*state, *output)),
+            params => Err(invalid_abi_shape(
+                format!(
+                    "verified scan {name} edge carries {} parameters, expected state and output",
+                    params.len()
+                ),
+                "verified C host ownership emission",
+            )),
+        };
+        let (body_state, body_output) = state_and_output(&body_edge, "body")?;
+        let (exit_state, exit_output) = state_and_output(&exit_edge, "exit")?;
         let acc_var = self.next_temp("scan_acc");
         self.emit_expr_to_var(init, &acc_var, &acc_ty)?;
-        let (body_edge, exit_edge) = site
-            .directives
-            .iter()
-            .find_map(|action| match action {
-                VerifiedHostAction::Terminator(VerifiedHostTerminator::Loop {
-                    body_edge,
-                    exit_edge,
-                    ..
-                }) => Some((body_edge.clone(), exit_edge.clone())),
-                _ => None,
-            })
-            .ok_or_else(|| {
-                invalid_abi_shape(
-                    "verified scan site has no loop terminator".to_string(),
-                    "verified C host ownership emission",
-                )
-            })?;
-        for (edge, name) in [(&body_edge, "body"), (&exit_edge, "exit")] {
-            let [state, output] = edge.params() else {
-                return Err(invalid_abi_shape(
-                    format!(
-                        "verified scan {name} edge carries {} parameters, expected state and output",
-                        edge.params().len()
-                    ),
-                    "verified C host ownership emission",
-                ));
-            };
-            self.owner_vars.insert(state.id(), acc_var.clone());
-            self.owner_vars.insert(output.id(), target.to_string());
-        }
+        self.emit_expression_block_actions(site, preheader_block, target)?;
         let list_var = self.next_temp("scan_list");
         self.emit_expr_to_var(list, &list_var, &host_type(list))?;
         let len_var = self.next_temp("scan_len");
@@ -8799,12 +8837,6 @@ impl<'a> HostEmitter<'a> {
         ));
         let nested_indent = format!("{}    ", self.indent);
         let previous = std::mem::replace(&mut self.indent, nested_indent);
-        self.emit_edge_terminals(site.id, &body_edge)?;
-        let item_value = self.next_temp("scan_item_value");
-        self.lines.push(format!(
-            "{}chelis_value {} = chelis_list_index({}, __i);",
-            self.indent, item_value, list_var
-        ));
         let params = callback_params(callback);
         let acc_arg = self.next_temp("scan_acc_arg");
         self.lines.push(format!(
@@ -8820,6 +8852,28 @@ impl<'a> HostEmitter<'a> {
             result_origin_name(&acc_arg),
             result_origin_name(&acc_var)
         ));
+        self.owner_vars.insert(body_state.id(), acc_arg.clone());
+        self.owner_vars.insert(body_output.id(), target.to_string());
+        self.owner_vars.insert(exit_state.id(), acc_var.clone());
+        self.owner_vars.insert(exit_output.id(), target.to_string());
+        let body_state_dropped = body_edge.terminals().iter().any(|terminal| {
+            matches!(
+                terminal,
+                VerifiedTerminalView::Drop { owner, .. } if owner.id() == body_state.id()
+            )
+        });
+        self.emit_edge_terminals(site.id, &body_edge)?;
+        if body_state_dropped && let Some(released) = params[0].ty.c_released_value() {
+            // As in `assign_fold`: an inline callback still binds a C alias
+            // for a state the schedule proves dead on entry.
+            self.lines
+                .push(format!("{}{} = {released};", self.indent, acc_arg));
+        }
+        let item_value = self.next_temp("scan_item_value");
+        self.lines.push(format!(
+            "{}chelis_value {} = chelis_list_index({}, __i);",
+            self.indent, item_value, list_var
+        ));
         let item_arg = self.next_temp("scan_item");
         self.lines.push(format!(
             "{}{} {};",
@@ -8832,13 +8886,20 @@ impl<'a> HostEmitter<'a> {
         self.bind_loop_item(site, &item_arg)?;
         self.emit_callback_assign(callback, &[acc_arg, item_arg], &acc_var)?;
         let pushed = self.box_value_expr(&acc_var, &acc_ty)?;
-        self.emit_loop_step_block_actions(site, body_block, target, "list_push", |this| {
-            this.lines.push(format!(
-                "{}chelis_list_push_moved({target}, {pushed});",
-                this.indent
-            ));
-            Ok(())
-        })?;
+        self.emit_loop_step_block_actions(
+            site,
+            body_block,
+            target,
+            &acc_var,
+            "list_push",
+            |this| {
+                this.lines.push(format!(
+                    "{}chelis_list_push_moved({target}, {pushed});",
+                    this.indent
+                ));
+                Ok(())
+            },
+        )?;
         self.indent = previous;
         self.lines.push(format!("{}}}", self.indent));
         self.emit_edge_terminals(site.id, &exit_edge)?;
@@ -8933,17 +8994,24 @@ impl<'a> HostEmitter<'a> {
         self.declare_result_origin(&arg_var, &param.ty, Some("load"));
         self.bind_loop_item(site, &arg_var)?;
         self.emit_callback_assign(callback, std::slice::from_ref(&arg_var), &keep_var)?;
-        self.emit_loop_step_block_actions(site, body_block, target, "partition_step", |this| {
-            let indent = &this.indent;
-            this.lines.extend([
-                format!("{indent}if ({keep_var}) {{"),
-                format!("{indent}    chelis_list_push_moved({pass_var}, {item_value});"),
-                format!("{indent}}} else {{"),
-                format!("{indent}    chelis_list_push_moved({fail_var}, {item_value});"),
-                format!("{indent}}}"),
-            ]);
-            Ok(())
-        })?;
+        self.emit_loop_step_block_actions(
+            site,
+            body_block,
+            target,
+            &keep_var,
+            "partition_step",
+            |this| {
+                let indent = &this.indent;
+                this.lines.extend([
+                    format!("{indent}if ({keep_var}) {{"),
+                    format!("{indent}    chelis_list_push_moved({pass_var}, {item_value});"),
+                    format!("{indent}}} else {{"),
+                    format!("{indent}    chelis_list_push_moved({fail_var}, {item_value});"),
+                    format!("{indent}}}"),
+                ]);
+                Ok(())
+            },
+        )?;
         self.indent = previous;
         self.lines.push(format!("{}}}", self.indent));
         self.emit_edge_terminals(site.id, &exit_edge)?;
@@ -9020,13 +9088,20 @@ impl<'a> HostEmitter<'a> {
         self.declare_result_origin(&arg_var, &param.ty, Some("load"));
         self.bind_loop_item(site, &arg_var)?;
         self.emit_callback_assign(callback, std::slice::from_ref(&arg_var), &result_var)?;
-        self.emit_loop_step_block_actions(site, body_block, target, "list_extend", |this| {
-            this.lines.push(format!(
-                "{}chelis_list_extend_moved({target}, {result_var});",
-                this.indent
-            ));
-            Ok(())
-        })?;
+        self.emit_loop_step_block_actions(
+            site,
+            body_block,
+            target,
+            &result_var,
+            "list_extend",
+            |this| {
+                this.lines.push(format!(
+                    "{}chelis_list_extend_moved({target}, {result_var});",
+                    this.indent
+                ));
+                Ok(())
+            },
+        )?;
         self.indent = previous;
         self.lines.push(format!("{}}}", self.indent));
         self.emit_edge_terminals(site.id, &exit_edge)?;
