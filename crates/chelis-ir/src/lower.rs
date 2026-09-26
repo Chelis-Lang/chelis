@@ -10360,6 +10360,24 @@ impl<'program> LowerCtx<'program> {
                 if let Some(callable) = local_callables.get(&name) {
                     return Some(callable.clone());
                 }
+                // The innermost binding of the name wins (chelis#1949): a
+                // function-typed parameter is a callable, and a local value
+                // shadows a same-named top-level function, so it is no
+                // callable at all. The top level itself binds a function's
+                // lowered value under its name too, which is no shadow.
+                if fn_typed_params.contains(&name) {
+                    return Some(CallableExpr::Parameter { name });
+                }
+                if !declaration
+                    && let Some(local) = self.bindings.get(&name)
+                    && self
+                        .top_level
+                        .bindings
+                        .get(&name)
+                        .is_none_or(|top| top.flatten_nodes() != local.flatten_nodes())
+                {
+                    return None;
+                }
                 if let Some(body) = self.program_defs.get(&name) {
                     let mut callable = self.resolve_callable_expr_inner(body, visited, true)?;
                     if let CallableExpr::Plain(function) = &mut callable {
@@ -10373,9 +10391,6 @@ impl<'program> LowerCtx<'program> {
                         }
                     }
                     return Some(callable);
-                }
-                if fn_typed_params.contains(&name) {
-                    return Some(CallableExpr::Parameter { name });
                 }
                 None
             }
