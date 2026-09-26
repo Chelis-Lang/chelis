@@ -242,6 +242,34 @@ TYPED_NONNUMERIC_BACKEND_FINAL_FORMS = (
         "load-store-template",
         "CEmitter::emit_guarded_fail",
     ),
+    # chelis#2413 / spec/10 section 3.2: a node's activation is a Bool node,
+    # and a checking node reads it as the Bool stored bits it is, compared
+    # against zero: once for a rank-0 activation, once per row for a per-row
+    # one (`emit_activation_gate`, `open_element_loop`), and any row for a
+    # local extent claim's carrier (`emit_local_dim_guards_matching`). The
+    # same typed-nonnumeric final forms `emit_where` and `emit_guarded_fail`
+    # register, for the same reason: no numeric interpretation is placed on
+    # the activation.
+    (
+        "crates/chelis-backend-c/src/emit.rs",
+        "backend-element-spelling",
+        "CEmitter::emit_activation_gate",
+    ),
+    (
+        "crates/chelis-backend-c/src/emit.rs",
+        "load-store-template",
+        "CEmitter::emit_activation_gate",
+    ),
+    (
+        "crates/chelis-backend-c/src/emit.rs",
+        "backend-element-spelling",
+        "CEmitter::open_element_loop",
+    ),
+    (
+        "crates/chelis-backend-c/src/emit.rs",
+        "load-store-template",
+        "CEmitter::emit_local_dim_guards_matching",
+    ),
     (
         "crates/chelis-backend-hip/src/emit.rs",
         "backend-element-spelling",
