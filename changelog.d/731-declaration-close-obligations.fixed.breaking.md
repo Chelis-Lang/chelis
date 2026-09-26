@@ -53,7 +53,7 @@ the type they wait on.
 - Now accepted: recursive definitions with annotated parameters and an omitted
   result that read their own result's tuple or record fields or pass it to
   `take`; members with authored binders and an omitted result that were
-  rejected as polymorphic recursion, across two or three members, over
+  rejected as recursive calls at another instantiation, across two or three members, over
   named-dimension tensors and under `grad`; a literal pattern on a sibling's
   omitted result; and a `cast` of a sibling's omitted result to a bounded
   binder. Omitted types still generalize when the group completes.
@@ -61,7 +61,8 @@ the type they wait on.
   binders at other types, for example `f(y, x, n - 1)` inside
   `def f[a, b](x: a, y: b, n: i32) = ...`. It identifies two authored binders
   ([04-INF-6]), and the diagnostic names the repair: write the omitted types,
-  after which the call is polymorphic recursion. Some of these checked with
+  after which a call at another instantiation of the member's own binders is
+  admitted ([04-INF-2]). Some of these checked with
   score 1 before and failed in `eval`; others, such as a swapped `swap[a, b]`
   with its result omitted, checked and ran. A member whose every type is
   written is still referenced at its declared scheme.

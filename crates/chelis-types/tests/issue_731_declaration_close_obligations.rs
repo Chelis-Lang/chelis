@@ -336,8 +336,7 @@ fn verdict(source: &str) -> Vec<String> {
 
 /// The repair a rejection names when a recursive call reaches a member that
 /// omits a type at an instantiation other than its own.
-const POLYMORPHIC_RECURSION_REPAIR: &str =
-    "Write the omitted types to allow a call at another instantiation (polymorphic recursion)";
+const POLYMORPHIC_RECURSION_REPAIR: &str = "Write the omitted types to allow a call at another instantiation of its own binders ([04-INF-2]).";
 
 /// Suggestions of every diagnostic, on the typed ingress.
 fn suggestions(source: &str) -> Vec<String> {

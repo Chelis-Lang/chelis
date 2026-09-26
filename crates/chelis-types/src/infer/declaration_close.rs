@@ -100,8 +100,8 @@ impl AuthoredBinderContract {
                     "`{name}` omits a type in its signature, so every call to it inside its \
                      recursive group is typed at `{name}`'s own instantiation \
                      (spec/04-type-system.md §3.1.3 [04-INF-5], §3.1.1 [04-INF-2]). Write the \
-                     omitted types to allow a call at another instantiation (polymorphic \
-                     recursion)."
+                     omitted types to allow a call at another instantiation of its own \
+                     binders ([04-INF-2])."
                 ));
                 errors.push(error);
             }
