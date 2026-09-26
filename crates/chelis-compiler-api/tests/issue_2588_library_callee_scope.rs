@@ -6,8 +6,10 @@
 //! `scale`, so `total(x)` is `2x` wherever it is called. New code that binds a
 //! local, a parameter or its own top-level declaration under one of those
 //! names must not change that: the library's names are the library's.
-//! Before the fix a new-code local or parameter named `scale` replaced the
-//! library's value, and a local function named `helper` replaced its helper.
+//! These are disposition locks, not regression tests: each case already gave
+//! `2x` at the pre-fix base `d029224fd`, because the composed program names
+//! the library's declarations by their module path. They keep the scoping
+//! change from making a library body resolve new code's names.
 use std::collections::BTreeMap;
 
 use chelis_compiler_api::compiler::{check_in_context, prepare_eval_in_context};
