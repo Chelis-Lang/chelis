@@ -2380,6 +2380,30 @@ pub fn host_program_requires_host_backend(program: &ConcreteHostProgram) -> bool
     })
 }
 
+/// Whether the host program keeps an authored definition with a parameter
+/// the whole-program DAG entry has no input for: one `tensor_type_from_host_input`
+/// refuses (a string, data type, container, tuple or unit). `lower_host_program`
+/// gives such a definition its own host function (chelis#2522). A device
+/// target whose single DAG entry is selected instead drops that definition
+/// and its authored signature (chelis#2575), so such a program takes the
+/// device target's host backend. Callable parameters keep their own rules,
+/// as they do in `lower_host_program`.
+pub fn host_program_keeps_signature_outside_dag_entry(program: &ConcreteHostProgram) -> bool {
+    program
+        .functions
+        .iter()
+        .filter(|function| !function.is_monomorphized_specialization())
+        .flat_map(|function| &function.params)
+        .any(|param| match &param.ty {
+            ConcreteHostType::Tensor(_) | ConcreteHostType::Function(..) => false,
+            ConcreteHostType::Scalar(prim) => tensor_type_from_host_input(&HostTypeTerm::Scalar(
+                HostPrecisionTerm::Concrete(*prim),
+            ))
+            .is_none(),
+            _ => true,
+        })
+}
+
 fn host_expr_stays_on_tensor_path(
     expr: &ConcreteHostExpr,
     tensor_only_functions: &UnordSet<String>,

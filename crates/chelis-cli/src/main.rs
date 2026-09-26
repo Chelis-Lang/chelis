@@ -4093,8 +4093,14 @@ fn cmd_build(
                 .entries
                 .iter()
                 .any(|entry| entry.lane == chelis_types::types::Lane::Host);
+            // chelis#2575: the single DAG entry would drop a def whose
+            // parameter it cannot carry; the host backend keeps it, as C does.
+            let keeps_host_signature = compiled_host
+                .as_ref()
+                .is_some_and(chelis_ir::host::host_program_keeps_signature_outside_dag_entry);
             if (has_host_roots
                 || preferred_entry_is_host
+                || keeps_host_signature
                 || (dag.roots().is_empty()
                     && preferred_entry_dag.is_none()
                     && host_requires_host_backend))
@@ -4178,6 +4184,11 @@ fn cmd_build(
                 .as_ref()
                 .and_then(chelis_ir::host::preferred_tensor_entry_name)
                 .and_then(|name| chelis_ir::host::lower_named_tensor_entry_dag(checked, name));
+            // chelis#2575: as on HIP, a def whose parameter the DAG entry
+            // cannot carry keeps its authored signature on the host backend.
+            let keeps_host_signature = compiled_host
+                .as_ref()
+                .is_some_and(chelis_ir::host::host_program_keeps_signature_outside_dag_entry);
             let validated_host = if host_requires_host_backend {
                 if let Some(selected) = compiled_host.take() {
                     // The helper manifest is read before C payload selection
@@ -4201,8 +4212,7 @@ fn cmd_build(
             } else {
                 None
             };
-            if dag.roots().is_empty()
-                && preferred_entry_dag.is_none()
+            if (keeps_host_signature || (dag.roots().is_empty() && preferred_entry_dag.is_none()))
                 && host_requires_host_backend
                 && let Some(result) = validated_host
             {
@@ -4432,8 +4442,14 @@ fn cmd_build_deep(
                 .entries
                 .iter()
                 .any(|entry| entry.lane == chelis_types::types::Lane::Host);
+            // chelis#2575: the single DAG entry would drop a def whose
+            // parameter it cannot carry; the host backend keeps it, as C does.
+            let keeps_host_signature = compiled_host
+                .as_ref()
+                .is_some_and(chelis_ir::host::host_program_keeps_signature_outside_dag_entry);
             if (has_host_roots
                 || preferred_entry_is_host
+                || keeps_host_signature
                 || (dag.roots().is_empty()
                     && preferred_entry_dag.is_none()
                     && host_requires_host_backend))
@@ -4512,6 +4528,11 @@ fn cmd_build_deep(
                 .as_ref()
                 .and_then(chelis_ir::host::preferred_tensor_entry_name)
                 .and_then(|name| chelis_ir::host::lower_named_tensor_entry_dag(checked, name));
+            // chelis#2575: as on HIP, a def whose parameter the DAG entry
+            // cannot carry keeps its authored signature on the host backend.
+            let keeps_host_signature = compiled_host
+                .as_ref()
+                .is_some_and(chelis_ir::host::host_program_keeps_signature_outside_dag_entry);
             let validated_host = if host_requires_host_backend {
                 if let Some(selected) = compiled_host.take() {
                     // The helper manifest is read before C payload selection
@@ -4535,8 +4556,7 @@ fn cmd_build_deep(
             } else {
                 None
             };
-            if dag.roots().is_empty()
-                && preferred_entry_dag.is_none()
+            if (keeps_host_signature || (dag.roots().is_empty() && preferred_entry_dag.is_none()))
                 && host_requires_host_backend
                 && let Some(result) = validated_host
             {
