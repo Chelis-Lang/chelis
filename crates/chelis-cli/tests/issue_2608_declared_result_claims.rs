@@ -21,6 +21,8 @@ enum Expect {
     Trap(&'static str, &'static str),
     /// The exact line the program prints, with no trap.
     Value(&'static str),
+    /// One trap line with no extent context: an earlier independent trap.
+    TrapOnly(&'static str),
 }
 
 struct Case {
@@ -227,16 +229,6 @@ const CASES: &[Case] = &[
                  out = f(to_tensor([4.0, 5.0]))\n",
         expect: Expect::Value("out = tensor(shape=[2], data=[4.0, 5.0])"),
     },
-    Case {
-        name: "literal_pass_through_inlined_into_a_caller",
-        source: "def f(t0: tensor[*, f32]) -> tensor[2, f32] = {\n  y = t0\n  y\n}\n\
-                 def g(t: tensor[*, f32]) -> tensor[*, f32] = f(t)\n\
-                 out = g(to_tensor([4.0, 5.0, 6.0]))\n",
-        expect: Expect::Trap(
-            "extent `2`: claimed = 2, t axis 0 = 3",
-            "numeric trap: domain in load at i64",
-        ),
-    },
     // Untaken-arm negative for that guard: the callee never runs.
     Case {
         name: "literal_pass_through_in_an_untaken_arm",
@@ -244,6 +236,48 @@ const CASES: &[Case] = &[
                  def g(t: tensor[*, f32], b: bool) -> tensor[*, f32] = if b then f(t) else t\n\
                  out = g(to_tensor([4.0, 5.0, 6.0]), false)\n",
         expect: Expect::Value("out = tensor(shape=[3], data=[4.0, 5.0, 6.0])"),
+    },
+    // A callee inlined into another tensor kernel does not turn its
+    // pass-through claim into an entry guard of the caller: that guard would
+    // run in an untaken eager `where` arm and before earlier effects. Such a
+    // claim is still dropped, as on `7807ca4ff` (chelis#2636).
+    Case {
+        name: "inlined_block_callee_in_an_untaken_block_internal_arm",
+        source: "def f(t0: tensor[*, f32]) -> tensor[2, f32] = {\n  y = t0\n  y\n}\n\
+                 def g(u: tensor[2, f32], t: tensor[*, f32], b: bool) -> tensor[f32] = {\n  \
+                 s = if b then sum(f(t), 0i32) else sum(u, 0i32)\n  \
+                 mul(s, s)\n}\n\
+                 out = g(to_tensor([7.0, 1.0]), to_tensor([4.0, 5.0, 6.0]), false)\n",
+        expect: Expect::Value("out = 64.0"),
+    },
+    Case {
+        name: "inlined_direct_callee_in_an_untaken_block_internal_arm",
+        source: "def f(t0: tensor[*, f32]) -> tensor[2, f32] = t0\n\
+                 def g(u: tensor[2, f32], t: tensor[*, f32], b: bool) -> tensor[f32] = {\n  \
+                 s = if b then sum(f(t), 0i32) else sum(u, 0i32)\n  \
+                 mul(s, s)\n}\n\
+                 out = g(to_tensor([7.0, 1.0]), to_tensor([4.0, 5.0, 6.0]), false)\n",
+        expect: Expect::Value("out = 64.0"),
+    },
+    Case {
+        name: "inlined_block_callee_after_an_earlier_overflow",
+        source: "def f(t0: tensor[*, f32]) -> tensor[2, f32] = {\n  y = t0\n  y\n}\n\
+                 def g(u: tensor[2, i32], t: tensor[*, f32]) -> tensor[2, f32] = {\n  \
+                 z = add(u, u)\n  \
+                 w = f(t)\n  \
+                 add(w, cast(z, f32))\n}\n\
+                 out = g(to_tensor([2147483647i32, 1i32]), to_tensor([4.0, 5.0, 6.0]))\n",
+        expect: Expect::TrapOnly("numeric trap: overflow in add at i32"),
+    },
+    Case {
+        name: "inlined_direct_callee_after_an_earlier_overflow",
+        source: "def f(t0: tensor[*, f32]) -> tensor[2, f32] = t0\n\
+                 def g(u: tensor[2, i32], t: tensor[*, f32]) -> tensor[2, f32] = {\n  \
+                 z = add(u, u)\n  \
+                 w = f(t)\n  \
+                 add(w, cast(z, f32))\n}\n\
+                 out = g(to_tensor([2147483647i32, 1i32]), to_tensor([4.0, 5.0, 6.0]))\n",
+        expect: Expect::TrapOnly("numeric trap: overflow in add at i32"),
     },
     // A named claim in a tensor-lane body already unifies the wildcard with
     // the binder and checks it at entry; the host frame adds no second check.
@@ -284,6 +318,16 @@ fn check(case: &Case) -> Result<(), String> {
                 if ok || trap_lines(output) != [context, trap] || printed_a_binding(output) {
                     return Err(format!(
                         "{}: {lane} must trap with `{context}` / `{trap}` and print nothing after\n{}\n{output}",
+                        case.name, case.source
+                    ));
+                }
+            }
+        }
+        Expect::TrapOnly(trap) => {
+            for (lane, ok, output) in [("C", c_ok, &compiled), ("eval", eval_ok, &evaluated)] {
+                if ok || trap_lines(output) != [trap] || printed_a_binding(output) {
+                    return Err(format!(
+                        "{}: {lane} must trap with exactly `{trap}`\n{}\n{output}",
                         case.name, case.source
                     ));
                 }
