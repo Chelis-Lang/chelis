@@ -17,9 +17,8 @@ while `index`, `take` and `skip` keep the element's own producer (spec/04
 aborts with an internal provenance error, and a wrong extent traps as, for
 example, `numeric trap: domain in map at i64` on both lanes.
 
-In a hand-built tensor graph, an operation that forwards an input axis under
-another binder's name now checks the two extents itself and traps in that
-operation. See [#2608](https://github.com/Chelis-Lang/chelis/issues/2608),
+A tensor-graph operation that forwards an input axis under another binder's
+name now checks the two extents itself and traps in that operation. See [#2608](https://github.com/Chelis-Lang/chelis/issues/2608),
 [#1900](https://github.com/Chelis-Lang/chelis/issues/1900),
 [#2598](https://github.com/Chelis-Lang/chelis/issues/2598) and
 [#2512](https://github.com/Chelis-Lang/chelis/issues/2512).

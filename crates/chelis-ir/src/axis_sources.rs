@@ -1438,18 +1438,17 @@ fn abi_input_slot(dag: &Dag, load: NodeId) -> Option<usize> {
         .position(|node| matches!(&node.op, RiscOp::Load { name: other } if other.as_str() == name))
 }
 
-/// The claim stamped on one output axis, or `None` when the axis carries no
-/// referenceable claim.
-///
-/// An ANONYMOUS dimension is not a claim: nothing renders it, distinct
-/// runtime extents share the spelling, and grouping by it would identify
-/// unrelated axes, which is the string-matching defect this module removes.
 /// Whether a pass-through output axis restates its input's axis under a
 /// different claim: a same-shape `neg` from `[n]` stamped `[m]`
 /// (chelis#2512). Nothing in the interface relates the two extents; the
 /// equality comes from that operation alone, so spec/04 section 4.7 makes it
 /// a guard the operation owns, at its own source position. A forwarded axis
 /// whose input carries no claim, or the same claim, restates nothing.
+///
+/// Surf lowering reaches this: an inlined callee's result binder stamped on a
+/// compiler-inserted `Copy` over a runtime reshape axis, or an `expand`'s kept
+/// axis over a runtime stride extent, restates its input's claim. The class
+/// then gains a local guard at that operation.
 fn restamps_input_axis(dag: &Dag, node: NodeId, axis: usize) -> bool {
     let Some(owner) = dag.get(node) else {
         return false;
@@ -1477,6 +1476,12 @@ fn restamps_input_axis(dag: &Dag, node: NodeId, axis: usize) -> bool {
         .is_some_and(|input_claim| input_claim != claim)
 }
 
+/// The claim stamped on one output axis, or `None` when the axis carries no
+/// referenceable claim.
+///
+/// An ANONYMOUS dimension is not a claim: nothing renders it, distinct
+/// runtime extents share the spelling, and grouping by it would identify
+/// unrelated axes, which is the string-matching defect this module removes.
 fn axis_claim(dim: &DimInfo) -> Option<DimClaim> {
     match dim {
         DimInfo::Lit(value) => Some(DimClaim::Literal(*value)),

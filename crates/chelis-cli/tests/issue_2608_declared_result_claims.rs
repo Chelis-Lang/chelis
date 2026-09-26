@@ -279,6 +279,33 @@ const CASES: &[Case] = &[
                  out = g(to_tensor([2147483647i32, 1i32]), to_tensor([4.0, 5.0, 6.0]))\n",
         expect: Expect::TrapOnly("numeric trap: overflow in add at i32"),
     },
+    // Surf reaches the #2512 restamp path: an inlined callee's result binder
+    // stamped over a runtime reshape axis inside a block-internal `if`, which
+    // the kernel lowers to an eager `where`. The restamp site must not trap in
+    // the untaken arm; in the taken arm the reshape's own claim traps.
+    Case {
+        name: "restamped_reshape_in_an_untaken_block_internal_arm",
+        source: "def g[n](x: tensor[n, f32]) -> tensor[n, 2, f32] = reshape(x, [floor_div(shape(x, 0i32), 2i64), 2i64])\n\
+                 def f[n](x: tensor[n, f32], w: tensor[n, 2, f32], b: bool) -> tensor[n, 2, f32] = {\n  \
+                 r = if b then g(x) else w\n  \
+                 r\n}\n\
+                 out = f(to_tensor([1.0, 2.0, 3.0, 4.0]), to_tensor([[1.0, 1.0], [1.0, 1.0], [1.0, 1.0], [1.0, 1.0]]), false)\n",
+        expect: Expect::Value(
+            "out = tensor(shape=[4, 2], data=[1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0])",
+        ),
+    },
+    Case {
+        name: "restamped_reshape_in_a_taken_block_internal_arm",
+        source: "def g[n](x: tensor[n, f32]) -> tensor[n, 2, f32] = reshape(x, [floor_div(shape(x, 0i32), 2i64), 2i64])\n\
+                 def f[n](x: tensor[n, f32], w: tensor[n, 2, f32], b: bool) -> tensor[n, 2, f32] = {\n  \
+                 r = if b then g(x) else w\n  \
+                 r\n}\n\
+                 out = f(to_tensor([1.0, 2.0, 3.0, 4.0]), to_tensor([[1.0, 1.0], [1.0, 1.0], [1.0, 1.0], [1.0, 1.0]]), true)\n",
+        expect: Expect::Trap(
+            "extent `n`: claimed = 4, reshape axis 0 = 2",
+            "numeric trap: domain in reshape at i64",
+        ),
+    },
     // A named claim in a tensor-lane body already unifies the wildcard with
     // the binder and checks it at entry; the host frame adds no second check.
     Case {
@@ -350,13 +377,14 @@ fn check(case: &Case) -> Result<(), String> {
     Ok(())
 }
 
-// REGRESSION TEST. With the source reverted to `7807ca4ff`, 14 of these 28
+// REGRESSION TEST. With the source reverted to `7807ca4ff`, 14 of these 30
 // rows fail: every named trap row except `named_block_body_checks_at_entry` ran
 // to completion (`issue_1900_original` instead trapped on `main`'s literal
 // claim), and so did `literal_block_pass_through`. The four `inlined_*` rows
 // passed there and failed on this pull request's first head, where an inlined
 // callee's claim became an entry guard of its caller. `literal_identity`, the
-// entry row and the value rows lock the controls.
+// entry row, the value rows and the two `restamped_reshape_*` rows (identical
+// at base) lock the controls.
 #[test]
 fn declared_result_claims_are_checked_on_both_lanes() {
     let failures: Vec<String> = CASES.iter().filter_map(|case| check(case).err()).collect();
