@@ -2316,8 +2316,15 @@ impl<'a, 'sites> UnitLowerer<'a, 'sites> {
             .names
             .insert(names[0].clone(), Place::Owner(element));
         let depth = self.depth();
+        // The step keeps the item after the predicate reads it, so the
+        // predicate runs one scope deeper than the item: no use of the item
+        // there is its last, and a consuming use, such as a by-value call to a
+        // named definition, receives its own copy (chelis#2577).
+        self.push_scope();
+        let predicate_depth = self.depth();
         let predicate = self.lower_callback_body(callback, &[element])?;
-        let predicate = self.consume(predicate, Some(depth))?;
+        let predicate = self.consume(predicate, Some(predicate_depth))?;
+        self.exit_scope()?;
         let item = self.consume(Value::Named(element), Some(depth))?;
         let carried = self.consume(Value::Named(acc), Some(depth))?;
         let next = self.mint(ty, Placement::Value, OwnerOrigin::Owned, Vec::new())?;

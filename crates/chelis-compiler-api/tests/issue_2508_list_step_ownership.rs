@@ -16,6 +16,12 @@
 //! predicate's result origin before declaring it, and a `fold` whose unread
 //! accumulator has a struct C type was cleared with a pointer `NULL`.
 //!
+//! chelis#2579, chelis#2580 and chelis#2578 are `scan`'s accumulator: the copy
+//! paying for a seed the caller keeps ran after the loop, the body's state
+//! named the variable the callback's result had overwritten, and a named
+//! callback's result was bound to the output list. The seeded rows cross
+//! `fold` and `scan` with every seed owner and callback form.
+//!
 //! The corpus crosses every operation with every heap item kind. Oracle: the
 //! compiled program runs against the `ownership-ledger` runtime, every
 //! allocation must be finalized with no live owner left, and stdout must equal
@@ -46,6 +52,9 @@ struct ItemKind {
     measure: &'static str,
     /// A freshly allocated item used as an initial accumulator.
     seed: &'static str,
+    /// An expression of the item type that reads both an accumulator `acc`
+    /// and an item `x`.
+    combine: &'static str,
     /// Whether the checker treats a value of this type as linear: a closure
     /// that captures one consumes it, so a later read is rejected.
     linear: bool,
@@ -61,6 +70,7 @@ const KINDS: &[ItemKind] = &[
         predicate: "gt(string_len(x), 2i64)",
         measure: "string_len(x)",
         seed: "string_concat(\"in\", \"it\")",
+        combine: "string_concat(acc, x)",
         linear: false,
     },
     ItemKind {
@@ -72,6 +82,7 @@ const KINDS: &[ItemKind] = &[
         predicate: "gt(len(x), 1i64)",
         measure: "len(x)",
         seed: "[string_concat(\"in\", \"it\")]",
+        combine: "concat(acc, x)",
         linear: false,
     },
     ItemKind {
@@ -83,6 +94,7 @@ const KINDS: &[ItemKind] = &[
         predicate: "match x with {\n    | Named(s, k) => gt(k, 2i64)\n  }",
         measure: "match x with {\n    | Named(s, k) => add(string_len(s), k)\n  }",
         seed: "Named(string_concat(\"in\", \"it\"), 0i64)",
+        combine: "match acc with {\n    | Named(s, k) => match x with {\n        | Named(t, j) => Named(string_concat(s, t), add(k, j))\n      }\n  }",
         linear: false,
     },
     ItemKind {
@@ -94,6 +106,7 @@ const KINDS: &[ItemKind] = &[
         predicate: "gt(tensor_to_scalar(sum(x, 0)), 7.0)",
         measure: "len([x])",
         seed: "to_tensor([0.0, 0.0, 0.0])",
+        combine: "(acc + x)",
         linear: true,
     },
 ];
@@ -330,6 +343,202 @@ fn instantiate_outer(kind: &ItemKind, shape: &Shape, owner: OuterOwner) -> Strin
     }
 }
 
+/// A `fold` or `scan` accumulator callback. `{T}` and `{combine}` are
+/// replaced from the item kind; `{z}` names an owner the callback captures.
+struct SeededCallback {
+    name: &'static str,
+    /// A top-level definition the callback names, or empty for an inline one.
+    definition: &'static str,
+    callback: &'static str,
+}
+
+const SEEDED_CALLBACKS: &[SeededCallback] = &[
+    SeededCallback {
+        name: "inline_reads_acc",
+        definition: "",
+        callback: "fn (acc: {T}, x: {T}) -> {combine}",
+    },
+    SeededCallback {
+        name: "inline_returns_acc",
+        definition: "",
+        callback: "fn (acc: {T}, x: {T}) -> acc",
+    },
+    SeededCallback {
+        name: "inline_nested_returns_acc",
+        definition: "",
+        callback: "fn (acc: {T}, x: {T}) -> fold(fn (inner: {T}, y: {T}) -> acc, x, [x])",
+    },
+    SeededCallback {
+        name: "inline_returns_captured",
+        definition: "",
+        callback: "fn (acc: {T}, x: {T}) -> z",
+    },
+    SeededCallback {
+        name: "named_reads_acc",
+        definition: "def step(acc: {T}, x: {T}) -> {T} = {combine}\n",
+        callback: "step",
+    },
+    SeededCallback {
+        name: "named_returns_acc",
+        definition: "def keep(acc: {T}, x: {T}) -> {T} = acc\n",
+        callback: "keep",
+    },
+];
+
+/// Where a `fold` or `scan` seed comes from.
+#[derive(Clone, Copy, PartialEq)]
+enum SeedOwner {
+    /// A fresh expression written in the call.
+    Fresh,
+    /// A local of the calling function, not used after the loop.
+    Local,
+    /// A local of the calling function, read again after the loop.
+    LocalUsedAfter,
+    /// A parameter, so the caller's storage owns it.
+    Parameter,
+    /// A parameter, read again after the loop.
+    ParameterUsedAfter,
+    /// A top-level binding, printed after the calls.
+    Global,
+}
+
+const SEED_OWNERS: &[(&str, SeedOwner)] = &[
+    ("fresh", SeedOwner::Fresh),
+    ("local", SeedOwner::Local),
+    ("local_used_after", SeedOwner::LocalUsedAfter),
+    ("parameter", SeedOwner::Parameter),
+    ("parameter_used_after", SeedOwner::ParameterUsedAfter),
+    ("global", SeedOwner::Global),
+];
+
+fn instantiate_seeded(
+    kind: &ItemKind,
+    op: &str,
+    callback: &SeededCallback,
+    owner: SeedOwner,
+) -> String {
+    let fill = |text: &str| {
+        text.replace("{combine}", kind.combine)
+            .replace("{T}", kind.ty)
+    };
+    let ty = kind.ty;
+    let seed_name = match owner {
+        SeedOwner::Fresh => kind.seed,
+        SeedOwner::Global => "g0",
+        _ => "s0",
+    };
+    let call = format!(
+        "{op}({}, {seed_name}, {})",
+        fill(callback.callback),
+        kind.items
+    );
+    let result = if op == "scan" {
+        format!("List[{ty}]")
+    } else {
+        ty.to_string()
+    };
+    let (result, value) = match owner {
+        SeedOwner::LocalUsedAfter | SeedOwner::ParameterUsedAfter => {
+            (format!("({result}, {ty})"), format!("({call}, s0)"))
+        }
+        _ => (result, call),
+    };
+    let parameters = match owner {
+        SeedOwner::Parameter | SeedOwner::ParameterUsedAfter => format!("flag: bool, s0: {ty}"),
+        _ => "flag: bool".to_string(),
+    };
+    let mut locals = String::new();
+    if callback.name == "inline_returns_captured" {
+        locals.push_str(&format!("  z = {}\n", kind.seed));
+    }
+    if matches!(owner, SeedOwner::Local | SeedOwner::LocalUsedAfter) {
+        locals.push_str(&format!("  s0 = {}\n", kind.seed));
+    }
+    let (globals, arguments, after) = match owner {
+        SeedOwner::Parameter | SeedOwner::ParameterUsedAfter => (
+            String::new(),
+            (
+                format!("true, {}", kind.seed),
+                format!("false, {}", kind.seed),
+            ),
+            String::new(),
+        ),
+        SeedOwner::Global => (
+            format!("g0 = {}\n", kind.seed),
+            ("true".to_string(), "false".to_string()),
+            "c = g0\n".to_string(),
+        ),
+        _ => (
+            String::new(),
+            ("true".to_string(), "false".to_string()),
+            String::new(),
+        ),
+    };
+    // A block needs a binding before its tail, so a body with no locals is
+    // the bare expression.
+    let body = if locals.is_empty() {
+        format!("\n  {value}\n")
+    } else {
+        format!(" {{\n{locals}  {value}\n}}\n")
+    };
+    format!(
+        "{}{globals}{}def case({parameters}) -> {result} ={body}\
+         a = case({})\nb = case({})\n{after}",
+        kind.prelude,
+        fill(callback.definition),
+        arguments.0,
+        arguments.1,
+    )
+}
+
+/// Run every seeded `fold` and `scan` over one item kind.
+fn every_seeded_accumulator_over(kind_name: &str) {
+    let kind = KINDS
+        .iter()
+        .find(|kind| kind.name == kind_name)
+        .expect("declared item kind");
+    let cases: Vec<(String, String, Expectation)> = ["fold", "scan"]
+        .iter()
+        .flat_map(|op| {
+            SEEDED_CALLBACKS.iter().flat_map(move |callback| {
+                SEED_OWNERS.iter().map(move |(owner_name, owner)| {
+                    let binds_local =
+                        callback.name == "inline_returns_captured" || *owner == SeedOwner::Local;
+                    let returns_tuple = matches!(
+                        owner,
+                        SeedOwner::LocalUsedAfter | SeedOwner::ParameterUsedAfter
+                    );
+                    // chelis#2574: eval refuses a function that binds a local
+                    // and returns a `fold`'s tensor.
+                    let expectation =
+                        if kind.linear && *op == "fold" && binds_local && !returns_tuple {
+                            Expectation::EvalGap("reaches the host-only builtin `fold`")
+                        } else {
+                            Expectation::AgreesWithEval
+                        };
+                    (
+                        format!("{op}_{}_{owner_name}_{}", callback.name, kind.name),
+                        instantiate_seeded(kind, op, callback, *owner),
+                        expectation,
+                    )
+                })
+            })
+        })
+        .collect();
+    let failures: Vec<String> = cases
+        .iter()
+        .filter_map(|(name, source, expectation)| check_expecting(name, source, *expectation).err())
+        .collect();
+    assert!(
+        failures.is_empty(),
+        "{} of {} `{}` seeded-accumulator cases failed:\n\n{}",
+        failures.len(),
+        cases.len(),
+        kind.name,
+        failures.join("\n\n")
+    );
+}
+
 /// The evaluator's rejection of a program it must not run.
 fn eval_error(source: &str) -> String {
     let error = eval(EvalRequest {
@@ -525,6 +734,30 @@ fn every_list_step_over_an_outer_tensor_owner_runs_its_copy_first() {
     every_outer_owner_over("tensor");
 }
 
+// REGRESSION TESTS, chelis#2579, chelis#2580 and chelis#2578: a `scan`
+// accumulator seeded from an owner the caller keeps, or whose callback reads
+// or is a named definition, with `fold` beside it on every row.
+
+#[test]
+fn every_seeded_accumulator_over_string_items_leaves_its_seed_intact() {
+    every_seeded_accumulator_over("string");
+}
+
+#[test]
+fn every_seeded_accumulator_over_list_items_leaves_its_seed_intact() {
+    every_seeded_accumulator_over("list_of_string");
+}
+
+#[test]
+fn every_seeded_accumulator_over_adt_items_leaves_its_seed_intact() {
+    every_seeded_accumulator_over("adt_with_string");
+}
+
+#[test]
+fn every_seeded_accumulator_over_tensor_items_leaves_its_seed_intact() {
+    every_seeded_accumulator_over("tensor");
+}
+
 /// Run one named witness and fail with its report.
 fn witness(name: &str, source: &str) {
     if let Err(report) = check(name, source) {
@@ -572,6 +805,19 @@ fn flat_map_returning_a_global_list_leaves_the_global_intact() {
     );
 }
 
+/// REGRESSION TEST, chelis#2580 witness w03: the `scan` state is read by a
+/// nested `flat_map`, and the copy that pays for it retained the `flat_map`
+/// destination the callback had already written over the state's variable.
+#[test]
+fn scan_state_read_by_a_nested_flat_map_is_copied_before_it_is_replaced() {
+    witness(
+        "w03_scan_inner_flat_map_acc",
+        "def case(xs: List[string]) -> List[List[string]] =\n  \
+         scan(fn (acc: List[string], x: string) -> flat_map(fn (s: string) -> acc, [x, x]), [string_concat(\"s\", \"d\")], xs)\n\
+         a = case([string_concat(\"ab\", \"c\"), string_concat(\"x\", \"\")])\n",
+    );
+}
+
 /// Every declared kind has a test above, so a kind added to the table
 /// cannot go unrun.
 #[test]
@@ -580,7 +826,11 @@ fn every_item_kind_has_a_test() {
     for kind in KINDS {
         assert!(
             source.contains(&format!("every_shape_over(\"{}\");", kind.name))
-                && source.contains(&format!("every_outer_owner_over(\"{}\");", kind.name)),
+                && source.contains(&format!("every_outer_owner_over(\"{}\");", kind.name))
+                && source.contains(&format!(
+                    "every_seeded_accumulator_over(\"{}\");",
+                    kind.name
+                )),
             "item kind `{}` has no test",
             kind.name
         );
