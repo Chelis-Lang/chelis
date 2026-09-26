@@ -660,6 +660,15 @@ _NUMPY_WIRE_DTYPES: dict[tuple[str, int], str] = {
 
 
 def _tensor_value_payload(value: Any) -> dict[str, Any]:
+    if isinstance(value, Key):
+        # Bindings supply tensor parameters only; a scalar key has no tensor
+        # form of its own to guess at.
+        raise ChelisError(
+            "a scalar `chelis.Key` is not a binding: bindings supply tensor parameters "
+            "only. Make the key in the source with `key_from_seed(seed)`, or bind a key "
+            "tensor (the `TensorValue` of dtype `key` that `chelis.eval` returns for "
+            "`split_keys(k, n)`) to a `tensor[n, key]` parameter."
+        )
     if isinstance(value, TensorValue) and value.dtype == "key":
         # A key tensor has no NumPy form; it feeds back as the storage object
         # it was printed in.

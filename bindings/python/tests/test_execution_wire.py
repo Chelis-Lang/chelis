@@ -203,6 +203,15 @@ class KeyExecutionValueTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 chelis._tensor_value({"shape": [1], "data": storage})
 
+    def test_a_scalar_key_binding_says_what_to_pass_instead(self):
+        with self.assertRaises(chelis.ChelisError) as caught:
+            chelis._tensor_value_payload(chelis.Key("0000000000000007"))
+        message = str(caught.exception)
+        self.assertIn("scalar `chelis.Key` is not a binding", message)
+        self.assertIn("key_from_seed", message)
+        self.assertIn("tensor[n, key]", message)
+        self.assertNotIn("astype", message)
+
     def test_a_key_is_never_a_numpy_value(self):
         with self.assertRaises(ValueError):
             chelis.Key(7)
