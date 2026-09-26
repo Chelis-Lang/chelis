@@ -659,6 +659,187 @@ fn a_group_whose_types_grow_without_bound_reaches_the_round_bound() {
 }
 
 // ---------------------------------------------------------------------------
+// chelis#2626: `grad` decided on the group's types.
+
+/// Round 3's `o1`: `g` differentiates a lambda whose result is `f`'s, which
+/// only `f`'s body determines.
+const GRAD_OF_SIBLING: &str = "def f(x, n) = if eq(n, 0i32) then mul(x, x) else g(x, n - 1i32)\n\n\
+     def g(y: f32, n: i32) = if eq(n, 0) then y else {\n  d = grad(fn (z: f32) -> f(z, 0i32))\n  d(y)\n}\n\n\
+     def main() -> f32 = f(3.0f32, 2i32)\n";
+
+/// REGRESSION TEST (fails on `main`, `375598343` and `0db7e3c8e`, which
+/// rejected round 3's `o1` with `g` declared first: `grad` decided that `f`'s
+/// result, a variable until `f`'s body was inferred, was not a floating
+/// scalar). chelis#2626: `grad` waits for a type that only the group
+/// determines, so `o1` is accepted in every order and publishes its
+/// written-type twin's signatures; the twin is accepted in every order on
+/// every head (a lock). A result that is not a floating scalar is rejected in
+/// every order with `grad`'s own diagnostic naming the type, where those heads
+/// named a variable in one order.
+#[test]
+fn grad_decides_a_sibling_determined_output_on_the_groups_types() {
+    let written = GRAD_OF_SIBLING
+        .replace("def f(x, n) =", "def f(x: f32, n: i32) -> f32 =")
+        .replace("def g(y: f32, n: i32) =", "def g(y: f32, n: i32) -> f32 =");
+    for program in [GRAD_OF_SIBLING, written.as_str()] {
+        for order in declaration_orders(program) {
+            accepts(&order);
+            for member in ["f", "g"] {
+                assert_eq!(
+                    published(&order, member),
+                    "(f32, i32) -> f32",
+                    "`{member}`:\n{order}"
+                );
+            }
+        }
+    }
+    let tensor_result = "def f(x, n) = if eq(n, 0i32) then to_tensor([x, x]) else to_tensor([g(x, n - 1i32), x])\n\n\
+         def g(y: f32, n: i32) -> f32 = if eq(n, 0) then y else {\n  d = grad(fn (z: f32) -> f(z, 0i32))\n  d(y)\n}\n\n\
+         def main() -> f32 = g(3.0f32, 2i32)\n";
+    for order in declaration_orders(tensor_result) {
+        rejects_with(
+            &order,
+            &["grad requires a scalar floating output, got tensor"],
+        );
+    }
+}
+
+/// REGRESSION TEST (the acceptances fail on `main`, `375598343` and
+/// `0db7e3c8e` with `g` declared first, where `grad` decided that `f`'s first
+/// parameter, still a variable, was not differentiable, dropping it from the
+/// gradient or rejecting `wrt=x`, and on `main` the integer programs got a
+/// different diagnostic in each order). chelis#2626: a parameter of `f`'s
+/// provisional type is decided on the type the group gives it, in every
+/// order. When the group makes it an integer, the rule rejects `wrt=x`, and
+/// without `wrt` leaves the parameter out of the gradient, in every order.
+#[test]
+fn grad_differentiates_a_sibling_determined_parameter_in_every_order() {
+    for program in [
+        "def g(y: f32, n: i32) -> f32 = if eq(n, 0i32) then y else grad(fn (z) -> f(z, 0i32))(y)\n\n\
+         def f(x, n) = if eq(n, 0i32) then mul(x, mul(x, x)) else g(x, n - 1i32)\n\n\
+         def main() -> f32 = f(3.0f32, 2i32)\n",
+        "def g(y: f32, n: i32) -> f32 = if eq(n, 0i32) then y else grad(f, wrt=x)(y, 0i32)\n\n\
+         def f(x, n) = if eq(n, 0i32) then mul(x, mul(x, x)) else g(x, n - 1i32)\n\n\
+         def main() -> f32 = f(3.0f32, 2i32)\n",
+    ] {
+        for order in declaration_orders(program) {
+            accepts(&order);
+        }
+    }
+    for (program, fragment) in [
+        (
+            "def g(k: i32, n: i32) -> f32 = if eq(n, 0i32) then 1.0f32 else grad(f, wrt=x)(k, 0i32)\n\n\
+             def f(x, n) = if eq(n, 0i32) then 2.0f32 else g(x, n - 1i32)\n\n\
+             def main() -> f32 = f(3i32, 2i32)\n",
+            "grad `wrt` index 0 is not differentiable",
+        ),
+        (
+            "def g(k: i32, n: i32) -> f32 = if eq(n, 0i32) then 1.0f32 else grad(fn (z) -> f(z, 0i32))(k)\n\n\
+             def f(x, n) = if eq(n, 0i32) then 2.0f32 else g(x, n - 1i32)\n\n\
+             def main() -> f32 = f(3i32, 2i32)\n",
+            "type mismatch: f32 vs ()",
+        ),
+    ] {
+        for order in declaration_orders(program) {
+            rejects_with(&order, &[fragment]);
+        }
+    }
+}
+
+/// REGRESSION TEST (fails on `main`, `375598343` and `0db7e3c8e`, which
+/// rejected the `g`-first order). `w` is a lambda parameter whose type no
+/// sibling determines. The rule decides it where `grad` is inferred, as it
+/// always has: it is still a variable there, so it is not differentiated. In
+/// the `g`-first order the rule waits on `f`'s result and `w` has bound by the
+/// time it is decided, so the rule keeps the decision it made where it was
+/// inferred, and the outcome is the same in every order. This asserts only
+/// that; the decision itself is the pre-existing one for a parameter no
+/// sibling determines, which `chelis eval` does not follow (it returns both
+/// partial derivatives), and chelis#2626 does not change it.
+#[test]
+fn grad_decides_a_parameter_no_sibling_determines_where_it_is_inferred() {
+    let program = "def g(y: f32, n: i32) -> f32 = if eq(n, 0i32) then y else grad(fn (z, w) -> f(z, 0i32))(y, y)\n\n\
+         def f(x, n) = if eq(n, 0i32) then mul(x, mul(x, x)) else g(x, n - 1i32)\n\n\
+         def main() -> f32 = f(3.0f32, 2i32)\n";
+    let orders = declaration_orders(program);
+    let first = outcome(&orders[0]);
+    for order in &orders[1..] {
+        assert_eq!(outcome(order), first, "{order}");
+    }
+}
+
+/// REGRESSION TEST (the rejections fail on `main`, `375598343` and
+/// `0db7e3c8e`, which accepted both: `grad` of an operand whose type was a
+/// variable published a fresh variable that nothing ever checked).
+/// chelis#2626: the rule waits for the operand to bind and is decided then,
+/// so a function whose result is a tensor is rejected with `grad`'s own
+/// diagnostic, and an operand that never binds is rejected at the declaration
+/// boundary. A function with a floating scalar result is accepted (a lock).
+#[test]
+fn grad_of_an_unresolved_operand_is_decided_when_it_binds() {
+    let applied = |function: &str| {
+        format!("def main() -> f32 = {{\n  k = fn (g) -> grad(g)(3.0f32)\n  k({function})\n}}\n")
+    };
+    accepts(&applied("fn (x: f32) -> mul(x, mul(x, x))"));
+    rejects_with(
+        &applied("fn (x: f32) -> to_tensor([x, x])"),
+        &["grad requires a scalar floating output, got tensor"],
+    );
+    rejects_with(
+        "def h(g) = grad(g)\n\ndef main() -> f32 = 1.0f32\n",
+        &[
+            "`grad` admits only some operand types",
+            "never determined within `h`",
+        ],
+    );
+}
+
+/// LOCK (every head rejects these). chelis#2626 waits only on a type in the
+/// provisional type of a group member that writes no signature, which every
+/// reference shares, so a sibling inferred first can bind it. `grad` over any
+/// other variable is decided where it is inferred, as before, and the verdict
+/// does not depend on the declaration order: over a generic function
+/// instantiated at the call, inside a generic function, over a lambda whose
+/// parameter a later application determines, and over a group member whose
+/// signature omits only some types, whose reference takes a fresh instance of
+/// them wherever it appears. Waiting on those would accept `grad` of a
+/// generic function, which the compiled lanes do not implement: with
+/// `sq[a: Float]`, `grad(sq)(3.0f32)` gives 27 in `chelis eval` but
+/// `chelis build --target c` rejects it, where the same program with
+/// `sq(x: f32) -> f32` builds and prints 27. The last program's `ev` is
+/// generic once its group completes; its twin with `ev(x: f32, n: i32) -> f32`
+/// is accepted and builds.
+#[test]
+fn grad_waits_on_no_type_outside_a_provisional_group_type() {
+    for program in [
+        "def sq[a: Float](x: a) -> a = mul(x, mul(x, x))\n\ndef main() -> f32 = grad(sq)(3.0f32)\n",
+        "def k[a: Float](x: a) -> a = grad(fn (z: a) -> mul(z, mul(z, z)))(x)\n\n\
+         def main() -> f32 = k(3.0f32)\n",
+        "def main() -> f32 = grad(fn (x) -> mul(x, mul(x, x)))(3.0f32)\n",
+    ] {
+        rejects_with(program, &["grad requires a scalar floating output"]);
+    }
+    for (program, fragment) in [
+        (
+            "def g(y: f32, n: i32) -> f32 = if eq(n, 0i32) then y else grad(ev)(y, 0i32)\n\n\
+             def ev(x, n: i32) = if eq(n, 0i32) then x else {\n  u = g(1.0f32, 0i32)\n  x\n}\n\n\
+             def main() -> f32 = g(3.0f32, 1i32)\n",
+            "grad requires a scalar floating output",
+        ),
+        (
+            "def g(y: f32, n: i32) -> f32 = if eq(n, 0i32) then y else grad(fn (z) -> f(z, 0i32))(y)\n\n\
+             def f(x, n: i32) -> f32 = if eq(n, 0i32) then mul(x, mul(x, x)) else g(x, n - 1i32)\n\n\
+             def main() -> f32 = f(3.0f32, 2i32)\n",
+            "type mismatch: f32 vs ()",
+        ),
+    ] {
+        for order in declaration_orders(program) {
+            rejects_with(&order, &[fragment]);
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // The order-independence oracle.
 
 /// What the oracle compares across declaration orders: the verdict, each
@@ -1002,23 +1183,13 @@ fn group_fixtures() -> Vec<(String, String)> {
     fixtures
 }
 
-/// Fixtures whose outcome depends on the declaration order for a cause
-/// outside the recursive-group rule, each with that cause. The oracle
-/// asserts that each still diverges, so an entry must leave the list when
-/// its cause is repaired, and the list cannot hide a new divergence.
-const ORDER_DEPENDENT_ELSEWHERE: &[(&str, &str)] = &[(
-    "round3/o1",
-    "`grad` decides whether its function's output is a scalar float when it is \
-     inferred (`infer_grad`), before a group sibling's body has determined that \
-     output; `main` behaves the same",
-)];
-
 /// ORACLE (fails on `375598343` for round 3's `tw`, `bad3` and `nm3`, which it
-/// accepted in some declaration orders and rejected in others). Every
+/// accepted in some declaration orders and rejected in others, and on
+/// `0db7e3c8e` for round 3's `o1` and the chelis#2626 programs above, whose
+/// `grad` it decided before a sibling had determined its types). Every
 /// recursive-group fixture gets one outcome in every declaration order: the
 /// same verdict, the same diagnostic kinds citing the same atoms, and the same
-/// published signatures, on both checker ingresses. The exceptions in
-/// [`ORDER_DEPENDENT_ELSEWHERE`] must still diverge.
+/// published signatures, on both checker ingresses. No fixture is exempt.
 #[test]
 fn every_group_fixture_has_one_outcome_in_every_declaration_order() {
     let fixtures = group_fixtures();
@@ -1028,7 +1199,6 @@ fn every_group_fixture_has_one_outcome_in_every_declaration_order() {
         fixtures.len()
     );
     let mut divergent = Vec::new();
-    let mut exempt = Vec::new();
     let mut reordered = 0;
     for (name, program) in &fixtures {
         let orders = reorderings(program);
@@ -1042,28 +1212,13 @@ fn every_group_fixture_has_one_outcome_in_every_declaration_order() {
             .iter()
             .map(|order| (order, outcome(order)))
             .find(|(_, other)| *other != first);
-        if ORDER_DEPENDENT_ELSEWHERE
-            .iter()
-            .any(|(exception, _)| exception == name)
-        {
-            assert!(
-                divergence.is_some(),
-                "`{name}` no longer depends on the declaration order: remove it from \
-                 ORDER_DEPENDENT_ELSEWHERE"
-            );
-            exempt.push(name.as_str());
-        } else if let Some((order, other)) = divergence {
+        if let Some((order, other)) = divergence {
             divergent.push(format!(
                 "`{name}`:\n{}\n  {first:?}\nversus\n{order}\n  {other:?}",
                 orders[0]
             ));
         }
     }
-    assert_eq!(
-        exempt.len(),
-        ORDER_DEPENDENT_ELSEWHERE.len(),
-        "every exception names a fixture the oracle found"
-    );
     // A self-recursive fixture has one order; the oracle's force is in the
     // groups of two or more members.
     assert!(

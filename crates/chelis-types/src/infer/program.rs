@@ -558,6 +558,12 @@ pub(super) fn infer_program_with_product_in_session(
         } else {
             UnordMap::new()
         };
+        product.record_group_provisional_types(
+            provisional_types
+                .to_sorted()
+                .into_iter()
+                .map(|(_, ty)| ty.clone()),
+        );
         // spec/04 §3.1.1: recursive-instantiation validation remains the
         // function-plan projection. A mixed reference cycle alone must not
         // activate it.
@@ -1623,6 +1629,12 @@ pub(super) fn infer_ir_program_with_state(
         } else {
             UnordMap::new()
         };
+        product.record_group_provisional_types(
+            provisional_types
+                .to_sorted()
+                .into_iter()
+                .map(|(_, ty)| ty.clone()),
+        );
         // spec/04 §3.1.1: recursive-instantiation validation remains the
         // function-plan projection. A mixed reference cycle alone must not
         // activate it.

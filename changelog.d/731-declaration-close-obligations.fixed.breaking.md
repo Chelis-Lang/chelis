@@ -39,6 +39,12 @@ these checked with score 1:
   a returned closure whose parameter only the declared type fixes
   ([#2537](https://github.com/Chelis-Lang/chelis/issues/2537)). The binder's
   declared contract is now checked after the last such replay.
+- A `grad` of an operand whose type was still a variable, such as the lambda
+  parameter in `fn (g) -> grad(g)(3.0f32)`, published a result nothing checked
+  ([#2626](https://github.com/Chelis-Lang/chelis/issues/2626)). It is now
+  decided when the operand binds, so that lambda applied to a function with a
+  tensor result is rejected with `grad`'s own diagnostic, and
+  `def h(g) = grad(g)` is rejected at the declaration boundary.
 
 A recursive group whose members omit types is typed by [04-INF-2] and
 [04-INF-5] together ([#2590](https://github.com/Chelis-Lang/chelis/issues/2590)).
@@ -108,3 +114,26 @@ completes.
   Previously the check was dropped. So is `vmap(g)(k)` over a member's
   omitted tensor result `k`, as its direct form `vmap(g)(to_tensor(...))` and
   its written twin already were; `main` checked and ran it.
+- `grad` decided whether its function's result was a floating scalar, and
+  whether each parameter was differentiable, where it was inferred, while a
+  type that the group determines for a member writing no signature was still
+  a variable, so the verdict depended on the declaration order
+  ([#2626](https://github.com/Chelis-Lang/chelis/issues/2626)). It now waits
+  for that type and is decided on it, in every order. Now accepted in every
+  order: `d = grad(fn (z: f32) -> f(z, 0i32))` inside `g`, where `def f(x, n)`
+  returns `mul(x, x)`, which `main` checked with `f` declared first and
+  rejected with `g` first as "grad requires a scalar floating output", a false
+  rejection; `grad(f, wrt=x)` and `grad(fn (z) -> f(z, 0i32))` over such an
+  `f`'s parameter, which `main` rejected with `g` first; and
+  `grad(ev)(y, 0i32)` over a sibling `def ev(x, n)` whose parameter only that
+  call determines, which `main` rejected in every order. In every order, a
+  result that is not a floating scalar is rejected with `grad`'s own
+  diagnostic, and a parameter the group makes an integer is rejected under
+  `wrt` with it and left out of the gradient without `wrt`, where `main`
+  reported a variable's type in one order. `grad` over any other variable is still decided where it is
+  inferred, which gives one verdict in every order: over a generic function
+  instantiated at the call, inside a generic function, over a lambda parameter
+  a later application determines, and over a member whose signature omits only
+  some types, as in `def f(x, n: i32) -> f32`, whose every reference takes a
+  fresh instance of them. `chelis build --target c` does not implement `grad`
+  of a generic function.

@@ -1,11 +1,13 @@
 //! chelis#1836, chelis#2523: a tuple projection or record-field read whose
-//! target was still a type variable when it was inferred.
+//! target was still a type variable when it was inferred, and chelis#2626: a
+//! `grad` whose operand, output or differentiated parameter was.
 //!
 //! `infer_tuple_get` and `infer_access` cannot name the projected type before
 //! the target's constructor is known, and this type system has no
 //! row-polymorphic tuple or record to bind the target to, so the access
 //! publishes a fresh variable and records the derivation that ties it to the
-//! target. The derivation is an entry of the deferred shape ledger
+//! target. `infer_grad` cannot name the gradient's type, or decide whether the
+//! operand admits one, before those types are known, so it does the same. The derivation is an entry of the deferred shape ledger
 //! (`DeferredShapeRule::Derivation`), so the ledger's three guarantees hold for
 //! it as for a suspended call: it is decided once the target binds, a
 //! `let`-bound lambda carrying one stays monomorphic until its first
@@ -14,19 +16,44 @@
 
 use super::*;
 
-/// What a deferred access reads off its target.
+/// What a deferred derivation reads off its target.
 #[derive(Clone, Debug)]
 pub(super) enum TypeDerivation {
-    TupleProjection { index: usize },
-    RecordField { field: String },
+    TupleProjection {
+        index: usize,
+    },
+    RecordField {
+        field: String,
+    },
+    /// `grad` of the target, differentiating the parameters `wrt` selects, or
+    /// every parameter without it, except the `frozen` ones the call decided
+    /// were not differentiable ([`decide_grad`]). The projected type is the
+    /// type the call published: the gradient's function type.
+    Grad {
+        wrt: Option<Vec<usize>>,
+        frozen: Vec<usize>,
+    },
 }
 
 impl TypeDerivation {
-    /// The access as written, for a declaration-boundary diagnostic.
-    pub(super) fn spelling(&self) -> String {
+    /// The operation as written, for a declaration-boundary diagnostic.
+    pub(super) fn operation(&self) -> String {
         match self {
-            Self::TupleProjection { index } => format!(".{index}"),
-            Self::RecordField { field } => format!(".{field}"),
+            Self::TupleProjection { index } => format!("the access `.{index}`"),
+            Self::RecordField { field } => format!("the access `.{field}`"),
+            Self::Grad { .. } => "`grad`".to_string(),
+        }
+    }
+
+    /// The type a rejection's witness binds, so a route waiting on the
+    /// projected type inherits the rejection rather than reporting again
+    /// (chelis#731 §C3). A deferred `grad` published a function, and what
+    /// stands for the gradient is that function's result; its parameters are
+    /// the operand's own.
+    fn witness_slot(&self, projected: &Type, subst: &Subst) -> Type {
+        match (self, subst.apply(projected)) {
+            (Self::Grad { .. }, Type::Fn(_, result)) => *result,
+            _ => projected.clone(),
         }
     }
 }
@@ -42,7 +69,8 @@ impl TypeDerivation {
 /// and `infer_tuple_get` reject once the target is known: this runs on a target
 /// that was a variable at the access, and the ordinary access rule is not
 /// re-entered, so a wrong field name or a non-record binding must be reported
-/// from here or nowhere.
+/// from here or nowhere. A `grad` runs [`decide_grad`], the rule `infer_grad`
+/// runs, and reports its diagnostics.
 ///
 /// Round 1 P3-1 (chelis#1836): every failing shape BINDS `projected` to the
 /// reported error's witness. The eager arm gets this for free by returning
@@ -71,7 +99,8 @@ pub(super) fn resolve_type_derivation(
         // The target's own rejection was already reported; the access
         // inherits its witness and stays silent (§C3).
         (Type::Error(witness), _) => {
-            let _ = unify(projected, &propagate(witness), subst);
+            let slot = derivation.witness_slot(projected, subst);
+            let _ = unify(&slot, &propagate(witness), subst);
             return true;
         }
         (Type::Tuple(elements), TypeDerivation::TupleProjection { index }) => {
@@ -103,6 +132,31 @@ pub(super) fn resolve_type_derivation(
             ),
             vec![],
         ))),
+        // The rule `infer_grad` runs on an operand it knows, so a `grad`
+        // decided here and one decided at the call cannot disagree. What the
+        // call waited on has bound or its group has completed, so nothing is
+        // waited on again: a variable left is decided as the call decides one.
+        (Type::Fn(args, _), TypeDerivation::Grad { wrt, frozen }) => {
+            // An operand that was a variable at the call published a variable
+            // for the gradient, which applications since may have constrained.
+            // The gradient's parameters are the operand's, as they are for a
+            // call that published the function itself, so tie them first and
+            // decide on what those applications determined.
+            let gradient = Type::Fn(args.clone(), Box::new(vg.fresh_type()));
+            if let Err(error) = unify(projected, &gradient, subst) {
+                let witness = report(errors, error.into());
+                let slot = derivation.witness_slot(projected, subst);
+                let _ = unify(&slot, &witness, subst);
+                return true;
+            }
+            match subst.apply(&target) {
+                Type::Fn(args, ret) => {
+                    grad_function_type(&args, &ret, wrt.as_deref(), frozen, adt_reg)
+                }
+                other => Err(grad_expects_a_function(&other)),
+            }
+        }
+        (other, TypeDerivation::Grad { .. }) => Err(grad_expects_a_function(other)),
     };
     match resolved {
         Ok(ty) => {
@@ -112,7 +166,8 @@ pub(super) fn resolve_type_derivation(
         }
         Err(error) => {
             let witness = report(errors, *error);
-            let _ = unify(projected, &witness, subst);
+            let slot = derivation.witness_slot(projected, subst);
+            let _ = unify(&slot, &witness, subst);
         }
     }
     true

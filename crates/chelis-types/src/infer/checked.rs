@@ -106,6 +106,11 @@ pub(super) struct InferenceProduct {
     /// (`group_link::link_group_references`).
     group_references: Vec<GroupReference>,
     group_member_types: Vec<(String, Type)>,
+    /// chelis#2626: the provisional monomorphic type of each member of the
+    /// recursive group being inferred whose declaration writes no signature.
+    /// Every reference shares it, so a sibling inferred earlier can determine
+    /// it. Dropped when the group completes.
+    group_provisional_types: Vec<Type>,
 }
 
 struct InferredAdmissionContract {
@@ -396,9 +401,49 @@ impl InferenceProduct {
         self.group_member_types.push((name.to_string(), ty));
     }
 
+    /// chelis#2626: the provisional types of the members of the recursive
+    /// group about to be inferred that write no signature.
+    pub(super) fn record_group_provisional_types(&mut self, types: impl IntoIterator<Item = Type>) {
+        self.group_provisional_types.extend(types);
+    }
+
+    /// chelis#2626: whether `ty` is a type variable of the provisional type of
+    /// a member of the recursive group being inferred that writes no
+    /// signature. Every reference to such a member shares that type, so
+    /// whichever member is inferred first can bind it, and a member's body
+    /// sees it bound or not depending on the order the group is written in. A
+    /// rule that cannot be decided on such a variable waits for it rather than
+    /// deciding on whatever that order has reached ([04-INF-5]).
+    ///
+    /// A reference to a member whose signature omits only some types takes a
+    /// fresh instance of them (chelis#2590), which is a variable wherever the
+    /// reference appears, in every order, so a rule decided on it is decided
+    /// the same way in every order. Waiting on it instead would let the
+    /// caller's own use of the reference choose the instance, which is how a
+    /// generic function is instantiated.
+    pub(super) fn awaits_group_completion(&self, ty: &Type, subst: &Subst) -> bool {
+        let Type::Var(var) = subst.apply(ty) else {
+            return false;
+        };
+        self.group_provisional_types.iter().any(|provisional| {
+            // `Subst::apply` resolves a binding as it was recorded, so repeat
+            // it until nothing changes, as `group_link::resolved` does.
+            let mut current = subst.apply(provisional);
+            loop {
+                let next = subst.apply(&current);
+                if next == current {
+                    break;
+                }
+                current = next;
+            }
+            crate::env::free_tvars(&current).contains(&var)
+        })
+    }
+
     /// The component's in-group references and member types, taken for its
     /// completion.
     pub(super) fn take_group_links(&mut self) -> (Vec<GroupReference>, Vec<(String, Type)>) {
+        self.group_provisional_types.clear();
         (
             std::mem::take(&mut self.group_references),
             std::mem::take(&mut self.group_member_types),
@@ -1238,6 +1283,27 @@ impl InferenceProduct {
                     continue;
                 }
                 DeferredShapeRule::Derivation(ref derivation) => {
+                    // chelis#2626: a `grad` waits only on types its recursive
+                    // group determines, and the group is complete here, so it
+                    // is decided on the types the group left, as the call
+                    // decides them. Replaying it at every instantiation of a
+                    // variable left would admit `grad` of a generic function,
+                    // which the compiled lanes do not implement. Only an
+                    // operand that is still a variable goes to the boundary's
+                    // instantiations, where it is rejected.
+                    if matches!(derivation, TypeDerivation::Grad { .. })
+                        && resolve_type_derivation(
+                            derivation,
+                            &check.arg_tys[0],
+                            &check.result_ty,
+                            vg,
+                            subst,
+                            adt_reg,
+                            errors,
+                        )
+                    {
+                        continue;
+                    }
                     decide_at_boundary(
                         BoundaryObligation::Derivation(derivation),
                         &check.arg_tys,

@@ -981,8 +981,7 @@
       "function": "infer_grad",
       "ordinal": 1,
       "pattern": "Type::Var(_)",
-      "disposition": "constrains_the_variable",
-      "reason": "publishes a fresh variable that commits to nothing, which is what the checker does with an unresolved input elsewhere; chelis#874 R4 / [04-TOT-1] documents the arm"
+      "disposition": "deferred"
     },
     {
       "file": "group_link.rs",

@@ -267,7 +267,7 @@ impl BoundaryObligation<'_> {
     fn operation(&self) -> String {
         match self {
             Self::Call(call) => format!("`{}`", call.func_name),
-            Self::Derivation(derivation) => format!("the access `{}`", derivation.spelling()),
+            Self::Derivation(derivation) => derivation.operation(),
         }
     }
 }
