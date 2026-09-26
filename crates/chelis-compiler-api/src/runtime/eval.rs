@@ -1804,9 +1804,9 @@ impl<'a> EvalContext<'a> {
                     };
                     producer.filter(|producer| producer.matches_value(&value))
                 }
-                // spec/04 section 4.7: a Container operation produces every
-                // tensor held in the aggregate it returns.
-                _ if chelis_ir::host::produces_container_result(name)
+                // spec/04 section 4.7: a builtin produces every tensor held in
+                // the aggregate it returns.
+                _ if chelis_ir::host::produces_its_result(name)
                     && !matches!(value, RuntimeValue::Tensor(_)) =>
                 {
                     Some(ResultProducer::Uniform(name.to_string()))

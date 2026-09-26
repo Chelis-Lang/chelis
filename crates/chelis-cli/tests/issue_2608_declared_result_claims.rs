@@ -369,8 +369,8 @@ fn declared_result_claims_are_checked_on_both_lanes() {
     );
 }
 
-/// chelis#2598, spec/04 section 4.7: a tensor a Container operation returns,
-/// or holds in its aggregate result, has that operation as its producer. Each
+/// chelis#2598, spec/04 section 4.7: a tensor a builtin returns, or holds in
+/// its aggregate result, has that builtin as its producer. Each
 /// shape returns a three-element tensor, so `{n}` = 3 agrees and `{n}` = 2
 /// traps.
 struct Combinator {
@@ -539,6 +539,23 @@ const COMBINATOR_CASES: &[Case] = &[
             "numeric trap: domain in map at i64",
         ),
     },
+    // `split` is a builtin outside the Container domain; it produces the
+    // slices in the List it returns like every non-projecting builtin.
+    Case {
+        name: "split_result_projected_by_index",
+        source: "def f(t0: tensor[*, f32]) -> tensor[3, f32] = index(split(t0, 0i32, [2i64, 2i64]), 0i64)\n\
+                 a = f(to_tensor([1.0, 2.0, 3.0, 4.0]))\n",
+        expect: Expect::Trap(
+            "extent `3`: claimed = 3, split axis 0 = 2",
+            "numeric trap: domain in split at i64",
+        ),
+    },
+    Case {
+        name: "split_result_projected_by_index_agrees",
+        source: "def f(t0: tensor[*, f32]) -> tensor[2, f32] = index(split(t0, 0i32, [2i64, 2i64]), 0i64)\n\
+                 a = f(to_tensor([1.0, 2.0, 3.0, 4.0]))\n",
+        expect: Expect::Value("a = tensor(shape=[2], data=[1.0, 2.0])"),
+    },
     // The selections `take` and `skip` project: the element keeps its own
     // producer, here the interface `load`.
     Case {
@@ -614,7 +631,7 @@ fn check_combinator(shape: &Combinator) -> Result<(), String> {
     Ok(())
 }
 
-// REGRESSION TEST. With the source reverted to `7807ca4ff`, 22 of these 24
+// REGRESSION TEST. With the source reverted to `7807ca4ff`, 24 of these 26
 // fail: every mismatch ended in an internal provenance error, an abort or
 // another primitive's name on at least one lane, and the agreeing tuple `fold`
 // and `take` programs failed. `skip_keeps_the_element_producer` and

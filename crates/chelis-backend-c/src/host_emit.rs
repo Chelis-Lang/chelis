@@ -5019,7 +5019,7 @@ impl<'a> HostEmitter<'a> {
             } => {
                 require_same_abi_type(ty, expr_ty, "builtin expression")?;
                 self.assign_builtin(target, name, args, ty, site, result_claims.as_deref())?;
-                if chelis_ir::host::produces_container_result(name) {
+                if chelis_ir::host::produces_its_result(name) {
                     self.stamp_combinator_result_origin(target, ty, name);
                 } else if !matches!(name.as_str(), "tuple-get" | "index") {
                     self.stamp_result_origin(target, ty, name);

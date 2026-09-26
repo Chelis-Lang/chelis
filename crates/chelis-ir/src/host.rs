@@ -1955,25 +1955,18 @@ pub struct HostExpr<T = HostTypeTerm> {
     pub merged_spans: Vec<String>,
 }
 
-/// The `Container` operations that return one contiguous part of their input
-/// selected by an `i64` index or count. They project rather than produce
-/// (spec/04 section 4.7), so a tensor they return keeps its producer.
-pub const CONTAINER_PROJECTIONS: &[&str] = &["index", "skip", "take"];
+/// The builtins that return one contiguous part of their input selected by
+/// an `i64` index or count. They project rather than produce (spec/04 section
+/// 4.7), so a tensor they return or hold keeps its producer.
+pub const BUILTIN_PROJECTIONS: &[&str] = &["index", "skip", "take"];
 
 /// Whether builtin `name` produces every tensor it returns, directly or held
-/// in its aggregate result (spec/04 section 4.7): every `Container`-domain
-/// operation of the semantic-identity registry except the projections. The
-/// set is derived from the builtin catalogue that the registry mirrors, so a
-/// new `Container` operation is covered without editing a list;
-/// `tests/container_result_producers.rs` reconciles it with the registry.
-pub fn produces_container_result(name: &str) -> bool {
-    !CONTAINER_PROJECTIONS.contains(&name)
-        && chelis_types::builtin_decl(name).is_some_and(|decl| {
-            decl.capability
-                .sibling_cases
-                .iter()
-                .any(|case| case.domain == chelis_types::BuiltinSemanticDomain::Container)
-        })
+/// at any depth in its aggregate result (spec/04 section 4.7): every builtin
+/// of the catalogue except the projections, so a new builtin is covered
+/// without editing a list. `tests/builtin_result_producers.rs` checks the
+/// projections against the spec's own statement of them.
+pub fn produces_its_result(name: &str) -> bool {
+    !BUILTIN_PROJECTIONS.contains(&name) && chelis_types::builtin_decl(name).is_some()
 }
 
 /// One invocation-local literal result obligation retained when host

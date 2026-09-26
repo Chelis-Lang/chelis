@@ -8,12 +8,12 @@ that declares it. A literal result claim on a block-bodied pass-through of a
 wildcard parameter, which both lanes also dropped, now traps at the parameter
 when the function runs as its own kernel.
 
-A tensor that a container operation returns, or holds in the list, tuple,
-option or dictionary it returns (`map`, `filter`, `partition`, `fold`, `scan`,
-`flat_map`, `flatten`, `zip`, `enumerate`, `append`, `concat`, `chunk`, and the
-`dict_*` operations), now has that operation as its producer for a
-declared-result check, while `index`, `take` and `skip` keep the element's own
-producer (spec/04 §4.7). A valid program that indexes such a result no longer
+A tensor that a builtin returns, or holds in the list, tuple, option or
+dictionary it returns (for example `map`, `filter`, `partition`, `fold`,
+`scan`, `flat_map`, `zip`, `append`, `chunk`, `split` and the `dict_*`
+operations), now has that builtin as its producer for a declared-result check,
+while `index`, `take` and `skip` keep the element's own producer (spec/04
+§4.7). A valid program that indexes such a result no longer
 aborts with an internal provenance error, and a wrong extent traps as, for
 example, `numeric trap: domain in map at i64` on both lanes.
 

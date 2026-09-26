@@ -1770,15 +1770,14 @@ guarded extent: for an interface guard, the
 (spec/05-risc-primitives.md §2.5); for a non-negativity guard, the owning
 movement operation; for a declared-result guard, the primitive that produced
 the returned value, whether the return expression names it directly or reaches
-it through a block tail, a binding, or a callee. A tensor that a
-`Container`-domain operation of the builtin semantic-identity registry
-(spec/05-risc-primitives.md §1.5) returns, directly or held at any depth in
-the aggregate it returns, has that operation as the producing primitive named
-by [04-NUM-9]'s `<op>` slot, whichever operand, element, callback result, seed
-or iteration supplied it. The exceptions are the operations that return one
-contiguous part of their input selected by an `i64` index or count, `index`,
-`take` and `skip` ([05-OP-54]): like a pattern, they project, and a tensor
-they return or hold keeps its producer. The guard's `<prim>` slot is `i64`,
+it through a block tail, a binding, or a callee. A tensor that a builtin
+returns, directly or held at any depth in the aggregate it returns, has that
+builtin as the producing primitive named by [04-NUM-9]'s `<op>` slot,
+whichever operand, element, callback result, seed or iteration supplied it.
+The exceptions are the builtins that return one contiguous part of their
+input selected by an `i64` index or count, `index`, `take` and `skip`
+([05-OP-54]): like a pattern, they project, and a tensor they return or hold
+keeps its producer. The guard's `<prim>` slot is `i64`,
 because the result this
 guard finalizes is an extent ([05-DIM-1]) and not a tensor element. The
 complete user-facing line is therefore
