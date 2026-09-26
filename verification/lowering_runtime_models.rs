@@ -547,6 +547,76 @@ pub fn grown_push(scope: &mut Scope, item: u32) -> LowerResult<usize> {
     Ok(length + 1)
 }
 
+/// `host.rs`'s `HostCx`: a shared and three mutable borrows.
+pub struct HostCx<'a> {
+    pub checked: &'a u32,
+    pub scope: &'a mut Scope,
+    pub runtime: &'a mut LoweringRuntime,
+    pub native: &'a mut u32,
+}
+
+/// `scoped` on the borrowing context, as `host.rs`'s `with_inlining`: enter
+/// pushes, exit pops. The body grows the stack on a tuple of the context's
+/// mutable borrows, then catches on the context's runtime.
+pub fn host_scopes(
+    checked: &u32,
+    scope: &mut Scope,
+    runtime: &mut LoweringRuntime,
+    native: &mut u32,
+    reject: bool,
+) -> Result<usize, LowerDiagnostic> {
+    let mut cx = HostCx { checked, scope, runtime, native };
+    scoped(
+        &mut cx,
+        |cx| {
+            cx.scope.items.push(*cx.checked);
+            cx.scope.items.len()
+        },
+        |cx, entered| {
+            cx.scope.exits += entered as u32;
+            cx.scope.items.pop();
+        },
+        |cx| {
+            let grown = grow_stack_if_needed(
+                &mut (&mut *cx.scope, &mut *cx.native),
+                64 * 1024,
+                4 * 1024 * 1024,
+                |(scope, native)| {
+                    **native += 1;
+                    scope.items.push(**native);
+                    scope.items.len()
+                },
+            );
+            cx.runtime.catch_lowering(move |runtime| {
+                if reject {
+                    Err(runtime.raise_unrepresentable())
+                } else {
+                    Ok(grown)
+                }
+            })
+        },
+    )
+}
+
+/// Not modeled: a scope on a borrow of a borrow, whose innermost region gives
+/// back through a staged backward function. Strict extraction rejects it.
+pub fn reject_nested_borrow_state(x: &mut u32) -> u32 {
+    let mut inner: &mut u32 = x;
+    let mut outer: &mut &mut u32 = &mut inner;
+    scoped(
+        &mut outer,
+        |o| {
+            ***o += 1;
+            7
+        },
+        |o, t| ***o += t,
+        |o| {
+            ***o *= 2;
+            ***o
+        },
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -687,6 +757,29 @@ mod tests {
             assert_eq!(profile_unissued_mark(runtime, 5, 8), 5);
             assert_eq!(profile_unissued_mark(runtime, 0, 8), 5);
         });
+    }
+
+    #[test]
+    fn host_scopes_thread_the_context() {
+        record_raises();
+        with_native_lowering_runtime(|runtime| {
+            let mut scope = Scope { items: vec![1], exits: 0 };
+            let mut native = 4;
+            assert_eq!(host_scopes(&7, &mut scope, runtime, &mut native, false), Ok(3));
+            assert_eq!((scope.items.clone(), scope.exits, native), (vec![1, 7], 2, 5));
+            assert_eq!(raises(), []);
+            assert_eq!(host_scopes(&9, &mut scope, runtime, &mut native, true), Err(diagnostic(1)));
+            assert_eq!((scope.items.clone(), scope.exits, native), (vec![1, 7, 9], 5, 6));
+            assert_eq!(raises(), [(false, true)]);
+            assert_eq!(observe::flags(), (false, false));
+        });
+    }
+
+    #[test]
+    fn nested_borrow_state_scope() {
+        let mut x = 3;
+        assert_eq!(reject_nested_borrow_state(&mut x), 8);
+        assert_eq!(x, 15);
     }
 
     #[test]

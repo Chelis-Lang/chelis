@@ -189,6 +189,37 @@ def caughtWithState (count : U32) (reject : Bool) (s : Runtime) :
     (match LoweringFailure.resume_at_boundary f with | .fail _ => true | _ => false) true
   IO.println "lowering_runtime_models: raise and catch scenarios agree"
 
+/-! The native observations of `host_scopes_thread_the_context`: `scoped` on a
+context holding mutable borrows, with a grown stack on a tuple of them. -/
+
+def hostScopes (checked : Nat) (s : chelis_ir.Scope) (native : Nat) (reject : Bool)
+    (rt : Runtime) :
+    Result ((core.result.Result Usize chelis_ir.lower.LowerDiagnostic × chelis_ir.Scope × U32) ×
+      Runtime) := do
+  let (r, s, rt, native) ←
+    chelis_ir.host_scopes ⟨BitVec.ofNat _ checked⟩ s rt ⟨BitVec.ofNat _ native⟩ reject
+  ok ((r, s, native), rt)
+
+/-- A result with its diagnostic reduced to `(code, fatal)`. -/
+def plainUsize : core.result.Result Usize chelis_ir.lower.LowerDiagnostic → Sum Nat (Nat × Bool)
+  | .Ok v => .inl v.val
+  | .Err d => .inr (d.code.val, d.fatal)
+
+#eval do
+  -- host_scopes_thread_the_context
+  let .ok ((r, s, native), raises, rt) := observe (hostScopes 7 (scope [1] 0) 4 false) (fresh)
+    | throw (IO.userError "host scope")
+  expect "host scope" (plainUsize r) (.inl 3)
+  expect "host scope state" (contents s, native.val) (([1, 7], 2), 5)
+  expect "host scope raises" raises []
+  let .ok ((r, s, native), raises, rt) := observe (hostScopes 9 s native.val true) rt
+    | throw (IO.userError "host scope rejection")
+  expect "host scope rejection" (plainUsize r) (.inr (1, false))
+  expect "host scope state after the rejection" (contents s, native.val) (([1, 7, 9], 5), 6)
+  expect "host scope raise flags" raises [(false, true)]
+  expect "no flag left set" (flags rt) (false, false)
+  IO.println "lowering_runtime_models: borrowing context scenarios agree"
+
 end RaiseCatch
 
 end LoweringRuntimeModelsChecks

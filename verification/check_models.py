@@ -107,7 +107,7 @@ MODEL_ROOTS = {
         "speculation_flags", "summary_probes", "preflight_frames", "host_inference_vars",
         "profile_declarations", "profile_unissued_mark", "scoped_push", "grown_push",
         "speculative_rejection", "rejection_after_inner_catch", "fatal_reraise",
-        "uncaught_rejection", "caught_with_state",
+        "uncaught_rejection", "caught_with_state", "host_scopes",
         "lowering_runtime::{chelis_ir::lowering_runtime::LoweringFailure}::resume_at_boundary",
     )),
     "associated_iterators": tuple(f"associated_iterators::{entry}" for entry in (
@@ -132,6 +132,15 @@ REJECTED_ROOTS = {
         "reject_generic_collector", "reject_zip_consumer",
         "reject_borrowed_map_hint", "reject_mapped_vec_zip", "reject_drop_vec_zip",
     )),
+    # A native-shell scope on a borrow of a borrow: its instance is not the model at
+    # an extended state (a staged backward function, see ModelStateABI.threaded_fun_body).
+    "lowering_runtime_models": ("chelis_ir::reject_nested_borrow_state",),
+}
+
+# The admission diagnostic that each fixture's rejected roots must report.
+REJECTED_DIAGNOSTICS = {
+    "collection_contracts": "E_UNSUPPORTED_COLLECTION",
+    "lowering_runtime_models": "Model at a borrowing state",
 }
 
 
@@ -269,11 +278,12 @@ def check_rejected_roots(name: str, source: Path, output: Path, root: Path) -> N
         result = subprocess.run(command, cwd=root, text=True, capture_output=True, check=False)
         print(result.stdout, end="")
         print(result.stderr, end="", file=sys.stderr)
+        diagnostic = REJECTED_DIAGNOSTICS[name]
         if result.returncode == 0:
-            raise RuntimeError(f"Unsupported collection was accepted: {entry}")
-        if "E_UNSUPPORTED_COLLECTION" not in result.stdout + result.stderr:
-            raise RuntimeError(f"Collection failed without its admission diagnostic: {entry}")
-        print(f"Collection admission: {entry} rejected")
+            raise RuntimeError(f"Unsupported root was accepted: {entry}")
+        if diagnostic not in result.stdout + result.stderr:
+            raise RuntimeError(f"{entry} failed without its admission diagnostic {diagnostic}")
+        print(f"Admission: {entry} rejected with {diagnostic}")
 
 
 def check_collection_contracts(root: Path) -> None:
