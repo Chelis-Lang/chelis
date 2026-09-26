@@ -76,7 +76,7 @@ fn is_fusible_elementwise(node: &DagNode) -> bool {
     // A checking operation under an activation substitutes operands its
     // checks accept where the activation is false (spec/10 section 3.2);
     // it stays its own kernel, where both lanes substitute them.
-    if node.owner.activation.is_some() && node.inactive_operand(0).is_some() {
+    if node.is_activation_gated() {
         return false;
     }
     // chelis#729 Phase 3 / chelis#699: the typed backends now have trapping

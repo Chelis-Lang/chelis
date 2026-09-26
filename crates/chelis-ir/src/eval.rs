@@ -22,8 +22,8 @@ use std::collections::BTreeSet;
 
 use crate::dag::{
     ComparisonKind, Dag, DagNode, DimExpr, DimInfo, ExtremaKind, ExtremaOperand, FusedInput,
-    FusedStepOp, LogicalKind, NodeId, ReduceWindowKind, RiscOp, RtAxis, RtDim, SHRINK_TO_END,
-    TensorType, bind_symbolic_dims,
+    FusedStepOp, LogicalKind, NodeId, ReduceWindowKind, RiscOp, RtAxis, RtDim, RuntimeCheck,
+    SHRINK_TO_END, TensorType, bind_symbolic_dims,
 };
 use chelis_types::dtype_semantics::{
     ArgReduceOp, CheckedCastPlan, CompareOp, ExtremaOperand as KernelExtremaOperand, FloatBinOp,
@@ -543,7 +543,7 @@ fn neutralize_inactive_operands(
     node: &DagNode,
     values: &mut UnordMap<NodeId, TensorValue>,
 ) -> Result<Vec<(NodeId, TensorValue)>, String> {
-    if node.owner.activation.is_none() || node.inactive_operand(0).is_none() {
+    if !node.is_activation_gated() || node.inactive_operand(0).is_none() {
         return Ok(Vec::new());
     }
     let activity = node_activity(node, values)?;
@@ -551,12 +551,13 @@ fn neutralize_inactive_operands(
         return Ok(Vec::new());
     }
     // One operand may fill several slots (`x / x`); the larger neutral
-    // (one) is accepted in every slot.
+    // (one) is accepted in every slot. A slot with no inactive value (a
+    // guarded abort's fallback) is read unchanged.
     let mut neutrals = Vec::<(NodeId, i64)>::new();
     for (slot, input) in node.inputs.iter().enumerate() {
-        let neutral = node
-            .inactive_operand(slot)
-            .expect("a checking operation names each operand's inactive value");
+        let Some(neutral) = node.inactive_operand(slot) else {
+            continue;
+        };
         match neutrals.iter_mut().find(|(id, _)| id == input) {
             Some((_, existing)) => *existing = (*existing).max(neutral),
             None => neutrals.push((*input, neutral)),
@@ -3547,7 +3548,15 @@ where
         {
             continue;
         }
-        if let Some(failure) = movement_failures.remove(&node.id) {
+        // spec/10 §3.2: a node whose activation holds in no row checks
+        // nothing. An operand-value check reads neutral operands below; an
+        // extent or bound check is skipped here, since one tensor's rows
+        // share their extents and it runs when any row is active.
+        let inactive = node.is_activation_gated()
+            && matches!(node_activity(node, &values)?, Activity::Inactive);
+        if let Some(failure) = movement_failures.remove(&node.id)
+            && !inactive
+        {
             return Err(failure);
         }
         // `spec/05-risc-primitives.md` section 2.4.1 makes every stride step
@@ -3557,7 +3566,9 @@ where
         // movement plan validates this same vector before emitting any local
         // extent site. Reuse the resolved vector for both the sites and the
         // operation so Eval has one signed-validation boundary as well.
-        let resolved_stride_steps = if let RiscOp::Stride { strides } = &node.op {
+        let resolved_stride_steps = if inactive {
+            None
+        } else if let RiscOp::Stride { strides } = &node.op {
             let input = values.get(&node.inputs[0]).ok_or_else(|| {
                 format!(
                     "stride at node {}: missing value for tensor operand",
@@ -3670,8 +3681,18 @@ where
         // spec/10 §3.2: a node under a false activation computes a value
         // from operands its checks accept, and checks nothing.
         let inactive_operands = neutralize_inactive_operands(node, &mut values)?;
+        let mut inactive_value = if inactive {
+            inactive_unchecked_value(node, &values, &runtime_dims)?
+        } else {
+            None
+        };
         let out_prim = node.output_type.precision;
         let value = match &node.op {
+            // An extent or bound check under a false activation: the value
+            // of its declared type, checked by nothing.
+            _ if inactive_value.is_some() => inactive_value
+                .take()
+                .expect("an inactive node's unchecked value"),
             RiscOp::Const { value } => {
                 // chelis#616: a Const whose symbolic dims resolve neither
                 // statically nor through the runtime bindings may carry a
@@ -4611,6 +4632,101 @@ where
     })
 }
 
+/// The value a node whose activation holds in no row produces without
+/// checking anything (spec/10 §3.2), for the classes that check an extent or
+/// a bound rather than an operand's values ([`RuntimeCheck`]); `None` for a
+/// node that computes from its operands as usual.
+///
+/// A movement node reads no bound and produces zeros of its declared type,
+/// each axis it declares itself taking its operand's extent, so an empty or
+/// out-of-range bound in an untaken arm allocates and traps on nothing. A
+/// reduction over an empty axis reduces to zeros. An extent claim compares
+/// nothing and produces the value it would have checked.
+fn inactive_unchecked_value(
+    node: &DagNode,
+    values: &UnordMap<NodeId, TensorValue>,
+    runtime_dims: &UnordMap<String, usize>,
+) -> Result<Option<TensorValue>, String> {
+    let operand = || {
+        node.inputs
+            .first()
+            .and_then(|input| values.get(input))
+            .ok_or_else(|| format!("node {} reads a missing operand", node.id.0))
+    };
+    let zeros = |shape: &[usize]| {
+        let len = admit_result("activation", shape, node.output_type.precision)?;
+        finalize_wide(
+            "activation",
+            node.output_type.precision,
+            shape.to_vec(),
+            vec![0.0; len],
+        )
+    };
+    match node.runtime_check() {
+        RuntimeCheck::MovementBounds => {
+            let operand = operand()?;
+            let shape = node
+                .output_type
+                .dims
+                .iter()
+                .enumerate()
+                .map(|(axis, dim)| match dim {
+                    DimInfo::Lit(extent) | DimInfo::Named(_, Some(extent)) => *extent,
+                    DimInfo::Named(name, None) => runtime_dims
+                        .get(name)
+                        .or_else(|| operand.shape.get(axis))
+                        .copied()
+                        .unwrap_or(0),
+                })
+                .collect::<Vec<_>>();
+            zeros(&shape).map(Some)
+        }
+        RuntimeCheck::EmptyAxis => {
+            let axis = match &node.op {
+                RiscOp::MaxReduce { axis }
+                | RiscOp::MinReduce { axis }
+                | RiscOp::Argmax { axis }
+                | RiscOp::Argmin { axis } => *axis,
+                _ => return Ok(None),
+            };
+            let operand = operand()?;
+            if operand.shape.get(axis) != Some(&0) {
+                return Ok(None);
+            }
+            let mut shape = operand.shape.clone();
+            shape.remove(axis);
+            zeros(&shape).map(Some)
+        }
+        RuntimeCheck::ExtentClaims => match &node.op {
+            RiscOp::ExtentWitness {
+                axis: RtAxis::Lit(axis),
+                ..
+            } => {
+                let extent = operand()?
+                    .shape
+                    .get(*axis as usize)
+                    .copied()
+                    .ok_or_else(|| format!("extent witness axis {axis} out of bounds"))?;
+                finalize_wide_int(
+                    "shape",
+                    node.output_type.precision,
+                    vec![],
+                    vec![i64::try_from(extent).map_err(|_| "extent exceeds i64")?],
+                )
+                .map(Some)
+            }
+            RiscOp::CheckedReshapeExtent { .. } => Ok(Some(operand()?.clone())),
+            _ => Ok(None),
+        },
+        RuntimeCheck::Nothing
+        | RuntimeCheck::OperandValues
+        | RuntimeCheck::MeanDivisor
+        | RuntimeCheck::Random
+        | RuntimeCheck::Abort
+        | RuntimeCheck::Ungated => Ok(None),
+    }
+}
+
 fn local_guard_is_active(
     claim: &crate::axis_sources::LocalGuardClaim,
     values: &UnordMap<NodeId, TensorValue>,
@@ -4624,10 +4740,14 @@ fn local_guard_is_active(
             activation.0
         )
     })?;
+    // An extent is shared by every row of its tensor, so under a per-row
+    // activation the guard runs when any row is active.
     match value.storage().to_raw() {
-        RawTensor::Int(values) if values.len() == 1 => Ok(values[0] != 0),
+        RawTensor::Int(values) if value.prim() == Prim::Bool => {
+            Ok(values.iter().any(|value| *value != 0))
+        }
         _ => Err(format!(
-            "local extent guard activation at node {} is not a scalar Bool",
+            "local extent guard activation at node {} is not a Bool",
             activation.0
         )),
     }

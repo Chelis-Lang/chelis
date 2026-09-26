@@ -102,8 +102,9 @@ struct ActivationGate {
     any: String,
     /// Whether output element `i`'s row is active, inside an element loop.
     element: String,
-    /// The value each operand slot takes where the element's row is inactive.
-    neutrals: Vec<i64>,
+    /// The value each operand slot takes where the element's row is inactive,
+    /// or `None` for a slot no check reads (a guarded abort's fallback).
+    neutrals: Vec<Option<i64>>,
 }
 
 #[derive(Debug, Clone)]
@@ -1294,10 +1295,7 @@ impl CEmitter {
             any,
             element,
             neutrals: (0..node.inputs.len())
-                .map(|slot| {
-                    node.inactive_operand(slot)
-                        .expect("a checking operation names each operand's inactive value")
-                })
+                .map(|slot| node.inactive_operand(slot))
                 .collect(),
         });
     }
@@ -1307,7 +1305,10 @@ impl CEmitter {
     /// checks accept where the element's row is inactive.
     fn gated(&self, elem: String, slot: usize) -> String {
         match &self.gate {
-            Some(gate) => format!("(({}) ? ({elem}) : {})", gate.element, gate.neutrals[slot]),
+            Some(gate) => match gate.neutrals.get(slot).copied().flatten() {
+                Some(neutral) => format!("(({}) ? ({elem}) : {neutral})", gate.element),
+                None => elem,
+            },
             None => elem,
         }
     }
