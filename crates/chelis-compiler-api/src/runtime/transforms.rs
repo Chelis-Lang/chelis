@@ -207,20 +207,20 @@ impl<'a> EvalContext<'a> {
             }
         };
         let fn_expr = transform_children.first();
-        // #1956: only the already-resolved direct declaration owns free
-        // values here. The fresh lowerer has no local callable for this
-        // operand; its exact program_defs entry is the original Fn, and
-        // captured-closure injection below cannot replace that entry.
+        // #1956, chelis#2588: for `grad` and `vmap` alike, only the
+        // already-resolved direct declaration owns free values here. The
+        // fresh lowerer has no local callable for this operand; its exact
+        // program_defs entry is the original Fn, and captured-closure
+        // injection below cannot replace that entry.
         // A present snapshot binding, alias or inline Fn stays on the old
         // lexical path. Do not use current caller bindings or the formals
         // helper to infer identity, and do not rewrite the target.
-        let declaration_captures = matches!(kind, TransformKind::Grad)
-            && fn_expr.and_then(var_name).is_some_and(|name| {
-                !captured_env.contains_key(name)
-                    && self.program.defs().get(name).is_some_and(|body| {
-                        tagged_expr_children(body).is_some_and(|(tag, _)| tag == DeepTag::Fn)
-                    })
-            });
+        let declaration_captures = fn_expr.and_then(var_name).is_some_and(|name| {
+            !captured_env.contains_key(name)
+                && self.program.defs().get(name).is_some_and(|body| {
+                    tagged_expr_children(body).is_some_and(|(tag, _)| tag == DeepTag::Fn)
+                })
+        });
         let grad_formals = match kind {
             TransformKind::Grad => {
                 resolve_transform_fn_for_formals(transform_expr, self.program.defs())
@@ -406,11 +406,15 @@ impl<'a> EvalContext<'a> {
         // parameter names and the body erases parameter types and the checked
         // function signature. A nested function-valued capture then reaches
         // lowering as rank zero and corrupts the backward DAG (chelis#676).
+        //
+        // A direct declaration target reads only declarations (chelis#2588):
+        // a caller's closure must not replace a function its body calls.
         let mut program_defs = self.program.defs().clone();
         for (name, value) in captured_env.to_sorted() {
             if let RuntimeValue::Closure {
                 checked_function, ..
             } = value
+                && !declaration_captures
             {
                 program_defs.insert(name.clone(), checked_function.as_ref().clone());
             }
@@ -684,6 +688,7 @@ impl<'a> EvalContext<'a> {
         }
         let load = |name: &str| prepared_inputs.get(name).cloned();
         let result = chelis_ir::eval::eval_tensor_roots_exact(&dag, &roots, load);
+        let result = self.mark_numeric_trap_from_trusted_result(result);
         let values = result.map_err(|err| {
             // [04-NUM-9]: a numeric trap renders byte-identically on every
             // surface, so it takes no prefix.

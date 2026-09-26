@@ -44,6 +44,11 @@ pub struct CompiledArtifactManifest {
     pub symbolic_dims: Vec<String>,
     pub source_path: String,
     pub source_hash: String,
+    /// Lowercase hexadecimal SHA-256 of the runtime archive the writing
+    /// extension carried and linked (spec/08 §2.1, spec/11 §1.4).
+    pub runtime_sha256: String,
+    /// Lowercase hexadecimal SHA-256 of the compiled library's bytes.
+    pub library_sha256: String,
 }
 
 #[derive(Deserialize)]
@@ -63,6 +68,8 @@ struct CompiledArtifactManifestFields {
     symbolic_dims: Vec<String>,
     source_path: String,
     source_hash: String,
+    runtime_sha256: String,
+    library_sha256: String,
 }
 
 impl<'de> Deserialize<'de> for CompiledArtifactManifest {
@@ -85,6 +92,8 @@ impl<'de> Deserialize<'de> for CompiledArtifactManifest {
             symbolic_dims: fields.symbolic_dims,
             source_path: fields.source_path,
             source_hash: fields.source_hash,
+            runtime_sha256: fields.runtime_sha256,
+            library_sha256: fields.library_sha256,
         })
     }
 }
@@ -100,7 +109,8 @@ mod tests {
             let expected = json!({
                 "abi_version": 2, "target": "c", "host_entry_name": "chelis_main",
                 "inputs": [{"name": "x", "dtype": "float32", "dims": [{"name": "n", "size": size}]}],
-                "outputs": [], "source_path": "model.chelis", "source_hash": "digest"
+                "outputs": [], "source_path": "model.chelis", "source_hash": "digest",
+                "runtime_sha256": "runtime-digest", "library_sha256": "library-digest"
             });
             let manifest: CompiledArtifactManifest =
                 serde_json::from_value(expected.clone()).unwrap();
@@ -134,8 +144,33 @@ mod tests {
             );
         }
         let error = serde_json::from_str::<CompiledArtifactManifest>(
-            r#"{"abi_version":2,"target":"c","host_entry_name":"main","inputs":[{"name":"x","dtype":"float32","dims":[{"name":"n","size":-1}]}],"outputs":[],"source_path":"","source_hash":""}"#
+            r#"{"abi_version":2,"target":"c","host_entry_name":"main","inputs":[{"name":"x","dtype":"float32","dims":[{"name":"n","size":-1}]}],"outputs":[],"source_path":"","source_hash":"","runtime_sha256":"","library_sha256":""}"#
         ).unwrap_err();
         assert!(error.to_string().contains("nonnegative"), "{error}");
+    }
+
+    /// spec/11 §1.4: the runtime and library digests have no missing-field
+    /// default. A version-2 manifest without either is refused after the ABI
+    /// version is admitted.
+    #[test]
+    fn artifact_manifest_requires_runtime_and_library_digests() {
+        let complete = json!({
+            "abi_version": 2, "target": "c", "host_entry_name": "chelis_main",
+            "inputs": [], "outputs": [], "source_path": "model.chelis", "source_hash": "digest",
+            "runtime_sha256": "runtime-digest", "library_sha256": "library-digest"
+        });
+        for field in ["runtime_sha256", "library_sha256"] {
+            let mut incomplete = complete.clone();
+            incomplete.as_object_mut().unwrap().remove(field);
+            let error = serde_json::from_value::<CompiledArtifactManifest>(incomplete).unwrap_err();
+            assert!(
+                error
+                    .to_string()
+                    .contains(&format!("missing field `{field}`")),
+                "{field}: {error}"
+            );
+        }
+        let manifest: CompiledArtifactManifest = serde_json::from_value(complete.clone()).unwrap();
+        assert_eq!(serde_json::to_value(manifest).unwrap(), complete);
     }
 }

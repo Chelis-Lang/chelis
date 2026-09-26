@@ -8,7 +8,6 @@ import hashlib
 import json
 import os
 from pathlib import Path
-import shutil
 import subprocess
 import sys
 import tempfile
@@ -245,42 +244,47 @@ def _source_packet(root):
     return {"head": head.decode().strip(), "common_source_sha256": source_identity(root), "files": records}
 
 
-def _runtime_artifact(root, target, records):
-    source = root / "crates/chelis-runtime/src/lib.rs"
-    _require(isinstance(records, list), "malformed Cargo runtime artifact stream")
-    rows = [row for row in records if isinstance(row, dict)
-            and row.get("reason") == "compiler-artifact"
-            and isinstance(row.get("target"), dict) and isinstance(row.get("profile"), dict)
-            and row.get("target", {}).get("name") == "chelis_runtime"
-            and row["target"].get("src_path") == str(source.resolve())
-            and row["target"].get("kind") == ["staticlib", "rlib"]
-            and row["target"].get("crate_types") == ["staticlib", "rlib"]
-            and row.get("profile", {}).get("test") is False]
-    _require(len(rows) == 1, "Cargo did not emit one exact current runtime artifact")
-    names = rows[0].get("filenames")
-    _require(isinstance(names, list) and all(isinstance(name, str) for name in names),
-             "malformed Cargo runtime filenames")
-    archives = [Path(name) for name in names if name.endswith(".a")]
-    _require(len(archives) == 1, "Cargo runtime staticlib is missing or ambiguous")
-    archive = _inside(archives[0], target)
-    _digest(archive)
-    return archive
+def _bound_runtime(library, fixture_kind):
+    """Return the runtime digest a retained manifest binds, after checking its bindings.
+
+    Every manifest names its library's bytes. A generated manifest also names
+    the archive its compilation staged beside it, as its staging receipt records.
+    """
+    manifest = _read_json(library.with_suffix(".json"))
+    _require(isinstance(manifest, dict) and all(isinstance(manifest.get(key), str)
+                                                for key in ("runtime_sha256", "library_sha256")),
+             "native loaded manifest omitted its runtime or library digest")
+    _require(manifest["library_sha256"] == _digest(library), "native loaded manifest names different library bytes")
+    if fixture_kind == "generated-c-current-runtime":
+        staged = _digest(library.parent / "libchelis_runtime.a")
+        receipt = _read_json(library.parent / "chelis_runtime.receipt.json")
+        _require(isinstance(receipt, dict) and receipt.get("archive") == "libchelis_runtime.a"
+                 and receipt.get("archive_sha256") == staged,
+                 "generated runtime receipt differs from its staged archive")
+        _require(manifest["runtime_sha256"] == staged, "generated manifest names a runtime it did not stage")
+    return manifest["runtime_sha256"]
 
 
-def _worker_environment(runtime, directory, group):
+def _carried_runtime(captures):
+    digests = {row["runtime_sha256"] for row in captures}
+    _require(len(digests) == 1, "native captures bind different carried runtimes")
+    return digests.pop()
+
+
+def _worker_environment(directory, group):
     environment = _managed_python_environment()
     for name in ("CHELIS_RUNTIME_DIR", "CHELIS_CC", "CHELIS_TEST_CC", "CHELIS_HIPCC",
                  "CHELIS_NATIVE_EXECUTION_CAPTURE", "CHELIS_NATIVE_EXECUTION_SUITE",
                  "CHELIS_DEVICE_OWNER_TEST_WORKER", "CHELIS_NATIVE_ENV_TEST_WORKER"):
         environment.pop(name, None)
-    environment.update(CHELIS_RUNTIME_DIR=str(runtime), CARGO_BUILD_JOBS="1",
+    environment.update(CARGO_BUILD_JOBS="1",
                        CHELIS_NATIVE_EXECUTION_CAPTURE=str(directory),
                        CHELIS_NATIVE_EXECUTION_SUITE=group.name,
                        CARGO_HUSKY_DONT_INSTALL_HOOKS="1")
     return environment
 
 
-def _validate_instance(directory, group, test, packet, runtime_digest):
+def _validate_instance(directory, group, test, packet):
     _require(isinstance(packet, dict) and set(packet) == {
         "schema", "suite", "test", "completed", "library", "files",
     }, "malformed native fixture completion")
@@ -330,6 +334,7 @@ def _validate_instance(directory, group, test, packet, runtime_digest):
     _require(isinstance(decoded, dict) and type(decoded.get("abi_version")) is int
              and decoded["abi_version"] == 2, "native loaded manifest is not callable ABI 2")
     _require(any(path.endswith(".c") for path in captured), "native fixture source was not retained")
+    runtime_digest = _bound_runtime(library, group.fixture_kind)
     if group.fixture_kind == "generated-c-current-runtime":
         _require(decoded.get("target") == "c" and any(path.endswith(".h") for path in captured),
                  "generated C source/header provenance is incomplete")
@@ -339,8 +344,6 @@ def _validate_instance(directory, group, test, packet, runtime_digest):
         authored = _inside(Path(decoded["source_path"]), directory)
         _require(authored.suffix == ".ch" and _digest(authored) == decoded["source_hash"],
                  "generated manifest differs from its actual authored source")
-        _require(_digest(snapshot / "libchelis_runtime.a") == runtime_digest,
-                 "generated library staged a different runtime archive")
     else:
         expected = "hip" if group.fixture_kind == "simulated-device-foreign-abi" else "c"
         _require(decoded.get("target") == expected, "foreign fixture target changed")
@@ -357,7 +360,8 @@ def _validate_instance(directory, group, test, packet, runtime_digest):
                  "foreign fixture unexpectedly links an archive")
     return {"directory": str(directory), "test": test, "fixture_kind": group.fixture_kind,
             "library": {"path": str(library), "sha256": _digest(library)},
-            "original_library": str(original), "completion_sha256": _digest(directory / "completion.json")
+            "original_library": str(original), "runtime_sha256": runtime_digest,
+            "completion_sha256": _digest(directory / "completion.json")
             if (directory / "completion.json").is_file() else None}
 
 
@@ -374,7 +378,7 @@ def _validate_process(path, root):
     return process
 
 
-def _validate_captures(directory, group, runtime_digest, binary):
+def _validate_captures(directory, group, binary):
     fixtures = directory / "fixtures"
     expected = {name: count for name, count in zip(group.selected, group.instances, strict=True) if count}
     actual = {path.name for path in fixtures.iterdir()} if fixtures.exists() else set()
@@ -386,8 +390,7 @@ def _validate_captures(directory, group, runtime_digest, binary):
         for instance in cases:
             _inside(instance, fixtures)
             _require(instance.is_dir(), "native fixture instance is not a directory")
-            results.append(_validate_instance(instance, group, test,
-                                             _read_json(instance / "completion.json"), runtime_digest))
+            results.append(_validate_instance(instance, group, test, _read_json(instance / "completion.json")))
     children = directory / "children"
     actual_children = {path.name for path in children.iterdir()} if children.exists() else set()
     _require(actual_children == set(group.children), "native subprocess case association differs")
@@ -437,9 +440,11 @@ class CheckedNativeExecution:
             _require(_digest(binary["path"]) == binary["sha256"], "native execution binary changed")
         interpreter = self.packet["interpreter"]
         _require(_digest(interpreter["path"]) == interpreter["sha256"], "native execution interpreter changed")
-        runtime = self.packet["runtime"]
-        _require(_digest(runtime["cargo_artifact"]) == _digest(runtime["isolated_archive"]) == runtime["sha256"],
-                 "native current runtime artifact changed")
+        runtime, captures = self.packet["runtime"], self.packet["captures"]
+        _require(set(runtime) == {"sha256"} and _carried_runtime(captures) == runtime["sha256"]
+                 and all(_bound_runtime(Path(row["library"]["path"]), row["fixture_kind"]) == row["runtime_sha256"]
+                         for row in captures),
+                 "native carried runtime binding changed")
         expected = tuple(f"{group.name}::{name}" for group in GROUPS for name in sorted(group.selected))
         _require(tuple(self.packet["selected"]) == expected
                  and self.packet["executed"] == [{"id": name, "outcome": "passed"} for name in expected],
@@ -458,30 +463,16 @@ def _owned_interpreter(root: Path) -> bool:
 
 
 def collect_native_execution(root: Path, target: Path):
-    """Build current runtime and execute the exact corpus; accept no evidence inputs."""
+    """Execute the exact corpus with the runtime its test build carries; accept no evidence inputs."""
     root, target = root.resolve(), target.resolve()
     _require(target.is_relative_to(root / "target"), "native execution target must belong to this worktree")
     _require(_owned_interpreter(root),
              "native execution requires this worktree's owned interpreter")
     source = _source_packet(root)
-    environment = _managed_python_environment()
-    environment.update(CARGO_TARGET_DIR=str(target), CARGO_BUILD_JOBS="1", CARGO_HUSKY_DONT_INSTALL_HOOKS="1")
     with _target_lease(target):
         runs = target / "native-execution"
         runs.mkdir(exist_ok=True)
         directory = Path(tempfile.mkdtemp(prefix="run-", dir=runs))
-        command = ["cargo", "build", "--locked", "-p", "chelis-runtime", "--lib", "--message-format=json"]
-        result = subprocess.run(command, cwd=root, env=environment, capture_output=True, check=False)
-        record_process(directory / "runtime-build", command, result)
-        _require(result.returncode == 0, "current native runtime build failed: " + result.stderr.decode(errors="replace")[-6000:])
-        records = [_json_bytes(line) for line in result.stdout.splitlines()]
-        runtime = _runtime_artifact(root, target, records)
-        runtime_digest = _digest(runtime)
-        isolated = directory / "runtime"
-        isolated.mkdir()
-        archive = isolated / "libchelis_runtime.a"
-        shutil.copyfile(runtime, archive)
-        _require(_digest(archive) == runtime_digest, "native runtime isolation changed archive bytes")
         selected, executed, binaries, captures = [], [], [], []
         worker = root / "scripts/capacity_census_native_execution.py"
         _require(worker.resolve() == Path(__file__).resolve(), "native execution worker differs from current source")
@@ -489,7 +480,7 @@ def collect_native_execution(root: Path, target: Path):
             group_dir = directory / "groups" / group.name
             group_dir.mkdir(parents=True)
             command = [sys.executable, str(worker), "--worker", str(root), str(target), str(group_dir), group.name]
-            child_environment = _worker_environment(isolated, group_dir, group)
+            child_environment = _worker_environment(group_dir, group)
             child_environment["CARGO_TARGET_DIR"] = str(target)
             result = subprocess.run(command, cwd=root, env=child_environment, capture_output=True, check=False)
             record_process(group_dir / "worker", command, result)
@@ -513,14 +504,14 @@ def collect_native_execution(root: Path, target: Path):
             selected.extend(names)
             executed.extend({"id": name, "outcome": "passed"} for name in names)
             binaries.append({"path": str(binary), "sha256": _digest(binary)})
-            captures.extend(_validate_captures(group_dir, group, runtime_digest, binary))
-            _require(_digest(runtime) == _digest(archive) == runtime_digest, "runtime changed during native execution")
+            captures.extend(_validate_captures(group_dir, group, binary))
         _require(_source_packet(root) == source, "native execution source changed during collection")
         _require(len(selected) == 37 and len(captures) == 50, "native execution matrix is incomplete")
+        runtime_digest = _carried_runtime(captures)
         interpreter = Path(sys.executable).resolve()
         packet = dict(schema=1, source=source, selected=selected, executed=executed, binaries=binaries,
                       interpreter=dict(path=str(interpreter), sha256=_digest(interpreter), prefix=sys.prefix, version=sys.version),
-                      runtime=dict(cargo_artifact=str(runtime), isolated_archive=str(archive), sha256=runtime_digest),
+                      runtime=dict(sha256=runtime_digest),
                       captures=captures, evidence=_files(directory),
                       limits=dict(device="simulated SDK and foreign ABI; no GPU execution",
                                   generated_c_link="fixed current source path and actual staged archive; internal C child argv not separately observed"))

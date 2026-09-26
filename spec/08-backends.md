@@ -166,8 +166,8 @@ take them from that compiler's runtime export and SHALL verify the archive
 against the export's digest. The carried runtime adds no C callable and does not
 change callable metadata `abi_version: 2` (spec/11 §1.4).
 
-(The Python extension's carried runtime and development freshness are not yet
-implemented; see [#1354](https://github.com/Chelis-Lang/chelis/issues/1354).)
+(Development freshness is not yet implemented; see
+[#1354](https://github.com/Chelis-Lang/chelis/issues/1354).)
 
 ## 3. Phase 1: HIP Backend
 

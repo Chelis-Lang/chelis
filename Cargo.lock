@@ -626,6 +626,7 @@ dependencies = [
  "proptest",
  "serde",
  "serde_json",
+ "stacker",
  "thiserror 2.0.18",
 ]
 
@@ -796,6 +797,7 @@ dependencies = [
  "chelis-abi",
  "chelis-backend-c",
  "chelis-compiler-api",
+ "chelis-runtime-bundle",
  "chelis-vocab",
  "libc",
  "libloading",

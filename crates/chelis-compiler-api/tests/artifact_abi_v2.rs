@@ -15,7 +15,9 @@ fn callable_v2_preserves_exact_int64_extents() {
             "inputs": [{"name": "x", "dtype": "f32", "dims": [{"size": extent}]}],
             "outputs": [],
             "source_path": "absent.ch",
-            "source_hash": "fixture"
+            "source_hash": "fixture",
+            "runtime_sha256": "runtime-fixture",
+            "library_sha256": "library-fixture"
         });
         let manifest: CompiledArtifactManifest =
             serde_json::from_value(value).expect("valid V2 metadata");

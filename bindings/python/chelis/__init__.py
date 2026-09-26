@@ -279,7 +279,10 @@ def load(path: str | Path) -> CompiledModel:
     """Load a previously compiled shared library.
 
     If the sidecar manifest still points at an existing source file whose content hash no
-    longer matches, `load()` emits a warning about the stale artifact.
+    longer matches, `load()` emits a warning about the stale artifact. If the manifest's
+    runtime or library digest is missing or differs from this extension's carried runtime or
+    the library file, `load()` raises `ChelisError` before opening the library; recompile
+    with `chelis.compile_and_load`.
     """
 
     return CompiledModel(_native.load(str(path)))

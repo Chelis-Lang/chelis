@@ -8,6 +8,78 @@ use tempfile::tempdir;
 
 use assert_cmd::Command;
 
+fn assert_only_trap_line(output: &std::process::Output, expected: &str) {
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let traps = text
+        .lines()
+        .filter(|line| line.contains("numeric trap:"))
+        .collect::<Vec<_>>();
+    assert_eq!(traps, [expected], "{text}");
+}
+
+fn zero_element_concat_source(width: i64) -> String {
+    format!(
+        "def empty() -> tensor[0, f32] = to_tensor([])\ndef join[n](x: tensor[0, n, 2, f32]) -> tensor[0, *, 2, f32] = concat([x, x], 1i32)\nbase = insert(insert(empty(), 1i32, 2i64), 1i32, {width}i64)\noutput = join(base)\n"
+    )
+}
+
+#[test]
+fn user_authored_trap_line_is_an_ordinary_eval_failure() {
+    for source in [
+        "fail(\"numeric trap: domain in concat at i64\")",
+        "fail(\"ordinary failure\\nnumeric trap: domain in concat at i64\")",
+        "test_assert(false, \"ordinary assertion\\nnumeric trap: domain in concat at i64\")",
+    ] {
+        for json in [false, true] {
+            let mut command = Command::cargo_bin("chelis").expect("binary");
+            command.env("CHELIS_STYLE_GATE_DISABLE", "1").arg("eval");
+            if json {
+                command.arg("--json");
+            }
+            let output = command.arg(source).output().expect("eval");
+            assert!(!output.status.success());
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            assert!(
+                stderr.starts_with("error: "),
+                "source={source:?}, json={json}, stderr={stderr:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn registered_numeric_builtins_keep_canonical_eval_trap_lines() {
+    for (source, expected) in [
+        (
+            "add(9223372036854775807i64, 1i64)",
+            "numeric trap: overflow in add at i64\n",
+        ),
+        (
+            "trunc_div(-9223372036854775808i64, -1i64)",
+            "numeric trap: overflow in trunc_div at i64\n",
+        ),
+    ] {
+        for json in [false, true] {
+            let mut command = Command::cargo_bin("chelis").expect("binary");
+            command.env("CHELIS_STYLE_GATE_DISABLE", "1").arg("eval");
+            if json {
+                command.arg("--json");
+            }
+            let output = command.arg(source).output().expect("eval");
+            assert!(!output.status.success());
+            assert_eq!(
+                String::from_utf8_lossy(&output.stderr),
+                expected,
+                "source={source:?}, json={json}"
+            );
+        }
+    }
+}
+
 fn program(producer: &str) -> String {
     let binding = match producer {
         "direct" => "scores = x",
@@ -103,16 +175,99 @@ fn non_axis_mismatch_reaches_concat_in_both_lanes() {
         .output()
         .expect("linked C run");
     assert!(!c.status.success());
-    for (lane, output) in [("Eval", eval), ("C", c)] {
-        let text = format!(
-            "{}{}",
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
-        );
-        assert!(
-            text.contains("numeric trap: domain in concat at i64"),
-            "{lane}: {text}"
-        );
+    for output in [&eval, &c] {
+        assert_only_trap_line(output, "numeric trap: domain in concat at i64");
+    }
+}
+
+#[test]
+fn zero_element_concat_output_metadata_overflow_matches_eval_and_c() {
+    assert!(gcc_available(), "this oracle requires a linked C binary");
+    let source = zero_element_concat_source(1_i64 << 61);
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("concat_metadata_overflow.ch");
+    let out_dir = dir.path().join("concat_metadata_overflow-out");
+    write_file(&path, &source);
+
+    let eval = Command::cargo_bin("chelis")
+        .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .args(["eval", "--file", path.to_str().unwrap()])
+        .output()
+        .expect("eval");
+    assert!(!eval.status.success());
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .args([
+            "build",
+            path.to_str().unwrap(),
+            "--target",
+            "c",
+            "--output",
+            out_dir.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+    assert!(
+        link_generated(
+            &out_dir,
+            "concat_metadata_overflow.c",
+            "concat_metadata_overflow"
+        )
+        .success()
+    );
+    let c = StdCommand::new(out_dir.join("concat_metadata_overflow"))
+        .output()
+        .expect("linked C run");
+    assert!(!c.status.success());
+    for output in [&c, &eval] {
+        assert_only_trap_line(output, "numeric trap: overflow in concat at i64");
+    }
+}
+
+#[test]
+fn zero_element_concat_output_metadata_within_i64_succeeds_on_both_lanes() {
+    assert!(gcc_available(), "this oracle requires a linked C binary");
+    let source = zero_element_concat_source(1_i64 << 60);
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("concat_metadata_fits.ch");
+    let out_dir = dir.path().join("concat_metadata_fits-out");
+    write_file(&path, &source);
+
+    let eval = Command::cargo_bin("chelis")
+        .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .args(["eval", "--file", path.to_str().unwrap()])
+        .output()
+        .expect("eval");
+    assert!(
+        eval.status.success(),
+        "{}",
+        String::from_utf8_lossy(&eval.stderr)
+    );
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .args([
+            "build",
+            path.to_str().unwrap(),
+            "--target",
+            "c",
+            "--output",
+            out_dir.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+    assert!(link_generated(&out_dir, "concat_metadata_fits.c", "concat_metadata_fits").success());
+    let c = StdCommand::new(out_dir.join("concat_metadata_fits"))
+        .output()
+        .expect("linked C run");
+    assert!(c.status.success(), "{}", String::from_utf8_lossy(&c.stderr));
+    for output in [&eval, &c] {
+        let text = String::from_utf8_lossy(&output.stdout);
+        assert!(text.contains("shape=[0, 2305843009213693952, 2]"), "{text}");
+        assert!(text.contains("data=[]"), "{text}");
     }
 }
 
@@ -132,6 +287,17 @@ fn copied_extent_keeps_result_claim_on_eval_and_linked_c() {
         .output()
         .expect("eval");
     assert!(!eval.status.success());
+    let eval_json = Command::cargo_bin("chelis")
+        .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .args(["eval", "--json", "--file", path.to_str().unwrap()])
+        .output()
+        .expect("eval json");
+    assert!(!eval_json.status.success());
+    for output in [&eval, &eval_json] {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(!stderr.starts_with("error: "), "{stderr}");
+    }
 
     Command::cargo_bin("chelis")
         .expect("binary")
@@ -227,6 +393,17 @@ fn empty_list_fails_in_linked_c() {
     let path = dir.path().join(format!("{stem}.ch"));
     let out_dir = dir.path().join(format!("{stem}-out"));
     write_file(&path, source);
+    let eval = Command::cargo_bin("chelis")
+        .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .args(["eval", "--file", path.to_str().unwrap()])
+        .output()
+        .expect("eval");
+    assert!(!eval.status.success());
+    assert_eq!(
+        String::from_utf8_lossy(&eval.stderr),
+        "error: concat expects at least one tensor part\n"
+    );
     Command::cargo_bin("chelis")
         .expect("binary")
         .env("CHELIS_STYLE_GATE_DISABLE", "1")

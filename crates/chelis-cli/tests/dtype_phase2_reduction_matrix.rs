@@ -54,7 +54,7 @@ fn assert_numeric_trap(expr: &str, expected: &str) {
         !ok,
         "`{expr}` unexpectedly succeeded with stdout `{stdout}`"
     );
-    let diagnostic = format!("error: {expected}");
+    let diagnostic = expected;
     assert!(
         stderr.lines().any(|line| line.trim() == diagnostic),
         "`{expr}` must raise exact trap `{expected}`, got stderr:\n{stderr}"
@@ -72,7 +72,7 @@ fn assert_numeric_value_trap(expr: &str, expected: &str) {
         !ok,
         "`{expr}` unexpectedly succeeded with stdout `{stdout}`"
     );
-    let diagnostic = format!("error: {expected}");
+    let diagnostic = expected;
     assert!(
         stderr.lines().any(|line| line.trim() == diagnostic),
         "`{expr}` must raise exact trap `{expected}`, got stderr:\n{stderr}"

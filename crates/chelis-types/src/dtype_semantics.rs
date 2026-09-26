@@ -111,6 +111,63 @@ impl std::fmt::Display for NumericTrap {
 
 impl std::error::Error for NumericTrap {}
 
+impl NumericTrap {
+    /// Recognize one complete [04-NUM-9] trap line at the boundary where an
+    /// evaluator's legacy text failure becomes a structured diagnostic.
+    /// Context belongs on other lines; a CLI prefix or appended hint is not
+    /// part of this grammar.
+    pub fn is_canonical_line(line: &str) -> bool {
+        let Some(body) = line.strip_prefix(NUMERIC_TRAP_PREFIX) else {
+            return false;
+        };
+        let operation_and_prim = [
+            NUMERIC_TRAP_OVERFLOW_KIND,
+            NUMERIC_TRAP_DOMAIN_KIND,
+            NUMERIC_TRAP_DIV_ZERO_KIND,
+        ]
+        .into_iter()
+        .find_map(|kind| {
+            body.strip_prefix(kind)?
+                .strip_prefix(NUMERIC_TRAP_OPERATION_SEPARATOR)
+        });
+        let Some((operation, prim)) =
+            operation_and_prim.and_then(|rest| rest.rsplit_once(NUMERIC_TRAP_DTYPE_SEPARATOR))
+        else {
+            return false;
+        };
+        !operation.is_empty()
+            && operation
+                .bytes()
+                .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_')
+            && (Prim::parse_name(prim).is_some() || prim == "key")
+    }
+}
+
+#[cfg(test)]
+mod numeric_trap_line_tests {
+    use super::NumericTrap;
+
+    #[test]
+    fn canonical_line_excludes_cli_decoration_and_context() {
+        assert!(NumericTrap::is_canonical_line(
+            "numeric trap: domain in concat at i64"
+        ));
+        assert!(NumericTrap::is_canonical_line(
+            "numeric trap: division by zero in floor_div at i32"
+        ));
+        for line in [
+            "error: numeric trap: domain in concat at i64",
+            "numeric trap: domain in concat at i64; hint: retry",
+            "numeric trap: domain in concat at i64 trailing",
+            "numeric trap: other in concat at i64",
+            "numeric trap: domain in concat at imaginary",
+            "numeric trap: domain in bad op at i64",
+        ] {
+            assert!(!NumericTrap::is_canonical_line(line), "{line}");
+        }
+    }
+}
+
 /// One elementwise trap paired with the row-major flat index that produced
 /// it ([04-NUM-15]). Parallel lanes reduce this value by `flat_index`; a
 /// sequential lane may use the same reduction without changing semantics.

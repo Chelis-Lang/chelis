@@ -30,6 +30,13 @@ pub(crate) enum ResultProducer {
     Aggregate(Vec<Option<ResultProducer>>),
 }
 
+/// One pending step of [`ResultProducer::interface_load`]'s walk.
+enum InterfaceStep<'a> {
+    Visit(&'a RuntimeValue),
+    /// The last `usize` stamps are one aggregate's children, in order.
+    Assemble(usize),
+}
+
 impl ResultProducer {
     pub(crate) fn tensor(operation: impl Into<String>) -> Self {
         Self::Tensor(operation.into())
@@ -68,17 +75,67 @@ impl ResultProducer {
     /// Stamp a value crossing a genuine runtime interface. Every tensor leaf
     /// is observed through `load`; aggregate shape is retained so a later
     /// projection cannot lose the interface origin or borrow a sibling's.
+    /// The value is walked from a worklist, so a value nested far deeper than
+    /// the native stack is stamped with bounded native depth (chelis#2567).
     pub(crate) fn interface_load(value: &RuntimeValue) -> Option<Self> {
-        match value {
-            RuntimeValue::Tensor(_) => Some(Self::tensor("load")),
-            RuntimeValue::Tuple(values) | RuntimeValue::List(values) => {
-                Self::aggregate(values.iter().map(Self::interface_load).collect())
-            }
-            RuntimeValue::Adt { fields, .. } => {
-                Self::aggregate(fields.iter().map(Self::interface_load).collect())
-            }
-            _ => None,
+        if let Some(stamp) = Self::shallow_interface_load(value) {
+            return stamp;
         }
+        let mut steps = vec![InterfaceStep::Visit(value)];
+        let mut stamped: Vec<Option<Self>> = Vec::new();
+        while let Some(step) = steps.pop() {
+            match step {
+                InterfaceStep::Visit(value) => match value {
+                    value if let Some(stamp) = Self::shallow_interface_load(value) => {
+                        stamped.push(stamp)
+                    }
+                    RuntimeValue::Tensor(_) => stamped.push(Some(Self::tensor("load"))),
+                    RuntimeValue::Tuple(values)
+                    | RuntimeValue::List(values)
+                    | RuntimeValue::Adt { fields: values, .. } => {
+                        steps.push(InterfaceStep::Assemble(values.len()));
+                        steps.extend(values.iter().rev().map(InterfaceStep::Visit));
+                    }
+                    _ => stamped.push(None),
+                },
+                InterfaceStep::Assemble(count) => {
+                    let children = stamped.split_off(stamped.len() - count);
+                    stamped.push(Self::aggregate(children));
+                }
+            }
+        }
+        stamped.pop().flatten()
+    }
+
+    /// The stamp of a leaf, or of an aggregate whose children are all leaves,
+    /// made directly; `None` when a child is itself an aggregate. An aggregate
+    /// with no tensor child is stamped without allocating.
+    fn shallow_interface_load(value: &RuntimeValue) -> Option<Option<Self>> {
+        let values = match value {
+            RuntimeValue::Tensor(_) => return Some(Some(Self::tensor("load"))),
+            RuntimeValue::Tuple(values)
+            | RuntimeValue::List(values)
+            | RuntimeValue::Adt { fields: values, .. } => values,
+            _ => return Some(None),
+        };
+        let mut has_tensor = false;
+        for value in values {
+            match value {
+                RuntimeValue::Tensor(_) => has_tensor = true,
+                RuntimeValue::Tuple(_) | RuntimeValue::List(_) | RuntimeValue::Adt { .. } => {
+                    return None;
+                }
+                _ => {}
+            }
+        }
+        if !has_tensor {
+            return Some(None);
+        }
+        let children = values
+            .iter()
+            .map(|value| matches!(value, RuntimeValue::Tensor(_)).then(|| Self::tensor("load")))
+            .collect();
+        Some(Some(Self::Aggregate(children)))
     }
 
     pub(crate) fn matches_value(&self, value: &RuntimeValue) -> bool {

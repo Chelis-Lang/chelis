@@ -15,6 +15,7 @@ from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
 import os
 from pathlib import Path
+import re
 import subprocess
 import sys
 import tempfile
@@ -128,14 +129,23 @@ fn diagnostic_kind_oracle_mutation(mut diagnostic: crate::schema::Diagnostic) {
 
 
 def mutate_diagnostic_vocabulary(source: str) -> str:
+    counts = re.findall(
+        r"impl DiagnosticKind \{\n    pub const ALL: \[Self; (\d+)\] = \[",
+        source,
+    )
+    if len(counts) != 1:
+        raise OracleFailure(
+            "diagnostic vocabulary mutation anchor drifted: expected one ALL declaration"
+        )
+    count = int(counts[0])
     replacements = (
         (
             "    EmptyTestSelection,\n}\n\nimpl DiagnosticKind",
             "    EmptyTestSelection,\n    Phase3OracleKind,\n}\n\nimpl DiagnosticKind",
         ),
         (
-            "    pub const ALL: [Self; 55] = [",
-            "    pub const ALL: [Self; 56] = [",
+            f"    pub const ALL: [Self; {count}] = [",
+            f"    pub const ALL: [Self; {count + 1}] = [",
         ),
         (
             "        Self::EmptyTestSelection,\n    ];",

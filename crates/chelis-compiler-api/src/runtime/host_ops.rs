@@ -3079,6 +3079,30 @@ fn render_tensor(tensor: &RuntimeTensorValue) -> String {
     )
 }
 
+/// One pending piece of [`render_value`]'s output.
+enum RenderStep<'a> {
+    Value(&'a RuntimeValue),
+    Text(&'static str),
+}
+
+/// Schedule a container's comma-separated parts and its closing text so they
+/// pop in output order.
+fn schedule_render<'a>(
+    steps: &mut Vec<RenderStep<'a>>,
+    parts: impl Iterator<Item = Vec<RenderStep<'a>>>,
+    close: &'static str,
+) {
+    let mut ordered = Vec::new();
+    for (index, part) in parts.enumerate() {
+        if index > 0 {
+            ordered.push(RenderStep::Text(", "));
+        }
+        ordered.extend(part);
+    }
+    ordered.push(RenderStep::Text(close));
+    steps.extend(ordered.into_iter().rev());
+}
+
 // pub(crate): compiler.rs pre-renders each evaluated root's display text
 // through this exact function (the [05-OBS-1] single renderer) while the
 // dtype tags still exist; see `EvaluatedRoot::display`.
@@ -3088,65 +3112,92 @@ fn render_key(key: RandomKey) -> String {
 
 pub(crate) fn render_value(value: &RuntimeValue) -> String {
     use chelis_types::{ElementRef, format_element};
-    match value {
-        RuntimeValue::Tensor(tensor) => render_tensor(tensor),
-        RuntimeValue::Key(key) => render_key(*key),
-        RuntimeValue::Scalar(payload) => {
-            // Scalars carry their dtype in the sealed storage variant
-            // (the dtype/bits invariant holds by construction), so every
-            // scalar exit renders at its OWN width per [05-OBS-2].
-            format_element(payload.dtype(), payload.value().element_ref())
+    // A worklist rather than recursion, and one output buffer rather than a
+    // string per level: a value nested far deeper than the native stack
+    // renders in one pass (chelis#2567). Steps pop in output order.
+    let mut out = String::new();
+    let mut steps = vec![RenderStep::Value(value)];
+    while let Some(step) = steps.pop() {
+        let value = match step {
+            RenderStep::Text(text) => {
+                out.push_str(text);
+                continue;
+            }
+            RenderStep::Value(value) => value,
+        };
+        match value {
+            RuntimeValue::Tensor(tensor) => out.push_str(&render_tensor(tensor)),
+            RuntimeValue::Key(key) => out.push_str(&render_key(*key)),
+            RuntimeValue::Scalar(payload) => {
+                // Scalars carry their dtype in the sealed storage variant
+                // (the dtype/bits invariant holds by construction), so every
+                // scalar exit renders at its OWN width per [05-OBS-2].
+                out.push_str(&format_element(
+                    payload.dtype(),
+                    payload.value().element_ref(),
+                ));
+            }
+            RuntimeValue::Bool(value) => {
+                out.push_str(&format_element(Prim::Bool, ElementRef::Bool(*value)));
+            }
+            RuntimeValue::String(value) => out.push_str(value),
+            RuntimeValue::List(items) => {
+                out.push('[');
+                schedule_render(
+                    &mut steps,
+                    items.iter().map(|item| vec![RenderStep::Value(item)]),
+                    "]",
+                );
+            }
+            RuntimeValue::Dict(entries) => {
+                out.push_str("dict(");
+                schedule_render(
+                    &mut steps,
+                    entries.iter().map(|(key, value)| {
+                        vec![
+                            RenderStep::Value(key),
+                            RenderStep::Text(": "),
+                            RenderStep::Value(value),
+                        ]
+                    }),
+                    ")",
+                );
+            }
+            RuntimeValue::Tuple(items) => {
+                out.push('(');
+                schedule_render(
+                    &mut steps,
+                    items.iter().map(|item| vec![RenderStep::Value(item)]),
+                    ")",
+                );
+            }
+            // Show the user-facing (de-mangled) constructor name; a reef-linked
+            // ADT carries the internal `Pkg__..__Ctor` form, which must not leak
+            // to eval output (chelis#399). `demangle_ident` is a no-op on bare /
+            // builtin constructors.
+            RuntimeValue::Adt { ctor, fields, .. } => {
+                out.push_str(&chelis_types::demangle_ident(ctor));
+                if !fields.is_empty() {
+                    out.push('(');
+                    schedule_render(
+                        &mut steps,
+                        fields.iter().map(|field| vec![RenderStep::Value(field)]),
+                        ")",
+                    );
+                }
+            }
+            RuntimeValue::MappedFile(bytes) => {
+                out.push_str(&format!("<mapped-file:{}>", bytes.len()));
+            }
+            RuntimeValue::Closure { .. } => out.push_str("<closure>"),
+            RuntimeValue::Transform { kind, .. } => out.push_str(match kind {
+                TransformKind::Grad => "<grad>",
+                TransformKind::Vmap => "<vmap>",
+            }),
+            RuntimeValue::Unit => out.push_str("()"),
         }
-        RuntimeValue::Bool(value) => format_element(Prim::Bool, ElementRef::Bool(*value)),
-        RuntimeValue::String(value) => value.clone(),
-        RuntimeValue::List(items) => format!(
-            "[{}]",
-            items
-                .iter()
-                .map(render_value)
-                .collect::<Vec<_>>()
-                .join(", ")
-        ),
-        RuntimeValue::Dict(entries) => format!(
-            "dict({})",
-            entries
-                .iter()
-                .map(|(key, value)| format!("{}: {}", render_value(key), render_value(value)))
-                .collect::<Vec<_>>()
-                .join(", ")
-        ),
-        RuntimeValue::Tuple(items) => format!(
-            "({})",
-            items
-                .iter()
-                .map(render_value)
-                .collect::<Vec<_>>()
-                .join(", ")
-        ),
-        // Show the user-facing (de-mangled) constructor name; a reef-linked
-        // ADT carries the internal `Pkg__..__Ctor` form, which must not leak
-        // to eval output (chelis#399). `demangle_ident` is a no-op on bare /
-        // builtin constructors.
-        RuntimeValue::Adt { ctor, fields, .. } if fields.is_empty() => {
-            chelis_types::demangle_ident(ctor)
-        }
-        RuntimeValue::Adt { ctor, fields, .. } => format!(
-            "{}({})",
-            chelis_types::demangle_ident(ctor),
-            fields
-                .iter()
-                .map(render_value)
-                .collect::<Vec<_>>()
-                .join(", ")
-        ),
-        RuntimeValue::MappedFile(bytes) => format!("<mapped-file:{}>", bytes.len()),
-        RuntimeValue::Closure { .. } => "<closure>".to_string(),
-        RuntimeValue::Transform { kind, .. } => match kind {
-            TransformKind::Grad => "<grad>".to_string(),
-            TransformKind::Vmap => "<vmap>".to_string(),
-        },
-        RuntimeValue::Unit => "()".to_string(),
     }
+    out
 }
 
 // ---------------------------------------------------------------------------

@@ -830,6 +830,7 @@ pub(crate) fn revalidate_adt_value(
         // Invariant predicates run inside an enclosing evaluation, so they
         // honour whatever token that evaluation installed (chelis#914).
         cancel: chelis_types::current_cancel_token(),
+        failure_kind: RuntimeFailureKind::Ordinary,
     };
     ctx.bindings.insert(pred.binder.clone(), value.clone());
 

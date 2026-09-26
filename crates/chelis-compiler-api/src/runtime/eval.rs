@@ -847,7 +847,7 @@ impl<'a> EvalContext<'a> {
                     })
             },
         );
-        let values = result?;
+        let values = self.mark_numeric_trap_from_trusted_result(result)?;
         let value = pack_dag_roots(&kernel.dag, &roots, &values, name)?;
         self.result_producer = result_producer;
         Ok(value)
@@ -946,7 +946,8 @@ impl<'a> EvalContext<'a> {
                     let computed =
                         chelis_ir::eval::eval_tensor_roots_exact(dag, dag.roots(), |input| {
                             inputs.get(input).cloned()
-                        })?;
+                        });
+                    let computed = self.mark_numeric_trap_from_trusted_result(computed)?;
                     for (output, root) in outputs.iter().zip(dag.roots()) {
                         let value = computed
                             .get(root)
@@ -1495,7 +1496,7 @@ impl<'a> EvalContext<'a> {
             // Its result is a tensor it produced, as every tensor builtin's is.
             self.result_producer = Some(ResultProducer::tensor("dropout"));
             for claim in claims {
-                claim.verdict(&value, "dropout")?;
+                self.check_declared_result_claim(claim, &value, "dropout")?;
             }
             return Ok(value);
         }
@@ -1611,11 +1612,39 @@ impl<'a> EvalContext<'a> {
                     ));
                 }
                 for claim in claims {
-                    claim.shape_verdict(&[sequences.len(), width as usize], name)?;
+                    self.check_declared_shape_claim(
+                        claim,
+                        &[sequences.len(), width as usize],
+                        name,
+                    )?;
                 }
             }
-            let value =
-                self.eval_builtin(name, &args, &arg_type_exprs, result_type_expr.as_ref())?;
+            let builtin_result =
+                self.eval_builtin(name, &args, &arg_type_exprs, result_type_expr.as_ref());
+            // The checked builtin catalog owns the numeric operation set.
+            // Mixed-domain equality is trusted only for numeric arguments;
+            // recursive container comparison can include authored strings.
+            let trusted_numeric_source = chelis_types::builtin_decl(name).is_some_and(|decl| {
+                decl.capability.domains == [chelis_types::BuiltinSemanticDomain::Numeric]
+                    || (decl
+                        .capability
+                        .domains
+                        .contains(&chelis_types::BuiltinSemanticDomain::Numeric)
+                        && args.iter().all(|arg| {
+                            matches!(
+                                arg,
+                                RuntimeValue::Scalar(_)
+                                    | RuntimeValue::Tensor(_)
+                                    | RuntimeValue::Bool(_)
+                            )
+                        }))
+            }) || (name == "concat"
+                && matches!(args.first(), Some(RuntimeValue::List(parts)) if parts.iter().all(|part| matches!(part, RuntimeValue::Tensor(_)))));
+            let value = if trusted_numeric_source {
+                self.mark_numeric_trap_from_trusted_result(builtin_result)?
+            } else {
+                builtin_result?
+            };
             self.result_producer = match name {
                 "index" => args
                     .get(1)
@@ -1664,10 +1693,11 @@ impl<'a> EvalContext<'a> {
                     .as_ref()
                     .and_then(ResultProducer::operation)
                     .unwrap_or(name)
-            };
+            }
+            .to_owned();
             if name != "pad_sequences_to" {
                 for claim in claims {
-                    claim.verdict(&value, producer)?;
+                    self.check_declared_result_claim(claim, &value, &producer)?;
                 }
             }
             return Ok(value);
@@ -1907,9 +1937,10 @@ impl<'a> EvalContext<'a> {
             .ok_or_else(|| {
                 "host runtime: pending result claim reached a tensor without producer provenance"
                     .to_string()
-            })?;
+            })?
+            .to_owned();
         for claim in claims {
-            claim.verdict(&value, producer)?;
+            self.check_declared_result_claim(claim, &value, &producer)?;
         }
         Ok(value)
     }
@@ -2188,10 +2219,11 @@ impl<'a> EvalContext<'a> {
         )?;
         let values = chelis_ir::eval::eval_tensor_roots_exact(dag, &roots, |name| {
             prepared.get(name).cloned()
-        })?;
+        });
+        let values = self.mark_numeric_trap_from_trusted_result(values)?;
         let value = pack_dag_roots(dag, &roots, &values, "local tensor ascription")?;
         for claim in inherited_result_claims {
-            claim.verdict(&value, producer_operation)?;
+            self.check_declared_result_claim(claim, &value, producer_operation)?;
         }
         self.result_producer = Some(ResultProducer::tensor(producer_operation));
         Ok(value)
@@ -2633,6 +2665,10 @@ impl<'a> EvalContext<'a> {
             kids.first()
                 .ok_or_else(|| "cast missing value".to_string())?,
         )?;
+        let numeric_input = matches!(
+            value,
+            RuntimeValue::Scalar(_) | RuntimeValue::Tensor(_) | RuntimeValue::Bool(_)
+        );
         let target = kids
             .get(1)
             .and_then(|ty| match ty.carrier() {
@@ -2661,7 +2697,7 @@ impl<'a> EvalContext<'a> {
             .map_err(|selector| format!("`{selector}` is not a recognized cast mode selector"))?
             == chelis_deep::CastMode::Trunc
         {
-            return match value {
+            let result = match value {
                 RuntimeValue::Scalar(payload) => {
                     chelis_types::cast_trunc_scalar("cast_trunc", payload.value(), target_prim)
                         .map(RuntimeValue::from_scalar_value)
@@ -2679,24 +2715,29 @@ impl<'a> EvalContext<'a> {
                     target_prim.name()
                 )),
             };
+            return if numeric_input {
+                self.mark_numeric_trap_from_trusted_result(result)
+            } else {
+                result
+            };
         }
         // The CHECKED default ladder (`chelis_types::cast_scalar`; the
         // chelis#759 one-rule-per-direction obligation), identical to
         // the tensor surfaces: out-of-range integer targets trap,
         // fractional-to-integer traps Domain instead of choosing an
         // implicit rounding rule, and a bool target requires exactly 0/1.
-        match (value, target_prim) {
+        let result = match (value, target_prim) {
             (RuntimeValue::Bool(value), Prim::Bool) => Ok(RuntimeValue::Bool(value)),
             (RuntimeValue::String(value), Prim::String) => Ok(RuntimeValue::String(value)),
             (RuntimeValue::Scalar(payload), dst_dtype)
                 if dst_dtype.is_integer() || dst_dtype.is_float() || dst_dtype == Prim::Bool =>
             {
-                let cast = chelis_types::cast_scalar("cast", payload.value(), dst_dtype)
-                    .map_err(|trap| trap.to_string())?;
-                match cast.as_bool_exact() {
-                    Some(flag) => Ok(RuntimeValue::Bool(flag)),
-                    None => Ok(RuntimeValue::from_scalar_value(cast)),
-                }
+                chelis_types::cast_scalar("cast", payload.value(), dst_dtype)
+                    .map(|cast| match cast.as_bool_exact() {
+                        Some(flag) => RuntimeValue::Bool(flag),
+                        None => RuntimeValue::from_scalar_value(cast),
+                    })
+                    .map_err(|trap| trap.to_string())
             }
             (RuntimeValue::Bool(value), dst_dtype)
                 if dst_dtype.is_integer() || dst_dtype.is_float() =>
@@ -2704,16 +2745,53 @@ impl<'a> EvalContext<'a> {
                 let source =
                     chelis_types::scalar_from_i64("cast", Prim::Bool, if value { 1 } else { 0 })
                         .expect("bool payload is always in the bool value set");
-                let cast = chelis_types::cast_scalar("cast", source, dst_dtype)
-                    .map_err(|trap| trap.to_string())?;
-                Ok(RuntimeValue::from_scalar_value(cast))
+                chelis_types::cast_scalar("cast", source, dst_dtype)
+                    .map(RuntimeValue::from_scalar_value)
+                    .map_err(|trap| trap.to_string())
             }
             (RuntimeValue::Tensor(tensor), _) => cast_tensor_value(tensor, target_prim),
             (other, _) => Err(format!(
                 "unsupported cast from {other:?} to {}",
                 target_prim.name()
             )),
+        };
+        if numeric_input {
+            self.mark_numeric_trap_from_trusted_result(result)
+        } else {
+            result
         }
+    }
+
+    fn check_declared_result_claim(
+        &mut self,
+        claim: &DeclaredResultClaim,
+        value: &RuntimeValue,
+        producer: &str,
+    ) -> Result<(), String> {
+        self.mark_numeric_trap_from_trusted_result(claim.verdict(value, producer))
+    }
+
+    fn check_declared_shape_claim(
+        &mut self,
+        claim: &DeclaredResultClaim,
+        shape: &[usize],
+        producer: &str,
+    ) -> Result<(), String> {
+        self.mark_numeric_trap_from_trusted_result(claim.shape_verdict(shape, producer))
+    }
+
+    pub(super) fn mark_numeric_trap_from_trusted_result<T>(
+        &mut self,
+        result: Result<T, String>,
+    ) -> Result<T, String> {
+        if result.as_ref().err().is_some_and(|message| {
+            message
+                .lines()
+                .any(chelis_types::NumericTrap::is_canonical_line)
+        }) {
+            self.failure_kind = RuntimeFailureKind::NumericTrap;
+        }
+        result
     }
 
     /// [05-OP-37] in the host walk: `dropout(k, x, rate)`. The rate is the
@@ -4873,6 +4951,7 @@ mod legacy_capture_order_tests {
             transcript_capture: None,
             resolving_top_levels: Vec::new(),
             cancel: None,
+            failure_kind: RuntimeFailureKind::Ordinary,
         }
     }
 

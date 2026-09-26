@@ -352,6 +352,8 @@ fn artifact_manifest(request: &Request) -> Result<Value, String> {
             symbolic_dims: vec![],
             source_path: "model.chelis".into(),
             source_hash: "digest".into(),
+            runtime_sha256: "runtime-digest".into(),
+            library_sha256: "library-digest".into(),
         }
     } else {
         decode(request)?

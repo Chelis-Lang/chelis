@@ -130,7 +130,16 @@ struct Summary {
     obligations: usize,
 }
 
+/// Run the whole prove command on the checker's grown stack segment
+/// (chelis#2425), as `chelis check` runs each file. Parsing, validation, the
+/// linked-program preparation and every recursive pass over the tree then
+/// share one depth limit with `check`, instead of recursing on the process
+/// main thread's much smaller stack.
 pub fn cmd_prove(options: ProveOptions<'_>) -> Result<i32, String> {
+    chelis_types::run_on_grown_stack(|| cmd_prove_on_grown_stack(options))
+}
+
+fn cmd_prove_on_grown_stack(options: ProveOptions<'_>) -> Result<i32, String> {
     #[cfg(not(feature = "chelis-prove"))]
     if options.tier == "beacon-only" {
         return Err(

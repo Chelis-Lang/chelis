@@ -29,6 +29,13 @@ def replace_bytes(path: Path, content: bytes) -> None:
     path.write_bytes(content)
 
 
+def receipt_bytes(archive_sha256: str, archive: str = "libchelis_runtime.a") -> bytes:
+    """A staging receipt shaped like the one chelis-runtime-bundle writes."""
+    return json.dumps({"schema": "chelis-runtime-staging/1", "archive": archive,
+                       "archive_sha256": archive_sha256, "headers": {"chelis_runtime.h": "h" * 64},
+                       "mode": "development", "chelis_version": "0.0.0"}).encode()
+
+
 class MatrixContractTests(unittest.TestCase):
     def test_authority_identity_ignores_run_paths_but_binds_the_executed_contract(self):
         packet = {
@@ -50,11 +57,7 @@ class MatrixContractTests(unittest.TestCase):
                 "prefix": "/run-a/venv",
                 "version": "Python test version",
             },
-            "runtime": {
-                "cargo_artifact": "/run-a/libchelis_runtime.a",
-                "isolated_archive": "/run-a/isolated/libchelis_runtime.a",
-                "sha256": "r" * 64,
-            },
+            "runtime": {"sha256": "r" * 64},
             "captures": [
                 {
                     "directory": "/run-a/capture",
@@ -62,6 +65,7 @@ class MatrixContractTests(unittest.TestCase):
                     "fixture_kind": "host-foreign-abi",
                     "library": {"path": "/run-a/model.so", "sha256": "l" * 64},
                     "original_library": "/run-a/original/model.so",
+                    "runtime_sha256": "r" * 64,
                     "completion_sha256": "m" * 64,
                 }
             ],
@@ -74,8 +78,6 @@ class MatrixContractTests(unittest.TestCase):
             row["path"] = row["path"].replace("/run-a/", "/run-b/")
         another_run["interpreter"]["path"] = "/run-b/python"
         another_run["interpreter"]["prefix"] = "/run-b/venv"
-        another_run["runtime"]["cargo_artifact"] = "/run-b/libchelis_runtime.a"
-        another_run["runtime"]["isolated_archive"] = "/run-b/isolated/libchelis_runtime.a"
         another_run["captures"][0].update(
             directory="/run-b/capture",
             original_library="/run-b/original/model.so",
@@ -118,7 +120,7 @@ class MatrixContractTests(unittest.TestCase):
     def test_fixed_worker_imports_current_helpers_with_safe_path_enabled(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory).resolve()
-            environment = execution._worker_environment(root / "runtime", root / "capture", execution.GROUPS[0])
+            environment = execution._worker_environment(root / "capture", execution.GROUPS[0])
             self.assertEqual(environment["PYTHONSAFEPATH"], "1")
             result = subprocess.run([sys.executable, str(Path(execution.__file__).resolve())],
                                     cwd=root, env=environment, capture_output=True, check=False)
@@ -144,7 +146,6 @@ class MatrixContractTests(unittest.TestCase):
     def test_worker_environment_is_explicit_without_mutating_parent_or_falling_back(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            runtime = root / "runtime"
             group = root / "group"
             hostile = {
                 "CHELIS_RUNTIME_DIR": "/foreign/runtime", "CHELIS_CC": "/foreign/compiler",
@@ -154,54 +155,15 @@ class MatrixContractTests(unittest.TestCase):
             }
             with mock.patch.dict(os.environ, hostile):
                 before = dict(os.environ)
-                child = execution._worker_environment(runtime, group, execution.GROUPS[0])
+                child = execution._worker_environment(group, execution.GROUPS[0])
                 self.assertEqual(dict(os.environ), before)
-                self.assertEqual(child["CHELIS_RUNTIME_DIR"], str(runtime))
                 self.assertEqual(child["CHELIS_NATIVE_EXECUTION_CAPTURE"], str(group))
                 self.assertEqual(child["CHELIS_NATIVE_EXECUTION_SUITE"], execution.GROUPS[0].name)
                 self.assertEqual(child["CARGO_BUILD_JOBS"], "1")
-                for name in ("CHELIS_CC", "CHELIS_TEST_CC", "CHELIS_HIPCC",
+                for name in ("CHELIS_RUNTIME_DIR", "CHELIS_CC", "CHELIS_TEST_CC", "CHELIS_HIPCC",
                              "CHELIS_DEVICE_OWNER_TEST_WORKER", "CHELIS_NATIVE_ENV_TEST_WORKER"):
                     self.assertNotIn(name, child)
                 self.assertNotEqual(child["PYTHONPATH"], hostile["PYTHONPATH"])
-
-
-class RuntimeArtifactTests(unittest.TestCase):
-    def setUp(self):
-        self.directory = tempfile.TemporaryDirectory()
-        self.addCleanup(self.directory.cleanup)
-        self.root = Path(self.directory.name).resolve()
-        self.target = self.root / "target/owned"
-        self.target.mkdir(parents=True)
-        self.source = self.root / "crates/chelis-runtime/src/lib.rs"
-        self.source.parent.mkdir(parents=True)
-        self.source.write_text("// exact source identity\n")
-        self.archive = self.target / "debug/libchelis_runtime.a"
-        self.archive.parent.mkdir()
-        self.archive.write_bytes(b"actual Cargo output stand-in for this pure selector test")
-        self.row = {"reason": "compiler-artifact", "package_id": "path+file://runtime#chelis-runtime@0.18.6",
-                    "target": {"name": "chelis_runtime", "kind": ["staticlib", "rlib"],
-                               "crate_types": ["staticlib", "rlib"], "src_path": str(self.source)},
-                    "profile": {"test": False}, "filenames": [str(self.archive)], "executable": None}
-
-    def test_selects_only_the_actual_exact_runtime_staticlib_record(self):
-        self.assertEqual(execution._runtime_artifact(self.root, self.target, [self.row]), self.archive)
-
-    def test_missing_duplicate_test_or_foreign_runtime_artifact_is_rejected(self):
-        variants = [[], [self.row, self.row], [dict(self.row, profile={"test": True})],
-                    [dict(self.row, target={**self.row["target"], "name": "other"})],
-                    [dict(self.row, target={**self.row["target"], "src_path": "/foreign/lib.rs"})],
-                    [dict(self.row, filenames=[str(self.root / "foreign.a")])]]
-        for rows in variants:
-            with self.subTest(rows=rows), self.assertRaises(GraphError):
-                execution._runtime_artifact(self.root, self.target, rows)
-
-    def test_symlink_cannot_redirect_runtime_selection(self):
-        target = self.archive.with_name("actual.a")
-        self.archive.rename(target)
-        self.archive.symlink_to(target)
-        with self.assertRaises(GraphError):
-            execution._runtime_artifact(self.root, self.target, [self.row])
 
 
 class SourceIdentityTests(unittest.TestCase):
@@ -262,16 +224,20 @@ class RetainedCaptureTests(unittest.TestCase):
         self.case.mkdir(parents=True)
         self.runtime = b"current runtime bytes"
         self.runtime_digest = hashlib.sha256(self.runtime).hexdigest()
+        source = b"def main(x: tensor[1,f32]) -> tensor[1,f32] = copy(x)\n"
+        library = b"actual library stand-in for pure record validation"
+        self.manifest = {"abi_version": 2, "target": "c", "source_path": str(self.case / "program.ch"),
+                         "source_hash": hashlib.sha256(source).hexdigest(),
+                         "runtime_sha256": self.runtime_digest,
+                         "library_sha256": hashlib.sha256(library).hexdigest()}
         self.files = {
-            "program.ch": b"def main(x: tensor[1,f32]) -> tensor[1,f32] = copy(x)\n",
+            "program.ch": source,
             "compiled/program.c": b"/* generated fixture source */",
             "compiled/chelis_runtime.h": b"/* current embedded header */",
-            "compiled/program.so": b"actual library stand-in for pure record validation",
-            "compiled/program.json": json.dumps({"abi_version": 2, "target": "c",
-                "source_path": str(self.case / "program.ch"),
-                "source_hash": hashlib.sha256(b"def main(x: tensor[1,f32]) -> tensor[1,f32] = copy(x)\n").hexdigest(),
-            }).encode(),
+            "compiled/program.so": library,
+            "compiled/program.json": json.dumps(self.manifest).encode(),
             "compiled/libchelis_runtime.a": self.runtime,
+            "compiled/chelis_runtime.receipt.json": receipt_bytes(self.runtime_digest),
         }
         original = self.root / "deleted-original"
         self.files["loaded-model.json"] = json.dumps({
@@ -291,11 +257,32 @@ class RetainedCaptureTests(unittest.TestCase):
                                  for name, content in sorted(self.files.items())]}
 
     def validate(self):
-        return execution._validate_instance(self.case, self.group, self.group.selected[0],
-                                            self.packet, self.runtime_digest)
+        return execution._validate_instance(self.case, self.group, self.group.selected[0], self.packet)
+
+    def rewrite(self, name, content):
+        """Replace or remove one snapshot file and rehash every record of it, as a forger would."""
+        path = self.case / name
+        path.unlink(missing_ok=True)
+        model_path = self.case / "loaded-model.json"
+        model = json.loads(model_path.read_text())
+        model["files"] = [row for row in model["files"] if row["captured"] != name]
+        files = [row for row in self.packet["files"] if row["path"] not in (name, "loaded-model.json")]
+        if content is not None:
+            path.write_bytes(content)
+            digest = hashlib.sha256(content).hexdigest()
+            model["files"].append({"original": str(Path(model["root"]) / Path(name).name),
+                                   "captured": name, "sha256": digest})
+            files.append({"path": name, "sha256": digest})
+        model_path.write_text(json.dumps(model))
+        files.append({"path": "loaded-model.json", "sha256": hashlib.sha256(model_path.read_bytes()).hexdigest()})
+        self.packet = {**self.packet, "files": sorted(files, key=lambda row: row["path"])}
+
+    def rewrite_manifest(self, **changes):
+        manifest = {key: value for key, value in {**self.manifest, **changes}.items() if value is not None}
+        self.rewrite("compiled/program.json", json.dumps(manifest).encode())
 
     def test_complete_retained_generated_artifacts_bind_actual_model_and_runtime(self):
-        self.assertTrue(self.validate())
+        self.assertEqual(self.validate()["runtime_sha256"], self.runtime_digest)
 
     def test_missing_changed_or_extra_artifact_cannot_preserve_evidence(self):
         for name, content in self.files.items():
@@ -309,28 +296,61 @@ class RetainedCaptureTests(unittest.TestCase):
         (self.case / "unrecorded.c").write_bytes(b"extra")
         with self.assertRaises(GraphError): self.validate()
 
-    def test_staged_archive_must_match_current_cargo_bytes_even_if_its_record_is_rehashed(self):
-        path = self.case / "compiled/libchelis_runtime.a"
-        path.write_bytes(b"foreign runtime")
-        for row in self.packet["files"]:
-            if row["path"] == "compiled/libchelis_runtime.a":
-                row["sha256"] = hashlib.sha256(path.read_bytes()).hexdigest()
-        model_path = self.case / "loaded-model.json"
-        model = json.loads(model_path.read_text())
-        for row in model["files"]:
-            if row["captured"] == "compiled/libchelis_runtime.a":
-                row["sha256"] = hashlib.sha256(path.read_bytes()).hexdigest()
-        model_path.write_text(json.dumps(model))
-        for row in self.packet["files"]:
-            if row["path"] == "loaded-model.json":
-                row["sha256"] = hashlib.sha256(model_path.read_bytes()).hexdigest()
+    def test_staged_archive_must_match_its_receipt_and_manifest_even_if_its_record_is_rehashed(self):
+        self.rewrite("compiled/libchelis_runtime.a", b"foreign runtime")
         with self.assertRaises(GraphError): self.validate()
+
+    def test_generated_manifest_must_name_the_runtime_it_staged(self):
+        other = hashlib.sha256(b"another carried runtime").hexdigest()
+        self.rewrite_manifest(runtime_sha256=other)
+        with self.assertRaises(GraphError): self.validate()
+        # A foreign manifest stages nothing, so only the run-wide shared digest binds it.
+        library = self.case / "compiled/program.so"
+        self.assertEqual(execution._bound_runtime(library, "host-foreign-abi"), other)
+
+    def test_receipt_must_exist_and_record_the_staged_archive(self):
+        original = self.files["compiled/chelis_runtime.receipt.json"]
+        variants = [None, b"[]", receipt_bytes(self.runtime_digest, archive="other.a"),
+                    receipt_bytes(hashlib.sha256(b"another carried runtime").hexdigest())]
+        for content in variants:
+            with self.subTest(content=content):
+                self.rewrite("compiled/chelis_runtime.receipt.json", content)
+                with self.assertRaises(GraphError): self.validate()
+                self.rewrite("compiled/chelis_runtime.receipt.json", original)
+        self.assertTrue(self.validate())
+
+    def test_every_manifest_must_carry_both_digests_and_name_its_library(self):
+        library = self.case / "compiled/program.so"
+        variants = [{"runtime_sha256": None}, {"library_sha256": None},
+                    {"library_sha256": hashlib.sha256(b"another library").hexdigest()}]
+        for change in variants:
+            with self.subTest(change=change):
+                self.rewrite_manifest(**change)
+                with self.assertRaises(GraphError): self.validate()
+                with self.assertRaises(GraphError): execution._bound_runtime(library, "host-foreign-abi")
+        self.rewrite_manifest()
+        self.assertTrue(self.validate())
+
+    def test_consistently_restaged_runtime_is_bound_by_its_own_digest(self):
+        runtime = b"another carried runtime"
+        digest = hashlib.sha256(runtime).hexdigest()
+        self.rewrite("compiled/libchelis_runtime.a", runtime)
+        self.rewrite("compiled/chelis_runtime.receipt.json", receipt_bytes(digest))
+        self.rewrite_manifest(runtime_sha256=digest)
+        self.assertEqual(self.validate()["runtime_sha256"], digest)
+
+    def test_captures_must_share_one_carried_runtime(self):
+        other = hashlib.sha256(b"another carried runtime").hexdigest()
+        shared = [{"runtime_sha256": self.runtime_digest}] * 2
+        self.assertEqual(execution._carried_runtime(shared), self.runtime_digest)
+        for captures in ([], shared + [{"runtime_sha256": other}]):
+            with self.subTest(captures=captures), self.assertRaises(GraphError):
+                execution._carried_runtime(captures)
 
     def test_one_fixture_cannot_stand_in_for_the_other_selected_cases(self):
         (self.case / "completion.json").write_text(json.dumps(self.packet))
         with self.assertRaises(GraphError):
-            execution._validate_captures(self.root, self.group, self.runtime_digest,
-                                         self.root / "actual-test-binary")
+            execution._validate_captures(self.root, self.group, self.root / "actual-test-binary")
 
     def test_original_model_artifacts_may_disappear_without_invalidating_snapshot(self):
         self.assertFalse((self.root / "deleted-original").exists())
@@ -394,8 +414,8 @@ class NativeExecutionIntegration(unittest.TestCase):
         packet = self.witness.validate()
         first = Path(packet["captures"][0]["directory"])
         library = Path(packet["captures"][0]["library"]["path"])
-        candidates = [Path(packet["binaries"][0]["path"]), Path(packet["runtime"]["cargo_artifact"]),
-                      Path(packet["runtime"]["isolated_archive"]), library, library.with_suffix(".json"),
+        candidates = [Path(packet["binaries"][0]["path"]), library.with_name("libchelis_runtime.a"),
+                      library.with_name("chelis_runtime.receipt.json"), library, library.with_suffix(".json"),
                       first / "loaded-model.json", first / "completion.json",
                       self.witness.directory / "groups/native_tensor_boundary/test.stdout.log",
                       self.witness.directory / "report.json"]

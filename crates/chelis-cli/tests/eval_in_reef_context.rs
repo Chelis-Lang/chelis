@@ -132,7 +132,10 @@ fn cmd_eval_reef_failure_preserves_transcript_channels() {
         assert!(!stderr.contains("after"), "{stderr}");
         if json {
             assert!(output.stdout.is_empty());
-            assert!(stderr.starts_with("before\nerror:"), "{stderr}");
+            assert!(
+                stderr.starts_with("before\nnumeric trap: division by zero in floor_div at i64"),
+                "{stderr}"
+            );
         } else {
             assert_eq!(output.stdout, b"before\n");
             assert!(!stderr.contains("before"), "{stderr}");

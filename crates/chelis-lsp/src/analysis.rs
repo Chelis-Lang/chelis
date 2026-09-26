@@ -1381,7 +1381,8 @@ fn parse_error_offset_deep(err: &chelis_deep::parser::ParseError) -> usize {
         }
         chelis_deep::parser::ParseError::UnexpectedEof { offset }
         | chelis_deep::parser::ParseError::Expected { offset, .. }
-        | chelis_deep::parser::ParseError::EmptyList { offset } => *offset,
+        | chelis_deep::parser::ParseError::EmptyList { offset }
+        | chelis_deep::parser::ParseError::NestingTooDeep { offset } => *offset,
         chelis_deep::parser::ParseError::ForbiddenSpanChar { value_offset, .. } => *value_offset,
         chelis_deep::parser::ParseError::Metadata(error) => error.span.offset,
     }
