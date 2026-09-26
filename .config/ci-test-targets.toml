@@ -3163,6 +3163,24 @@ reason = "direct arithmetic oracle mutation controls execute in the script unit 
 tracking_issue = "chelis#1306"
 
 [[path_rule]]
+prefix = "scripts/dtype_relu_oracle.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "relu oracle source contracts and runner legs execute in the script unit suite"
+tracking_issue = "chelis#1313"
+
+[[path_rule]]
+prefix = "scripts/test_dtype_relu_oracle.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "relu oracle mutation controls execute in the script unit suite"
+tracking_issue = "chelis#1313"
+
+[[path_rule]]
 prefix = "scripts/dtype_exact_reductions_oracle.py"
 disposition = "owner"
 workflow = "ci.yml"
