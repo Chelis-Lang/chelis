@@ -3010,6 +3010,18 @@ pub struct LocalGuardClaim {
     /// The lowering owner carries this scalar Bool beside its claim token as
     /// a non-value dependency. `None` is the ordinary unconditional guard.
     pub activation: Option<NodeId>,
+    /// The declaring parameter axis of a caller's named result claim, which
+    /// the context names beside the binder (spec/04 section 4.7). `None`
+    /// renders the canonical value as `claimed = N`.
+    pub source: Option<ClaimSource>,
+}
+
+/// A named claim's binder and the parameter axis whose extent it requires.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClaimSource {
+    pub claim: String,
+    pub parameter: String,
+    pub axis: usize,
 }
 
 /// A returned axis and the operation where its inherited claim becomes ready.
@@ -3579,6 +3591,7 @@ pub fn local_dim_guard_sites(dag: &Dag) -> Result<Vec<(LocalGuardSite, LocalGuar
                         op: site.operation,
                         observed,
                         activation: local_ascription_guard_activation(dag, node.id, *required)?,
+                        source: None,
                     },
                 ));
                 continue;
@@ -3626,6 +3639,7 @@ pub fn local_dim_guard_sites(dag: &Dag) -> Result<Vec<(LocalGuardSite, LocalGuar
                         op: site.operation,
                         observed,
                         activation: None,
+                        source: None,
                     },
                 ));
                 continue;
@@ -3659,6 +3673,7 @@ pub fn local_dim_guard_sites(dag: &Dag) -> Result<Vec<(LocalGuardSite, LocalGuar
                     op: site.operation,
                     observed: site.observation,
                     activation: None,
+                    source: None,
                 },
             ));
         }
@@ -3759,6 +3774,7 @@ pub fn local_dim_guard_sites(dag: &Dag) -> Result<Vec<(LocalGuardSite, LocalGuar
                         op: crate::grad::risc_op_name(&node.op),
                         observed: LocalGuardObservation::ComputedExtent(observed),
                         activation: None,
+                        source: None,
                     },
                 ));
                 continue;
@@ -3778,6 +3794,7 @@ pub fn local_dim_guard_sites(dag: &Dag) -> Result<Vec<(LocalGuardSite, LocalGuar
                         op: site.operation,
                         observed: site.observation,
                         activation: None,
+                        source: None,
                     },
                 ));
                 continue;
@@ -3850,6 +3867,7 @@ pub fn local_dim_guard_sites(dag: &Dag) -> Result<Vec<(LocalGuardSite, LocalGuar
                     op,
                     observed: LocalGuardObservation::Carrier(carrier.clone()),
                     activation: None,
+                    source: None,
                 },
             ));
         }
@@ -3891,6 +3909,7 @@ pub fn local_dim_guard_sites(dag: &Dag) -> Result<Vec<(LocalGuardSite, LocalGuar
                 // something a consumer infers from the site's `op`.
                 observed: LocalGuardObservation::RealizedExtent,
                 activation: None,
+                source: None,
             },
         ));
     }

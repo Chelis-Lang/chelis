@@ -3234,12 +3234,28 @@ where
     )
 }
 
+/// One caller's declared-result obligation on a graph's single root.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InheritedResultClaim {
+    pub rank: usize,
+    pub axes: Vec<InheritedResultAxis>,
+}
+
+/// One claimed result axis: its required extent and, for a named claim, the
+/// binder and declaring parameter axis its context names.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InheritedResultAxis {
+    pub axis: usize,
+    pub required: usize,
+    pub source: Option<crate::axis_sources::ClaimSource>,
+}
+
 fn eval_tensor_internal_with_result_claims<F>(
     dag: &Dag,
     scope: EvaluationScope<'_>,
     strict_loads: bool,
     random_frame: &mut RandomFrame,
-    result_claims: &[crate::TensorType],
+    result_claims: &[InheritedResultClaim],
     mut load_input: F,
 ) -> Result<EvaluatedValues, String>
 where
@@ -3438,24 +3454,29 @@ where
         let root = dag.roots()[0];
         let rank = dag.get(root).expect("result root").output_type.dims.len();
         let result_sites = crate::axis_sources::result_extent_sites(dag, root);
-        for claim in result_claims
-            .iter()
-            .filter(|claim| claim.dims.len() == rank)
-        {
+        for claim in result_claims.iter().filter(|claim| claim.rank == rank) {
             for site in &result_sites {
                 let RtAxis::Lit(output_axis) = site.output_axis();
                 let RtAxis::Lit(producer_axis) = site.producer_axis();
-                let DimInfo::Lit(required) = &claim.dims[output_axis as usize] else {
+                let Some(axis) = claim
+                    .axes
+                    .iter()
+                    .find(|axis| axis.axis == output_axis as usize)
+                else {
                     continue;
                 };
                 local_guard_sites.entry(site.producer()).or_default().push((
                     producer_axis as usize,
                     crate::axis_sources::LocalGuardClaim {
-                        claim: required.to_string(),
-                        canonical: crate::axis_sources::CanonicalExtent::Resolved(*required),
+                        claim: axis.source.as_ref().map_or_else(
+                            || axis.required.to_string(),
+                            |source| source.claim.clone(),
+                        ),
+                        canonical: crate::axis_sources::CanonicalExtent::Resolved(axis.required),
                         op: site.operation(),
                         observed: site.observation().clone(),
                         activation: None,
+                        source: axis.source.clone(),
                     },
                 ));
             }
@@ -4599,8 +4620,12 @@ fn local_guard_verdict(
         },
     };
     if observed != claimed {
+        let canonical = match &claim.source {
+            None => format!("claimed = {claimed}"),
+            Some(source) => format!("{} axis {} = {claimed}", source.parameter, source.axis),
+        };
         return Err(format!(
-            "extent `{}`: claimed = {claimed}, {} axis {axis} = {observed}\n\
+            "extent `{}`: {canonical}, {} axis {axis} = {observed}\n\
              numeric trap: domain in {} at i64",
             claim.claim, claim.op, claim.op,
         ));
@@ -4970,7 +4995,7 @@ pub fn eval_tensor_roots_with_frame_and_result_claims<F>(
     dag: &Dag,
     roots: &[NodeId],
     frame: &mut RandomFrame,
-    result_claims: &[crate::TensorType],
+    result_claims: &[InheritedResultClaim],
     load_input: F,
 ) -> Result<UnordMap<NodeId, TensorValue>, String>
 where
@@ -7647,6 +7672,7 @@ mod value_reclamation {
             op: "expand",
             observed,
             activation,
+            source: None,
         }
     }
 

@@ -851,20 +851,28 @@ impl<'a> EvalContext<'a> {
         let result_claims = inherited_claims
             .iter()
             .map(|claim| {
-                let mut dims = vec![DimInfo::Named("*".to_string(), None); claim.rank];
-                for ResultAxisClaim { axis, required, .. } in &claim.axes {
-                    dims[*axis] = DimInfo::Lit(usize::try_from(*required).map_err(|_| {
-                        "declared result extent is outside the admitted range".to_string()
-                    })?);
-                }
-                Ok(TensorType {
-                    dims,
-                    precision: kernel
-                        .dag
-                        .get(roots[0])
-                        .expect("result")
-                        .output_type
-                        .precision,
+                let axes = claim
+                    .axes
+                    .iter()
+                    .map(|axis| {
+                        Ok(chelis_ir::eval::InheritedResultAxis {
+                            axis: axis.axis,
+                            required: usize::try_from(axis.required).map_err(|_| {
+                                "declared result extent is outside the admitted range".to_string()
+                            })?,
+                            source: axis.source.as_ref().map(|source| {
+                                chelis_ir::axis_sources::ClaimSource {
+                                    claim: source.claim.clone(),
+                                    parameter: source.parameter.clone(),
+                                    axis: source.axis,
+                                }
+                            }),
+                        })
+                    })
+                    .collect::<Result<Vec<_>, String>>()?;
+                Ok(chelis_ir::eval::InheritedResultClaim {
+                    rank: claim.rank,
+                    axes,
                 })
             })
             .collect::<Result<Vec<_>, String>>()?;
@@ -1685,6 +1693,9 @@ impl<'a> EvalContext<'a> {
                 items.insert(0, args[0].clone());
                 let mut producers = match arg_producers.get(1).and_then(Option::as_ref) {
                     Some(ResultProducer::Aggregate(children)) => children.clone(),
+                    Some(uniform @ ResultProducer::Uniform(_)) => {
+                        vec![Some(uniform.clone()); items.len().saturating_sub(1)]
+                    }
                     _ => vec![None; items.len().saturating_sub(1)],
                 };
                 producers.insert(0, arg_producers.first().cloned().flatten());
@@ -1775,6 +1786,13 @@ impl<'a> EvalContext<'a> {
                         Err(_) => None,
                     };
                     producer.filter(|producer| producer.matches_value(&value))
+                }
+                // spec/04 section 4.7: a list combinator produces every tensor
+                // it returns, directly or nested in its result.
+                "map" | "flat_map" | "filter" | "scan" | "fold" | "append"
+                    if !matches!(value, RuntimeValue::Tensor(_)) =>
+                {
+                    Some(ResultProducer::Uniform(name.to_string()))
                 }
                 _ => matches!(value, RuntimeValue::Tensor(_)).then(|| ResultProducer::tensor(name)),
             };

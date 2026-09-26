@@ -28,6 +28,10 @@ use super::RuntimeValue;
 pub(crate) enum ResultProducer {
     Tensor(String),
     Aggregate(Vec<Option<ResultProducer>>),
+    /// A list combinator's result: every tensor nested in it, at any depth,
+    /// has that combinator as its producer (spec/04 section 4.7), so a
+    /// projection of any child is the same stamp.
+    Uniform(String),
 }
 
 /// One pending step of [`ResultProducer::interface_load`]'s walk.
@@ -44,7 +48,7 @@ impl ResultProducer {
 
     pub(crate) fn operation(&self) -> Option<&str> {
         match self {
-            Self::Tensor(operation) => Some(operation),
+            Self::Tensor(operation) | Self::Uniform(operation) => Some(operation),
             Self::Aggregate(_) => None,
         }
     }
@@ -52,6 +56,7 @@ impl ResultProducer {
     pub(crate) fn child(&self, index: usize) -> Option<Self> {
         match self {
             Self::Aggregate(children) => children.get(index).cloned().flatten(),
+            Self::Uniform(_) => Some(self.clone()),
             Self::Tensor(_) => None,
         }
     }
@@ -61,6 +66,7 @@ impl ResultProducer {
             Self::Aggregate(children) => {
                 Self::aggregate(children.iter().skip(start).cloned().collect())
             }
+            Self::Uniform(_) => Some(self.clone()),
             Self::Tensor(_) => None,
         }
     }
@@ -140,6 +146,7 @@ impl ResultProducer {
 
     pub(crate) fn matches_value(&self, value: &RuntimeValue) -> bool {
         match (self, value) {
+            (Self::Uniform(_), _) => true,
             (Self::Tensor(_), RuntimeValue::Tensor(_)) => true,
             (Self::Aggregate(children), RuntimeValue::Tuple(values))
             | (Self::Aggregate(children), RuntimeValue::List(values)) => {

@@ -2283,6 +2283,15 @@ static const __chelis_host_result_origin *__chelis_host_result_origin_leaf(__che
     return node;
 }
 
+/* The origin of a list combinator's result. spec/04 section 4.7 makes the
+   combinator the producer of every tensor nested in it, so one uniform leaf
+   describes the whole value. */
+static const __chelis_host_result_origin *__chelis_host_result_origin_uniform(__chelis_host_result_origin_arena *arena, const char *op, const char *trap) {
+    const __chelis_host_result_origin *leaf = __chelis_host_result_origin_leaf(arena, op, trap);
+    ((__chelis_host_result_origin *)leaf)->uniform = 1;
+    return leaf;
+}
+
 /* The origin of a value that entered this invocation from its caller.
    Every tensor nested in an interface value is a `load`, so one uniform leaf
    describes the whole value without walking it (chelis#2522). */
@@ -4994,7 +5003,9 @@ impl<'a> HostEmitter<'a> {
             } => {
                 require_same_abi_type(ty, expr_ty, "builtin expression")?;
                 self.assign_builtin(target, name, args, ty, site, result_claims.as_deref())?;
-                if !matches!(name.as_str(), "tuple-get" | "index") {
+                if name == "append" {
+                    self.stamp_combinator_result_origin(target, ty, name);
+                } else if !matches!(name.as_str(), "tuple-get" | "index") {
                     self.stamp_result_origin(target, ty, name);
                 }
                 if name != "pad_sequences_to" {
@@ -5301,12 +5312,14 @@ impl<'a> HostEmitter<'a> {
             HostExprKind::Map { callback, list, ty } => {
                 let (_, body_block) = Self::loop_blocks(site)?;
                 self.assign_map(target, callback, list, ty, site, body_block)?;
+                self.stamp_combinator_result_origin(target, ty, "map");
                 self.emit_expression_site_excluding_block(site, target, Some(body_block))?;
                 return Ok(());
             }
             HostExprKind::Filter { callback, list, ty } => {
                 let (_, body_block) = Self::loop_blocks(site)?;
                 self.assign_filter(target, callback, list, ty, site, body_block)?;
+                self.stamp_combinator_result_origin(target, ty, "filter");
                 self.emit_expression_site_excluding_block(site, target, Some(body_block))?;
                 return Ok(());
             }
@@ -5329,8 +5342,9 @@ impl<'a> HostEmitter<'a> {
                 )?;
                 // chelis#2581: `fold` itself produces a returned tensor,
                 // whichever iteration or seed supplied it, so it stamps and
-                // guards that value exactly as a builtin producer does.
-                self.stamp_result_origin(target, ty, "fold");
+                // guards that value exactly as a builtin producer does. A
+                // tensor nested in an aggregate result is its too.
+                self.stamp_combinator_result_origin(target, ty, "fold");
                 self.emit_result_claim_guard(target, ty, result_claims.as_deref());
                 self.emit_expression_site_excluding_blocks(
                     site,
@@ -5356,6 +5370,7 @@ impl<'a> HostEmitter<'a> {
                     preheader_block,
                     body_block,
                 )?;
+                self.stamp_combinator_result_origin(target, ty, "scan");
                 self.emit_expression_site_excluding_blocks(
                     site,
                     target,
@@ -5372,6 +5387,7 @@ impl<'a> HostEmitter<'a> {
             HostExprKind::FlatMap { callback, list, ty } => {
                 let (_, body_block) = Self::loop_blocks(site)?;
                 self.assign_flat_map(target, callback, list, ty, site, body_block)?;
+                self.stamp_combinator_result_origin(target, ty, "flat_map");
                 self.emit_expression_site_excluding_block(site, target, Some(body_block))?;
                 return Ok(());
             }
@@ -5496,6 +5512,20 @@ impl<'a> HostEmitter<'a> {
             }
         }
         self.emit_expression_site(site, target)
+    }
+
+    /// spec/04 section 4.7: a list combinator produces every tensor it
+    /// returns, directly or nested in its aggregate result.
+    fn stamp_combinator_result_origin(&mut self, target: &str, ty: &HostType, op: &str) {
+        if matches!(ty, HostType::Tensor(_)) {
+            self.stamp_result_origin(target, ty, op);
+            return;
+        }
+        let origin = result_origin_name(target);
+        self.lines.push(format!(
+            "{}{origin} = __chelis_host_result_origin_uniform(__chelis_origin_arena, \"{op}\", \"numeric trap: domain in {op} at i64\");",
+            self.indent
+        ));
     }
 
     fn stamp_result_origin(&mut self, target: &str, ty: &HostType, op: &str) {
