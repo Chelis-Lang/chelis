@@ -2725,12 +2725,38 @@ impl Dag {
             RuntimeCheck::Nothing => false,
             RuntimeCheck::OperandValues
             | RuntimeCheck::MeanDivisor
-            | RuntimeCheck::ExtentClaims
             | RuntimeCheck::Abort
             | RuntimeCheck::Ungated => true,
+            RuntimeCheck::ExtentClaims => self.extent_claims_may_fail(node),
             RuntimeCheck::EmptyAxis => self.reduced_axis_may_be_empty(node),
             RuntimeCheck::MovementBounds => self.movement_bounds_may_fail(node),
             RuntimeCheck::Random => self.random_node_may_trap(node),
+        }
+    }
+
+    /// Whether an [`RuntimeCheck::ExtentClaims`] node compares anything. A
+    /// `CheckedReshapeExtent` always carries a claim. An `ExtentWitness`
+    /// compares its axis against its literal requirements, its named claims
+    /// and the literal result claims observed at it
+    /// ([`crate::axis_sources::literal_result_witness_requirements`], the
+    /// evaluator's full list); a witness with none of the three only reports
+    /// the extent it reads, which no input can fail. Lowering places such a
+    /// witness at every call entry, so seeding it would keep a parameter's
+    /// `Load` that nothing else reads and make that parameter a required
+    /// input.
+    fn extent_claims_may_fail(&self, node: &DagNode) -> bool {
+        match &node.op {
+            RiscOp::ExtentWitness {
+                requirements,
+                claims,
+                ..
+            } => {
+                !requirements.is_empty()
+                    || !claims.is_empty()
+                    || !crate::axis_sources::literal_result_witness_requirements(self, node.id)
+                        .is_empty()
+            }
+            _ => true,
         }
     }
 
