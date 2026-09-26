@@ -263,8 +263,8 @@ fn grad_dag_checked_impl(
                 // chelis#1464 / [05-OP-68]: input 0 is the guard's firing
                 // predicate, a control edge, and input 1 is the value the
                 // result carries. Only the fallback is on the gradient path.
-                // The predicate conjoins the enclosing branch path, so it is
-                // built from `Logical` nodes; treating the control edge as
+                // The predicate is a `Bool` built from `Compare` and
+                // `Logical` nodes; treating the control edge as
                 // live would reject a program whose gradient is perfectly
                 // well defined, exactly as the `UniformLike` note above
                 // describes for its activation edge.
@@ -1022,9 +1022,9 @@ fn compute_adjoints(
             // an explicit zero. Omitting it IS the zero cotangent of
             // spec/06 2.10.1 — no contribution is queued — and it keeps the
             // backward walk out of the condition subgraph entirely. That
-            // matters because the guard's firing predicate conjoins the
-            // enclosing branch path (chelis#1464), so it contains `Logical`
-            // nodes, and `Logical` is non-differentiable: materializing a
+            // matters because the guard's firing predicate is a `Bool` that
+            // may contain `Logical` nodes (a compound `if` condition), and
+            // `Logical` is non-differentiable: materializing a
             // zero for the condition would make AD descend into it and
             // reject a program whose gradient is perfectly well defined.
             Some(vec![(node.inputs[1], g)])

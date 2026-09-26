@@ -18946,51 +18946,6 @@ impl<'program> LowerCtx<'program> {
         lowered
     }
 
-    /// chelis#1464 / [05-OP-68]: the predicate under which the guard must
-    /// actually abort — the branch predicate AND the enclosing path.
-    ///
-    /// Without the conjunction, a guard nested inside another runtime `if`
-    /// aborts even when the outer condition selects the sibling, because
-    /// the DAG evaluates every node regardless of which branch the forward
-    /// program takes. That turned programs with a well-defined value into
-    /// hard aborts in both lanes, and was visible as a static/runtime split:
-    /// the same program returned a value when the outer condition folded
-    /// (chelis#620 pruning removed the guard) and aborted when it did not.
-    ///
-    /// At the top level there is no enclosing path, so the branch predicate
-    /// is used directly and no nodes are synthesized.
-    fn guard_fire_condition(&mut self, cond: NodeId, trap_on_true: bool) -> (NodeId, bool) {
-        let Some(path) = self.branch_path_condition else {
-            return (cond, trap_on_true);
-        };
-        let path_ty = TensorType {
-            dims: Vec::new(),
-            precision: Prim::Bool,
-        };
-        // `trap_on_true` exists to avoid synthesizing a negation when the
-        // `fail` is the else arm; once the path is conjoined the firing
-        // predicate is explicit, so it collapses to `true`.
-        let branch_predicate = if trap_on_true {
-            cond
-        } else {
-            self.dag.add_node(
-                self.owner(),
-                RiscOp::Logical(LogicalKind::Not),
-                vec![cond],
-                path_ty.clone(),
-                self.current_span_id.clone(),
-            )
-        };
-        let fires = self.dag.add_node(
-            self.owner(),
-            RiscOp::Logical(LogicalKind::And),
-            vec![path, branch_predicate],
-            path_ty,
-            self.current_span_id.clone(),
-        );
-        (fires, true)
-    }
-
     /// chelis#1464: a compile-time-resolvable `if` that selects its
     /// `fail(...)` branch, inside a transform.
     ///
@@ -19055,6 +19010,13 @@ impl<'program> LowerCtx<'program> {
     /// The result carries the fallback's exact type, so the guard is
     /// type-transparent: every consumer downstream sees what it would have
     /// seen had the branch been written without the guard.
+    ///
+    /// The condition is the `if`'s own predicate. The enclosing path is the
+    /// guard's owner activation ([`Self::owner`]), which implies every arm
+    /// predicate [`Self::branch_path_condition`] holds, and a guard whose
+    /// activation is false fires nothing in any lane (spec/10 section 3.2).
+    /// A guard nested in an arm the outer condition does not select, whose
+    /// condition the DAG still computes, therefore does not abort.
     fn guarded_fail_value(
         &mut self,
         cond: NodeId,
@@ -19068,7 +19030,6 @@ impl<'program> LowerCtx<'program> {
         // came from `else`.
         let which = if trap_on_true { "else" } else { "then" };
         let fallback = self.expect_runtime_if_branch(fallback, which, span);
-        let (cond, trap_on_true) = self.guard_fire_condition(cond, trap_on_true);
         let out_ty = self
             .dag
             .get(fallback)
