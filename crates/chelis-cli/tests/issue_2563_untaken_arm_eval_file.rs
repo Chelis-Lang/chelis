@@ -14,6 +14,9 @@
 //! in a `grad` body), and a discarded `let` of each kind the trap seed
 //! gained traps (decisions sections 6.2 and 11). `chelis-backend-c`'s
 //! `exec_compile` has the DAG-evaluator and C rows of those.
+//!
+//! An untaken arm also contributes nothing to a gradient (spec/06 §2.10.1),
+//! even where its values are not finite; a taken arm keeps its gradient.
 use assert_cmd::Command;
 use std::path::Path;
 
@@ -576,4 +579,205 @@ fn a_dead_let_of_each_newly_seeded_kind_traps_in_eval_file() {
         }
     }
     assert!(failures.is_empty(), "\n{}", failures.join("\n"));
+}
+
+// spec/06 §2.10.1: the untaken arm contributes nothing to a gradient, even
+// where the arm's values (computed from substituted operands, or genuinely)
+// are not finite. `chelis-compiler-api`'s `untaken_arm_gradients` runs the
+// same shapes in the DAG evaluator and C, and documents each.
+const GRAD_DIV_SUBSTITUTED: &str = "def loss(x: tensor[1, f32]) -> tensor[f32] = {
+  s = tensor_to_scalar(sum(&x, 0i32))
+  r = if lt(5.0f32, s) then mul(&x, log(div(&x, to_tensor([1.0f32])))) else copy(x)
+  sum(r, 0i32)
+}
+def main() -> tensor[1, f32] = grad(loss)(to_tensor([1.0f32]))
+";
+
+const GRAD_DRAW_SUBSTITUTED: &str = "def loss(x: tensor[4, f32]) -> tensor[f32] = {
+  s = tensor_to_scalar(sum(copy(x), 0i32))
+  r = if lt(100.0f32, s) then mul(copy(x), log(uniform_like(key_from_seed(1i64), copy(x), 1.0f32, 2.0f32))) else copy(x)
+  sum(r, 0i32)
+}
+def main() -> tensor[4, f32] = grad(loss)(to_tensor([1.0f32, 1.0f32, 1.0f32, 1.0f32]))
+";
+
+const GRAD_GENUINE_LOG: &str = "def loss(x: tensor[1, f32]) -> tensor[f32] = {
+  s = tensor_to_scalar(sum(&x, 0i32))
+  r = if lt(5.0f32, s) then log(sub(&x, to_tensor([1.0f32]))) else copy(x)
+  sum(r, 0i32)
+}
+def main() -> tensor[1, f32] = grad(loss)(to_tensor([1.0f32]))
+";
+
+const GRAD_GENUINE_PRODUCT: &str = "def loss(x: tensor[1, f32]) -> tensor[f32] = {
+  s = tensor_to_scalar(sum(&x, 0i32))
+  r = if lt(5.0f32, s) then mul(&x, log(sub(&x, to_tensor([1.0f32])))) else copy(x)
+  sum(r, 0i32)
+}
+def main() -> tensor[1, f32] = grad(loss)(to_tensor([1.0f32]))
+";
+
+const GRAD_VMAP_GRAD_PRODUCT: &str = "def loss(x: tensor[1, f32]) -> tensor[f32] = {
+  s = tensor_to_scalar(sum(&x, 0i32))
+  r = if lt(5.0f32, s) then mul(&x, log(sub(&x, to_tensor([1.0f32])))) else copy(x)
+  sum(r, 0i32)
+}
+def main() -> tensor[2, 1, f32] = vmap(grad(loss))(to_tensor([[1.0f32], [10.0f32]]))
+";
+
+const GRAD_VMAP_GRAD_DIV_SUBSTITUTED: &str = "def loss(x: tensor[1, f32]) -> tensor[f32] = {
+  s = tensor_to_scalar(sum(&x, 0i32))
+  r = if lt(5.0f32, s) then mul(&x, log(div(&x, to_tensor([1.0f32])))) else copy(x)
+  sum(r, 0i32)
+}
+def main() -> tensor[2, 1, f32] = vmap(grad(loss))(to_tensor([[1.0f32], [10.0f32]]))
+";
+
+const GRAD_GRAD_OF_VMAPPED_ARM: &str = "def h(x: tensor[f32]) -> tensor[f32] = if lt(5.0f32, tensor_to_scalar(copy(x))) then mul(&x, log(sub(&x, scalar_to_tensor(1.0f32)))) else copy(x)
+def loss(xs: tensor[2, f32]) -> tensor[f32] = sum(vmap(h)(xs), 0i32)
+def main() -> tensor[2, f32] = grad(loss)(to_tensor([1.0f32, 10.0f32]))
+";
+
+const GRAD_GRAD_OF_VMAPPED_CAPTURE: &str = "def loss(xs: tensor[2, f32], w: tensor[f32]) -> tensor[f32] = {
+  ys = vmap(fn (x: tensor[f32]) -> if lt(5.0f32, tensor_to_scalar(copy(x))) then mul(log(sub(&x, scalar_to_tensor(1.0f32))), copy(w)) else mul(x, copy(w)))(xs)
+  sum(ys, 0i32)
+}
+def main() -> tensor[f32] = grad(loss, wrt=w)(to_tensor([1.0f32, 10.0f32]), scalar_to_tensor(2.0f32))
+";
+
+const GRAD_GRAD_OF_NESTED_VMAPPED_ARMS: &str = "def h(x: tensor[f32]) -> tensor[f32] = if lt(5.0f32, tensor_to_scalar(copy(x))) then mul(&x, log(sub(&x, scalar_to_tensor(1.0f32)))) else copy(x)
+def row(xs: tensor[2, f32]) -> tensor[2, f32] = if lt(0.0f32, tensor_to_scalar(sum(copy(xs), 0i32))) then vmap(h)(xs) else mul(xs, to_tensor([3.0f32, 3.0f32]))
+def loss(xss: tensor[2, 2, f32]) -> tensor[f32] = sum(sum(vmap(row)(xss), 0i32), 0i32)
+def main() -> tensor[2, 2, f32] = grad(loss)(to_tensor([[1.0f32, 10.0f32], [-1.0f32, -2.0f32]]))
+";
+
+const GRAD_TAKEN_DIV: &str = "def loss(x: tensor[1, f32]) -> tensor[f32] = {
+  s = tensor_to_scalar(sum(&x, 0i32))
+  r = if lt(s, 5.0f32) then mul(&x, log(div(&x, to_tensor([1.0f32])))) else copy(x)
+  sum(r, 0i32)
+}
+def main() -> tensor[1, f32] = grad(loss)(to_tensor([1.0f32]))
+";
+
+const GRAD_TAKEN_GENUINE_LOG: &str = "def loss(x: tensor[1, f32]) -> tensor[f32] = {
+  s = tensor_to_scalar(sum(&x, 0i32))
+  r = if lt(s, 5.0f32) then log(sub(&x, to_tensor([1.0f32]))) else copy(x)
+  sum(r, 0i32)
+}
+def main() -> tensor[1, f32] = grad(loss)(to_tensor([1.0f32]))
+";
+
+const GRAD_TAKEN_GENUINE_PRODUCT: &str = "def loss(x: tensor[1, f32]) -> tensor[f32] = {
+  s = tensor_to_scalar(sum(&x, 0i32))
+  r = if lt(s, 5.0f32) then mul(&x, log(sub(&x, to_tensor([1.0f32])))) else copy(x)
+  sum(r, 0i32)
+}
+def main() -> tensor[1, f32] = grad(loss)(to_tensor([1.0f32]))
+";
+
+const GRAD_VMAP_GRAD_TAKEN_GENUINE_LOG: &str = "def loss(x: tensor[1, f32]) -> tensor[f32] = {
+  s = tensor_to_scalar(sum(&x, 0i32))
+  r = if lt(s, 5.0f32) then log(sub(&x, to_tensor([1.0f32]))) else copy(x)
+  sum(r, 0i32)
+}
+def main() -> tensor[2, 1, f32] = vmap(grad(loss))(to_tensor([[1.0f32], [10.0f32]]))
+";
+
+/// Each untaken row returns the else arm's gradient alone.
+const UNTAKEN_GRADIENTS: [(&str, &str, &str); 9] = [
+    (
+        "div substituted",
+        GRAD_DIV_SUBSTITUTED,
+        "main = tensor(shape=[1], data=[1.0])",
+    ),
+    (
+        "draw substituted",
+        GRAD_DRAW_SUBSTITUTED,
+        "main = tensor(shape=[4], data=[1.0, 1.0, 1.0, 1.0])",
+    ),
+    (
+        "genuine log",
+        GRAD_GENUINE_LOG,
+        "main = tensor(shape=[1], data=[1.0])",
+    ),
+    (
+        "genuine product",
+        GRAD_GENUINE_PRODUCT,
+        "main = tensor(shape=[1], data=[1.0])",
+    ),
+    (
+        "vmap(grad) product",
+        GRAD_VMAP_GRAD_PRODUCT,
+        "main = tensor(shape=[2, 1], data=[1.0, 3.3083358])",
+    ),
+    (
+        "vmap(grad) div substituted",
+        GRAD_VMAP_GRAD_DIV_SUBSTITUTED,
+        "main = tensor(shape=[2, 1], data=[1.0, 3.3025851])",
+    ),
+    (
+        "grad of a vmapped arm",
+        GRAD_GRAD_OF_VMAPPED_ARM,
+        "main = tensor(shape=[2], data=[1.0, 3.3083358])",
+    ),
+    (
+        "grad of a vmapped capture",
+        GRAD_GRAD_OF_VMAPPED_CAPTURE,
+        "main = 3.1972246",
+    ),
+    (
+        "grad of nested vmapped arms",
+        GRAD_GRAD_OF_NESTED_VMAPPED_ARMS,
+        "main = tensor(shape=[2, 2], data=[1.0, 3.3083358, 3.0, 3.0])",
+    ),
+];
+
+/// Each taken row keeps its true gradient, a non-finite one included.
+const TAKEN_GRADIENTS: [(&str, &str, &str); 4] = [
+    (
+        "taken div",
+        GRAD_TAKEN_DIV,
+        "main = tensor(shape=[1], data=[1.0])",
+    ),
+    (
+        "taken genuine log",
+        GRAD_TAKEN_GENUINE_LOG,
+        "main = tensor(shape=[1], data=[inf])",
+    ),
+    (
+        "taken genuine product",
+        GRAD_TAKEN_GENUINE_PRODUCT,
+        "main = tensor(shape=[1], data=[NaN])",
+    ),
+    (
+        "vmap(grad) taken genuine log",
+        GRAD_VMAP_GRAD_TAKEN_GENUINE_LOG,
+        "main = tensor(shape=[2, 1], data=[inf, 1.0])",
+    ),
+];
+
+/// Every row's `eval --file` output is exactly its expected line.
+fn check_gradients(prefix: &str, rows: &[(&str, &str, &str)]) {
+    let directory = tempfile::tempdir().unwrap();
+    let mut failures = Vec::new();
+    for (index, (row, source, expected)) in rows.iter().enumerate() {
+        let output = eval_file(directory.path(), &format!("{prefix}_{index}"), source);
+        if !output.status.success() || String::from_utf8_lossy(&output.stdout).trim() != *expected {
+            failures.push(format!("{row}: {}", text(&output).trim()));
+        }
+    }
+    assert!(failures.is_empty(), "\n{}", failures.join("\n"));
+}
+
+/// Evidentiary status: REGRESSION TEST for the substituted rows (NaN at
+/// b47fdd7d3) and the genuine rows (NaN on main 7807ca4ff, chelis#2640).
+#[test]
+fn an_untaken_arm_contributes_nothing_to_a_gradient_in_eval_file() {
+    check_gradients("gradient_untaken", &UNTAKEN_GRADIENTS);
+}
+
+/// Evidentiary status: DISPOSITION LOCK (every row holds at b47fdd7d3).
+#[test]
+fn a_taken_arm_keeps_its_gradient_in_eval_file() {
+    check_gradients("gradient_taken", &TAKEN_GRADIENTS);
 }

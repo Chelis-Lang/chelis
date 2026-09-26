@@ -347,7 +347,10 @@ destructuring preserves the field paths used by §2.1's recursive cotangent
 type.
 
 Scalar `if` likewise differentiates the executed branch and gives its boolean
-condition zero cotangent. Tensor conditions use the exact `where` adjoint.
+condition zero cotangent. The untaken arm contributes exactly zero to every
+cotangent outside it, row by row under `vmap`, even where a where-lowered
+branch computes that arm's values and they or their derivatives are not
+finite (spec/10 §3). Tensor conditions use the exact `where` adjoint.
 Branch values may be scalar, tensor, List, tuple, or ADT; their cotangent keeps
 the same recursive shape.
 
