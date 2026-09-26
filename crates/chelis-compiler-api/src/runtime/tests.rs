@@ -4787,3 +4787,57 @@ fn runtime_value_clone_copies_every_container_in_order() {
         "Record([1, 2], (true, ()), dict(a: 3, b: []))"
     );
 }
+
+/// chelis#2619: a transform's closures are closure-converted against their
+/// own environments. A closure several others reach is staged once, however
+/// many paths reach it: a chain where each closure calls the previous two
+/// reached the first ones along Fibonacci-many paths, which took 75 s and
+/// 8.4 GB at depth 18 before staged values were keyed by value.
+///
+/// Failing first, measured with only the `FrameCaptures::staged` lookup
+/// bypassed: depth 12 staged 431 values; with it, 13.
+mod issue_2619_shared_capture_staging {
+    use crate::compiler::eval_selected;
+    use crate::schema::{EvalRequest, SourceKind};
+
+    fn source(depth: usize) -> String {
+        let mut body = String::from(
+            "  w = to_tensor([1.0f32, 1.0f32])\n  f0 = fn (x: tensor[2, f32]) -> mul(x, w)\n  f1 = fn (x: tensor[2, f32]) -> mul(x, w)\n",
+        );
+        for k in 2..depth {
+            body.push_str(&format!(
+                "  f{k} = fn (x: tensor[2, f32]) -> add(f{}(x), f{}(x))\n",
+                k - 1,
+                k - 2
+            ));
+        }
+        format!(
+            "out = {{\n{body}  grad(fn (x: tensor[2, f32]) -> sum(f{}(x), 0i32))(to_tensor([1.0f32, 2.0f32]))\n}}\n",
+            depth - 1
+        )
+    }
+
+    #[test]
+    fn a_closure_many_closures_reach_is_staged_once() {
+        super::super::transforms::reset_staged_frame_values();
+        let result = eval_selected(
+            EvalRequest {
+                source_kind: SourceKind::Surf,
+                source: source(12),
+                bindings: Default::default(),
+            },
+            &["out".to_string()],
+        )
+        .expect("the closure chain evaluates");
+        let staged = super::super::transforms::staged_frame_values();
+        // f11 is Fib(12) = 144 copies of w, so its gradient is [144, 144].
+        assert_eq!(
+            serde_json::to_value(&result.roots[0].value).unwrap()["value"]["data"]["bits"],
+            serde_json::json!(["43100000", "43100000"])
+        );
+        assert!(
+            staged <= 16,
+            "a depth-12 closure chain staged {staged} frame values; one per closure and value is 13"
+        );
+    }
+}

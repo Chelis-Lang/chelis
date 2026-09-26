@@ -405,10 +405,11 @@ impl<'a> EvalContext<'a> {
             placeholder_types: &mut placeholder_types,
             placeholder_tensors: &mut placeholder_tensors,
             bindings: Vec::new(),
+            staged: UnordMap::new(),
             fresh: 0,
             span,
         };
-        let application = captures.convert(&application, &captured_env);
+        let application = captures.convert(&application, &captured_env)?;
         let capture_bindings = captures.bindings;
         let app_expr = if capture_bindings.is_empty() {
             application
@@ -1112,6 +1113,25 @@ fn stage_grad_list_value(
     }
 }
 
+#[cfg(test)]
+thread_local! {
+    /// Frame values staged on this thread (chelis#2619). A receipt that a
+    /// value several closures reach is staged once, not once per path.
+    static STAGED_FRAME_VALUES: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// Frame values staged on this thread since the last reset.
+#[cfg(test)]
+pub(crate) fn staged_frame_values() -> u64 {
+    STAGED_FRAME_VALUES.with(std::cell::Cell::get)
+}
+
+/// Reset [`staged_frame_values`] for this thread.
+#[cfg(test)]
+pub(crate) fn reset_staged_frame_values() {
+    STAGED_FRAME_VALUES.with(|staged| staged.set(0));
+}
+
 /// Frame values a transform's lowering reads, staged under fresh names
 /// (chelis#2619).
 struct FrameCaptures<'a> {
@@ -1120,6 +1140,10 @@ struct FrameCaptures<'a> {
     placeholder_types: &'a mut Vec<TensorType>,
     placeholder_tensors: &'a mut UnordMap<String, IrTensorValue>,
     bindings: Vec<(String, Expr)>,
+    /// The fresh name each staged frame value is read under, keyed by the
+    /// value's address. Frames share their captured layers, so a value
+    /// several closures reach is one entry, staged once.
+    staged: UnordMap<usize, String>,
     fresh: usize,
     span: Span,
 }
@@ -1137,32 +1161,55 @@ impl FrameCaptures<'_> {
     /// read and keeps its spelling. A function literal in `env` is converted
     /// against its own environment, so it reads what it closed over rather
     /// than whatever the caller's frame binds under the same spelling.
-    fn convert(&mut self, expr: &Expr, env: &Frame) -> Expr {
+    ///
+    /// A name `env` binds to a value this lowering cannot carry is an error:
+    /// left spelled as written, it would be read as a same-named top-level
+    /// declaration instead.
+    fn convert(&mut self, expr: &Expr, env: &Frame) -> Result<Expr, String> {
         let mut renames = BTreeMap::new();
         for name in chelis_types::linearity::free_runtime_variables(expr) {
-            if let Some(value) = env.get(&name)
-                && let Some(fresh) = self.stage(value)
-            {
-                renames.insert(name, fresh);
-            }
+            let Some(value) = env.get(&name) else {
+                continue;
+            };
+            let key = std::ptr::from_ref(value) as usize;
+            let fresh = match self.staged.get(&key) {
+                Some(fresh) => fresh.clone(),
+                None => {
+                    let fresh = self.stage(value)?.ok_or_else(|| {
+                        format!(
+                            "host runtime: a `grad` or `vmap` target reads the local `{name}`, \
+                             whose value this lowering cannot carry (chelis#2619)"
+                        )
+                    })?;
+                    self.staged.insert(key, fresh.clone());
+                    fresh
+                }
+            };
+            renames.insert(name, fresh);
         }
-        chelis_types::linearity::rename_free_runtime_variables(expr, &renames)
+        Ok(chelis_types::linearity::rename_free_runtime_variables(
+            expr, &renames,
+        ))
     }
 
     /// The fresh name a frame value is read under, or `None` when the value
-    /// cannot be staged (it is then left unbound, as it always was).
-    fn stage(&mut self, value: &RuntimeValue) -> Option<String> {
+    /// cannot be staged.
+    fn stage(&mut self, value: &RuntimeValue) -> Result<Option<String>, String> {
+        #[cfg(test)]
+        STAGED_FRAME_VALUES.with(|staged| staged.set(staged.get() + 1));
         let span = self.span;
         let bound = match value {
             RuntimeValue::Tensor(_) | RuntimeValue::Scalar(_) if !matches!(value, RuntimeValue::Scalar(payload) if payload.dtype().is_integer()) =>
             {
-                let (tensor, ty) = runtime_value_to_dag_input_lossy(value, None, 0).ok()?;
+                let Ok((tensor, ty)) = runtime_value_to_dag_input_lossy(value, None, 0) else {
+                    return Ok(None);
+                };
                 let placeholder = self.fresh_name();
                 self.placeholder_tensors.insert(placeholder.clone(), tensor);
                 self.placeholder_names.push(placeholder.clone());
                 self.placeholder_types.push(ty);
                 // A placeholder is an input of the lowering, bound already.
-                return Some(placeholder);
+                return Ok(Some(placeholder));
             }
             RuntimeValue::Scalar(payload) => {
                 make_integer_literal_with_type(payload.as_i64(), payload.dtype(), span)
@@ -1171,7 +1218,7 @@ impl FrameCaptures<'_> {
             RuntimeValue::List(_) | RuntimeValue::Tuple(_) | RuntimeValue::Adt { .. } => {
                 let mut leaf_index = 0;
                 let argument_index = self.argument_count + self.fresh;
-                stage_grad_list_value(
+                match stage_grad_list_value(
                     value,
                     argument_index,
                     &mut leaf_index,
@@ -1179,9 +1226,10 @@ impl FrameCaptures<'_> {
                     self.placeholder_types,
                     self.placeholder_tensors,
                     span,
-                )
-                .ok()?
-                .0
+                ) {
+                    Ok((expr, _, _)) => expr,
+                    Err(_) => return Ok(None),
+                }
             }
             // A declaration's closure keeps reading top-level names.
             RuntimeValue::Closure {
@@ -1193,12 +1241,19 @@ impl FrameCaptures<'_> {
                 env,
                 def_name: None,
                 ..
-            } => self.convert(checked_function, env),
-            _ => return None,
+            } => self.convert(checked_function, env)?,
+            // A transform value is a callable written where its frame was:
+            // its own reads are converted against that frame.
+            RuntimeValue::Transform {
+                transform_expr,
+                captured_env,
+                ..
+            } => self.convert(transform_expr, captured_env)?,
+            _ => return Ok(None),
         };
         let name = self.fresh_name();
         self.bindings.push((name.clone(), bound));
-        Some(name)
+        Ok(Some(name))
     }
 }
 

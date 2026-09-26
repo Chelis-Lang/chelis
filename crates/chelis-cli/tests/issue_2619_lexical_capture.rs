@@ -191,3 +191,17 @@ def main() = total(to_tensor([7.0f32, 11.0f32]))\n";
     assert_eq!(printed(&native, "main.0"), "18.0", "{native}");
     assert_eq!(printed(&native, "main.1"), "8.0", "{native}");
 }
+
+/// A local transform value is itself staged, never left to be read as a
+/// same-named top-level function.
+#[test]
+fn a_local_transform_value_is_not_read_as_a_same_named_top_level_function() {
+    let source = "def loss(x: tensor[2, f32]) -> tensor[f32] = sum(mul(x, x), 0i32)\n\
+def g(x: tensor[2, f32]) -> tensor[2, f32] = mul(x, to_tensor([100.0f32, 100.0f32]))\n\
+out = {\n  g = grad(loss)\n  vmap(fn (x: tensor[2, f32]) -> g(x))(to_tensor([[1.0f32, 2.0f32], [3.0f32, 4.0f32]]))\n}\n";
+    assert_eval(
+        source,
+        "out",
+        "tensor(shape=[2, 2], data=[2.0, 4.0, 6.0, 8.0])",
+    );
+}
