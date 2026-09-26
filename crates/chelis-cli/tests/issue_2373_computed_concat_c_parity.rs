@@ -287,6 +287,17 @@ fn copied_extent_keeps_result_claim_on_eval_and_linked_c() {
         .output()
         .expect("eval");
     assert!(!eval.status.success());
+    let eval_json = Command::cargo_bin("chelis")
+        .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .args(["eval", "--json", "--file", path.to_str().unwrap()])
+        .output()
+        .expect("eval json");
+    assert!(!eval_json.status.success());
+    for output in [&eval, &eval_json] {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(!stderr.starts_with("error: "), "{stderr}");
+    }
 
     Command::cargo_bin("chelis")
         .expect("binary")

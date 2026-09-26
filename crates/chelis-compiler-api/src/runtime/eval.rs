@@ -1557,7 +1557,7 @@ impl<'a> EvalContext<'a> {
             // Its result is a tensor it produced, as every tensor builtin's is.
             self.result_producer = Some(ResultProducer::tensor("dropout"));
             for claim in claims {
-                claim.verdict(&value, "dropout")?;
+                self.check_declared_result_claim(claim, &value, "dropout")?;
             }
             return Ok(value);
         }
@@ -1673,7 +1673,11 @@ impl<'a> EvalContext<'a> {
                     ));
                 }
                 for claim in claims {
-                    claim.shape_verdict(&[sequences.len(), width as usize], name)?;
+                    self.check_declared_shape_claim(
+                        claim,
+                        &[sequences.len(), width as usize],
+                        name,
+                    )?;
                 }
             }
             let builtin_result =
@@ -1750,10 +1754,11 @@ impl<'a> EvalContext<'a> {
                     .as_ref()
                     .and_then(ResultProducer::operation)
                     .unwrap_or(name)
-            };
+            }
+            .to_owned();
             if name != "pad_sequences_to" {
                 for claim in claims {
-                    claim.verdict(&value, producer)?;
+                    self.check_declared_result_claim(claim, &value, &producer)?;
                 }
             }
             return Ok(value);
@@ -1993,9 +1998,10 @@ impl<'a> EvalContext<'a> {
             .ok_or_else(|| {
                 "host runtime: pending result claim reached a tensor without producer provenance"
                     .to_string()
-            })?;
+            })?
+            .to_owned();
         for claim in claims {
-            claim.verdict(&value, producer)?;
+            self.check_declared_result_claim(claim, &value, &producer)?;
         }
         Ok(value)
     }
@@ -2281,7 +2287,7 @@ impl<'a> EvalContext<'a> {
         let values = self.mark_numeric_trap_from_trusted_result(values)?;
         let value = pack_dag_roots(dag, &roots, &values, "local tensor ascription")?;
         for claim in inherited_result_claims {
-            claim.verdict(&value, producer_operation)?;
+            self.check_declared_result_claim(claim, &value, producer_operation)?;
         }
         self.result_producer = Some(ResultProducer::tensor(producer_operation));
         Ok(value)
@@ -2818,6 +2824,24 @@ impl<'a> EvalContext<'a> {
         } else {
             result
         }
+    }
+
+    fn check_declared_result_claim(
+        &mut self,
+        claim: &DeclaredResultClaim,
+        value: &RuntimeValue,
+        producer: &str,
+    ) -> Result<(), String> {
+        self.mark_numeric_trap_from_trusted_result(claim.verdict(value, producer))
+    }
+
+    fn check_declared_shape_claim(
+        &mut self,
+        claim: &DeclaredResultClaim,
+        shape: &[usize],
+        producer: &str,
+    ) -> Result<(), String> {
+        self.mark_numeric_trap_from_trusted_result(claim.shape_verdict(shape, producer))
     }
 
     pub(super) fn mark_numeric_trap_from_trusted_result<T>(
