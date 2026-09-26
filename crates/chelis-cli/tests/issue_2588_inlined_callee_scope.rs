@@ -353,3 +353,25 @@ def apply(h: (tensor[1, f32]) -> tensor[1, f32], x: tensor[1, f32]) -> tensor[1,
 out = apply(fn (v: tensor[1, f32]) -> {\n  c = to_tensor([10.0f32])\n  add(f(v), c)\n}, to_tensor([1.0f32]))\n";
     assert_both_lanes(source, "out", "tensor(shape=[1], data=[13.0])");
 }
+
+/// A function literal applied inside a `grad` body keeps the scope it was
+/// written in, even when the callee it is passed to binds the same name.
+#[test]
+fn a_function_literal_in_a_grad_body_keeps_its_scope_inside_the_callee() {
+    let source = "def apply(h: (tensor[1, f32]) -> tensor[1, f32], v: tensor[1, f32]) -> tensor[1, f32] = {\n  a = to_tensor([100.0f32])\n  add(h(v), a)\n}\n\
+def main() -> tensor[1, f32] =\n  grad(fn (x: tensor[1, f32]) -> {\n    a = mul(x, x)\n    sum(apply(fn (v: tensor[1, f32]) -> mul(v, a), x), 0i32)\n  })(to_tensor([5.0f32]))\n";
+    assert_both_lanes(source, "main", "tensor(shape=[1], data=[75.0])");
+}
+
+/// The same through `vmap` inside the `grad` body. The evaluator has no
+/// lowering for this `vmap`, so only the compiled value is pinned.
+#[test]
+fn a_function_literal_vmapped_in_a_grad_body_keeps_its_scope_inside_the_callee() {
+    let source = "def apply(h: (tensor[1, f32]) -> tensor[1, f32], v: tensor[2, 1, f32]) -> tensor[2, 1, f32] = {\n  a = to_tensor([100.0f32])\n  vmap(h)(v)\n}\n\
+def main() -> tensor[1, f32] =\n  grad(fn (x: tensor[1, f32]) -> {\n    a = mul(x, x)\n    sum(sum(apply(fn (v: tensor[1, f32]) -> mul(v, a), insert(x, 0i32, 2i64)), 0i32), 0i32)\n  })(to_tensor([5.0f32]))\n";
+    assert!(common::gcc_available(), "native execution is required");
+    assert_eq!(
+        printed(&common::build_and_run(source, "scope"), "main"),
+        "tensor(shape=[1], data=[150.0])"
+    );
+}

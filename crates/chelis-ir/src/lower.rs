@@ -7226,8 +7226,9 @@ impl<'program> LowerCtx<'program> {
         if self.interface_loads.contains(name) {
             raise_lowering_error(
                 format!(
-                    "the top-level `{name}` read by an inlined body shares its name with an \
-                     input of this tensor graph, which names both `{name}` (chelis#2588)"
+                    "the name `{name}` that an inlined body reads from its own scope shares its \
+                     spelling with an input of this tensor graph, which names both `{name}` \
+                     (chelis#2588)"
                 ),
                 span,
                 self.current_span_id.clone(),
