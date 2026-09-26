@@ -1782,6 +1782,30 @@ pub(super) fn expr_type_expr(expr: &deep::Expr, type_env: &IrTypeEnv) -> Option<
             {
                 return type_env.get(name).cloned();
             }
+            // A block's value is its body's (chelis#2547): read the body with
+            // each binding's type in scope, so a top-level value defined by
+            // a block records its type like any other.
+            if node.tag() == DeepTag::Let
+                && let [bind, body] = node.children_slice()
+                && let Some((DeepTag::Bind, _, pairs)) = stamped_parts(bind)
+            {
+                let mut scoped = type_env.clone();
+                for pair in pairs.chunks(2) {
+                    let [name, value] = pair else {
+                        return None;
+                    };
+                    let name = symbol_name(name)?;
+                    match expr_type_expr(value, &scoped) {
+                        Some(ty) => {
+                            scoped.insert(name.to_string(), ty);
+                        }
+                        None => {
+                            scoped.remove(name);
+                        }
+                    }
+                }
+                return expr_type_expr(body, &scoped);
+            }
             None
         }
         deep::Expr::MetaExpr(meta, _) => expr_type_expr(&meta.expr, type_env),
