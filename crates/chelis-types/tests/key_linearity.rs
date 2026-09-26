@@ -1305,3 +1305,41 @@ fn a_borrowed_key_parameter_is_refused_through_an_alias() {
         "type T = tensor[2, f32]\ndef good(t: &T) -> tensor[2, f32] = neg(t)\n",
     );
 }
+
+/// #2413: the counter-stream draws took no key. A call at their retired
+/// arity is refused with a diagnostic that names the retired spelling and
+/// the keyed one, not a bare arity count; the keyed call checks.
+///
+/// Evidentiary status: REGRESSION TEST. At `b47fdd7d3` both negatives gave
+/// only "function arity mismatch: expected N args, got M".
+#[test]
+fn a_retired_draw_spelling_points_at_keys() {
+    for (retired, keyed, source) in [
+        (
+            "dropout(x, rate)",
+            "dropout(k, x, rate)",
+            "def bad(x: tensor[4, f32]) -> tensor[4, f32] = dropout(x, 0.5f32)\n",
+        ),
+        (
+            "uniform_like(t, low, high)",
+            "uniform_like(k, t, low, high)",
+            "def bad(x: tensor[4, f32]) -> tensor[4, f32] = uniform_like(x, 0.0f32, 1.0f32)\n",
+        ),
+    ] {
+        let errors = rejects(retired, source, CheckErrorKind::ArityMismatch);
+        assert!(
+            errors.iter().any(|error| {
+                error.message.contains(&format!(
+                    "`{retired}` is the retired counter-stream spelling"
+                )) && error.message.contains(keyed)
+                    && error.suggestions.join(" ").contains("key_from_seed")
+            }),
+            "{retired}: expected the retired-spelling diagnostic: {errors:?}"
+        );
+    }
+    accepts(
+        "the keyed draws",
+        "def good(k: key, x: tensor[4, f32]) -> (tensor[4, f32], tensor[4, f32]) = {\n  (a, b) = \
+         split_key(k)\n  (dropout(a, x, 0.5f32), uniform_like(b, x, 0.0f32, 1.0f32))\n}\n",
+    );
+}

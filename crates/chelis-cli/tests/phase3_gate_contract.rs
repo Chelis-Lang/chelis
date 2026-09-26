@@ -275,9 +275,9 @@ fn assert_keyless_entry_rejects(kind: SourceKind) {
                 .errors
         };
         assert!(
-            errors
-                .iter()
-                .any(|error| error.message.contains("expected 3 args, got 2")),
+            errors.iter().any(|error| error
+                .message
+                .contains("`dropout(x, rate)` is the retired counter-stream spelling")),
             "{errors:?}"
         );
         if execution {
@@ -296,9 +296,9 @@ fn assert_keyless_entry_rejects(kind: SourceKind) {
             build_deep(&deep_of(keyed), "keyed_deep", "c"),
         ),
     };
-    rejected
-        .failure()
-        .stderr(predicates::str::contains("expected 3 args, got 2"));
+    rejected.failure().stderr(predicates::str::contains(
+        "`dropout(x, rate)` is the retired counter-stream spelling",
+    ));
     admitted.success();
 }
 

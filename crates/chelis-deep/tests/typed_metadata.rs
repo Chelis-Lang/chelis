@@ -488,13 +488,13 @@ fn previous_extension_checkpoints_reject_and_core_json_remains_readable() {
     for (source, json) in sources.iter().zip(old) {
         // The `random` handler kind was retired with the counter stream
         // (#2413): its source no longer parses and its old core JSON no
-        // longer decodes, each naming the unknown kind.
+        // longer decodes, each naming the retired kind.
         if source.contains("{effect: random}") {
             assert!(parse_str(source).is_err(), "retired kind parsed: {source}");
             let error = serde_json::from_value::<Vec<chelis_deep::Expr>>(json)
                 .unwrap_err()
                 .to_string();
-            assert!(error.contains("unknown effect kind `random`"), "{error}");
+            assert!(error.contains("effect kind `random` is retired"), "{error}");
             retired += 1;
             continue;
         }
@@ -598,8 +598,12 @@ fn unknown_effect_diagnostics_preserve_the_kind_at_text_and_serde_ingress() {
     let wire = serde_json::json!({"entries": [["effect", value]]});
     assert!(serde_json::from_value::<Metadata>(wire).is_ok());
     // `random` was a handler kind until the counter stream was retired
-    // (#2413); it is now as unknown as `teleport` at both ingresses.
-    for kind in ["teleport", "random"] {
+    // (#2413); both ingresses refuse it as a typed retired spelling, and
+    // `teleport` as an unknown kind.
+    for (kind, expected) in [
+        ("teleport", "unknown effect kind `teleport`"),
+        ("random", "effect kind `random` is retired"),
+    ] {
         let source = format!("(handle-effect {{effect: {kind}}} (lit {{}} 1) (lit {{}} 2))");
         let value = Expr::Atom(Atom::Name(kind.into()), Span::new(0, 0));
         let wire = serde_json::json!({"entries": [["effect", value]]});
@@ -610,10 +614,7 @@ fn unknown_effect_diagnostics_preserve_the_kind_at_text_and_serde_ingress() {
                 .to_string(),
         ] {
             assert!(error.contains("metadata `effect`"), "{error}");
-            assert!(
-                error.contains(&format!("unknown effect kind `{kind}`")),
-                "{error}"
-            );
+            assert!(error.contains(expected), "{error}");
         }
     }
     let wrong_owner = parse_str("(var {effect: resource} x)")

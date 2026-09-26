@@ -89,7 +89,7 @@ fn hostless_entry_rejects_a_keyless_draw_as_an_arity_error() {
     .unwrap_err();
     let message = format!("{error:?}");
     assert!(
-        message.contains("arity mismatch: expected 3 args, got 2"),
+        message.contains("`dropout(x, rate)` is the retired counter-stream spelling"),
         "{error:?}"
     );
 }

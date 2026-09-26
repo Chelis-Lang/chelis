@@ -5976,9 +5976,9 @@ fn check_reports_a_keyless_dropout_as_an_arity_error() {
     assert!(
         errors.iter().any(|error| {
             error["kind"].as_str() == Some("ArityMismatch")
-                && error["message"]
-                    .as_str()
-                    .is_some_and(|message| message.contains("expected 3 args, got 2"))
+                && error["message"].as_str().is_some_and(|message| {
+                    message.contains("`dropout(x, rate)` is the retired counter-stream spelling")
+                })
         }),
         "{json}"
     );
@@ -9813,7 +9813,10 @@ fn concrete_static_rate_local_helper_executes_eval_and_native_c() {
         .assert()
         .failure();
     let stderr = String::from_utf8_lossy(&refused.get_output().stderr).into_owned();
-    assert!(stderr.contains("expected 3 args, got 2"), "{stderr}");
+    assert!(
+        stderr.contains("`dropout(x, rate)` is the retired counter-stream spelling"),
+        "{stderr}"
+    );
     write_file(
         &source,
         "def keep(k: key, x: tensor[4, f32], rate: f32) -> tensor[4, f32] = dropout(k, x, rate)\n",

@@ -152,8 +152,10 @@ fn keyless_2318_programs_are_arity_errors_at_check() {
             errors.iter().any(|error| error["kind"] == "ArityMismatch"
                 && error["message"]
                     .as_str()
-                    .is_some_and(|message| message.contains("expected 4 args, got 3"))),
-            "{stem}: expected uniform_like's arity error: {report}"
+                    .is_some_and(|message| message.contains(
+                        "`uniform_like(t, low, high)` is the retired counter-stream spelling"
+                    ))),
+            "{stem}: expected uniform_like's retired-spelling error: {report}"
         );
         chelis()
             .args(["build", path.to_str().unwrap(), "--target", "c", "--output"])

@@ -260,6 +260,7 @@ impl EffectKind {
             EffectKindInput::Missing => Err(EffectKindDecodeError::Missing),
             EffectKindInput::Malformed => Err(EffectKindDecodeError::Malformed),
             EffectKindInput::Symbol("resource") => Ok(Self::Resource),
+            EffectKindInput::Symbol("random") => Err(EffectKindDecodeError::RetiredRandom),
             EffectKindInput::Symbol(symbol) => Err(EffectKindDecodeError::Unknown { symbol }),
         }
     }
@@ -273,7 +274,13 @@ impl EffectKind {
 pub enum EffectKindDecodeError<'a> {
     Missing,
     Malformed,
-    Unknown { symbol: &'a str },
+    Unknown {
+        symbol: &'a str,
+    },
+    /// The `random` handler kind, retired with the counter stream (#2413):
+    /// randomness has no handler or effect, and a random primitive takes an
+    /// explicit key.
+    RetiredRandom,
 }
 
 impl fmt::Display for EffectKindDecodeError<'_> {
@@ -282,6 +289,11 @@ impl fmt::Display for EffectKindDecodeError<'_> {
             Self::Missing => f.write_str("missing effect kind"),
             Self::Malformed => f.write_str("malformed effect kind"),
             Self::Unknown { symbol } => write!(f, "unknown effect kind `{symbol}`"),
+            Self::RetiredRandom => f.write_str(
+                "effect kind `random` is retired: randomness has no handler or effect, and a \
+                 random primitive takes an explicit key made by `key_from_seed` and derived by \
+                 `split_key`, `split_keys` or `fold_in` (spec/04-type-system.md section 1.1)",
+            ),
         }
     }
 }

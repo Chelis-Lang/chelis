@@ -205,13 +205,16 @@ fn effect_kind_missing_malformed_and_unknown_are_distinct_errors() {
 }
 
 #[test]
-fn effect_kind_random_is_an_unknown_symbol() {
+fn effect_kind_random_is_a_retired_spelling_that_points_at_keys() {
     // The `random` handler kind was retired with the counter stream (#2413):
-    // randomness flows through explicit key values, so `random` decodes as an
-    // unknown symbol rather than a handler kind.
-    assert_eq!(
-        EffectKind::decode(EffectKindInput::Symbol("random")),
-        Err(EffectKindDecodeError::Unknown { symbol: "random" })
+    // randomness flows through explicit key values, so `random` decodes as
+    // the typed retired spelling, which names the key operations.
+    let error = EffectKind::decode(EffectKindInput::Symbol("random")).expect_err("retired kind");
+    assert_eq!(error, EffectKindDecodeError::RetiredRandom);
+    let text = error.to_string();
+    assert!(
+        text.contains("`random` is retired") && text.contains("key_from_seed"),
+        "{text}"
     );
 }
 

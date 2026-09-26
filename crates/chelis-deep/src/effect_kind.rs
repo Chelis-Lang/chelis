@@ -55,7 +55,7 @@ mod tests {
             "effect: resource, effect: resource",
             "effect: teleport",
             // The `random` handler kind was retired with the counter stream
-            // (#2413); Deep naming it is rejected like any unknown kind.
+            // (#2413); Deep naming it is a typed retired-spelling rejection.
             "effect: random",
         ] {
             let source = format!("(handle-effect {{{metadata}}} (lit {{}} 1) (lit {{}} 2))");
