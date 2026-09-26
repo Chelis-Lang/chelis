@@ -288,6 +288,17 @@ fn inlining_would_capture(program: &HostLoweringSession<'_>, callee: &str) -> bo
     if free.is_empty() {
         return false;
     }
+    enclosing_bodies()
+        .into_iter()
+        .any(|name| match def_binders(program, &name) {
+            Some(binders) => free.iter().any(|name| binders.contains(name)),
+            None => true,
+        })
+}
+
+/// The top-level declarations whose bodies surround the current host
+/// lowering site: the one being lowered and every body substituted into it.
+fn enclosing_bodies() -> Vec<String> {
     let mut enclosing = HOST_DECLARATION_STACK.with(|stack| stack.borrow().clone());
     enclosing.extend(INLINING_STACK.with(|stack| {
         stack
@@ -298,11 +309,6 @@ fn inlining_would_capture(program: &HostLoweringSession<'_>, callee: &str) -> bo
             .collect::<Vec<_>>()
     }));
     enclosing
-        .into_iter()
-        .any(|name| match def_binders(program, &name) {
-            Some(binders) => free.iter().any(|name| binders.contains(name)),
-            None => true,
-        })
 }
 
 /// Every name top-level `name`'s definition binds anywhere in its body, its
@@ -5264,7 +5270,7 @@ fn lower_def_body_kernel(
     #[cfg(feature = "lowering-trace")]
     let lowered = if tensor_helpers.collect_trace {
         let context = cached_subexpr_lowering_context(program);
-        let scoped = kernel_scope_types(&signature.scope, Some(&signature.params));
+        let scoped = kernel_scope_types(program, &signature.scope, Some(&signature.params));
         let traced = if transfer_literal_result_claims {
             crate::lower::try_lower_tensor_helper_program_with_ordered_inputs_and_trace(
                 &signature.body_expr,
@@ -5390,7 +5396,7 @@ fn lower_kernel_dag(
     transfer_literal_result_claims: bool,
 ) -> Result<crate::Dag, crate::lower::LowerDiagnostic> {
     let context = cached_subexpr_lowering_context(program);
-    let scope_types = kernel_scope_types(scope, declaring_params);
+    let scope_types = kernel_scope_types(program, scope, declaring_params);
     let dag = if transfer_literal_result_claims {
         crate::lower::try_lower_tensor_helper_program_with_ordered_inputs(
             expr,
@@ -5412,6 +5418,7 @@ fn lower_kernel_dag(
 }
 
 fn kernel_scope_types(
+    program: &HostLoweringSession<'_>,
     scope: &UnordMap<String, HostTypeTerm>,
     declaring_params: Option<&[HostParam]>,
 ) -> Vec<(String, TensorType)> {
@@ -5422,7 +5429,7 @@ fn kernel_scope_types(
                 tensor_type_from_host_input(&param.ty).map(|ty| (param.name.clone(), ty))
             })
             .collect(),
-        None => collect_tensor_scope(scope).into_sorted(),
+        None => collect_tensor_scope(program, scope).into_sorted(),
     }
 }
 
@@ -6243,7 +6250,7 @@ fn lower_tensor_helper_dag(
     lower_tensor_helper_with(expr, program, || {
         let dag = crate::lower::try_lower_tensor_helper_program_with_ordered_inputs(
             expr,
-            collect_tensor_scope(scope).into_sorted(),
+            collect_tensor_scope(program, scope).into_sorted(),
             context,
             None,
             false,
@@ -6280,7 +6287,7 @@ fn lower_tensor_helper_product(
     #[cfg(feature = "lowering-trace")]
     if collect_trace {
         return lower_tensor_helper_with(expr, program, || {
-            let scoped = collect_tensor_scope(scope).into_sorted();
+            let scoped = collect_tensor_scope(program, scope).into_sorted();
             let (dag, trace) =
                 crate::lower::try_lower_tensor_helper_program_with_ordered_inputs_and_trace(
                     expr, scoped, &context, None, false,
@@ -6317,7 +6324,7 @@ fn lower_tensor_helper_dag_with_controls(
     let context = cached_subexpr_lowering_context(program);
     let mut lowered = match crate::lower::try_lower_subexpr_program_with_context_and_controls(
         expr,
-        collect_tensor_scope(scope),
+        collect_tensor_scope(program, scope),
         &context,
     ) {
         Ok(lowered) => lowered,
@@ -17309,14 +17316,40 @@ fn collect_top_level_items<'a>(expr: &'a Expr, out: &mut Vec<&'a Expr>) {
     out.push(expr);
 }
 
-fn collect_tensor_scope(scope: &UnordMap<String, HostTypeTerm>) -> UnordMap<String, TensorType> {
+/// The tensor inputs a helper over `scope` takes.
+///
+/// A top-level value that `scope` carries under its own name, which no
+/// surrounding body rebinds, stays a free read of that declaration rather
+/// than becoming an input (chelis#2588). Kernel lowering declines a free
+/// top-level read that shares its name with an input, because an input
+/// usually stands for a local that shadows the declaration; here the name
+/// can only mean the declaration, as it does for a host function's kernel.
+fn collect_tensor_scope(
+    program: &HostLoweringSession<'_>,
+    scope: &UnordMap<String, HostTypeTerm>,
+) -> UnordMap<String, TensorType> {
     scope
         .to_sorted()
         .into_iter()
+        .filter(|(name, _)| !is_unshadowed_top_level_value(program, name))
         .filter_map(|(name, ty)| {
             tensor_type_from_host_input(ty).map(|tensor| (name.clone(), tensor))
         })
         .collect()
+}
+
+/// Whether `name` in the current host scope can only be the top-level value
+/// declared under it: no body surrounding the current site binds it.
+fn is_unshadowed_top_level_value(program: &HostLoweringSession<'_>, name: &str) -> bool {
+    let Some((_, body)) = program.def_named(name) else {
+        return false;
+    };
+    if matches!(body, Expr::Node(node, _) if node.tag() == DeepTag::Fn) {
+        return false;
+    }
+    !enclosing_bodies().into_iter().any(|enclosing| {
+        def_binders(program, &enclosing).is_none_or(|binders| binders.contains(name))
+    })
 }
 
 pub(crate) fn tensor_type_from_host_input(ty: &HostTypeTerm) -> Option<TensorType> {
