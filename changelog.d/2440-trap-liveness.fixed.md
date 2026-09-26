@@ -20,19 +20,25 @@ nodes run only when it is selected. A discarded trapping node in a selected
 declaration, or reached through a call or such a reference, therefore traps
 in `chelis eval` (the DAG evaluator and the host interpreter) and in compiled
 C, while an uncalled function's discarded overflow neither runs nor makes
-its parameters required inputs. A node in an `if` arm that is lowered as a
-selection checks only when its arm is taken: an untaken arm's integer
-arithmetic, division, cast or dead value reference checks nothing in the
-DAG evaluator and in compiled C, including under `grad`, per `vmap` row and
-at a `vmap` call site
+its parameters required inputs. A node in an `if` arm that is lowered as a selection checks only when its
+arm is taken. An untaken arm's integer arithmetic, division or cast, integer
+sum, `max_reduce` or `argmax_reduce` over an empty axis, runtime `shrink`, `stride` or
+`pad` bound, call or result extent claim, local tensor ascription, abort, or
+dead value reference checks nothing in the DAG evaluator and in compiled C,
+including under `grad`, per `vmap` row, at a `vmap` call site and in the
+body of a `vmap` of `grad`
 ([#2563](https://github.com/Chelis-Lang/chelis/issues/2563)).
+`chelis build --target hip` gates its integer arithmetic and division
+kernels the same way and refuses any other checking node under an
+activation. A dead `let` of an overflowing integer sum or product, an
+empty-axis `max_reduce` or `argmax_reduce`, or an out-of-range runtime `shrink`, `stride` or `pad` bound now
+traps in every lane.
 
-Not yet covered: integer reductions and the movement-op domain traps, so
-[05-OP-68] keeps a non-normative note that its rule is not fully
-implemented for every trapping operation; and in an `if` lowered as a
-selection, an untaken arm's shrink or stride bound, integer reduction,
-extent witness or shift, or a check in the body of a `vmap` of `grad`
-applied there, can still trap in `chelis eval` and compiled C.
-This carries and supersedes
+Not yet covered: an unused float `mean` over an empty axis, and an unused
+runtime `reshape` or `expand` target or `gather`, `scatter`, `scatter_add`,
+`scatter_elements` or `one_hot` index, may still be removed, and those
+index and target checks still run in an untaken arm; [05-OP-68] and
+spec/03 §4.4 keep a note that their rule is not fully implemented for every
+trapping operation. This carries and supersedes
 [#2466](https://github.com/Chelis-Lang/chelis/pull/2466). See
 [#2440](https://github.com/Chelis-Lang/chelis/issues/2440).

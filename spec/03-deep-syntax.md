@@ -757,8 +757,8 @@ list, record, and record-update children evaluate left to right (§6.2's
 A binding's initializer is evaluated where evaluation reaches the binding,
 whether or not the binding is read, so its traps are preserved; this holds for
 a `let` bind pair and for a top-level value declaration that a reached
-expression names. (This requirement is not fully implemented; see
-chelis#2440.)
+expression names. (This requirement is not fully implemented for every
+trapping operation; see chelis#2440.)
 
 Within a single primitive, elementwise and reduction evaluation order is
 owned by `spec/04-type-system.md` [04-NUM-12] and [04-NUM-15]; this section
