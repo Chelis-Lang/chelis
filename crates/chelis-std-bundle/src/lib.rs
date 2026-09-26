@@ -46,7 +46,9 @@
 //! filesystem-resident archive.
 
 use sha2::{Digest, Sha256};
-use std::path::Path;
+use std::collections::BTreeMap;
+use std::io::Read;
+use std::path::{Component, Path, PathBuf};
 
 /// The version of chelis-std these embedded bytes provide. Hand-
 /// maintained in lockstep with `crates/chelis-reef/src/lib.rs`'s
@@ -126,6 +128,65 @@ pub fn extract_into(dest: &Path) -> Result<(), String> {
         )
     })?;
     Ok(())
+}
+
+/// Decompress [`CHELIS_STD_ARCHIVE`] into memory: every regular file keyed
+/// by its package-relative path (`reef.toml`, `src/io/json.ch`, ...).
+///
+/// This is the loader's view of the runtime (chelis#2616). Reading the
+/// archive in memory gives the bundled package no filesystem location, so
+/// nothing is written to disk, nothing can leak, and no path can enter a
+/// cache. An entry that is not a regular file, or whose path is absolute or
+/// climbs out of the package, is an error rather than a skip.
+pub fn archive_files() -> Result<BTreeMap<PathBuf, Vec<u8>>, String> {
+    let decoder = zstd::stream::read::Decoder::new(CHELIS_STD_ARCHIVE)
+        .map_err(|e| format!("failed to start zstd decoder for chelis-std bundle: {e}"))?;
+    let mut archive = tar::Archive::new(decoder);
+    let mut files = BTreeMap::new();
+    for entry in archive
+        .entries()
+        .map_err(|e| format!("failed to read chelis-std bundle entries: {e}"))?
+    {
+        let mut entry =
+            entry.map_err(|e| format!("failed to read chelis-std bundle entry: {e}"))?;
+        let path = entry
+            .path()
+            .map_err(|e| format!("chelis-std bundle entry has an unreadable path: {e}"))?
+            .into_owned();
+        if !entry.header().entry_type().is_file() {
+            return Err(format!(
+                "chelis-std bundle entry `{}` is not a regular file",
+                path.display()
+            ));
+        }
+        let mut relative = PathBuf::new();
+        for component in path.components() {
+            match component {
+                Component::Normal(part) => relative.push(part),
+                Component::CurDir => {}
+                Component::ParentDir | Component::RootDir | Component::Prefix(_) => {
+                    return Err(format!(
+                        "chelis-std bundle entry `{}` leaves the package root",
+                        path.display()
+                    ));
+                }
+            }
+        }
+        let mut bytes = Vec::new();
+        entry.read_to_end(&mut bytes).map_err(|e| {
+            format!(
+                "failed to read chelis-std bundle entry `{}`: {e}",
+                path.display()
+            )
+        })?;
+        if files.insert(relative, bytes).is_some() {
+            return Err(format!(
+                "chelis-std bundle entry `{}` appears twice",
+                path.display()
+            ));
+        }
+    }
+    Ok(files)
 }
 
 #[cfg(test)]
@@ -234,6 +295,33 @@ mod tests {
             .filter_map(|e| e.ok())
             .any(|e| e.path().extension().and_then(|s| s.to_str()) == Some("ch"));
         assert!(any_ch, "src/ must contain at least one .ch file");
+    }
+
+    /// The in-memory view the reef loader reads (chelis#2616) is exactly the
+    /// tree an extraction writes: the same package-relative paths and bytes.
+    #[test]
+    fn archive_files_match_an_extracted_tree() {
+        let dir = tempdir().expect("tempdir");
+        extract_into(dir.path()).expect("extract bundle");
+        let mut on_disk = BTreeMap::new();
+        let mut pending = vec![dir.path().to_path_buf()];
+        while let Some(current) = pending.pop() {
+            for entry in std::fs::read_dir(&current).expect("read extracted dir") {
+                let path = entry.expect("read extracted entry").path();
+                if path.is_dir() {
+                    pending.push(path);
+                } else {
+                    let relative = path
+                        .strip_prefix(dir.path())
+                        .expect("relative")
+                        .to_path_buf();
+                    on_disk.insert(relative, std::fs::read(&path).expect("read extracted file"));
+                }
+            }
+        }
+        let in_memory = archive_files().expect("read archive in memory");
+        assert!(in_memory.contains_key(Path::new("reef.toml")));
+        assert_eq!(in_memory, on_disk);
     }
 
     #[test]

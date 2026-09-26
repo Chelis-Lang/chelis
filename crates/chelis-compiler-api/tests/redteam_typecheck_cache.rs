@@ -546,8 +546,8 @@ fn a_bumped_envelope_version_byte_is_rejected_as_unsupported() {
         Ok(Some(_)) => panic!("a bumped envelope version must NEVER load as Ok(Some(_))"),
         Ok(None) => { /* tolerated: the envelope may fail to decode first */ }
         Err(CacheError::UnsupportedVersion { stored, expected }) => {
-            assert_eq!(expected, 30, "the running binary expects format version 30");
-            assert_ne!(stored, 30, "the forged version must differ from 30");
+            assert_eq!(expected, 31, "the running binary expects format version 31");
+            assert_ne!(stored, 31, "the forged version must differ from 31");
         }
         Err(CacheError::Corrupt(_) | CacheError::Decode(_)) => {
             // Also acceptable: bumping a byte can break the bincode shape
