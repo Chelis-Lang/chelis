@@ -55,6 +55,15 @@ fn main() {
     for (i, b) in explicit64.into_iter().enumerate() {
         println!("bf16-from-f64-{i}={}", bf16::from_f64(f64::from_bits(b)).to_bits());
     }
+    // f16::from_f64 (FCVT on aarch64): ties, sticky bits below the high word,
+    // subnormal and overflow boundaries, NaN payloads.
+    let explicit64_f16: [u64; 12] = [0x3FF0_0200_0000_0000, 0x3FF0_0200_0000_0001,
+        0x3FF0_0600_0000_0000, 0x3E70_0000_0000_0000, 0x3E70_0000_0000_0001, 0x3E60_0000_0000_0000,
+        0x40EF_FE00_0000_0000, 0x40EF_FDFF_FFFF_FFFF, 0x7FF0_0000_0000_0001, 0xFFF4_0000_0000_0001,
+        0x7FF8_0000_0000_0000, 0xFFF0_0000_0000_0000];
+    for (i, b) in explicit64_f16.into_iter().enumerate() {
+        println!("f16-from-f64-{i}={}", f16::from_f64(f64::from_bits(b)).to_bits());
+    }
     let man32 = mantissas32();
     for sign in 0..2u64 {
         for exp in 0..256u64 {
@@ -77,6 +86,16 @@ fn main() {
                 h = fnv(h, bf16::from_f64(f64::from_bits(sign << 63 | exp << 52 | m)).to_bits() as u64);
             }
             println!("f64-to-bf16-{sign}-{exp}={h}");
+        }
+    }
+    for sign in 0..2u64 {
+        for exp in 0..2048u64 {
+            let near = exp == 0 || exp == 2047 || (1023 - 30..=1023 + 20).contains(&exp);
+            let mut h = FNV_START;
+            for &m in if near { &full } else { &small } {
+                h = fnv(h, f16::from_f64(f64::from_bits(sign << 63 | exp << 52 | m)).to_bits() as u64);
+            }
+            println!("f64-to-f16-{sign}-{exp}={h}");
         }
     }
     for hi in 0..256u64 {

@@ -57,9 +57,67 @@ macro_rules! check_width {
     }};
 }
 
+fn lcg(s: &mut u64) -> u64 {
+    *s = s.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+    *s
+}
+
+fn fnv(h: u64, v: u64) -> u64 {
+    (h ^ v).wrapping_mul(0x0000_0100_0000_01B3)
+}
+
+// Dense rows for ceil, round_ties_even, sqrt, max, min and mul_add (FloatStdModels):
+// 4096 pseudo-random operand triples per width, cycling through raw encodings,
+// values near one, mul_add cancellations (the addend's exponent is the product's,
+// its sign opposite) and special values. NaN results of the IEEE operations are
+// canonicalized; max/min (FMAXNM/FMINNM) keep every bit.
+macro_rules! dense_width {
+    ($float:ty, $uint:ty, $width:expr, $frac:expr, $bias:expr, $max_exp:expr) => {{
+        let (width, frac, bias, max_exp): (u64, u64, u64, u64) = ($width, $frac, $bias, $max_exp);
+        let sign: u64 = 1 << (width - 1);
+        let mask: u64 = (1 << frac) - 1;
+        let one: u64 = bias << frac;
+        let inf: u64 = max_exp << frac;
+        let specials = [0, sign, inf, sign | inf, inf | (1 << (frac - 1)), inf | 1, one, sign | one, 1, inf - 1];
+        let near = |r: u64| ((r >> 63) << (width - 1)) | ((bias - 40 + (r >> 32) % 81) << frac) | (r & mask);
+        let raw = |r: u64| r >> (64 - width);
+        let canon = |x: $float| if x.is_nan() { u64::MAX } else { x.to_bits() as u64 };
+        let mut s: u64 = width;
+        let mut h = [0xCBF2_9CE4_8422_2325u64; 6];
+        for i in 0..4096u64 {
+            let (r1, r2, r3) = (lcg(&mut s), lcg(&mut s), lcg(&mut s));
+            let (x, y, z) = match i % 4 {
+                0 => (raw(r1), raw(r2), raw(r3)),
+                1 => (near(r1), near(r2), near(r3)),
+                2 => {
+                    let (x, y) = (near(r1), near(r2));
+                    let e = ((x >> frac) & max_exp) as i64 + ((y >> frac) & max_exp) as i64 - bias as i64;
+                    let e = e.clamp(1, max_exp as i64 - 1) as u64;
+                    let product_sign = ((x ^ y) >> (width - 1)) & 1;
+                    (x, y, ((product_sign ^ 1) << (width - 1)) | (e << frac) | (r3 & mask))
+                }
+                _ => (specials[(r1 % 10) as usize], near(r2), specials[(r3 % 10) as usize]),
+            };
+            let fx = std::hint::black_box(<$float>::from_bits(x as $uint));
+            let fy = std::hint::black_box(<$float>::from_bits(y as $uint));
+            let fz = std::hint::black_box(<$float>::from_bits(z as $uint));
+            let values = [canon(fx.ceil()), canon(fx.round_ties_even()), canon(fx.sqrt()),
+                fx.max(fy).to_bits() as u64, fx.min(fy).to_bits() as u64, canon(fx.mul_add(fy, fz))];
+            for (k, v) in values.into_iter().enumerate() {
+                h[k] = fnv(h[k], v);
+            }
+        }
+        for (label, v) in ["ceil", "even", "sqrt", "max", "min", "fma"].into_iter().zip(h) {
+            println!("dense{width}-{label}={v}");
+        }
+    }};
+}
+
 fn main() {
     check_width!(f32, u32, 32, 23, 127, 255);
     check_width!(f64, u64, 64, 52, 1023, 2047);
+    dense_width!(f32, u32, 32, 23, 127, 255);
+    dense_width!(f64, u64, 64, 52, 1023, 2047);
     println!("narrow-0={}", (f64::from_bits(0) as f32).to_bits());
     println!("narrow-1={}", (f64::from_bits(9223372036854775808) as f32).to_bits());
     println!("narrow-2={}", (f64::from_bits(4607182419068452864) as f32).to_bits());

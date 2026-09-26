@@ -51,6 +51,8 @@ MODELS = {
     "primitive_order_models": "PrimitiveOrderModels",
     "checked_place_updates": "CheckedPlaceUpdates",
     "eval_std_models": "EvalStdModels",
+    "float_std_models": "FloatStdModels",
+    "misc_std_models": "MiscStdModels",
 }
 
 # Fixtures of crate-local native primitives compile under the production crate

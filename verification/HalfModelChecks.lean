@@ -88,6 +88,12 @@ def main : IO Unit := do
     0x3800000000000000]
   for (b, i) in explicit64.zipIdx do
     IO.println s!"bf16-from-f64-{i}={(ok! (BF16.from_f64 (f64 b))).bits.toNat}"
+  let explicit64F16 : List Nat := [0x3FF0020000000000, 0x3FF0020000000001,
+    0x3FF0060000000000, 0x3E70000000000000, 0x3E70000000000001, 0x3E60000000000000,
+    0x40EFFE0000000000, 0x40EFFDFFFFFFFFFF, 0x7FF0000000000001, 0xFFF4000000000001,
+    0x7FF8000000000000, 0xFFF0000000000000]
+  for (b, i) in explicit64F16.zipIdx do
+    IO.println s!"f16-from-f64-{i}={(ok! (F16.from_f64 (f64 b))).bits.toNat}"
   for sign in [0, 1] do
     for exp in List.range 256 do
       let mut h := fnvStart
@@ -105,6 +111,13 @@ def main : IO Unit := do
       for m in if near then mantissas64Full else mantissas64Small do
         h := fnv h (ok! (BF16.from_f64 (f64 (sign <<< 63 ||| exp <<< 52 ||| m)))).bits.toNat
       IO.println s!"f64-to-bf16-{sign}-{exp}={h}"
+  for sign in [0, 1] do
+    for exp in List.range 2048 do
+      let near := exp == 0 || exp == 2047 || (1023 - 30 ≤ exp && exp ≤ 1023 + 20)
+      let mut h := fnvStart
+      for m in if near then mantissas64Full else mantissas64Small do
+        h := fnv h (ok! (F16.from_f64 (f64 (sign <<< 63 ||| exp <<< 52 ||| m)))).bits.toNat
+      IO.println s!"f64-to-f16-{sign}-{exp}={h}"
   for hi in List.range 256 do
     let mut hs := List.replicate 6 fnvStart
     for lo in List.range 256 do

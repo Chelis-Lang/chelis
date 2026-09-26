@@ -65,9 +65,58 @@ def checkWidth (f : BinaryFormat) : IO Unit := do
   for (n, i) in [0, 2 ^ 64 - 1, 2 ^ 63 + 1].zipIdx do
     IO.println s!"fromu64-{width}-{i}={(BinaryFloat.round f false n 1).bits.toNat}"
 
+def lcgNext (s : Nat) : Nat := (s * 6364136223846793005 + 1442695040888963407) % 2 ^ 64
+def fnv (h v : Nat) : Nat := ((h ^^^ v) * 0x100000001B3) % 2 ^ 64
+
+/-- The dense rows of float_model_oracle.rs `dense_width!` (same generator). -/
+def denseWidth (f : BinaryFormat) : IO Unit := do
+  let width := f.width
+  let frac := f.fractionBits
+  let bias := f.bias
+  let maxExp := f.maxExponent
+  let sign := 2 ^ (width - 1)
+  let one := bias * 2 ^ frac
+  let inf := maxExp * 2 ^ frac
+  let specials := #[0, sign, inf, sign + inf, inf + 2 ^ (frac - 1), inf + 1, one, sign + one, 1,
+    inf - 1]
+  let near (r : Nat) : Nat := r / 2 ^ 63 * sign + (bias - 40 + r / 2 ^ 32 % 81) * 2 ^ frac + r % 2 ^ frac
+  let raw (r : Nat) : Nat := r / 2 ^ (64 - width)
+  let canon (x : BinaryFloat f) : Nat := if x.isNaN then 2 ^ 64 - 1 else x.bits.toNat
+  let mut s := width
+  let mut h := List.replicate 6 0xCBF29CE484222325
+  for i in [0:4096] do
+    s := lcgNext s
+    let r1 := s
+    s := lcgNext s
+    let r2 := s
+    s := lcgNext s
+    let r3 := s
+    let (x, y, z) := match i % 4 with
+      | 0 => (raw r1, raw r2, raw r3)
+      | 1 => (near r1, near r2, near r3)
+      | 2 =>
+        let x := near r1
+        let y := near r2
+        let e : Int := (x / 2 ^ frac % (maxExp + 1) : Nat) + (y / 2 ^ frac % (maxExp + 1) : Nat) - (bias : Int)
+        let e := (max 1 (min e ((maxExp : Int) - 1))).toNat
+        let productSign := (x ^^^ y) / sign % 2
+        (x, y, (1 - productSign) * sign + e * 2 ^ frac + r3 % 2 ^ frac)
+      | _ => (specials[r1 % 10]!, near r2, specials[r3 % 10]!)
+    let fx := BinaryFloat.ofNat f x
+    let fy := BinaryFloat.ofNat f y
+    let fz := BinaryFloat.ofNat f z
+    let values := [canon fx.ceil, canon fx.roundTiesEven, canon fx.sqrt,
+      (BinaryFloat.maxNum true fx fy).bits.toNat, (BinaryFloat.maxNum false fx fy).bits.toNat,
+      canon (BinaryFloat.mulAdd fx fy fz)]
+    h := (h.zip values).map fun (a, v) => fnv a v
+  for (label, v) in ["ceil", "even", "sqrt", "max", "min", "fma"].zip h do
+    IO.println s!"dense{width}-{label}={v}"
+
 #eval do
   checkWidth .binary32
   checkWidth .binary64
+  denseWidth .binary32
+  denseWidth .binary64
   IO.println s!"narrow-0={(F64.toF32 (f64 0)).bits.toNat}"
   IO.println s!"narrow-1={(F64.toF32 (f64 9223372036854775808)).bits.toNat}"
   IO.println s!"narrow-2={(F64.toF32 (f64 4607182419068452864)).bits.toNat}"
