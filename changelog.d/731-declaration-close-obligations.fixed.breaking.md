@@ -40,33 +40,56 @@ these checked with score 1:
   ([#2537](https://github.com/Chelis-Lang/chelis/issues/2537)). The binder's
   declared contract is now checked after the last such replay.
 
-Two routes decide on the types a recursive group determines rather than
-before them. A group member whose declared header omits a type, such as its
-result, is typed inside its group at one provisional monomorphic instantiation,
-its authored binders and omitted types together ([04-INF-5], [04-INF-2]). Each
-recursive call used to see a fresh variable in place of the omitted type, so
-`def step(n: i32) = ... step(n - 1).0` over an `i32` result checked with score 1
-and failed in `eval`. And a group member's open obligations are decided when the
+A recursive group whose members omit types is typed by [04-INF-2] and
+[04-INF-5] together ([#2590](https://github.com/Chelis-Lang/chelis/issues/2590)).
+Inside its group, a member whose declared header omits a type, such as its
+result, shares its authored binders with every in-group reference, and each
+reference takes its own instance of each omitted type. When the group
+completes, each reference is typed at the type the member's body determines,
+which it never narrows: an instance of an omitted type must be that type
+itself or a fully concrete type, and anything else is polymorphic recursion
+([04-INF-3]), reported at the reference with both types. A use that disagrees
+with the body-determined type is also reported at the reference. Previously
+each recursive call saw a fresh variable that nothing tied to the body, so
+`def step(n: i32) = ... step(n - 1).0` over an `i32` result checked with score
+1 and failed in `eval`. A group member's open obligations are decided when the
 whole group has been inferred, so a sibling declared later can still determine
-the type they wait on.
+the type they wait on, and omitted types still generalize when the group
+completes.
 
-- Now accepted: recursive definitions with annotated parameters and an omitted
-  result that read their own result's tuple or record fields or pass it to
-  `take`; members with authored binders and an omitted result that were
-  rejected as recursive calls at another instantiation, across two or three members, over
-  named-dimension tensors and under `grad`; a literal pattern on a sibling's
-  omitted result; and a `cast` of a sibling's omitted result to a bounded
-  binder. Omitted types still generalize when the group completes.
+- Now accepted: members with authored binders and an omitted result that were
+  rejected as recursive calls at another instantiation, across two or three
+  members, over named-dimension tensors and under `grad`; an in-group call
+  that instantiates an omitted type at a fully concrete type beside an
+  authored binder, as `f(x, 3i32, n - 1)` in `def f[a](x: a, y, n: i32)`; an
+  omitted result used at a concrete type by an in-group call, as
+  `append(mk(n - 1), 1i32)` where `mk` returns `[]`; a literal pattern on a
+  sibling's omitted result; and a `cast` of a sibling's omitted result to a
+  bounded binder.
 - Now rejected: a call inside the group that instantiates such a member's
   binders at other types, for example `f(y, x, n - 1)` inside
   `def f[a, b](x: a, y: b, n: i32) = ...`. It identifies two authored binders
   ([04-INF-6]), and the diagnostic names the repair: write the omitted types,
   after which a call at another instantiation of the member's own binders is
-  admitted ([04-INF-2]). Some of these checked with
-  score 1 before and failed in `eval`; others, such as a swapped `swap[a, b]`
-  with its result omitted, checked and ran. A member whose every type is
-  written is still referenced at its declared scheme.
-- The ill-typed `step(n - 1).0` is rejected with the access's own diagnostic,
-  and an `eq` over a list reached through such a recursive call is rejected by
-  `eq`'s own rule, as the direct `eq([1i32], [1i32])` already was; previously
-  the check was dropped.
+  admitted ([04-INF-2]). Some of these checked with score 1 before and failed
+  in `eval`; others, such as a swapped `swap[a, b]` with its result omitted,
+  checked and ran. A member whose every type is written is still referenced at
+  its declared scheme.
+- Now rejected: an in-group reference that instantiates an omitted type at
+  another of the member's own omitted types, or at a type containing a
+  variable ([04-INF-3]), such as `swap(y, x, n - 1)` in
+  `def swap(x, y, n: i32)`, or two calls `f(x, n)` and `f(y, n)` that would
+  give one member's two omitted types one type. `main` checked and ran some
+  of these; their twins with the types written as authored binders check. A
+  call at a concrete type whose result the body returns makes the body itself
+  determine that type: after
+  `def pick(x, n: i32) = if eq(n, 0) then x else pick(3i32, n - 1)`,
+  `pick("s", 2)` is rejected, where it checked with score 1 and failed in
+  `eval`.
+- Now rejected: an ill-typed use of a member's omitted result, with the
+  operation's own diagnostic or at the reference: `step(n - 1).0` over an `i32`
+  result, `numel` over a list result, and an `eq` over a list reached through
+  a recursive call, as the direct `eq([1i32], [1i32])` already was.
+  Previously the check was dropped. So is `vmap(g)(k)` over a member's
+  omitted tensor result `k`, as its direct form `vmap(g)(to_tensor(...))` and
+  its written twin already were; `main` checked and ran it.
